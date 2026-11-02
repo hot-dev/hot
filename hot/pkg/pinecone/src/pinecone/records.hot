@@ -1,0 +1,92 @@
+::pinecone::records ns
+meta {
+    doc: """
+    Records with integrated embedding, for indexes created with
+    `::pinecone::indexes/create-index-for-model`: upsert text and let
+    Pinecone embed it, then search by text (optionally reranked).
+    Pinecone calls this the legacy Records API; it keeps working on
+    API version 2026-07.
+    """
+}
+
+::api ::pinecone::api
+
+upsert-records
+meta {
+    ctx: {"pinecone.api.key": {required: false}},
+    doc: """
+    POST {host}/records/namespaces/{namespace}/upsert - Upsert records
+    (up to 96 per call): each needs an `_id` and the text field named
+    in the index's `field_map`; every other field is stored as
+    metadata. Sent as newline-delimited JSON. Use
+    `::pinecone/DEFAULT_NAMESPACE` for the default namespace.
+
+    **Example**
+
+    ```hot
+    ::pinecone::records/upsert-records(host, "notes", [
+      {_id: "n1", chunk_text: "Hot runs workflows as code.", category: "docs"},
+      {_id: "n2", chunk_text: "Pinecone stores the vectors.", category: "docs"}
+    ])
+    ```
+    """
+}
+fn
+(host: Str, namespace: Str, records: Vec): Any {
+  upsert-records(host, namespace, records, {})
+},
+(host: Str, namespace: Str, records: Vec, opts: Map): Any {
+  ::api/ndjson(::api/data-url(host, ["records", "namespaces", namespace, "upsert"], {}), records, opts)
+}
+
+build-search-body
+meta {
+    doc: """
+    The Records search body for a text query: `query: {inputs: {text},
+    top_k, filter?}` plus the set options among `fields` and `rerank`.
+    `options`: `top_k` (default 10), `filter`, `fields`, `rerank`
+    (`{model, rank_fields, top_n?}`). Exposed for testing.
+    """
+}
+fn (text: Str, options: Map): Map {
+  ::api/compact({
+    query: ::api/compact({
+      inputs: {text: text},
+      top_k: or(get(options, "top_k"), 10),
+      filter: get(options, "filter")
+    }),
+    fields: get(options, "fields"),
+    rerank: get(options, "rerank")
+  })
+}
+
+search-records
+meta {
+    ctx: {"pinecone.api.key": {required: false}},
+    doc: """
+    POST {host}/records/namespaces/{namespace}/search - Search by text.
+    `options` as for `build-search-body`. Returns `{result: {hits:
+    [{_id, _score, fields}]}, usage}`.
+
+    **Example**
+
+    ```hot
+    out ::pinecone::records/search-records(host, "notes", "what runs workflows?", {
+      top_k: 5,
+      fields: ["chunk_text", "category"],
+      rerank: {model: "bge-reranker-v2-m3", rank_fields: ["chunk_text"], top_n: 3}
+    })
+    map(out.result.hits, (h) { h.fields.chunk_text })
+    ```
+    """
+}
+fn
+(host: Str, namespace: Str, text: Str): Map {
+  search-records(host, namespace, text, {})
+},
+(host: Str, namespace: Str, text: Str, options: Map): Map {
+  search-records(host, namespace, text, options, {})
+},
+(host: Str, namespace: Str, text: Str, options: Map, opts: Map): Map {
+  ::api/json("POST", ::api/data-url(host, ["records", "namespaces", namespace, "search"], {}), build-search-body(text, options), opts)
+}

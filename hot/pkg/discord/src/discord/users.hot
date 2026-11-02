@@ -1,32 +1,31 @@
 ::discord::users ns
+meta {
+    doc: """Users: the bot's own user and guilds, other users, and DM channels."""
+}
 
-api-request ::discord::api/request
-HttpError ::discord::api/HttpError
-is-ok-response ::hot::http/is-ok-response
+::api ::discord::api
 
-// ============================================================================
-// Users
-// ============================================================================
+seg ::discord::api/seg
 
 get-current-user
 meta {
     doc: """
-GET /users/@me - Get the current bot user. Returns the user object for the authenticated bot.
+    GET /users/@me - The bot's own user. The cheapest token smoke test.
 
-**Example**
+    **Example**
 
-```hot
-::users ::discord::users
-
-response ::users/get-current-user()
-response.id        // => "123456789"
-response.username  // => "my-bot"
-```
-"""
+    ```hot
+    me ::discord::users/get-current-user()
+    me.username
+    ```
+    """
 }
-fn (): Map {
-  response api-request("GET", `${::discord::core/BASE_URL}/users/@me`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(): Map {
+  get-current-user({})
+},
+(opts: Map): Map {
+  ::api/call("GET", "/users/@me", {}, opts)
 }
 
 GetUserRequest type {
@@ -36,57 +35,126 @@ GetUserRequest type {
 get-user
 meta {
     doc: """
-GET /users/{user_id} - Get a user by ID. Returns limited user information (username, avatar, banner, etc.).
+    GET /users/{user_id} - A user by id (username, global_name, avatar, banner, bot flag).
 
-**Example**
+    **Example**
 
-```hot
-::users ::discord::users
+    ```hot
+    ::users ::discord::users
 
-response ::users/get-user(::users/GetUserRequest({
-  user_id: "123456789"
-}))
-response.username  // => "some-user"
-```
-"""
+    user ::users/get-user(::users/GetUserRequest({user_id: "1300000000000000000"}))
+    user.username
+    ```
+    """
 }
-fn (request: GetUserRequest): Map {
-  response api-request("GET", `${::discord::core/BASE_URL}/users/${request.user_id}`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: GetUserRequest): Map {
+  get-user(request, {})
+},
+(request: GetUserRequest, opts: Map): Map {
+  ::api/call("GET", `/users/${seg(request.user_id)}`, {}, opts)
 }
 
 ModifyCurrentUserRequest type {
   username: Str?,
-  avatar: Str?
+  avatar: Str?,
+  banner: Str?,
+  clear: Vec<Str>?
 }
 
 modify-current-user
 meta {
-    doc: """PATCH /users/@me - Modify the current bot user. Can change `username` and `avatar` (base64-encoded image data URI)."""
+    doc: """
+    PATCH /users/@me - Change the bot's `username`, `avatar` or `banner`
+    (image data URIs, e.g. `data:image/png;base64,...`). Only fields you
+    set are sent. To remove the avatar or banner, list it in `clear`:
+    `clear: ["avatar"]`.
+
+    **Example**
+
+    ```hot
+    ::users ::discord::users
+
+    ::users/modify-current-user(::users/ModifyCurrentUserRequest({username: "hot-bot"}))
+    ::users/modify-current-user(::users/ModifyCurrentUserRequest({clear: ["banner"]}))
+    ```
+    """
 }
-fn (request: ModifyCurrentUserRequest): Map {
-  body merge({}, {
-    username: request.username,
-    avatar: request.avatar
-  })
-  response api-request("PATCH", `${::discord::core/BASE_URL}/users/@me`, {}, body)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: ModifyCurrentUserRequest): Map {
+  modify-current-user(request, {})
+},
+(request: ModifyCurrentUserRequest, opts: Map): Map {
+  ::api/call("PATCH", "/users/@me", {body: ::api/body(request, [])}, opts)
 }
 
 GetCurrentUserGuildsRequest type {
   before: Str?,
   after: Str?,
   limit: Int?,
-  with_counts: Bool?
+  with_counts: Bool?,
+  shard: Int?
 }
 
 get-current-user-guilds
 meta {
-    doc: """GET /users/@me/guilds - List guilds the current bot is a member of. Returns partial guild objects. Supports pagination with `before`/`after` guild IDs."""
+    doc: """
+    GET /users/@me/guilds - Guilds the bot is in (partial guild objects),
+    up to `limit` (1-200). Page with `before`/`after` guild ids, or use
+    `get-all-current-user-guilds`. Apps on large bot sharding must pass
+    `shard`.
+    """
 }
-fn (request: GetCurrentUserGuildsRequest): Vec<Map> {
-  response api-request("GET", `${::discord::core/BASE_URL}/users/@me/guilds?before=${or(request.before, "")}&after=${or(request.after, "")}&limit=${or(request.limit, "")}&with_counts=${or(request.with_counts, "")}`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: GetCurrentUserGuildsRequest): Vec<Map> {
+  get-current-user-guilds(request, {})
+},
+(request: GetCurrentUserGuildsRequest, opts: Map): Vec<Map> {
+  ::api/call("GET", "/users/@me/guilds", {
+    query: {
+      before: request.before,
+      after: request.after,
+      limit: request.limit,
+      with_counts: request.with_counts,
+      shard: request.shard
+    }
+  }, opts)
+}
+
+get-all-current-user-guilds
+meta {
+    doc: """Every guild the bot is in (up to `max-items`, default 1000), paging with `after` 200 at a time."""
+}
+fn
+(): Vec<Map> {
+  get-all-current-user-guilds(1000)
+},
+(max-items: Int): Vec<Map> {
+  get-all-current-user-guilds(max-items, {})
+},
+(max-items: Int, opts: Map): Vec<Map> {
+  ::api/paginate(
+    (after) { get-current-user-guilds(GetCurrentUserGuildsRequest({after: after, limit: 200}), opts) },
+    (page) { last(page).id },
+    200,
+    max-items
+  )
+}
+
+GetCurrentUserGuildMemberRequest type {
+  guild_id: Str
+}
+
+get-current-user-guild-member
+meta {
+    doc: """GET /users/@me/guilds/{guild_id}/member - The current user's member object in a guild. Needs the `guilds.members.read` OAuth2 scope (user tokens); bots should use `::discord::guilds/get-guild-member`."""
+}
+fn
+(request: GetCurrentUserGuildMemberRequest): Map {
+  get-current-user-guild-member(request, {})
+},
+(request: GetCurrentUserGuildMemberRequest, opts: Map): Map {
+  ::api/call("GET", `/users/@me/guilds/${seg(request.guild_id)}/member`, {}, opts)
 }
 
 LeaveGuildRequest type {
@@ -95,11 +163,14 @@ LeaveGuildRequest type {
 
 leave-guild
 meta {
-    doc: """DELETE /users/@me/guilds/{guild_id} - Leave a guild. The bot will no longer be a member."""
+    doc: """DELETE /users/@me/guilds/{guild_id} - Make the bot leave a guild."""
 }
-fn (request: LeaveGuildRequest): Bool {
-  response api-request("DELETE", `${::discord::core/BASE_URL}/users/@me/guilds/${request.guild_id}`)
-  if(is-ok-response(response), true, err(HttpError(response)))
+fn
+(request: LeaveGuildRequest): Bool {
+  leave-guild(request, {})
+},
+(request: LeaveGuildRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `/users/@me/guilds/${seg(request.guild_id)}`, {}, opts)
 }
 
 CreateDMRequest type {
@@ -109,39 +180,36 @@ CreateDMRequest type {
 create-dm
 meta {
     doc: """
-POST /users/@me/channels - Create a new DM channel with a user. If a DM already exists, the existing channel is returned.
+    POST /users/@me/channels - Open (or fetch the existing) DM channel with
+    a user. Send into it with `::discord::messages/create-message`.
 
-**Example**
+    **Example**
 
-```hot
-::users ::discord::users
-::messages ::discord::messages
+    ```hot
+    ::users ::discord::users
+    ::messages ::discord::messages
 
-// Open DM channel
-dm ::users/create-dm(::users/CreateDMRequest({
-  recipient_id: "123456789"
-}))
-
-// Send a DM
-::messages/create-message(::messages/CreateMessageRequest({
-  channel_id: dm.id,
-  content: "Hello via DM!"
-}))
-```
-"""
+    dm ::users/create-dm(::users/CreateDMRequest({recipient_id: "1300000000000000000"}))
+    ::messages/create-message(::messages/CreateMessageRequest({channel_id: dm.id, content: "Your export is ready"}))
+    ```
+    """
 }
-fn (request: CreateDMRequest): Map {
-  response api-request("POST", `${::discord::core/BASE_URL}/users/@me/channels`, {}, {recipient_id: request.recipient_id})
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: CreateDMRequest): Map {
+  create-dm(request, {})
+},
+(request: CreateDMRequest, opts: Map): Map {
+  ::api/call("POST", "/users/@me/channels", {body: {recipient_id: request.recipient_id}}, opts)
 }
-
-GetCurrentUserConnectionsRequest type Map
 
 get-current-user-connections
 meta {
-    doc: """GET /users/@me/connections - Get the current user's connected accounts (Twitch, YouTube, etc.). Requires the `connections` OAuth2 scope."""
+    doc: """GET /users/@me/connections - The current user's connected accounts. Needs a user OAuth2 token with the `connections` scope; bot tokens are rejected."""
 }
-fn (request: GetCurrentUserConnectionsRequest): Vec<Map> {
-  response api-request("GET", `${::discord::core/BASE_URL}/users/@me/connections`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(): Vec<Map> {
+  get-current-user-connections({})
+},
+(opts: Map): Vec<Map> {
+  ::api/call("GET", "/users/@me/connections", {}, opts)
 }

@@ -1,0 +1,385 @@
+::openai-compatible::test::presets ns
+meta ["test"]
+
+// Hermetic tests: preset data, provider construction, request preparation.
+
+::oc      ::openai-compatible
+::chat    ::openai-compatible::chat
+::models  ::openai-compatible::models
+::emb     ::openai-compatible::embeddings
+::api     ::openai::api
+::ai-chat ::ai::chat
+
+test-preset-base-urls
+meta ["test"]
+fn () {
+    assert-eq("http://localhost:11434/v1", ::oc/OLLAMA.base-url)
+    assert-eq("http://localhost:8000/v1", ::oc/VLLM.base-url)
+    assert-eq("http://localhost:1234/v1", ::oc/LM_STUDIO.base-url)
+    assert-eq("https://api.groq.com/openai/v1", ::oc/GROQ.base-url)
+    assert-eq("https://openrouter.ai/api/v1", ::oc/OPENROUTER.base-url)
+    assert-eq("https://api.deepseek.com", ::oc/DEEPSEEK.base-url)
+    assert-eq("https://api.together.ai/v1", ::oc/TOGETHER.base-url)
+    assert-eq("https://api.fireworks.ai/inference/v1", ::oc/FIREWORKS.base-url)
+    assert-eq("https://api.mistral.ai/v1", ::oc/MISTRAL.base-url)
+    assert-eq("https://api.cerebras.ai/v1", ::oc/CEREBRAS.base-url)
+    assert-eq("https://api.perplexity.ai", ::oc/PERPLEXITY.base-url)
+    assert-eq(11, length(::oc/PRESETS))
+}
+
+test-preset-prefixes-are-unique
+meta ["test"]
+fn () {
+    prefixes map(::oc/PRESETS, (p) { p.model-prefix })
+    assert-eq(length(prefixes), length(distinct(prefixes)))
+    for-each(prefixes, (p) { assert(ends-with(p, "/"), `prefix ${p} ends with /`) })
+}
+
+test-configure-keyless-ollama
+meta ["test"]
+fn () {
+    p ::oc/configure(::oc/OLLAMA, null)
+    assert-eq("Ollama", p.name)
+    assert-eq("http://localhost:11434/v1", p.endpoint.base-url)
+    assert(is-null(p.endpoint.api-key), "no key")
+    h ::api/endpoint-headers(p.endpoint, {}, true)
+    assert(is-null(get(h, "Authorization")), "keyless sends no Authorization")
+    assert-eq("max_tokens", p.options.max-tokens-param)
+    assert-eq(4096, p.options.max-completion-tokens)
+}
+
+test-configure-overrides
+meta ["test"]
+fn () {
+    p ::oc/configure(::oc/OLLAMA, null, {
+        base-url: "http://gpu-box.internal:11434/v1/",
+        model-prefix: "gpu/",
+        max-tokens: 512,
+        extra-body: {keep_alive: "5m"}
+    })
+    assert-eq("http://gpu-box.internal:11434/v1", p.endpoint.base-url)
+    assert-eq("gpu/", p.model-prefix)
+    assert-eq(512, p.options.max-completion-tokens)
+    assert-eq("5m", p.options.extra-body.keep_alive)
+    assert(is-null(p.endpoint.headers), "no headers by default")
+}
+
+test-named-presets-read-ctx
+meta ["test"]
+fn () {
+    ::hot::ctx/set({
+        "groq.api.key": "gsk_test",
+        "ollama.base.url": "http://ollama.internal:11434/v1",
+        "openrouter.api.key": "sk-or-test",
+        "openrouter.app.url": "https://example.com",
+        "openai-compatible.url": "https://gateway.example.com/v1/",
+        "openai-compatible.api.key": "gw-key"
+    })
+    assert-eq("gsk_test", ::oc/groq().endpoint.api-key)
+    assert-eq("http://ollama.internal:11434/v1", ::oc/ollama().endpoint.base-url)
+    or-p ::oc/openrouter()
+    assert-eq("https://example.com", get(or-p.endpoint.headers, "HTTP-Referer"))
+    assert(is-null(get(or-p.endpoint.headers, "X-OpenRouter-Title")), "unset title omitted")
+    custom ::oc/custom()
+    assert-eq("https://gateway.example.com/v1", custom.endpoint.base-url)
+    assert-eq("gw-key", custom.endpoint.api-key)
+    assert-eq("custom/", custom.model-prefix)
+}
+
+test-ollama-defaults-without-ctx
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"ollama.base.url": null, "ollama.api.key": null})
+    p ::oc/ollama()
+    assert-eq("http://localhost:11434/v1", p.endpoint.base-url)
+    assert(is-null(p.endpoint.api-key), "keyless by default")
+}
+
+test-openrouter-headers
+meta ["test"]
+fn () {
+    assert-eq({}, ::oc/openrouter-headers(null, ""))
+    h ::oc/openrouter-headers("https://example.com", "Example")
+    assert-eq("https://example.com", get(h, "HTTP-Referer"))
+    assert-eq("Example", get(h, "X-OpenRouter-Title"))
+}
+
+test-provider-registration
+meta ["test"]
+fn () {
+    reg ::oc/provider(::oc/configure(::oc/GROQ, "gsk_test"))
+    assert-eq("Groq", reg.display-name)
+    assert(reg.detect("groq/llama-3.3-70b-versatile"), "routes groq/ models")
+    assert(not(reg.detect("llama-3.3-70b-versatile")), "unprefixed models are not claimed")
+    assert(not(is-null(reg.chat-fn)), "chat-fn wired")
+    assert(not(is-null(reg.chat-stream-fn)), "chat-stream-fn wired")
+
+    perplexity ::oc/provider(::oc/configure(::oc/PERPLEXITY, "pplx"))
+    assert(not(in("tools", perplexity.meta.capabilities)), "perplexity advertises no tools")
+}
+
+test-registry-routes-between-presets
+meta ["test"]
+fn () {
+    registry ::ai-chat/with-providers([
+        ::oc/provider(::oc/configure(::oc/OLLAMA, null)),
+        ::oc/provider(::oc/configure(::oc/OPENROUTER, "k"))
+    ])
+    a ::ai-chat/resolve-registration(::ai-chat/ChatOptions({model: "ollama/llama3.2", providers: registry}))
+    b ::ai-chat/resolve-registration(::ai-chat/ChatOptions({model: "openrouter/anthropic/claude-sonnet-4.5", providers: registry}))
+    assert-eq("Ollama", a.display-name)
+    assert-eq("OpenRouter", b.display-name)
+}
+
+test-prepare-request
+meta ["test"]
+fn () {
+    groq ::oc/configure(::oc/GROQ, "k")
+    req ::chat/prepare-request(groq, {model: "groq/llama-3.3-70b-versatile", messages: []})
+    assert-eq("llama-3.3-70b-versatile", req.model)
+    assert-eq(4096, req.max_completion_tokens)
+    assert(is-null(get(req, "max_tokens")), "groq uses max_completion_tokens only")
+
+    ds ::oc/configure(::oc/DEEPSEEK, "k", {extra-body: {temperature: 0.1}})
+    req2 ::chat/prepare-request(ds, {model: "deepseek-chat", messages: [], max_tokens: 99, temperature: 0.7})
+    assert-eq("deepseek-chat", req2.model)
+    assert-eq(99, req2.max_tokens)
+    assert(is-null(get(req2, "max_completion_tokens")), "caller's ceiling kept, none added")
+    assert-eq(0.7, req2.temperature)
+}
+
+test-developer-role-accepted
+meta ["test"]
+fn () {
+    m ::openai::chat/Message({role: "developer", content: "Be terse."})
+    assert-eq("developer", m.role)
+    req ::chat/prepare-request(::oc/configure(::oc/VLLM, null), {model: "m", messages: [m, ::chat/user-message("Hi")]})
+    assert-eq("developer", req.messages[0].role)
+    assert-eq("user", req.messages[1].role)
+}
+
+test-reply-text
+meta ["test"]
+fn () {
+    assert-eq("hi", ::chat/reply-text({choices: [{message: {role: "assistant", content: "hi"}}]}))
+    assert-eq("", ::chat/reply-text({choices: []}))
+    assert-eq("", ::chat/reply-text({}))
+}
+
+test-model-path-encodes
+meta ["test"]
+fn () {
+    p ::oc/configure(::oc/OPENROUTER, "k")
+    assert-eq("/models/openai%2Fgpt-5.2", ::models/model-path(p, "openrouter/openai/gpt-5.2"))
+    assert-eq("/models/llama3.2", ::models/model-path(::oc/configure(::oc/OLLAMA, null), "llama3.2"))
+}
+
+test-embeddings-body-omits-unset
+meta ["test"]
+fn () {
+    body ::emb/embeddings-body(::emb/EmbeddingsRequest({model: "nomic-embed-text", input: "hello"}))
+    assert-eq("nomic-embed-text", body.model)
+    assert(is-null(get(body, "dimensions")), "unset dimensions omitted")
+    assert(not(contains(to-json(body), "null")), "no JSON nulls")
+}
+
+// ============================================================================
+// Identity
+// ============================================================================
+
+test-preset-identity-survives-a-typed-field-and-the-registry
+meta ["test"]
+fn () {
+    registry ::ai-chat/with-providers([
+        ::oc/provider(::oc/configure(::oc/OLLAMA, null)),
+        ::oc/provider(::oc/configure(::oc/GROQ, "k"))
+    ])
+    found ::ai-chat/resolve-registration(::ai-chat/ChatOptions({model: "groq/llama-3.3-70b-versatile", providers: registry}))
+    assert(is-type(found.variant, ::ai-chat/Provider), "still a Provider")
+    assert(is-type(found.variant, ::ai-chat/Provider.Compat), "with its own variant")
+    assert-eq("Groq", found.variant.name)
+    assert(ne(::ai-chat/Provider.OpenAi, found.variant), "never OpenAI")
+    assert(not(in("compatible", keys(found.meta))), "identity lives in variant")
+    local ::ai-chat/resolve-registration(::ai-chat/ChatOptions({model: "ollama/llama3.2", providers: registry}))
+    assert(ne(local.variant, found.variant), "presets differ")
+    openai ::ai-chat/resolve-registration(::ai-chat/ChatOptions({model: "gpt-4o", providers: registry}))
+    assert-eq(::ai-chat/Provider.OpenAi, openai.variant, "OpenAI itself is untouched")
+}
+
+// ============================================================================
+// Per-call credentials
+// ============================================================================
+
+// Port 1 refuses connections, so a call that used these opts fails at the
+// connection, naming this URL, and no request leaves the machine.
+OFFLINE {api-key: "sk-tenant", base-url: "http://127.0.0.1:1/v1"}
+
+assert-reached-offline-url
+meta {
+    doc: """The call got as far as the HTTP layer, against the `base-url` from opts."""
+}
+fn (call: Fn, label: Str) {
+    result ::hot::internal::exec/contain(call)
+    assert(is-err(result), `${label}: a refused connection is an Err`)
+    assert(contains(Str(err-value(result)), "http://127.0.0.1:1/"), `${label}: reached the opts base-url, got ${Str(err-value(result))}`)
+}
+
+test-resolve-opts-override-ctx
+meta ["test"]
+fn () {
+    p ::oc/resolve-from(::oc/GROQ, {api-key: "sk-tenant"}, {key: "sk-ctx"})
+    assert-eq("sk-tenant", p.endpoint.api-key)
+    assert-eq(::oc/GROQ.base-url, p.endpoint.base-url)
+}
+
+test-resolve-ctx-used-when-opts-empty
+meta ["test"]
+fn () {
+    p ::oc/resolve-from(::oc/OLLAMA, {}, {key: "sk-ctx", base-url: "https://ollama.com/v1/"})
+    assert-eq("sk-ctx", p.endpoint.api-key)
+    assert-eq("https://ollama.com/v1", p.endpoint.base-url, "a ctx URL and ctx key go together")
+}
+
+test-resolve-blank-key-is-an-error-not-a-fallback
+meta ["test"]
+fn () {
+    for-each([null, "", "   "], (blank) {
+        r ::oc/resolve-from(::oc/GROQ, {api-key: blank}, {key: "sk-ctx"})
+        assert(is-err(r), "a blank key in opts is an Err, with a ctx key available")
+        assert(contains(err-value(r), "api-key"), "naming the opts key")
+        assert(not(contains(err-value(r), "sk-ctx")), "and not showing the ctx key")
+    })
+}
+
+test-resolve-hosted-url-without-key-is-an-error
+meta ["test"]
+fn () {
+    r ::oc/resolve-from(::oc/GROQ, {base-url: "https://proxy.example.com/v1"}, {key: "sk-ctx"})
+    assert(is-err(r))
+    assert(contains(err-value(r), "base-url"), "naming base-url")
+    assert(contains(err-value(r), "api-key"), "and api-key")
+    assert(not(contains(err-value(r), "sk-ctx")))
+    with-key ::oc/resolve-from(::oc/GROQ, {base-url: "https://proxy.example.com/v1", api-key: "sk-t"}, {key: "sk-ctx"})
+    assert-eq("sk-t", with-key.endpoint.api-key)
+    assert-eq("https://proxy.example.com/v1", with-key.endpoint.base-url)
+}
+
+test-resolve-keyless-url-sends-no-key
+meta ["test"]
+fn () {
+    for-each([::oc/OLLAMA, ::oc/VLLM, ::oc/LM_STUDIO, ::oc/CUSTOM], (preset) {
+        p ::oc/resolve-from(preset, {base-url: "http://gpu-box.internal:1/v1"}, {key: "sk-ctx"})
+        assert-eq("http://gpu-box.internal:1/v1", p.endpoint.base-url)
+        assert(is-null(p.endpoint.api-key), `${preset.name}: the ctx key never goes to a per-call URL`)
+        assert(is-null(get(::api/endpoint-headers(p.endpoint, {}, false), "Authorization")), "so no Authorization header goes out")
+    })
+}
+
+test-resolve-refuses-a-malformed-url
+meta ["test"]
+fn () {
+    r ::oc/resolve-from(::oc/OLLAMA, {base-url: "http://user:pw@gpu-box/v1"}, {})
+    assert(is-err(r))
+    assert(contains(err-value(r), "base-url"))
+}
+
+test-custom-needs-a-url
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"openai-compatible.url": null, "openai-compatible.api.key": "gw-key"})
+    r ::oc/custom()
+    ::hot::ctx/set({"openai-compatible.api.key": null})
+    assert(is-err(r), "no URL is an Err, not a call to a default host")
+    assert(contains(err-value(r), "openai-compatible.url"))
+    assert(contains(err-value(r), "base-url"))
+    assert-eq("http://x.example.com/v1", ::oc/custom({base-url: "http://x.example.com/v1"}).endpoint.base-url)
+}
+
+test-named-presets-take-opts
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"groq.api.key": "gsk_ctx"})
+    assert-eq("gsk_tenant", ::oc/groq({api-key: "gsk_tenant"}).endpoint.api-key)
+    assert-eq("gsk_ctx", ::oc/groq().endpoint.api-key)
+    assert-eq("gsk_ctx", ::hot::ctx/get("groq.api.key"), "a per-call key is not written to ctx")
+    ::hot::ctx/set({"groq.api.key": null})
+    for-each([::oc/deepseek, ::oc/together, ::oc/fireworks, ::oc/mistral, ::oc/cerebras, ::oc/perplexity, ::oc/openrouter], (preset) {
+        assert-eq("k-tenant", preset({api-key: "k-tenant"}).endpoint.api-key)
+        assert(is-err(preset({api-key: ""})), "blank is an Err")
+        assert(is-err(preset({base-url: "https://x.example.com/v1"})), "a hosted URL needs a key")
+    })
+    assert-eq("http://b:1/v1", ::oc/ollama({base-url: "http://b:1/v1"}).endpoint.base-url)
+    assert-eq("http://b:1/v1", ::oc/vllm({base-url: "http://b:1/v1"}).endpoint.base-url)
+    assert-eq("http://b:1/v1", ::oc/lm-studio({base-url: "http://b:1/v1"}).endpoint.base-url)
+}
+
+test-openrouter-opts-keep-attribution-headers
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"openrouter.app.url": "https://example.com"})
+    p ::oc/openrouter({api-key: "k-tenant"})
+    ::hot::ctx/set({"openrouter.app.url": null})
+    assert-eq("https://example.com", get(p.endpoint.headers, "HTTP-Referer"))
+}
+
+test-hosted-preset-without-a-key-fails-at-the-call
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"groq.api.key": null})
+    p ::oc/groq()
+    result ::chat/complete(p, {model: "m", messages: []})
+    assert(is-err(result), "a clear Err, not an unauthenticated request")
+    assert(contains(err-value(result), "groq.api.key"))
+    assert(contains(err-value(result), "api-key"))
+}
+
+test-functions-take-opts-over-a-built-provider
+meta ["test"]
+fn () {
+    p ::oc/configure(::oc/GROQ, "gsk_configured")
+    assert-reached-offline-url(() { ::chat/complete(p, {model: "m", messages: []}, OFFLINE) }, "complete")
+    assert-reached-offline-url(() { ::chat/complete-stream(p, {model: "m", messages: []}, OFFLINE) }, "complete-stream")
+    assert-reached-offline-url(() { ::chat/chat(p, "m", "hi", OFFLINE) }, "chat")
+    assert-reached-offline-url(() { ::chat/chat(p, "m", "hi", "be brief", OFFLINE) }, "chat with a system prompt")
+    assert-reached-offline-url(() { ::models/list-models(p, OFFLINE) }, "list-models")
+    assert-reached-offline-url(() { ::models/get-model(p, "m", OFFLINE) }, "get-model")
+    assert-reached-offline-url(() { ::emb/create-embeddings(p, ::emb/EmbeddingsRequest({model: "m", input: "a"}), OFFLINE) }, "create-embeddings")
+
+    for-each([{api-key: ""}, {base-url: "http://127.0.0.1:1/v1"}], (refused) {
+        assert(is-err(::chat/complete(p, {model: "m", messages: []}, refused)), "complete refuses")
+        assert(is-err(::chat/complete-stream(p, {model: "m", messages: []}, refused)), "complete-stream refuses")
+        assert(is-err(::chat/chat(p, "m", "hi", refused)), "chat refuses")
+        assert(is-err(::models/list-models(p, refused)), "list-models refuses")
+        assert(is-err(::models/get-model(p, "m", refused)), "get-model refuses")
+        assert(is-err(::emb/create-embeddings(p, ::emb/EmbeddingsRequest({model: "m", input: "a"}), refused)), "create-embeddings refuses")
+    })
+}
+
+test-run-loop-provider-opts-reach-a-preset
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"groq.api.key": null})
+    opts ::ai-chat/ChatOptions({
+        model: "groq/m",
+        providers: ::ai-chat/with-providers([::oc/provider(::oc/groq())]),
+        provider-opts: OFFLINE
+    })
+    assert-reached-offline-url(() { ::ai-chat/run-loop(opts, "hi") }, "registry run-loop")
+    assert-reached-offline-url(() { ::ai-chat/run-loop-stream(opts, "hi") }, "registry run-loop-stream")
+
+    direct ::ai-chat/ChatOptions({chat-opts-fn: ::oc/chat-opts-fn(::oc/groq()), model: "m", provider-opts: OFFLINE})
+    assert-reached-offline-url(() { ::ai-chat/run-loop(direct, "hi") }, "bound run-loop")
+    stream ::ai-chat/ChatOptions({chat-stream-opts-fn: ::oc/chat-stream-opts-fn(::oc/groq()), model: "m", provider-opts: OFFLINE})
+    assert-reached-offline-url(() { ::ai-chat/run-loop-stream(stream, "hi") }, "bound run-loop-stream")
+}
+
+test-run-loop-reaches-a-keyless-endpoint-through-provider-opts
+meta ["test"]
+fn () {
+    opts ::ai-chat/ChatOptions({
+        model: "ollama/m",
+        providers: ::ai-chat/with-providers([::oc/provider(::oc/ollama())]),
+        provider-opts: {endpoint: ::api/endpoint("http://127.0.0.1:1/v1")}
+    })
+    assert-reached-offline-url(() { ::ai-chat/run-loop(opts, "hi") }, "a keyless server elsewhere")
+}

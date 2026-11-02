@@ -1,3 +1,34 @@
 ::discord::core ns
+meta {
+    doc: """
+    Discord API bindings: messages (with file uploads), channels and
+    threads, guilds, members, roles, bans, emoji, stickers, scheduled
+    events, auto-moderation, webhooks, application commands, and
+    interactions (Ed25519 request verification plus responses).
 
+    **Setup**: set `discord.bot.token` in context to the bot token from
+    the Developer Portal's **Bot** tab. For an interactions endpoint, also
+    set `discord.public.key` to the application's public key.
+
+    Every API-calling function also takes a trailing `opts` Map for a
+    per-call bot token; see `::discord::api`.
+
+    **Quick start**
+
+    ```hot
+    ::messages ::discord::messages
+
+    ::messages/create-message(::messages/CreateMessageRequest({
+      channel_id: "1100000000000000000",
+      content: "Deploy finished"
+    }))
+    ```
+    """
+}
+
+// Discord REST API v10 (the current version as of November 2026).
 BASE_URL "https://discord.com/api/v10"
+
+// Discord requires a `DiscordBot ($url, $versionNumber)` User-Agent;
+// requests without a valid one may be blocked by Cloudflare.
+USER_AGENT "DiscordBot (https://hot.dev/pkg/hot.dev/discord, 1.1.0)"

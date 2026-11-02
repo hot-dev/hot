@@ -1,11 +1,53 @@
 ::salesforce::integration ns
 meta ["test"]
 
-// Requires ctx: one salesforce.* auth mode (see package docs)
+// =============================================================================
+// Integration Tests (live Salesforce org, read-only)
+// =============================================================================
+// Requires ctx: one complete salesforce.* auth flow (see ::salesforce::auth).
+// Without one every test skips. Nothing here writes to the org.
 // Run with: hot test --project pkg-integration-salesforce
+
+::query ::salesforce::query
+::sobjects ::salesforce::sobjects
+::org ::salesforce::org
+
+skip fn (name: Str): Any {
+    println(`skipping ${name}: no Salesforce credentials configured`)
+    assert(true, "skipped without credentials")
+}
 
 test-soql-roundtrip
 meta ["test"] fn () {
-    out ::salesforce::query/soql("SELECT Id FROM User LIMIT 1")
-    assert(gt(out.totalSize, 0), "org should have a user")
+    cond {
+        not(::salesforce::auth/is-configured()) => { skip("test-soql-roundtrip") }
+        => {
+            out ::query/soql("SELECT Id FROM User LIMIT 1")
+            assert(gt(out.totalSize, 0), "org should have a user")
+        }
+    }
+}
+
+test-soql-records-pages
+meta ["test"] fn () {
+    cond {
+        not(::salesforce::auth/is-configured()) => { skip("test-soql-records-pages") }
+        => {
+            users ::query/soql-records("SELECT Id, Name FROM User", {max-records: 5})
+            assert(lte(length(users), 5), "max-records caps the result")
+        }
+    }
+}
+
+test-describe-and-limits
+meta ["test"] fn () {
+    cond {
+        not(::salesforce::auth/is-configured()) => { skip("test-describe-and-limits") }
+        => {
+            schema ::sobjects/describe-object("Contact")
+            assert(in("LastName", ::sobjects/field-names(schema)), "Contact has LastName")
+            limits ::org/limits()
+            assert(is-some(limits.DailyApiRequests), "limits include DailyApiRequests")
+        }
+    }
 }

@@ -1,0 +1,175 @@
+::google::oauth ns
+meta {
+    doc: """
+    Google OAuth consent helpers for user (refresh-token) credentials,
+    built on `hot.dev/oauth2`.
+
+    **Flow**
+
+    1. Redirect the user to `authorize-url(...)` (offline access, consent
+       prompt and incremental scopes are on by default, so Google returns
+       a refresh token).
+    2. In your callback, `exchange-code(...)` turns `?code=` into tokens.
+    3. Store `refresh_token` per user (it is long-lived), then pass it per
+       call as `{refresh-token, client-id, client-secret}` opts, or set
+       the `google.oauth.*` context variables for a single-user app.
+
+    ```hot
+    ::oauth ::google::oauth
+
+    verifier ::oauth/pkce-verifier()
+    url ::oauth/authorize-url(client-id, "https://app.example.com/oauth/google",
+      ["drive.file"], state, {code-verifier: verifier})
+
+    // callback handler:
+    tokens ::oauth/exchange-code(client-id, client-secret, request.query.code,
+      "https://app.example.com/oauth/google", {code-verifier: verifier})
+    tokens.refresh_token
+    ```
+    """
+}
+
+::auth ::google::auth
+::oauth2 ::oauth2
+::uri ::hot::uri
+::http ::hot::http
+
+pkce-verifier ::oauth2/pkce-verifier
+pkce-challenge ::oauth2/pkce-challenge
+
+build-authorize-params
+meta {
+    doc: """
+    The Google-specific authorization parameters for `authorize-url`
+    (pure). Options (all optional):
+
+    - `access-type` - `"offline"` (default; returns a refresh token) or `"online"`
+    - `prompt` - `"consent"` (default; guarantees a refresh token on
+      re-consent), `"select_account"`, `"none"`, or null to omit
+    - `include-granted-scopes` - `true` (default) for incremental authorization
+    - `login-hint` - pre-fill the account email
+    - `hd` - restrict the account chooser to a Workspace domain
+    - `code-verifier` - a PKCE verifier; its S256 challenge is sent
+    - `code-challenge` - a precomputed S256 challenge (instead of `code-verifier`)
+    - `extra` - any other parameters, merged last
+    """
+}
+fn (opts: Map): Map {
+  verifier get(opts, "code-verifier")
+  challenge or(get(opts, "code-challenge"), if(::auth/is-blank-value(verifier), null, pkce-challenge(verifier)))
+  prompt if(in("prompt", keys(opts)), opts.prompt, "consent")
+  include if(in("include-granted-scopes", keys(opts)), get(opts, "include-granted-scopes"), true)
+  {
+    params: filter-vals({
+      access_type: or(get(opts, "access-type"), "offline"),
+      prompt: prompt,
+      include_granted_scopes: if(is-some(include), if(include, "true", "false"), null),
+      login_hint: get(opts, "login-hint"),
+      hd: opts.hd,
+      ...or(opts.extra, {})
+    }, is-some),
+    code-challenge: challenge
+  }
+}
+
+authorize-url
+meta {
+    doc: """
+    Build the Google consent URL. `scopes` is a Vec or space/comma
+    separated Str (short names such as `"drive.file"` are expanded);
+    `state` is your CSRF token. See `build-authorize-params` for `opts`.
+
+    ```hot
+    url ::google::oauth/authorize-url("123.apps.googleusercontent.com",
+      "https://app.example.com/oauth/google", "drive.readonly", "csrf-123")
+    ```
+    """
+}
+fn
+(client-id: Str, redirect-uri: Str, scopes: Str | Vec, state: Str): Str {
+  authorize-url(client-id, redirect-uri, scopes, state, {})
+},
+(client-id: Str, redirect-uri: Str, scopes: Str | Vec, state: Str, opts: Map): Str {
+  built build-authorize-params(opts)
+  ::oauth2/authorize-url(filter-vals({
+    authorize-url: ::google/AUTH_URL,
+    client-id: client-id,
+    redirect-uri: redirect-uri,
+    scope: join(::auth/normalize-scopes(scopes), " "),
+    state: if(::auth/is-blank-value(state), null, state),
+    code-challenge: built.code-challenge,
+    extra: built.params
+  }, is-some))
+}
+
+exchange-code
+meta {
+    doc: """
+    Exchange an authorization code for tokens. Returns Google's token
+    response (`access_token`, `expires_in`, `refresh_token`, `scope`,
+    `token_type`, `id_token` when `openid` was requested), or a
+    `::google::auth/TokenError` such as
+    `"google: token exchange failed: invalid_grant (Bad Request)"`.
+    `opts.code-verifier` completes a PKCE flow. The client secret and the
+    returned tokens are masked in call records.
+    """
+}
+fn
+(client-id: Str, client-secret: Str?, code: Str, redirect-uri: Str): Map {
+  exchange-code(client-id, client-secret, code, redirect-uri, {})
+},
+(client-id: Str, client-secret: Str?, code: Str, redirect-uri: Str, opts: Map): Map {
+  ::auth/mark-fields({client-secret: client-secret}, ::auth/SECRET_KEYS)
+  tokens ::oauth2/exchange-code(::google/TOKEN_URL, filter-vals({
+    client-id: client-id,
+    client-secret: if(::auth/is-blank-value(client-secret), null, client-secret),
+    code: code,
+    redirect-uri: redirect-uri,
+    code-verifier: get(opts, "code-verifier")
+  }, is-some))
+  if(is-err(tokens), err(::auth/token-error("google: token exchange failed", err-value(tokens))), ::auth/mark-token-response(tokens))
+}
+
+refresh-access-token
+meta {
+    doc: """Exchange a refresh token for a fresh access token (no cache). Returns the token response or a `TokenError`. A revoked or expired refresh token yields `error-code: "invalid_grant"`; ask the user to consent again."""
+}
+fn (client-id: Str, client-secret: Str?, refresh-token: Str): Map {
+  ::auth/refresh-token-grant(client-id, if(::auth/is-blank-value(client-secret), null, client-secret), refresh-token)
+}
+
+revoke-token
+meta {
+    doc: """Revoke an access or refresh token (revoking a refresh token also revokes its access tokens). Returns true, or a `TokenError`. The token is masked in call records."""
+}
+fn (token: Str): Bool {
+  ::auth/mark-fields({token: token}, ::auth/SECRET_KEYS)
+  response ::http/request(::http/HttpRequest({
+    method: "POST",
+    url: ::google/REVOKE_URL,
+    headers: {Content-Type: "application/x-www-form-urlencoded"},
+    body: ::uri/encode-query({token: token})
+  }))
+  cond {
+    is-err(response) => { err(::auth/token-error("google: token revocation failed", err-value(response))) }
+    ::http/is-ok-response(response) => { true }
+    => { err(::auth/token-error("google: token revocation failed", {status: response.status, body: response.body})) }
+  }
+}
+
+granted-scopes
+meta {
+    doc: """The scopes a token response says were granted (`scope` split on spaces). Check it after consent: users can untick scopes."""
+}
+fn (tokens: Map): Vec {
+  ::auth/normalize-scopes(or(tokens.scope, ""))
+}
+
+missing-scopes
+meta {
+    doc: """The `required` scopes (Vec or Str, short names ok) that a token response did not grant. Empty when everything was granted."""
+}
+fn (tokens: Map, required: Str | Vec): Vec {
+  granted granted-scopes(tokens)
+  filter(::auth/normalize-scopes(required), (s) { not(in(s, granted)) })
+}

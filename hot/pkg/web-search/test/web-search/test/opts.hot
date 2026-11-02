@@ -1,0 +1,171 @@
+::web-search::test::opts ns
+meta ["test"]
+
+// Hermetic: no network and no provider context. Calls with a credential
+// are never sent: these tests stop at the resolver or build the request.
+
+::ws ::web-search
+::api ::web-search::api
+::tavily ::web-search::tavily
+::brave ::web-search::brave
+::exa ::web-search::exa
+::firecrawl ::web-search::firecrawl
+
+CTX {
+    "tavily.api.key": "ctx-tavily",
+    "brave.api.key": "ctx-brave",
+    "exa.api.key": "ctx-exa",
+    "firecrawl.api.key": "ctx-firecrawl"
+}
+
+test-resolve-opts-only-hold-what-was-passed
+meta ["test"] fn () {
+    r ::api/resolve-from({tavily-api-key: "t", exa-api-key: "e"}, CTX)
+    assert(r.per-call)
+    assert-eq({tavily: "t", exa: "e"}, r.keys, "context keys are not merged in")
+}
+
+test-resolve-ctx-used-when-no-credentials-in-opts
+meta ["test"] fn () {
+    r ::api/resolve-from({provider: "brave", fallback: true}, CTX)
+    assert(not(r.per-call))
+    assert-eq({tavily: "ctx-tavily", brave: "ctx-brave", exa: "ctx-exa", firecrawl: "ctx-firecrawl"}, r.keys)
+    assert-eq({}, ::api/resolve-from({}, {}).keys)
+}
+
+test-resolve-returns-marked-values-unchanged
+meta ["test"] fn () {
+    r ::api/resolve({tavily-api-key: "tvly-call-value", brave-api-key: "brave-call-value"})
+    assert-eq("tvly-call-value", r.keys.tavily)
+    assert-eq("brave-call-value", r.keys.brave)
+}
+
+test-resolve-never-writes-ctx
+meta ["test"] fn () {
+    before ::hot::ctx/get("tavily.api.key")
+    assert-eq("call-key", ::api/resolve({tavily-api-key: "call-key"}).keys.tavily)
+    assert-eq(before, ::hot::ctx/get("tavily.api.key"))
+}
+
+test-blank-credential-in-opts-is-an-error
+meta ["test"] fn () {
+    results map(["tavily-api-key", "brave-api-key", "exa-api-key", "firecrawl-api-key"], (name) {
+        map(["", "   ", null], (blank) {
+            out ::api/resolve-from(assoc({}, name, blank), CTX)
+            assert(is-err(out), "never falls back to context")
+            assert(contains(err-message(out), name))
+            true
+        })
+    })
+    assert-eq(4, length(results))
+    mixed ::api/resolve-from({tavily-api-key: "t", brave-api-key: ""}, CTX)
+    assert(contains(err-message(mixed), "brave-api-key"), "one blank key fails the call")
+    assert(is-err(::ws/search("q", 3, {tavily-api-key: ""})), "the error reaches the caller")
+}
+
+test-order-with-ctx-is-unchanged
+meta ["test"] fn () {
+    creds ::api/resolve-from({}, CTX)
+    assert-eq(["tavily"], ::ws/search-order({}, creds, null))
+    assert-eq(["brave"], ::ws/search-order({provider: "brave"}, creds, null))
+    assert-eq(["exa"], ::ws/search-order({}, creds, "exa"), "the context default applies")
+    assert-eq(["brave", "tavily", "exa", "firecrawl"], ::ws/search-order({provider: "brave", fallback: true}, creds, null))
+}
+
+test-order-with-per-call-credentials-only-has-those-providers
+meta ["test"] fn () {
+    options {tavily-api-key: "t", exa-api-key: "e"}
+    creds ::api/resolve-from(options, CTX)
+    assert-eq(["tavily"], ::ws/search-order(options, creds, null))
+    assert-eq(["tavily", "exa"], ::ws/search-order({...options, fallback: true}, creds, null), "fallback adds no context provider")
+    assert-eq(["exa", "tavily"], ::ws/search-order({...options, provider: "exa", fallback: true}, creds, null))
+}
+
+test-order-context-default-only-applies-when-it-is-a-candidate
+meta ["test"] fn () {
+    options {tavily-api-key: "t", exa-api-key: "e"}
+    creds ::api/resolve-from(options, CTX)
+    assert-eq(["exa"], ::ws/search-order(options, creds, "exa"))
+    assert-eq(["tavily"], ::ws/search-order(options, creds, "brave"), "brave has no credential in this call")
+}
+
+test-order-named-provider-without-credential-is-an-error
+meta ["test"] fn () {
+    options {provider: "brave", tavily-api-key: "t"}
+    creds ::api/resolve-from(options, CTX)
+    out ::ws/search-order(options, creds, null)
+    assert(is-err(out), "brave must not run on brave.api.key")
+    assert(contains(err-message(out), "brave-api-key"))
+    with-fallback ::ws/search-order({...options, fallback: true}, creds, null)
+    assert(is-err(with-fallback), "fallback doesn't hide the mistake")
+    unknown ::ws/search-order({provider: "bing", tavily-api-key: "t"}, creds, null)
+    assert(contains(err-message(unknown), "unknown provider"))
+}
+
+// A live context key proves the search stops before any request: it would
+// otherwise be sent.
+test-search-never-falls-through-to-a-context-key
+meta ["test"] fn () {
+    before ::hot::ctx/get("brave.api.key")
+    ::hot::ctx/set-secret("brave.api.key", "ctx_secret_key")
+    assert-eq("ctx_secret_key", ::api/api-key("brave", {}), "control: the live context key is set")
+    out ::ws/search("q", 3, {provider: "brave", tavily-api-key: "t", fallback: true})
+    assert(is-err(out))
+    assert(contains(err-message(out), "brave-api-key"))
+    assert(not(contains(err-message(out), "ctx_secret_key")), "the key stays out of messages")
+    native ::brave/search("q", {}, {tavily-api-key: "t"})
+    assert(is-err(native), "another provider's key in opts turns off this provider's context key")
+    assert(contains(err-message(native), "brave-api-key"))
+    ::hot::ctx/set-secret("brave.api.key", before)
+}
+
+test-api-key-names-what-to-set
+meta ["test"] fn () {
+    out ::api/api-key("exa", {})
+    assert(contains(err-message(out), "exa.api.key"))
+    assert(contains(err-message(out), "exa-api-key"))
+}
+
+test-build-request-uses-the-key-it-was-given
+meta ["test"] fn () {
+    tavily ::tavily/build-request("/search", {query: "q", skip: null}, "tvly-a")
+    assert-eq("https://api.tavily.com/search", tavily.url)
+    assert-eq("Bearer tvly-a", tavily.headers.Authorization)
+    assert-eq({query: "q"}, from-json(tavily.body), "nulls are dropped")
+    brave ::brave/build-request("/web/search?q=q", "brave-a")
+    assert-eq("https://api.search.brave.com/res/v1/web/search?q=q", brave.url)
+    assert-eq("brave-a", brave.headers.X-Subscription-Token)
+    exa ::exa/build-request("/search", {query: "q"}, "exa-a")
+    assert-eq("https://api.exa.ai/search", exa.url)
+    assert-eq("exa-a", exa.headers.x-api-key)
+    firecrawl ::firecrawl/build-request("q", {limit: 3}, "fc-a")
+    assert-eq("https://api.firecrawl.dev/v2/search", firecrawl.url)
+    assert-eq("Bearer fc-a", firecrawl.headers.Authorization)
+    assert-eq({limit: 3, query: "q"}, from-json(firecrawl.body))
+}
+
+// A blank credential error can only come from the call's own opts, so it
+// proves the opts reached the resolver, without any network traffic.
+stops-at fn (result: Result, name: Str): Bool {
+    and(is-err(result), contains(err-message(result), name))
+}
+
+test-opts-reach-every-function
+meta ["test"] fn () {
+    assert(stops-at(::tavily/search("q", {}, {tavily-api-key: ""}), "tavily-api-key"))
+    assert(stops-at(::tavily/extract(["https://example.com"], {}, {tavily-api-key: ""}), "tavily-api-key"))
+    assert(stops-at(::brave/search("q", {}, {brave-api-key: ""}), "brave-api-key"))
+    assert(stops-at(::exa/search("q", {}, {exa-api-key: ""}), "exa-api-key"))
+    assert(stops-at(::exa/get-contents(["https://example.com"], {}, {exa-api-key: ""}), "exa-api-key"))
+    assert(stops-at(::exa/find-similar("https://example.com", {}, {exa-api-key: ""}), "exa-api-key"))
+    assert(stops-at(::firecrawl/search("q", {}, {firecrawl-api-key: ""}), "firecrawl-api-key"))
+    assert(stops-at(::ws/search-with("tavily", "q", 3, {}, {tavily-api-key: ""}), "tavily-api-key"))
+    assert(stops-at(::ws/search-with("brave", "q", 3, {}, {brave-api-key: ""}), "brave-api-key"))
+    assert(stops-at(::ws/search-with("exa", "q", 3, {}, {exa-api-key: ""}), "exa-api-key"))
+    assert(stops-at(::ws/search-with("firecrawl", "q", 3, {}, {firecrawl-api-key: ""}), "firecrawl-api-key"))
+}
+
+test-explicit-key-arity-still-works
+meta ["test"] fn () {
+    assert(stops-at(::firecrawl/search("q", {}, ""), "firecrawl-api-key"))
+}

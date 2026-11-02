@@ -1,0 +1,72 @@
+::google::gmail::test::sync ns
+meta ["test"]
+
+::sync ::google::gmail::sync
+::b64 ::hot::base64
+
+push fn (token: Str?): Map {
+  data ::b64/encode("{\"emailAddress\":\"ada@example.com\",\"historyId\":9876543210}")
+  body {message: {data: data, messageId: "msg-1", publishTime: "2026-11-01T10:00:00Z", attributes: {}}, subscription: "projects/p/subscriptions/gmail"}
+  {method: "POST", url: "/gmail/push", headers: {"content-type": "application/json"}, query: if(is-null(token), {}, {token: token}), body: body, body-raw: to-json(body)}
+}
+
+test-parse-push
+meta ["test"] fn () {
+    n ::sync/parse-push(push(null))
+    assert-eq("ada@example.com", n.email-address)
+    assert-eq("9876543210", n.history-id, "the numeric historyId becomes a Str")
+    assert-eq("msg-1", n.message-id)
+    assert-eq("projects/p/subscriptions/gmail", n.subscription)
+    from-raw ::sync/parse-push({body-raw: to-json(push(null).body)})
+    assert-eq("ada@example.com", from-raw.email-address, "an unparsed body-raw works too")
+    assert(is-err(::sync/parse-push({body: {hello: "world"}})), "not a push envelope")
+    assert(is-err(::sync/parse-push({body: {message: {data: "%%%"}}})), "bad base64")
+}
+
+test-verify-push-token
+meta ["test"] fn () {
+    assert(::sync/verify-push-token(push("s3cret"), "s3cret"), "valid token")
+    assert(not(::sync/verify-push-token(push("guess"), "s3cret")), "tampered token")
+    assert(not(::sync/verify-push-token(push(null), "s3cret")), "missing token")
+    assert(not(::sync/verify-push-token(push(""), "")), "empty expected token fails closed")
+    assert(not(::sync/verify-push-token(push("x"), null)), "null expected token fails closed")
+    assert(not(::sync/verify-push-token(push("x"), "  ")), "blank expected token fails closed")
+    ok ::sync/verify-push(push("s3cret"), "s3cret")
+    assert-eq("9876543210", ok.history-id)
+    bad ::sync/verify-push(push("nope"), "s3cret")
+    assert(is-err(bad))
+    assert(contains(err-message(bad), "push token"))
+}
+
+test-history-params-and-watch-body
+meta ["test"] fn () {
+    p ::sync/history-params(123, {historyTypes: ["messageAdded"], token: "t"})
+    assert-eq({startHistoryId: "123", historyTypes: ["messageAdded"]}, p)
+    assert-eq({topicName: "projects/p/topics/gmail"}, ::sync/build-watch("projects/p/topics/gmail", {}))
+    assert-eq({topicName: "t", labelIds: ["INBOX"], labelFilterBehavior: "include"}, ::sync/build-watch("t", {label-ids: ["INBOX"], label-filter-behavior: "include"}))
+}
+
+test-summarize-history
+meta ["test"] fn () {
+    records [
+        {id: "10", messagesAdded: [{message: {id: "a"}}, {message: {id: "b"}}]},
+        {id: "11", labelsAdded: [{message: {id: "a"}, labelIds: ["STARRED"]}]},
+        {id: "12", messagesDeleted: [{message: {id: "b"}}], labelsRemoved: [{message: {id: "c"}, labelIds: ["UNREAD"]}]},
+        {id: "13", messagesAdded: [{message: {id: "a"}}]}
+    ]
+    set ::sync/summarize-history(records, "13", 1)
+    assert-eq("13", set.history-id)
+    assert-eq(["a"], set.added-message-ids, "deleted and duplicate ids are dropped")
+    assert-eq(["b"], set.deleted-message-ids)
+    assert-eq(["a", "c"], set.label-changed-message-ids)
+    assert-eq(4, length(set.history))
+}
+
+test-is-history-expired
+meta ["test"] fn () {
+    gone err(::google::api/HttpError(::hot::http/HttpResponse({status: 404, headers: {}, body: {error: {code: 404, message: "Requested entity was not found.", status: "NOT_FOUND"}}})))
+    assert(::sync/is-history-expired(gone))
+    assert(not(::sync/is-history-expired(err(::google::api/HttpError(::hot::http/HttpResponse({status: 500, headers: {}, body: ""}))))))
+    assert(not(::sync/is-history-expired({history: []})))
+    assert(not(::sync/is-history-expired(err("google: no credentials configured"))))
+}

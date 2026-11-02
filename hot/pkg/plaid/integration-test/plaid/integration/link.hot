@@ -1,9 +1,31 @@
 ::plaid::integration ns
 meta ["test"]
 
-// Requires ctx: plaid.client-id + plaid.secret (sandbox)
+// =============================================================================
+// Integration tests (live Plaid sandbox)
+// =============================================================================
+// Requires ctx: plaid.client-id (PLAID_CLIENT_ID) + plaid.secret
+// (PLAID_SECRET, the sandbox secret); plaid.env (PLAID_ENV) defaults to
+// "sandbox". Minting a link token creates nothing that needs cleaning up.
+// Without credentials each test records a skip and passes.
+// Run with: hot test --project pkg-integration-plaid
+
+configured fn (): Bool {
+    and(is-some(::hot::ctx/get("plaid.client-id")), is-some(::hot::ctx/get("plaid.secret")))
+}
+
+skip fn (): Bool {
+    println("PLAID_CLIENT_ID / PLAID_SECRET not set - skipping")
+    assert(true, "skipped: no Plaid credentials")
+}
+
 test-create-link-token
 meta ["test"] fn () {
-    out ::plaid/create-link-token("hot-itest-user", "Hot Integration Test")
-    assert(is-some(out.link_token), "sandbox should mint a link token")
+    cond {
+        not(configured()) => { skip() }
+        => {
+            out ::plaid::link/create-link-token("hot-itest-user", "Hot Integration Test")
+            assert(is-some(out.link_token), "sandbox should mint a link token")
+        }
+    }
 }

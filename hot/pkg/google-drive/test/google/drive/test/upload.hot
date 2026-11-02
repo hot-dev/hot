@@ -1,0 +1,116 @@
+::google::drive::test::upload ns
+meta ["test"]
+
+::up ::google::drive::upload
+
+// 0x00, 0xFF, and 0xC3 0x28 (an invalid UTF-8 sequence)
+BINARY Bytes([0, 1, 255, 254, 195, 40, 0, 10, 13])
+
+test-build-multipart-is-binary-safe
+meta ["test"] fn () {
+    body ::up/build-multipart({name: "blob.bin", parents: null}, BINARY, "application/octet-stream", "BOUND")
+    assert(is-bytes(body), "the body is Bytes, not Str")
+    head "--BOUND\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{\"name\":\"blob.bin\"}\r\n--BOUND\r\nContent-Type: application/octet-stream\r\n\r\n"
+    tail "\r\n--BOUND--\r\n"
+    expected concat(Bytes(head), BINARY, Bytes(tail))
+    assert-eq(expected, body, "metadata part, exact payload bytes, closing boundary")
+    start length(Bytes(head))
+    assert-eq(BINARY, slice(body, start, add(start, length(BINARY))), "payload bytes are untouched")
+    assert-eq(add(add(length(Bytes(head)), 9), length(Bytes(tail))), length(body))
+}
+
+test-build-multipart-text-and-json-content
+meta ["test"] fn () {
+    text ::up/build-multipart({name: "n.txt"}, "héllo", "text/plain", "B")
+    assert-eq(Bytes("héllo"), slice(text, sub(length(text), add(length(Bytes("héllo")), length(Bytes("\r\n--B--\r\n")))), sub(length(text), length(Bytes("\r\n--B--\r\n")))))
+    assert-eq(Bytes("{\"a\":1}"), ::up/to-bytes({a: 1}), "Map content is JSON-encoded")
+    assert-eq(Bytes([]), ::up/to-bytes(null))
+}
+
+test-boundaries-are-random
+meta ["test"] fn () {
+    a ::up/new-boundary()
+    assert(starts-with(a, "hot-drive-"))
+    assert(ne(a, ::up/new-boundary()))
+}
+
+test-convert-target
+meta ["test"] fn () {
+    assert-eq("application/vnd.google-apps.document", ::up/convert-target("document"))
+    assert-eq("application/vnd.google-apps.spreadsheet", ::up/convert-target("Sheet"))
+    assert-eq("application/x-custom", ::up/convert-target("application/x-custom"))
+    assert(is-null(::up/convert-target(null)))
+    assert(is-err(::up/convert-target("movie")))
+}
+
+test-chunk-math
+meta ["test"] fn () {
+    assert-eq(262144, ::up/align-chunk-size(1), "at least 256 KiB")
+    assert-eq(524288, ::up/align-chunk-size(600000), "rounded down to a 256 KiB multiple")
+    assert-eq(8388608, ::up/align-chunk-size(8388608))
+    assert-eq("bytes 0-524287/2000000", ::up/content-range(0, 524288, 2000000))
+    assert-eq("bytes 1572864-1999999/2000000", ::up/content-range(1572864, 2000000, 2000000))
+    assert-eq("bytes */2000000", ::up/content-range(5, 5, 2000000), "empty range is the status form")
+    assert-eq([0, 262144], ::up/chunk-bounds(0, 262144, 1000000))
+    assert-eq([786432, 1000000], ::up/chunk-bounds(786432, 262144, 1000000), "last chunk is short")
+}
+
+test-next-offset-from-range
+meta ["test"] fn () {
+    assert-eq(43, ::up/next-offset-from-range("bytes=0-42"))
+    assert-eq(524288, ::up/next-offset-from-range("bytes=0-524287"))
+    assert-eq(0, ::up/next-offset-from-range(null), "no Range header: nothing stored")
+    assert-eq(0, ::up/next-offset-from-range(""))
+    assert-eq(0, ::up/next-offset-from-range("bytes=junk"), "a malformed Range resumes from the start")
+}
+
+response fn (status: Int, headers: Map, body: Any): Any {
+    ::hot::http/HttpResponse({status: status, headers: headers, body: body})
+}
+
+test-classify-upload-response
+meta ["test"] fn () {
+    done ::up/classify-upload-response(response(200, {}, {id: "f1"}))
+    assert-eq("complete", done.state)
+    assert-eq("f1", done.file.id)
+    assert-eq("complete", ::up/classify-upload-response(response(201, {}, {id: "f1"})).state)
+
+    more ::up/classify-upload-response(response(308, {range: "bytes=0-262143"}, ""))
+    assert-eq("incomplete", more.state)
+    assert-eq(262144, more.next-offset, "the next byte comes from the Range header")
+    nothing ::up/classify-upload-response(response(308, {}, ""))
+    assert-eq("incomplete", nothing.state)
+    assert-eq(0, nothing.next-offset, "a 308 without Range: nothing stored")
+
+    retry ::up/classify-upload-response(response(503, {}, ""))
+    assert-eq("retry", retry.state)
+    assert(::google::api/is-retryable(err(retry.error)), "a failed chunk's error stays retryable")
+    assert-eq(503, retry.error.status)
+    dropped ::up/classify-upload-response(err("::hot::http/request: request failed: reset"))
+    assert-eq("retry", dropped.state)
+    assert(::google::api/is-retryable(err(dropped.error)))
+
+    expired ::up/classify-upload-response(response(404, {}, ""))
+    assert(is-err(expired))
+    assert(contains(err-message(expired), "expired"))
+    assert(is-err(::up/classify-upload-response(response(410, {}, ""))), "410 is an expired session too")
+    bad ::up/classify-upload-response(response(400, {}, {error: {code: 400, message: "bad"}}))
+    assert(is-err(bad))
+    assert-eq(400, err-value(bad).status, "other 4xx come back as HttpError")
+    assert(contains(err-message(::up/classify-upload-response(err("google: no credentials configured"))), "no credentials"), "other failures pass through")
+}
+
+test-session-uri-needs-google-or-its-own-credential
+meta ["test"] fn () {
+    google "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&upload_id=abc"
+    assert(is-null(::up/session-uri-error(google, {})), "a Google URL may use context credentials")
+    other "https://uploads.example.com/session/1"
+    refused ::up/session-uri-error(other, {})
+    assert(contains(refused, "session-uri"), "the error names both keys")
+    assert(contains(refused, "token"))
+    assert(is-some(::up/session-uri-error("https://www.googleapis.com.example.com/x", {})), "a look-alike host")
+    assert(is-some(::up/session-uri-error("https://example.com/.googleapis.com/x", {})), "a look-alike path")
+    assert(is-null(::up/session-uri-error(other, {token: "ya29.tenant"})), "its own credential may go anywhere")
+    assert(is-err(::up/upload-status(other, 10)), "nothing is sent")
+    assert(is-err(::up/resume-upload(other, "content")), "nothing is sent")
+}

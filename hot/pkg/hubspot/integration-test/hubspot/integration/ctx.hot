@@ -9,3 +9,12 @@
     "hubspot.token": ::env/get("HUBSPOT_TOKEN", ""),
     "hubspot.client.secret": ::env/get("HUBSPOT_CLIENT_SECRET", ""),
 }, (v) { not(is-empty(v)) }))
+
+// True when HUBSPOT_TOKEN is set. Tests call this first and skip (pass
+// with a note) when it is false, so an unconfigured run makes no calls.
+configured fn (): Bool {
+    if(is-empty(::env/get("HUBSPOT_TOKEN", "")), {
+        println("skipped: set HUBSPOT_TOKEN to run the HubSpot integration tests")
+        false
+    }, true)
+}

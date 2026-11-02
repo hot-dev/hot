@@ -1,19 +1,155 @@
 ::salesforce::auth ns
 meta {
-    doc: """Salesforce session acquisition. Usually used indirectly through `::salesforce::api`."""
+    doc: """
+    Salesforce session acquisition. Usually used indirectly through
+    `::salesforce::api`, which calls `session()` and retries once with a
+    fresh session on `401 INVALID_SESSION_ID`.
+
+    **Auth matrix**: the first flow whose credentials are present wins,
+    in this order (or force one with `salesforce.auth.flow`):
+
+    | Flow | Required context | Token endpoint host | JWT `aud` |
+    |---|---|---|---|
+    | `access-token` | `salesforce.access.token`, `salesforce.instance.url` | none (no exchange) | n/a |
+    | `refresh-token` | `salesforce.client-id`, `salesforce.refresh-token` (+ `salesforce.client-secret` if the app requires it) | My Domain if set, else login/test | n/a |
+    | `jwt-bearer` | `salesforce.client-id`, `salesforce.username`, `salesforce.private.key` | My Domain if set, else login/test | `salesforce.jwt.audience`, else login/test |
+    | `client-credentials` | `salesforce.client-id`, `salesforce.client-secret`, `salesforce.my-domain.url` | My Domain (required) | n/a |
+
+    "login/test" is `https://login.salesforce.com`, or
+    `https://test.salesforce.com` when `salesforce.sandbox` is "true".
+    The JWT audience is never the My Domain URL: Salesforce accepts only
+    login, test, or an Experience Cloud site URL there. The
+    client-credentials flow, by contrast, only works against the org's
+    My Domain token endpoint.
+
+    **Caching**: a minted session is cached in the run's context for
+    `expires_in` seconds when the token response carries it, otherwise
+    `salesforce.session.ttl` seconds (default 900). The cache is keyed on
+    a SHA-256 of the credentials, so each set of credentials has its own
+    session, and changing them mid-run mints a new one.
+
+    **Per-call credentials**: every session function takes an `opts` Map
+    (see `resolve-config`). Credentials in `opts` are a complete identity:
+    nothing in it falls back to context, so a per-call token is never sent
+    to the project's org and a context secret is never sent to a per-call
+    URL. They are masked in call records, and only the minted session is
+    stored, keyed as above.
+
+    - `access-token` (or `token`) + `instance-url`
+    - `refresh-token` + `client-id`, and `client-secret` if the app needs it
+    - `private-key` + `client-id` + `username`, optionally `audience`
+    - `client-secret` + `client-id` + `my-domain-url`
+
+    `my-domain-url` also picks the token host of the refresh-token and
+    JWT flows. `flow`, `sandbox` and `ttl` work as their context variables.
+    """
 }
 
 ::ctx ::hot::ctx
+::hash ::hot::hash
 ::jwt ::jwt
 ::oauth2 ::oauth2
 
-login-url fn (): Str {
-  or(::ctx/get("salesforce.login.url"), ::salesforce/DEFAULT_LOGIN_URL)
+CACHE_KEY "salesforce.session.cache"
+DEFAULT_SESSION_TTL 900
+
+FLOWS ["access-token", "refresh-token", "jwt-bearer", "client-credentials"]
+
+// Opts keys that make a call's identity its own. Any of them switches the
+// whole identity to `opts`.
+IDENTITY_OPTS ["token", "access-token", "refresh-token", "client-id", "client-secret", "private-key", "username"]
+
+// Opts keys that send requests or claims somewhere else. These need a
+// per-call identity beside them.
+URL_OPTS ["instance-url", "my-domain-url", "audience"]
+
+// Fields of a token endpoint's response masked in call records.
+TOKEN_FIELDS ["access_token", "refresh_token", "id_token"]
+
+// ---------------------------------------------------------------------------
+// Pure helpers (exposed for testing)
+// ---------------------------------------------------------------------------
+
+is-truthy
+meta {
+    doc: """True for `true` and the strings "true", "1", "yes" (any case); context values often arrive as strings. Exposed for testing."""
+}
+fn (value: Any): Bool {
+  cond {
+    is-null(value) => { false }
+    is-bool(value) => { value }
+    => { in(lowercase(trim(Str(value))), ["true", "1", "yes"]) }
+  }
+}
+
+is-blank-value fn (value: Any): Bool {
+  or(is-null(value), and(is-str(value), is-blank(value)))
+}
+
+normalize-url
+meta {
+    doc: """Trim a host URL, drop trailing slashes, and default the scheme to `https://` (`acme.my.salesforce.com/` → `https://acme.my.salesforce.com`). Exposed for testing."""
+}
+fn (url: Str): Str {
+  trimmed trim(url)
+  with-scheme cond {
+    or(starts-with(trimmed, "https://"), starts-with(trimmed, "http://")) => { trimmed }
+    => { `https://${trimmed}` }
+  }
+
+  strip-trailing-slashes(with-scheme)
+}
+
+strip-trailing-slashes fn (url: Str): Str {
+  cond {
+    ends-with(url, "/") => { strip-trailing-slashes(slice(url, 0, sub(length(url), 1))) }
+    => { url }
+  }
+}
+
+login-host
+meta {
+    doc: """`https://test.salesforce.com` for sandboxes, `https://login.salesforce.com` otherwise. Exposed for testing."""
+}
+fn (sandbox: Bool): Str {
+  if(sandbox, ::salesforce/TEST_URL, ::salesforce/LOGIN_URL)
+}
+
+jwt-audience
+meta {
+    doc: """The JWT-bearer `aud` claim: the explicit override (e.g. an Experience Cloud site URL) when set, else login or test by the sandbox flag. Never the My Domain URL. Exposed for testing."""
+}
+fn (sandbox: Bool, override: Any): Str {
+  cond {
+    is-blank-value(override) => { login-host(sandbox) }
+    => { normalize-url(override) }
+  }
+}
+
+token-url
+meta {
+    doc: """
+    The OAuth token endpoint for a flow. Client credentials require the
+    My Domain URL (Salesforce rejects that grant at login/test); the
+    other flows use My Domain when it is set and login/test otherwise.
+    Returns an Err for client credentials without a My Domain URL.
+    Exposed for testing.
+    """
+}
+fn (flow: Str, my-domain: Any, sandbox: Bool): Str {
+  cond {
+    and(eq(flow, "client-credentials"), is-blank-value(my-domain)) => {
+      err("salesforce: the client-credentials flow needs salesforce.my-domain.url (e.g. https://acme.my.salesforce.com); Salesforce does not support it on login.salesforce.com or test.salesforce.com")
+    }
+
+    is-blank-value(my-domain) => { `${login-host(sandbox)}/services/oauth2/token` }
+    => { `${normalize-url(my-domain)}/services/oauth2/token` }
+  }
 }
 
 build-jwt-claims
 meta {
-    doc: """Build the connected-app JWT-bearer claims: `iss` = consumer key, `sub` = username, `aud` = the login URL, 3-minute expiry. Exposed for testing."""
+    doc: """Build the connected-app JWT-bearer claims: `iss` = consumer key, `sub` = username, `aud` = the audience from `jwt-audience`, 3-minute expiry (Salesforce's maximum). Exposed for testing."""
 }
 fn (client-id: Str, username: Str, audience: Str): Map {
   {
@@ -24,69 +160,392 @@ fn (client-id: Str, username: Str, audience: Str): Map {
   }
 }
 
-session
+select-flow
+meta {
+    doc: """
+    Pick the auth flow for a config Map (see `config`). An explicit
+    `flow` wins; otherwise the first of access-token, refresh-token,
+    jwt-bearer, client-credentials whose credentials are present. Returns
+    null when nothing usable is configured, or an Err for an unknown
+    explicit flow. Exposed for testing.
+    """
+}
+fn (config: Map): Any {
+  explicit get(config, "flow")
+  cond {
+    not(is-blank-value(explicit)) => {
+      cond {
+        in(explicit, FLOWS) => { explicit }
+        => { err(`salesforce: unknown salesforce.auth.flow '${explicit}' (use ${join(FLOWS, ", ")})`) }
+      }
+    }
+
+    not(is-blank-value(get(config, "access-token"))) => { "access-token" }
+    not(is-blank-value(get(config, "refresh-token"))) => { "refresh-token" }
+    not(is-blank-value(get(config, "private-key"))) => { "jwt-bearer" }
+    not(is-blank-value(get(config, "client-secret"))) => { "client-credentials" }
+    => { null }
+  }
+}
+
+missing-for-flow
+meta {
+    doc: """The context variable names a flow still needs, given a config Map. Empty when the flow is fully configured. Exposed for testing."""
+}
+fn (flow: Str, config: Map): Vec {
+  required cond {
+    eq(flow, "access-token") => { {"access-token": "salesforce.access.token", "instance-url": "salesforce.instance.url"} }
+    eq(flow, "refresh-token") => { {"client-id": "salesforce.client-id", "refresh-token": "salesforce.refresh-token"} }
+    eq(flow, "jwt-bearer") => { {"client-id": "salesforce.client-id", username: "salesforce.username", "private-key": "salesforce.private.key"} }
+    => { {"client-id": "salesforce.client-id", "client-secret": "salesforce.client-secret", "my-domain": "salesforce.my-domain.url"} }
+  }
+
+  vals(filter-keys(required, (k) { is-blank-value(get(config, k)) }))
+}
+
+session-expiry
+meta {
+    doc: """When a minted session should be treated as expired (epoch seconds): `expires_in` from the token response when present, else `ttl`, minus 30 seconds of slack. Exposed for testing."""
+}
+fn (tokens: Map, now: Int, ttl: Int): Int {
+  expires-in get(tokens, "expires_in")
+  lifetime cond {
+    is-int(expires-in) => { expires-in }
+    and(is-str(expires-in), not(is-blank(expires-in))) => { Int(expires-in) }
+    => { ttl }
+  }
+
+  sub(add(now, lifetime), 30)
+}
+
+fingerprint
+meta {
+    doc: """A hash of the credentials in a config Map, so a cached session is only reused for the same credentials. Exposed for testing."""
+}
+fn (flow: Str, config: Map): Str {
+  parts map(["client-id", "client-secret", "username", "private-key", "refresh-token", "my-domain", "audience"], (k) { Str(or(get(config, k), "")) })
+  ::hash/sha256(join(concat([flow, Str(is-truthy(get(config, "sandbox")))], parts), "\n"))
+}
+
+// ---------------------------------------------------------------------------
+// Context
+// ---------------------------------------------------------------------------
+
+config
 meta {
     ctx: {
         "salesforce.access.token": {required: false},
-        "salesforce.instance.url": {required: false},
+        "salesforce.instance.url": {required: false, secret: false},
         "salesforce.client-id": {required: false},
         "salesforce.client-secret": {required: false},
-        "salesforce.username": {required: false},
+        "salesforce.username": {required: false, secret: false},
         "salesforce.private.key": {required: false},
-        "salesforce.login.url": {required: false}
+        "salesforce.refresh-token": {required: false},
+        "salesforce.my-domain.url": {required: false, secret: false},
+        "salesforce.sandbox": {required: false, secret: false},
+        "salesforce.jwt.audience": {required: false, secret: false},
+        "salesforce.auth.flow": {required: false, secret: false},
+        "salesforce.session.ttl": {required: false, secret: false}
     },
-    doc: """
-    Resolve a Salesforce session: `{token, instance-url}`. Checks, in
-    order: an explicit `salesforce.access.token` (+ `instance.url`), the
-    client-credentials flow, then the JWT-bearer flow. Returns an Err
-    when nothing is configured or the token exchange fails.
-    """
+    doc: """Read the auth settings from context into a Map: `access-token`, `instance-url`, `client-id`, `client-secret`, `username`, `private-key`, `refresh-token`, `my-domain`, `sandbox`, `audience`, `flow`, `ttl`."""
 }
 fn (): Map {
-  explicit or(::ctx/get("salesforce.access.token"), "")
-  client-secret or(::ctx/get("salesforce.client-secret"), "")
-  private-key or(::ctx/get("salesforce.private.key"), "")
-  token-url `${login-url()}/services/oauth2/token`
+  {
+    access-token: ::ctx/get("salesforce.access.token"),
+    instance-url: ::ctx/get("salesforce.instance.url"),
+    client-id: ::ctx/get("salesforce.client-id"),
+    client-secret: ::ctx/get("salesforce.client-secret"),
+    username: ::ctx/get("salesforce.username"),
+    private-key: ::ctx/get("salesforce.private.key"),
+    refresh-token: ::ctx/get("salesforce.refresh-token"),
+    my-domain: ::ctx/get("salesforce.my-domain.url"),
+    sandbox: is-truthy(::ctx/get("salesforce.sandbox")),
+    audience: ::ctx/get("salesforce.jwt.audience"),
+    flow: ::ctx/get("salesforce.auth.flow"),
+    ttl: ::ctx/get("salesforce.session.ttl")
+  }
+}
+
+is-configured
+meta {
+    doc: """True when the context holds a complete set of credentials for some flow. Used by `hot.dev/crm` to detect Salesforce, and by the integration tests to skip without credentials."""
+}
+fn (): Bool {
+  cfg config()
+  flow select-flow(cfg)
+  cond {
+    is-err(flow) => { false }
+    is-null(flow) => { false }
+    => { is-empty(missing-for-flow(flow, cfg)) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Per-call credentials
+// ---------------------------------------------------------------------------
+
+blank-option
+meta {
+    doc: """The first of `names` that `opts` has with a blank or null value, else null. Exposed for testing."""
+}
+fn (opts: Map, names: Vec): Str? {
+  find-first(names, (name) { and(in(name, keys(opts)), is-blank-value(get(opts, name))) })
+}
+
+has-identity
+meta {
+    doc: """True when `opts` carries credentials of its own. Exposed for testing."""
+}
+fn (opts: Map): Bool {
+  some(IDENTITY_OPTS, (name) { not(is-blank-value(get(opts, name))) })
+}
+
+setting fn (opts: Map, name: Str, fallback: Any): Any {
+  if(in(name, keys(opts)), get(opts, name), fallback)
+}
+
+mark-credentials
+meta {
+    doc: """Mask the credentials in `opts` in this run's call records. Called first wherever `opts` arrives, so the records of the calls after it are masked too. Returns null."""
+}
+fn (opts: Map): Any {
+  ::ctx/mark-secret([opts.token, opts.access-token, opts.refresh-token, opts.client-id, opts.client-secret, opts.private-key])
+  null
+}
+
+resolve-config
+meta {
+    doc: """
+    The one resolver, pure: the auth config Map for a call from `opts`
+    first, then `ctx-config` (see `config`). Credentials in `opts` replace
+    the context's identity entirely, so nothing from it goes to a per-call
+    URL or mixes with a per-call credential; `sandbox` and `ttl` still fall
+    back to context. A `token` (a session from `session`, say) is an access
+    token whatever its `flow` says. An Err when a credential or URL key is
+    in `opts` but blank or null, or when `opts` has `instance-url`,
+    `my-domain-url` or `audience` without a credential. Exposed for testing.
+    """
+}
+fn (opts: Map, ctx-config: Map): Map {
+  blank blank-option(opts, [...IDENTITY_OPTS, ...URL_OPTS])
+  url find-first(URL_OPTS, (name) { in(name, keys(opts)) })
+  settings {
+    sandbox: is-truthy(setting(opts, "sandbox", get(ctx-config, "sandbox"))),
+    ttl: setting(opts, "ttl", get(ctx-config, "ttl")),
+  }
 
   cond {
-    not(is-empty(explicit)) => {
-      instance or(::ctx/get("salesforce.instance.url"), "")
-      cond {
-        is-empty(instance) => { err("salesforce: salesforce.access.token is set but salesforce.instance.url is missing") }
-        => { {token: explicit, instance-url: instance} }
-      }
+    is-some(blank) => {
+      err(`salesforce: ${blank} is in the call's opts but is blank or null. Pass a value, or leave ${blank} out.`)
     }
 
-    not(is-empty(client-secret)) => {
-      tokens ::oauth2/client-credentials(token-url, {
-        client-id: ::ctx/get("salesforce.client-id"),
-        client-secret: client-secret
-      })
+    and(is-some(url), not(has-identity(opts))) => {
+      err(`salesforce: ${url} is in the call's opts without a credential. Pass access-token, refresh-token, private-key or client-secret with it. Context credentials are never sent to a per-call URL.`)
+    }
+
+    not(has-identity(opts)) => { {...ctx-config, ...settings, flow: setting(opts, "flow", get(ctx-config, "flow"))} }
+    => {
+      {
+        ...settings,
+        access-token: or(get(opts, "token"), get(opts, "access-token")),
+        instance-url: get(opts, "instance-url"),
+        client-id: get(opts, "client-id"),
+        client-secret: get(opts, "client-secret"),
+        username: get(opts, "username"),
+        private-key: get(opts, "private-key"),
+        refresh-token: get(opts, "refresh-token"),
+        my-domain: get(opts, "my-domain-url"),
+        audience: get(opts, "audience"),
+        flow: if(is-some(get(opts, "token")), "access-token", get(opts, "flow"))
+      }
+    }
+  }
+}
+
+missing-opts-for-flow
+meta {
+    doc: """The `opts` keys a flow still needs, given a config Map from `resolve-config`. Empty when the flow is fully configured. Exposed for testing."""
+}
+fn (flow: Str, config: Map): Vec {
+  required cond {
+    eq(flow, "access-token") => { {"access-token": "access-token", "instance-url": "instance-url"} }
+    eq(flow, "refresh-token") => { {"client-id": "client-id", "refresh-token": "refresh-token"} }
+    eq(flow, "jwt-bearer") => { {"client-id": "client-id", username: "username", "private-key": "private-key"} }
+    => { {"client-id": "client-id", "client-secret": "client-secret", "my-domain": "my-domain-url"} }
+  }
+
+  vals(filter-keys(required, (k) { is-blank-value(get(config, k)) }))
+}
+
+// ---------------------------------------------------------------------------
+// Token exchange
+// ---------------------------------------------------------------------------
+
+to-session fn (flow: Str, tokens: Map, ttl: Int): Map {
+  ::ctx/mark-secret(filter-keys(tokens, in(%, TOKEN_FIELDS)))
+  {
+    token: tokens.access_token,
+    instance-url: normalize-url(tokens.instance_url),
+    flow: flow,
+    expires-at: session-expiry(tokens, ::jwt/now-seconds(), ttl)
+  }
+}
+
+exchange
+meta {
+    doc: """Mint a session for `flow` from a config Map, bypassing the cache. Returns `{token, instance-url, flow, expires-at}` or an Err (missing settings, or the token endpoint's `{status, body}`)."""
+}
+fn (flow: Str, cfg: Map): Map {
+  missing missing-for-flow(flow, cfg)
+  sandbox is-truthy(get(cfg, "sandbox"))
+  ttl-setting get(cfg, "ttl")
+  ttl if(is-blank-value(ttl-setting), DEFAULT_SESSION_TTL, Int(ttl-setting))
+  cond {
+    not(is-empty(missing)) => { err(`salesforce: the ${flow} flow is missing ${join(missing, ", ")}`) }
+    eq(flow, "access-token") => {
+      {
+        token: ::ctx/mark-secret(cfg.access-token),
+        instance-url: normalize-url(cfg.instance-url),
+        flow: flow,
+        expires-at: null
+      }
+    }
+    => {
+      url token-url(flow, get(cfg, "my-domain"), sandbox)
+      tokens cond {
+        is-err(url) => { url }
+        eq(flow, "refresh-token") => {
+          ::oauth2/refresh(url, filter-vals({
+            client-id: cfg.client-id,
+            client-secret: if(is-blank-value(get(cfg, "client-secret")), null, cfg.client-secret),
+            refresh-token: cfg.refresh-token
+          }, is-some))
+        }
+
+        eq(flow, "client-credentials") => {
+          ::oauth2/client-credentials(url, {client-id: cfg.client-id, client-secret: cfg.client-secret})
+        }
+        => {
+          claims build-jwt-claims(cfg.client-id, cfg.username, jwt-audience(sandbox, get(cfg, "audience")))
+          assertion ::jwt/sign(claims, cfg.private-key, "RS256")
+          match assertion {
+            Result.Err => { err(assertion) }
+
+            _ => { ::oauth2/jwt-bearer(url, ::ctx/mark-secret(assertion)) }
+          }
+        }
+      }
+
       match tokens {
         Result.Err => { err(tokens) }
 
-        _ => { {token: tokens.access_token, instance-url: tokens.instance_url} }
+        _ => { to-session(flow, tokens, ttl) }
       }
     }
+  }
+}
 
-    not(is-empty(private-key)) => {
-      claims build-jwt-claims(::ctx/get("salesforce.client-id"), ::ctx/get("salesforce.username"), login-url())
-      assertion ::jwt/sign(claims, private-key, "RS256")
-      match assertion {
-        Result.Err => { err(assertion) }
+cached-session
+meta {
+    doc: """The cached session for a credentials fingerprint, or null when there is none, it belongs to other credentials, or it has expired. `cache` and `now` are explicit for testing."""
+}
+fn (cache: Any, key: Str, now: Int): Any {
+  cond {
+    not(is-map(cache)) => { null }
+    ne(get(cache, "fingerprint"), key) => { null }
+    and(is-some(get(cache, "expires-at")), gte(now, cache.expires-at)) => { null }
+    => { cache.session }
+  }
+}
 
-        _ => {
-          tokens ::oauth2/jwt-bearer(token-url, assertion)
-          match tokens {
-            Result.Err => { err(tokens) }
+cache-key
+meta {
+    doc: """The context key holding the cached session for a credentials fingerprint. Exposed for testing."""
+}
+fn (fingerprint: Str): Str {
+  `${CACHE_KEY}.${fingerprint}`
+}
 
-            _ => { {token: tokens.access_token, instance-url: tokens.instance_url} }
+session
+meta {
+    doc: """
+    Resolve a Salesforce session: `{token, instance-url, flow,
+    expires-at}`. Reuses the run's cached session when it is still
+    valid for the same credentials, otherwise mints one (see the auth
+    matrix in the namespace docs). `opts` carries per-call credentials
+    (see `resolve-config`). Returns an Err when nothing is configured,
+    `opts` is refused, or the token exchange fails.
+
+    **Example**
+
+    ```hot
+    ::salesforce::auth/session({access-token: "00D...", instance-url: "https://acme.my.salesforce.com"}).instance-url
+    ```
+    """
+}
+fn
+(): Map {
+  session({})
+},
+(opts: Map): Map {
+  mark-credentials(opts)
+  cfg resolve-config(opts, config())
+  cond {
+    is-err(cfg) => { cfg }
+    => {
+      flow select-flow(cfg)
+      missing if(or(is-err(flow), is-null(flow), not(has-identity(opts))), [], missing-opts-for-flow(flow, cfg))
+      cond {
+        is-err(flow) => { flow }
+        and(is-null(flow), has-identity(opts)) => {
+          err("salesforce: the call's opts have no complete credential. Pass access-token + instance-url, refresh-token + client-id, private-key + client-id + username, or client-secret + client-id + my-domain-url.")
+        }
+
+        is-null(flow) => {
+          err("salesforce: no credentials configured. Set salesforce.access.token + salesforce.instance.url, a refresh token, the JWT-bearer trio, or client credentials + salesforce.my-domain.url in Context Variables, or pass them in the call's opts.")
+        }
+
+        not(is-empty(missing)) => { err(`salesforce: the ${flow} flow is missing ${join(missing, ", ")} in the call's opts.`) }
+        eq(flow, "access-token") => { exchange(flow, cfg) }
+        => {
+          key fingerprint(flow, cfg)
+          hit cached-session(::ctx/get(cache-key(key)), key, ::jwt/now-seconds())
+          cond {
+            is-some(hit) => { hit }
+            => {
+              fresh exchange(flow, cfg)
+              cond {
+                is-err(fresh) => { fresh }
+                => {
+                  ::ctx/set-secret(cache-key(key), {fingerprint: key, expires-at: fresh.expires-at, session: fresh})
+                  fresh
+                }
+              }
+            }
           }
         }
       }
     }
+  }
+}
+
+invalidate
+meta {
+    doc: """Drop the run's cached session for these credentials so the next request mints a new one. `::salesforce::api` calls this on `401 INVALID_SESSION_ID`."""
+}
+fn
+(): Any {
+  invalidate({})
+},
+(opts: Map): Any {
+  mark-credentials(opts)
+  cfg resolve-config(opts, config())
+  flow if(is-err(cfg), null, select-flow(cfg))
+  cond {
+    or(is-err(flow), is-null(flow)) => { null }
     => {
-      err("salesforce: no credentials configured. Set salesforce.access.token + instance.url, the client-credentials pair, or the JWT-bearer trio in Context Variables.")
+      ::ctx/set-secret(cache-key(fingerprint(flow, cfg)), null)
+      null
     }
   }
 }

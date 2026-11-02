@@ -1,35 +1,108 @@
 ::pinecone::indexes ns
+meta {
+    doc: """
+    Control-plane index management on api.pinecone.io: list, describe,
+    create (vector, schema-based, or integrated-embedding), configure,
+    delete, and check whether a new index is ready (`is-ready`).
+
+    On API version 2026-07 `POST /indexes` is schema-based:
+    `create-index` sends the reserved `_values` dense-vector field,
+    which creates a classic vector index served by
+    `::pinecone::vectors`. `describe-index` returns the dimension and
+    metric under `schema.fields._values`.
+    """
+}
 
 ::api ::pinecone::api
 
 list-indexes
 meta {
-    doc: """GET /indexes - Your indexes (`{indexes: [{name, host, dimension, metric, ...}]}`)."""
+    ctx: {"pinecone.api.key": {required: false}},
+    doc: """GET /indexes - Your indexes: `{indexes: [{name, host, status, deployment, schema, deletion_protection, tags?}]}`."""
 }
-fn (): Map {
-  ::api/json("GET", `${::pinecone/CONTROL_URL}/indexes`, "")
+fn
+(): Map {
+  list-indexes({})
+},
+(opts: Map): Map {
+  ::api/json("GET", ::api/control-url("indexes"), "", opts)
 }
 
 describe-index
 meta {
-    doc: """GET /indexes/{name} - One index, including the `host` the data-plane functions need."""
+    ctx: {"pinecone.api.key": {required: false}},
+    doc: """GET /indexes/{name} - One index: `host` (what the data-plane functions take), `status: {ready, state}`, `deployment`, `schema`, `deletion_protection`, `tags`."""
 }
-fn (name: Str): Map {
-  ::api/json("GET", `${::pinecone/CONTROL_URL}/indexes/${name}`, "")
+fn
+(name: Str): Map {
+  describe-index(name, {})
+},
+(name: Str, opts: Map): Map {
+  ::api/json("GET", ::api/control-url("indexes", name), "", opts)
+}
+
+build-deployment
+meta {
+    doc: """The `deployment` for a managed (serverless) index from `cloud` (default "aws") and `region` (default "us-east-1") options. Exposed for testing."""
+}
+fn (options: Map): Map {
+  {
+    deployment_type: "managed",
+    cloud: or(get(options, "cloud"), "aws"),
+    region: or(get(options, "region"), "us-east-1")
+  }
+}
+
+build-create-index-body
+meta {
+    doc: """The `POST /indexes` body for a classic dense vector index: a schema with only the reserved `_values` field, plus deployment and any set `deletion_protection`, `tags`, `read_capacity`. Exposed for testing."""
+}
+fn (name: Str, dimension: Int, options: Map): Map {
+  build-schema-index-body(name, {
+    fields: {
+      _values: {type: "dense_vector", dimension: dimension, metric: or(get(options, "metric"), "cosine")}
+    }
+  }, options)
+}
+
+build-schema-index-body
+meta {
+    doc: """The `POST /indexes` body for an index with an explicit `schema`. Exposed for testing."""
+}
+fn (name: Str, schema: Map, options: Map): Map {
+  ::api/compact({
+    name: name,
+    schema: schema,
+    deployment: build-deployment(options),
+    deletion_protection: get(options, "deletion_protection"),
+    tags: get(options, "tags"),
+    read_capacity: get(options, "read_capacity")
+  })
 }
 
 create-index
 meta {
+    ctx: {"pinecone.api.key": {required: false}},
     doc: """
-    POST /indexes - Create a serverless index. `options`: `cloud`
-    ("aws"/"gcp"/"azure", default "aws"), `region` (default "us-east-1"),
-    `metric` ("cosine" default, "euclidean", "dotproduct").
+    POST /indexes - Create a serverless dense vector index. `options`:
+    `metric` ("cosine" default, "euclidean", "dotproduct"), `cloud`
+    ("aws" default, "gcp", "azure"), `region` (default "us-east-1"),
+    `deletion_protection` ("enabled"/"disabled"), `tags` (Map of
+    strings), `read_capacity`. Returns the index description. A new index is
+    not ready for data for a few seconds: from a later step or a
+    schedule, call `describe-index` until `is-ready` before upserting.
 
     **Example**
 
     ```hot
-    index ::pinecone::indexes/create-index("docs", 1536, {metric: "cosine"})
-    index.host
+    ::pinecone::indexes/create-index("docs", 1536, {
+      metric: "cosine",
+      deletion_protection: "enabled",
+      tags: {team: "search"}
+    })
+    // in a later step:
+    index ::pinecone::indexes/describe-index("docs")
+    if(::pinecone::indexes/is-ready(index), index.host, null)
     ```
     """
 }
@@ -38,23 +111,187 @@ fn
   create-index(name, dimension, {})
 },
 (name: Str, dimension: Int, options: Map): Map {
-  ::api/json("POST", `${::pinecone/CONTROL_URL}/indexes`, {
+  create-index(name, dimension, options, {})
+},
+(name: Str, dimension: Int, options: Map, opts: Map): Map {
+  ::api/json("POST", ::api/control-url("indexes"), build-create-index-body(name, dimension, options), opts)
+}
+
+create-index-from-schema
+meta {
+    ctx: {"pinecone.api.key": {required: false}},
+    doc: """
+    POST /indexes - Create an index from an explicit `schema`. A schema
+    of only `_values` (dense) and/or `_sparse_values` (sparse) makes a
+    vector index (`::pinecone::vectors`); any other fields make a
+    document index, read and written through the Documents API (use
+    `::pinecone::api/json` for those endpoints). `options` as for
+    `create-index`.
+
+    **Example**
+
+    ```hot
+    // A sparse vector index
+    ::pinecone::indexes/create-index-from-schema("keywords", {
+      fields: {_sparse_values: {type: "sparse_vector"}}
+    }, {})
+    ```
+    """
+}
+fn
+(name: Str, schema: Map, options: Map): Map {
+  create-index-from-schema(name, schema, options, {})
+},
+(name: Str, schema: Map, options: Map, opts: Map): Map {
+  ::api/json("POST", ::api/control-url("indexes"), build-schema-index-body(name, schema, options), opts)
+}
+
+build-create-for-model-body
+meta {
+    doc: """The `POST /indexes/create-for-model` body: `embed` holds `model`, `field_map` (default `{text: "text"}`), and optional `metric`, `dimension`, `read_parameters`, `write_parameters`. Exposed for testing."""
+}
+fn (name: Str, model: Str, options: Map): Map {
+  ::api/compact({
     name: name,
-    dimension: dimension,
-    metric: or(get(options, "metric"), "cosine"),
-    spec: {
-      serverless: {
-        cloud: or(get(options, "cloud"), "aws"),
-        region: or(get(options, "region"), "us-east-1")
-      }
-    }
+    cloud: or(get(options, "cloud"), "aws"),
+    region: or(get(options, "region"), "us-east-1"),
+    embed: ::api/compact({
+      model: model,
+      field_map: or(get(options, "field_map"), {text: "text"}),
+      metric: get(options, "metric"),
+      dimension: get(options, "dimension"),
+      read_parameters: get(options, "read_parameters"),
+      write_parameters: get(options, "write_parameters")
+    }),
+    deletion_protection: get(options, "deletion_protection"),
+    tags: get(options, "tags"),
+    read_capacity: get(options, "read_capacity")
   })
+}
+
+create-index-for-model
+meta {
+    ctx: {"pinecone.api.key": {required: false}},
+    doc: """
+    POST /indexes/create-for-model - Create an index with integrated
+    embedding: Pinecone embeds the text field named by `field_map` with
+    a hosted `model` (e.g. "llama-text-embed-v2",
+    "multilingual-e5-large", "pinecone-sparse-english-v0") on upsert and
+    search. Read and write it with `::pinecone::records`. `options`:
+    `field_map` (default `{text: "text"}`), `cloud`, `region`, `metric`,
+    `dimension`, `deletion_protection`, `tags`. Pinecone calls this a
+    legacy integrated index; it keeps working on 2026-07.
+
+    **Example**
+
+    ```hot
+    ::pinecone::indexes/create-index-for-model("notes", "llama-text-embed-v2", {
+      field_map: {text: "chunk_text"}
+    })
+    ```
+    """
+}
+fn
+(name: Str, model: Str): Map {
+  create-index-for-model(name, model, {})
+},
+(name: Str, model: Str, options: Map): Map {
+  create-index-for-model(name, model, options, {})
+},
+(name: Str, model: Str, options: Map, opts: Map): Map {
+  ::api/json("POST", ::api/control-url("indexes", "create-for-model"), build-create-for-model-body(name, model, options), opts)
+}
+
+build-configure-body
+meta {
+    doc: """The `PATCH /indexes/{name}` body from the set options among `deletion_protection`, `tags`, `read_capacity`, `deployment` (pod `replicas`/`pod_type`), and `schema`. Exposed for testing."""
+}
+fn (options: Map): Map {
+  ::api/compact({
+    deletion_protection: get(options, "deletion_protection"),
+    tags: get(options, "tags"),
+    read_capacity: get(options, "read_capacity"),
+    deployment: get(options, "deployment"),
+    schema: get(options, "schema")
+  })
+}
+
+configure-index
+meta {
+    ctx: {"pinecone.api.key": {required: false}},
+    doc: """
+    PATCH /indexes/{name} - Change an index: `deletion_protection`
+    ("enabled"/"disabled"), `tags` (merged; set a key to `""` to remove
+    it), `read_capacity`, pod `deployment`. Returns the updated
+    description.
+
+    **Example**
+
+    ```hot
+    ::pinecone::indexes/configure-index("docs", {deletion_protection: "disabled", tags: {team: ""}})
+    ```
+    """
+}
+fn
+(name: Str, options: Map): Map {
+  configure-index(name, options, {})
+},
+(name: Str, options: Map, opts: Map): Map {
+  ::api/json("PATCH", ::api/control-url("indexes", name), build-configure-body(options), opts)
 }
 
 delete-index
 meta {
-    doc: """DELETE /indexes/{name} - Delete an index and all its data."""
+    ctx: {"pinecone.api.key": {required: false}},
+    doc: """DELETE /indexes/{name} - Delete an index and all its data. Fails while `deletion_protection` is "enabled"; disable it with `configure-index` first."""
 }
-fn (name: Str): Any {
-  ::api/json("DELETE", `${::pinecone/CONTROL_URL}/indexes/${name}`, "")
+fn
+(name: Str): Any {
+  delete-index(name, {})
+},
+(name: Str, opts: Map): Any {
+  ::api/json("DELETE", ::api/control-url("indexes", name), "", opts)
+}
+
+// =============================================================================
+// Readiness
+// =============================================================================
+
+ready-check
+meta {
+    doc: """Classify an index description: "ready" (`status.ready` is true), "failed" (state `InitializationFailed` or `Failed`), or "pending". Exposed for testing."""
+}
+fn (index: Map): Str {
+  status or(get(index, "status"), {})
+  state get(status, "state")
+  cond {
+    eq(get(status, "ready"), true) => { "ready" }
+    in(state, ["InitializationFailed", "Failed"]) => { "failed" }
+    => { "pending" }
+  }
+}
+
+is-ready
+meta {
+    doc: """
+    True when an index description (from `describe-index`,
+    `create-index`, or `list-indexes`) reports `status.ready`, so its
+    `host` accepts data. Use `ready-check` to also spot a failed index.
+
+    **Example**
+
+    ```hot
+    // From a later step or a schedule, before the first upsert
+    index ::pinecone::indexes/describe-index("docs")
+    cond {
+      ::pinecone::indexes/is-ready(index) => {
+        ::pinecone::vectors/upsert(index.host, [{id: "doc-1", values: [0.1, 0.2, 0.3]}])
+      }
+      => { null }
+    }
+    ```
+    """
+}
+fn (index: Map): Bool {
+  eq(ready-check(index), "ready")
 }

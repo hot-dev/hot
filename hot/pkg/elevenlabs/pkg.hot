@@ -3,12 +3,12 @@
 hot.pkg.elevenlabs {
   name: "hot.dev/elevenlabs",
   version: "0.1.0",
-  hot-min-version: "2.6.0",
-  description: "ElevenLabs API bindings for Hot. Text-to-speech (including streaming), voice management, models, and account info.",
+  hot-min-version: "3.0.2",
+  description: "ElevenLabs API bindings for Hot. Text-to-speech (full, timestamped, streaming), Scribe speech-to-text, sound effects, voices, models, history, account quota, and webhook verification.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
-  tags: ["ai", "voice", "audio"],
+  tags: ["elevenlabs", "ai", "voice", "audio", "text-to-speech", "speech-to-text"],
   deps: {},
   src-paths: ["src/"],
   test-paths: ["test/"]

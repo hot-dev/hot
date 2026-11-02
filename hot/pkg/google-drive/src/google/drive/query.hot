@@ -1,0 +1,168 @@
+::google::drive::query ns
+meta {
+    doc: """
+    Build Drive search queries (the `q` parameter of `list-files`) without
+    hand-escaping. String values are single-quoted with `\\` and `'`
+    escaped; terms combine with `all-of`, `any-of` and `negate`. See
+    https://developers.google.com/workspace/drive/api/guides/ref-search-terms.
+
+    ```hot
+    ::q ::google::drive::query
+
+    q ::q/all-of(
+      ::q/in-folder("1AbCfolder"),
+      ::q/any-of(::q/mime-type-is(::google::drive/DOCUMENT_MIME), ::q/mime-type-is("application/pdf")),
+      ::q/modified-after("2026-10-01T00:00:00Z"),
+      ::q/not-trashed()
+    )
+    // "'1AbCfolder' in parents and (mimeType = 'application/vnd.google-apps.document'
+    //   or mimeType = 'application/pdf') and modifiedTime > '2026-10-01T00:00:00Z'
+    //   and trashed = false"
+    ```
+    """
+}
+
+BACKSLASH "\\"
+QUOTE "'"
+
+quote
+meta {
+    doc: """Quote a string value for a Drive query: wraps in single quotes, escaping `\\` as `\\\\` and `'` as `\\'`. `quote("Valentine's Day")` is `'Valentine\\'s Day'`."""
+}
+fn (value: Str): Str {
+  escaped replace(replace(value, BACKSLASH, concat(BACKSLASH, BACKSLASH)), QUOTE, concat(BACKSLASH, QUOTE))
+  concat(QUOTE, escaped, QUOTE)
+}
+
+term
+meta {
+    doc: """A raw `field operator 'value'` term with the value quoted, e.g. `term("name", "=", "a.txt")`. Escape hatch for terms without a helper."""
+}
+fn (field: Str, operator: Str, value: Str): Str {
+  `${field} ${operator} ${quote(value)}`
+}
+
+name-is
+meta {doc: """`name = '...'` (exact name)."""}
+fn (name: Str): Str { term("name", "=", name) }
+
+name-contains
+meta {doc: """`name contains '...'` (Drive matches name prefixes / word starts)."""}
+fn (text: Str): Str { term("name", "contains", text) }
+
+full-text-contains
+meta {
+    doc: """`fullText contains '...'` (name, description, indexable text and content; whole tokens). Wrap the text in double quotes for a phrase."""
+}
+fn (text: Str): Str { term("fullText", "contains", text) }
+
+mime-type-is
+meta {doc: """`mimeType = '...'`."""}
+fn (mime-type: Str): Str { term("mimeType", "=", mime-type) }
+
+mime-type-is-not
+meta {doc: """`mimeType != '...'`."""}
+fn (mime-type: Str): Str { term("mimeType", "!=", mime-type) }
+
+is-folder
+meta {doc: """Folders only."""}
+fn (): Str { mime-type-is(::google::drive/FOLDER_MIME) }
+
+not-folder
+meta {doc: """Everything except folders."""}
+fn (): Str { mime-type-is-not(::google::drive/FOLDER_MIME) }
+
+in-folder
+meta {doc: """`'<id>' in parents`: direct children of a folder (not descendants)."""}
+fn (folder-id: Str): Str { `${quote(folder-id)} in parents` }
+
+in-parents
+meta {doc: """Alias of `in-folder`."""}
+fn (folder-id: Str): Str { in-folder(folder-id) }
+
+owned-by
+meta {doc: """`'<email>' in owners`."""}
+fn (email: Str): Str { `${quote(email)} in owners` }
+
+modified-after
+meta {
+    doc: """`modifiedTime > '<RFC 3339>'`, e.g. `"2026-10-01T00:00:00Z"` (UTC unless an offset is given)."""
+}
+fn (timestamp: Str): Str { term("modifiedTime", ">", timestamp) }
+
+modified-before
+meta {doc: """`modifiedTime < '<RFC 3339>'`."""}
+fn (timestamp: Str): Str { term("modifiedTime", "<", timestamp) }
+
+created-after
+meta {doc: """`createdTime > '<RFC 3339>'`."""}
+fn (timestamp: Str): Str { term("createdTime", ">", timestamp) }
+
+not-trashed
+meta {
+    doc: """`trashed = false`. Drive includes trashed files unless you ask otherwise."""
+}
+fn (): Str { "trashed = false" }
+
+trashed
+meta {doc: """`trashed = true`."""}
+fn (): Str { "trashed = true" }
+
+starred
+meta {doc: """`starred = true`."""}
+fn (): Str { "starred = true" }
+
+shared-with-me
+meta {doc: """`sharedWithMe = true`."""}
+fn (): Str { "sharedWithMe = true" }
+
+shortcut-to
+meta {doc: """`shortcutDetails.targetId = '<id>'`: shortcuts pointing at a file."""}
+fn (target-id: Str): Str { term("shortcutDetails.targetId", "=", target-id) }
+
+has-property
+meta {
+    doc: """`properties has { key='k' and value='v' }` (public custom properties). Use `app-property` for `appProperties`."""
+}
+fn (key: Str, value: Str): Str {
+  `properties has { key=${quote(key)} and value=${quote(value)} }`
+}
+
+app-property
+meta {
+    doc: """`appProperties has { key='k' and value='v' }` (private to your OAuth client)."""
+}
+fn (key: Str, value: Str): Str {
+  `appProperties has { key=${quote(key)} and value=${quote(value)} }`
+}
+
+group fn (terms: Vec, joiner: Str): Str {
+  parts filter(terms, (t) { and(is-str(t), not(is-empty(trim(t)))) })
+  cond {
+    is-empty(parts) => { "" }
+    eq(length(parts), 1) => { first(parts) }
+    => { join(map(parts, (t) { if(or(contains(t, " or "), contains(t, " and ")), `(${t})`, t) }), joiner) }
+  }
+}
+
+all-of
+meta {
+    doc: """Join terms with `and`. Empty or null terms are skipped; compound terms (containing `and`/`or`) are parenthesised."""
+}
+fn (...terms: Any): Str {
+  group(terms, " and ")
+}
+
+any-of
+meta {
+    doc: """Join terms with `or`. Empty or null terms are skipped; compound terms are parenthesised, and `all-of` parenthesises the result when you combine it further."""
+}
+fn (...terms: Any): Str {
+  group(terms, " or ")
+}
+
+negate
+meta {doc: """`not (<term>)`."""}
+fn (term: Str): Str {
+  `not (${term})`
+}

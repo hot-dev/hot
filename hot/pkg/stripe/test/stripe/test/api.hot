@@ -2,6 +2,11 @@
 meta ["test"]
 
 ::api ::stripe::api
+::customers ::stripe::customers
+::subs ::stripe::subscriptions
+::invoices ::stripe::invoices
+::pi ::stripe::payment-intents
+::coupons ::stripe::coupons
 
 // ============================================================================
 // form-encode — Stripe requires application/x-www-form-urlencoded bodies
@@ -95,4 +100,272 @@ test-base-url-has-no-trailing-slash
 meta ["test"]
 fn () {
     assert-eq("https://api.stripe.com", ::stripe/BASE_URL)
+}
+
+// ============================================================================
+// Headers: Stripe-Version, Idempotency-Key, Stripe-Account
+// ============================================================================
+
+test-api-version-is-pinned
+meta ["test"]
+fn () {
+    assert-eq("2026-10-28.endive", ::stripe/API_VERSION)
+    assert(contains(::stripe/API_VERSION, "."), "API version carries its major release name")
+}
+
+test-build-request-sends-pinned-stripe-version
+meta ["test"]
+fn () {
+    req ::api/build-request("GET", "https://api.stripe.com/v1/balance", {}, "", "sk_test_123")
+    assert-eq(::stripe/API_VERSION, req.headers.Stripe-Version)
+    assert-eq("Bearer sk_test_123", req.headers.Authorization)
+}
+
+test-api-version-ctx-override
+meta ["test"]
+fn () {
+    ::hot::ctx/set("stripe.api.version", "2025-03-31.basil")
+    req ::api/build-request("GET", "https://api.stripe.com/v1/balance", {}, "", "sk_test_123")
+    overridden ::api/api-version()
+    ::hot::ctx/set("stripe.api.version", "")
+    assert-eq("2025-03-31.basil", req.headers.Stripe-Version)
+    assert-eq("2025-03-31.basil", overridden)
+    assert-eq(::stripe/API_VERSION, ::api/api-version(), "empty ctx value falls back to the pinned version")
+}
+
+test-option-headers-empty-when-unset
+meta ["test"]
+fn () {
+    assert-eq({}, ::api/option-headers(::api/RequestOptions({})))
+}
+
+test-option-headers-idempotency-key
+meta ["test"]
+fn () {
+    headers ::api/option-headers(::api/RequestOptions({idempotency_key: "order-42"}))
+    assert-eq({Idempotency-Key: "order-42"}, headers)
+}
+
+test-option-headers-all
+meta ["test"]
+fn () {
+    headers ::api/option-headers(::api/RequestOptions({
+        idempotency_key: "k1",
+        stripe_account: "acct_123",
+        stripe_version: "2025-03-31.basil"
+    }))
+    assert-eq("k1", headers.Idempotency-Key)
+    assert-eq("acct_123", headers.Stripe-Account)
+    assert-eq("2025-03-31.basil", headers.Stripe-Version)
+}
+
+test-option-headers-ignore-empty-strings
+meta ["test"]
+fn () {
+    assert-eq({}, ::api/option-headers(::api/RequestOptions({idempotency_key: ""})))
+}
+
+test-build-request-option-headers-override-defaults
+meta ["test"]
+fn () {
+    opts ::api/option-headers(::api/RequestOptions({idempotency_key: "k1", stripe_version: "2025-03-31.basil"}))
+    req ::api/build-request("POST", "https://api.stripe.com/v1/customers", opts, {name: "Alice"}, "sk_test_123")
+    assert-eq("k1", req.headers.Idempotency-Key)
+    assert-eq("2025-03-31.basil", req.headers.Stripe-Version, "per-call version beats the pinned default")
+}
+
+// ============================================================================
+// build-request: where parameters go
+// ============================================================================
+
+test-build-request-post-form-body
+meta ["test"]
+fn () {
+    req ::api/build-request("POST", "https://api.stripe.com/v1/customers", {}, {name: "Alice", email: null}, "sk_test_123")
+    assert-eq("POST", req.method)
+    assert-eq("https://api.stripe.com/v1/customers", req.url)
+    assert-eq("name=Alice", req.body)
+    assert-eq("application/x-www-form-urlencoded", req.headers.Content-Type)
+}
+
+test-build-request-post-empty-body-has-no-content-type
+meta ["test"]
+fn () {
+    req ::api/build-request("POST", "https://api.stripe.com/v1/invoices/in_1/finalize", {}, {}, "sk_test_123")
+    assert-eq("", req.body)
+    assert(is-null(get(req.headers, "Content-Type")), "no Content-Type without a body")
+}
+
+test-build-request-get-params-in-query
+meta ["test"]
+fn () {
+    req ::api/build-request("GET", "https://api.stripe.com/v1/customers", {}, {limit: 10, email: null}, "sk_test_123")
+    assert-eq("https://api.stripe.com/v1/customers?limit=10", req.url)
+    assert-eq("", req.body)
+}
+
+test-build-request-get-without-params-keeps-url
+meta ["test"]
+fn () {
+    req ::api/build-request("GET", "https://api.stripe.com/v1/balance", {}, {}, "sk_test_123")
+    assert-eq("https://api.stripe.com/v1/balance", req.url)
+}
+
+test-build-request-get-appends-to-existing-query
+meta ["test"]
+fn () {
+    req ::api/build-request("GET", "https://api.stripe.com/v1/customers?limit=1", {}, {email: "a@b.co"}, "sk_test_123")
+    assert-eq("https://api.stripe.com/v1/customers?limit=1&email=a%40b.co", req.url)
+}
+
+test-build-request-delete-params-in-query
+meta ["test"]
+fn () {
+    // Stripe's SDKs send DELETE parameters in the query string, never a body
+    body ::subs/CancelSubscriptionRequest({invoice_now: true, prorate: false})
+    req ::api/build-request("DELETE", "https://api.stripe.com/v1/subscriptions/sub_1", {}, body, "sk_test_123")
+    assert-eq("https://api.stripe.com/v1/subscriptions/sub_1?invoice_now=true&prorate=false", req.url)
+    assert-eq("", req.body)
+}
+
+test-encode-id-escapes-path-segments
+meta ["test"]
+fn () {
+    assert-eq("cus_123", ::api/encode-id("cus_123"))
+    assert-eq("..%2Fv1%2Fbalance", ::api/encode-id("../v1/balance"))
+}
+
+// ============================================================================
+// Typed request bodies: unset optionals are omitted
+// ============================================================================
+
+test-create-customer-body-omits-unset
+meta ["test"]
+fn () {
+    body ::api/form-encode(untype(::customers/CreateCustomerRequest({email: "a@b.co"})))
+    assert-eq("email=a%40b.co", body)
+}
+
+test-create-subscription-body-uses-discounts
+meta ["test"]
+fn () {
+    body ::api/form-encode(untype(::subs/CreateSubscriptionRequest({
+        customer: "cus_1",
+        items: [{price: "price_1"}],
+        discounts: [{coupon: "SAVE10"}],
+        expand: ["latest_invoice.confirmation_secret"]
+    })))
+    assert(contains(body, "discounts%5B0%5D%5Bcoupon%5D=SAVE10"), body)
+    assert(contains(body, "expand%5B0%5D=latest_invoice.confirmation_secret"), body)
+    assert(contains(body, "items%5B0%5D%5Bprice%5D=price_1"), body)
+    assert(not(contains(body, "trial")), "unset optionals are omitted")
+}
+
+test-cancel-subscription-body
+meta ["test"]
+fn () {
+    body ::api/form-encode(untype(::subs/CancelSubscriptionRequest({
+        cancellation_details: {feedback: "too_expensive"}
+    })))
+    assert-eq("cancellation_details%5Bfeedback%5D=too_expensive", body)
+}
+
+test-cancel-subscription-empty-request-has-no-params
+meta ["test"]
+fn () {
+    assert-eq("", ::api/form-encode(untype(::subs/CancelSubscriptionRequest({}))))
+}
+
+test-update-subscription-clear-discounts-sends-empty-string
+meta ["test"]
+fn () {
+    body ::api/form-encode(untype(::subs/UpdateSubscriptionRequest({discounts: ""})))
+    assert-eq("discounts=", body)
+}
+
+test-pay-invoice-body
+meta ["test"]
+fn () {
+    body ::api/form-encode(untype(::invoices/PayInvoiceRequest({payment_method: "pm_1", off_session: false})))
+    assert-eq("payment_method=pm_1&off_session=false", body)
+}
+
+test-finalize-invoice-body
+meta ["test"]
+fn () {
+    assert-eq("auto_advance=false", ::api/form-encode(untype(::invoices/FinalizeInvoiceRequest({auto_advance: false}))))
+    assert-eq("", ::api/form-encode(untype(::invoices/FinalizeInvoiceRequest({}))))
+}
+
+test-create-payment-intent-body
+meta ["test"]
+fn () {
+    body ::api/form-encode(untype(::pi/CreatePaymentIntentRequest({
+        amount: 2000,
+        currency: "usd",
+        allowed_payment_method_types: ["card"]
+    })))
+    assert-eq("amount=2000&currency=usd&allowed_payment_method_types%5B0%5D=card", body)
+}
+
+test-create-promotion-code-body
+meta ["test"]
+fn () {
+    body ::api/form-encode(untype(::coupons/CreatePromotionCodeRequest({
+        promotion: {type: "coupon", coupon: "SAVE10"},
+        code: "LAUNCH"
+    })))
+    assert(contains(body, "promotion%5Btype%5D=coupon"), body)
+    assert(contains(body, "promotion%5Bcoupon%5D=SAVE10"), body)
+    assert(contains(body, "code=LAUNCH"), body)
+}
+
+test-coupon-percent-off-decimal
+meta ["test"]
+fn () {
+    assert-eq("percent_off=12.5&duration=once", ::api/form-encode(untype(::coupons/CreateCouponRequest({percent_off: 12.5, duration: "once"}))))
+}
+
+// ============================================================================
+// Pagination
+// ============================================================================
+
+test-next-page-params-list
+meta ["test"]
+fn () {
+    page {object: "list", has_more: true, data: [{id: "cus_1"}, {id: "cus_2"}]}
+    assert-eq({limit: 2, starting_after: "cus_2"}, ::api/next-page-params({limit: 2}, page))
+}
+
+test-next-page-params-replaces-cursor
+meta ["test"]
+fn () {
+    page {object: "list", has_more: true, data: [{id: "cus_3"}]}
+    next ::api/next-page-params({limit: 1, starting_after: "cus_2"}, page)
+    assert-eq("cus_3", next.starting_after)
+}
+
+test-next-page-params-backwards
+meta ["test"]
+fn () {
+    page {object: "list", has_more: true, data: [{id: "cus_9"}, {id: "cus_8"}]}
+    next ::api/next-page-params({ending_before: "cus_10"}, page)
+    assert-eq("cus_9", next.ending_before)
+    assert(is-null(get(next, "starting_after")))
+}
+
+test-next-page-params-last-page
+meta ["test"]
+fn () {
+    assert(is-null(::api/next-page-params({}, {object: "list", has_more: false, data: [{id: "cus_1"}]})))
+    assert(is-null(::api/next-page-params({}, {object: "list", has_more: true, data: []})))
+}
+
+test-next-page-params-search
+meta ["test"]
+fn () {
+    page {object: "search_result", has_more: true, next_page: "pg_abc", data: [{id: "cus_1"}]}
+    assert-eq({query: "email:'a'", page: "pg_abc"}, ::api/next-page-params({query: "email:'a'"}, page))
+    done {object: "search_result", has_more: false, next_page: null, data: [{id: "cus_1"}]}
+    assert(is-null(::api/next-page-params({query: "x"}, done)))
 }

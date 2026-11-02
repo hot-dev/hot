@@ -1,0 +1,119 @@
+::deepgram::callbacks ns
+meta {
+    doc: """
+    Verify Deepgram callback requests (the results of
+    `transcribe-url-async` / `transcribe-audio-async`). Deepgram does not
+    sign callbacks; its docs recommend either Basic Auth credentials in
+    the callback URL (`verify-basic-auth`) or a shared secret sent as
+    `extra=callback_secret:<secret>` and echoed back in
+    `metadata.extra.callback_secret` (`verify-callback`). The `dg-token`
+    header carries the identifier of the API key that made the request;
+    it is not a secret and is not sent on every callback, so
+    `verify-dg-token` is only a supplementary check.
+    See https://developers.deepgram.com/docs/callback.
+    """
+}
+
+::ctx ::hot::ctx
+::json ::hot::json
+
+verify-callback
+meta {
+    ctx: {"deepgram.callback.secret": {required: false}},
+    doc: """
+    True when the callback body's `metadata.extra.callback_secret`
+    matches the shared secret (constant-time compare over the raw body).
+    Uses the `deepgram.callback.secret` context variable by default
+    (failing when it is unset, the same secret the async transcribe
+    functions send), or an explicit secret, which is masked in call
+    records; an empty explicit secret never verifies. Use a hex secret
+    (`openssl rand -hex 32`): Deepgram turns `+` into a space.
+
+    **Example**
+
+    ```hot
+    deepgram-callback
+    meta {webhook: {service: "deepgram", path: "/deepgram/callback"}}
+    fn (request) {
+      if(not(::deepgram::callbacks/verify-callback(request)),
+        ::hot::http/HttpResponse({status: 401, body: "invalid callback"}),
+        ::deepgram/transcript(request.body))
+    }
+    ```
+    """
+}
+fn
+(request: Map): Bool {
+  secret or(::ctx/get("deepgram.callback.secret"), "")
+  if(is-empty(secret),
+    fail("deepgram.callback.secret is not set. Add it in Context Variables to verify Deepgram callbacks.")
+  )
+  verify-callback(request, secret)
+},
+(request: Map, secret: Str?): Bool {
+  raw-body ::hot::http/raw-body(request)
+  cond {
+    // An empty secret would accept any body that omits one: fail closed.
+    or(is-null(secret), is-blank(secret)) => { false }
+    not(is-str(raw-body)) => { false }
+    is-empty(raw-body) => { false }
+    => {
+      key ::ctx/mark-secret(secret)
+      payload ::json/from-json(raw-body)
+      cond {
+        is-err(payload) => { false }
+        not(is-map(payload)) => { false }
+        => {
+          sent get-in(payload, ["metadata", "extra", "callback_secret"])
+          if(is-str(sent), secure-compare(sent, key), false)
+        }
+      }
+    }
+  }
+}
+
+verify-basic-auth
+meta {
+    doc: """
+    True when the request's `Authorization` header carries HTTP Basic
+    credentials matching `username`/`password` (constant-time compare).
+    Pair with a callback URL that embeds them,
+    `https://user:pass@example.com/hook`, which Deepgram sends as Basic
+    Auth. The password is masked in call records. Empty credentials never
+    verify.
+    """
+}
+fn (request: Map, username: Str?, password: Str?): Bool {
+  header or(get(or(get(request, "headers"), {}), "authorization"), "")
+  cond {
+    or(is-null(username), is-null(password)) => { false }
+    or(is-empty(username), is-empty(password)) => { false }
+    is-empty(header) => { false }
+    => {
+      key ::ctx/mark-secret(password)
+      credentials ::hot::base64/encode(`${username}:${key}`)
+      expected `Basic ${credentials}`
+      secure-compare(header, expected)
+    }
+  }
+}
+
+verify-dg-token
+meta {
+    doc: """
+    Supplementary check: true when the `dg-token` header equals the API
+    key identifier (the key's id in the Deepgram console, not the secret
+    key) that submitted the request. Deepgram does not guarantee the
+    header on every callback, so combine this with `verify-callback` or
+    `verify-basic-auth` rather than relying on it alone. An empty
+    `api-key-id` never verifies.
+    """
+}
+fn (request: Map, api-key-id: Str?): Bool {
+  token or(get(or(get(request, "headers"), {}), "dg-token"), "")
+  cond {
+    is-null(api-key-id) => { false }
+    or(is-empty(api-key-id), is-empty(token)) => { false }
+    => { secure-compare(token, api-key-id) }
+  }
+}

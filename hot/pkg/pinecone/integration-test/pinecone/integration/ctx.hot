@@ -2,9 +2,27 @@
 
 ::env ::hot::env
 
-// Placeholder credentials for the pinecone integration suite. Unset
-// environment variables are skipped entirely, so absent credentials
-// behave exactly as if never configured.
+// Credentials for the pinecone integration suite. Unset environment
+// variables are skipped entirely, so absent credentials behave exactly as
+// if never configured, and every test then skips (passes with a "skipped"
+// note) instead of calling Pinecone.
 ::hot::ctx/set(filter-vals({
     "pinecone.api.key": ::env/get("PINECONE_API_KEY", ""),
 }, (v) { not(is-empty(v)) }))
+
+configured
+meta {doc: """True when a Pinecone API key is configured."""}
+fn (): Bool {
+    not(is-empty(or(::hot::ctx/get("pinecone.api.key"), "")))
+}
+
+skip
+meta {
+    doc: """Record a skipped test: prints why and passes one assertion so the runner reports it cleanly."""
+}
+fn (reason: Str): Bool {
+    println(`skipped: ${reason}`)
+    assert(true, reason)
+}
+
+UNCONFIGURED "set PINECONE_API_KEY"

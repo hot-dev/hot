@@ -1,0 +1,67 @@
+::intercom::events ns
+meta {
+    ctx: {"intercom.token": {required: false}},
+    doc: """Data events: record what a contact did (`upgraded-plan`, `invited-teammate`) so it shows on their profile and can drive segments and messages."""
+}
+
+::api ::intercom::api
+
+build-event-body
+meta {
+    doc: """
+    Build a data event body. `contact` identifies who did it: one of
+    `{id}` (Intercom id), `{user_id}` or `{email}`. `options`:
+    `created_at` (Unix seconds; defaults to now), `metadata` (a flat Map
+    of Str/number/Bool values, or rich `{url, value}` / `{amount,
+    currency}` objects). Unset fields are omitted. Exposed for testing.
+    """
+}
+fn (event-name: Str, contact: Map, options: Map): Map {
+  ::api/compact({
+    event_name: event-name,
+    created_at: or(get(options, "created_at"), ::hot::time/epoch-seconds()),
+    id: get(contact, "id"),
+    user_id: get(contact, "user_id"),
+    email: get(contact, "email"),
+    metadata: get(options, "metadata")
+  })
+}
+
+submit-event
+meta {
+    doc: """
+    POST /events - Submit a data event. Intercom answers 202 with an
+    empty body, so success returns null.
+
+    **Example**
+
+    ```hot
+    ::intercom::events/submit-event("upgraded-plan", {email: "ada@example.com"}, {metadata: {plan: "enterprise", seats: 25}})
+    ```
+    """
+}
+fn
+(event-name: Str, contact: Map): Any {
+  submit-event(event-name, contact, {})
+},
+(event-name: Str, contact: Map, options: Map): Any {
+  submit-event(event-name, contact, options, {})
+},
+(event-name: Str, contact: Map, options: Map, opts: Map): Any {
+  ::api/request("POST", "/events", build-event-body(event-name, contact, options), opts)
+}
+
+list-events
+meta {
+    doc: """GET /events - A contact's events from the last 90 days. `contact`: `{intercom_user_id}`, `{user_id}` or `{email}`; `options`: `type` ("user" by default, or "lead"), `per_page`, `since`/`before` (Unix seconds), `summary` (Bool: counts per event name instead of the events)."""
+}
+fn
+(contact: Map): Any {
+  list-events(contact, {})
+},
+(contact: Map, options: Map): Any {
+  list-events(contact, options, {})
+},
+(contact: Map, options: Map, opts: Map): Any {
+  ::api/request("GET", `/events${::api/query-string({type: "user", ...contact, ...options})}`, "", opts)
+}

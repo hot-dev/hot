@@ -2,16 +2,20 @@
 
 ::env ::hot::env
 
-// Placeholder credentials for the crm integration suite. Unset
-// environment variables are skipped entirely, so absent credentials
-// behave exactly as if never configured.
+// Credentials for the crm integration suite. Unset environment variables
+// are dropped, so absent credentials behave exactly as if never configured
+// and every test skips. CRM_PROVIDER picks one when several are set.
 ::hot::ctx/set(filter-vals({
+    "crm.provider": ::env/get("CRM_PROVIDER", ""),
     "hubspot.token": ::env/get("HUBSPOT_TOKEN", ""),
     "attio.api.key": ::env/get("ATTIO_API_KEY", ""),
-    "salesforce.client-id": ::env/get("SALESFORCE_CLIENT_ID", ""),
-    "salesforce.client-secret": ::env/get("SALESFORCE_CLIENT_SECRET", ""),
-    "salesforce.private.key": ::env/get("SALESFORCE_PRIVATE_KEY", ""),
-    "salesforce.username": ::env/get("SALESFORCE_USERNAME", ""),
     "salesforce.access.token": ::env/get("SALESFORCE_ACCESS_TOKEN", ""),
     "salesforce.instance.url": ::env/get("SALESFORCE_INSTANCE_URL", ""),
+    "salesforce.client-id": ::env/get("SALESFORCE_CLIENT_ID", ""),
+    "salesforce.client-secret": ::env/get("SALESFORCE_CLIENT_SECRET", ""),
+    "salesforce.username": ::env/get("SALESFORCE_USERNAME", ""),
+    "salesforce.private.key": ::env/get("SALESFORCE_PRIVATE_KEY", ""),
+    "salesforce.refresh-token": ::env/get("SALESFORCE_REFRESH_TOKEN", ""),
+    "salesforce.my-domain.url": ::env/get("SALESFORCE_MY_DOMAIN_URL", ""),
+    "salesforce.sandbox": ::env/get("SALESFORCE_SANDBOX", ""),
 }, (v) { not(is-empty(v)) }))

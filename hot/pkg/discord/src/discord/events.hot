@@ -1,0 +1,180 @@
+::discord::events ns
+meta {
+    doc: """
+    Guild scheduled events: list, create, read, modify, delete, and list
+    who is interested. `entity_type` 1 = stage instance, 2 = voice,
+    3 = external (needs `entity_metadata.location` and
+    `scheduled_end_time`). `privacy_level` is always 2 (guild only).
+    `status` transitions: 1 scheduled -> 2 active -> 3 completed, or
+    1 -> 4 canceled.
+    """
+}
+
+::api ::discord::api
+
+seg ::discord::api/seg
+
+ListScheduledEventsRequest type {
+  guild_id: Str,
+  with_user_count: Bool?
+}
+
+list-scheduled-events
+meta {
+    doc: """GET /guilds/{guild_id}/scheduled-events - The guild's scheduled events; `with_user_count: true` adds `user_count`."""
+}
+fn
+(request: ListScheduledEventsRequest): Vec<Map> {
+  list-scheduled-events(request, {})
+},
+(request: ListScheduledEventsRequest, opts: Map): Vec<Map> {
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/scheduled-events`, {query: {with_user_count: request.with_user_count}}, opts)
+}
+
+CreateScheduledEventRequest type {
+  guild_id: Str,
+  name: Str,
+  privacy_level: Int,
+  scheduled_start_time: Str,
+  entity_type: Int,
+  scheduled_end_time: Str?,
+  channel_id: Str?,
+  entity_metadata: Map?,
+  description: Str?,
+  image: Str?,
+  recurrence_rule: Map?,
+  reason: Str?
+}
+
+create-scheduled-event
+meta {
+    doc: """
+    POST /guilds/{guild_id}/scheduled-events - Create a scheduled event.
+    Times are ISO8601. Needs CREATE_EVENTS.
+
+    **Example**
+
+    ```hot
+    ::events ::discord::events
+
+    ::events/create-scheduled-event(::events/CreateScheduledEventRequest({
+      guild_id: "1000000000000000000",
+      name: "Release party",
+      privacy_level: 2,
+      entity_type: 3,
+      entity_metadata: {location: "https://hot.dev/live"},
+      scheduled_start_time: "2026-11-20T18:00:00Z",
+      scheduled_end_time: "2026-11-20T19:00:00Z"
+    }))
+    ```
+    """
+}
+fn
+(request: CreateScheduledEventRequest): Map {
+  create-scheduled-event(request, {})
+},
+(request: CreateScheduledEventRequest, opts: Map): Map {
+  ::api/call("POST", `/guilds/${seg(request.guild_id)}/scheduled-events`, {
+    body: ::api/body(request, ["guild_id"]),
+    reason: request.reason
+  }, opts)
+}
+
+GetScheduledEventRequest type {
+  guild_id: Str,
+  event_id: Str,
+  with_user_count: Bool?
+}
+
+get-scheduled-event
+meta {
+    doc: """GET /guilds/{guild_id}/scheduled-events/{event_id} - One scheduled event."""
+}
+fn
+(request: GetScheduledEventRequest): Map {
+  get-scheduled-event(request, {})
+},
+(request: GetScheduledEventRequest, opts: Map): Map {
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/scheduled-events/${seg(request.event_id)}`, {
+    query: {with_user_count: request.with_user_count}
+  }, opts)
+}
+
+ModifyScheduledEventRequest type {
+  guild_id: Str,
+  event_id: Str,
+  name: Str?,
+  privacy_level: Int?,
+  scheduled_start_time: Str?,
+  scheduled_end_time: Str?,
+  entity_type: Int?,
+  channel_id: Str?,
+  entity_metadata: Map?,
+  description: Str?,
+  status: Int?,
+  image: Str?,
+  recurrence_rule: Map?,
+  reason: Str?,
+  clear: Vec<Str>?
+}
+
+modify-scheduled-event
+meta {
+    doc: """
+    PATCH /guilds/{guild_id}/scheduled-events/{event_id} - Change an event
+    or move it through its lifecycle (`status: 2` starts it, `3` ends it,
+    `4` cancels it). Only fields you set are sent. Switching to
+    `entity_type: 3` needs `clear: ["channel_id"]` plus a location and end
+    time. Needs MANAGE_EVENTS (or CREATE_EVENTS for your own events).
+    """
+}
+fn
+(request: ModifyScheduledEventRequest): Map {
+  modify-scheduled-event(request, {})
+},
+(request: ModifyScheduledEventRequest, opts: Map): Map {
+  ::api/call("PATCH", `/guilds/${seg(request.guild_id)}/scheduled-events/${seg(request.event_id)}`, {
+    body: ::api/body(request, ["guild_id", "event_id"]),
+    reason: request.reason
+  }, opts)
+}
+
+DeleteScheduledEventRequest type {
+  guild_id: Str,
+  event_id: Str
+}
+
+delete-scheduled-event
+meta {
+    doc: """DELETE /guilds/{guild_id}/scheduled-events/{event_id} - Delete an event."""
+}
+fn
+(request: DeleteScheduledEventRequest): Bool {
+  delete-scheduled-event(request, {})
+},
+(request: DeleteScheduledEventRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `/guilds/${seg(request.guild_id)}/scheduled-events/${seg(request.event_id)}`, {}, opts)
+}
+
+GetScheduledEventUsersRequest type {
+  guild_id: Str,
+  event_id: Str,
+  limit: Int?,
+  with_member: Bool?,
+  before: Str?,
+  after: Str?
+}
+
+get-scheduled-event-users
+meta {
+    doc: """GET /guilds/{guild_id}/scheduled-events/{event_id}/users - Users interested in an event (`[{guild_scheduled_event_id, user, member?}]`), up to `limit` (1-100). Page with `before`/`after` user ids."""
+}
+fn
+(request: GetScheduledEventUsersRequest): Vec<Map> {
+  get-scheduled-event-users(request, {})
+},
+(request: GetScheduledEventUsersRequest, opts: Map): Vec<Map> {
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/scheduled-events/${seg(request.event_id)}/users`, {
+    query: {limit: request.limit, with_member: request.with_member, before: request.before, after: request.after}
+  }, opts)
+}

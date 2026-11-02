@@ -1,0 +1,196 @@
+::shopify::inventory ns
+meta {
+    doc: """
+    Inventory levels and quantity changes. Since API 2026-04 the
+    quantity mutations require an idempotency key (`@idempotent`) and a
+    `changeFromQuantity` on every change: the quantity you expect before
+    the write, or null to skip that compare-and-set check. These
+    functions send both: pass `changeFromQuantity` per change to guard
+    against concurrent writes, and pass `idempotencyKey` in options to
+    make a retried call safe (a fresh UUID is used otherwise). Needs
+    `read_inventory` / `write_inventory`.
+    """
+}
+
+::api ::shopify::api
+
+DEFAULT_QUANTITY_NAMES ["available", "on_hand", "committed", "incoming", "reserved"]
+
+get-inventory-levels
+meta {
+    doc: """
+    An inventory item's levels per location: `{id, sku, tracked,
+    inventoryLevels: {nodes: [{id, location: {id, name}, quantities:
+    [{name, quantity}]}], pageInfo}}`. The variant's
+    `inventoryItem.id` is the id to pass. Options: `names` (quantity
+    names, default available/on_hand/committed/incoming/reserved),
+    `first`, `after`.
+    """
+}
+fn
+(inventory-item-id: Str): Map? {
+  get-inventory-levels(inventory-item-id, {})
+},
+(inventory-item-id: Str, options: Map): Map? {
+  get-inventory-levels(inventory-item-id, options, {})
+},
+(inventory-item-id: Str, options: Map, opts: Map): Map? {
+  query """
+  query InventoryLevels($id: ID!, $first: Int!, $after: String, $names: [String!]!) {
+    inventoryItem(id: $id) {
+      id sku tracked
+      inventoryLevels(first: $first, after: $after) {
+        nodes {
+          id
+          location { id name }
+          quantities(names: $names) { name quantity }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+  """
+  vars ::api/connection-variables(options)
+  data ::api/graphql(query, {
+    ...vars,
+    id: inventory-item-id,
+    names: or(get(options, "names"), DEFAULT_QUANTITY_NAMES)
+  }, opts)
+  if-ok(data, %(%.inventoryItem))
+}
+
+with-change-from fn (change: Map): Map {
+  // Required since 2026-04: an explicit null opts out of the check, so
+  // it is set (not omitted) when the caller didn't give one.
+  if(in("changeFromQuantity", keys(change)), change, {...change, changeFromQuantity: null})
+}
+
+idempotency-key fn (options: Map): Str {
+  or(get(options, "idempotencyKey"), Str(::hot::uuid/Uuid()))
+}
+
+build-adjust-input
+meta {
+    doc: """
+    `InventoryAdjustQuantitiesInput`. Each change is `{inventoryItemId,
+    locationId, delta, changeFromQuantity?}`; `changeFromQuantity`
+    defaults to an explicit null. Options: `name` (default
+    `"available"`), `reason` (default `"correction"`),
+    `referenceDocumentUri`. Exposed for testing.
+    """
+}
+fn (changes: Vec, options: Map): Map {
+  filter-vals({
+    name: or(get(options, "name"), "available"),
+    reason: or(get(options, "reason"), "correction"),
+    referenceDocumentUri: get(options, "referenceDocumentUri"),
+    changes: map(changes, with-change-from)
+  }, is-some)
+}
+
+adjust-quantities
+meta {
+    doc: """
+    Change quantities by a delta (`inventoryAdjustQuantities`). Options:
+    `name`, `reason`, `referenceDocumentUri`, `idempotencyKey`. Returns
+    the adjustment group `{createdAt, reason, changes: [{name, delta,
+    quantityAfterChange}]}`.
+
+    **Example**
+
+    ```hot
+    ::shopify::inventory/adjust-quantities([
+      {inventoryItemId: item-id, locationId: location-id, delta: -2, changeFromQuantity: 10}
+    ], {reason: "damaged", idempotencyKey: `damage-${ticket-id}`})
+    ```
+    """
+}
+fn
+(changes: Vec): Map {
+  adjust-quantities(changes, {})
+},
+(changes: Vec, options: Map): Map {
+  adjust-quantities(changes, options, {})
+},
+(changes: Vec, options: Map, opts: Map): Map {
+  mutation """
+  mutation InventoryAdjustQuantities($input: InventoryAdjustQuantitiesInput!, $idempotencyKey: String!) {
+    inventoryAdjustQuantities(input: $input) @idempotent(key: $idempotencyKey) {
+      inventoryAdjustmentGroup {
+        createdAt reason referenceDocumentUri
+        changes { name delta quantityAfterChange item { id } location { id } }
+      }
+      userErrors { field message code }
+    }
+  }
+  """
+  payload ::api/mutate(mutation, {
+    input: build-adjust-input(changes, options),
+    idempotencyKey: idempotency-key(options)
+  }, "inventoryAdjustQuantities", opts)
+  if-ok(payload, %(%.inventoryAdjustmentGroup))
+}
+
+build-set-input
+meta {
+    doc: """
+    `InventorySetQuantitiesInput`. Each quantity is `{inventoryItemId,
+    locationId, quantity, changeFromQuantity?}`; `changeFromQuantity`
+    defaults to an explicit null. Options: `name` (`"available"` default,
+    or `"on_hand"`), `reason` (default `"correction"`),
+    `referenceDocumentUri`. Exposed for testing.
+    """
+}
+fn (quantities: Vec, options: Map): Map {
+  filter-vals({
+    name: or(get(options, "name"), "available"),
+    reason: or(get(options, "reason"), "correction"),
+    referenceDocumentUri: get(options, "referenceDocumentUri"),
+    quantities: map(quantities, with-change-from)
+  }, is-some)
+}
+
+set-quantities
+meta {
+    doc: """Set absolute quantities (`inventorySetQuantities`). Options as in `build-set-input` plus `idempotencyKey`. Returns the adjustment group."""
+}
+fn
+(quantities: Vec): Map {
+  set-quantities(quantities, {})
+},
+(quantities: Vec, options: Map): Map {
+  set-quantities(quantities, options, {})
+},
+(quantities: Vec, options: Map, opts: Map): Map {
+  mutation """
+  mutation InventorySetQuantities($input: InventorySetQuantitiesInput!, $idempotencyKey: String!) {
+    inventorySetQuantities(input: $input) @idempotent(key: $idempotencyKey) {
+      inventoryAdjustmentGroup {
+        createdAt reason referenceDocumentUri
+        changes { name delta quantityAfterChange item { id } location { id } }
+      }
+      userErrors { field message code }
+    }
+  }
+  """
+  payload ::api/mutate(mutation, {
+    input: build-set-input(quantities, options),
+    idempotencyKey: idempotency-key(options)
+  }, "inventorySetQuantities", opts)
+  if-ok(payload, %(%.inventoryAdjustmentGroup))
+}
+
+set-on-hand-quantities
+meta {
+    doc: """Set on-hand quantities: `set-quantities` with `name: "on_hand"` (Shopify deprecated `inventorySetOnHandQuantities` in favour of this)."""
+}
+fn
+(quantities: Vec): Map {
+  set-on-hand-quantities(quantities, {})
+},
+(quantities: Vec, options: Map): Map {
+  set-on-hand-quantities(quantities, options, {})
+},
+(quantities: Vec, options: Map, opts: Map): Map {
+  set-quantities(quantities, {...options, name: "on_hand"}, opts)
+}

@@ -1,0 +1,321 @@
+::plaid::webhooks ns
+meta {
+    doc: """
+    Plaid webhook verification. Plaid signs each webhook with an ES256
+    JWT in the `Plaid-Verification` header. The JWT's `kid` names a
+    public key you fetch from `/webhook_verification_key/get`. Its claims
+    carry `iat` (reject anything older than 5 minutes) and
+    `request_body_sha256` (the SHA-256 of the raw body, compared in
+    constant time). See
+    https://plaid.com/docs/api/webhooks/webhook-verification/.
+    Needs Hot 3.0.2+ for ES256.
+    """
+}
+
+::ctx ::hot::ctx
+::store ::hot::store
+::time ::hot::time
+::api ::plaid::api
+
+VERIFICATION_HEADER "plaid-verification"
+
+// Plaid: reject webhooks whose iat is more than five minutes old.
+MAX_AGE_SECONDS 300
+
+// Verification keys cached by kid. Cached keys are refetched after a day
+// so a key Plaid has since expired (expired_at set) is noticed.
+KEY_CACHE_NAME "plaid:webhook-verification-keys"
+KEY_CACHE_TTL_SECONDS 86400
+
+// ---------------------------------------------------------------------------
+// Pure parts
+// ---------------------------------------------------------------------------
+
+verification-token
+meta {
+    doc: """The JWT from the `Plaid-Verification` header (looked up case-insensitively), or `""` when absent."""
+}
+fn (request: Map): Str {
+  headers or(get(request, "headers"), {})
+  direct get(headers, VERIFICATION_HEADER)
+  cond {
+    is-some(direct) => { trim(Str(direct)) }
+    => {
+      match-key find-first(keys(headers), (k) { eq(lowercase(Str(k)), VERIFICATION_HEADER) })
+      if(is-null(match-key), "", trim(Str(get(headers, match-key))))
+    }
+  }
+}
+
+token-key-id
+meta {
+    doc: """Decode the token header (without verifying it), require `alg` ES256, and return its `kid`. Errs otherwise. Exposed for testing."""
+}
+fn (token: Str): Str {
+  decoded ::jwt/decode(token)
+  cond {
+    is-err(decoded) => { decoded }
+    ne(get(decoded.header, "alg"), "ES256") => {
+      err(`plaid: webhook JWT alg must be ES256, got '${get(decoded.header, "alg")}'`)
+    }
+
+    or(is-null(get(decoded.header, "kid")), eq(get(decoded.header, "kid"), "")) => {
+      err("plaid: webhook JWT has no kid")
+    }
+    => { decoded.header.kid }
+  }
+}
+
+body-hash-matches
+meta {
+    doc: """True when `claimed` (the `request_body_sha256` claim) equals the hex SHA-256 of the raw body, compared in constant time. Hash the body exactly as received: Plaid's JSON uses 2-space indentation, and any reformatting breaks the match. Exposed for testing."""
+}
+fn (raw-body: Str | Bytes, claimed: Any): Bool {
+  cond {
+    not(is-str(claimed)) => { false }
+    is-empty(claimed) => { false }
+    => { secure-compare(::hot::hash/sha256(raw-body), lowercase(claimed)) }
+  }
+}
+
+check-key
+meta {
+    doc: """Reject a JWK that isn't an ES256 / P-256 key, lacks `x`/`y`, or whose `expired_at` (Unix seconds) has passed. Returns true or an Err. Exposed for testing."""
+}
+fn (jwk: Map, now: Int): Bool {
+  alg get(jwk, "alg")
+  crv get(jwk, "crv")
+  expired-at get(jwk, "expired_at")
+  cond {
+    and(is-some(alg), ne(alg, "ES256")) => { err(`plaid: verification key alg must be ES256, got '${alg}'`) }
+    and(is-some(crv), ne(crv, "P-256")) => { err(`plaid: verification key curve must be P-256, got '${crv}'`) }
+    or(is-null(get(jwk, "x")), is-null(get(jwk, "y"))) => { err("plaid: verification key is missing x or y") }
+    and(is-some(expired-at), lte(expired-at, now)) => { err("plaid: verification key has expired") }
+    => { true }
+  }
+}
+
+verify-options
+meta {
+    doc: """Options for `::jwt/verify-es256`: `max-age` 300 seconds (Plaid's five minutes) and no extra leeway, overridable. Exposed for testing."""
+}
+fn (options: Map): Map {
+  {max-age: MAX_AGE_SECONDS, leeway: 0, ...options}
+}
+
+check-webhook-with
+meta {
+    doc: """
+    `check-webhook` with the JWT verifier injected:
+    `verify-token(token, x, y, options)` returns the claims or an Err,
+    like `::jwt/verify-es256`. Exposed so the header, key, iat and body
+    checks can be tested with a stub verifier.
+    """
+}
+fn (request: Map, jwk: Map, options: Map, verify-token: Fn): Map {
+  token verification-token(request)
+  now or(get(options, "now"), ::time/epoch-seconds())
+  cond {
+    is-empty(token) => { err("plaid: missing Plaid-Verification header") }
+    => {
+      kid token-key-id(token)
+      key-kid get(jwk, "kid")
+      cond {
+        is-err(kid) => { kid }
+        and(is-some(key-kid), ne(key-kid, kid)) => {
+          err(`plaid: webhook kid '${kid}' doesn't match the key's kid '${key-kid}'`)
+        }
+        => {
+          usable check-key(jwk, now)
+          cond {
+            is-err(usable) => { usable }
+            => {
+              claims verify-token(token, jwk.x, jwk.y, verify-options({...options, now: now}))
+              cond {
+                is-err(claims) => { claims }
+                not(body-hash-matches(::hot::http/raw-body(request), get(claims, "request_body_sha256"))) => {
+                  err("plaid: request_body_sha256 doesn't match the body")
+                }
+                => { claims }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+check-webhook
+meta {
+    doc: """
+    Verify a webhook against a known JWK (`{kid, alg, crv, x, y,
+    expired_at}` from `/webhook_verification_key/get`). Returns the JWT
+    claims, or an Err saying what failed. Options: `max-age` (seconds,
+    default 300), `leeway` (seconds of clock skew, default 0), `now`
+    (Unix seconds, for tests).
+    """
+}
+fn
+(request: Map, jwk: Map): Map {
+  check-webhook(request, jwk, {})
+},
+(request: Map, jwk: Map, options: Map): Map {
+  check-webhook-with(request, jwk, options, (token, x, y, opts) { ::jwt/verify-es256(token, x, y, opts) })
+}
+
+// ---------------------------------------------------------------------------
+// Keys
+// ---------------------------------------------------------------------------
+
+get-verification-key
+meta {
+    doc: """POST /webhook_verification_key/get: the JWK for a `kid`, uncached. Returns the `key` map."""
+}
+fn
+(key-id: Str): Map {
+  get-verification-key(key-id, {})
+},
+(key-id: Str, opts: Map): Map {
+  out ::api/post("/webhook_verification_key/get", {key_id: key-id}, opts)
+  if(is-err(out), out, out.key)
+}
+
+cached-verification-key
+meta {
+    doc: """The JWK for a `kid`, from a persistent store cache (refetched after a day). Falls back to an uncached fetch when stores aren't available."""
+}
+fn
+(key-id: Str): Map {
+  cached-verification-key(key-id, {})
+},
+(key-id: Str, opts: Map): Map {
+  cache ::store/Map({name: KEY_CACHE_NAME})
+  cached ::store/get(cache, key-id)
+  now ::time/epoch-seconds()
+  hit cond {
+    is-err(cached) => { null }
+    not(is-map(cached)) => { null }
+    gt(sub(now, or(get(cached, "fetched-at"), 0)), KEY_CACHE_TTL_SECONDS) => { null }
+    => { get(cached, "key") }
+  }
+
+  cond {
+    is-some(hit) => { hit }
+    => {
+      key get-verification-key(key-id, opts)
+      cond {
+        is-err(key) => { key }
+        => {
+          // A cache write that fails (no store in this context) is ignored.
+          written ::store/put(cache, key-id, {key: key, fetched-at: now})
+          key
+        }
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Entry points
+// ---------------------------------------------------------------------------
+
+verify-webhook
+meta {
+    ctx: {"plaid.client-id": {required: false}, "plaid.secret": {required: false}},
+    doc: """
+    Verify a Plaid webhook request. Returns true only when the header is
+    present, the JWT is ES256 and signed by Plaid's key for its `kid`,
+    `iat` is at most five minutes old, and `request_body_sha256` matches
+    the raw body. The 1-arity form fetches (and caches) the key with
+    `plaid.client-id` / `plaid.secret`, failing when they are unset; the
+    2- and 3-arity forms take a JWK you fetched yourself, plus options as
+    in `check-webhook`. The 4-arity form takes per-call credentials to
+    fetch the key with: pass a null `jwk`. Use `check-webhook` to learn
+    why a request failed.
+
+    **Example**
+
+    ```hot
+    plaid-webhook
+    meta {webhook: {service: "plaid", path: "/plaid/webhook"}}
+    fn (request) {
+      if(not(::plaid::webhooks/verify-webhook(request)),
+        ::hot::http/HttpResponse({status: 401, body: "invalid signature"}),
+        handle-event(request.body))
+    }
+
+    // With a tenant's credentials, fetching and caching the key
+    ::plaid::webhooks/verify-webhook(request, null, {}, {client-id: "tenant-id", secret: "tenant-secret"})
+    ```
+    """
+}
+fn
+(request: Map): Bool {
+  token verification-token(request)
+  cond {
+    is-empty(token) => { false }
+    => {
+      if(or(is-null(::ctx/get("plaid.client-id")), is-null(::ctx/get("plaid.secret"))),
+        fail("plaid.client-id / plaid.secret are not set. Add them in Context Variables to verify webhook requests.")
+      )
+      kid token-key-id(token)
+      cond {
+        is-err(kid) => { false }
+        => {
+          jwk cached-verification-key(kid)
+          cond {
+            is-err(jwk) => { false }
+            => { verify-webhook(request, jwk) }
+          }
+        }
+      }
+    }
+  }
+},
+(request: Map, jwk: Map): Bool {
+  verify-webhook(request, jwk, {})
+},
+(request: Map, jwk: Map, options: Map): Bool {
+  is-ok(check-webhook(request, jwk, options))
+},
+// 4-arity: a null `jwk` fetches the key with the call's credentials. Bad
+// credentials are an Err naming the key, which is falsy like any refusal.
+(request: Map, jwk: Map?, options: Map, opts: Map): Bool {
+  usable ::api/resolve(opts)
+  token verification-token(request)
+  cond {
+    is-err(usable) => { usable }
+    is-some(jwk) => { verify-webhook(request, jwk, options) }
+    is-empty(token) => { false }
+    => {
+      kid token-key-id(token)
+      cond {
+        is-err(kid) => { false }
+        => {
+          fetched cached-verification-key(kid, opts)
+          cond {
+            is-err(fetched) => { false }
+            => { verify-webhook(request, fetched, options) }
+          }
+        }
+      }
+    }
+  }
+}
+
+event
+meta {
+    doc: """The routing fields of a webhook body: `{webhook_type, webhook_code, item_id, environment, error}` (null for absent ones). Call after verifying."""
+}
+fn (request: Map): Map {
+  body request.body
+  pick (k) { if(is-map(body), get(body, k), null) }
+  {
+    webhook_type: pick("webhook_type"),
+    webhook_code: pick("webhook_code"),
+    item_id: pick("item_id"),
+    environment: pick("environment"),
+    error: pick("error")
+  }
+}

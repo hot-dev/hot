@@ -161,3 +161,75 @@ meta ["test"] fn () {
     sig ::hot::base64/encode(::hot::hex/decode(::hot::hmac/hmac-sha256("", base)))
     assert(not(::wh/verify-request(hs-request(sig, ts), "")), "empty secret fails closed")
 }
+
+// ============================================================================
+// v3 URI decoding (HubSpot's percent-escape table)
+// ============================================================================
+
+HS_QUERY_URL "https://myapp.hot.dev/hubspot/webhook?portal=1&email=a%40b.com&name=a%20b"
+// Independent vector (Python hmac): signed over the decoded URI
+// https://myapp.hot.dev/hubspot/webhook?portal=1&email=a@b.com&name=a%20b
+HS_QUERY_SIG "R1+YP0GhLEXYUVmww9g6niBqN3mRwkLJ5XyzaKAwkxQ="
+
+test-normalize-uri-decodes-the-table
+meta ["test"] fn () {
+    assert-eq("https://h/p?a=:/?@!$'()*,;", ::wh/normalize-uri("https://h/p?a=%3A%2F%3F%40%21%24%27%28%29%2A%2C%3B"))
+    assert-eq("https://h/p?e=a@b.com", ::wh/normalize-uri("https://h/p?e=a%40b.com"), "upper-case hex")
+    assert-eq("https://h/p?e=a@b.com", ::wh/normalize-uri("https://h/p?e=a%40b.com"))
+    assert-eq("https://h/p?e=a@b,c", ::wh/normalize-uri("https://h/p?e=a%40b%2cc"), "lower-case hex")
+}
+
+test-normalize-uri-keeps-other-escapes
+meta ["test"] fn () {
+    assert-eq("https://h/p?q=a%20b&x=%26%3D", ::wh/normalize-uri("https://h/p?q=a%20b&x=%26%3D"))
+    assert-eq("https://h/p?q=1", ::wh/normalize-uri("https://h/p?q=1#section"), "fragment dropped")
+}
+
+test-webhook-query-string-vector
+meta ["test"] fn () {
+    base ::wh/build-base-string("POST", HS_QUERY_URL, HS_BODY, HS_TS)
+    assert(::hot::hmac/hmac-verify-base64(HS_SECRET, base, HS_QUERY_SIG, "sha256"), "encoded URL verifies against the decoded-URI vector")
+    raw-base `POST${HS_QUERY_URL}${HS_BODY}${HS_TS}`
+    assert(not(::hot::hmac/hmac-verify-base64(HS_SECRET, raw-base, HS_QUERY_SIG, "sha256")), "the undecoded URI would not")
+}
+
+test-webhook-fresh-query-string-request
+meta ["test"] fn () {
+    ts Str(mul(::hot::time/epoch-seconds(), 1000))
+    base ::wh/build-base-string("POST", HS_QUERY_URL, HS_BODY, ts)
+    sig ::hot::base64/encode(::hot::hex/decode(::hot::hmac/hmac-sha256(HS_SECRET, base)))
+    request {
+        method: "POST",
+        original-url: HS_QUERY_URL,
+        headers: {x-hubspot-signature-v3: sig, x-hubspot-request-timestamp: ts},
+        body-raw: HS_BODY
+    }
+
+    assert(::wh/verify-request(request, HS_SECRET))
+}
+
+test-webhook-signs-body-bytes
+meta ["test"] fn () {
+    ts Str(mul(::hot::time/epoch-seconds(), 1000))
+    body Bytes([123, 255, 125])
+    base ::wh/build-base-string("POST", HS_URL, body, ts)
+    assert(is-bytes(base), "a Bytes body is signed as Bytes")
+    sig ::hot::base64/encode(::hot::hex/decode(::hot::hmac/hmac-sha256(HS_SECRET, base)))
+    request {
+        method: "POST",
+        original-url: HS_URL,
+        headers: {x-hubspot-signature-v3: sig, x-hubspot-request-timestamp: ts},
+        body-raw: "lossy",
+        body-bytes: body
+    }
+
+    assert(::wh/verify-request(request, HS_SECRET), "raw-body prefers body-bytes")
+}
+
+test-webhook-missing-headers-fail
+meta ["test"] fn () {
+    request {method: "POST", original-url: HS_URL, headers: {}, body-raw: HS_BODY}
+    assert(not(::wh/verify-request(request, HS_SECRET)))
+    no-headers {method: "POST", original-url: HS_URL, body-raw: HS_BODY}
+    assert(not(::wh/verify-request(no-headers, HS_SECRET)), "no headers map at all")
+}

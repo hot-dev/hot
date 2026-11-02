@@ -1,0 +1,94 @@
+::salesforce::search ns
+meta {
+    doc: """SOSL full-text search across objects: `sosl` runs a raw SOSL string, `find` builds one safely from a search term."""
+}
+
+::api ::salesforce::api
+
+SOSL_RESERVED ["\\", "?", "&", "|", "!", "{", "}", "[", "]", "(", ")", "^", "~", "*", ":", "\"", "'", "+", "-"]
+
+escape-sosl
+meta {
+    doc: """Escape SOSL reserved characters (`? & | ! { } [ ] ( ) ^ ~ * : \\ " ' + -`) with a backslash so a user-supplied term searches literally inside `FIND {...}`. Exposed for testing."""
+}
+fn (term: Str): Str {
+  reduce(SOSL_RESERVED, (acc, ch) { replace(acc, ch, concat("\\", ch)) }, term)
+}
+
+build-sosl
+meta {
+    doc: """
+    Build a SOSL statement from a plain search term. `options`: `in`
+    (`"ALL"` (default), `"NAME"`, `"EMAIL"`, `"PHONE"`, or `"SIDEBAR"`;
+    "FIELDS" is appended), `returning` (Vec of object clauses such as
+    `"Contact(Id, Name, Email)"` or `"Lead"`), `limit`. Exposed for
+    testing; `find` uses it.
+    """
+}
+fn (term: Str, options: Map): Str {
+  scope uppercase(or(get(options, "in"), "ALL"))
+  returning get(options, "returning")
+  limit get(options, "limit")
+  parts filter([
+    `FIND {${escape-sosl(term)}}`,
+    `IN ${scope} FIELDS`,
+    if(or(is-null(returning), is-empty(returning)), null, `RETURNING ${join(returning, ", ")}`),
+    if(is-null(limit), null, `LIMIT ${limit}`)
+  ], is-some)
+  join(parts, " ")
+}
+
+sosl
+meta {
+    doc: """
+    GET /search?q= - Run a raw SOSL statement. Returns
+    `{searchRecords}`: matching records across objects, each with
+    `attributes.type`.
+
+    **Example**
+
+    ```hot
+    hits ::salesforce::search/sosl("FIND {Lovelace} IN NAME FIELDS RETURNING Contact(Id, Name), Lead(Id, Name)")
+    hits.searchRecords
+    ```
+    """
+}
+fn
+(statement: Str): Map {
+  sosl(statement, {})
+},
+(statement: Str, opts: Map): Map {
+  ::api/json("GET", `/search${::api/query-string({q: statement})}`, null, opts)
+}
+
+find
+meta {
+    doc: """
+    Search for a plain term (escaped for you) and return the matching
+    records. See `build-sosl` for the options.
+
+    **Example**
+
+    ```hot
+    people ::salesforce::search/find("ada@example.com", {
+      in: "EMAIL",
+      returning: ["Contact(Id, Name, Email)", "Lead(Id, Name, Email)"],
+      limit: 10
+    })
+    ```
+    """
+}
+fn
+(term: Str): Vec {
+  find(term, {})
+},
+(term: Str, options: Map): Vec {
+  find(term, options, {})
+},
+(term: Str, options: Map, opts: Map): Vec {
+  out sosl(build-sosl(term, options), opts)
+  cond {
+    is-err(out) => { out }
+    => { or(get(out, "searchRecords"), []) }
+  }
+}

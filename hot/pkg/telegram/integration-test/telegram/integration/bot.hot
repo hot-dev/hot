@@ -1,77 +1,116 @@
 ::telegram::integration::bot ns
 meta ["test"]
 
+::ctx ::telegram::integration::ctx
+::bot ::telegram::bot
+
 test-get-me
 meta ["test"]
 fn () {
-  response ::telegram::bot/get-me()
+  cond {
+    not(::ctx/configured()) => { ::ctx/skip(::ctx/UNCONFIGURED) }
+    => {
+      response ::bot/get-me()
 
-  assert(response.id, "getMe should return bot id")
-  assert(response.username, "getMe should return username")
-  assert(response.first_name, "getMe should return first_name")
-  assert(response.is_bot, "is_bot should be true")
+      assert(response.id, "getMe should return bot id")
+      assert(response.username, "getMe should return username")
+      assert(response.first_name, "getMe should return first_name")
+      assert(response.is_bot, "is_bot should be true")
+    }
+  }
 }
 
+// Sets a temporary command list and restores the bot's original one
+// (deleting the list again only if there was none).
 test-get-and-set-commands
 meta ["test"]
 fn () {
-  ::telegram::bot/set-my-commands(::telegram::bot/SetMyCommandsRequest({
-    commands: [
-      {command: "start", description: "Start the bot"},
-      {command: "help", description: "Show help"}
-    ]
-  }))
+  cond {
+    not(::ctx/configured()) => { ::ctx/skip(::ctx/UNCONFIGURED) }
+    => {
+      original ::bot/get-my-commands(::bot/GetMyCommandsRequest({}))
 
-  commands ::telegram::bot/get-my-commands(::telegram::bot/GetMyCommandsRequest({}))
+      ::bot/set-my-commands(::bot/SetMyCommandsRequest({
+        commands: [
+          {command: "start", description: "Start the bot"},
+          {command: "help", description: "Show help"}
+        ]
+      }))
 
-  assert-eq(2, length(commands), "should have 2 commands")
-  assert-eq("start", first(commands).command, "first command should be start")
-  assert-eq("help", last(commands).command, "second command should be help")
+      commands ::bot/get-my-commands(::bot/GetMyCommandsRequest({}))
 
-  ::telegram::bot/delete-my-commands(::telegram::bot/DeleteMyCommandsRequest({}))
+      // Restore before asserting, so a failed assertion can't leave the
+      // test commands behind.
+      cond {
+        is-empty(original) => { ::bot/delete-my-commands(::bot/DeleteMyCommandsRequest({})) }
+        => { ::bot/set-my-commands(::bot/SetMyCommandsRequest({commands: original})) }
+      }
 
-  empty-commands ::telegram::bot/get-my-commands(::telegram::bot/GetMyCommandsRequest({}))
-  assert-eq(0, length(empty-commands), "commands should be empty after delete")
+      assert-eq(2, length(commands), "should have 2 commands")
+      assert-eq("start", first(commands).command, "first command should be start")
+      assert-eq("help", last(commands).command, "second command should be help")
+
+      restored ::bot/get-my-commands(::bot/GetMyCommandsRequest({}))
+      assert-eq(length(original), length(restored), "original commands should be restored")
+    }
+  }
 }
 
 test-get-my-name
 meta ["test"]
 fn () {
-  response ::telegram::bot/get-my-name(::telegram::bot/GetMyNameRequest({}))
+  cond {
+    not(::ctx/configured()) => { ::ctx/skip(::ctx/UNCONFIGURED) }
+    => {
+      response ::bot/get-my-name(::bot/GetMyNameRequest({}))
 
-  assert(is-some(response.name), "getMyName should return a name field")
+      assert(is-some(response.name), "getMyName should return a name field")
+    }
+  }
 }
 
 test-get-and-set-description
 meta ["test"]
 fn () {
-  original ::telegram::bot/get-my-description(::telegram::bot/GetMyDescriptionRequest({}))
+  cond {
+    not(::ctx/configured()) => { ::ctx/skip(::ctx/UNCONFIGURED) }
+    => {
+      original ::bot/get-my-description(::bot/GetMyDescriptionRequest({}))
 
-  ::telegram::bot/set-my-description(::telegram::bot/SetMyDescriptionRequest({
-    description: "Hot integration test bot"
-  }))
+      ::bot/set-my-description(::bot/SetMyDescriptionRequest({
+        description: "Hot integration test bot"
+      }))
 
-  updated ::telegram::bot/get-my-description(::telegram::bot/GetMyDescriptionRequest({}))
-  assert-eq("Hot integration test bot", updated.description, "description should match")
+      updated ::bot/get-my-description(::bot/GetMyDescriptionRequest({}))
 
-  ::telegram::bot/set-my-description(::telegram::bot/SetMyDescriptionRequest({
-    description: or(original.description, "")
-  }))
+      ::bot/set-my-description(::bot/SetMyDescriptionRequest({
+        description: or(original.description, "")
+      }))
+
+      assert-eq("Hot integration test bot", updated.description, "description should match")
+    }
+  }
 }
 
 test-get-and-set-short-description
 meta ["test"]
 fn () {
-  original ::telegram::bot/get-my-short-description(::telegram::bot/GetMyShortDescriptionRequest({}))
+  cond {
+    not(::ctx/configured()) => { ::ctx/skip(::ctx/UNCONFIGURED) }
+    => {
+      original ::bot/get-my-short-description(::bot/GetMyShortDescriptionRequest({}))
 
-  ::telegram::bot/set-my-short-description(::telegram::bot/SetMyShortDescriptionRequest({
-    short_description: "Hot test bot"
-  }))
+      ::bot/set-my-short-description(::bot/SetMyShortDescriptionRequest({
+        short_description: "Hot test bot"
+      }))
 
-  updated ::telegram::bot/get-my-short-description(::telegram::bot/GetMyShortDescriptionRequest({}))
-  assert-eq("Hot test bot", updated.short_description, "short_description should match")
+      updated ::bot/get-my-short-description(::bot/GetMyShortDescriptionRequest({}))
 
-  ::telegram::bot/set-my-short-description(::telegram::bot/SetMyShortDescriptionRequest({
-    short_description: or(original.short_description, "")
-  }))
+      ::bot/set-my-short-description(::bot/SetMyShortDescriptionRequest({
+        short_description: or(original.short_description, "")
+      }))
+
+      assert-eq("Hot test bot", updated.short_description, "short_description should match")
+    }
+  }
 }

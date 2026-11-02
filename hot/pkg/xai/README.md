@@ -12,12 +12,20 @@ Add this to the `deps` in your `hot.hot` file:
 
 ## Configuration
 
-Set your xAI API key in your context:
+| Context Variable | Description |
+|---|---|
+| `xai.api.key` | xAI API key, used by every module except Collections management |
+| `xai.management.api.key` | xAI Management API key, required by the Collections management functions |
+
+Set them from the environment in a ctx file:
 
 ```hot
-ctx: {
-  "xai.api.key": env("XAI_API_KEY")
-}
+::myapp::ctx ns
+
+::hot::ctx/set(filter-vals({
+    "xai.api.key": ::hot::env/get("XAI_API_KEY", ""),
+    "xai.management.api.key": ::hot::env/get("XAI_MANAGEMENT_API_KEY", "")
+}, (v) { not(is-empty(v)) }))
 ```
 
 ## Per-call credentials
@@ -45,64 +53,61 @@ A per-call credential is masked in the run's call records, including inside stri
 ### Simple Chat
 
 ```hot
-import ::xai::responses
+::responses ::xai::responses
 
-// Simple one-shot chat
-response responses/chat("grok-3", "What is the capital of France?")
-println(response)
+answer ::responses/chat("grok-3", "What is the capital of France?")
+println(answer)
 ```
 
 ### With System Instructions
 
 ```hot
-response responses/chat(
+::responses ::xai::responses
+
+poem ::responses/chat(
     "grok-3",
     "Write a haiku about programming",
     "You are a creative poet who loves technology."
 )
-println(response)
+println(poem)
 ```
 
 ### Full Request Control
 
 ```hot
-import ::xai::responses
+::responses ::xai::responses
 
-request responses/CreateResponseRequest({
+request ::responses/CreateResponseRequest({
     model: "grok-3",
     input: [
-        responses/user-message("Hello!"),
-        responses/assistant-message("Hi there! How can I help you?"),
-        responses/user-message("Tell me a joke")
+        ::responses/user-message("Hello!"),
+        ::responses/assistant-message("Hi there! How can I help you?"),
+        ::responses/user-message("Tell me a joke")
     ],
     max_output_tokens: 1024,
     temperature: 0.8
 })
 
-response responses/create(request)
-println(responses/extract-response-text(response))
+response ::responses/create(request)
+println(::responses/extract-response-text(response))
 ```
 
 ### Streaming Responses
 
 ```hot
-import ::xai::responses
+::responses ::xai::responses
 
-request responses/CreateResponseRequest({
+response ::responses/create-stream(::responses/CreateResponseRequest({
     model: "grok-3",
     input: "Write a short story about a robot"
-})
-
-response responses/create-stream(request)
+}))
 
 for-each(response.body, (event) {
-    text responses/extract-delta-text(event)
+    text ::responses/extract-delta-text(event)
     cond {
         gt(length(text), 0) => { print(text) }
-    }
-
-    cond {
-        responses/is-stream-done(event) => { println("\n---Done!---") }
+        ::responses/is-stream-done(event) => { println("\n---Done!---") }
+        => { null }
     }
 })
 ```
@@ -112,14 +117,14 @@ for-each(response.body, (event) {
 The Responses API supports stateful conversations. Previous responses are stored server-side for 30 days.
 
 ```hot
-// First message
-first-response responses/create(responses/CreateResponseRequest({
+::responses ::xai::responses
+
+first-response ::responses/create(::responses/CreateResponseRequest({
     model: "grok-3",
     input: "My name is Alice"
 }))
 
-// Continue the conversation using the previous response ID
-second-response responses/create(responses/CreateResponseRequest({
+second-response ::responses/create(::responses/CreateResponseRequest({
     model: "grok-3",
     input: "What is my name?",
     previous_response_id: first-response.id
@@ -129,67 +134,43 @@ second-response responses/create(responses/CreateResponseRequest({
 ### Disable Server-Side Storage
 
 ```hot
-response responses/create(responses/CreateResponseRequest({
+::responses ::xai::responses
+
+response ::responses/create(::responses/CreateResponseRequest({
     model: "grok-3",
     input: "This conversation won't be stored",
     store: false
 }))
 ```
 
-## Embeddings
-
-Create text embeddings for semantic search, similarity, and more.
-
-```hot
-import ::xai::embeddings
-
-// Simple embedding
-vector embeddings/embed("embedding-beta-v1", "Hello world")
-
-// Batch embeddings
-vectors embeddings/embed-batch("embedding-beta-v1", ["Hello", "World", "Test"])
-
-// Calculate similarity between texts
-vec1 embeddings/embed("embedding-beta-v1", "I love programming")
-vec2 embeddings/embed("embedding-beta-v1", "Coding is my passion")
-similarity embeddings/cosine-similarity(vec1, vec2)
-println(`Similarity: ${similarity}`)  // ~0.85
-```
-
 ## Image Generation
 
-Generate images using the Aurora model. Returns unified `AIMedia.Image` types from `::ai::media`.
+Generate images with `grok-imagine-image` (the default). File helpers return unified `AIMedia.Image` values from `::ai::media`.
 
 ### Simple Image URL
 
 ```hot
-import ::xai::images
-
-url images/create-image("A futuristic city at sunset")
+url ::xai::images/create-image("A futuristic city at sunset")
 println(url)
 ```
 
 ### Generate and Save to File
 
 ```hot
-import ::xai::images
-import ::ai::media
+::images ::xai::images
+AIMedia ::ai::media/AIMedia
 
-// Generate and save to a file, returns AIMedia.Image
-result images/generate-to-file("uploads/city.png", "A futuristic city at sunset")
+result ::images/generate-to-file("uploads/city.png", "A futuristic city at sunset")
 
 match result {
     AIMedia.Image => {
-        println(result.media.file.path)   // "uploads/city.png"
-        println(result.media.file.size)   // 123456
-        println(result.revised_prompt)    // The prompt xAI actually used
-        println(result.provider)          // "xai"
+        println(result.media.file.path)
+        println(result.revised_prompt)
     }
-    HttpError => { println("Error generating image") }
+    _ => { println("Error generating image") }
 }
 
-// With options
-result images/generate-to-file("output/cat.png", images/CreateImageRequest({
+cat ::images/generate-to-file("output/cat.png", ::images/CreateImageRequest({
     prompt: "A cat wearing a spacesuit",
     quality: "hd",
     style: "vivid"
@@ -199,87 +180,82 @@ result images/generate-to-file("output/cat.png", images/CreateImageRequest({
 ### Generate Multiple Images
 
 ```hot
-// Generate 3 images with numbered filenames, returns AIMediaBatch
-batch images/generate-batch-to-files("uploads/landscape-{n}.png", "A beautiful mountain landscape", 3)
-// Creates: uploads/landscape-0.png, uploads/landscape-1.png, uploads/landscape-2.png
+// Creates uploads/landscape-0.png, uploads/landscape-1.png, uploads/landscape-2.png
+batch ::xai::images/generate-batch-to-files("uploads/landscape-{n}.png", "A beautiful mountain landscape", 3)
 
 println(`Generated ${batch.succeeded} images`)
-for-each(batch.items, (media) {
-    println(media.media.file.path)
-})
+for-each(batch.items, (media) { println(media.media.file.path) })
 ```
 
 ## Live Search
 
-Search the web and X (Twitter) with AI-powered responses.
+Search the web and X with AI-powered responses.
 
 ```hot
-import ::xai::search
+::search ::xai::search
 
-// Search the web
-response search/search-web("grok-3", "What is the latest news about AI?")
-println(response)
-
-// Search X (Twitter)
-response search/search-x("grok-3", "What are people saying about the new iPhone?")
-println(response)
-
-// Search both web and X
-response search/search-all("grok-3", "What's happening with climate change today?")
-println(response)
+news ::search/search-web("grok-3", "What is the latest news about AI?")
+posts ::search/search-x("grok-3", "What are people saying about the new iPhone?")
+both ::search/search-all("grok-3", "What's happening with climate change today?")
 ```
 
 ### Using Search Tools Directly
 
 ```hot
-import ::xai::responses
-import ::xai::search
+::responses ::xai::responses
+::search ::xai::search
 
-// Add search tools to a custom request
-response responses/create(responses/CreateResponseRequest({
+response ::responses/create(::responses/CreateResponseRequest({
     model: "grok-3",
     input: "Find recent discussions about Rust programming",
-    tools: [search/web-search-tool(), search/x-search-tool()]
+    tools: [::search/web-search-tool(), ::search/x-search-tool()]
 }))
+```
+
+## Collections (RAG)
+
+Collections store documents with automatic embeddings for semantic, keyword or hybrid search. Creating and managing collections uses `xai.management.api.key`. `search` uses `xai.api.key`.
+
+```hot
+::collections ::xai::collections
+
+results ::collections/search(::collections/SearchRequest({
+    query: "What were the key revenue drivers?",
+    collection_ids: ["col_abc123"],
+    max_results: 10,
+    retrieval_mode: ::collections/MODE_SEMANTIC
+}))
+first(results.results).content
 ```
 
 ## List Available Models
 
 ```hot
-import ::xai::models
-
-all-models models/list()
-for-each(all-models.data, (model) {
-    println(model.id)
-})
+all-models ::xai::models/list()
+for-each(all-models.data, (model) { println(model.id) })
 ```
 
 ## API Base URL
 
-`https://api.x.ai/v1`
+`https://api.x.ai/v1` (Collections management: `https://management-api.x.ai`)
 
 ## Available Models
 
-### Chat Models
-- `grok-4-1-fast-non-reasoning` - Latest vision-capable model
-- `grok-4-1-fast-reasoning` - Latest with reasoning
-- `grok-3` - Flagship model with advanced reasoning
-- `grok-3-mini` - Faster, cost-effective model
+Constants in `::xai::models`:
 
-### Embedding Models
-- `embedding-beta-v1` - Text embeddings
-
-### Image Models
-- `aurora` - Image generation
+- Chat: `grok-4-1-fast-reasoning`, `grok-4-1-fast-non-reasoning`, `grok-4-fast-reasoning`, `grok-4-fast-non-reasoning`, `grok-4-0709`, `grok-code-fast-1`, `grok-3`, `grok-3-mini`
+- Vision: `grok-2-vision-1212`
+- Images: `grok-imagine-image`, `grok-2-image-1212`
+- Video: `grok-imagine-video`
 
 ## Modules
 
 | Module | Description |
 |--------|-------------|
 | `::xai::responses` | Chat Responses API (main chat interface) |
-| `::xai::embeddings` | Text embeddings |
-| `::xai::images` | Image generation (Aurora) |
+| `::xai::images` | Image generation |
 | `::xai::search` | Live web and X search |
+| `::xai::collections` | Collections (document storage and search) |
 | `::xai::models` | Model listing and info |
 | `::xai::api` | Low-level authenticated requests |
 

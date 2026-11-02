@@ -1,0 +1,111 @@
+::google::drive::test::params ns
+meta ["test"]
+
+::drive ::google::drive
+::files ::google::drive::files
+::content ::google::drive::content
+::changes ::google::drive::changes
+::perms ::google::drive::permissions
+
+test-urls
+meta ["test"] fn () {
+    assert-eq("https://www.googleapis.com/drive/v3", ::drive/BASE_URL)
+    assert-eq("https://www.googleapis.com/upload/drive/v3", ::drive/UPLOAD_URL)
+    assert-eq("https://www.googleapis.com/drive/v3/files", ::drive/url("/files"))
+    assert-eq("https://www.googleapis.com/drive/v3/files/a%2Fb?supportsAllDrives=true", ::drive/url(`/files/${::drive/encode-id("a/b")}`, {supportsAllDrives: true}))
+    assert-eq("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart", ::drive/upload-url("/files", {uploadType: "multipart"}))
+}
+
+test-list-params-defaults
+meta ["test"] fn () {
+    p ::files/list-params({})
+    assert-eq(true, p.supportsAllDrives)
+    assert-eq(true, p.includeItemsFromAllDrives)
+    assert-eq(::drive/LIST_FIELDS, p.fields)
+    assert(contains(p.fields, "nextPageToken"), "default fields keep the page token")
+    assert(contains(p.fields, "files(id,name,mimeType,size,"))
+    assert(contains(p.fields, "shortcutDetails)"))
+    assert(not(in("corpora", keys(p))), "no corpora unless a driveId is given")
+    assert(not(in("q", keys(p))), "unset options are omitted")
+    assert(not(in("pageToken", keys(p))))
+}
+
+test-list-params-options
+meta ["test"] fn () {
+    p ::files/list-params({q: "trashed = false", pageSize: 50, pageToken: "tok-2", orderBy: "modifiedTime desc", driveId: "0ADrive", token: "ya29.secret", subject: "u@x"})
+    assert-eq("drive", p.corpora, "driveId implies corpora=drive")
+    assert-eq("0ADrive", p.driveId)
+    assert-eq("tok-2", p.pageToken)
+    assert-eq(50, p.pageSize)
+    assert-eq("modifiedTime desc", p.orderBy)
+    assert(not(in("token", keys(p))), "credentials never reach the query string")
+    assert(not(in("subject", keys(p))))
+
+    custom ::files/list-params({fields: "files(id)", corpora: "allDrives", includeItemsFromAllDrives: null})
+    assert-eq("files(id)", custom.fields)
+    assert-eq("allDrives", custom.corpora)
+    assert(not(in("includeItemsFromAllDrives", keys(custom))), "an explicit null drops a default")
+}
+
+test-query-params-local-keys
+meta ["test"] fn () {
+    p ::drive/query-params({supportsAllDrives: true}, {parent: "F", description: "d", keepRevisionForever: true}, ["parent", "description"])
+    assert-eq({supportsAllDrives: true, keepRevisionForever: true}, p)
+}
+
+test-download-and-change-params
+meta ["test"] fn () {
+    d ::content/download-params({acknowledgeAbuse: true, range: {start: 0, end: 9}, chunk-size: 10})
+    assert-eq({alt: "media", supportsAllDrives: true, acknowledgeAbuse: true}, d)
+
+    c ::changes/change-params("42", {driveId: "0AD", channel-token: "secret"})
+    assert-eq("42", c.pageToken)
+    assert-eq(true, c.supportsAllDrives)
+    assert-eq(true, c.includeItemsFromAllDrives)
+    assert-eq("0AD", c.driveId)
+    assert(contains(c.fields, "newStartPageToken"), "default fields keep the next start token")
+    assert(not(in("channel-token", keys(c))), "watch options are not query parameters")
+}
+
+test-build-metadata
+meta ["test"] fn () {
+    m ::files/build-metadata("a.txt", null, {parent: "F"})
+    assert-eq({name: "a.txt", parents: ["F"]}, m)
+    m2 ::files/build-metadata("b", ::drive/FOLDER_MIME, {parents: ["P1", "P2"], description: "x", metadata: {starred: true}})
+    assert-eq(["P1", "P2"], m2.parents)
+    assert-eq(true, m2.starred)
+    assert-eq("x", m2.description)
+    m3 ::files/build-metadata("c", null, {})
+    assert-eq({name: "c"}, m3, "no parents, mimeType or description when unset")
+}
+
+test-move-params
+meta ["test"] fn () {
+    assert-eq({addParents: "NEW", removeParents: "A,B"}, ::files/move-params("NEW", ["A", "B"]))
+    assert-eq({addParents: "NEW"}, ::files/move-params("NEW", ["NEW"]), "the target parent is never removed")
+    assert-eq({addParents: "NEW"}, ::files/move-params("NEW", []))
+}
+
+test-build-permission
+meta ["test"] fn () {
+    assert-eq({type: "user", role: "writer", emailAddress: "ada@example.com"}, ::perms/build-permission("user", "writer", "ada@example.com"))
+    assert-eq({type: "domain", role: "reader", domain: "example.com"}, ::perms/build-permission("domain", "reader", "example.com"))
+    assert-eq({type: "anyone", role: "reader"}, ::perms/build-permission("anyone", "reader", null))
+    assert-eq({type: "anyone", role: "reader", allowFileDiscovery: true}, ::perms/build-permission("anyone", "reader", null, {allowFileDiscovery: true}))
+    assert(is-err(::perms/build-permission("user", "editor", "a@b")), "unknown role")
+    assert(is-err(::perms/build-permission("team", "reader", "a@b")), "unknown type")
+    missing ::perms/build-permission("group", "reader", "")
+    assert(is-err(missing))
+    assert(contains(err-message(missing), "email"))
+}
+
+test-build-channel
+meta ["test"] fn () {
+    ch ::changes/build-channel("https://api.example.com/hook", {channel-id: "ch-1", channel-token: "tok", expires-in-ms: 1000}, 5000)
+    assert-eq({id: "ch-1", type: "web_hook", address: "https://api.example.com/hook", token: "tok", expiration: "6000"}, ch)
+    bare ::changes/build-channel("https://api.example.com/hook", {}, 0)
+    assert-eq(36, length(bare.id), "a UUID id by default")
+    assert(not(in("token", keys(bare))), "no token unless given")
+    assert(not(in("expiration", keys(bare))))
+    assert(is-err(::changes/build-channel("http://insecure", {}, 0)), "addresses must be https")
+}

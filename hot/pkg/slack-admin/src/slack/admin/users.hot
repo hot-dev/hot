@@ -1,0 +1,451 @@
+::slack::admin::users ns
+meta {
+    doc: """
+    `admin.users.*`: list, invite, assign and remove users; change roles
+    (admin, owner, regular); manage guest expiration; and list, reset or
+    invalidate sessions and session settings.
+
+    **Example**
+
+    ```hot
+    ::users ::slack::admin::users
+
+    // Sign a compromised account out everywhere
+    ::users/session-reset(::users/SessionResetRequest({user_id: "U0123ABCDEF"}))
+
+    // Deactivated users across the org
+    gone ::users/list-all(::users/ListRequest({is_active: false}), 2000)
+    ```
+    """
+}
+
+::api ::slack::admin::api
+
+ListRequest type {
+  team_id: Str?,
+  include_deactivated_user_workspaces: Bool?,
+  is_active: Bool?,
+  cursor: Str?,
+  limit: Int?
+}
+
+list
+meta {
+    doc: """
+    admin.users.list - List users (`users`). Pass `team_id` for one workspace, or omit it with an org token to list the whole org.
+
+    Scope: `admin.users:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `list-all`.
+    """
+}
+fn
+(): Map {
+  list(ListRequest({}))
+},
+(request: ListRequest): Map {
+  list(request, {})
+},
+(request: ListRequest, opts: Map): Map {
+  ::api/call("admin.users.list", request, opts)
+}
+
+list-all
+meta {
+    doc: """
+    Every `users` entry from `admin.users.list`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    """
+}
+fn
+(): Vec {
+  list-all(ListRequest({}), 1000)
+},
+(request: ListRequest): Vec {
+  list-all(request, 1000)
+},
+(request: ListRequest, max-items: Int): Vec {
+  list-all(request, max-items, {})
+},
+(request: ListRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.users.list", request, "users", max-items, opts)
+}
+
+InviteRequest type {
+  team_id: Str,
+  email: Str,
+  channel_ids: Vec<Str>,
+  real_name: Str?,
+  custom_message: Str?,
+  is_restricted: Bool?,
+  is_ultra_restricted: Bool?,
+  guest_expiration_ts: Str?,
+  email_password_policy_enabled: Bool?,
+  resend: Bool?
+}
+
+invite
+meta {
+    doc: """
+    admin.users.invite - Invite someone to a workspace, joining `channel_ids`. `is_restricted` / `is_ultra_restricted` invite a multi- or single-channel guest; `guest_expiration_ts` sets a guest's expiry.
+
+    Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: InviteRequest): Map {
+  invite(request, {})
+},
+(request: InviteRequest, opts: Map): Map {
+  ::api/call("admin.users.invite", request, opts)
+}
+
+AssignRequest type {
+  team_id: Str,
+  user_id: Str,
+  channel_ids: Vec<Str>?,
+  is_restricted: Bool?,
+  is_ultra_restricted: Bool?
+}
+
+assign
+meta {
+    doc: """
+    admin.users.assign - Add an existing org user to a workspace.
+
+    Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: AssignRequest): Map {
+  assign(request, {})
+},
+(request: AssignRequest, opts: Map): Map {
+  ::api/call("admin.users.assign", request, opts)
+}
+
+RemoveUserRequest type {
+  team_id: Str,
+  user_id: Str
+}
+
+remove-user
+meta {
+    doc: """
+    admin.users.remove - Remove a user from a workspace.
+
+    Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: RemoveUserRequest): Map {
+  remove-user(request, {})
+},
+(request: RemoveUserRequest, opts: Map): Map {
+  ::api/call("admin.users.remove", request, opts)
+}
+
+SetAdminRequest type {
+  team_id: Str,
+  user_id: Str
+}
+
+set-admin
+meta {
+    doc: """
+    admin.users.setAdmin - Make a user a workspace admin.
+
+    Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: SetAdminRequest): Map {
+  set-admin(request, {})
+},
+(request: SetAdminRequest, opts: Map): Map {
+  ::api/call("admin.users.setAdmin", request, opts)
+}
+
+SetOwnerRequest type {
+  team_id: Str,
+  user_id: Str
+}
+
+set-owner
+meta {
+    doc: """
+    admin.users.setOwner - Make a user a workspace owner.
+
+    Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: SetOwnerRequest): Map {
+  set-owner(request, {})
+},
+(request: SetOwnerRequest, opts: Map): Map {
+  ::api/call("admin.users.setOwner", request, opts)
+}
+
+SetRegularRequest type {
+  team_id: Str,
+  user_id: Str
+}
+
+set-regular
+meta {
+    doc: """
+    admin.users.setRegular - Make a user a regular member (drops admin/owner, or converts a guest).
+
+    Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: SetRegularRequest): Map {
+  set-regular(request, {})
+},
+(request: SetRegularRequest, opts: Map): Map {
+  ::api/call("admin.users.setRegular", request, opts)
+}
+
+SetExpirationRequest type {
+  user_id: Str,
+  expiration_ts: Int,
+  team_id: Str?
+}
+
+set-expiration
+meta {
+    doc: """
+    admin.users.setExpiration - Set when a guest account expires (Unix seconds).
+
+    Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: SetExpirationRequest): Map {
+  set-expiration(request, {})
+},
+(request: SetExpirationRequest, opts: Map): Map {
+  ::api/call("admin.users.setExpiration", request, opts)
+}
+
+GetExpirationRequest type {
+  user_id: Str?,
+  target_team: Str?
+}
+
+get-expiration
+meta {
+    doc: """
+    admin.users.getExpiration - Get a guest's expiration timestamp.
+
+    Scope: `admin.users:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(): Map {
+  get-expiration(GetExpirationRequest({}))
+},
+(request: GetExpirationRequest): Map {
+  get-expiration(request, {})
+},
+(request: GetExpirationRequest, opts: Map): Map {
+  ::api/call("admin.users.getExpiration", request, opts)
+}
+
+SessionListRequest type {
+  team_id: Str?,
+  user_id: Str?,
+  cursor: Str?,
+  limit: Int?
+}
+
+session-list
+meta {
+    doc: """
+    admin.users.session.list - List active sessions (`active_sessions`). Pass both `team_id` and `user_id`, or neither for the whole org.
+
+    Scope: `admin.users:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `session-list-all`.
+    """
+}
+fn
+(): Map {
+  session-list(SessionListRequest({}))
+},
+(request: SessionListRequest): Map {
+  session-list(request, {})
+},
+(request: SessionListRequest, opts: Map): Map {
+  ::api/call("admin.users.session.list", request, opts)
+}
+
+session-list-all
+meta {
+    doc: """
+    Every `active_sessions` entry from `admin.users.session.list`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    """
+}
+fn
+(): Vec {
+  session-list-all(SessionListRequest({}), 1000)
+},
+(request: SessionListRequest): Vec {
+  session-list-all(request, 1000)
+},
+(request: SessionListRequest, max-items: Int): Vec {
+  session-list-all(request, max-items, {})
+},
+(request: SessionListRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.users.session.list", request, "active_sessions", max-items, opts)
+}
+
+SessionResetRequest type {
+  user_id: Str,
+  mobile_only: Bool?,
+  web_only: Bool?
+}
+
+session-reset
+meta {
+    doc: """
+    admin.users.session.reset - Sign a user out of every session (or only mobile/web ones).
+
+    Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: SessionResetRequest): Map {
+  session-reset(request, {})
+},
+(request: SessionResetRequest, opts: Map): Map {
+  ::api/call("admin.users.session.reset", request, opts)
+}
+
+SessionResetBulkRequest type {
+  user_ids: Vec<Str>,
+  mobile_only: Bool?,
+  web_only: Bool?
+}
+
+session-reset-bulk
+meta {
+    doc: """
+    admin.users.session.resetBulk - Sign up to 1000 users out of their sessions (background job).
+
+    Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: SessionResetBulkRequest): Map {
+  session-reset-bulk(request, {})
+},
+(request: SessionResetBulkRequest, opts: Map): Map {
+  ::api/call("admin.users.session.resetBulk", request, opts)
+}
+
+SessionInvalidateRequest type {
+  session_id: Str,
+  team_id: Str
+}
+
+session-invalidate
+meta {
+    doc: """
+    admin.users.session.invalidate - Invalidate one session by id.
+
+    Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: SessionInvalidateRequest): Map {
+  session-invalidate(request, {})
+},
+(request: SessionInvalidateRequest, opts: Map): Map {
+  ::api/call("admin.users.session.invalidate", request, opts)
+}
+
+SessionGetSettingsRequest type {
+  user_ids: Vec<Str>
+}
+
+session-get-settings
+meta {
+    doc: """
+    admin.users.session.getSettings - Get per-user session settings (duration, quit-on-close).
+
+    Scope: `admin.users:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: SessionGetSettingsRequest): Map {
+  session-get-settings(request, {})
+},
+(request: SessionGetSettingsRequest, opts: Map): Map {
+  ::api/call("admin.users.session.getSettings", request, opts)
+}
+
+SessionSetSettingsRequest type {
+  user_ids: Vec<Str>,
+  duration: Int?,
+  desktop_app_browser_quit: Bool?
+}
+
+session-set-settings
+meta {
+    doc: """
+    admin.users.session.setSettings - Set session duration (seconds, 28800 to 315569520) or quit-on-close for users.
+
+    Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: SessionSetSettingsRequest): Map {
+  session-set-settings(request, {})
+},
+(request: SessionSetSettingsRequest, opts: Map): Map {
+  ::api/call("admin.users.session.setSettings", request, opts)
+}
+
+SessionClearSettingsRequest type {
+  user_ids: Vec<Str>
+}
+
+session-clear-settings
+meta {
+    doc: """
+    admin.users.session.clearSettings - Clear per-user session settings so the org defaults apply.
+
+    Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: SessionClearSettingsRequest): Map {
+  session-clear-settings(request, {})
+},
+(request: SessionClearSettingsRequest, opts: Map): Map {
+  ::api/call("admin.users.session.clearSettings", request, opts)
+}
+
+UnsupportedVersionsExportRequest type {
+  date_end_of_support: Int?,
+  date_sessions_started: Int?
+}
+
+unsupported-versions-export
+meta {
+    doc: """
+    admin.users.unsupportedVersions.export - Ask Slackbot to send a CSV of users on unsupported Slack client versions.
+
+    Scope: `admin.users:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(): Map {
+  unsupported-versions-export(UnsupportedVersionsExportRequest({}))
+},
+(request: UnsupportedVersionsExportRequest): Map {
+  unsupported-versions-export(request, {})
+},
+(request: UnsupportedVersionsExportRequest, opts: Map): Map {
+  ::api/call("admin.users.unsupportedVersions.export", request, opts)
+}

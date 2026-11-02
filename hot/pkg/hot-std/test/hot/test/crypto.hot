@@ -79,3 +79,35 @@ meta ["test"] fn () {
         ::b64/encode(server-sig),
         "ServerSignature matches RFC 7677")
 }
+
+// RFC 7515 Appendix A.3: the ES256 JWS example, verified from its JWK.
+es256-x fn (): Bytes { ::b64/decode-url("f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU") }
+es256-y fn (): Bytes { ::b64/decode-url("x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0") }
+ES256_SIGNING_INPUT "eyJhbGciOiJFUzI1NiJ9.eyJpc3MiOiJqb2UiLA0KICJleHAiOjEzMDA4MTkzODAsDQogImh0dHA6Ly9leGFtcGxlLmNvbS9pc19yb290Ijp0cnVlfQ"
+es256-signature fn (): Bytes {
+    ::b64/decode-url("DtEhU3ljbEg8L38VWAfUAqOyKAM6-Xx-F4GawxaepmXFCgfTjDxw5djxLa8ISlSApmWQxfKTUJqPP3-Kg6NU1Q")
+}
+
+test-ecdsa-p256-verify-rfc7515
+meta ["test"] fn () {
+    assert(::crypto/ecdsa-p256-sha256-verify(es256-x(), es256-y(), ES256_SIGNING_INPUT, es256-signature()),
+        "RFC 7515 A.3 ES256 signature should verify")
+}
+
+test-ecdsa-p256-verify-rejects-tampered-message
+meta ["test"] fn () {
+    assert(not(::crypto/ecdsa-p256-sha256-verify(es256-x(), es256-y(), "eyJhbGciOiJFUzI1NiJ9.e30", es256-signature())),
+        "a signature over a different message should not verify")
+}
+
+test-ecdsa-p256-verify-swapped-coordinates
+meta ["test"] fn () {
+    assert(not(::crypto/ecdsa-p256-sha256-verify(es256-y(), es256-x(), ES256_SIGNING_INPUT, es256-signature())),
+        "a different (here off-curve) key should not verify")
+}
+
+test-ecdsa-p256-verify-short-coordinate-is-err
+meta ["test"] fn () {
+    assert(is-err(::crypto/ecdsa-p256-sha256-verify(slice(es256-x(), 0, 31), es256-y(), ES256_SIGNING_INPUT, es256-signature())),
+        "a 31-byte x coordinate should be an error")
+}

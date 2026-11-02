@@ -1,0 +1,214 @@
+::elevenlabs::stt ns
+meta {
+    doc: """ElevenLabs speech-to-text (Scribe): transcribe uploaded audio or a hosted URL, fetch or delete stored transcripts, and read text and words out of a result."""
+}
+
+::api ::elevenlabs::api
+
+DEFAULT_MODEL "scribe_v2"
+
+SpeechToTextRequest
+meta {
+    doc: """
+    Options for `/v1/speech-to-text`. All optional; unset fields are not
+    sent. `model_id` defaults to "scribe_v2". `keyterms` is a Vec of
+    words or phrases to bias toward; `additional_formats` a Vec like
+    `[{format: "srt"}]`; `webhook_metadata` a Map echoed back on the
+    webhook; `entity_detection` "all", a type, or a Vec of types.
+    """
+}
+type {
+    model_id: Str?,
+    language_code: Str?,
+    tag_audio_events: Bool?,
+    num_speakers: Int?,
+    timestamps_granularity: Str?,
+    diarize: Bool?,
+    diarization_threshold: Dec?,
+    file_format: Str?,
+    temperature: Dec?,
+    seed: Int?,
+    use_multi_channel: Bool?,
+    multichannel_output_style: Str?,
+    keyterms: Vec?,
+    additional_formats: Vec?,
+    no_verbatim: Bool?,
+    entity_detection: Any?,
+    webhook: Bool?,
+    webhook_id: Str?,
+    webhook_metadata: Any?,
+    enable_logging: Bool?
+}
+
+// Fields sent JSON-encoded, matching the official SDKs.
+JSON_FIELDS ["additional_formats", "webhook_metadata", "entity_detection"]
+
+// Query-string (not form) fields.
+QUERY_FIELDS ["enable_logging"]
+
+form-fields
+meta {
+    doc: """The form fields for a request as `[[name, value-string]]`, with `model_id` defaulted, nulls dropped, Vec `keyterms` repeated, and JSON fields encoded. Exposed for testing."""
+}
+fn (request: SpeechToTextRequest): Vec {
+  fields {model_id: DEFAULT_MODEL, ...untype(request)}
+  reduce(fields, (acc, entry) {
+    name first(entry)
+    value entry[1]
+    cond {
+      is-null(value) => { acc }
+      in(name, QUERY_FIELDS) => { acc }
+      in(name, JSON_FIELDS) => { concat(acc, [[name, to-json(untype(value))]]) }
+      is-vec(value) => { concat(acc, map(value, (item) { [name, Str(item)] })) }
+      => { concat(acc, [[name, Str(value)]]) }
+    }
+  }, [])
+}
+
+multipart-body
+meta {
+    doc: """The `multipart/form-data` body for an upload: form fields, then the `file` part (when `audio` is non-null) with its bytes concatenated verbatim. Exposed for testing."""
+}
+fn (request: SpeechToTextRequest, audio: Any, filename: Str, boundary: Str): Bytes {
+  fields reduce(form-fields(request), (acc, pair) {
+    concat(acc, ::api/multipart-field(boundary, pair[0], pair[1]))
+  }, Bytes(""))
+  file-part if(is-bytes(audio),
+    ::api/multipart-file(boundary, "file", filename, mime-for(filename), audio),
+    Bytes(""))
+  concat(fields, file-part, ::api/multipart-close(boundary))
+}
+
+mime-for fn (filename: Str): Str {
+  or(::hot::mime/from-path(filename), "application/octet-stream")
+}
+
+stt-path fn (request: SpeechToTextRequest): Str {
+  `/v1/speech-to-text${::api/query-string({enable_logging: request.enable_logging})}`
+}
+
+post-multipart fn (request: SpeechToTextRequest, audio: Any, filename: Str, opts: Map): Map {
+  boundary `hot-elevenlabs-${Uuid()}`
+  ::api/json("POST", stt-path(request), {Content-Type: `multipart/form-data; boundary=${boundary}`},
+    multipart-body(request, audio, filename, boundary), opts)
+}
+
+speech-to-text
+meta {
+    ctx: {"elevenlabs.api.key": {required: false}},
+    doc: """
+    POST /v1/speech-to-text: transcribe audio `Bytes` (any common audio
+    or video format, up to 5 GB). `filename` (default "audio")
+    names the upload; its extension sets the part's MIME type
+    (`application/octet-stream` without one). Returns `{language_code,
+    language_probability, text, words: [{text, type, start, end,
+    speaker_id, logprob}]}`, or `{transcripts: [...]}` for multichannel.
+    With `webhook: true` it returns `{message, request_id,
+    transcription_id}` at once and delivers the result to your
+    speech-to-text webhook.
+
+    **Example**
+
+    ```hot
+    ::stt ::elevenlabs::stt
+
+    audio ::hot::file/read-file-bytes("meeting.mp3")
+    out ::stt/speech-to-text(audio, ::stt/SpeechToTextRequest({diarize: true, keyterms: ["Hot Dev"]}))
+    ::stt/transcript-text(out)
+    ```
+    """
+}
+fn
+(audio: Bytes): Map {
+  speech-to-text(audio, SpeechToTextRequest({}))
+},
+(audio: Bytes, request: SpeechToTextRequest): Map {
+  speech-to-text(audio, request, "audio")
+},
+(audio: Bytes, request: SpeechToTextRequest, filename: Str): Map {
+  speech-to-text(audio, request, filename, {})
+},
+(audio: Bytes, request: SpeechToTextRequest, opts: Map): Map {
+  speech-to-text(audio, request, "audio", opts)
+},
+(audio: Bytes, request: SpeechToTextRequest, filename: Str, opts: Map): Map {
+  post-multipart(request, audio, filename, opts)
+}
+
+speech-to-text-url
+meta {
+    ctx: {"elevenlabs.api.key": {required: false}},
+    doc: """
+    POST /v1/speech-to-text with `source_url`: transcribe a hosted file
+    (HTTPS URL, including YouTube and TikTok links) without uploading
+    it. Same options and result as `speech-to-text`.
+
+    **Example**
+
+    ```hot
+    out ::elevenlabs::stt/speech-to-text-url("https://example.com/podcast.mp3")
+    out.text
+    ```
+    """
+}
+fn
+(source-url: Str): Map {
+  speech-to-text-url(source-url, SpeechToTextRequest({}))
+},
+(source-url: Str, request: SpeechToTextRequest): Map {
+  speech-to-text-url(source-url, request, {})
+},
+(source-url: Str, request: SpeechToTextRequest, opts: Map): Map {
+  boundary `hot-elevenlabs-${Uuid()}`
+  body concat(
+    ::api/multipart-field(boundary, "source_url", source-url),
+    multipart-body(request, null, "", boundary)
+  )
+  ::api/json("POST", stt-path(request), {Content-Type: `multipart/form-data; boundary=${boundary}`}, body, opts)
+}
+
+get-transcript
+meta {
+    ctx: {"elevenlabs.api.key": {required: false}},
+    doc: """GET /v1/speech-to-text/transcripts/{transcription_id}: fetch a stored transcript (for example one produced through a webhook request)."""
+}
+fn
+(transcription-id: Str): Map {
+  get-transcript(transcription-id, {})
+},
+(transcription-id: Str, opts: Map): Map {
+  ::api/json("GET", `/v1/speech-to-text/transcripts/${::api/path-segment(transcription-id)}`, {}, "", opts)
+}
+
+delete-transcript
+meta {
+    ctx: {"elevenlabs.api.key": {required: false}},
+    doc: """DELETE /v1/speech-to-text/transcripts/{transcription_id}: delete a stored transcript."""
+}
+fn
+(transcription-id: Str): Any {
+  delete-transcript(transcription-id, {})
+},
+(transcription-id: Str, opts: Map): Any {
+  ::api/json("DELETE", `/v1/speech-to-text/transcripts/${::api/path-segment(transcription-id)}`, {}, "", opts)
+}
+
+transcript-text
+meta {
+    doc: """The transcript text of a result; multichannel results join each channel's text with newlines. `""` when absent."""
+}
+fn (response: Map): Str {
+  channels get(response, "transcripts")
+  cond {
+    is-vec(channels) => { join(map(channels, (t) { or(get(t, "text"), "") }), "\n") }
+    => { or(get(response, "text"), "") }
+  }
+}
+
+words
+meta {
+    doc: """The spoken words of a result (entries of `type` "word"; spacing and audio events dropped) as `{text, start, end, speaker_id, ...}`."""
+}
+fn (response: Map): Vec {
+  filter(or(get(response, "words"), []), (w) { eq(get(w, "type"), "word") })
+}

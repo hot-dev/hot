@@ -1,8 +1,26 @@
 ::crm::hubspot ns
+meta {
+    doc: """The HubSpot backend for `::crm`: contacts, companies, deals, and notes over `hot.dev/hubspot`. Called through `::crm`; the builders are exposed for testing."""
+}
 
-::contacts ::hubspot::contacts
+::objects ::hubspot::objects
 ::companies ::hubspot::companies
 ::notes ::hubspot::notes
+
+CONTACT_PROPERTIES ["email", "firstname", "lastname", "phone", "company", "associatedcompanyid"]
+COMPANY_PROPERTIES ["name", "domain"]
+DEAL_PROPERTIES ["dealname", "dealstage", "amount", "closedate", "pipeline"]
+NOTE_PROPERTIES ["hs_note_body", "hs_timestamp"]
+
+is-blank-value ::crm/is-blank-value
+
+id-str fn (value: Any): Any {
+  if(is-null(value), null, Str(value))
+}
+
+// ============================================================================
+// Normalizers
+// ============================================================================
 
 normalize-contact
 meta {
@@ -15,23 +33,72 @@ fn (resource: Map): ::crm/Contact {
     email: get(props, "email"),
     first-name: get(props, "firstname"),
     last-name: get(props, "lastname"),
+    phone: get(props, "phone"),
+    company-id: id-str(get(props, "associatedcompanyid")),
     provider: "hubspot",
     raw: untype(resource)
   })
 }
 
-normalize-company fn (resource: Map): ::crm/Company {
+normalize-company
+meta {
+    doc: """Normalize a HubSpot company resource into `::crm/Company`. Exposed for testing."""
+}
+fn (resource: Map): ::crm/Company {
   props or(get(resource, "properties"), {})
   ::crm/Company({
     id: Str(resource.id),
     name: get(props, "name"),
-    domain: get(props, "domain"),
+    domain: ::crm/normalize-domain(get(props, "domain")),
     provider: "hubspot",
     raw: untype(resource)
   })
 }
 
-to-properties fn (fields: Map): Map {
+normalize-deal
+meta {
+    doc: """Normalize a HubSpot deal resource into `::crm/Deal`; `close-date` is the date part of `closedate`. `company-id` is what the caller knows (search results carry no associations). Exposed for testing."""
+}
+fn (resource: Map, company-id: Any): ::crm/Deal {
+  props or(get(resource, "properties"), {})
+  close get(props, "closedate")
+  ::crm/Deal({
+    id: Str(resource.id),
+    name: get(props, "dealname"),
+    stage: get(props, "dealstage"),
+    amount: get(props, "amount"),
+    close-date: if(is-blank-value(close), null, slice(Str(close), 0, 10)),
+    company-id: id-str(company-id),
+    provider: "hubspot",
+    raw: untype(resource)
+  })
+}
+
+normalize-activity
+meta {
+    doc: """Normalize a HubSpot note into `::crm/Activity`. Exposed for testing."""
+}
+fn (resource: Map, subject: Any): ::crm/Activity {
+  props or(get(resource, "properties"), {})
+  ::crm/Activity({
+    id: Str(resource.id),
+    subject: subject,
+    body: get(props, "hs_note_body"),
+    occurred-at: get(props, "hs_timestamp"),
+    provider: "hubspot",
+    raw: untype(resource)
+  })
+}
+
+// ============================================================================
+// Builders (pure)
+// ============================================================================
+
+to-properties
+meta {
+    doc: """Map normalized contact fields to HubSpot properties, omitting unset ones. `company` is the contact's company-name text property. Exposed for testing."""
+}
+fn (fields: Map): Map {
   filter-vals({
     email: get(fields, "email"),
     firstname: get(fields, "first-name"),
@@ -41,62 +108,270 @@ to-properties fn (fields: Map): Map {
   }, is-some)
 }
 
-upsert-contact fn (fields: Map): ::crm/Contact {
-  existing ::contacts/find-by-email(fields.email)
-  cond {
-    is-err(existing) => { existing }
-    is-null(existing) => {
-      created ::contacts/create-contact(to-properties(fields))
-      match created {
-        Result.Err => { err(created) }
+build-contact-upsert
+meta {
+    doc: """The single record for `::hubspot::objects/batch-upsert("contacts", "email", ...)`: `{id: email, properties}`. Exposed for testing."""
+}
+fn (fields: Map): Map {
+  {id: fields.email, properties: to-properties(fields)}
+}
 
-        _ => { normalize-contact(created) }
-      }
-    }
+deal-properties
+meta {
+    doc: """Map normalized deal fields to HubSpot deal properties (`dealname`, `dealstage`, `amount`, `closedate`, `pipeline`), omitting unset ones. Exposed for testing."""
+}
+fn (fields: Map): Map {
+  amount get(fields, "amount")
+  filter-vals({
+    dealname: get(fields, "name"),
+    dealstage: get(fields, "stage"),
+    amount: if(is-null(amount), null, Str(amount)),
+    closedate: get(fields, "close-date"),
+    pipeline: get(fields, "pipeline")
+  }, is-some)
+}
+
+build-deal-search
+meta {
+    doc: """The deal search options for a `find-deals` filter: `dealname`/`dealstage` EQ, and `associations.company`/`associations.contact` for `company-id`/`contact-id`, newest first. Unset keys add no filter. Exposed for testing."""
+}
+fn (criteria: Map): Map {
+  pairs [
+    ["dealname", get(criteria, "name")],
+    ["dealstage", get(criteria, "stage")],
+    ["associations.company", get(criteria, "company-id")],
+    ["associations.contact", get(criteria, "contact-id")]
+  ]
+  filters map(filter(pairs, (p) { not(is-blank-value(p[1])) }), (p) { {propertyName: p[0], operator: "EQ", value: Str(p[1])} })
+  filter-vals({
+    filters: if(is-empty(filters), null, filters),
+    properties: DEAL_PROPERTIES,
+    sorts: [{propertyName: "createdate", direction: "DESCENDING"}],
+    limit: or(get(criteria, "limit"), 20)
+  }, is-some)
+}
+
+build-note-search
+meta {
+    doc: """The note search options for a contact's activities, newest first. Exposed for testing."""
+}
+fn (contact-id: Str, limit: Int): Map {
+  {
+    filters: [{propertyName: "associations.contact", operator: "EQ", value: contact-id}],
+    properties: NOTE_PROPERTIES,
+    sorts: [{propertyName: "hs_timestamp", direction: "DESCENDING"}],
+    limit: limit
+  }
+}
+
+note-text
+meta {
+    doc: """The note body: `subject` as a bold first line when given. Exposed for testing."""
+}
+fn (body: Str, subject: Any): Str {
+  if(is-blank-value(subject), body, `<strong>${subject}</strong><br>${body}`)
+}
+
+// ============================================================================
+// Contacts
+// ============================================================================
+
+is-not-found fn (out: Result): Bool {
+  match out {
+    Result.Err => { and(is-map(untype(out)), eq(get(untype(out), "status"), 404)) }
+    _ => { false }
+  }
+}
+
+find-contact fn
+(email: Str): Any {
+  find-contact(email, {})
+},
+(email: Str, opts: Map): Any {
+  out ::objects/get-object("contacts", email, CONTACT_PROPERTIES, {idProperty: "email"}, opts)
+  cond {
+    is-not-found(out) => { null }
+    is-err(out) => { out }
+    => { normalize-contact(out) }
+  }
+}
+
+upsert-contact fn
+(fields: Map): ::crm/Contact {
+  upsert-contact(fields, {})
+},
+(fields: Map, opts: Map): ::crm/Contact {
+  out ::objects/batch-upsert("contacts", "email", [build-contact-upsert(fields)], opts)
+  results cond {
+    is-err(out) => { [] }
+    => { or(get(out, "results"), []) }
+  }
+
+  company-id get(fields, "company-id")
+  cond {
+    is-err(out) => { out }
+    is-empty(results) => { err({message: "crm: HubSpot upsert returned no contact", body: untype(out)}) }
     => {
-      updated ::contacts/update-contact(Str(existing.id), to-properties(fields))
-      match updated {
-        Result.Err => { err(updated) }
-
-        _ => { normalize-contact(updated) }
+      contact first(results)
+      linked if(is-blank-value(company-id), null, ::objects/associate("contacts", Str(contact.id), "companies", Str(company-id), opts))
+      normalized normalize-contact(contact)
+      cond {
+        is-err(linked) => { linked }
+        is-blank-value(company-id) => { normalized }
+        => { {...normalized, company-id: Str(company-id)} }
       }
     }
   }
 }
 
-find-contact fn (email: Str): Any {
-  found ::contacts/find-by-email(email)
+// ============================================================================
+// Activities
+// ============================================================================
+
+log-activity fn
+(contact-id: Str, body: Str, options: Map): ::crm/Activity {
+  log-activity(contact-id, body, options, {})
+},
+(contact-id: Str, body: Str, options: Map, opts: Map): ::crm/Activity {
+  subject get(options, "subject")
+  note ::notes/log-note("contacts", contact-id, note-text(body, subject), opts)
   cond {
-    is-err(found) => { found }
-    is-null(found) => { null }
-    => { normalize-contact(found) }
+    is-err(note) => { note }
+    => { normalize-activity(note, subject) }
   }
 }
 
-log-activity fn (contact-id: Str, body: Str): Any {
-  ::notes/log-note("contacts", contact-id, body)
+list-activities fn
+(contact-id: Str, limit: Int): Vec {
+  list-activities(contact-id, limit, {})
+},
+(contact-id: Str, limit: Int, opts: Map): Vec {
+  out ::objects/search-objects("notes", build-note-search(contact-id, limit), opts)
+  cond {
+    is-err(out) => { out }
+    => { map(out.results, (n) { normalize-activity(n, null) }) }
+  }
 }
 
-upsert-company fn (fields: Map): ::crm/Company {
-  existing ::companies/find-by-domain(fields.domain)
-  props filter-vals({domain: get(fields, "domain"), name: get(fields, "name")}, is-some)
+// ============================================================================
+// Companies
+// ============================================================================
+
+find-company fn
+(domain: Str): Any {
+  find-company(domain, {})
+},
+(domain: Str, opts: Map): Any {
+  out ::objects/search-objects("companies", {
+    filters: [{propertyName: "domain", operator: "EQ", value: domain}],
+    properties: COMPANY_PROPERTIES,
+    limit: 1
+  }, opts)
   cond {
+    is-err(out) => { out }
+    is-empty(out.results) => { null }
+    => { normalize-company(first(out.results)) }
+  }
+}
+
+upsert-company fn
+(fields: Map): ::crm/Company {
+  upsert-company(fields, {})
+},
+(fields: Map, opts: Map): ::crm/Company {
+  existing find-company(fields.domain, opts)
+  props filter-vals({domain: fields.domain, name: get(fields, "name")}, is-some)
+  written cond {
     is-err(existing) => { existing }
-    is-null(existing) => {
-      created ::companies/create-company(props)
-      match created {
-        Result.Err => { err(created) }
+    is-null(existing) => { ::companies/create-company(props, opts) }
+    => { ::companies/update-company(existing.id, props, opts) }
+  }
 
-        _ => { normalize-company(created) }
-      }
-    }
+  cond {
+    is-err(written) => { written }
+    => { normalize-company(written) }
+  }
+}
+
+// ============================================================================
+// Deals
+// ============================================================================
+
+link-deal fn
+(deal-id: Str, fields: Map): Any {
+  link-deal(deal-id, fields, {})
+},
+(deal-id: Str, fields: Map, opts: Map): Any {
+  company-id get(fields, "company-id")
+  contact-id get(fields, "contact-id")
+  company-link if(is-blank-value(company-id), null, ::objects/associate("deals", deal-id, "companies", Str(company-id), opts))
+  contact-link cond {
+    is-err(company-link) => { company-link }
+    is-blank-value(contact-id) => { null }
+    => { ::objects/associate("deals", deal-id, "contacts", Str(contact-id), opts) }
+  }
+
+  contact-link
+}
+
+find-deals fn
+(criteria: Map): Vec {
+  find-deals(criteria, {})
+},
+(criteria: Map, opts: Map): Vec {
+  out ::objects/search-objects("deals", build-deal-search(criteria), opts)
+  cond {
+    is-err(out) => { out }
+    => { map(out.results, (d) { normalize-deal(d, get(criteria, "company-id")) }) }
+  }
+}
+
+finish-deal fn
+(deal: Result, fields: Map): ::crm/Deal {
+  finish-deal(deal, fields, {})
+},
+(deal: Result, fields: Map, opts: Map): ::crm/Deal {
+  cond {
+    is-err(deal) => { deal }
     => {
-      updated ::companies/update-company(Str(existing.id), props)
-      match updated {
-        Result.Err => { err(updated) }
-
-        _ => { normalize-company(updated) }
+      linked link-deal(Str(deal.id), fields, opts)
+      cond {
+        is-err(linked) => { linked }
+        => { normalize-deal(deal, get(fields, "company-id")) }
       }
     }
   }
+}
+
+create-deal fn
+(fields: Map): ::crm/Deal {
+  create-deal(fields, {})
+},
+(fields: Map, opts: Map): ::crm/Deal {
+  cond {
+    is-blank-value(get(fields, "stage")) => { err("crm: a HubSpot deal needs 'stage' (a dealstage id)") }
+    => { finish-deal(::objects/create-object("deals", deal-properties(fields), opts), fields, opts) }
+  }
+}
+
+update-deal fn
+(id: Str, fields: Map): ::crm/Deal {
+  update-deal(id, fields, {})
+},
+(id: Str, fields: Map, opts: Map): ::crm/Deal {
+  props deal-properties(fields)
+  written cond {
+    is-empty(props) => { ::objects/get-object("deals", id, DEAL_PROPERTIES, {}, opts) }
+    => { ::objects/update-object("deals", id, props, opts) }
+  }
+
+  finish-deal(written, fields, opts)
+}
+
+move-stage fn
+(id: Str, stage: Str): ::crm/Deal {
+  move-stage(id, stage, {})
+},
+(id: Str, stage: Str, opts: Map): ::crm/Deal {
+  update-deal(id, {stage: stage}, opts)
 }

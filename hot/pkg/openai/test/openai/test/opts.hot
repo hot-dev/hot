@@ -1,0 +1,591 @@
+::openai::test::opts ns
+meta ["test"]
+
+// Hermetic tests for per-call credentials: the one resolver, explicit
+// endpoints, full URLs, typed functions and the hot-ai slots.
+
+::api      ::openai::api
+::ctx      ::hot::ctx
+::ct       ::openai::chat-tools
+::compat   ::openai::compatible
+::chat     ::openai::chat
+::ai-chat  ::ai::chat
+::models   ::openai::models
+::emb      ::openai::embeddings
+::mod      ::openai::moderations
+::audio    ::openai::audio
+::images   ::openai::images
+::create   ::openai::create
+::delete   ::openai::delete
+::list     ::openai::list
+::org      ::openai::organization
+
+// Port 1 refuses connections, so a call that resolved these opts fails at the
+// connection, naming this URL, and no request leaves the machine.
+OFFLINE {api-key: "sk-tenant", base-url: "http://127.0.0.1:1/v1"}
+
+CTX {"openai.api.key": "sk-ctx", "openai.base.url": "https://ctx.example.com/v1/"}
+
+assert-reached-offline-url
+meta {
+    doc: """The call got as far as the HTTP layer, against the `base-url` from opts."""
+}
+fn (call: Fn, label: Str) {
+    result ::hot::internal::exec/contain(call)
+    assert(is-err(result), `${label}: a refused connection is an Err`)
+    assert(contains(Str(err-value(result)), "http://127.0.0.1:1/"), `${label}: reached the opts base-url, got ${Str(err-value(result))}`)
+}
+
+with-ctx-key
+meta {
+    doc: """Run `call` with `key` as `openai.api.key`, restoring the value tests run under."""
+}
+fn (key: Str?, call: Fn): Any {
+    before ::ctx/get("openai.api.key")
+    ::ctx/set("openai.api.key", key)
+    result call()
+    ::ctx/set("openai.api.key", before)
+    result
+}
+
+// ============================================================================
+// Resolver
+// ============================================================================
+
+test-resolve-opts-override-ctx
+meta ["test"] fn () {
+    r ::api/resolve-from({api-key: "sk-tenant", base-url: "https://opts.example.com/v1"}, CTX)
+    assert-eq("sk-tenant", r.api-key)
+    assert-eq("https://opts.example.com/v1", r.base-url)
+}
+
+test-resolve-returns-an-endpoint
+meta ["test"] fn () {
+    assert(is-type(::api/resolve-from({api-key: "k"}, {}), ::api/Endpoint), "resolve and Endpoint are one form")
+}
+
+test-resolve-ctx-used-when-opts-empty
+meta ["test"] fn () {
+    r ::api/resolve-from({}, CTX)
+    assert-eq("sk-ctx", r.api-key)
+    assert-eq("https://ctx.example.com/v1", r.base-url, "the trailing slash is dropped")
+}
+
+test-resolve-defaults
+meta ["test"] fn () {
+    assert-eq("https://api.openai.com/v1", ::api/resolve-from({api-key: "k"}, {}).base-url)
+}
+
+test-resolve-blank-base-url-falls-through
+meta ["test"] fn () {
+    assert-eq("https://ctx.example.com/v1", ::api/resolve-from({base-url: ""}, CTX).base-url)
+}
+
+test-resolve-missing-key-is-a-clear-error
+meta ["test"] fn () {
+    r ::api/resolve-from({}, {})
+    assert(is-err(r), "no key is an Err")
+    assert(contains(err-value(r), "openai.api.key"), "the error names the ctx key")
+    assert(contains(err-value(r), "api-key"), "and the opts key")
+}
+
+test-resolve-live-ctx-and-no-ctx-writes
+meta ["test"] fn () {
+    before ::ctx/get("openai.api.key")
+    ::ctx/set("openai.api.key", "sk-ctx-live")
+    assert-eq("sk-ctx-live", ::api/resolve().api-key, "ctx is used when opts is empty")
+    assert-eq("sk-tenant", ::api/resolve({api-key: "sk-tenant"}).api-key, "opts win over ctx")
+    assert-eq("sk-ctx-live", ::ctx/get("openai.api.key"), "a per-call key is not written to ctx")
+    ::ctx/set("openai.api.key", before)
+}
+
+test-resolve-returns-marked-key-unchanged
+meta ["test"] fn () {
+    assert-eq("sk-marked-tenant-key", ::api/resolve({api-key: "sk-marked-tenant-key"}).api-key)
+    assert-eq("sk-marked-endpoint-key", ::api/endpoint("https://x.example.com/v1", "sk-marked-endpoint-key").api-key)
+    req ::api/build-request(::api/endpoint("https://x.example.com/v1", "sk-marked-endpoint-key"), "GET", "https://x.example.com/v1/m", {}, "")
+    assert-eq("Bearer sk-marked-endpoint-key", req.headers.Authorization, "masking is for records, the header keeps the key")
+}
+
+test-resolve-blank-opts-key-is-an-error-not-a-fallback
+meta ["test"] fn () {
+    for-each([null, "", "   "], (blank) {
+        r ::api/resolve-from({api-key: blank}, CTX)
+        assert(is-err(r), "a blank key in opts is an Err, with a ctx key available")
+        assert(contains(err-value(r), "api-key"), "that names the opts key")
+        assert(not(contains(err-value(r), "sk-ctx")), "and doesn't show the ctx key")
+    })
+}
+
+test-resolve-opts-base-url-without-key-never-gets-the-ctx-key
+meta ["test"] fn () {
+    r ::api/resolve-from({base-url: "https://tenant.example.com/v1"}, CTX)
+    assert(is-err(r), "a per-call base URL without a per-call key is an Err, with a ctx key available")
+    assert(contains(err-value(r), "base-url"), "that names base-url")
+    assert(contains(err-value(r), "api-key"), "and api-key")
+    assert(not(contains(err-value(r), "sk-ctx")), "and doesn't show the ctx key")
+    assert(is-err(::api/resolve-from({base-url: "http://localhost:11434/v1"}, {})), "also with no ctx key at all: a keyless server uses an Endpoint")
+}
+
+test-ctx-base-url-with-ctx-key-still-works
+meta ["test"] fn () {
+    r ::api/resolve-from({}, CTX)
+    assert-eq("sk-ctx", r.api-key)
+    assert-eq("https://ctx.example.com/v1", r.base-url)
+}
+
+test-resolve-refuses-a-malformed-base-url
+meta ["test"] fn () {
+    for-each(["https://user:pw@evil.example/v1", "https://evil.example\\@api.openai.com/v1", "ftp://x/v1", "api.openai.com/v1"], (url) {
+        r ::api/resolve-from({api-key: "k", base-url: url}, {})
+        assert(is-err(r), `${url} is refused`)
+        assert(contains(err-value(r), "base-url"), "naming base-url")
+    })
+}
+
+// ============================================================================
+// Explicit endpoints in opts
+// ============================================================================
+
+test-resolve-keyless-endpoint-reads-no-ctx
+meta ["test"] fn () {
+    ::ctx/set("openai.base.url", "https://ctx.example.com/v1")
+    local ::api/endpoint("http://localhost:11434/v1")
+    r with-ctx-key("sk-ctx-live", () { ::api/resolve({endpoint: local}) })
+    ::ctx/set("openai.base.url", null)
+    assert-eq("http://localhost:11434/v1", r.base-url)
+    assert(is-null(r.api-key), "a keyless Endpoint stays keyless, with a ctx key available")
+    assert(is-null(get(::api/endpoint-headers(r, {}, false), "Authorization")), "so no Authorization header goes out")
+}
+
+test-resolve-endpoint-with-key
+meta ["test"] fn () {
+    r ::api/resolve({endpoint: ::api/endpoint("https://gw.example.com/v1", "sk-endpoint-key")})
+    assert-eq("sk-endpoint-key", r.api-key)
+}
+
+test-endpoint-in-opts-must-be-an-endpoint
+meta ["test"] fn () {
+    url ::api/resolve-from({endpoint: "http://localhost:11434/v1"}, CTX)
+    assert(is-err(url), "a URL is not an Endpoint")
+    assert(contains(err-value(url), "endpoint"), "naming the key")
+    both ::api/resolve-from({endpoint: ::api/endpoint("http://localhost:1/v1"), api-key: "k"}, CTX)
+    assert(is-err(both), "an Endpoint can't be combined with api-key")
+}
+
+test-resolve-with-a-url-as-endpoint-is-an-error
+meta ["test"] fn () {
+    r ::api/resolve({endpoint: "http://localhost:11434/v1"})
+    assert(is-err(r))
+    assert(contains(err-value(r), "endpoint"))
+}
+
+test-endpoint-as-a-map-survives-the-run-loop
+meta ["test"] fn () {
+    // The hot-ai run loop hands `provider-opts` on as plain Maps.
+    r ::api/resolve-from({endpoint: {base-url: "http://localhost:11434/v1/", api-key: null, headers: null}}, CTX)
+    assert-eq("http://localhost:11434/v1", r.base-url)
+    assert(is-null(r.api-key))
+    assert(is-type(r, ::api/Endpoint))
+    assert(is-err(::api/resolve-from({endpoint: {api-key: "k"}}, CTX)), "an Endpoint needs a base URL")
+}
+
+test-endpoint-needs-a-base-url
+meta ["test"] fn () {
+    assert(is-err(::api/endpoint(null, "k")), "a key never ends up at the default URL")
+    assert(is-err(::api/endpoint("  ", "k")))
+}
+
+test-default-endpoint-without-a-key-is-an-error
+meta ["test"] fn () {
+    r with-ctx-key(null, () { ::api/default-endpoint() })
+    assert(is-err(r))
+    assert(contains(err-value(r), "openai.api.key"))
+}
+
+test-with-opts
+meta ["test"] fn () {
+    keyed ::api/endpoint("https://a.example.com/v1", "sk-a", {"X-Route": "a"})
+    assert-eq("sk-a", ::api/with-opts(keyed, {}).api-key, "empty opts change nothing")
+    assert-eq("a", get(::api/with-opts(keyed, {api-key: "sk-b"}).headers, "X-Route"), "headers stay on the same URL")
+    assert-eq("sk-b", ::api/with-opts(keyed, {api-key: "sk-b"}).api-key)
+    assert(is-err(::api/with-opts(keyed, {api-key: ""})), "blank is an Err")
+    assert(is-err(::api/with-opts(keyed, {base-url: "https://b.example.com/v1"})), "the configured key never goes to a per-call URL")
+
+    moved ::api/with-opts(keyed, {api-key: "sk-b", base-url: "https://b.example.com/v1/"})
+    assert-eq("https://b.example.com/v1", moved.base-url)
+    assert(is-null(moved.headers), "headers don't follow to another URL")
+
+    keyless ::api/endpoint("http://localhost:11434/v1")
+    gpu ::api/with-opts(keyless, {base-url: "http://gpu-box:11434/v1"})
+    assert-eq("http://gpu-box:11434/v1", gpu.base-url, "a keyless server can move without a key")
+    assert(is-null(gpu.api-key), "and stays keyless")
+
+    other ::api/endpoint("http://other:1/v1")
+    assert-eq("http://other:1/v1", ::api/with-opts(keyed, {endpoint: other}).base-url)
+}
+
+// ============================================================================
+// Full URLs
+// ============================================================================
+
+test-url-parts
+meta ["test"] fn () {
+    parts ::api/url-parts("HTTPS://API.OpenAI.com:8443/v1/Models?x=1")
+    assert-eq("https", parts.scheme)
+    assert-eq("api.openai.com", parts.host)
+    assert-eq(":8443", parts.port)
+    assert-eq("/v1/Models", parts.path, "the path keeps its case")
+    assert-eq("my_service", ::api/url-parts("http://my_service:8000/v1").host)
+    assert-eq("[::1]", ::api/url-parts("http://[::1]:8000/v1").host)
+    assert-eq("", ::api/url-parts("https://api.openai.com").path)
+}
+
+test-url-parts-refuses-what-parsers-disagree-on
+meta ["test"] fn () {
+    for-each([
+        "https://user@api.openai.com/v1",
+        "https://user:pw@api.openai.com/v1",
+        "https://evil.example\\@api.openai.com/v1",
+        "https://evil.example\\.api.openai.com/v1",
+        "https://api.openai.com\t.evil.example/v1",
+        "https://api.openai.com\n.evil.example/v1",
+        "https://api.openai.com/v1\nX-Evil: 1",
+        "https://api.openai.com/v1 x",
+        "https://api.openai.com/\\evil",
+        "https:///api.openai.com/v1",
+        "https://",
+        "ftp://api.openai.com/v1",
+        "//api.openai.com/v1"
+    ], (url) {
+        assert(is-null(::api/url-parts(url)), `no host can be read from ${url}`)
+    })
+}
+
+test-is-on-root
+meta ["test"] fn () {
+    root "https://api.openai.com/v1"
+    assert(::api/is-on-root("https://api.openai.com/v1/models", root), "under the root")
+    assert(::api/is-on-root("https://API.openai.com/v1", root), "the root itself, host case aside")
+    assert(::api/is-on-root("https://api.openai.com/v1?x=1", root), "with a query")
+    assert(not(::api/is-on-root("https://evil.example/v1/models", root)), "another host")
+    assert(not(::api/is-on-root("https://api.openai.com.evil.example/v1/models", root)), "a host that merely starts the same")
+    assert(not(::api/is-on-root("http://api.openai.com/v1/models", root)), "a scheme downgrade")
+    assert(not(::api/is-on-root("https://api.openai.com:8443/v1/models", root)), "another port")
+    assert(not(::api/is-on-root("https://api.openai.com/v1x/models", root)), "a path that merely starts the same")
+    assert(not(::api/is-on-root("https://api.openai.com/other", root)), "outside the root's path")
+    assert(not(::api/is-on-root("https://api.openai.com/v1/../other", root)), "dot segments")
+    assert(not(::api/is-on-root("https://api.openai.com/v1/%2E%2e/other", root)), "encoded dot segments")
+    assert(not(::api/is-on-root("https://user@api.openai.com/v1/models", root)), "userinfo")
+}
+
+test-ctx-key-never-goes-off-the-root
+meta ["test"] fn () {
+    for-each([
+        "https://evil.example/steal",
+        "HTTPS://evil.example/steal",
+        "http://api.openai.com/v1/models",
+        "https://api.openai.com.evil.example/v1",
+        "https://evil.example\\@api.openai.com/v1/models"
+    ], (url) {
+        result with-ctx-key("sk-ctx-live", () { ::api/request("GET", url) })
+        assert(is-err(result), `the ctx key doesn't go to ${url}`)
+        assert(contains(err-value(result), "refusing"), `refused before any request, got ${Str(err-value(result))}`)
+        assert(not(contains(err-value(result), "sk-ctx-live")), "and the key isn't shown")
+        stream with-ctx-key("sk-ctx-live", () { ::api/request-stream("POST", url, {}, {}) })
+        assert(is-err(stream), `nor by stream to ${url}`)
+    })
+}
+
+test-ctx-key-goes-to-a-full-url-on-the-root
+meta ["test"] fn () {
+    req with-ctx-key("sk-ctx-live", () { ::api/resolved-request("GET", "https://api.openai.com/v1/models", {}, "", {}) })
+    assert-eq("https://api.openai.com/v1/models", req.url)
+    assert-eq("Bearer sk-ctx-live", req.headers.Authorization)
+    joined with-ctx-key("sk-ctx-live", () { ::api/resolved-request("GET", "/models", {}, "", {}) })
+    assert-eq("https://api.openai.com/v1/models", joined.url, "a path is joined onto the root")
+}
+
+test-own-key-may-go-off-the-root
+meta ["test"] fn () {
+    req with-ctx-key("sk-ctx-live", () { ::api/resolved-request("GET", "https://other.example/x", {}, "", {api-key: "sk-own"}) })
+    assert-eq("https://other.example/x", req.url)
+    assert-eq("Bearer sk-own", req.headers.Authorization)
+    assert-reached-offline-url(() { ::api/request("GET", "http://127.0.0.1:1/x", {}, "", "sk-own") }, "explicit key arity")
+    assert-reached-offline-url(() { ::api/request-stream("GET", "http://127.0.0.1:1/x", {}, "", "sse", "sk-own") }, "explicit key stream arity")
+}
+
+test-own-key-still-needs-a-readable-host
+meta ["test"] fn () {
+    result ::api/request("GET", "https://evil.example\\@api.openai.com/v1", {}, "", {api-key: "sk-own"})
+    assert(is-err(result))
+    assert(contains(err-value(result), "cannot be read safely"))
+}
+
+test-endpoint-key-stays-on-its-root
+meta ["test"] fn () {
+    ep ::api/endpoint("https://gw.example.com/v1", "sk-endpoint-key")
+    assert(is-err(::api/build-endpoint-request(ep, "GET", "https://evil.example/x", {}, "")), "an Endpoint's key may have come from ctx")
+    ok ::api/build-endpoint-request(ep, "GET", "https://gw.example.com/v1/models", {}, "")
+    assert-eq("Bearer sk-endpoint-key", ok.headers.Authorization)
+    result ::api/endpoint-request(ep, "GET", "https://evil.example/x")
+    assert(is-err(result), "sending it returns the Err")
+    assert(is-err(::api/endpoint-response(result)), "and unwrapping passes it along")
+
+    with-headers ::api/endpoint("http://localhost:1/v1", null, {"X-Gateway-Key": "secret"})
+    assert(is-err(::api/build-endpoint-request(with-headers, "GET", "https://evil.example/x", {}, "")), "headers can be credentials too")
+
+    keyless ::api/endpoint("http://localhost:11434/v1")
+    assert-eq("https://other.example/x", ::api/build-endpoint-request(keyless, "GET", "https://other.example/x", {}, "").url, "a keyless Endpoint has nothing to leak")
+}
+
+// ============================================================================
+// Request building
+// ============================================================================
+
+test-explicit-key-arity-goes-through-the-resolver
+meta ["test"] fn () {
+    result ::api/request("GET", "/models", {}, "", "")
+    assert(is-err(result), "a blank explicit key is an Err")
+    assert(contains(err-value(result), "api-key"))
+}
+
+test-empty-body-sends-no-body
+meta ["test"] fn () {
+    req ::api/resolved-request("GET", "/models", {}, "", {api-key: "k"})
+    assert(is-null(req.body))
+    assert(is-null(get(req.headers, "Content-Type")))
+}
+
+test-additional-headers-override
+meta ["test"] fn () {
+    req ::api/resolved-request("POST", "/x", {"Content-Type": "text/plain", "X-A": "1"}, {a: 1}, {api-key: "k"})
+    assert-eq("text/plain", get(req.headers, "Content-Type"))
+    assert-eq("1", get(req.headers, "X-A"))
+    assert-eq(1, from-json(req.body).a)
+}
+
+test-bytes-body-is-sent-as-is
+meta ["test"] fn () {
+    req ::api/resolved-request("POST", "/x", {}, Bytes("raw"), {api-key: "k"})
+    assert-eq("raw", Str(req.body))
+}
+
+// ============================================================================
+// Typed functions take opts
+// ============================================================================
+
+test-typed-functions-reach-the-opts-base-url
+meta ["test"] fn () {
+    assert-reached-offline-url(() { ::models/list(OFFLINE) }, "models/list")
+    assert-reached-offline-url(() { ::models/get("gpt-4o", OFFLINE) }, "models/get")
+    assert-reached-offline-url(() { ::emb/create(::emb/EmbeddingRequest({input: "a", model: "m"}), OFFLINE) }, "embeddings/create")
+    assert-reached-offline-url(() { ::emb/embed("a", OFFLINE) }, "embeddings/embed")
+    assert-reached-offline-url(() { ::emb/embed("a", "m", OFFLINE) }, "embeddings/embed with a model")
+    assert-reached-offline-url(() { ::mod/check("a", OFFLINE) }, "moderations/check")
+    assert-reached-offline-url(() { ::audio/speak("a", OFFLINE) }, "audio/speak")
+    assert-reached-offline-url(() { ::audio/speak("a", "nova", OFFLINE) }, "audio/speak with a voice")
+    assert-reached-offline-url(() { ::images/create-image("a", OFFLINE) }, "images/create-image")
+    assert-reached-offline-url(() { ::images/create-image("a", "1024x1024", OFFLINE) }, "images/create-image with a size")
+    assert-reached-offline-url(() { ::images/generate-to-file("/tmp/x.png", "a", OFFLINE) }, "images/generate-to-file")
+    assert-reached-offline-url(() { ::delete/delete-finetuned-model(::delete/DeleteModelRequest({model: "m"}), OFFLINE) }, "delete/delete-finetuned-model")
+    assert-reached-offline-url(() { ::org/delete-invite(::org/DeleteInviteRequest({invite-id: "i"}), OFFLINE) }, "organization/delete-invite")
+}
+
+test-chat-functions-reach-the-opts-base-url
+meta ["test"] fn () {
+    request ::chat/ChatCompletionRequest({model: "m", messages: [::chat/user-message("hi")]})
+    assert-reached-offline-url(() { ::chat/complete(request, OFFLINE) }, "chat/complete")
+    assert-reached-offline-url(() { ::chat/complete-stream(request, OFFLINE) }, "chat/complete-stream")
+    assert-reached-offline-url(() { ::chat/chat("m", "hi", OFFLINE) }, "chat/chat")
+    assert-reached-offline-url(() { ::chat/chat("m", "hi", "be brief", OFFLINE) }, "chat/chat with a system prompt")
+    assert-reached-offline-url(() { ::chat/chat("m", "hi", "be brief", 10, OFFLINE) }, "chat/chat with a ceiling")
+}
+
+test-existing-arities-keep-working-from-ctx
+meta ["test"] fn () {
+    before-url ::ctx/get("openai.base.url")
+    before-key ::ctx/get("openai.api.key")
+    ::ctx/set({"openai.base.url": "http://127.0.0.1:1/v1", "openai.api.key": "sk-ctx-live"})
+    request ::chat/ChatCompletionRequest({model: "m", messages: [::chat/user-message("hi")]})
+    msgs [::ai-chat/user-message("hi")]
+    assert-reached-offline-url(() { ::models/list() }, "models/list")
+    assert-reached-offline-url(() { ::models/get("m") }, "models/get")
+    assert-reached-offline-url(() { ::chat/complete(request) }, "complete")
+    assert-reached-offline-url(() { ::chat/complete-stream(request) }, "complete-stream")
+    assert-reached-offline-url(() { ::chat/chat("m", "hi") }, "chat 2")
+    assert-reached-offline-url(() { ::chat/chat("m", "hi", "sys") }, "chat 3")
+    assert-reached-offline-url(() { ::chat/chat("m", "hi", "sys", 10) }, "chat 4")
+    assert-reached-offline-url(() { ::chat/chat("m", "hi", null, 10) }, "chat 4 with no system")
+    assert-reached-offline-url(() { ::chat/chat("m", "hi", "sys", null) }, "chat 4 with no ceiling")
+    assert-reached-offline-url(() { ::chat/chat("m", "hi", null, null) }, "chat 4 with neither")
+    assert-reached-offline-url(() { ::emb/embed("a") }, "embed 1")
+    assert-reached-offline-url(() { ::emb/embed("a", "m") }, "embed 2")
+    assert-reached-offline-url(() { ::mod/check("a") }, "check")
+    assert-reached-offline-url(() { ::audio/speak("a") }, "speak 1")
+    assert-reached-offline-url(() { ::audio/speak("a", "nova") }, "speak 2")
+    assert-reached-offline-url(() { ::images/create-image("a") }, "create-image 1")
+    assert-reached-offline-url(() { ::images/create-image("a", null) }, "create-image with no size")
+    assert-reached-offline-url(() { ::images/create-image("a", "1024x1024") }, "create-image 2")
+    assert-reached-offline-url(() { ::ct/chat-with-tools("m", msgs, null, null) }, "chat-with-tools")
+    assert-reached-offline-url(() { ::ct/chat-with-tools-options("m", msgs, null, null, ::ct/DEFAULT_REQUEST_OPTIONS) }, "chat-with-tools-options")
+    assert-reached-offline-url(() { ::ct/chat-with-tools-stream("m", msgs, null, null, (d) { null }) }, "chat-with-tools-stream")
+    assert-reached-offline-url(() { ::ai-chat/run-loop(::ai-chat/ChatOptions({chat-fn: ::ct/chat-with-tools, model: "m"}), "hi") }, "the plain chat-fn slot")
+    assert-reached-offline-url(() { ::api/request("GET", "/models") }, "request 2")
+    assert-reached-offline-url(() { ::api/request("GET", "http://127.0.0.1:1/v1/models") }, "request with a full URL on the root")
+    assert-reached-offline-url(() { ::api/request("GET", "/models", {}) }, "request 3")
+    assert-reached-offline-url(() { ::api/request("POST", "/x", {}, {a: 1}) }, "request 4")
+    assert-reached-offline-url(() { ::api/request-stream("POST", "/x", {}, {a: 1}) }, "request-stream 4")
+    assert-reached-offline-url(() { ::api/request-stream("POST", "/x", {}, {a: 1}, "sse") }, "request-stream 5")
+    ::ctx/set({"openai.base.url": before-url, "openai.api.key": before-key})
+}
+
+test-typed-functions-return-resolver-errors
+meta ["test"] fn () {
+    blank {api-key: ""}
+    results [
+        {label: "models/list", attempt: () { ::models/list(blank) }},
+        {label: "embed", attempt: () { ::emb/embed("a", blank) }},
+        {label: "check", attempt: () { ::mod/check("a", blank) }},
+        {label: "speak", attempt: () { ::audio/speak("a", blank) }},
+        {label: "chat", attempt: () { ::chat/chat("m", "hi", blank) }},
+        {label: "create-image", attempt: () { ::images/create-image("a", blank) }},
+        {label: "generate-to-file", attempt: () { ::images/generate-to-file("/tmp/x.png", "a", blank) }}
+    ]
+    for-each(results, (entry) {
+        result with-ctx-key("sk-ctx-live", entry.attempt)
+        assert(is-err(result), `${entry.label}: a blank key is an Err, not an empty answer`)
+        assert(contains(err-value(result), "api-key"), `${entry.label}: naming the key, got ${Str(err-value(result))}`)
+    })
+}
+
+test-typed-function-with-base-url-and-no-key-sends-nothing
+meta ["test"] fn () {
+    result with-ctx-key("sk-ctx-live", () { ::models/list({base-url: "http://127.0.0.1:1/v1"}) })
+    assert(is-err(result))
+    assert(contains(err-value(result), "base-url"), `stops at the resolver, got ${Str(err-value(result))}`)
+}
+
+test-typed-function-without-any-key-is-a-clear-error
+meta ["test"] fn () {
+    result with-ctx-key(null, () { ::models/list() })
+    assert(is-err(result))
+    assert(contains(err-value(result), "openai.api.key"))
+}
+
+test-typed-function-with-keyless-endpoint
+meta ["test"] fn () {
+    local ::api/endpoint("http://127.0.0.1:1/v1")
+    assert-reached-offline-url(() { with-ctx-key(null, () { ::models/list({endpoint: local}) }) }, "needs no ctx key")
+}
+
+test-batch-collects-resolver-errors
+meta ["test"] fn () {
+    batch ::images/generate-batch-to-files("/tmp/x-{n}.png", "a", 2, {api-key: ""})
+    assert-eq(0, batch.succeeded)
+    assert-eq(2, batch.failed)
+    assert(contains(batch.errors[0].message, "api-key"))
+}
+
+// ============================================================================
+// hot-ai slots
+// ============================================================================
+
+test-chat-with-tools-opts-arity
+meta ["test"] fn () {
+    msgs [::ai-chat/user-message("hi")]
+    assert-reached-offline-url(() { ::ct/chat-with-tools("m", msgs, null, null, OFFLINE) }, "chat-with-tools")
+    assert-reached-offline-url(() { ::ct/chat-with-tools-options("m", msgs, null, null, ::ct/DEFAULT_REQUEST_OPTIONS, OFFLINE) }, "chat-with-tools-options")
+    assert-reached-offline-url(() { ::ct/chat-with-tools-stream("m", msgs, null, null, (d) { null }, OFFLINE) }, "chat-with-tools-stream")
+    assert-reached-offline-url(() { ::ct/chat-with-tools-stream-options("m", msgs, null, null, (d) { null }, ::ct/DEFAULT_REQUEST_OPTIONS, OFFLINE) }, "chat-with-tools-stream-options")
+}
+
+test-run-loop-provider-opts-reach-the-request
+meta ["test"] fn () {
+    opts ::ai-chat/ChatOptions({chat-opts-fn: ::ct/chat-with-tools, model: "m", provider-opts: OFFLINE})
+    assert-reached-offline-url(() { ::ai-chat/run-loop(opts, "hi") }, "run-loop")
+    stream ::ai-chat/ChatOptions({chat-stream-opts-fn: ::ct/chat-with-tools-stream, model: "m", provider-opts: OFFLINE})
+    assert-reached-offline-url(() { ::ai-chat/run-loop-stream(stream, "hi") }, "run-loop-stream")
+}
+
+test-run-loop-reaches-a-keyless-endpoint-through-provider-opts
+meta ["test"] fn () {
+    opts ::ai-chat/ChatOptions({chat-opts-fn: ::ct/chat-with-tools, model: "m", provider-opts: {endpoint: ::api/endpoint("http://127.0.0.1:1/v1")}})
+    assert-reached-offline-url(() { with-ctx-key(null, () { ::ai-chat/run-loop(opts, "hi") }) }, "a keyless local server")
+}
+
+test-registration-routes-provider-opts
+meta ["test"] fn () {
+    groq ::compat/provider("Groq", "https://api.groq.com/openai/v1", "sk-configured", "groq/")
+    opts ::ai-chat/ChatOptions({model: "groq/m", providers: ::ai-chat/with-providers([groq]), provider-opts: OFFLINE})
+    assert-reached-offline-url(() { ::ai-chat/run-loop(opts, "hi") }, "registry run-loop")
+    assert-reached-offline-url(() { ::ai-chat/run-loop-stream(opts, "hi") }, "registry run-loop-stream")
+}
+
+// ============================================================================
+// Compatible providers
+// ============================================================================
+
+test-compat-identity-survives-a-typed-field-and-the-registry
+meta ["test"] fn () {
+    reg ::compat/provider("Ollama", "http://localhost:11434/v1", null, "ollama/")
+    registry ::ai-chat/with-providers([reg])
+    found ::ai-chat/resolve-registration(::ai-chat/ChatOptions({model: "ollama/llama3.2", providers: registry}))
+    assert(is-type(found.variant, ::ai-chat/Provider), "still a Provider")
+    assert(is-type(found.variant, ::ai-chat/Provider.Compat), "and its own variant")
+    assert-eq("Ollama", found.variant.name)
+    assert-eq(::ai-chat/Provider.Compat({name: "Ollama"}), found.variant)
+    assert(ne(::ai-chat/Provider.Compat({name: "Groq"}), found.variant), "names tell servers apart")
+    openai ::ai-chat/resolve-registration(::ai-chat/ChatOptions({model: "gpt-4o", providers: registry}))
+    assert-eq(::ai-chat/Provider.OpenAi, openai.variant, "OpenAI itself is untouched")
+}
+
+test-compat-custom-variant-wins
+meta ["test"] fn () {
+    cfg ::compat/CompatibleProvider({
+        name: "Mine",
+        endpoint: ::api/endpoint("http://localhost:1/v1"),
+        variant: ::ai-chat/Provider.Compat({name: "Other"})
+    })
+    assert-eq("Other", ::compat/provider(cfg).variant.name)
+}
+
+test-compat-resolve
+meta ["test"] fn () {
+    keyed ::compat/config("Groq", ::api/endpoint("https://api.groq.com/openai/v1", "sk-configured"), "groq/")
+    assert-eq("sk-configured", ::compat/resolve(keyed).api-key)
+    assert-eq("sk-tenant", ::compat/resolve(keyed, {api-key: "sk-tenant"}).api-key)
+    assert(is-err(::compat/resolve(keyed, {api-key: ""})), "blank is an Err")
+    assert(is-err(::compat/resolve(keyed, {base-url: "https://x.example.com/v1"})), "the configured key never goes to a per-call URL")
+
+    needs-key ::compat/CompatibleProvider({name: "Groq", endpoint: ::api/endpoint("https://api.groq.com/openai/v1"), key-name: "groq.api.key"})
+    missing ::compat/resolve(needs-key)
+    assert(is-err(missing), "a server that needs a key says so")
+    assert(contains(err-value(missing), "groq.api.key"))
+    assert(contains(err-value(missing), "api-key"))
+    assert-eq("sk-tenant", ::compat/resolve(needs-key, {api-key: "sk-tenant"}).api-key)
+}
+
+test-compat-functions-take-opts
+meta ["test"] fn () {
+    p ::compat/config("Groq", ::api/endpoint("https://api.groq.com/openai/v1", "sk-configured"), "groq/")
+    assert-reached-offline-url(() { ::compat/list-models(p, OFFLINE) }, "list-models")
+    assert-reached-offline-url(() { ::compat/create-embeddings(p, {model: "m", input: "a"}, OFFLINE) }, "create-embeddings")
+    msgs [::ai-chat/user-message("hi")]
+    chat ::compat/chat-opts-fn(p)
+    stream ::compat/chat-stream-opts-fn(p)
+    assert-reached-offline-url(() { chat("m", msgs, null, null, OFFLINE) }, "chat-opts-fn")
+    assert-reached-offline-url(() { stream("m", msgs, null, null, (d) { null }, OFFLINE) }, "chat-stream-opts-fn")
+    refused ::compat/list-models(p, {base-url: "http://127.0.0.1:1/v1"})
+    assert(is-err(refused), "no key, no per-call URL")
+    assert(contains(err-value(refused), "base-url"))
+}
+
+test-compat-chat-fn-returns-the-missing-key-error
+meta ["test"] fn () {
+    needs-key ::compat/CompatibleProvider({name: "Groq", endpoint: ::api/endpoint("https://api.groq.com/openai/v1"), key-name: "groq.api.key"})
+    chat ::compat/chat-fn(needs-key)
+    result chat("m", [::ai-chat/user-message("hi")], null, null)
+    assert(is-err(result))
+    assert(contains(err-value(result), "groq.api.key"))
+}

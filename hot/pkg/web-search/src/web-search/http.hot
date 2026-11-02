@@ -1,0 +1,111 @@
+::web-search::http ns
+meta {
+    doc: """Shared HTTP plumbing for the providers: one `HttpError` shape with a readable message, plus the text and number helpers the normalizers use."""
+}
+
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+HttpError
+meta {
+    doc: """A non-2xx provider response. `message` is readable text such as `Tavily API error 401: Unauthorized: missing or invalid API key.`; `provider` names the backend and `body` keeps the raw response."""
+}
+type {
+    provider: Str,
+    status: Int,
+    message: Str,
+    headers: Map,
+    body: Any
+}
+
+error-detail
+meta {
+    doc: """The provider's error text from a response body, or null. Understands Tavily (`{detail: {error}}`), Brave (`{error: {detail}}`), Exa and Firecrawl (`{error}`), and plain `{message}` or string bodies. Exposed for testing."""
+}
+fn (body: Any): Any {
+  cond {
+    is-str(body) => { text-or-null(body) }
+    not(is-map(body)) => { null }
+    => {
+      detail get(body, "detail")
+      error get(body, "error")
+      or(
+        if(is-map(detail), text-or-null(get(detail, "error")), text-or-null(detail)),
+        if(is-map(error), or(text-or-null(get(error, "detail")), text-or-null(get(error, "message"))), text-or-null(error)),
+        text-or-null(get(body, "message"))
+      )
+    }
+  }
+}
+
+text-or-null fn (value: Any): Any {
+  if(and(is-str(value), not(is-blank(value))), value, null)
+}
+
+error-message
+meta {
+    doc: """`<Label> API error <status>: <detail>`, or without the detail when the body has none. Exposed for testing."""
+}
+fn (label: Str, status: Int, body: Any): Str {
+  detail error-detail(body)
+  if(is-some(detail), `${label} API error ${status}: ${detail}`, `${label} API error ${status}`)
+}
+
+http-error
+meta {
+    doc: """Build the `HttpError` for a non-2xx response from `provider` (shown as `label`). Exposed for testing."""
+}
+fn (provider: Str, label: Str, response: HttpResponse): HttpError {
+  HttpError({
+    provider: provider,
+    status: response.status,
+    message: error-message(label, response.status, response.body),
+    headers: or(response.headers, {}),
+    body: response.body
+  })
+}
+
+send
+meta {
+    doc: """Send `request` and unwrap: the decoded JSON body on 2xx, an Err carrying `HttpError` otherwise, or the transport Err."""
+}
+fn (provider: Str, label: Str, request: HttpRequest): Any {
+  response ::hot::http/request(request)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response.body }
+    => { err(http-error(provider, label, response)) }
+  }
+}
+
+clamp
+meta {
+    doc: """`n` limited to the range `low`..`high`. Exposed for testing."""
+}
+fn (n: Int, low: Int, high: Int): Int {
+  max(low, min(n, high))
+}
+
+// Entities seen in provider snippets. `&amp;` is decoded last so an
+// escaped entity like `&amp;lt;` comes out as the literal text `&lt;`.
+ENTITIES [
+  ["&lt;", "<"], ["&gt;", ">"], ["&quot;", "\""], ["&#34;", "\""],
+  ["&#39;", "'"], ["&#x27;", "'"], ["&apos;", "'"], ["&#x2F;", "/"],
+  ["&nbsp;", " "], ["&#160;", " "], ["&hellip;", "…"], ["&mdash;", "—"],
+  ["&ndash;", "–"], ["&amp;", "&"]
+]
+
+clean-text
+meta {
+    doc: """Strip HTML tags (Brave wraps matched terms in `<strong>`) and decode common HTML entities in a snippet. Null stays null. Exposed for testing."""
+}
+fn (text: Any): Any {
+  cond {
+    not(is-str(text)) => { text }
+    => {
+      stripped ::hot::regex/replace-all(text, "<[^>]*>", "")
+      reduce(ENTITIES, (s, pair) { replace(s, pair[0], pair[1]) }, stripped)
+    }
+  }
+}

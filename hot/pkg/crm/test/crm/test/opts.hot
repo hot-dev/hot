@@ -1,0 +1,168 @@
+::crm::test::opts ns
+meta ["test"]
+
+// Hermetic: no network. A provider section with a blank credential stops every
+// call in that package's resolver with an Err naming the key, which proves the
+// section reached it.
+
+::ctx ::hot::ctx
+Contact ::crm/Contact
+Deal ::crm/Deal
+
+HUBSPOT_BLANK {provider: "hubspot", hubspot: {token: ""}}
+SALESFORCE_BLANK {provider: "salesforce", salesforce: {access-token: ""}}
+ATTIO_BLANK {provider: "attio", attio: {api-key: ""}}
+
+refused fn (result: Result, key: Str): Bool {
+    and(is-err(result), contains(err-message(result), key), contains(err-message(result), "blank or null"))
+}
+
+test-resolve-provider-explicit-wins
+meta ["test"] fn () {
+    assert-eq("salesforce", ::crm/resolve-provider({provider: "salesforce", hubspot: {token: "pat-1"}}))
+}
+
+test-resolve-provider-first-section-picks
+meta ["test"] fn () {
+    ::ctx/set("crm.provider", "attio")
+    picked ::crm/resolve-provider({salesforce: {access-token: "a"}, hubspot: {token: "pat-1"}})
+    ::ctx/set("crm.provider", null)
+    assert-eq("hubspot", picked)
+}
+
+test-provider-opts-passes-only-the-chosen-section
+meta ["test"] fn () {
+    options {provider: "hubspot", subject: "s", hubspot: {token: "pat-1"}, salesforce: {access-token: "a"}}
+    assert-eq({token: "pat-1"}, ::crm/provider-opts(options, "hubspot"))
+    assert-eq({}, ::crm/provider-opts({provider: "hubspot"}, "hubspot"))
+}
+
+test-non-map-section-is-an-error-not-a-fallback
+meta ["test"] fn () {
+    ::ctx/set("hubspot.token", "pat-ctx-token")
+    result ::crm/find-contact("a@b.co", {hubspot: null})
+    other ::crm/find-contact("a@b.co", {provider: "hubspot", hubspot: "pat-1"})
+    ::ctx/set("hubspot.token", null)
+    assert(is-err(result))
+    assert(contains(err-message(result), "not a Map"))
+    assert(is-err(other))
+    assert(contains(err-message(other), "not a Map"))
+}
+
+test-attio-section-picks-attio
+meta ["test"] fn () {
+    assert-eq("attio", ::crm/resolve-provider({attio: {api-key: "tenant-attio-key"}}))
+}
+
+test-blank-attio-key-is-an-error-not-a-fallback
+meta ["test"] fn () {
+    ::ctx/set("attio.api.key", "ctx-attio-key")
+    result ::crm/find-contact("a@b.co", ATTIO_BLANK)
+    ::ctx/set("attio.api.key", null)
+    assert(refused(result, "api-key"))
+}
+
+test-per-call-attio-key-reaches-attio
+meta ["test"] fn () {
+    // `base-url` with no `api-key` is refused only in attio's own resolver,
+    // and with the key in the same section it is accepted: an unroutable
+    // host answers with a network Err, not attio's "without api-key" one,
+    // so the section's key is what the call went out with.
+    ::ctx/set("attio.api.key", "ctx-attio-key")
+    no-key ::crm/find-contact("a@b.co", {provider: "attio", attio: {base-url: "http://127.0.0.1:1/v2"}})
+    with-key ::crm/find-contact("a@b.co", {provider: "attio", attio: {api-key: "tenant-attio-key", base-url: "http://127.0.0.1:1/v2"}})
+    ::ctx/set("attio.api.key", null)
+    assert(is-err(no-key))
+    assert(contains(err-message(no-key), "without api-key"))
+    assert(is-err(with-key))
+    assert(not(contains(err-message(with-key), "api-key")), "the key in the section satisfied attio's resolver")
+}
+
+test-attio-section-is-ignored-for-other-providers
+meta ["test"] fn () {
+    result ::crm/find-contact("a@b.co", {provider: "hubspot", hubspot: {token: ""}, attio: {api-key: "k"}})
+    assert(refused(result, "token"))
+}
+
+test-resolve-provider-returns-without-writing-ctx
+meta ["test"] fn () {
+    ::crm/resolve-provider({hubspot: {token: "pat-tenant-token"}})
+    assert(ne("pat-tenant-token", ::ctx/get("hubspot.token")))
+}
+
+test-sections-reach-hubspot
+meta ["test"] fn () {
+    assert(refused(::crm/upsert-contact({email: "a@b.co"}, HUBSPOT_BLANK), "token"))
+    assert(refused(::crm/find-contact("a@b.co", HUBSPOT_BLANK), "token"))
+    assert(refused(::crm/log-activity("a@b.co", "hi", HUBSPOT_BLANK), "token"))
+    assert(refused(::crm/list-activities("a@b.co", HUBSPOT_BLANK), "token"))
+    assert(refused(::crm/upsert-company({domain: "a.co"}, HUBSPOT_BLANK), "token"))
+    assert(refused(::crm/find-company("a.co", HUBSPOT_BLANK), "token"))
+    assert(refused(::crm/find-deals({}, HUBSPOT_BLANK), "token"))
+    assert(refused(::crm/upsert-deal({name: "d"}, HUBSPOT_BLANK), "token"))
+    assert(refused(::crm/upsert-deal({id: "1", name: "d"}, HUBSPOT_BLANK), "token"))
+    assert(refused(::crm/move-stage("1", "s", HUBSPOT_BLANK), "token"))
+}
+
+test-sections-reach-salesforce
+meta ["test"] fn () {
+    assert(refused(::crm/upsert-contact({email: "a@b.co"}, SALESFORCE_BLANK), "access-token"))
+    assert(refused(::crm/find-contact("a@b.co", SALESFORCE_BLANK), "access-token"))
+    assert(refused(::crm/log-activity("a@b.co", "hi", SALESFORCE_BLANK), "access-token"))
+    assert(refused(::crm/list-activities("a@b.co", SALESFORCE_BLANK), "access-token"))
+    assert(refused(::crm/upsert-company({domain: "a.co"}, SALESFORCE_BLANK), "access-token"))
+    assert(refused(::crm/find-company("a.co", SALESFORCE_BLANK), "access-token"))
+    assert(refused(::crm/find-deals({}, SALESFORCE_BLANK), "access-token"))
+    assert(refused(::crm/upsert-deal({name: "d"}, SALESFORCE_BLANK), "access-token"))
+    assert(refused(::crm/upsert-deal({id: "1", stage: "s"}, SALESFORCE_BLANK), "access-token"))
+    assert(refused(::crm/move-stage("1", "s", SALESFORCE_BLANK), "access-token"))
+}
+
+test-sections-reach-attio
+meta ["test"] fn () {
+    assert(refused(::crm/upsert-contact({email: "a@b.co"}, ATTIO_BLANK), "api-key"))
+    assert(refused(::crm/upsert-contact({email: "a@b.co", first-name: "A"}, ATTIO_BLANK), "api-key"))
+    assert(refused(::crm/upsert-contact({email: "a@b.co", company: "Acme"}, ATTIO_BLANK), "api-key"))
+    assert(refused(::crm/find-contact("a@b.co", ATTIO_BLANK), "api-key"))
+    assert(refused(::crm/log-activity("a@b.co", "hi", ATTIO_BLANK), "api-key"))
+    assert(refused(::crm/list-activities("a@b.co", ATTIO_BLANK), "api-key"))
+    assert(refused(::crm/upsert-company({domain: "a.co"}, ATTIO_BLANK), "api-key"))
+    assert(refused(::crm/find-company("a.co", ATTIO_BLANK), "api-key"))
+    assert(refused(::crm/find-deals({}, ATTIO_BLANK), "api-key"))
+    assert(refused(::crm/upsert-deal({name: "d"}, ATTIO_BLANK), "api-key"))
+    assert(refused(::crm/upsert-deal({id: "1", stage: "s"}, ATTIO_BLANK), "api-key"))
+    assert(refused(::crm/move-stage("1", "s", ATTIO_BLANK), "api-key"))
+
+    contact Contact({id: "1", provider: "attio", raw: null})
+    deal Deal({id: "1", provider: "attio", raw: null})
+    assert(refused(::crm/log-activity(contact, "hi", ATTIO_BLANK), "api-key"))
+    assert(refused(::crm/list-activities(contact, ATTIO_BLANK), "api-key"))
+    assert(refused(::crm/move-stage(deal, "s", ATTIO_BLANK), "api-key"))
+}
+
+test-a-record-uses-its-own-providers-section
+meta ["test"] fn () {
+    contact Contact({id: "1", provider: "salesforce", raw: null})
+    deal Deal({id: "1", provider: "hubspot", raw: null})
+    options {hubspot: {token: ""}, salesforce: {access-token: ""}}
+    assert(refused(::crm/log-activity(contact, "hi", options), "access-token"))
+    assert(refused(::crm/list-activities(contact, options), "access-token"))
+    assert(refused(::crm/move-stage(deal, "s", options), "token"))
+}
+
+test-a-record-with-a-bad-section-is-an-error
+meta ["test"] fn () {
+    contact Contact({id: "1", provider: "hubspot", raw: null})
+    result ::crm/log-activity(contact, "hi", {hubspot: null})
+    assert(is-err(result))
+    assert(contains(err-message(result), "not a Map"))
+}
+
+test-hubspot-404-is-not-found
+meta ["test"] fn () {
+    missing err(::hubspot::api/HttpError(::hot::http/HttpResponse({status: 404, headers: {}, body: {message: "not found"}})))
+    denied err(::hubspot::api/HttpError(::hot::http/HttpResponse({status: 403, headers: {}, body: {message: "no"}})))
+    assert(::crm::hubspot/is-not-found(missing), "an unknown email is null, not an Err")
+    assert(not(::crm::hubspot/is-not-found(denied)))
+    assert(not(::crm::hubspot/is-not-found(err("socket closed"))))
+}

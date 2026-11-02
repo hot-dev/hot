@@ -175,3 +175,88 @@ test-sign-rejects-unknown-algorithm
 meta ["test"] fn () {
     assert(is-err(::jwt/sign({a: 1}, "k", "none")), "alg none must not be signable")
 }
+
+// RFC 7515 Appendix A.3: the ES256 JWS example and its public JWK. Its
+// payload has exp 1300819380, so verification pins `now` before that.
+RFC7515_ES256_TOKEN "eyJhbGciOiJFUzI1NiJ9.eyJpc3MiOiJqb2UiLA0KICJleHAiOjEzMDA4MTkzODAsDQogImh0dHA6Ly9leGFtcGxlLmNvbS9pc19yb290Ijp0cnVlfQ.DtEhU3ljbEg8L38VWAfUAqOyKAM6-Xx-F4GawxaepmXFCgfTjDxw5djxLa8ISlSApmWQxfKTUJqPP3-Kg6NU1Q"
+RFC7515_EC_X "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU"
+RFC7515_EC_Y "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0"
+
+test-es256-verifies-rfc7515-example
+meta ["test"] fn () {
+    claims ::jwt/verify-es256(RFC7515_ES256_TOKEN, RFC7515_EC_X, RFC7515_EC_Y, {now: 1300819000})
+    assert-eq("joe", claims.iss)
+}
+
+test-es256-accepts-raw-coordinate-bytes
+meta ["test"] fn () {
+    x ::hot::base64/decode-url(RFC7515_EC_X)
+    y ::hot::base64/decode-url(RFC7515_EC_Y)
+    claims ::jwt/verify-es256(RFC7515_ES256_TOKEN, x, y, {now: 1300819000})
+    assert-eq("joe", claims.iss)
+}
+
+test-es256-still-validates-claims
+meta ["test"] fn () {
+    // A valid signature does not excuse an expired token
+    assert(is-err(::jwt/verify-es256(RFC7515_ES256_TOKEN, RFC7515_EC_X, RFC7515_EC_Y)),
+        "the RFC example is long expired")
+}
+
+test-es256-rejects-tampered-token
+meta ["test"] fn () {
+    parts split(RFC7515_ES256_TOKEN, ".")
+    forged-payload ::hot::base64/encode-url(to-json({iss: "attacker"}))
+    forged `${parts[0]}.${forged-payload}.${parts[2]}`
+    assert(is-err(::jwt/verify-es256(forged, RFC7515_EC_X, RFC7515_EC_Y, {now: 1300819000})),
+        "tampered ES256 should fail")
+}
+
+test-es256-rejects-hs256-token
+meta ["test"] fn () {
+    assert(is-err(::jwt/verify-es256(KNOWN_TOKEN, RFC7515_EC_X, RFC7515_EC_Y)))
+}
+
+test-es256-rejects-malformed-coordinates
+meta ["test"] fn () {
+    bad-x ::jwt/verify-es256(RFC7515_ES256_TOKEN, "!!not-base64url!!", RFC7515_EC_Y, {now: 1300819000})
+    assert(is-err(bad-x), "malformed x yields an Err")
+    short-x ::jwt/verify-es256(RFC7515_ES256_TOKEN, "AQAB", RFC7515_EC_Y, {now: 1300819000})
+    assert(is-err(short-x), "a 3-byte x coordinate yields an Err")
+}
+
+test-max-age-rejects-old-iat
+meta ["test"] fn () {
+    token ::jwt/sign({sub: "42", iat: 1000}, SECRET)
+    assert(is-err(::jwt/verify(token, SECRET, {max-age: 300, now: 1400})),
+        "iat 400s ago exceeds max-age 300 plus 60s leeway")
+    claims ::jwt/verify(token, SECRET, {max-age: 300, now: 1300})
+    assert-eq("42", claims.sub)
+}
+
+test-max-age-requires-iat
+meta ["test"] fn () {
+    assert(is-err(::jwt/verify(KNOWN_TOKEN, SECRET, {max-age: 300})),
+        "max-age without an iat claim must fail")
+}
+
+// ============================================================================
+// Masking returns values unchanged
+// ============================================================================
+
+test-sign-and-verify-return-values-unchanged-after-masking
+meta ["test"] fn () {
+    ::hot::ctx/mark-secret(SECRET)
+    assert-eq(KNOWN_TOKEN, ::jwt/sign({sub: "42", name: "Ada"}, SECRET), "a marked token is still the real token")
+    assert-eq("42", ::jwt/verify(KNOWN_TOKEN, SECRET).sub)
+    token ::jwt/sign({sub: "42"}, TEST_RSA_PEM, "RS256")
+    assert-eq(3, length(split(token, ".")))
+}
+
+test-sign-err-passes-through-marking
+meta ["test"] fn () {
+    bad ::jwt/sign({sub: "42"}, "not a pem", "RS256")
+    assert(is-err(bad), "a bad key is still an Err, not halted by marking")
+    unsupported ::jwt/sign({sub: "42"}, SECRET, "none")
+    assert(is-err(unsupported))
+}

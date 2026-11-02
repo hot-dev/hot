@@ -1,0 +1,43 @@
+::elevenlabs::user ns
+meta {
+    doc: """ElevenLabs account info: the user record and the subscription with its character quota."""
+}
+
+::api ::elevenlabs::api
+
+get-user
+meta {
+    ctx: {"elevenlabs.api.key": {required: false}},
+    doc: """GET /v1/user: the account (`user_id`, `first_name`, `subscription`, ...). The cheapest key smoke test."""
+}
+fn
+(): Map {
+  get-user({})
+},
+(opts: Map): Map {
+  ::api/json("GET", "/v1/user", {}, "", opts)
+}
+
+get-subscription
+meta {
+    ctx: {"elevenlabs.api.key": {required: false}},
+    doc: """
+    GET /v1/user/subscription: tier, status, and quota
+    (`character_count`, `character_limit`, `next_character_count_reset_unix`,
+    voice slots).
+
+    **Example**
+
+    ```hot
+    plan ::elevenlabs::user/get-subscription()
+    remaining sub(plan.character_limit, plan.character_count)
+    ```
+    """
+}
+fn
+(): Map {
+  get-subscription({})
+},
+(opts: Map): Map {
+  ::api/json("GET", "/v1/user/subscription", {}, "", opts)
+}

@@ -2,10 +2,34 @@
 
 ::env ::hot::env
 
-// Placeholder credentials for the twilio integration suite. Unset
-// environment variables are skipped entirely, so absent credentials
-// behave exactly as if never configured.
+// Credentials for the twilio integration suite. Unset environment
+// variables are skipped entirely, so absent credentials behave exactly as
+// if never configured, and every test then skips (passes with a "skipped"
+// note) instead of calling Twilio.
 ::hot::ctx/set(filter-vals({
     "twilio.account.sid": ::env/get("TWILIO_ACCOUNT_SID", ""),
     "twilio.auth.token": ::env/get("TWILIO_AUTH_TOKEN", ""),
+    "twilio.api.key.sid": ::env/get("TWILIO_API_KEY_SID", ""),
+    "twilio.api.key.secret": ::env/get("TWILIO_API_KEY_SECRET", ""),
 }, (v) { not(is-empty(v)) }))
+
+configured
+meta {
+    doc: """True when an Account SID and either an Auth Token or an API key are configured."""
+}
+fn (): Bool {
+    has fn (k: Str): Bool { not(is-empty(or(::hot::ctx/get(k), ""))) }
+    and(has("twilio.account.sid"),
+        or(has("twilio.auth.token"), and(has("twilio.api.key.sid"), has("twilio.api.key.secret"))))
+}
+
+skip
+meta {
+    doc: """Record a skipped test: prints why and passes one assertion so the runner reports it cleanly."""
+}
+fn (reason: Str): Bool {
+    println(`skipped: ${reason}`)
+    assert(true, reason)
+}
+
+UNCONFIGURED "set TWILIO_ACCOUNT_SID plus TWILIO_AUTH_TOKEN (or TWILIO_API_KEY_SID/TWILIO_API_KEY_SECRET)"

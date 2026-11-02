@@ -1,0 +1,95 @@
+::elevenlabs::test::webhooks ns
+meta ["test"]
+
+::wh ::elevenlabs::webhooks
+
+SECRET "wsec_test_secret"
+BODY """{"type":"post_call_transcription","data":{"agent_id":"a1"}}"""
+
+// Vectors generated independently with Python's hmac module over
+// "<t>.<body>". Their timestamp (2023) is far outside the 30-minute
+// window, so they exercise the HMAC with the age check disabled (0);
+// the freshness tests sign current timestamps in-test.
+
+test-parse-signature-header
+meta ["test"] fn () {
+    parsed ::wh/parse-signature-header("t=1700000000,v0=abc, v0=def")
+    assert-eq("1700000000", parsed.timestamp)
+    assert-eq(["abc", "def"], parsed.signatures)
+    empty ::wh/parse-signature-header("")
+    assert(is-null(empty.timestamp))
+    assert-eq([], empty.signatures)
+}
+
+test-verify-accepts-vector
+meta ["test"] fn () {
+    request {
+        headers: {elevenlabs-signature: "t=1700000000,v0=1738d2360149a02f5c49399ffd90a4bf8be44e02df13a1e07f3f35d27c47ac4e"},
+        body-raw: BODY
+    }
+
+    assert(::wh/verify-request(request, SECRET, 0))
+}
+
+test-verify-rejects-tampered
+meta ["test"] fn () {
+    // The signature for t=1700000001 must not verify t=1700000000.
+    wrong-time {
+        headers: {elevenlabs-signature: "t=1700000000,v0=0a9133829597cfe12856ae5a73a67c85b33c19058885530e9c473ea1960250e8"},
+        body-raw: BODY
+    }
+
+    assert(not(::wh/verify-request(wrong-time, SECRET, 0)), "signature bound to its timestamp")
+
+    wrong-body {
+        headers: {elevenlabs-signature: "t=1700000000,v0=1738d2360149a02f5c49399ffd90a4bf8be44e02df13a1e07f3f35d27c47ac4e"},
+        body-raw: """{"type":"post_call_audio"}"""
+    }
+
+    assert(not(::wh/verify-request(wrong-body, SECRET, 0)), "tampered body fails")
+    assert(not(::wh/verify-request(wrong-body, "other-secret", 0)), "wrong secret fails")
+}
+
+test-verify-rejects-missing-header-parts
+meta ["test"] fn () {
+    assert(not(::wh/verify-request({headers: {}, body-raw: BODY}, SECRET, 0)), "missing header fails")
+    no-sig {headers: {elevenlabs-signature: "t=1700000000"}, body-raw: BODY}
+    assert(not(::wh/verify-request(no-sig, SECRET, 0)), "missing v0 fails")
+    no-time {headers: {elevenlabs-signature: "v0=1738d2360149a02f5c49399ffd90a4bf8be44e02df13a1e07f3f35d27c47ac4e"}, body-raw: BODY}
+    assert(not(::wh/verify-request(no-time, SECRET, 0)), "missing t fails")
+}
+
+test-verify-empty-secret-fails-closed
+meta ["test"] fn () {
+    now Str(::hot::time/epoch-seconds())
+    sig ::hot::hmac/hmac-sha256("", `${now}.${BODY}`)
+    request {headers: {elevenlabs-signature: `t=${now},v0=${sig}`}, body-raw: BODY}
+    assert(not(::wh/verify-request(request, "")), "empty secret never verifies")
+}
+
+signed-request fn (timestamp: Int): Map {
+    sig ::hot::hmac/hmac-sha256(SECRET, `${timestamp}.${BODY}`)
+    {headers: {elevenlabs-signature: `t=${timestamp},v0=${sig}`}, body-raw: BODY}
+}
+
+test-verify-replay-window
+meta ["test"] fn () {
+    now ::hot::time/epoch-seconds()
+    assert(::wh/verify-request(signed-request(now), SECRET), "fresh delivery verifies")
+    assert(::wh/verify-request(signed-request(sub(now, 600)), SECRET), "10 minutes old is inside the 30-minute window")
+
+    stale signed-request(sub(now, 3600))
+    assert(not(::wh/verify-request(stale, SECRET)), "an hour-old delivery is rejected")
+    assert(::wh/verify-request(stale, SECRET, 7200), "wider explicit tolerance accepts it")
+    assert(::wh/verify-request(stale, SECRET, 0), "age check can be disabled explicitly")
+
+    future signed-request(add(now, 3600))
+    assert(not(::wh/verify-request(future, SECRET)), "far-future timestamps are rejected too")
+}
+
+test-verify-non-numeric-timestamp-fails
+meta ["test"] fn () {
+    sig ::hot::hmac/hmac-sha256(SECRET, `soon.${BODY}`)
+    request {headers: {elevenlabs-signature: `t=soon,v0=${sig}`}, body-raw: BODY}
+    assert(not(::wh/verify-request(request, SECRET)), "malformed timestamp fails closed")
+}

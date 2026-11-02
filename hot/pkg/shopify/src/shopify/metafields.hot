@@ -1,0 +1,167 @@
+::shopify::metafields ns
+meta {
+    doc: """
+    Metafields on any owner that has them (products, variants, orders,
+    customers, draft orders, the shop, ...): set (upsert), get one, list
+    and delete. Needs the owner resource's read/write scope.
+    """
+}
+
+::api ::shopify::api
+
+METAFIELD_FIELDS "id namespace key type value compareDigest updatedAt"
+
+MAX_METAFIELDS_PER_SET 25
+
+build-metafield-input
+meta {
+    doc: """
+    One `MetafieldsSetInput`: `{ownerId, namespace, key, type, value}`
+    plus optional `compareDigest` (write only if the stored value still
+    matches). Non-string values are JSON-encoded, as Shopify expects for
+    `json`, list and number types. Exposed for testing.
+    """
+}
+fn (metafield: Map): Map {
+  value get(metafield, "value")
+  encoded cond {
+    is-str(value) => { value }
+    is-null(value) => { value }
+    => { to-json(value) }
+  }
+
+  filter-vals({
+    ownerId: get(metafield, "ownerId"),
+    namespace: get(metafield, "namespace"),
+    key: get(metafield, "key"),
+    type: get(metafield, "type"),
+    value: encoded,
+    compareDigest: get(metafield, "compareDigest")
+  }, is-some)
+}
+
+set-metafields
+meta {
+    doc: """
+    Create or update up to 25 metafields atomically (`metafieldsSet`).
+    Each entry is `{ownerId, namespace, key, type, value,
+    compareDigest?}`; `type` may be omitted when a definition exists.
+    Returns the saved metafields.
+
+    **Example**
+
+    ```hot
+    ::shopify::metafields/set-metafields([
+      {ownerId: product.id, namespace: "custom", key: "care_guide", type: "multi_line_text_field", value: "Hand wash cold."}
+    ])
+    ```
+    """
+}
+fn
+(metafields: Vec): Vec {
+  set-metafields(metafields, {})
+},
+(metafields: Vec, opts: Map): Vec {
+  mutation ```
+  mutation MetafieldsSet($metafields: [MetafieldsSetInput!]!) {
+    metafieldsSet(metafields: $metafields) {
+      metafields { ${METAFIELD_FIELDS} }
+      userErrors { field message code }
+    }
+  }
+  ```
+  cond {
+    gt(length(metafields), MAX_METAFIELDS_PER_SET) => {
+      err(`shopify: metafieldsSet takes at most ${MAX_METAFIELDS_PER_SET} metafields per call (got ${length(metafields)})`)
+    }
+    => {
+      payload ::api/mutate(mutation, {metafields: map(metafields, build-metafield-input)}, "metafieldsSet", opts)
+      if-ok(payload, %(%.metafields))
+    }
+  }
+}
+
+set-metafield
+meta {
+    doc: """Set one metafield on an owner. Returns the saved metafield."""
+}
+fn
+(owner-id: Str, namespace: Str, key: Str, value-type: Str, value: Any): Map {
+  set-metafield(owner-id, namespace, key, value-type, value, {})
+},
+(owner-id: Str, namespace: Str, key: Str, value-type: Str, value: Any, opts: Map): Map {
+  saved set-metafields([{ownerId: owner-id, namespace: namespace, key: key, type: value-type, value: value}], opts)
+  if-ok(saved, first)
+}
+
+get-metafield
+meta {
+    doc: """One metafield on an owner by namespace and key, or null when unset (or the owner doesn't exist)."""
+}
+fn
+(owner-id: Str, namespace: Str, key: Str): Map? {
+  get-metafield(owner-id, namespace, key, {})
+},
+(owner-id: Str, namespace: Str, key: Str, opts: Map): Map? {
+  query ```
+  query Metafield($id: ID!, $namespace: String!, $key: String!) {
+    node(id: $id) {
+      ... on HasMetafields {
+        metafield(namespace: $namespace, key: $key) { ${METAFIELD_FIELDS} }
+      }
+    }
+  }
+  ```
+  data ::api/graphql(query, {id: owner-id, namespace: namespace, key: key}, opts)
+  if-ok(data, %(get-in(%, ["node", "metafield"])))
+}
+
+list-metafields
+meta {
+    doc: """One page of an owner's metafields. Options: `namespace`, `first`, `after`. Returns `{nodes, pageInfo}` (empty when the owner doesn't exist)."""
+}
+fn
+(owner-id: Str): Map {
+  list-metafields(owner-id, {})
+},
+(owner-id: Str, options: Map): Map {
+  list-metafields(owner-id, options, {})
+},
+(owner-id: Str, options: Map, opts: Map): Map {
+  query ```
+  query Metafields($id: ID!, $first: Int!, $after: String, $namespace: String) {
+    node(id: $id) {
+      ... on HasMetafields {
+        metafields(first: $first, after: $after, namespace: $namespace) {
+          nodes { ${METAFIELD_FIELDS} }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    }
+  }
+  ```
+  vars ::api/connection-variables(options)
+  data ::api/graphql(query, filter-vals({...vars, id: owner-id, namespace: get(options, "namespace")}, is-some), opts)
+  if-ok(data, %(or(get-in(%, ["node", "metafields"]), {nodes: [], pageInfo: {hasNextPage: false, endCursor: null}})))
+}
+
+delete-metafields
+meta {
+    doc: """Delete metafields by `{ownerId, namespace, key}` (`metafieldsDelete`). Returns the deleted identifiers (null entries for ones that didn't exist)."""
+}
+fn
+(identifiers: Vec): Vec {
+  delete-metafields(identifiers, {})
+},
+(identifiers: Vec, opts: Map): Vec {
+  mutation """
+  mutation MetafieldsDelete($metafields: [MetafieldIdentifierInput!]!) {
+    metafieldsDelete(metafields: $metafields) {
+      deletedMetafields { ownerId namespace key }
+      userErrors { field message }
+    }
+  }
+  """
+  payload ::api/mutate(mutation, {metafields: identifiers}, "metafieldsDelete", opts)
+  if-ok(payload, %(%.deletedMetafields))
+}
