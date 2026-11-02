@@ -310,7 +310,7 @@ Read options: `delimiter`, `quote` (`false` makes quotes ordinary text), `header
 
 Write options: `delimiter`, `quote`, `columns`, `header`, `line-ending`, `escape-formulas` (off by default because it changes the data; use it for files opened in a spreadsheet).
 
-`from-csv` returns rows that are recorded inline in `call.return_value` and in the `call.args` of each function they're passed to. They can make the run fail on PostgreSQL when they pass 256 MB as JSON, and they often hold personal data. For large files or personal data use `iter-csv` with a lambda: a lambda's row isn't recorded, but a named function called with one records it.
+`from-csv` returns rows that are recorded in `call.return_value` and in the `call.args` of each function they're passed to, in blob storage when they're over 1 MB as JSON. That's slow and memory-heavy for large files, and rows often hold personal data. For large files or personal data use `iter-csv` with a lambda: a lambda's row isn't recorded, but a named function called with one records it.
 
 ```hot
 total reduce(iter-csv(read-file-stream("orders.csv")), (sum, row) {
