@@ -42,6 +42,11 @@ pub const MIN_SUBSTRING_LEN: usize = 8;
 /// No credential is this long.
 const MAX_SUBSTRING_LEN: usize = 64 * 1024;
 
+/// How many keys and results of natives a run matches inside other text. HMACs
+/// can run in a loop: past this, the rest match as whole values, as themselves
+/// or in a common encoding, so that what matching holds stays small.
+const MAX_MINTED_SUBSTRINGS: usize = 64;
+
 /// The hash of `value`, as recorded in `ExecutionContext::secret_value_hashes`.
 pub fn value_hash(value: &Val) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -65,7 +70,9 @@ pub struct SecretValues(Arc<RwLock<Registry>>);
 struct Registry {
     values: AHashSet<Vec<u8>>,
     exact_hashes: AHashSet<u64>,
-    /// Bumped by each new value, so a record can tell it was masked before it.
+    minted_substrings: usize,
+    /// Bumped by each new value that earlier records could hold, so a record
+    /// can tell it was masked before it.
     generation: u64,
     matchers: Option<Arc<Matchers>>,
 }
@@ -104,6 +111,63 @@ impl SecretValues {
         self.add(value, Vec::new());
     }
 
+    /// Mask a credential a native has just made, like a signature. No earlier
+    /// record can hold it, so nothing already written needs masking again.
+    pub fn register_minted(&self, value: &Val) {
+        let mut forms = vec![value.clone()];
+        if let Val::Bytes(bytes) = value {
+            forms.push(Val::from(hex::encode(bytes)));
+        }
+        let mut new_hashes = AHashSet::new();
+        crate::lang::hot::ctx::hash_secret_value_recursive(value, &mut new_hashes);
+        if let Val::Bytes(bytes) = value {
+            new_hashes.insert(value_hash(&Val::from(hex::encode(bytes))));
+            for encoded in [
+                base64::engine::general_purpose::STANDARD.encode(bytes),
+                base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes),
+                base64::engine::general_purpose::URL_SAFE.encode(bytes),
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes),
+            ] {
+                new_hashes.insert(value_hash(&Val::from(encoded)));
+            }
+        }
+        let mut new_values = Vec::new();
+        for form in &forms {
+            collect_values(form, &mut new_values);
+        }
+        let mut registry = self.0.write().unwrap_or_else(|error| error.into_inner());
+        if registry.minted_substrings < MAX_MINTED_SUBSTRINGS {
+            registry.minted_substrings += 1;
+            registry.values.extend(new_values);
+        }
+        registry.exact_hashes.extend(new_hashes);
+        registry.matchers = None;
+    }
+
+    /// Mask a key a native was given. One that a native made is known already,
+    /// as chained HMACs are: only a new one could be in earlier records.
+    pub fn register_key(&self, key: &Val) {
+        let (known, over_limit) = {
+            let registry = self.0.read().unwrap_or_else(|error| error.into_inner());
+            (
+                registry.exact_hashes.contains(&value_hash(key)),
+                registry.minted_substrings >= MAX_MINTED_SUBSTRINGS,
+            )
+        };
+        if known {
+            return;
+        }
+        if over_limit {
+            self.register_exact(key);
+        } else {
+            self.0
+                .write()
+                .unwrap_or_else(|error| error.into_inner())
+                .minted_substrings += 1;
+            self.register(key);
+        }
+    }
+
     fn add(&self, value: &Val, new_values: Vec<Vec<u8>>) {
         let mut new_hashes = AHashSet::new();
         crate::lang::hot::ctx::hash_secret_value_recursive(value, &mut new_hashes);
@@ -139,7 +203,7 @@ impl SecretValues {
         }
     }
 
-    /// Changes when a new value is registered.
+    /// Changes when a new value is registered that earlier records could hold.
     pub fn generation(&self) -> u64 {
         self.0
             .read()
@@ -822,6 +886,20 @@ impl<'a> RecordMask<'a> {
         Some(masked.unwrap_or_else(|| format!("\"{MASK}\"")))
     }
 
+    /// Mask a stored JSON payload again: what it should now hold, if that
+    /// differs from what it does.
+    pub fn remask_json(&self, json: &str) -> Option<String> {
+        let masked = self.mask_json(json)?;
+        let same = matches!(
+            (
+                serde_json::from_str::<serde_json::Value>(json),
+                serde_json::from_str::<serde_json::Value>(&masked),
+            ),
+            (Ok(stored), Ok(now)) if stored == now
+        );
+        (!same).then_some(masked)
+    }
+
     /// Mask a registered secret in a payload delivered to a live consumer,
     /// leaving credential fields, which may be what it asked for.
     pub fn mask_delivered(&self, value: Val) -> Val {
@@ -891,6 +969,10 @@ mod tests {
 
     fn std_b64(text: &str) -> String {
         base64::engine::general_purpose::STANDARD.encode(text)
+    }
+
+    fn url_b64_bytes(bytes: &[u8]) -> String {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
     }
 
     fn url_b64(text: &str) -> String {
@@ -1389,6 +1471,72 @@ mod tests {
         // still checked.
         let split = format!("1000, {}", decimals(PLAIN, ", "));
         assert_eq!(mask.mask_text(&split), format!("1000, {MASK}"));
+    }
+
+    #[test]
+    fn minted_values_mask_without_marking_records_stale() {
+        let registry = SecretValues::default();
+        let signature: Vec<u8> = (0u8..32).map(|byte| byte.wrapping_mul(7) ^ 0xa5).collect();
+        registry.register_minted(&Val::Bytes(signature.clone()));
+        assert_eq!(registry.generation(), 0);
+
+        let hashes = AHashSet::new();
+        let mask = RecordMask::new(&registry, &hashes);
+        assert_eq!(
+            mask.mask_val(Val::Bytes(signature.clone())),
+            Val::from(MASK)
+        );
+        let url = url_b64_bytes(&signature);
+        assert_eq!(mask.mask_text(&format!("a.b.{url}")), format!("a.b.{MASK}"));
+        assert_eq!(
+            mask.mask_text(&format!("sig={}", hex::encode(&signature))),
+            format!("sig={MASK}")
+        );
+    }
+
+    #[test]
+    fn a_key_a_native_made_marks_no_record_stale() {
+        let registry = SecretValues::default();
+        let minted = Val::Bytes(vec![0xa5; 32]);
+        registry.register_minted(&minted);
+        registry.register_key(&minted);
+        assert_eq!(registry.generation(), 0);
+        registry.register_key(&Val::from("a-key-given-by-the-program"));
+        assert_eq!(registry.generation(), 1);
+    }
+
+    #[test]
+    fn minted_values_past_the_limit_match_only_whole() {
+        let registry = SecretValues::default();
+        let minted = |n: u32| -> Vec<u8> {
+            (0u8..32)
+                .map(|byte| (n.to_le_bytes()[usize::from(byte) % 4]) ^ byte.wrapping_mul(13))
+                .collect()
+        };
+        for n in 0..=MAX_MINTED_SUBSTRINGS as u32 {
+            registry.register_minted(&Val::Bytes(minted(n)));
+        }
+        let hashes = AHashSet::new();
+        let mask = RecordMask::new(&registry, &hashes);
+        let last = minted(MAX_MINTED_SUBSTRINGS as u32);
+        assert_eq!(mask.mask_val(Val::Bytes(last.clone())), Val::from(MASK));
+        let url = url_b64_bytes(&last);
+        assert_eq!(mask.mask_val(Val::from(url.clone())), Val::from(MASK));
+        let hex_form = hex::encode(&last);
+        assert_eq!(mask.mask_val(Val::from(hex_form)), Val::from(MASK));
+        let joined = format!("a.b.{url}");
+        assert_eq!(mask.mask_text(&joined), joined);
+    }
+
+    #[test]
+    fn remasking_reports_only_a_payload_that_changes() {
+        let (registry, hashes) = mask_for(&[PLAIN]);
+        let mask = RecordMask::new(&registry, &hashes);
+        let holds = serde_json::to_string(&val!({"note": format!("x {PLAIN}"), "n": 1})).unwrap();
+        let masked = mask.remask_json(&holds).unwrap();
+        assert!(!masked.contains(PLAIN), "{masked}");
+        assert_eq!(mask.remask_json(&masked), None);
+        assert_eq!(mask.remask_json(r#"{"note": "nothing",   "n": 1}"#), None);
     }
 
     #[test]

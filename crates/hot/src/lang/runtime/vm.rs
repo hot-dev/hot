@@ -1585,6 +1585,20 @@ impl VirtualMachine {
         }
     }
 
+    /// Register a key given to a native.
+    pub fn register_secret_key(&mut self, key: &Val) {
+        if let Some(ctx) = &self.execution_context {
+            ctx.secret_values.register_key(key);
+        }
+    }
+
+    /// Register a credential a native has just made.
+    pub fn register_minted_secret(&mut self, value: &Val) {
+        if let Some(ctx) = &self.execution_context {
+            ctx.secret_values.register_minted(value);
+        }
+    }
+
     /// Like [`Self::register_secret_value`], for a value masked only where it
     /// is the whole value.
     pub fn register_secret_value_exact(&mut self, value: &Val) {
