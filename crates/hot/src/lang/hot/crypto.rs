@@ -461,7 +461,8 @@ QXhWy10d3WpWR4Z0MjiJ0/Pm+gRizor9Zqvdd6HVd4K4yWaB+M5J
     const ES256_JWK_X: &str = "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU";
     const ES256_JWK_Y: &str = "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0";
     const ES256_SIGNING_INPUT: &str = "eyJhbGciOiJFUzI1NiJ9.eyJpc3MiOiJqb2UiLA0KICJleHAiOjEzMDA4MTkzODAsDQogImh0dHA6Ly9leGFtcGxlLmNvbS9pc19yb290Ijp0cnVlfQ";
-    const ES256_SIGNATURE: &str = "DtEhU3ljbEg8L38VWAfUAqOyKAM6-Xx-F4GawxaepmXFCgfTjDxw5djxLa8ISlSApmWQxfKTUJqPP3-Kg6NU1Q";
+    const ES256_SIGNATURE: &str =
+        "DtEhU3ljbEg8L38VWAfUAqOyKAM6-Xx-F4GawxaepmXFCgfTjDxw5djxLa8ISlSApmWQxfKTUJqPP3-Kg6NU1Q";
 
     fn b64url(s: &str) -> Vec<u8> {
         use base64::Engine;
@@ -493,7 +494,10 @@ QXhWy10d3WpWR4Z0MjiJ0/Pm+gRizor9Zqvdd6HVd4K4yWaB+M5J
 
     #[test]
     fn test_ecdsa_verify_rejects_tampered_message() {
-        assert!(!rfc7515_verify("eyJhbGciOiJFUzI1NiJ9.e30", b64url(ES256_SIGNATURE)));
+        assert!(!rfc7515_verify(
+            "eyJhbGciOiJFUzI1NiJ9.e30",
+            b64url(ES256_SIGNATURE)
+        ));
     }
 
     #[test]
