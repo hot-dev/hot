@@ -1,0 +1,66 @@
+::dropbox::integration::dropbox ns
+meta ["test"]
+
+// =============================================================================
+// Integration tests (live Dropbox, read-only)
+// =============================================================================
+// Requires DROPBOX_ACCESS_TOKEN, or DROPBOX_REFRESH_TOKEN + DROPBOX_APP_KEY
+// (+ DROPBOX_APP_SECRET); optional DROPBOX_TEST_PATH (a folder to read,
+// default the root). A free Dropbox account and a scoped app with
+// account_info.read, files.metadata.read and files.content.read work.
+// Every test only reads. Without credentials each test records a skip
+// and passes. Run with: hot test -p pkg-integration-dropbox
+
+::ctx ::dropbox::integration::ctx
+::files ::dropbox::files
+::content ::dropbox::content
+::sync ::dropbox::sync
+
+test-current-account
+meta ["test"] fn () {
+  cond {
+    not(::ctx/configured()) => { ::ctx/skip() }
+    => {
+      account ::dropbox::users/get-current-account()
+      assert(starts-with(account.account_id, "dbid:"), "credentials resolve to an account")
+      usage ::dropbox::users/get-space-usage()
+      assert(is-int(usage.used), "space usage is readable")
+    }
+  }
+}
+
+test-list-and-cursor
+meta ["test"] fn () {
+  cond {
+    not(::ctx/configured()) => { ::ctx/skip() }
+    => {
+      page ::files/list-folder(::ctx/test-path(), {limit: 5})
+      assert(is-vec(page.entries), "list_folder returns entries")
+      assert(is-str(page.cursor), "and a cursor")
+      cursor ::sync/get-latest-cursor(::ctx/test-path())
+      set ::sync/sync-changes(cursor)
+      assert(is-str(set.cursor), "an empty delta still returns a cursor")
+      assert(not(set.reset))
+    }
+  }
+}
+
+test-download-matches-content-hash
+meta ["test"] fn () {
+  cond {
+    not(::ctx/configured()) => { ::ctx/skip() }
+    => {
+      entries ::files/list-all(::ctx/test-path(), {}, 200)
+      small filter(entries, (e) { and(::dropbox/is-file(e), not(::dropbox/is-exportable(e)), lt(or(e.size, 0), 1048576)) })
+      cond {
+        is-empty(small) => { assert(true, "no small downloadable file under DROPBOX_TEST_PATH") }
+        => {
+          entry first(small)
+          doc ::content/read-document(entry.id)
+          assert-eq(entry.size, doc.size, "downloaded size matches metadata")
+          assert(::content/matches-content-hash(doc.bytes, entry.content_hash), "bytes match Dropbox's content_hash")
+        }
+      }
+    }
+  }
+}

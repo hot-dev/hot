@@ -1,0 +1,76 @@
+::dropbox::test::upload ns
+meta ["test"]
+
+::up ::dropbox::upload
+::content ::dropbox::content
+
+BINARY Bytes([0, 1, 255, 254, 195, 40, 0, 10, 13])
+
+http-err fn
+(response: Map): Any {
+  ::dropbox::api/HttpError(::hot::http/HttpResponse(response))
+},
+(response: Map, route: Str?): Any {
+  ::dropbox::api/http-error(response, route)
+}
+
+test-to-bytes
+meta ["test"] fn () {
+    assert-eq(BINARY, ::up/to-bytes(BINARY), "Bytes pass through untouched")
+    assert-eq(Bytes("héllo"), ::up/to-bytes("héllo"))
+    assert-eq(Bytes("{\"a\":1}"), ::up/to-bytes({a: 1}))
+    assert-eq(Bytes([]), ::up/to-bytes(null))
+}
+
+test-write-mode
+meta ["test"] fn () {
+    assert-eq("add", ::up/write-mode(null, null))
+    assert-eq("overwrite", ::up/write-mode("overwrite", null))
+    assert-eq({".tag": "update", update: "a1c10ce0dd78"}, ::up/write-mode("update", "a1c10ce0dd78"))
+    assert-eq({".tag": "update", update: "r9"}, ::up/write-mode(null, "r9"), "a rev alone means update")
+    assert(is-err(::up/write-mode("update", null)))
+    assert(is-err(::up/write-mode("replace", null)))
+}
+
+test-commit-info
+meta ["test"] fn () {
+    c ::up/commit-info("Reports/q3.csv", {mode: "overwrite", autorename: true, mute: null, chunk-size: 9, token: "t", session: true})
+    assert-eq({path: "/Reports/q3.csv", mode: "overwrite", autorename: true}, c, "only commit fields; nulls, local and credential keys dropped")
+    assert-eq({path: "/a", mode: "add"}, ::up/commit-info("/a", {}))
+}
+
+test-upload-arg
+meta ["test"] fn () {
+    arg ::up/upload-arg("/blob.bin", BINARY, {})
+    assert-eq(::content/content-hash(BINARY), arg.content_hash, "the content_hash of the bytes sent")
+    assert-eq("add", arg.mode)
+    unverified ::up/upload-arg("/blob.bin", BINARY, {verify: false})
+    assert(not(in("content_hash", keys(unverified))))
+    assert(is-err(::up/upload-arg("/a", BINARY, {mode: "bogus"})))
+}
+
+test-chunk-math
+meta ["test"] fn () {
+    assert-eq(4194304, ::up/align-chunk-size(1), "at least 4 MiB")
+    assert-eq(8388608, ::up/align-chunk-size(10000000), "rounded down to a 4 MiB multiple")
+    assert-eq(16777216, ::up/align-chunk-size(16777216))
+    assert-eq(155189248, ::up/align-chunk-size(500000000), "capped under 150 MiB")
+    assert-eq([0, 4], ::up/chunk-bounds(0, 4, 10))
+    assert-eq([8, 10], ::up/chunk-bounds(8, 4, 10), "the last chunk is short")
+    assert-eq({session_id: "s1", offset: 42}, ::up/session-cursor("s1", 42))
+}
+
+test-append-outcome
+meta ["test"] fn () {
+    assert-eq(150, ::up/append-outcome(null, 100, 50), "success: offset + bytes sent")
+    lost http-err({status: 409, headers: {}, body: {
+        error_summary: "incorrect_offset/..",
+        error: {".tag": "incorrect_offset", correct_offset: 150}
+    }})
+    assert-eq(150, ::up/append-outcome(err(lost), 100, 50), "the data had arrived: counts as done")
+    behind http-err({status: 409, headers: {}, body: {
+        error: {".tag": "incorrect_offset", correct_offset: 80}
+    }})
+    assert(is-err(::up/append-outcome(err(behind), 100, 50)), "a real mismatch is an error")
+    assert(is-err(::up/append-outcome(err("request failed"), 100, 50)))
+}

@@ -1,0 +1,36 @@
+::box::integration::ctx ns
+
+::env ::hot::env
+
+// Placeholder credentials for the box integration suite. Unset
+// environment variables are skipped entirely, so absent credentials
+// behave exactly as if never configured. Use either:
+//   BOX_ACCESS_TOKEN (a developer token from the Developer Console), or
+//   BOX_CLIENT_ID + BOX_CLIENT_SECRET with BOX_ENTERPRISE_ID or BOX_USER_ID
+//   (a Client Credentials Grant app).
+// BOX_TEST_FOLDER_ID names a folder the credentials can read (default the
+// root, "0"). Every test only reads.
+::hot::ctx/set(filter-vals({
+    "box.access.token": ::env/get("BOX_ACCESS_TOKEN", ""),
+    "box.client.id": ::env/get("BOX_CLIENT_ID", ""),
+    "box.client.secret": ::env/get("BOX_CLIENT_SECRET", ""),
+    "box.enterprise.id": ::env/get("BOX_ENTERPRISE_ID", ""),
+    "box.user.id": ::env/get("BOX_USER_ID", ""),
+}, (v) { not(is-empty(v)) }))
+
+configured fn (): Bool {
+    has (key) { is-some(::hot::ctx/get(key)) }
+    or(
+        has("box.access.token"),
+        and(has("box.client.id"), has("box.client.secret"), or(has("box.enterprise.id"), has("box.user.id")))
+    )
+}
+
+skip fn (): Bool {
+    println("Box credentials not set - skipping")
+    assert(true, "skipped: no Box credentials")
+}
+
+test-folder-id fn (): Str {
+    ::env/get("BOX_TEST_FOLDER_ID", "0")
+}

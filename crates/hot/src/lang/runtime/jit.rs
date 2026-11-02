@@ -623,6 +623,7 @@ struct JitHelperRefs {
     store_global: FuncRef,
     set_namespace: FuncRef,
     check_constraint: FuncRef,
+    check_param: FuncRef,
     set_pending_proven: FuncRef,
     call_native: FuncRef,
     define_function: FuncRef,
@@ -645,7 +646,7 @@ impl JitHelperRefs {
     /// The helpers that never look up a name in the calling frame or run
     /// Hot code that could. A call to a top-level function runs in its own
     /// frame.
-    fn scope_free(&self) -> [FuncRef; 45] {
+    fn scope_free(&self) -> [FuncRef; 46] {
         [
             self.call_vm,
             self.template_interpolate,
@@ -687,6 +688,7 @@ impl JitHelperRefs {
             self.str_starts_with,
             self.make_vec_with_spread,
             self.set_pending_proven,
+            self.check_param,
             self.length,
             self.length_value,
             self.vec_append,
@@ -2046,6 +2048,7 @@ fn compile_with_return_kind(
         "hot_jit_check_constraint",
         hot_jit_check_constraint as *const u8,
     );
+    builder.symbol("hot_jit_check_param", hot_jit_check_param as *const u8);
     builder.symbol(
         "hot_jit_set_pending_proven",
         hot_jit_set_pending_proven as *const u8,
@@ -2509,6 +2512,9 @@ contained_helpers! {
     ) -> 0;
     hot_jit_check_constraint = hot_jit_check_constraint_body(
         src_ptr: i64, spec_ptr: i64, test: i64
+    ) -> HALT_SENTINEL;
+    hot_jit_check_param = hot_jit_check_param_body(
+        src_ptr: i64, spec_ptr: i64, mask: i64, each: i64
     ) -> HALT_SENTINEL;
 }
 
@@ -3531,6 +3537,32 @@ unsafe fn hot_jit_check_constraint_body(src_ptr: i64, spec_ptr: i64, test: i64) 
     let error_capture = vm.error_capture_active;
     match vm.execute_check_constraint(value, spec, test != 0) {
         Ok(result) => new_owned_val(result),
+        Err(err) => vm_error_to_owned_val(err, error_capture),
+    }
+}
+
+/// JIT helper: a `CheckParam` on an owned value. Returns 0 when the value
+/// stays as it is, reading it in place; otherwise an OwnedVal handle to the
+/// converted value or the `ConstraintError` Err. Primitive checks never look up
+/// a name or run Hot code (see `JitHelperRefs::scope_free`).
+unsafe fn hot_jit_check_param_body(src_ptr: i64, spec_ptr: i64, mask: i64, each: i64) -> i64 {
+    let value = unsafe { &*(src_ptr as *const Val) };
+    if crate::lang::bytecode::param_mask::passes(value, mask as u32, each != 0) {
+        return 0;
+    }
+    let vm_ptr = get_jit_vm_ptr();
+    if vm_ptr.is_null() {
+        return new_owned_val(Val::err(Val::Str(
+            "JIT check_param: no VM available".into(),
+        )));
+    }
+    let vm = unsafe { &mut *vm_ptr };
+    let spec = unsafe { &*(spec_ptr as *const Val) };
+    let error_capture = vm.error_capture_active;
+    use crate::lang::runtime::vm::ParamCheck;
+    match vm.check_param_value(value.clone(), spec, mask as u32) {
+        Ok(ParamCheck::Passed) => 0,
+        Ok(ParamCheck::Converted(value) | ParamCheck::Failed(value)) => new_owned_val(value),
         Err(err) => vm_error_to_owned_val(err, error_capture),
     }
 }
@@ -4609,6 +4641,14 @@ fn declare_jit_helpers(
             ptr_ty,
             "hot_jit_check_constraint",
             &[types::I64, types::I64, types::I64],
+            &[types::I64],
+        )?,
+        check_param: declare_helper_func(
+            module,
+            func,
+            ptr_ty,
+            "hot_jit_check_param",
+            &[types::I64, types::I64, types::I64, types::I64],
             &[types::I64],
         )?,
         set_pending_proven: declare_helper_func(
@@ -8482,6 +8522,91 @@ impl<'a> EmitCtx<'a> {
                     self.define_register(builder, *dest, RawKind::OwnedVal, result)?;
                 }
                 self.jump_to_next(builder, ip)?;
+                self.emit_halt_return(builder, halt_block);
+                Ok(EmitResult::Handled)
+            }
+            // A raw parameter's kind was guarded on entry, so one in the mask
+            // needs no code at all. An owned one is tested in place: a self
+            // call can pass any owned value.
+            Instruction::CheckParam {
+                var_name,
+                spec,
+                mask,
+                each,
+            } => {
+                use crate::lang::bytecode::param_mask as kinds;
+                let name = constant_string(self.program, *var_name)?;
+                let Some(&(var, kind)) = self.locals.get(name) else {
+                    return Err(unsupported_jit_bailout(
+                        "check_param",
+                        format!("parameter '{}' isn't a local", name),
+                    ));
+                };
+                let raw_bit = match kind {
+                    RawKind::Int => Some(kinds::INT),
+                    RawKind::Dec => Some(kinds::DEC),
+                    RawKind::Bool => Some(kinds::BOOL),
+                    RawKind::Null => Some(kinds::NULL),
+                    _ => None,
+                };
+                if !*each && raw_bit.is_some_and(|bit| mask & bit != 0) {
+                    self.jump_to_next(builder, ip)?;
+                    return Ok(EmitResult::Handled);
+                }
+                // A raw value outside the mask is converted or fails, and a
+                // converted local would change kind: the interpreter runs this
+                // signature, as it does a body that can't return from here.
+                if kind != RawKind::OwnedVal || !self.function_body || self.error_capture_active {
+                    return Err(unsupported_jit_bailout(
+                        "check_param",
+                        format!("parameter '{}' needs the checked path", name),
+                    ));
+                }
+                let spec_val = match self.program.constants.get(*spec as usize) {
+                    Some(Constant::Val(v)) => v,
+                    _ => return Err(format!("CheckParam: invalid spec constant {}", spec)),
+                };
+                let spec_raw = builder
+                    .ins()
+                    .iconst(types::I64, new_owned_val(spec_val.clone()));
+                let mask_raw = builder.ins().iconst(types::I64, i64::from(*mask));
+                let each_raw = builder.ins().iconst(types::I64, i64::from(*each));
+                let value = builder.use_var(var);
+                let call = builder.ins().call(
+                    self.helper_refs.check_param,
+                    &[value, spec_raw, mask_raw, each_raw],
+                );
+                let result = builder.inst_results(call)[0];
+                let halt_block = emit_halt_check(builder, result);
+                let checked_block = builder.create_block();
+                let next = self
+                    .blocks
+                    .get(ip + 1)
+                    .copied()
+                    .ok_or_else(|| "CheckParam at end of block list".to_string())?;
+                builder.ins().brif(result, checked_block, &[], next, &[]);
+
+                builder.switch_to_block(checked_block);
+                builder.seal_block(checked_block);
+                let call = builder.ins().call(self.helper_refs.is_err, &[result]);
+                let is_err = builder.inst_results(call)[0];
+                let error_block = builder.create_block();
+                let converted_block = builder.create_block();
+                builder
+                    .ins()
+                    .brif(is_err, error_block, &[], converted_block, &[]);
+
+                builder.switch_to_block(error_block);
+                builder.seal_block(error_block);
+                self.emit_cleanup_owned(builder);
+                builder.ins().return_(&[result]);
+
+                builder.switch_to_block(converted_block);
+                builder.seal_block(converted_block);
+                drop_owned_var(builder, &self.helper_refs, var);
+                builder.def_var(var, result);
+                builder.ins().jump(next, &[]);
+
                 self.emit_halt_return(builder, halt_block);
                 Ok(EmitResult::Handled)
             }

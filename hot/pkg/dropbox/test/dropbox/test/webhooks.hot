@@ -1,0 +1,77 @@
+::dropbox::test::webhooks ns
+meta ["test"]
+
+::hooks ::dropbox::webhooks
+
+// Vectors generated with Python:
+//   hmac.new(SECRET.encode(), BODY.encode(), hashlib.sha256).hexdigest()
+SECRET "dropbox-app-secret-123"
+BODY "{\"list_folder\": {\"accounts\": [\"dbid:AAH4f99T0taONIb-OurWxbNQ6ywGRopQngc\", \"dbid:AAAz-oOm3Ynl3m4-KzOBh1Kp6tx9Mrb4CLg\"]}, \"delta\": {\"users\": [12345678, 23456789]}}"
+SIGNATURE "1722a8e2b8f590d000a1a596039f55058f8c4c72a0ac61b76dfb144e0e1c2577"
+
+// A body that is not valid UTF-8 (0xFF 0xFE inside a string): verified
+// over body-bytes, never the lossy body-raw.
+BINARY_BODY Bytes([123, 34, 120, 34, 58, 34, 255, 254, 34, 125])
+BINARY_SIGNATURE "5cf98bac71c922259197d6c7ef334d70c25dcfaf68adc1d05f55ae4ade3570ad"
+
+request fn (signature: Str?, body: Str): Map {
+  headers if(is-null(signature), {"content-type": "application/json"}, {"content-type": "application/json", "x-dropbox-signature": signature})
+  {method: "POST", url: "/dropbox/hook", headers: headers, body-raw: body, body: from-json(body)}
+}
+
+test-challenge-response
+meta ["test"] fn () {
+    ok ::hooks/challenge-response({method: "GET", query: {challenge: "abc123"}, headers: {}})
+    assert-eq(200, ok.status)
+    assert-eq("abc123", ok.body, "the challenge is echoed verbatim")
+    assert-eq("text/plain", get(ok.headers, "Content-Type"))
+    assert-eq("nosniff", get(ok.headers, "X-Content-Type-Options"))
+    missing ::hooks/challenge-response({method: "GET", query: {}, headers: {}})
+    assert-eq(400, missing.status)
+    assert-eq(400, ::hooks/challenge-response({method: "GET", headers: {}}).status)
+}
+
+test-verify-signature
+meta ["test"] fn () {
+    assert(::hooks/verify-signature(request(SIGNATURE, BODY), SECRET), "valid signature")
+    assert(::hooks/verify-signature(request(uppercase(SIGNATURE), BODY), SECRET), "hex is case-insensitive")
+    assert(::hooks/verify-signature({headers: {"X-Dropbox-Signature": SIGNATURE}, body-raw: BODY}, SECRET), "header names are case-insensitive")
+    assert(not(::hooks/verify-signature(request(SIGNATURE, replace(BODY, "12345678", "12345679")), SECRET)), "tampered body")
+    assert(not(::hooks/verify-signature(request(SIGNATURE, BODY), "other-secret")), "wrong secret")
+    assert(not(::hooks/verify-signature(request(null, BODY), SECRET)), "missing header")
+    assert(not(::hooks/verify-signature(request("", BODY), SECRET)), "empty header")
+    assert(not(::hooks/verify-signature(request("not-hex", BODY), SECRET)), "malformed header")
+    assert(not(::hooks/verify-signature(request(SIGNATURE, BODY), "")), "empty secret fails closed")
+    assert(not(::hooks/verify-signature(request(SIGNATURE, BODY), null)), "null secret fails closed")
+}
+
+test-verify-signature-binary-body
+meta ["test"] fn () {
+    req {headers: {"x-dropbox-signature": BINARY_SIGNATURE}, body-raw: Str(BINARY_BODY), body-bytes: BINARY_BODY}
+    assert(::hooks/verify-signature(req, SECRET), "verified over the exact bytes")
+    lossy {headers: {"x-dropbox-signature": BINARY_SIGNATURE}, body-raw: Str(BINARY_BODY)}
+    assert(not(::hooks/verify-signature(lossy, SECRET)), "the lossy text form does not verify")
+}
+
+test-parse-notification
+meta ["test"] fn () {
+    n ::hooks/parse-notification(request(SIGNATURE, BODY))
+    assert-eq(["dbid:AAH4f99T0taONIb-OurWxbNQ6ywGRopQngc", "dbid:AAAz-oOm3Ynl3m4-KzOBh1Kp6tx9Mrb4CLg"], n.accounts)
+    assert-eq([12345678, 23456789], n.users)
+    from-raw ::hooks/parse-notification({body-raw: BODY})
+    assert-eq(2, length(from-raw.accounts), "falls back to body-raw")
+    team ::hooks/parse-notification({delta: {users: [42]}})
+    assert-eq([], team.accounts)
+    assert-eq([42], team.users)
+    junk ::hooks/parse-notification({body-raw: "not json"})
+    assert-eq([], junk.accounts)
+}
+
+test-verify-notification
+meta ["test"] fn () {
+    ok ::hooks/verify-notification(request(SIGNATURE, BODY), SECRET)
+    assert-eq(2, length(ok.accounts))
+    bad ::hooks/verify-notification(request("00", BODY), SECRET)
+    assert(is-err(bad))
+    assert(contains(err-message(bad), "X-Dropbox-Signature"))
+}

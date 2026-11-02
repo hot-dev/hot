@@ -1,0 +1,486 @@
+::dropbox::content ns
+meta {
+    doc: """
+    Read file content: `read-document` for any file (Paper docs and other
+    export-only files are exported, everything else downloaded),
+    byte-exact downloads, Range and chunked downloads past the response
+    cap, exports, temporary links, and Dropbox's `content_hash`.
+
+    Results are `::dropbox/FileContent`: `bytes` is always the raw body
+    (the response's `body-bytes`), and `text` is filled in when the MIME
+    type (from the file name; Dropbox sends no useful Content-Type) is
+    textual. The file's metadata comes from the `Dropbox-API-Result`
+    header and is attached as a `DocFile`.
+
+    **Limits.** Every single response is capped by the runtime's
+    `http.max-response-bytes` (16 MiB by default, 120 s timeout):
+    `download` switches to Range-chunked downloads (pinned to the file's
+    `rev`) when a file is larger. Exports cannot be ranged. The whole
+    file is held in memory either way.
+
+    **Scopes.** `files.content.read`.
+    """
+}
+
+::api ::dropbox::api
+::files ::dropbox::files
+::hash ::hot::hash
+::hex ::hot::hex
+FileContent ::dropbox/FileContent
+is-ok-response ::hot::http/is-ok-response
+
+BLOCK_SIZE 4194304
+DEFAULT_DOWNLOAD_CHUNK 8388608
+DOWNLOAD_LOCAL_KEYS ["range", "chunk-size"]
+
+// Export format aliases accepted by `export` / `read-document`. Dropbox
+// lists the valid values per file in `export_info.export_options`
+// (Paper docs offer "markdown" and "html").
+FORMAT_ALIASES {
+    md: "markdown",
+    markdown: "markdown",
+    htm: "html",
+    html: "html",
+    txt: "plain_text",
+    text: "plain_text",
+    plain: "plain_text",
+    plain_text: "plain_text"
+}
+
+// MIME types for export formats whose export name has no known extension.
+FORMAT_MIMES {
+    markdown: "text/markdown",
+    html: "text/html",
+    plain_text: "text/plain",
+    pdf: "application/pdf",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    csv: "text/csv"
+}
+
+// ---------------------------------------------------------------------------
+// content_hash (pure)
+// ---------------------------------------------------------------------------
+
+hash-loop fn (data: Bytes, block-size: Int, offset: Int, acc: Bytes): Bytes {
+  total length(data)
+  cond {
+    gte(offset, total) => { acc }
+    => {
+      end min(total, add(offset, block-size))
+      digest ::hex/decode(::hash/sha256(slice(data, offset, end)))
+      hash-loop(data, block-size, end, concat(acc, digest))
+    }
+  }
+}
+
+content-hash
+meta {
+    doc: """
+    Dropbox's `content_hash` of some content (pure): split it into 4 MiB
+    blocks, SHA-256 each block, concatenate the raw digests, and SHA-256
+    that, as lowercase hex. An empty file hashes the empty string. Use it
+    to skip downloads of unchanged files (compare with a metadata entry's
+    `content_hash`) or to check a download. The 2-arity form takes
+    another block size (for tests).
+
+    See https://www.dropbox.com/developers/reference/content-hash.
+
+    ```hot
+    ::dropbox::content/content-hash(Bytes("hello"))
+    // "9595c9df90075148eb06860365df33584b75bff782a510c6cd4883a419833d50"
+    ```
+    """
+}
+fn
+(content: Bytes | Str): Str {
+  content-hash(content, BLOCK_SIZE)
+},
+(content: Bytes | Str, block-size: Int): Str {
+  data if(is-str(content), Bytes(content), content)
+  ::hash/sha256(hash-loop(data, max(block-size, 1), 0, Bytes([])))
+}
+
+matches-content-hash
+meta {
+    doc: """True when `content` hashes to `expected` (a metadata entry's `content_hash`). False for a null or empty `expected`."""
+}
+fn (content: Bytes | Str, expected: Str?): Bool {
+  cond {
+    ::dropbox/is-blank(expected) => { false }
+    => { eq(content-hash(content), lowercase(trim(expected))) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Range math (pure)
+// ---------------------------------------------------------------------------
+
+range-header
+meta {
+    doc: """An HTTP `Range` value for bytes `start`..`end` inclusive (`end` null for "to the end"): `range-header(0, 1023)` is `"bytes=0-1023"`."""
+}
+fn (start: Int, end: Int?): Str {
+  if(is-null(end), `bytes=${start}-`, `bytes=${start}-${end}`)
+}
+
+download-ranges
+meta {
+    doc: """Split `size` bytes into inclusive `[start, end]` ranges of at most `chunk-size` bytes (pure). `download-ranges(10, 4)` is `[[0, 3], [4, 7], [8, 9]]`."""
+}
+fn (size: Int, chunk-size: Int): Vec {
+  c max(chunk-size, 1)
+  count floor(div(add(size, sub(c, 1)), c))
+  map(range(0, count), (i) {
+    start mul(i, c)
+    [start, sub(min(size, add(start, c)), 1)]
+  })
+}
+
+is-size-limit-error
+meta {
+    doc: """True when a request failed because the response exceeded `http.max-response-bytes`."""
+}
+fn (result: Result): Bool {
+  and(is-err(result), contains(err-message(result), "exceeds"))
+}
+
+// ---------------------------------------------------------------------------
+// FileContent building (pure)
+// ---------------------------------------------------------------------------
+
+response-bytes
+meta {
+    doc: """The exact body of a response as Bytes: `body-bytes` (never the auto-decoded `body`), else a Str body's UTF-8 bytes, else empty."""
+}
+fn (response: Map): Bytes {
+  raw get(response, "body-bytes")
+  cond {
+    is-bytes(raw) => { raw }
+    is-bytes(response.body) => { response.body }
+    is-str(response.body) => { Bytes(response.body) }
+    => { Bytes([]) }
+  }
+}
+
+build-content
+meta {
+    doc: """
+    Build a `FileContent` (pure) from `bytes`, the file's metadata entry
+    (null when unknown), the output `name` (the export name for exports)
+    and the export `format` (null for downloads). The MIME type comes
+    from `name`, else from `format`.
+    """
+}
+fn (file-id: Str, bytes: Bytes, entry: Map?, name: Str?, format: Str?, source: Str): FileContent {
+  out-name or(name, if(is-map(entry), get(entry, "name"), null))
+  ext ::dropbox/file-extension(out-name)
+  by-name if(is-null(ext), null, ::hot::mime/from-ext(ext))
+  by-format if(is-null(format), null, get(FORMAT_MIMES, format))
+  mime cond {
+    eq(ext, "md") => { "text/markdown" }
+    is-some(by-name) => { by-name }
+    is-some(by-format) => { by-format }
+    is-map(entry) => { ::dropbox/mime-type-of(entry) }
+    => { "application/octet-stream" }
+  }
+
+  FileContent({
+    file-id: file-id,
+    name: out-name,
+    mime-type: mime,
+    size: length(bytes),
+    bytes: bytes,
+    text: if(::dropbox/is-textual-mime(mime), Str(bytes), null),
+    source: source,
+    format: format,
+    file: if(is-map(entry), ::dropbox/to-doc-file(entry), null)
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Downloads
+// ---------------------------------------------------------------------------
+
+download-arg
+meta {
+    doc: """The `files/download` argument (pure): `path`, or `rev:<rev>` when `opts.rev` is set (Dropbox deprecated the separate `rev` field in favour of a `rev:` path), plus other Dropbox arguments from `opts`."""
+}
+fn (path: Str, opts: Map): Map {
+  rev get(opts, "rev")
+  target if(::dropbox/is-blank(rev), ::dropbox/normalize-path(path), `rev:${rev}`)
+  ::api/build-arg({path: target}, opts, concat(DOWNLOAD_LOCAL_KEYS, ["rev"]))
+}
+
+download
+meta {
+    doc: """
+    POST files/download (content host) - a file's exact bytes as a
+    `FileContent`, with its metadata from `Dropbox-API-Result`. Files
+    larger than `http.max-response-bytes` are fetched again in Range
+    chunks (`download-chunked`). Export-only files (Paper docs) fail with
+    409 `unsupported_file`: use `read-document` or `export`.
+
+    Options: `rev` (a specific revision), `range: {start, end}`
+    (inclusive; `end` null for the rest) for a partial download,
+    `chunk-size` for the chunked fallback, plus credentials.
+
+    ```hot
+    pdf ::dropbox::content/download("/Reports/Q3.pdf")
+    pdf.mime-type    // "application/pdf"
+    pdf.bytes        // exact bytes
+    pdf.file.rev
+    ```
+    """
+}
+fn
+(path: Str): FileContent {
+  download(path, {})
+},
+(path: Str, opts: Map): FileContent {
+  rng get(opts, "range")
+  headers if(is-map(rng), {Range: range-header(rng.start, rng.end)}, {})
+  route "files/download"
+  response ::api/request("download", route, download-arg(path, opts), "", headers, ::api/credential-opts(opts))
+  cond {
+    and(is-size-limit-error(response), not(is-map(rng))) => { download-chunked(path, opts) }
+    is-err(response) => { response }
+    not(is-ok-response(response)) => { err(::api/http-error(response, route)) }
+    => { build-content(path, response-bytes(response), ::api/api-result(response), null, null, if(is-map(rng), "range", "download")) }
+  }
+}
+
+download-range
+meta {doc: """Download bytes `start`..`end` (inclusive) of a file."""}
+fn
+(path: Str, start: Int, end: Int): FileContent {
+  download-range(path, start, end, {})
+},
+(path: Str, start: Int, end: Int, opts: Map): FileContent {
+  download(path, {...opts, range: {start: start, end: end}})
+}
+
+fetch-ranges fn (arg: Map, ranges: Vec, index: Int, acc: Bytes, opts: Map): Bytes {
+  cond {
+    gte(index, length(ranges)) => { acc }
+    => {
+      r get(ranges, index)
+      response ::api/request("download", "files/download", arg, "", {Range: range-header(first(r), last(r))}, opts)
+      cond {
+        is-err(response) => { response }
+        // A server that ignores Range answers 200 with the whole body.
+        eq(response.status, 200) => { response-bytes(response) }
+        eq(response.status, 206) => { fetch-ranges(arg, ranges, add(index, 1), concat(acc, response-bytes(response)), opts) }
+        => { err(::api/http-error(response, "files/download")) }
+      }
+    }
+  }
+}
+
+download-chunked
+meta {
+    doc: """
+    Download a file in Range requests of `opts.chunk-size` bytes (default
+    8 MiB; keep it under `http.max-response-bytes`) and join them, so
+    files larger than one response can be read. Every chunk asks for the
+    `rev` the metadata reported, so a file changing mid-download cannot
+    mix versions. The whole file is still held in memory.
+    """
+}
+fn
+(path: Str): FileContent {
+  download-chunked(path, {})
+},
+(path: Str, opts: Map): FileContent {
+  chunk or(get(opts, "chunk-size"), DEFAULT_DOWNLOAD_CHUNK)
+  creds ::api/credential-opts(opts)
+  entry ::files/get-metadata(path, creds)
+  cond {
+    is-err(entry) => { entry }
+    not(::dropbox/is-file(entry)) => { err(`dropbox: ${path} is not a file`) }
+    ::dropbox/is-exportable(entry) => { err(`dropbox: ${entry.name} cannot be downloaded directly; use export or read-document`) }
+    => {
+      arg {path: `rev:${or(get(opts, "rev"), entry.rev)}`}
+      bytes fetch-ranges(arg, download-ranges(or(entry.size, 0), chunk), 0, Bytes([]), creds)
+      cond {
+        is-err(bytes) => { bytes }
+        => { build-content(path, bytes, entry, null, null, "chunked") }
+      }
+    }
+  }
+}
+
+download-text
+meta {doc: """Download a file and decode it as UTF-8 text."""}
+fn
+(path: Str): Str {
+  download-text(path, {})
+},
+(path: Str, opts: Map): Str {
+  content download(path, opts)
+  if(is-err(content), content, ::dropbox/content-text(content))
+}
+
+// ---------------------------------------------------------------------------
+// Exports
+// ---------------------------------------------------------------------------
+
+export-format
+meta {
+    doc: """
+    Pick the export format for an export-only file (pure). `entry` is its
+    metadata (null when unknown); `format` is a Dropbox format name or an
+    alias (`md`/`markdown`, `html`, `text`/`txt` for `plain_text`), or
+    `"auto"`/null. `"auto"` prefers `markdown` when the file offers it,
+    else the file's default `export_as`. When the entry lists
+    `export_options`, a format outside them is an Err naming the options.
+    Returns null to let Dropbox use the default.
+
+    ```hot
+    ::dropbox::content/export-format({export_info: {export_as: "html", export_options: ["html", "markdown"]}}, "auto")
+    // "markdown"
+    ```
+    """
+}
+fn (entry: Map?, format: Str?): Str? {
+  info if(is-map(entry), get(entry, "export_info"), null)
+  options if(is-map(info), or(get(info, "export_options"), []), [])
+  default if(is-map(info), get(info, "export_as"), null)
+  f if(::dropbox/is-blank(format), "auto", lowercase(trim(format)))
+  wanted or(get(FORMAT_ALIASES, f), f)
+  cond {
+    eq(f, "auto") => { if(in("markdown", options), "markdown", default) }
+    is-empty(options) => { wanted }
+    in(wanted, options) => { wanted }
+    => { err(`dropbox: no "${format}" export for ${or(get(or(entry, {}), "name"), "this file")}; supported: ${join(options, ", ")}`) }
+  }
+}
+
+export
+meta {
+    doc: """
+    POST files/export (content host) - export a file that cannot be
+    downloaded directly (Paper docs, cloud docs) as a `FileContent`.
+    `format` is checked by `export-format` when `opts.entry` (the file's
+    metadata) is given; null uses the file's default (`export_as`).
+    Dropbox answers 409 `retry_error` while an export is not ready yet
+    (`is-retryable` is true for it).
+
+    ```hot
+    md ::dropbox::content/export("/Notes/Roadmap.paper", "markdown")
+    md.text
+    ```
+    """
+}
+fn
+(path: Str): FileContent {
+  export(path, null, {})
+},
+(path: Str, format: Str?): FileContent {
+  export(path, format, {})
+},
+(path: Str, format: Str?, opts: Map): FileContent {
+  entry get(opts, "entry")
+  chosen export-format(entry, format)
+  route "files/export"
+  cond {
+    is-err(chosen) => { chosen }
+    => {
+      arg ::dropbox/compact({path: ::dropbox/normalize-path(path), export_format: chosen})
+      response ::api/request("download", route, arg, "", {}, ::api/credential-opts(opts))
+      cond {
+        is-err(response) => { response }
+        not(is-ok-response(response)) => { err(::api/http-error(response, route)) }
+        => {
+          result ::api/api-result(response)
+          export-meta if(is-map(result), get(result, "export_metadata"), null)
+          file-meta if(is-map(result), get(result, "file_metadata"), entry)
+          used or(chosen, if(is-map(file-meta), get(or(get(file-meta, "export_info"), {}), "export_as"), null))
+          build-content(path, response-bytes(response), file-meta, if(is-map(export-meta), get(export-meta, "name"), null), used, "export")
+        }
+      }
+    }
+  }
+}
+
+get-temporary-link
+meta {
+    doc: """POST files/get_temporary_link - a direct download link for a file, valid for four hours: `{metadata, link}`. Anyone with the link can download the file, so treat it as a secret. Not available for export-only files."""
+}
+fn
+(path: Str): Map {
+  get-temporary-link(path, {})
+},
+(path: Str, opts: Map): Map {
+  ::api/rpc("files/get_temporary_link", {path: ::dropbox/normalize-path(path)}, opts)
+}
+
+// ---------------------------------------------------------------------------
+// read-document: one call for any file
+// ---------------------------------------------------------------------------
+
+read-document
+meta {
+    doc: """
+    Read any file as a `FileContent` with its `DocFile` attached.
+
+    - Paper docs and other export-only files are exported in `format`
+      (`"auto"` by default: Markdown when offered, else the file's default
+      export); see `export-format` for the names.
+    - Other files are downloaded as stored (`format` is ignored): `text`
+      is set for textual types (`.txt`, `.md`, `.csv`, `.json`, ...) and
+      `bytes` always holds the exact content.
+    - Folders and deleted entries return an Err.
+
+    ```hot
+    doc ::dropbox::content/read-document("/Notes/Roadmap.paper", "markdown")
+    doc.text             // Markdown, ready for chunking and embedding
+    doc.file.version     // the rev, for incremental re-indexing
+    ```
+    """
+}
+fn
+(path: Str): FileContent {
+  read-document(path, "auto", {})
+},
+(path: Str, format: Str?): FileContent {
+  read-document(path, format, {})
+},
+(path: Str, format: Str?, opts: Map): FileContent {
+  creds ::api/credential-opts(opts)
+  entry ::files/get-metadata(path, creds)
+  cond {
+    is-err(entry) => { entry }
+    ::dropbox/is-folder(entry) => { err(`dropbox: ${entry.name} is a folder; list it with ::dropbox::files/list-folder`) }
+    not(::dropbox/is-file(entry)) => { err(`dropbox: ${path} is not a file`) }
+    ::dropbox/is-exportable(entry) => { export(entry.id, format, {...opts, entry: entry}) }
+    => {
+      content download(entry.id, {...filter-keys(opts, (k) { ne(k, "entry") }), rev: entry.rev})
+      cond {
+        is-err(content) => { content }
+        => { FileContent({...untype(content), file-id: path, file: ::dropbox/to-doc-file(entry)}) }
+      }
+    }
+  }
+}
+
+read-document-text
+meta {
+    doc: """`read-document`, returning just the text; an Err when the result is not textual (a PDF, an image, ...)."""
+}
+fn
+(path: Str): Str {
+  read-document-text(path, "auto", {})
+},
+(path: Str, format: Str?): Str {
+  read-document-text(path, format, {})
+},
+(path: Str, format: Str?, opts: Map): Str {
+  content read-document(path, format, opts)
+  cond {
+    is-err(content) => { content }
+    is-null(content.text) => { err(`dropbox: ${content.name} is ${content.mime-type}, not text`) }
+    => { content.text }
+  }
+}

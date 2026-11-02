@@ -1,0 +1,581 @@
+::microsoft::onedrive ns
+meta {
+    doc: """
+    OneDrive and SharePoint document libraries over the Microsoft Graph
+    `driveItem` API. The same functions work for OneDrive (personal),
+    OneDrive for work or school, and SharePoint document libraries:
+    every drive is addressed by its base path, and a library is just a
+    drive id. Credentials, clouds, retries and errors come from
+    `microsoft-graph`.
+
+    **Namespaces**
+
+    - `::microsoft::onedrive::drives` - resolve drives (me, user, site, group, id)
+    - `::microsoft::onedrive::items` - get, list, search, folders, rename, move, copy, delete
+    - `::microsoft::onedrive::content` - `read-document`, downloads, Range, PDF/HTML conversion, thumbnails
+    - `::microsoft::onedrive::upload` - simple uploads and resumable upload sessions
+    - `::microsoft::onedrive::sharing` - sharing links, invitations, permissions, app grants
+    - `::microsoft::onedrive::versions` - version history
+    - `::microsoft::onedrive::delta` - delta sync and change-notification subscriptions
+
+    **Choosing the drive.** Every function takes `opts.drive`: `"me"`
+    (the default for delegated tokens), a drive id (a SharePoint library
+    from `::microsoft::sharepoint::sites/list-drives`), or a base path
+    from `user-drive`, `site-drive`, `group-drive`. The
+    `microsoft.onedrive.drive-id` context variable sets a default drive
+    (needed for app-only tokens, which have no `/me`).
+
+    **Addressing items.** An item is an id (`"01ABCDEF..."`), `"root"`,
+    a path from the drive root (`"/Reports/Q3.xlsx"`, encoded for you),
+    or a driveItem / `DocFile` Map (its own drive is used, so items from
+    delta, search and shared lists work across drives).
+
+    **Quick start**
+
+    ```hot
+    ::items ::microsoft::onedrive::items
+    ::content ::microsoft::onedrive::content
+
+    files ::items/list-all-children("/Reports", {}, 50)
+    doc ::content/read-document(first(files), "auto")
+    doc.file.name
+    doc.bytes
+    ```
+    """
+}
+
+::api ::microsoft::graph::api
+::auth ::microsoft::graph::auth
+::ctx ::hot::ctx
+
+PROVIDER "microsoft-onedrive"
+
+// ---------------------------------------------------------------------------
+// Drives and item addressing (pure)
+// ---------------------------------------------------------------------------
+
+me-drive
+meta {doc: """The signed-in user's OneDrive: `"/me/drive"` (delegated tokens only)."""}
+fn (): Str {
+  "/me/drive"
+}
+
+drive
+meta {doc: """A drive by id (any OneDrive or SharePoint library): `/drives/{id}`."""}
+fn (drive-id: Str): Str {
+  `/drives/${::api/encode-segment(drive-id)}`
+}
+
+user-drive
+meta {doc: """A user's OneDrive by id or user principal name: `/users/{id}/drive`."""}
+fn (user: Str): Str {
+  `/users/${::api/encode-segment(user)}/drive`
+}
+
+site-drive
+meta {
+    doc: """A SharePoint site's default document library: `/sites/{site-id}/drive`."""
+}
+fn (site-id: Str): Str {
+  `/sites/${::api/encode-segment(site-id)}/drive`
+}
+
+group-drive
+meta {
+    doc: """A Microsoft 365 group's (or team's) document library: `/groups/{id}/drive`."""
+}
+fn (group-id: Str): Str {
+  `/groups/${::api/encode-segment(group-id)}/drive`
+}
+
+drive-base-from
+meta {
+    doc: """
+    The base path for a drive reference (pure): null means `default`
+    (from context) or `/me/drive`; `"me"` is `/me/drive`; a Str starting
+    with `/` is a base path as built by `drive`, `user-drive`,
+    `site-drive`, `group-drive`; any other Str is a drive id; a Map may
+    carry `drive-id`, `user`, `site` or `group`.
+    """
+}
+fn (ref: Any, default-drive-id: Any): Str {
+  cond {
+    ::auth/is-blank-value(ref) => {
+      if(::auth/is-blank-value(default-drive-id), me-drive(), drive(Str(default-drive-id)))
+    }
+
+    is-map(ref) => {
+      cond {
+        is-some(get(ref, "drive-id")) => { drive(get(ref, "drive-id")) }
+        is-some(get(ref, "user")) => { user-drive(get(ref, "user")) }
+        is-some(get(ref, "site")) => { site-drive(get(ref, "site")) }
+        is-some(get(ref, "group")) => { group-drive(get(ref, "group")) }
+        => { me-drive() }
+      }
+    }
+
+    eq(ref, "me") => { me-drive() }
+    starts-with(Str(ref), "/") => { Str(ref) }
+    => { drive(Str(ref)) }
+  }
+}
+
+drive-base
+meta {
+    ctx: {"microsoft.onedrive.drive-id": {required: false, secret: false}},
+    doc: """The base path of the drive a call targets: `opts.drive`, else the `microsoft.onedrive.drive-id` context variable, else `/me/drive`."""
+}
+fn (opts: Map): Str {
+  drive-base-from(get(opts, "drive"), ::ctx/get("microsoft.onedrive.drive-id"))
+}
+
+encode-path
+meta {
+    doc: """
+    Encode a drive path for path-based addressing (pure): segments are
+    split on `/`, empty ones dropped, and each is percent-encoded (spaces,
+    `#`, `%`, `?`, `&`, `'` and non-ASCII included), with a leading `/`.
+
+    ```hot
+    ::microsoft::onedrive/encode-path("/Shared Docs/Q3 #1.docx")
+    // "/Shared%20Docs/Q3%20%231.docx"
+    ```
+    """
+}
+fn (path: Str): Str {
+  segments filter(split(path, "/"), (s) { not(is-empty(s)) })
+  `/${join(map(segments, ::api/encode-segment), "/")}`
+}
+
+is-path-ref fn (ref: Any): Bool {
+  and(is-str(ref), starts-with(ref, "/"))
+}
+
+is-root-path fn (ref: Any): Bool {
+  or(eq(ref, "root"), and(is-path-ref(ref), is-empty(filter(split(ref, "/"), (s) { not(is-empty(s)) }))))
+}
+
+item-drive-id
+meta {
+    doc: """The drive id a driveItem or `DocFile` Map belongs to (`parentReference.driveId` or `drive-id`), or null (pure)."""
+}
+fn (item: Map): Str? {
+  parent get(item, "parentReference")
+  or(get(item, "drive-id"), if(is-map(parent), get(parent, "driveId"), null))
+}
+
+item-path
+meta {
+    doc: """
+    The Graph path of an item reference (pure): `"root"` and `"/"` are
+    `{drive}/root`; a `/path` is `{drive}/root:/encoded/path:`; a Str id
+    is `{drive}/items/{id}`; a Map uses its own `id` and drive
+    (`/drives/{driveId}/items/{id}`), falling back to `opts.drive`.
+    Append `/children`, `/content`, ... to the result.
+
+    ```hot
+    ::microsoft::onedrive/item-path("/Reports/Q3.xlsx", {})
+    // "/me/drive/root:/Reports/Q3.xlsx:"
+    ::microsoft::onedrive/item-path("01ABC", {drive: "b!xyz"})
+    // "/drives/b%21xyz/items/01ABC"
+    ```
+    """
+}
+fn (ref: Any, opts: Map): Str {
+  cond {
+    is-map(ref) => {
+      d item-drive-id(ref)
+      base if(is-null(d), drive-base(opts), drive(d))
+      `${base}/items/${::api/encode-segment(Str(get(ref, "id")))}`
+    }
+
+    is-root-path(ref) => { `${drive-base(opts)}/root` }
+    is-path-ref(ref) => { `${drive-base(opts)}/root:${encode-path(ref)}:` }
+    => { `${drive-base(opts)}/items/${::api/encode-segment(Str(ref))}` }
+  }
+}
+
+child-path
+meta {
+    doc: """
+    The Graph path of a (possibly new) child named `name` under `parent`
+    (pure), for uploads: `{drive}/root:/name:`, `{drive}/root:/parent/path/name:`
+    or `{drive}/items/{parent-id}:/name:`.
+    """
+}
+fn (parent: Any, name: Str, opts: Map): Str {
+  encoded-name ::api/encode-segment(name)
+  cond {
+    is-map(parent) => { `${item-path(parent, opts)}:/${encoded-name}:` }
+    is-root-path(parent) => { `${drive-base(opts)}/root:/${encoded-name}:` }
+    is-path-ref(parent) => { `${drive-base(opts)}/root:${encode-path(parent)}/${encoded-name}:` }
+    => { `${item-path(parent, opts)}:/${encoded-name}:` }
+  }
+}
+
+remote-target
+meta {
+    doc: """For a shared or "Add to My files" item (a `remoteItem` facet), a Map addressing the target item in its own drive; otherwise `item` itself (pure)."""
+}
+fn (item: Map): Map {
+  remote get(item, "remoteItem")
+  cond {
+    not(is-map(remote)) => { item }
+    => { remote }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Options
+// ---------------------------------------------------------------------------
+
+// Keys this package reads from `opts` itself (never sent as query parameters).
+LOCAL_KEYS ["drive", "conflict", "if-match", "range", "chunk-size", "fallback", "offset", "description", "defer-commit", "file-size"]
+
+query-opts
+meta {
+    doc: """The OData/API parameters of `opts` (pure): `defaults`, overridden by `opts` minus credential keys, this package's local keys and `extra-local`, nulls dropped. Pass a key as null in `opts` to drop a default."""
+}
+fn
+(defaults: Map, opts: Map): Map {
+  query-opts(defaults, opts, [])
+},
+(defaults: Map, opts: Map, extra-local: Vec): Map {
+  params filter-keys(::api/api-params(opts), (k) { and(not(in(k, LOCAL_KEYS)), not(in(k, extra-local))) })
+  filter-vals({...defaults, ...params}, is-some)
+}
+
+creds
+meta {
+    doc: """The microsoft-graph part of `opts` (credentials, cloud, retry, headers), passed through to `::microsoft::graph::api`."""
+}
+fn (opts: Map): Map {
+  ::api/credential-opts(opts)
+}
+
+if-match-headers fn (opts: Map): Map {
+  tag get(opts, "if-match")
+  if(::auth/is-blank-value(tag), {}, {If-Match: Str(tag)})
+}
+
+CONFLICT_BEHAVIORS ["fail", "replace", "rename"]
+
+conflict-behavior
+meta {
+    doc: """Validate a conflict behavior (`fail`, `replace`, `rename`); null passes through as `default` (pure)."""
+}
+fn (value: Any, default: Str?): Str? {
+  v if(::auth/is-blank-value(value), default, lowercase(Str(value)))
+  cond {
+    is-null(v) => { null }
+    in(v, CONFLICT_BEHAVIORS) => { v }
+    => { err(`microsoft-onedrive: conflict must be fail, replace or rename (got "${value}")`) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Neutral document metadata
+// ---------------------------------------------------------------------------
+
+extension
+meta {
+    doc: """The lower-case extension of a file name without the dot (`"Q3 Plan.DOCX"` is `"docx"`), or `""` (pure)."""
+}
+fn (name: Str?): Str {
+  n or(name, "")
+  parts split(n, ".")
+  if(lt(length(parts), 2), "", lowercase(last(parts)))
+}
+
+DocFile
+meta {
+    doc: """
+    Provider-neutral file metadata, with the same fields as
+    `::google::drive/DocFile` plus `hashes`, so a documents pipeline can
+    treat OneDrive, SharePoint and Google Drive alike.
+
+    **Fields**
+    - `provider` - `"microsoft-onedrive"` (OneDrive and SharePoint libraries alike)
+    - `id`, `name`, `mime-type` (`file.mimeType`; `""` for folders and packages)
+    - `size` - bytes (Int); null for folders and packages
+    - `modified`, `created` - `lastModifiedDateTime`, `createdDateTime`
+    - `parents` - `[parentReference.id]` (driveItems have one parent)
+    - `drive-id` - `parentReference.driveId`
+    - `web-url` - the browser link (`webUrl`)
+    - `version` - the `eTag` (changes on any change; use for If-Match)
+    - `revision-id` - the `cTag` (changes only when content changes)
+    - `md5` - always null (Graph has no MD5)
+    - `sha256` - `file.hashes.sha256Hash` lower-cased when present (Graph documents it as unsupported; usually null)
+    - `hashes` - `file.hashes` as returned: `quickXorHash` (base64, OneDrive for work and SharePoint),
+      `sha1Hash` and `crc32Hash` (personal OneDrive)
+    - `is-folder` (`folder` facet), `is-google-native` (always false),
+      `is-shortcut` (a `remoteItem`: shared or "Add to My files"),
+      `shortcut-target-id` (the remote item's id)
+    - `trashed` - true when the item has a `deleted` facet (delta)
+    - `export-formats` - MIME types Graph can convert this file to (`application/pdf`, `text/html`)
+    - `raw` - the driveItem as returned
+    """
+}
+type {
+    provider: Str,
+    id: Str,
+    name: Str,
+    mime-type: Str,
+    size: Int?,
+    modified: Str?,
+    created: Str?,
+    parents: Vec,
+    drive-id: Str?,
+    web-url: Str?,
+    version: Str?,
+    revision-id: Str?,
+    md5: Str?,
+    sha256: Str?,
+    hashes: Map,
+    is-folder: Bool,
+    is-google-native: Bool,
+    is-shortcut: Bool,
+    shortcut-target-id: Str?,
+    trashed: Bool,
+    export-formats: Vec,
+    raw: Map
+}
+
+// Source extensions Graph converts, from
+// https://learn.microsoft.com/graph/api/driveitem-get-content-format
+PDF_SOURCE_EXTENSIONS ["doc", "docx", "dot", "dotx", "dotm", "dsn", "dwg", "eml", "epub", "fluidframework", "form", "htm", "html", "loop", "loot", "markdown", "md", "msg", "note", "odp", "ods", "odt", "page", "pps", "ppsx", "ppt", "pptx", "pulse", "rtf", "task", "tif", "tiff", "wbtx", "whiteboard", "xls", "xlsm", "xlsx"]
+HTML_SOURCE_EXTENSIONS ["loop", "fluid", "wbtx", "whiteboard"]
+
+// Format conversion only works for source files up to 2 MB.
+MAX_CONVERT_BYTES 2097152
+
+conversion-formats
+meta {
+    doc: """The MIME types Graph can convert a file with this name to (pure): `application/pdf` and/or `text/html`, from the documented source extensions."""
+}
+fn (name: Str?): Vec {
+  ext extension(name)
+  filter([
+    if(in(ext, PDF_SOURCE_EXTENSIONS), "application/pdf", null),
+    if(in(ext, HTML_SOURCE_EXTENSIONS), "text/html", null)
+  ], is-some)
+}
+
+is-folder-item
+meta {
+    doc: """True for a folder (or a shared folder via `remoteItem.folder`) or a package (OneNote notebook), which have no content to download (pure)."""
+}
+fn (item: Map): Bool {
+  remote get(item, "remoteItem")
+  or(is-map(get(item, "folder")), is-map(get(item, "package")), and(is-map(remote), is-map(get(remote, "folder"))))
+}
+
+to-doc-file
+meta {
+    doc: """
+    Normalise a driveItem (from `get-item`, `list-children`, `search`,
+    delta, ...) into a `DocFile` (pure). Missing fields become
+    null/false; for a `remoteItem` the target's file facet and size fill
+    in what the local entry lacks.
+
+    ```hot
+    f ::microsoft::onedrive/to-doc-file(item)
+    f.hashes.quickXorHash   // change detection on OneDrive for work / SharePoint
+    ```
+    """
+}
+fn (item: Map): DocFile {
+  remote if(is-map(get(item, "remoteItem")), item.remoteItem, null)
+  file-facet or(get(item, "file"), if(is-map(remote), get(remote, "file"), null))
+  is-dir is-folder-item(item)
+  parent get(item, "parentReference")
+  hashes if(and(is-map(file-facet), is-map(get(file-facet, "hashes"))), file-facet.hashes, {})
+  sha256 get(hashes, "sha256Hash")
+  size or(get(item, "size"), if(is-map(remote), get(remote, "size"), null))
+  name or(get(item, "name"), if(is-map(remote), get(remote, "name"), null), "")
+  DocFile({
+    provider: PROVIDER,
+    id: Str(or(get(item, "id"), "")),
+    name: name,
+    mime-type: if(is-map(file-facet), or(get(file-facet, "mimeType"), ""), ""),
+    size: if(is-dir, null, ::auth/parse-int(size)),
+    modified: get(item, "lastModifiedDateTime"),
+    created: get(item, "createdDateTime"),
+    parents: if(and(is-map(parent), is-some(get(parent, "id"))), [parent.id], []),
+    drive-id: item-drive-id(item),
+    web-url: get(item, "webUrl"),
+    version: get(item, "eTag"),
+    revision-id: get(item, "cTag"),
+    md5: null,
+    sha256: if(::auth/is-blank-value(sha256), null, lowercase(sha256)),
+    hashes: hashes,
+    is-folder: is-dir,
+    is-google-native: false,
+    is-shortcut: is-map(remote),
+    shortcut-target-id: if(is-map(remote), get(remote, "id"), null),
+    trashed: is-map(get(item, "deleted")),
+    export-formats: if(is-dir, [], conversion-formats(name)),
+    raw: item
+  })
+}
+
+to-doc-files
+meta {doc: """`to-doc-file` over a Vec of driveItems."""}
+fn (items: Vec): Vec {
+  map(items, to-doc-file)
+}
+
+// ---------------------------------------------------------------------------
+// File content
+// ---------------------------------------------------------------------------
+
+FileContent
+meta {
+    doc: """
+    Downloaded or converted file content (the same shape as
+    `::google::drive/FileContent`). `bytes` is always the exact response
+    body (binary safe); `text` is the UTF-8 decoding when the content is
+    textual (by MIME type or by extension), else null.
+
+    **Fields**
+    - `file-id`, `name`
+    - `mime-type` - the MIME type of `bytes`
+    - `size` - `length(bytes)`
+    - `bytes`, `text`
+    - `source` - `"download"`, `"range"`, `"chunked"`, `"convert"`,
+      `"version"` or `"thumbnail"`
+    - `format` - what `read-document` produced: `"original"`, `"pdf"`,
+      `"html"` or `"text"`; null otherwise
+    - `file` - the `DocFile` (set by `read-document`)
+    """
+}
+type {
+    file-id: Str,
+    name: Str?,
+    mime-type: Str?,
+    size: Int,
+    bytes: Bytes,
+    text: Str?,
+    source: Str,
+    format: Str?,
+    file: DocFile?
+}
+
+TEXT_EXTENSIONS ["txt", "text", "md", "markdown", "csv", "tsv", "json", "jsonl", "ndjson", "xml", "yaml", "yml", "html", "htm", "log", "ini", "toml", "sql", "svg", "rtf"]
+
+base-mime
+meta {
+    doc: """A Content-Type without parameters, lower-cased: `"text/plain; charset=utf-8"` becomes `"text/plain"` (pure)."""
+}
+fn (content-type: Str?): Str? {
+  cond {
+    ::auth/is-blank-value(content-type) => { null }
+    => { lowercase(trim(first(split(content-type, ";")))) }
+  }
+}
+
+is-textual-mime
+meta {
+    doc: """True when content of this MIME type is text: `text/*`, JSON, XML, YAML, SQL, SVG, `+json` / `+xml` (pure)."""
+}
+fn (mime-type: Str?): Bool {
+  m or(base-mime(mime-type), "")
+  or(
+    starts-with(m, "text/"),
+    in(m, ["application/json", "application/xml", "application/javascript", "application/x-ndjson", "application/x-yaml", "application/yaml", "application/sql", "image/svg+xml"]),
+    ends-with(m, "+json"),
+    ends-with(m, "+xml")
+  )
+}
+
+is-textual
+meta {
+    doc: """True when a file is text by MIME type, or by extension (`.txt`, `.md`, `.csv`, `.json`, ... since OneDrive often stores those as `application/octet-stream`) (pure)."""
+}
+fn (mime-type: Str?, name: Str?): Bool {
+  or(is-textual-mime(mime-type), in(extension(name), TEXT_EXTENSIONS))
+}
+
+content-from-bytes
+meta {
+    doc: """Build a `FileContent` from raw bytes, their MIME type, the file name (for text detection) and the source (pure)."""
+}
+fn (file-id: Str, bytes: Bytes, mime-type: Str?, name: Str?, source: Str): FileContent {
+  mime base-mime(mime-type)
+  FileContent({
+    file-id: file-id,
+    name: name,
+    mime-type: mime,
+    size: length(bytes),
+    bytes: bytes,
+    text: if(is-textual(mime, name), Str(bytes), null),
+    source: source,
+    format: null,
+    file: null
+  })
+}
+
+response-bytes
+meta {
+    doc: """The exact body of an HTTP response as Bytes: `body-bytes`, never the auto-decoded `body` (so a JSON file stays bytes) (pure)."""
+}
+fn (response: Map): Bytes {
+  raw get(response, "body-bytes")
+  cond {
+    is-bytes(raw) => { raw }
+    is-str(response.body) => { Bytes(response.body) }
+    => { Bytes([]) }
+  }
+}
+
+content-from-response
+meta {
+    doc: """Build a `FileContent` from an HTTP response: `response-bytes` and the Content-Type header (pure)."""
+}
+fn (file-id: Str, response: Map, name: Str?, source: Str): FileContent {
+  content-from-bytes(file-id, response-bytes(response), ::api/header-value(response.headers, "content-type"), name, source)
+}
+
+follow-redirect
+meta {
+    doc: """
+    If `response` is a 3xx with a `Location` (Graph's `/content` and
+    `?format=` answers point at a pre-authenticated URL), GET that URL
+    without an Authorization header and return its response; otherwise
+    return `response` unchanged. Hot's client normally follows the
+    redirect itself; this covers a runtime that hands the 302 back.
+    """
+}
+fn (response: Result): Any {
+  cond {
+    is-err(response) => { response }
+    and(gte(response.status, 300), lt(response.status, 400)) => {
+      location ::api/header-value(response.headers, "location")
+      if(is-null(location), response, ::hot::http/request(::hot::http/HttpRequest({method: "GET", url: location, headers: {}, body: ""})))
+    }
+    => { response }
+  }
+}
+
+content-text
+meta {
+    doc: """The text of a `FileContent`: its `text`, or the UTF-8 decoding of `bytes` (invalid sequences become U+FFFD)."""
+}
+fn (content: Map): Str {
+  if(is-some(content.text), content.text, Str(content.bytes))
+}
+
+// ---------------------------------------------------------------------------
+// Shortcuts to the most used functions
+// ---------------------------------------------------------------------------
+
+get-item ::microsoft::onedrive::items/get-item
+list-children ::microsoft::onedrive::items/list-children
+list-all-children ::microsoft::onedrive::items/list-all-children
+search ::microsoft::onedrive::items/search
+create-folder ::microsoft::onedrive::items/create-folder
+delete-item ::microsoft::onedrive::items/delete-item
+download ::microsoft::onedrive::content/download
+read-document ::microsoft::onedrive::content/read-document
+upload-file ::microsoft::onedrive::upload/upload-file
+sync-changes ::microsoft::onedrive::delta/sync-changes

@@ -1,0 +1,266 @@
+::documents::webhooks ns
+meta {
+    doc: """
+    Turn any provider's change notification into one answer: "something
+    changed in this source; call `changes` with your stored cursor".
+    Verification is done by the provider packages' own verifiers:
+
+    | Provider | Verifier | Secret |
+    |---|---|---|
+    | Google Drive | `::google::drive::changes/verify-notification` (channel token) | `google.drive.channel.token` |
+    | OneDrive / SharePoint | `::microsoft::graph::subscriptions/verify-notifications` (clientState) | `microsoft.graph.client-state` |
+    | Dropbox | `::dropbox::webhooks/verify-notification` (HMAC-SHA256 of the raw body) | `dropbox.app.secret` |
+    | Box | `::box::webhooks/verify-request` (primary/secondary HMAC, 10-minute window) | `box.webhook.primary-key`, `box.webhook.secondary-key` |
+
+    `normalize(provider, request)` uses those context variables (through
+    the provider package, which fails the run when the secret is unset);
+    `normalize(provider, request, secret)` takes the secret explicitly: a
+    Str, or for Box `{primary, secondary}`. A request that fails
+    verification is an Err (answer 401). Handshakes (Graph
+    `validationToken`, Dropbox `challenge`) need no secret and come back
+    with `kind: "handshake"`.
+
+    S3 has no webhook of its own: S3 Event Notifications go to SQS, SNS
+    or EventBridge, so `normalize("s3", ...)` is an Err.
+
+    ```hot
+    docs-hook
+    meta {webhook: {service: "docs", path: "/docs/box"}}
+    fn (request) {
+      event ::documents::webhooks/normalize("box", request)
+      cond {
+        is-err(event) => { ::hot::http/HttpResponse({status: 401, body: "invalid signature"}) }
+        => {
+          if(event.changed, send("docs:changed", {provider: event.provider, hint: event.hint}), null)
+          event.response
+        }
+      }
+    }
+    ```
+    """
+}
+
+::source ::documents::source
+::gchanges ::google::drive::changes
+::subs ::microsoft::graph::subscriptions
+::dhooks ::dropbox::webhooks
+::bhooks ::box::webhooks
+HttpResponse ::hot::http/HttpResponse
+
+WebhookEvent
+meta {
+    doc: """
+    A verified, provider-neutral notification.
+
+    - `provider` - the canonical provider name
+    - `kind` - `"change"`, `"sync"` (Drive's first message on a channel),
+      `"lifecycle"` (Graph subscription lifecycle only) or `"handshake"`
+    - `changed` - true: call `::documents/changes(source, cursor)` now
+    - `resync` - Graph reported `missed` or `subscriptionRemoved`: run a
+      sync now and recreate the subscription if it was removed
+    - `reauthorize` - Graph subscription ids that sent `reauthorizationRequired`
+    - `hint` - provider ids that say which source changed: Drive
+      `channel-id`, `resource-id`, `resource-state`; Graph
+      `subscription-ids`, `resources`; Dropbox `accounts`, `users`; Box
+      `webhook-id`, `trigger`, `source-id`, `source-type`
+    - `response` - the `HttpResponse` to return to the provider
+    """
+}
+type {
+    provider: Str,
+    kind: Str,
+    changed: Bool,
+    resync: Bool,
+    reauthorize: Vec,
+    hint: Map,
+    response: Any
+}
+
+ok-response fn (): HttpResponse {
+  HttpResponse({status: 200, body: ""})
+}
+
+make-event fn (provider: Str, kind: Str, changed: Bool, hint: Map, response: Any): WebhookEvent {
+  WebhookEvent({provider: provider, kind: kind, changed: changed, resync: false, reauthorize: [], hint: hint, response: response})
+}
+
+// ---------------------------------------------------------------------------
+// Per provider (pure given the verified notification)
+// ---------------------------------------------------------------------------
+
+from-drive
+meta {
+    doc: """A `WebhookEvent` from a verified Drive `Notification` (pure). The first message on a channel (`sync`) is not a change."""
+}
+fn (note: Map): WebhookEvent {
+  hint filter-vals({channel-id: note.channel-id, resource-id: note.resource-id, resource-state: note.resource-state, message-number: note.message-number}, is-some)
+  make-event("google-drive", if(note.is-sync, "sync", "change"), not(note.is-sync), hint, ok-response())
+}
+
+from-graph
+meta {
+    doc: """A `WebhookEvent` from verified Graph `Notification`s (pure): changed when any change notification arrived (or a resync is needed), with lifecycle signals in `resync` and `reauthorize`."""
+}
+fn (notes: Vec): WebhookEvent {
+  changes ::subs/change-notifications(notes)
+  resync ::subs/needs-resync(notes)
+  hint {
+    subscription-ids: distinct(filter(map(notes, (n) { n.subscription-id }), is-some)),
+    resources: distinct(filter(map(changes, (n) { n.resource }), is-some))
+  }
+
+  WebhookEvent({
+    provider: "onedrive",
+    kind: if(is-empty(changes), "lifecycle", "change"),
+    changed: or(not(is-empty(changes)), resync),
+    resync: resync,
+    reauthorize: ::subs/needs-reauthorization(notes),
+    hint: hint,
+    response: ::subs/accepted()
+  })
+}
+
+from-dropbox
+meta {
+    doc: """A `WebhookEvent` from a verified Dropbox `Notification` (pure): one notification can name several accounts."""
+}
+fn (note: Map): WebhookEvent {
+  make-event("dropbox", "change", true, {accounts: or(note.accounts, []), users: or(note.users, [])}, ok-response())
+}
+
+from-box
+meta {doc: """A `WebhookEvent` from a verified Box delivery payload (pure).""" }
+fn (delivery: Map): WebhookEvent {
+  src get(delivery, "source")
+  hook get(delivery, "webhook")
+  hint filter-vals({
+    delivery-id: get(delivery, "id"),
+    webhook-id: if(is-map(hook), get(hook, "id"), null),
+    trigger: get(delivery, "trigger"),
+    source-id: if(is-map(src), get(src, "id"), null),
+    source-type: if(is-map(src), get(src, "type"), null)
+  }, is-some)
+  make-event("box", "change", true, hint, ok-response())
+}
+
+handshake fn (provider: Str, response: Any): WebhookEvent {
+  make-event(provider, "handshake", false, {}, response)
+}
+
+is-get fn (request: Map): Bool {
+  eq(uppercase(Str(or(get(request, "method"), ""))), "GET")
+}
+
+has-challenge fn (request: Map): Bool {
+  q get(request, "query")
+  and(is-map(q), not(::source/is-blank(get(q, "challenge"))))
+}
+
+// ---------------------------------------------------------------------------
+// normalize
+// ---------------------------------------------------------------------------
+
+normalize
+meta {
+    doc: """
+    Verify a webhook request with the provider package's verifier and
+    return a `WebhookEvent`, or an Err when verification fails.
+    `provider` is a provider name or a source descriptor. The 2-arity
+    form reads the secret from context through the provider package (and
+    fails the run when it is unset); the 3-arity form takes `secret`: a
+    Str (Drive channel token, Graph clientState, Dropbox app secret,
+    marked as a secret here), or
+    a Map `{primary, secondary, max-age-seconds?}` for Box.
+    """
+}
+fn
+(provider: Any, request: Map): WebhookEvent {
+  name ::source/provider-name(provider)
+  cond {
+    is-err(name) => { name }
+    eq(name, "google-drive") => {
+      note ::gchanges/verify-notification(request)
+      if(is-err(note), note, from-drive(note))
+    }
+
+    eq(name, "onedrive") => {
+      shake ::subs/validation-response(request)
+      cond {
+        is-some(shake) => { handshake(name, shake) }
+        => {
+          notes ::subs/verify-notifications(request)
+          if(is-err(notes), notes, from-graph(notes))
+        }
+      }
+    }
+
+    eq(name, "dropbox") => {
+      cond {
+        and(is-get(request), has-challenge(request)) => { handshake(name, ::dhooks/challenge-response(request)) }
+        => {
+          note ::dhooks/verify-notification(request)
+          if(is-err(note), note, from-dropbox(note))
+        }
+      }
+    }
+
+    eq(name, "box") => {
+      cond {
+        not(::bhooks/verify-request(request)) => { err("documents: invalid or missing Box webhook signature") }
+        => { box-delivery(request) }
+      }
+    }
+    => { err("documents: S3 has no webhooks; route S3 Event Notifications through SQS, SNS or EventBridge") }
+  }
+},
+(provider: Any, request: Map, secret: Any): WebhookEvent {
+  name ::source/provider-name(provider)
+  text if(is-str(secret), secret, "")
+  given if(is-map(secret), [get(secret, "primary"), get(secret, "secondary")], [text])
+  ::hot::ctx/mark-secret(filter(given, (v) { not(::source/is-blank(v)) }))
+  cond {
+    is-err(name) => { name }
+    eq(name, "google-drive") => {
+      note ::gchanges/verify-notification(request, text)
+      if(is-err(note), note, from-drive(note))
+    }
+
+    eq(name, "onedrive") => {
+      shake ::subs/validation-response(request)
+      cond {
+        is-some(shake) => { handshake(name, shake) }
+        => {
+          notes ::subs/verify-notifications(request, text)
+          if(is-err(notes), notes, from-graph(notes))
+        }
+      }
+    }
+
+    eq(name, "dropbox") => {
+      cond {
+        and(is-get(request), has-challenge(request)) => { handshake(name, ::dhooks/challenge-response(request)) }
+        => {
+          note ::dhooks/verify-notification(request, text)
+          if(is-err(note), note, from-dropbox(note))
+        }
+      }
+    }
+
+    eq(name, "box") => {
+      key-set if(is-map(secret), secret, {primary: text})
+      max-age or(get(key-set, "max-age-seconds"), ::bhooks/DEFAULT_MAX_AGE_SECONDS)
+      cond {
+        not(::bhooks/verify-request(request, get(key-set, "primary"), get(key-set, "secondary"), max-age)) => {
+          err("documents: invalid or missing Box webhook signature")
+        }
+        => { box-delivery(request) }
+      }
+    }
+    => { err("documents: S3 has no webhooks; route S3 Event Notifications through SQS, SNS or EventBridge") }
+  }
+}
+
+box-delivery fn (request: Map): WebhookEvent {
+  delivery ::bhooks/parse-delivery(request)
+  if(is-err(delivery), delivery, from-box(delivery))
+}

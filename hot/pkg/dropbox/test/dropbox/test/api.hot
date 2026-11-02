@@ -1,0 +1,226 @@
+::dropbox::test::api ns
+meta ["test"]
+
+// Hermetic: no network, no dropbox.* context.
+
+::api ::dropbox::api
+
+// Generated with Python: json.dumps(..., ensure_ascii=True) plus the
+// 0x7F escape the Dropbox SDKs add.
+NON_ASCII_JSON `{"path":"/Café/naïve ✓ 😀${Str(Bytes([127]))}/日本"}`
+NON_ASCII_ESCAPED "{\"path\":\"/Caf\\u00e9/na\\u00efve \\u2713 \\ud83d\\ude00\\u007f/\\u65e5\\u672c\"}"
+
+http-err fn
+(response: Map): Any {
+  ::dropbox::api/HttpError(::hot::http/HttpResponse(response))
+},
+(response: Map, route: Str?): Any {
+  ::dropbox::api/http-error(response, route)
+}
+
+test-ascii-escape
+meta ["test"] fn () {
+    assert-eq(NON_ASCII_ESCAPED, ::api/ascii-escape(NON_ASCII_JSON), "Latin-1, BMP, astral (surrogate pair), DEL and CJK")
+    assert-eq("{\"path\":\"/plain.txt\"}", ::api/ascii-escape("{\"path\":\"/plain.txt\"}"), "ASCII passes through")
+    assert-eq("\\u00e9", ::api/unicode-escape(233))
+    assert-eq("\\ud83d\\ude00", ::api/unicode-escape(128512))
+    assert-eq("00e9", ::api/hex4(233))
+    assert-eq("ffff", ::api/hex4(65535))
+}
+
+test-header-json
+meta ["test"] fn () {
+    h ::api/header-json({path: "/Café.txt", rev: null})
+    assert-eq("{\"path\":\"/Caf\\u00e9.txt\"}", h, "nulls dropped, non-ASCII escaped")
+    assert-eq({path: "/Café.txt"}, from-json(h), "the escaped JSON decodes back to the same string")
+    assert-eq("{}", ::api/header-json(null))
+}
+
+test-path-root-value
+meta ["test"] fn () {
+    assert-eq({".tag": "root", root: "3235641"}, from-json(::api/path-root-value("3235641")))
+    assert-eq({".tag": "namespace_id", namespace_id: "1234"}, from-json(::api/path-root-value("ns:1234")))
+    assert-eq({".tag": "home"}, from-json(::api/path-root-value("home")))
+    assert-eq({".tag": "root", root: "99"}, from-json(::api/path-root-value(::api/path-root-team("99"))))
+    assert-eq("{\".tag\":\"home\"}", ::api/path-root-value("{\".tag\":\"home\"}"), "JSON passes through")
+    assert(is-null(::api/path-root-value(null)))
+    assert(is-null(::api/path-root-value("  ")))
+}
+
+test-team-headers
+meta ["test"] fn () {
+    none ::api/team-headers({}, {})
+    assert-eq({}, none, "nothing set: no headers")
+    from-ctx ::api/team-headers({}, {select-user: "dbmid:ctx", path-root: "42"})
+    assert-eq("dbmid:ctx", get(from-ctx, "Dropbox-API-Select-User"))
+    assert-eq({".tag": "root", root: "42"}, from-json(get(from-ctx, "Dropbox-API-Path-Root")))
+    assert(not(in("Dropbox-API-Select-Admin", keys(from-ctx))))
+    opts-win ::api/team-headers({select-user: "dbmid:opt", select-admin: "dbmid:admin"}, {select-user: "dbmid:ctx"})
+    assert-eq("dbmid:opt", get(opts-win, "Dropbox-API-Select-User"))
+    assert-eq("dbmid:admin", get(opts-win, "Dropbox-API-Select-Admin"))
+    off ::api/team-headers({select-user: null}, {select-user: "dbmid:ctx"})
+    assert(not(in("Dropbox-API-Select-User", keys(off))), "an explicit null in opts turns the context value off")
+}
+
+test-build-arg
+meta ["test"] fn () {
+    arg ::api/build-arg({path: "/a"}, {recursive: true, limit: null, token: "secret", app-key: "k", retry: false, chunk-size: 9}, ["chunk-size"])
+    assert-eq({path: "/a", recursive: true}, arg, "credential keys, local keys and nulls are dropped")
+}
+
+test-route-url
+meta ["test"] fn () {
+    assert-eq("https://api.dropboxapi.com/2/files/list_folder", ::api/route-url("rpc", "files/list_folder"))
+    assert-eq("https://content.dropboxapi.com/2/files/upload", ::api/route-url("upload", "files/upload"))
+    assert-eq("https://content.dropboxapi.com/2/files/download", ::api/route-url("download", "files/download"))
+    assert-eq("https://notify.dropboxapi.com/2/files/list_folder/longpoll", ::api/route-url("notify", "files/list_folder/longpoll"))
+    assert-eq("http://127.0.0.1:8080/2/files/upload", ::api/route-url("upload", "files/upload", "http://127.0.0.1:8080/"), "an api root sends every host to one place")
+    assert-eq("https://api.dropboxapi.com/2/x", ::api/route-url("rpc", "x", ""), "a blank root is ignored")
+}
+
+test-build-request-rpc
+meta ["test"] fn () {
+    req ::api/build-request("rpc", "files/list_folder", {path: "", recursive: true, limit: null}, "", "tok", {})
+    assert-eq("POST", req.method)
+    assert-eq("Bearer tok", get(req.headers, "Authorization"))
+    assert-eq("application/json", get(req.headers, "Content-Type"))
+    assert-eq({path: "", recursive: true}, from-json(req.body), "JSON body without nulls")
+
+    void ::api/build-request("rpc", "users/get_current_account", null, "", "tok", {})
+    assert-eq("", void.body, "Void routes send no body")
+    assert(not(in("Content-Type", keys(void.headers))), "and no Content-Type")
+
+    noauth ::api/build-request("notify", "files/list_folder/longpoll", {cursor: "c", timeout: 30}, "", null, {})
+    assert(not(in("Authorization", keys(noauth.headers))), "notify routes are unauthenticated")
+}
+
+test-build-request-content
+meta ["test"] fn () {
+    data Bytes([0, 255, 195, 40])
+    up ::api/build-request("upload", "files/upload", {path: "/Café.bin", mode: "add"}, data, "tok", {Dropbox-API-Select-User: "dbmid:1"})
+    assert-eq("application/octet-stream", get(up.headers, "Content-Type"))
+    assert-eq({path: "/Café.bin", mode: "add"}, from-json(get(up.headers, "Dropbox-API-Arg")))
+    assert(::hot::regex/is-match(get(up.headers, "Dropbox-API-Arg"), "^[\\x00-\\x7E]*$"), "the arg header is pure ASCII")
+    assert-eq(data, up.body, "upload bodies are the exact bytes")
+    assert-eq("dbmid:1", get(up.headers, "Dropbox-API-Select-User"))
+
+    down ::api/build-request("download", "files/download", {path: "/a.txt"}, "", "tok", {Range: "bytes=0-9"})
+    assert-eq("", down.body)
+    assert(not(in("Content-Type", keys(down.headers))), "downloads send no Content-Type")
+    assert-eq("bytes=0-9", get(down.headers, "Range"))
+    assert-eq({path: "/a.txt"}, from-json(get(down.headers, "Dropbox-API-Arg")))
+}
+
+test-http-error-409-path
+meta ["test"] fn () {
+    e http-err({
+        status: 409,
+        headers: {},
+        body: {error_summary: "path/not_found/..", error: {".tag": "path", path: {".tag": "not_found"}}}
+    }, "files/get_metadata")
+    assert-eq(409, e.status)
+    assert-eq("path/not_found", e.error-tag)
+    assert-eq(["path", "not_found"], e.error-tags)
+    assert-eq("path/not_found/..", e.error-summary)
+    assert-eq("dropbox: HTTP 409 path/not_found (files/get_metadata)", e.message)
+    assert(::api/is-not-found(err(e)))
+    assert(::api/has-error-tag(err(e), "path"))
+    assert(not(::api/is-retryable(err(e))))
+}
+
+test-http-error-summary-only-and-user-message
+meta ["test"] fn () {
+    e http-err({
+        status: 409,
+        headers: {},
+        body: {error_summary: "to/conflict/file/.,", user_message: {text: "A file already exists.", locale: "en"}}
+    })
+    assert-eq(["to", "conflict", "file"], e.error-tags, "trailing punctuation is dropped from error_summary")
+    assert-eq("A file already exists.", e.user-message)
+    assert-eq("dropbox: HTTP 409 to/conflict/file: A file already exists.", e.message)
+}
+
+test-http-error-400-text-and-401
+meta ["test"] fn () {
+    bad http-err({status: 400, headers: {}, body: "Error in call to API function \"files/list_folder\": request body: could not decode input as JSON"}, "files/list_folder")
+    assert(contains(bad.message, "could not decode input as JSON"), "text bodies are shown")
+    assert(is-null(bad.error-tag))
+
+    expired http-err({status: 401, headers: {}, body: Bytes("{\"error_summary\": \"expired_access_token/..\", \"error\": {\".tag\": \"expired_access_token\"}}")})
+    assert-eq("expired_access_token", expired.error-tag, "Bytes JSON bodies are decoded")
+    assert(not(::api/is-retryable(err(expired))))
+}
+
+test-http-error-429
+meta ["test"] fn () {
+    limited http-err({
+        status: 429,
+        headers: {"retry-after": "300"},
+        body: {error_summary: "too_many_requests/..", error: {reason: {".tag": "too_many_requests"}, retry_after: 300}}
+    })
+    assert-eq(300, limited.retry-after)
+    assert-eq(["too_many_requests"], limited.error-tags)
+    assert(::api/is-retryable(err(limited)))
+
+    body-only http-err({status: 429, headers: {}, body: {error: {reason: {".tag": "too_many_write_operations"}, retry_after: 7}}})
+    assert-eq(7, body-only.retry-after, "the body's retry_after when there is no header")
+
+    junk http-err({status: 503, headers: {"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}, body: ""})
+    assert(is-null(junk.retry-after), "HTTP dates are not parsed (and never halt)")
+    assert(::api/is-retryable(err(junk)))
+}
+
+test-retry-classification
+meta ["test"] fn () {
+    write-contention http-err({status: 409, headers: {}, body: {error_summary: "path/too_many_write_operations/", error: {".tag": "path", path: {".tag": "too_many_write_operations"}}}})
+    assert(::api/is-retryable(err(write-contention)), "409 write contention is transient")
+    assert(::api/is-retryable(err("::hot::http/request: request failed: connection reset")))
+    assert(not(::api/is-retryable(err("::hot::http/request: response exceeds http.max-response-bytes"))))
+    assert(not(::api/is-retryable({entries: []})), "a success is not retryable")
+    assert(::api/is-retryable(err(::dropbox::auth/token-error("x", {status: 503, body: "busy"}))))
+    assert(not(::api/is-retryable(err(::dropbox::auth/token-error("x", {status: 400, body: {error: "invalid_grant"}})))))
+}
+
+test-transport-limit
+meta ["test"] fn () {
+    limit http-err({status: 403, headers: {}, body: {error_summary: "invalid_account_type/feature/..", error: {".tag": "invalid_account_type", invalid_account_type: {".tag": "feature"}}}})
+    assert(::api/is-transport-limit(err(limit)))
+    assert(not(::api/is-retryable(err(limit))))
+    other http-err({status: 403, headers: {}, body: {error_summary: "no_permission/..", error: {".tag": "no_permission"}}})
+    assert(not(::api/is-transport-limit(err(other))))
+}
+
+test-error-node
+meta ["test"] fn () {
+    e {".tag": "lookup_failed", lookup_failed: {".tag": "incorrect_offset", correct_offset: 8}}
+    assert-eq(8, ::api/error-node(e, "incorrect_offset").correct_offset)
+    assert-eq(["lookup_failed", "incorrect_offset"], ::api/union-tags(e))
+    assert(is-null(::api/error-node(e, "not_found")))
+    assert(is-null(::api/error-node(null, "x")))
+}
+
+test-retry-policy
+meta ["test"] fn () {
+    assert-eq(1, ::api/retry-policy({}).max-retries)
+    assert-eq(0, ::api/retry-policy({retry: false}).max-retries)
+    assert-eq(1, ::api/retry-policy({retry: 5}).max-retries, "never more than one immediate retry")
+    assert(in("files/download", ::api/IDEMPOTENT_ROUTES))
+    assert(not(in("files/upload", ::api/IDEMPOTENT_ROUTES)), "writes are not resent")
+}
+
+test-collect-cursor
+meta ["test"] fn () {
+    pages {
+        c1: {entries: [3, 4], cursor: "c2", has_more: true},
+        c2: {entries: [5], cursor: "c3", has_more: false}
+    }
+
+    first-page {entries: [1, 2], cursor: "c1", has_more: true}
+    all ::api/collect-cursor(first-page, (c) { get(pages, c) }, "entries")
+    assert-eq([1, 2, 3, 4, 5], all)
+    limited ::api/collect-cursor(first-page, (c) { get(pages, c) }, "entries", 3)
+    assert-eq([1, 2, 3], limited)
+    failing ::api/collect-cursor(first-page, (c) { err("boom") }, "entries")
+    assert(is-err(failing))
+    assert-eq([1], ::api/collect-cursor({entries: [1], cursor: "c", has_more: false}, (c) { err("not called") }, "entries"))
+}

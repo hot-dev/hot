@@ -1,0 +1,146 @@
+::documents::test::webhooks ns
+meta ["test"]
+
+// Webhook normalising over the provider verifiers. The Dropbox and Box
+// vectors are the providers' own, generated independently with Python:
+//   dropbox: hmac.new(SECRET, BODY, sha256).hexdigest()
+//   box:     base64(hmac.new(key, body + timestamp, sha256).digest())
+
+::hooks ::documents::webhooks
+::hmac ::hot::hmac
+::b64 ::hot::base64
+
+drive-request fn (token: Str?, state: Str): Map {
+  base {
+      "x-goog-channel-id": "ch-1",
+      "x-goog-channel-expiration": "Sat, 07 Nov 2026 10:00:00 GMT",
+      "x-goog-resource-id": "res-9",
+      "x-goog-resource-uri": "https://www.googleapis.com/drive/v3/changes?pageToken=42",
+      "x-goog-resource-state": state,
+      "x-goog-message-number": "1234"
+  }
+  {method: "POST", url: "/drive/hook", headers: if(is-null(token), base, {...base, "x-goog-channel-token": token}), body-raw: ""}
+}
+
+test-drive
+meta ["test"] fn () {
+    e ::hooks/normalize("google-drive", drive-request("secret-1", "change"), "secret-1")
+    assert-eq("google-drive", e.provider)
+    assert-eq("change", e.kind)
+    assert(e.changed, "a change: call changes now")
+    assert-eq("ch-1", e.hint.channel-id)
+    assert-eq("res-9", e.hint.resource-id)
+    assert-eq(200, e.response.status)
+    sync ::hooks/normalize({provider: "google"}, drive-request("secret-1", "sync"), "secret-1")
+    assert-eq("sync", sync.kind)
+    assert(not(sync.changed), "the first message on a channel is not a change")
+    assert(is-err(::hooks/normalize("google-drive", drive-request("wrong", "change"), "secret-1")), "tampered token")
+    assert(is-err(::hooks/normalize("google-drive", drive-request(null, "change"), "secret-1")), "missing token")
+    assert(is-err(::hooks/normalize("google-drive", drive-request("secret-1", "change"), "")), "empty secret fails closed")
+}
+
+graph-request fn (value: Vec): Map {
+  {method: "POST", url: "/graph/hook", headers: {"content-type": "application/json"}, body: {value: value}}
+}
+
+test-graph
+meta ["test"] fn () {
+    shake ::hooks/normalize("onedrive", {method: "POST", url: "/graph/hook?validationToken=Validation%3A%20Testing", query: {validationToken: "Validation: Testing"}, headers: {}}, "s3cret")
+    assert-eq("handshake", shake.kind)
+    assert(not(shake.changed))
+    assert-eq("Validation: Testing", shake.response.body, "the validation token is echoed")
+    change ::hooks/normalize("sharepoint", graph-request([{subscriptionId: "sub-1", changeType: "updated", resource: "drives/b!xyz/root", clientState: "s3cret"}]), "s3cret")
+    assert-eq("onedrive", change.provider)
+    assert(change.changed)
+    assert-eq(["sub-1"], change.hint.subscription-ids)
+    assert-eq(["drives/b!xyz/root"], change.hint.resources)
+    assert-eq(202, change.response.status, "Graph wants 202 Accepted")
+    life ::hooks/normalize("onedrive", graph-request([
+        {subscriptionId: "sub-1", lifecycleEvent: "reauthorizationRequired", clientState: "s3cret"},
+        {subscriptionId: "sub-2", lifecycleEvent: "missed", clientState: "s3cret"}
+    ]), "s3cret")
+    assert-eq("lifecycle", life.kind)
+    assert(life.resync, "missed: run a sync")
+    assert(life.changed, "a resync is a reason to call changes")
+    assert-eq(["sub-1"], life.reauthorize)
+    quiet ::hooks/normalize("onedrive", graph-request([{subscriptionId: "sub-1", lifecycleEvent: "reauthorizationRequired", clientState: "s3cret"}]), "s3cret")
+    assert(not(quiet.changed), "reauthorization alone is not a change")
+    assert(is-err(::hooks/normalize("onedrive", graph-request([{subscriptionId: "s", changeType: "updated", clientState: "evil"}]), "s3cret")), "wrong clientState")
+    assert(is-err(::hooks/normalize("onedrive", graph-request([{subscriptionId: "s", changeType: "updated"}]), "s3cret")), "missing clientState")
+    assert(is-err(::hooks/normalize("onedrive", graph-request([{subscriptionId: "s", changeType: "updated", clientState: "s3cret"}]), "")), "empty secret fails closed")
+}
+
+DROPBOX_SECRET "dropbox-app-secret-123"
+DROPBOX_BODY "{\"list_folder\": {\"accounts\": [\"dbid:AAH4f99T0taONIb-OurWxbNQ6ywGRopQngc\", \"dbid:AAAz-oOm3Ynl3m4-KzOBh1Kp6tx9Mrb4CLg\"]}, \"delta\": {\"users\": [12345678, 23456789]}}"
+DROPBOX_SIGNATURE "1722a8e2b8f590d000a1a596039f55058f8c4c72a0ac61b76dfb144e0e1c2577"
+
+dropbox-request fn (signature: Str?, body: Str): Map {
+  headers if(is-null(signature), {"content-type": "application/json"}, {"content-type": "application/json", "x-dropbox-signature": signature})
+  {method: "POST", url: "/dropbox/hook", headers: headers, body-raw: body, body: from-json(body)}
+}
+
+test-dropbox
+meta ["test"] fn () {
+    e ::hooks/normalize("dropbox", dropbox-request(DROPBOX_SIGNATURE, DROPBOX_BODY), DROPBOX_SECRET)
+    assert(e.changed)
+    assert-eq(2, length(e.hint.accounts))
+    assert-eq([12345678, 23456789], e.hint.users)
+    assert-eq(200, e.response.status)
+    challenge ::hooks/normalize("dropbox", {method: "GET", query: {challenge: "abc123"}, headers: {}}, DROPBOX_SECRET)
+    assert-eq("handshake", challenge.kind)
+    assert-eq("abc123", challenge.response.body)
+    assert(is-err(::hooks/normalize("dropbox", dropbox-request(DROPBOX_SIGNATURE, replace(DROPBOX_BODY, "12345678", "12345679")), DROPBOX_SECRET)), "tampered body")
+    assert(is-err(::hooks/normalize("dropbox", dropbox-request(null, DROPBOX_BODY), DROPBOX_SECRET)), "missing signature")
+    assert(is-err(::hooks/normalize("dropbox", dropbox-request(DROPBOX_SIGNATURE, DROPBOX_BODY), "")), "empty secret fails closed")
+}
+
+BOX_PRIMARY "hotPrimaryKeyForTests0001"
+BOX_SECONDARY "hotSecondaryKeyForTests002"
+BOX_BODY """{"type":"webhook_event","id":"8f5e1c0e-1111-4b5f-9a2d-0e5c1b2a3f4d","created_at":"2026-10-30T09:15:02-07:00","trigger":"FILE.UPLOADED","webhook":{"id":"1234567","type":"webhook"},"source":{"id":"987654321","type":"file","name":"Q3 report.pdf"}}"""
+BOX_TIMESTAMP "2026-10-30T09:15:03-07:00"
+BOX_PRIMARY_SIG "S6UMjqOvEcHX4jgVIHTnF2kJwILfMA28ZHqZUFcCiro="
+BOX_SECONDARY_SIG "bQlR8Qu03Gr1Xz9sRXwGrHEDKChnZ7cW3RJTvP3+3U0="
+
+box-request fn (body: Str, timestamp: Str, primary: Str, secondary: Str): Map {
+  {
+    method: "POST",
+    url: "/box/webhook",
+    headers: {
+      "box-delivery-id": "f96bb54b-ee16-4fc5-aa65-8c2d9e5b546f",
+      "box-delivery-timestamp": timestamp,
+      "box-signature-algorithm": "HmacSHA256",
+      "box-signature-primary": primary,
+      "box-signature-secondary": secondary,
+      "box-signature-version": "1"
+    },
+    body: from-json(body),
+    body-raw: body
+  }
+}
+
+test-box
+meta ["test"] fn () {
+    vector box-request(BOX_BODY, BOX_TIMESTAMP, BOX_PRIMARY_SIG, BOX_SECONDARY_SIG)
+    old ::hooks/normalize("box", vector, {primary: BOX_PRIMARY, secondary: BOX_SECONDARY, max-age-seconds: 0})
+    assert(old.changed, "the Python vector verifies (age check off)")
+    assert-eq("FILE.UPLOADED", old.hint.trigger)
+    assert-eq("987654321", old.hint.source-id)
+    assert-eq("1234567", old.hint.webhook-id)
+    assert(is-err(::hooks/normalize("box", vector, {primary: BOX_PRIMARY, secondary: BOX_SECONDARY})), "two days old: stale under the 10-minute window")
+
+    ts Str(::hot::time/now())
+    sig ::b64/encode(::hmac/hmac-sha256-bytes(BOX_PRIMARY, `${BOX_BODY}${ts}`))
+    fresh ::hooks/normalize("box", box-request(BOX_BODY, ts, sig, ""), BOX_PRIMARY)
+    assert(fresh.changed, "a fresh delivery verifies with the primary key alone")
+    assert(is-err(::hooks/normalize("box", box-request(replace(BOX_BODY, "987654321", "987654322"), ts, sig, ""), BOX_PRIMARY)), "tampered body")
+    assert(is-err(::hooks/normalize("box", box-request(BOX_BODY, ts, sig, ""), {primary: "", secondary: ""})), "no keys fails closed")
+    assert(is-err(::hooks/normalize("box", box-request(BOX_BODY, ts, "", ""), BOX_PRIMARY)), "missing signature")
+}
+
+test-s3-and-unknown
+meta ["test"] fn () {
+    s3 ::hooks/normalize("s3", {method: "POST", headers: {}, body-raw: "{}"}, "x")
+    assert(is-err(s3))
+    assert(contains(err-message(s3), "SQS"))
+    assert(is-err(::hooks/normalize("ftp", {method: "POST", headers: {}}, "x")))
+}

@@ -333,7 +333,7 @@ impl ErrPath {
                 self.vars.retain(|(_, bound)| *bound <= depth);
                 Step::Next
             }
-            Instruction::ProvenArgs { .. } => Step::Next,
+            Instruction::ProvenArgs { .. } | Instruction::CheckParam { .. } => Step::Next,
             // A constraint check passes an Err through unchanged.
             Instruction::CheckConstraint {
                 dest,

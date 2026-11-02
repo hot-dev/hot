@@ -2545,6 +2545,7 @@ impl Compiler {
                 lazy_params[0] = true;
             }
         }
+        let keeps_result = lazy_params.first().copied().unwrap_or(false);
 
         // Create function info with empty instructions (will be filled after compilation)
         let function_info = FunctionInfo {
@@ -2591,6 +2592,7 @@ impl Compiler {
             &fn_def.args,
             fn_def.return_type.as_deref(),
             fn_def.precondition.as_ref(),
+            keeps_result,
         );
         let function_instructions =
             self.compile_checked_function_body(&fn_def.body, checks.as_ref())?;
@@ -2700,6 +2702,7 @@ impl Compiler {
                 lazy_params[0] = true;
             }
         }
+        let keeps_result = lazy_params.first().copied().unwrap_or(false);
 
         // Update the pre-reserved FunctionInfo slot with full metadata
         if let Some(func_info) = self.program.functions.get_mut(reserved_id as usize) {
@@ -2741,6 +2744,7 @@ impl Compiler {
             &fn_def.args,
             fn_def.return_type.as_deref(),
             fn_def.precondition.as_ref(),
+            keeps_result,
         );
         let function_instructions =
             self.compile_checked_function_body(&fn_def.body, checks.as_ref())?;
@@ -4850,8 +4854,13 @@ impl Compiler {
             Some(name) => format!("{}/{}/lambda", self.current_namespace, name),
             None => format!("{}/lambda", self.current_namespace),
         };
-        let checks =
-            self.signature_checks(&label, &lambda.args, lambda.return_type.as_deref(), None);
+        let checks = self.signature_checks(
+            &label,
+            &lambda.args,
+            lambda.return_type.as_deref(),
+            None,
+            false,
+        );
 
         let lambda_instructions: Result<Vec<Instruction>, String> = (|| {
             if let Some(checks) = &checks {

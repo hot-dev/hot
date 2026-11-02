@@ -1,0 +1,378 @@
+::documents::adapters ns
+meta {
+    doc: """
+    One adapter per provider, each mapping that provider package's
+    `DocFile` into a `::documents/Document` (pure):
+
+    | Adapter | Input |
+    |---|---|
+    | `from-google` | `::google::drive/DocFile` (`md5`, `sha256`, or a `hashes` Map) |
+    | `from-onedrive` | `::microsoft::onedrive/DocFile` (its `hashes` Map) |
+    | `from-dropbox` | `::dropbox/DocFile` (`path`, `content-hash`) |
+    | `from-box` | `::box/DocFile` (`sha1`; the path from `path_collection`) |
+    | `from-s3` | `::documents::s3/DocFile` (aws-s3 has no DocFile of its own) |
+
+    The provider differences are normalised here: hashes go into one
+    `hashes` Map keyed by algorithm, export formats become MIME types,
+    `trashed` becomes `deleted`, folders become `kind: "folder"`, and an
+    empty MIME type becomes `application/octet-stream` (or
+    `inode/directory` for folders).
+    """
+}
+
+::source ::documents::source
+Document ::documents/Document
+FileContent ::documents/FileContent
+
+FOLDER_MIME "inode/directory"
+DEFAULT_MIME "application/octet-stream"
+
+// Dropbox export format names as MIME types (::dropbox::content/FORMAT_MIMES).
+DROPBOX_EXPORT_MIMES {
+    markdown: "text/markdown",
+    html: "text/html",
+    plain_text: "text/plain",
+    pdf: "application/pdf",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    csv: "text/csv"
+}
+
+// Graph `file.hashes` names to documents hash names.
+ONEDRIVE_HASH_NAMES {
+    quickXorHash: "quickXorHash",
+    sha1Hash: "sha1",
+    sha256Hash: "sha256",
+    crc32Hash: "crc32"
+}
+
+// ---------------------------------------------------------------------------
+// Helpers (pure)
+// ---------------------------------------------------------------------------
+
+compact-hashes
+meta {doc: """Drop blank hash values (pure)."""}
+fn (hashes: Map): Map {
+  filter-vals(hashes, (v) { not(::source/is-blank(v)) })
+}
+
+kind-of fn (is-folder: Any): Str {
+  if(eq(is-folder, true), "folder", "file")
+}
+
+mime-or-default fn (mime-type: Any, is-folder: Any, name: Any): Str {
+  cond {
+    eq(is-folder, true) => { if(::source/is-blank(mime-type), FOLDER_MIME, mime-type) }
+    ::source/is-blank(mime-type) => { ::documents::text/mime-from-name(name) }
+    => { mime-type }
+  }
+}
+
+with-scope
+meta {
+    doc: """The `source` Map of a Document (pure): the descriptor's identifying keys plus `extra` (nulls dropped). Never includes `opts`."""
+}
+fn (source: Map, extra: Map): Map {
+  {...::source/source-id(source), ...filter-vals(extra, is-some)}
+}
+
+join-path fn (parent: Str?, name: Str): Str {
+  p or(parent, "")
+  trimmed if(ends-with(p, "/"), slice(p, 0, sub(length(p), 1)), p)
+  `${trimmed}/${name}`
+}
+
+// ---------------------------------------------------------------------------
+// Google Drive
+// ---------------------------------------------------------------------------
+
+// Drive API checksum names to documents hash names.
+GOOGLE_HASH_NAMES {
+    md5Checksum: "md5",
+    sha1Checksum: "sha1",
+    sha256Checksum: "sha256"
+}
+
+google-hashes
+meta {
+    doc: """A Drive `DocFile`'s hashes under documents names (pure): its `md5` / `sha256` fields and its `hashes` Map when it has them, the Map winning. Drive's own `md5Checksum` / `sha1Checksum` / `sha256Checksum` names are accepted in the Map."""
+}
+fn (f: Map): Map {
+  given get(f, "hashes")
+  named if(is-map(given), reduce(keys(given), (acc, k) { assoc(acc, or(get(GOOGLE_HASH_NAMES, k), k), get(given, k)) }, {}), {})
+  compact-hashes({md5: get(f, "md5"), sha256: get(f, "sha256"), ...named})
+}
+
+from-google
+meta {
+    doc: """
+    A Google Drive `DocFile` as a `Document` (pure). Drive has no paths
+    (`path` is null; files can have several parents), `hashes` holds
+    what Drive reports for blob files (`md5`, `sha1`, `sha256`), `is-native` marks Google Docs,
+    Sheets, Slides and the like, and `export-formats` are their export
+    MIME types. Shortcuts keep Drive's shortcut MIME type; their target
+    id is in `raw.shortcutDetails.targetId`.
+    """
+}
+fn (source: Map, f: Map): Document {
+  Document({
+    provider: "google-drive",
+    source: with-scope(source, {drive-id: f.drive-id}),
+    id: f.id,
+    name: f.name,
+    path: null,
+    parents: or(f.parents, []),
+    kind: kind-of(f.is-folder),
+    mime-type: mime-or-default(f.mime-type, f.is-folder, f.name),
+    is-native: eq(f.is-google-native, true),
+    export-formats: or(f.export-formats, []),
+    size: f.size,
+    created: f.created,
+    modified: f.modified,
+    version: f.version,
+    hashes: google-hashes(f),
+    web-url: f.web-url,
+    deleted: eq(f.trashed, true),
+    raw: or(f.raw, {})
+  })
+}
+
+// ---------------------------------------------------------------------------
+// OneDrive and SharePoint
+// ---------------------------------------------------------------------------
+
+onedrive-hashes
+meta {
+    doc: """Graph `file.hashes` under documents names (pure): `quickXorHash` as is, `sha1Hash` / `sha256Hash` lower-cased as `sha1` / `sha256`, `crc32Hash` as `crc32`."""
+}
+fn (hashes: Map): Map {
+  compact-hashes(reduce(keys(hashes), (acc, k) {
+    name get(ONEDRIVE_HASH_NAMES, k)
+    v get(hashes, k)
+    cond {
+      is-null(name) => { acc }
+      eq(name, "quickXorHash") => { assoc(acc, name, v) }
+      is-str(v) => { assoc(acc, name, lowercase(v)) }
+      => { acc }
+    }
+  }, {}))
+}
+
+onedrive-path
+meta {
+    doc: """The display path of a driveItem (pure): `parentReference.path` after `root:` plus the name (`/Reports/Q3.docx`), `/` for the root, or null when Graph gave no path (delta and search omit it)."""
+}
+fn (raw: Map, name: Str): Str? {
+  parent get(raw, "parentReference")
+  ppath if(is-map(parent), get(parent, "path"), null)
+  cond {
+    is-map(get(raw, "root")) => { "/" }
+    not(is-str(ppath)) => { null }
+    not(contains(ppath, "root:")) => { null }
+    => {
+      after last(split(ppath, "root:"))
+      join-path(::hot::uri/decode(after), name)
+    }
+  }
+}
+
+from-onedrive
+meta {
+    doc: """
+    A OneDrive / SharePoint `DocFile` as a `Document` (pure). `source`
+    adds the item's `drive-id`; `version` is the eTag; `hashes` holds
+    `quickXorHash` (work/school and SharePoint) or `sha1` / `crc32`
+    (personal), and `sha256` when Graph sends it; `export-formats` are Graph's conversions (`application/pdf`,
+    `text/html`; sources up to 2 MB). Packages (OneNote) count as folders.
+    """
+}
+fn (source: Map, f: Map): Document {
+  raw or(f.raw, {})
+  Document({
+    provider: "onedrive",
+    source: with-scope(source, {drive-id: f.drive-id}),
+    id: f.id,
+    name: f.name,
+    path: onedrive-path(raw, f.name),
+    parents: or(f.parents, []),
+    kind: kind-of(f.is-folder),
+    mime-type: mime-or-default(f.mime-type, f.is-folder, f.name),
+    is-native: false,
+    export-formats: or(f.export-formats, []),
+    size: f.size,
+    created: f.created,
+    modified: f.modified,
+    version: f.version,
+    hashes: onedrive-hashes(or(f.hashes, {})),
+    web-url: f.web-url,
+    deleted: eq(f.trashed, true),
+    raw: raw
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Dropbox
+// ---------------------------------------------------------------------------
+
+dropbox-export-mimes
+meta {
+    doc: """Dropbox export format names (`markdown`, `html`, ...) as MIME types (pure); unknown names pass through."""
+}
+fn (names: Vec): Vec {
+  map(names, (n) { or(get(DROPBOX_EXPORT_MIMES, n), n) })
+}
+
+from-dropbox
+meta {
+    doc: """
+    A Dropbox `DocFile` as a `Document` (pure). `id` is Dropbox's stable
+    `id:...` (deleted entries have none: the lower-cased path stands in),
+    `path` the display path, `parents` the parent path, `version` the
+    `rev`, `hashes.dropbox-content-hash` the `content_hash`. Paper docs
+    and other export-only files are `is-native`, with their export
+    formats as MIME types. Dropbox records no creation time.
+    """
+}
+fn (source: Map, f: Map): Document {
+  Document({
+    provider: "dropbox",
+    source: with-scope(source, {namespace-id: f.drive-id}),
+    id: f.id,
+    name: f.name,
+    path: f.path,
+    parents: or(f.parents, []),
+    kind: kind-of(f.is-folder),
+    mime-type: mime-or-default(f.mime-type, f.is-folder, f.name),
+    is-native: eq(f.is-google-native, true),
+    export-formats: dropbox-export-mimes(or(f.export-formats, [])),
+    size: f.size,
+    created: f.created,
+    modified: f.modified,
+    version: f.version,
+    hashes: compact-hashes({dropbox-content-hash: f.content-hash}),
+    web-url: f.web-url,
+    deleted: eq(f.trashed, true),
+    raw: or(f.raw, {})
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Box
+// ---------------------------------------------------------------------------
+
+box-path
+meta {
+    doc: """The display path of a Box item from `path_collection` (pure): the ancestors' names without "All Files" plus the item name (`/Reports/Q3.pdf`), `/` for the root folder, or null when `path_collection` was not requested."""
+}
+fn (raw: Map, name: Str): Str? {
+  pc get(raw, "path_collection")
+  entries if(is-map(pc), get(pc, "entries"), null)
+  cond {
+    eq(Str(or(get(raw, "id"), "")), "0") => { "/" }
+    not(is-vec(entries)) => { null }
+    => {
+      names map(filter(entries, (e) { and(is-map(e), ne(Str(or(get(e, "id"), "")), "0")) }), (e) { or(get(e, "name"), "") })
+      join-path(if(is-empty(names), "", `/${join(names, "/")}`), name)
+    }
+  }
+}
+
+from-box
+meta {
+    doc: """
+    A Box `DocFile` as a `Document` (pure). `version` is the item `etag`,
+    `hashes.sha1` the content SHA-1, `path` comes from `path_collection`
+    when it was requested. Web links are files with MIME type
+    `application/vnd.box.web-link`. Box folder sizes are the total of
+    their contents.
+    """
+}
+fn (source: Map, f: Map): Document {
+  raw or(f.raw, {})
+  Document({
+    provider: "box",
+    source: with-scope(source, {}),
+    id: f.id,
+    name: f.name,
+    path: box-path(raw, f.name),
+    parents: or(f.parents, []),
+    kind: kind-of(f.is-folder),
+    mime-type: mime-or-default(f.mime-type, f.is-folder, f.name),
+    is-native: false,
+    export-formats: [],
+    size: f.size,
+    created: f.created,
+    modified: f.modified,
+    version: f.version,
+    hashes: compact-hashes({sha1: f.sha1}),
+    web-url: f.web-url,
+    deleted: eq(f.trashed, true),
+    raw: raw
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Amazon S3
+// ---------------------------------------------------------------------------
+
+from-s3
+meta {
+    doc: """
+    An S3 `DocFile` (see `::documents::s3/to-doc-file`) as a `Document`
+    (pure). `id` is the object key (a common prefix ending in `/` for a
+    folder), `path` is `/` + key, `parents` the parent prefix, `version`
+    the ETag without quotes. `hashes` is empty: an S3 ETag is an MD5
+    only for single-part uploads without SSE-KMS, so it is not reported
+    as one. S3 records no creation time.
+    """
+}
+fn (source: Map, f: Map): Document {
+  Document({
+    provider: "s3",
+    source: with-scope(source, {}),
+    id: f.key,
+    name: f.name,
+    path: `/${f.key}`,
+    parents: if(is-null(f.parent), [], [f.parent]),
+    kind: kind-of(f.is-folder),
+    mime-type: mime-or-default(f.mime-type, f.is-folder, f.name),
+    is-native: false,
+    export-formats: [],
+    size: f.size,
+    created: null,
+    modified: f.modified,
+    version: f.etag,
+    hashes: {},
+    web-url: null,
+    deleted: false,
+    raw: or(f.raw, {})
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Content
+// ---------------------------------------------------------------------------
+
+to-content
+meta {
+    doc: """
+    A provider `FileContent` (all five share `file-id`, `name`,
+    `mime-type`, `size`, `bytes`, `text`, `source`, `file`) as a
+    `::documents/FileContent` (pure). `document` is `adapter(source,
+    content.file)` when the provider attached its DocFile, else `doc`. (Typed records are not `is-map`, so presence is checked with `is-some`.)
+    """
+}
+fn (source: Map, content: Map, adapter: Fn, doc: Any): FileContent {
+  file get(content, "file")
+  FileContent({
+    document-id: Str(or(get(content, "file-id"), if(is-some(doc), doc.id, ""))),
+    name: or(get(content, "name"), if(is-some(doc), doc.name, null)),
+    mime-type: get(content, "mime-type"),
+    size: length(content.bytes),
+    bytes: content.bytes,
+    text: get(content, "text"),
+    method: or(get(content, "source"), "download"),
+    document: if(is-some(file), adapter(source, file), doc)
+  })
+}

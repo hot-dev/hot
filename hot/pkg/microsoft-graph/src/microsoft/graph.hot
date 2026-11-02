@@ -1,0 +1,59 @@
+::microsoft::graph ns
+meta {
+    doc: """
+    Microsoft Graph v1.0 foundation shared by the microsoft-* packages
+    (onedrive, sharepoint, ...): Entra ID credential resolution, a
+    per-run token cache, national clouds, the authenticated request
+    helper, OData query building, `@odata.nextLink` paging, JSON
+    batching, Graph-shaped errors with retry classification
+    (`is-retryable`; backoff is left to Hot's run retry policies), and
+    change-notification subscriptions.
+
+    **Credentials** come from context by default, checked in order:
+
+    1. `microsoft.access.token` - a ready access token you manage
+    2. `microsoft.oauth.refresh-token` + `microsoft.client.id` - a
+       user's delegated refresh token (from the auth-code + PKCE flow in
+       `::microsoft::graph::oauth`); add `microsoft.client.secret` for a
+       confidential (web) app
+    3. `microsoft.client.private-key` + `microsoft.client.certificate`
+       (or `microsoft.client.thumbprint`) + `microsoft.client.id` +
+       `microsoft.tenant.id` - app-only, certificate credential
+    4. `microsoft.client.secret` + `microsoft.client.id` +
+       `microsoft.tenant.id` - app-only, client secret
+
+    Every request helper also takes an `opts` Map whose credential keys
+    (`token`, `refresh-token`, `client-id`, `client-secret`,
+    `private-key`, `certificate`, `thumbprint`, `tenant-id`, `cloud`,
+    `scopes`) override context for that one call, which is how
+    multi-tenant apps act for many users and tenants.
+
+    **Namespaces**
+
+    - `::microsoft::graph::auth` - credential resolution, scopes, token cache, certificate assertions
+    - `::microsoft::graph::oauth` - `authorize-url` (PKCE), `exchange-code`, refresh, client credentials
+    - `::microsoft::graph::api` - `request` / `json`, `HttpError`, `is-retryable`, OData queries, paging, `batch`
+    - `::microsoft::graph::subscriptions` - change-notification subscriptions, webhook validation and parsing
+    - `::microsoft::graph::users` - `/me` and `/users/{id}` basics
+    """
+}
+
+API_VERSION "v1.0"
+DEFAULT_CLOUD "global"
+DEFAULT_TENANT "common"
+
+// National cloud endpoints, from https://learn.microsoft.com/graph/deployments.
+// GCC (moderate) tenants use the global endpoints.
+CLOUDS {
+    global: {graph: "https://graph.microsoft.com", login: "https://login.microsoftonline.com"},
+    us-gov: {graph: "https://graph.microsoft.us", login: "https://login.microsoftonline.us"},
+    us-dod: {graph: "https://dod-graph.microsoft.us", login: "https://login.microsoftonline.us"},
+    china: {graph: "https://microsoftgraph.chinacloudapi.cn", login: "https://login.chinacloudapi.cn"}
+}
+
+// Tenant segments that name an audience rather than one tenant. They work
+// for delegated sign-in but not for app-only (client credentials) tokens.
+MULTI_TENANT_SEGMENTS ["common", "organizations", "consumers"]
+
+// OpenID Connect scopes: never prefixed with the Graph resource.
+OIDC_SCOPES ["openid", "profile", "email", "offline_access"]

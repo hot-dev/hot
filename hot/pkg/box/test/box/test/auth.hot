@@ -1,0 +1,301 @@
+::box::test::auth ns
+meta ["test"]
+
+// Hermetic: no box.* context is set here, and nothing touches the network.
+
+::auth ::box::auth
+::fx ::box::test::fixtures
+::b64 ::hot::base64
+::hex ::hot::hex
+
+APP {client-id: "app-client", client-secret: "app-secret"}
+
+test-merge-sources-primary-opts-replace-context
+meta ["test"] fn () {
+    ctx {token: "ctx-token", client-id: "ctx-client", client-secret: "ctx-secret", user-id: "111", token-store: "tokens"}
+    picked ::auth/merge-sources({account: "tenant-1"}, ctx)
+    assert-eq("tenant-1", picked.account)
+    assert(is-null(picked.token), "the context access token does not leak into per-call credentials")
+    assert(is-null(picked.user-id), "the context subject does not leak either")
+    assert-eq("ctx-client", picked.client-id, "the app's client id still fills in")
+    assert-eq("ctx-secret", picked.client-secret, "and its secret")
+    assert-eq("tokens", picked.token-store, "and the keeper store name")
+}
+
+test-merge-sources-own-client-id-skips-context-secret
+meta ["test"] fn () {
+    ctx {client-id: "ctx-client", client-secret: "ctx-secret"}
+    picked ::auth/merge-sources({client-id: "other", client-secret: "other-secret", enterprise-id: "9"}, ctx)
+    assert-eq("other", picked.client-id)
+    assert-eq("other-secret", picked.client-secret)
+}
+
+test-merge-sources-subject-override
+meta ["test"] fn () {
+    ctx {client-id: "c", client-secret: "s", enterprise-id: "9", user-id: null}
+    as-user ::auth/merge-sources({user-id: "42"}, ctx)
+    assert-eq("42", as-user.user-id)
+    assert-eq("9", as-user.enterprise-id)
+    ctx2 {client-id: "c", client-secret: "s", user-id: "42"}
+    as-ent ::auth/merge-sources({enterprise-id: "77"}, ctx2)
+    assert-eq("77", as-ent.enterprise-id)
+    assert(is-null(as-ent.user-id), "an enterprise subject clears the user subject")
+    assert-eq(ctx, ::auth/merge-sources({}, ctx), "nothing in opts: context as-is")
+}
+
+test-credentials-token-wins
+meta ["test"] fn () {
+    creds ::auth/credentials-from({token: " dev-token ", ...APP, enterprise-id: "1"})
+    assert-eq("token", creds.kind)
+    assert-eq("dev-token", creds.token)
+}
+
+test-credentials-ccg-enterprise-and-user
+meta ["test"] fn () {
+    ent ::auth/credentials-from({...APP, enterprise-id: "123"})
+    assert-eq("ccg", ent.kind)
+    assert-eq({type: "enterprise", id: "123"}, ent.subject)
+    usr ::auth/credentials-from({...APP, enterprise-id: "123", user-id: "456"})
+    assert-eq({type: "user", id: "456"}, usr.subject, "a user subject wins over the enterprise")
+}
+
+test-credentials-ccg-needs-subject
+meta ["test"] fn () {
+    missing ::auth/credentials-from(APP)
+    assert(is-err(missing))
+    assert(contains(err-message(missing), "needs a subject"))
+}
+
+test-credentials-none
+meta ["test"] fn () {
+    none ::auth/credentials-from({})
+    assert(is-err(none))
+    assert(contains(err-message(none), "no credentials configured"))
+    blank ::auth/credentials-from({token: "  ", refresh-token: ""})
+    assert(is-err(blank), "blank values count as unset")
+}
+
+test-credentials-refresh-token-needs-a-home
+meta ["test"] fn () {
+    lost ::auth/credentials-from({...APP, refresh-token: "r1"})
+    assert(is-err(lost), "a bare refresh token is refused: its replacement would be lost")
+    assert(contains(err-message(lost), "single-use"))
+    cb (tokens) { true }
+    ok ::auth/credentials-from({...APP, refresh-token: "r1", on-refresh: cb})
+    assert-eq("refresh", ok.kind)
+    assert-eq("r1", ok.refresh-token)
+    no-app ::auth/credentials-from({refresh-token: "r1", on-refresh: cb})
+    assert(is-err(no-app), "a refresh needs the app keys")
+}
+
+test-credentials-keeper
+meta ["test"] fn () {
+    kept ::auth/credentials-from({...APP, account: "tenant-9", refresh-token: "seed", token-store: "my-tokens"})
+    assert-eq("keeper", kept.kind)
+    assert-eq("tenant-9", kept.account)
+    assert-eq("seed", kept.seed-refresh-token)
+    assert-eq("my-tokens", kept.store)
+    assert(is-err(::auth/credentials-from({account: "x"})), "the keeper needs the app keys")
+}
+
+test-ccg-body
+meta ["test"] fn () {
+    body ::auth/ccg-body("cid", "csecret", {type: "enterprise", id: "123"})
+    assert-eq("client_credentials", body.grant_type)
+    assert-eq("cid", body.client_id)
+    assert-eq("csecret", body.client_secret)
+    assert-eq("enterprise", body.box_subject_type)
+    assert-eq("123", body.box_subject_id)
+    assert(not(in("scope", keys(body))), "no null scope is sent")
+}
+
+test-jwt-claims
+meta ["test"] fn () {
+    claims ::auth/jwt-claims("cid", {type: "user", id: "456"}, "0123456789abcdef-jti", 1000)
+    assert-eq("cid", claims.iss)
+    assert-eq("456", claims.sub)
+    assert-eq("user", claims.box_sub_type)
+    assert-eq("https://api.box.com/oauth2/token", claims.aud)
+    assert-eq("0123456789abcdef-jti", claims.jti)
+    assert-eq(1045, claims.exp, "45 s lifetime, under Box's 60 s maximum")
+}
+
+test-jwt-header
+meta ["test"] fn () {
+    assert-eq({alg: "RS256", typ: "JWT", kid: "k1"}, ::auth/jwt-header("k1"))
+    assert-eq({alg: "RS256", typ: "JWT"}, ::auth/jwt-header(null), "no null kid")
+}
+
+test-sign-assertion-verifies-with-the-public-key
+meta ["test"] fn () {
+    claims ::auth/jwt-claims("cid", {type: "enterprise", id: "123"}, Str(Uuid()), ::jwt/now-seconds())
+    token ::auth/sign-assertion(claims, "pubkey-1", ::fx/TEST_RSA_PEM)
+    assert(not(is-err(token)), "signing with a PKCS#8 key works")
+    decoded ::jwt/decode(token)
+    assert-eq("pubkey-1", get(decoded.header, "kid"))
+    assert-eq("RS256", get(decoded.header, "alg"))
+    n ::hex/decode(::fx/TEST_RSA_MODULUS_HEX)
+    verified ::jwt/verify-rs256(token, n, Bytes([1, 0, 1]))
+    assert(not(is-err(verified)), "the assertion verifies against the key's modulus")
+    assert-eq("enterprise", verified.box_sub_type)
+}
+
+test-jwt-body
+meta ["test"] fn () {
+    body ::auth/jwt-body("a.b.c", "cid", "cs")
+    assert-eq("urn:ietf:params:oauth:grant-type:jwt-bearer", body.grant_type)
+    assert-eq("a.b.c", body.assertion)
+    assert-eq("cid", body.client_id)
+    assert-eq("cs", body.client_secret)
+}
+
+config-json fn (key: Str): Str {
+    to-json({
+        boxAppSettings: {
+            clientID: "jwt-client",
+            clientSecret: "jwt-secret",
+            appAuth: {publicKeyID: "kid-7", privateKey: key, passphrase: "pw"}
+        },
+        enterpriseID: "555"
+    })
+}
+
+test-parse-jwt-config
+meta ["test"] fn () {
+    creds ::auth/parse-jwt-config(config-json(::fx/TEST_RSA_PEM), null, {})
+    assert-eq("jwt", creds.kind)
+    assert-eq("jwt-client", creds.client-id)
+    assert-eq("kid-7", creds.key-id)
+    assert-eq({type: "enterprise", id: "555"}, creds.subject, "enterpriseID from the config")
+    as-user ::auth/parse-jwt-config(config-json(::fx/TEST_RSA_PEM), null, {user-id: "42"})
+    assert-eq({type: "user", id: "42"}, as-user.subject)
+}
+
+test-parse-jwt-config-rejects-encrypted-key
+meta ["test"] fn () {
+    encrypted "-----BEGIN ENCRYPTED PRIVATE KEY-----\nMIIFHDBOBgkqhkiG9w0BBQ0wQTApBgkqhkiG9w0BBQwwHAQI\n-----END ENCRYPTED PRIVATE KEY-----"
+    rejected ::auth/parse-jwt-config(config-json(encrypted), null, {})
+    assert(is-err(rejected))
+    assert-eq("encrypted_private_key", err-value(rejected).error-code)
+    assert(contains(err-message(rejected), "openssl pkcs8"), "the error says how to convert the key")
+    assert(not(contains(err-message(rejected), "MIIF")), "the key never appears in the error")
+    // The override key replaces the encrypted one.
+    fixed ::auth/parse-jwt-config(config-json(encrypted), ::fx/TEST_RSA_PEM, {})
+    assert-eq("jwt", fixed.kind)
+}
+
+test-parse-jwt-config-errors
+meta ["test"] fn () {
+    assert(is-err(::auth/parse-jwt-config("{not json", null, {})))
+    assert(is-err(::auth/parse-jwt-config(to-json({boxAppSettings: {}}), ::fx/TEST_RSA_PEM, {enterprise-id: "1"})))
+    no-subject to-json({boxAppSettings: {clientID: "c", clientSecret: "s", appAuth: {privateKey: ::fx/TEST_RSA_PEM}}})
+    assert(contains(err-message(::auth/parse-jwt-config(no-subject, null, {})), "needs a subject"))
+}
+
+test-normalize-pem-unescapes-newlines
+meta ["test"] fn () {
+    escaped "-----BEGIN PRIVATE KEY-----\\nABC\\n-----END PRIVATE KEY-----\\n"
+    assert-eq("-----BEGIN PRIVATE KEY-----\nABC\n-----END PRIVATE KEY-----", ::auth/normalize-pem(escaped))
+}
+
+test-pem-problem
+meta ["test"] fn () {
+    assert(is-null(::auth/pem-problem(::fx/TEST_RSA_PEM)))
+    assert(is-some(::auth/pem-problem("")))
+    assert(is-some(::auth/pem-problem("not a key")))
+    assert(contains(::auth/pem-problem("-----BEGIN ENCRYPTED PRIVATE KEY-----"), "encrypted"))
+}
+
+test-token-cache-key
+meta ["test"] fn () {
+    ccg {kind: "ccg", client-id: "c", client-secret: "s", subject: {type: "enterprise", id: "1"}}
+    other {...ccg, subject: {type: "user", id: "2"}}
+    k1 ::auth/token-cache-key(ccg)
+    assert(starts-with(k1, "box.token-cache."))
+    assert(ne(k1, ::auth/token-cache-key(other)), "subjects are cached separately")
+    assert(is-null(::auth/token-cache-key({kind: "token", token: "t"})), "explicit tokens are never cached")
+    keeper ::auth/token-cache-key({kind: "keeper", account: "a", store: null})
+    assert(ne(keeper, ::auth/token-cache-key({kind: "keeper", account: "b", store: null})))
+}
+
+test-cache-entry
+meta ["test"] fn () {
+    entry ::auth/cache-entry({access_token: "at", expires_in: 3600, refresh_token: "rt2"}, 1000)
+    assert-eq("at", entry.access-token)
+    assert-eq(add(1000, mul(3540, 1000)), entry.expires-at, "expires 60 s early")
+    assert-eq("rt2", entry.refresh-token, "the rotated refresh token is kept for the run")
+    plain ::auth/cache-entry({access_token: "at", expires_in: "100"}, 0)
+    assert(not(in("refresh-token", keys(plain))), "no null refresh token")
+    assert-eq(40000, plain.expires-at, "a string expires_in is parsed")
+    assert(::auth/is-fresh(entry, 2000))
+    assert(not(::auth/is-fresh(entry, add(entry.expires-at, 1))))
+    assert(not(::auth/is-fresh(null, 0)))
+}
+
+test-token-error-from-oauth-payload
+meta ["test"] fn () {
+    e ::auth/token-error("box: token request failed", {status: 400, body: {error: "invalid_grant", error_description: "Refresh token has expired"}})
+    assert-eq("box: token request failed: invalid_grant (Refresh token has expired)", e.message)
+    assert-eq("invalid_grant", e.error-code)
+    assert-eq(400, e.status)
+    transport ::auth/token-error("box: token request failed", "::hot::http/request: request failed: dns error")
+    assert(contains(transport.message, "dns error"))
+}
+
+// ---------------------------------------------------------------------------
+// The live resolver (opts over context). Context is set and then cleared
+// within each test.
+// ---------------------------------------------------------------------------
+
+clear-box-ctx fn (): Bool {
+    ::hot::ctx/set({"box.access.token": "", "box.client.id": "", "box.client.secret": "", "box.enterprise.id": "", "box.user.id": ""})
+    true
+}
+
+test-resolve-uses-context-when-opts-are-empty
+meta ["test"] fn () {
+    ::hot::ctx/set({"box.client.id": "ctx-app", "box.client.secret": "ctx-secret", "box.enterprise.id": "42"})
+    creds ::box::api/resolve({})
+    clear-box-ctx()
+    assert-eq("ccg", creds.kind)
+    assert-eq("ctx-app", creds.client-id)
+    assert-eq({type: "enterprise", id: "42"}, creds.subject)
+}
+
+test-resolve-opts-override-context-without-writing-it
+meta ["test"] fn () {
+    ::hot::ctx/set({"box.access.token": "ctx-token", "box.client.id": "ctx-app", "box.client.secret": "ctx-secret", "box.enterprise.id": "42"})
+    tenant ::box::api/resolve({token: "tenant-token"})
+    as-user ::box::api/resolve({user-id: "7"})
+    other-app ::box::api/resolve({client-id: "app-2", client-secret: "s2", enterprise-id: "9"})
+    ctx-token-after ::hot::ctx/get("box.access.token")
+    ctx-subject-after ::hot::ctx/get("box.user.id")
+    clear-box-ctx()
+    assert-eq("tenant-token", tenant.token, "a per-call token wins")
+    assert-eq("token", as-user.kind, "context precedence still applies (its access token)")
+    assert-eq("app-2", other-app.client-id)
+    assert-eq({type: "enterprise", id: "9"}, other-app.subject)
+    assert-eq("ctx-token", ctx-token-after, "resolving never writes per-call credentials into context")
+    assert(::auth/is-blank-value(ctx-subject-after), "nor the per-call subject")
+}
+
+test-resolve-missing-credentials
+meta ["test"] fn () {
+    clear-box-ctx()
+    missing ::box::api/resolve({})
+    assert(is-err(missing))
+    assert(contains(err-message(missing), "no credentials configured"))
+}
+
+test-app-keys
+meta ["test"] fn () {
+    ::hot::ctx/set({"box.client.id": "ctx-app", "box.client.secret": "ctx-secret"})
+    from-ctx ::auth/app-keys({})
+    from-opts ::auth/app-keys({client-id: "o", client-secret: "os"})
+    half ::auth/app-keys({client-id: "other-app"})
+    clear-box-ctx()
+    assert-eq({client-id: "ctx-app", client-secret: "ctx-secret"}, from-ctx)
+    assert-eq({client-id: "o", client-secret: "os"}, from-opts)
+    assert(is-err(half), "another app's id never borrows this app's context secret")
+    assert(is-err(::auth/app-keys({})), "no keys: a clear error")
+}
