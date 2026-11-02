@@ -108,6 +108,24 @@ f fn (n: Int): Str {
     reduce(range(n), (acc, i) { concat(acc, `item-${i}-`) }, "")
 }
 length(f(200))"#,
+            // --- Results that change kind between Int and Dec, per element ---
+            r#"::t ns
+f fn (n: Int): Dec {
+    range(1, add(n, 1))
+    |> map((x) { div(x, 2) })
+    |> map((d) { mul(d, 3) })
+    |> reduce((acc, x) { add(acc, x) }, 0)
+}
+f(50)"#,
+            // --- A Str accumulator replaced for every element, newest first ---
+            r#"::t ns
+f fn (n: Int): Str {
+    range(1, add(n, 1))
+    |> map((i) { `item-${i}` })
+    |> map((s) { concat(s, "!") })
+    |> reduce((acc, s) { concat(s, acc) }, "")
+}
+f(10)"#,
             // --- Some/All terminals ---
             r#"::t ns
 f fn (n: Int): Bool {
