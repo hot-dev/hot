@@ -835,6 +835,17 @@ pub struct VirtualMachine {
     task_id: Option<uuid::Uuid>,
 }
 
+/// The types of a typed signature key: `::ns/name/1:::other/Type,Str` gives
+/// `::other/Type,Str`. Names and types both contain `/` and `:`, but only the
+/// arity is all digits, so the types start after `/<arity>:`. `None` for an
+/// untyped key (`::ns/name/1`) or a bare name (`::ns/name`).
+fn signature_key_types(key: &str) -> Option<&str> {
+    key.match_indices('/').find_map(|(slash, _)| {
+        let (arity, types) = key[slash + 1..].split_once(':')?;
+        (!arity.is_empty() && arity.bytes().all(|b| b.is_ascii_digit())).then_some(types)
+    })
+}
+
 /// Split the types of a typed signature key, `Map<Str, Int>,Str?`, at the
 /// commas between parameters.
 fn split_param_types(types: &str) -> Vec<String> {
@@ -7246,17 +7257,7 @@ impl VirtualMachine {
             if fid != function_id {
                 continue;
             }
-            // Function-signature keys look like `::ns/name/arity` (untyped)
-            // or `::ns/name/arity:Type1,Type2` (typed). Names contain `:`
-            // (namespaces use `::`), so we must locate the typed-signature
-            // colon as the *first* colon after the last `/`.
-            let last_slash = match key.rfind('/') {
-                Some(i) => i,
-                None => continue,
-            };
-            let after_slash = &key[last_slash + 1..];
-            if let Some(colon_off) = after_slash.find(':') {
-                let types_str = &after_slash[colon_off + 1..];
+            if let Some(types_str) = signature_key_types(key) {
                 let types = split_param_types(types_str);
                 // Skip pure-`Any` signatures — they don't constrain dispatch
                 // and would always "match" any arg, causing useless work.
@@ -7282,30 +7283,39 @@ impl VirtualMachine {
     }
 
     /// A parameter's written type as the qualified path arrows register under,
-    /// resolved in the function's `namespace` the way the compiler resolves an
-    /// arrow's target: a short name means something only in its own scope.
-    /// Unions, generics and nullables are no arrow's target, so they stay as
-    /// written.
+    /// resolved the way the compiler resolves an arrow's target: a short name
+    /// means something only in the function's `namespace`, and a qualified one
+    /// may name a type its namespace imports. The compiler has already resolved
+    /// namespace aliases. Unions, generics and nullables are no arrow's target,
+    /// so they stay as written.
     fn param_type_path(&self, namespace: &str, written: &str) -> String {
-        if written == "Any" || written.starts_with("::") || written.contains(['<', '|', '?', ' ']) {
+        if written == "Any" || written.contains(['<', '|', '?', ' ']) {
             return written.to_owned();
         }
-        let (name, variant) = match written.split_once('.') {
-            Some((name, variant)) => (name, Some(variant)),
-            None => (written, None),
+        let (scope, unscoped) = match written.rsplit_once('/') {
+            Some((scope, unscoped)) => (scope, unscoped),
+            None => (namespace, written),
         };
-        let local = format!("{namespace}/{name}");
+        let (name, variant) = match unscoped.split_once('.') {
+            Some((name, variant)) => (name, Some(variant)),
+            None => (unscoped, None),
+        };
+        let local = format!("{scope}/{name}");
         let variables = self
             .program
             .namespaces
             .namespaces
-            .get(namespace)
+            .get(scope)
             .map(|info| &info.variables);
         let path = if variables.is_some_and(|vars| vars.contains_key(&local)) {
             local
         } else if let Some(imported) = variables.and_then(|vars| vars.get(name)) {
             imported.name.clone()
-        } else if let Some(core) = self.core_variables.get(name) {
+        } else if let Some(core) = self
+            .core_variables
+            .get(name)
+            .filter(|_| !written.starts_with("::"))
+        {
             format!("{}/{}", core.namespace_path, name)
         } else {
             local
