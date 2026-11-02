@@ -137,8 +137,8 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/web-search/test",
     "./hot/pkg/whatsapp/test",
     "./hot/pkg/whisper/test",
-    "./hot/pkg/xero/test",
     "./hot/pkg/xai/test",
+    "./hot/pkg/xero/test",
     "./hot/pkg/zendesk/test"
 ]
 hot.project.hot-pkg-all.test.capture true
