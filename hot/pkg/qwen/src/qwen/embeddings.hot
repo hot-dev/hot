@@ -89,9 +89,17 @@ meta {
     ```
     """
 }
-fn (request: EmbeddingRequest): EmbeddingResponse | HttpError {
-    response ::qwen::api/request("POST", "/embeddings", {}, request-body(request))
-    if(is-ok-response(response), EmbeddingResponse(response.body), err(HttpError(response)))
+fn
+(request: EmbeddingRequest): EmbeddingResponse | HttpError {
+    create(request, {})
+},
+(request: EmbeddingRequest, opts: Map): EmbeddingResponse | HttpError {
+    response ::qwen::api/request("POST", "/embeddings", {}, request-body(request), opts)
+    cond {
+        is-err(response) => { response }
+        is-ok-response(response) => { EmbeddingResponse(response.body) }
+        => { err(HttpError(response)) }
+    }
 }
 
 request-body
@@ -120,19 +128,29 @@ meta {
     ```
     """
 }
-fn (text: Str): Vec<Dec> {
-    embed(text, "text-embedding-v4")
+fn
+(text: Str): Vec<Dec> {
+    embed(text, "text-embedding-v4", {})
+},
+(text: Str, opts: Map): Vec<Dec> {
+    embed(text, "text-embedding-v4", opts)
 },
 (text: Str, model: Str): Vec<Dec> {
+    embed(text, model, {})
+},
+(text: Str, model: Str, opts: Map): Vec<Dec> {
     response create(EmbeddingRequest({
         input: text,
         model: model
-    }))
+    }), opts)
 
     // An Err (bad key, wrong region, ...) propagates instead of
     // collapsing into an empty vector.
-    data response.data
-    if(is-empty(data), [], data[0].embedding)
+    cond {
+        is-err(response) => { response }
+        is-empty(response.data) => { [] }
+        => { response.data[0].embedding }
+    }
 }
 
 embed-batch
@@ -149,16 +167,26 @@ meta {
     ```
     """
 }
-fn (texts: Vec<Str>): Vec<Vec<Dec>> {
-    embed-batch(texts, "text-embedding-v4")
+fn
+(texts: Vec<Str>): Vec<Vec<Dec>> {
+    embed-batch(texts, "text-embedding-v4", {})
+},
+(texts: Vec<Str>, opts: Map): Vec<Vec<Dec>> {
+    embed-batch(texts, "text-embedding-v4", opts)
 },
 (texts: Vec<Str>, model: Str): Vec<Vec<Dec>> {
+    embed-batch(texts, model, {})
+},
+(texts: Vec<Str>, model: Str, opts: Map): Vec<Vec<Dec>> {
     response create(EmbeddingRequest({
         input: texts,
         model: model
-    }))
+    }), opts)
 
-    map(response.data, %.embedding)
+    cond {
+        is-err(response) => { response }
+        => { map(response.data, %.embedding) }
+    }
 }
 
 // ============================================================================

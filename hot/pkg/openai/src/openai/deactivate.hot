@@ -44,9 +44,17 @@ deactivate-certificates-organization
 meta {
     doc: """POST /organization/certificates/deactivate - Deactivate certificates for organization"""
 }
-fn (request: DeactivateOrganizationCertificatesRequest): DeactivateOrganizationCertificatesResponse {
-  response api-request("POST", `${::openai::api/base-url()}/organization/certificates/deactivate`, {}, request)
-  if(is-ok-response(response), DeactivateOrganizationCertificatesResponse(response.body), err(HttpError(response)))
+fn
+(request: DeactivateOrganizationCertificatesRequest): DeactivateOrganizationCertificatesResponse {
+  deactivate-certificates-organization(request, {})
+},
+(request: DeactivateOrganizationCertificatesRequest, opts: Map): DeactivateOrganizationCertificatesResponse {
+  response api-request("POST", "/organization/certificates/deactivate", {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { DeactivateOrganizationCertificatesResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 DeactivateProjectCertificatesRequest type {
@@ -66,7 +74,15 @@ deactivate-certificates-project
 meta {
     doc: """POST /organization/projects/{project_id}/certificates/deactivate - Deactivate certificates for project"""
 }
-fn (project-id: Str, request: DeactivateProjectCertificatesRequest): DeactivateProjectCertificatesResponse {
-  response api-request("POST", `${::openai::api/base-url()}/organization/projects/${project-id}/certificates/deactivate`, {}, request)
-  if(is-ok-response(response), DeactivateProjectCertificatesResponse(response.body), err(HttpError(response)))
+fn
+(project-id: Str, request: DeactivateProjectCertificatesRequest): DeactivateProjectCertificatesResponse {
+  deactivate-certificates-project(project-id, request, {})
+},
+(project-id: Str, request: DeactivateProjectCertificatesRequest, opts: Map): DeactivateProjectCertificatesResponse {
+  response api-request("POST", `/organization/projects/${project-id}/certificates/deactivate`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { DeactivateProjectCertificatesResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

@@ -239,3 +239,24 @@ meta ["test"] fn () {
     assert(is-err(::jwt/verify(KNOWN_TOKEN, SECRET, {max-age: 300})),
         "max-age without an iat claim must fail")
 }
+
+// ============================================================================
+// Masking returns values unchanged
+// ============================================================================
+
+test-sign-and-verify-return-values-unchanged-after-masking
+meta ["test"] fn () {
+    ::hot::ctx/mark-secret(SECRET)
+    assert-eq(KNOWN_TOKEN, ::jwt/sign({sub: "42", name: "Ada"}, SECRET), "a marked token is still the real token")
+    assert-eq("42", ::jwt/verify(KNOWN_TOKEN, SECRET).sub)
+    token ::jwt/sign({sub: "42"}, TEST_RSA_PEM, "RS256")
+    assert-eq(3, length(split(token, ".")))
+}
+
+test-sign-err-passes-through-marking
+meta ["test"] fn () {
+    bad ::jwt/sign({sub: "42"}, "not a pem", "RS256")
+    assert(is-err(bad), "a bad key is still an Err, not halted by marking")
+    unsupported ::jwt/sign({sub: "42"}, SECRET, "none")
+    assert(is-err(unsupported))
+}

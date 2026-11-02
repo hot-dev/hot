@@ -102,9 +102,17 @@ create-session
 meta {
     doc: """POST /realtime/sessions - Create a realtime session for audio/text conversations with GPT-4o models."""
 }
-fn (request: CreateRealtimeSessionRequest): CreateRealtimeSessionResponse {
-  response api-request("POST", `${::openai::api/base-url()}/realtime/sessions`, {}, request)
-  if(is-ok-response(response), CreateRealtimeSessionResponse(response.body), err(HttpError(response)))
+fn
+(request: CreateRealtimeSessionRequest): CreateRealtimeSessionResponse {
+  create-session(request, {})
+},
+(request: CreateRealtimeSessionRequest, opts: Map): CreateRealtimeSessionResponse {
+  response api-request("POST", "/realtime/sessions", {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { CreateRealtimeSessionResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 CreateRealtimeTranscriptionSessionRequest type {
@@ -130,7 +138,15 @@ create-transcription-session
 meta {
     doc: """POST /realtime/transcription_sessions - Create a realtime transcription session for live audio-to-text."""
 }
-fn (request: CreateRealtimeTranscriptionSessionRequest): CreateRealtimeTranscriptionSessionResponse {
-  response api-request("POST", `${::openai::api/base-url()}/realtime/transcription_sessions`, {}, request)
-  if(is-ok-response(response), CreateRealtimeTranscriptionSessionResponse(response.body), err(HttpError(response)))
+fn
+(request: CreateRealtimeTranscriptionSessionRequest): CreateRealtimeTranscriptionSessionResponse {
+  create-transcription-session(request, {})
+},
+(request: CreateRealtimeTranscriptionSessionRequest, opts: Map): CreateRealtimeTranscriptionSessionResponse {
+  response api-request("POST", "/realtime/transcription_sessions", {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { CreateRealtimeTranscriptionSessionResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

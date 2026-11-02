@@ -1,7 +1,40 @@
 ::openai::api ns
+meta {
+    doc: """
+    Transport for the OpenAI API and OpenAI-compatible servers: bearer auth,
+    the base URL, the one credential resolver, and explicit endpoints.
+
+    **Per-call credentials.** Every typed function takes a trailing
+    `opts: Map`, which wins over ctx for that call. Nothing is kept in ctx,
+    so one run can serve many tenants and parallel flows don't share keys.
+
+    - `api-key`: overrides `openai.api.key`. Present but null or blank is an
+      Err, never a fallback to ctx.
+    - `base-url`: overrides `openai.base.url`, for a proxy or gateway. It
+      needs `api-key` in `opts` too: the ctx key is never sent to a per-call
+      URL. A base URL and key both set in ctx work as usual.
+    - `endpoint`: an `Endpoint` to use instead, on its own. This is the
+      explicit form: it reads no ctx, and a keyless `Endpoint` sends no
+      `Authorization` header, which is how local servers work.
+
+    `resolve` always returns an `Endpoint`, and every request goes out through
+    one, so the two forms can't drift apart.
+
+    **Full URLs.** A `path` or `url` that is a full URL gets the key only when
+    it is on the call's base URL, or when `opts` carries its own `api-key`. A
+    URL whose host can't be read safely (userinfo, backslashes, control
+    characters) is always refused.
+
+    **Call records.** A key passed in `opts` or an `Endpoint` is masked in the
+    run's call records, including inside strings like `Bearer ${key}`. A key
+    shorter than 8 bytes is masked only as a whole value. Mark a credential
+    you put in `Endpoint.headers` yourself with `::hot::ctx/mark-secret`.
+    """
+}
 
 // Namespace alias for ctx module
 ::ctx ::hot::ctx
+::re  ::hot::regex
 
 http-request ::hot::http/request
 http-request-stream ::hot::http/request-stream
@@ -24,118 +57,18 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   })
 }
 
-request
-meta {
-    doc: """Make an HTTP request with pre-filled service headers. Additional headers can be provided to merge/override defaults.""",
-    ctx: {"openai.api.key": {}}
-}
-fn
-(method: Str, url: Str): HttpResponse {
-  request(method, url, {}, "")
-},
-(method: Str, url: Str, additional-headers: Map): HttpResponse {
-  request(method, url, additional-headers, "")
-},
-// 4-arity: use ctx api key (default) — delegates to 5-arity
-(method: Str, url: Str, additional-headers: Map, body: Any): HttpResponse {
-  request(method, url, additional-headers, body, ::ctx/get("openai.api.key"))
-},
-// 5-arity: explicit api key override
-(method: Str, url: Str, additional-headers: Map, body: Any, api-key: Str): HttpResponse {
-  default-headers {
-    Authorization: `Bearer ${api-key}`
+non-blank
+meta { doc: """`value`, or null when it is null or a blank Str.""" }
+fn (value: Any): Any {
+  cond {
+    is-str(value) => { if(is-empty(trim(value)), null, value) }
+    => { value }
   }
-
-  match body {
-    "" | Null => {
-      final-headers {...default-headers, ...additional-headers}
-      ::hot::http/request(HttpRequest({
-        method,
-        url,
-        headers: final-headers
-      }))
-    }
-
-    Bytes => {
-      final-headers {...default-headers, ...additional-headers}
-      ::hot::http/request(HttpRequest({
-        method,
-        url,
-        headers: final-headers,
-        body: body
-      }))
-    }
-
-    _ => {
-      headers {...default-headers, Content-Type: "application/json"}
-      final-headers {...headers, ...additional-headers}
-      ::hot::http/request(HttpRequest({
-        method,
-        url,
-        headers: final-headers,
-        body: to-json(untype(body))
-      }))
-    }
-  }
-}
-
-request-stream
-meta {
-    doc: """Make a streaming HTTP request with pre-filled service headers. Returns a response with an iterator body for SSE streams.""",
-    ctx: {"openai.api.key": {}}
-}
-fn
-(method: Str, url: Str, additional-headers: Map, body: Any): StreamingHttpResponse {
-  request-stream(method, url, additional-headers, body, "sse")
-},
-// 5-arity: use ctx api key (default) — delegates to 6-arity
-(method: Str, url: Str, additional-headers: Map, body: Any, format: Str): StreamingHttpResponse {
-  request-stream(method, url, additional-headers, body, format, ::ctx/get("openai.api.key"))
-},
-// 6-arity: explicit api key override
-(method: Str, url: Str, additional-headers: Map, body: Any, format: Str, api-key: Str): StreamingHttpResponse {
-  default-headers {
-    Authorization: `Bearer ${api-key}`
-  }
-
-  headers if(eq(body, ""), default-headers, {...default-headers, Content-Type: "application/json"})
-  final-headers {...headers, ...additional-headers}
-
-  ::hot::http/request-stream(HttpRequest({
-    method,
-    url,
-    headers: final-headers,
-    body: to-json(untype(body))
-  }), format)
 }
 
 // ============================================================================
-// Base URL and endpoints (OpenAI-compatible servers)
+// URLs
 // ============================================================================
-
-base-url
-meta {
-    doc: """
-    The base URL every `::openai::*` function calls. Reads the
-    `openai.base.url` ctx variable and falls back to
-    `https://api.openai.com/v1` (`::openai/BASE_URL`). A trailing slash is
-    dropped, so `https://gateway.example.com/v1/` works too.
-
-    Set it to route the whole package through a gateway or proxy that
-    speaks the OpenAI API. To call several OpenAI-compatible servers from
-    one program, build an `Endpoint` per server instead.
-
-    **Example**
-
-    ```hot
-    ::openai::api/base-url()  // => "https://api.openai.com/v1"
-    ```
-    """,
-    ctx: {"openai.base.url": {required: false, default: "https://api.openai.com/v1", secret: false}}
-}
-fn (): Str {
-  normalize-base-url(::ctx/get("openai.base.url", ::openai/BASE_URL))
-}
 
 normalize-base-url
 meta {
@@ -160,12 +93,80 @@ fn (url: Str?): Str {
   }
 }
 
+url-parts
+meta {
+    doc: """
+    The `{scheme, host, port, path}` of an `http(s)` URL (pure), with scheme
+    and host lower-cased, or null unless the authority is plainly a host and
+    optional port. Userinfo, backslashes, extra slashes, whitespace and control
+    characters all give null: URL parsers disagree on where the host is in
+    those, and a backslash ends the authority in the one that opens the
+    connection, so `https://evil.example\@api.openai.com/` connects to
+    `evil.example`.
+
+    **Example**
+
+    ```hot
+    ::openai::api/url-parts("https://API.openai.com/v1/models").host  // => "api.openai.com"
+    ::openai::api/url-parts("https://user@api.openai.com/")           // => null
+    ```
+    """
+}
+fn (url: Str): Map? {
+  m ::re/capture(url, "(?i)^(https?)://([a-z0-9._-]+|\\[[0-9a-f:.]+\\])((?::[0-9]+)?)(/[^?#\\s\\\\\\x00-\\x1f\\x7f]*|)((?:[?#][^\\s\\\\\\x00-\\x1f\\x7f]*)?)$")
+  cond {
+    is-map(m) => {
+      {
+        scheme: lowercase(m.groups[0]),
+        host: lowercase(m.groups[1]),
+        port: m.groups[2],
+        path: m.groups[3]
+      }
+    }
+    => { null }
+  }
+}
+
+is-on-root
+meta {
+    doc: """
+    True when the full URL `url` is under the base URL `root` (pure): same
+    scheme, host and port, a path inside the root's, and no `..` segments.
+    Hosts match exactly, so `api.openai.com.evil.example` is off the root.
+
+    **Example**
+
+    ```hot
+    ::openai::api/is-on-root("https://api.openai.com/v1/models", "https://api.openai.com/v1")  // => true
+    ::openai::api/is-on-root("https://evil.example/v1/models", "https://api.openai.com/v1")    // => false
+    ```
+    """
+}
+fn (url: Str, root: Str): Bool {
+  target url-parts(url)
+  base url-parts(root)
+  cond {
+    or(is-null(target), is-null(base)) => { false }
+    => {
+      same-origin and(eq(target.scheme, base.scheme), and(eq(target.host, base.host), eq(target.port, base.port)))
+      in-root or(eq(target.path, base.path), starts-with(target.path, `${base.path}/`))
+      dot-segments is-some(::re/first-match(target.path, "(?i)(^|/)(\\.|%2e)(\\.|%2e)(/|$)"))
+      and(same-origin, and(in-root, not(dot-segments)))
+    }
+  }
+}
+
+is-full-url fn (path: Str): Bool {
+  lowered lowercase(path)
+  or(starts-with(lowered, "https://"), starts-with(lowered, "http://"))
+}
+
 join-url
 meta {
     doc: """
     Join an API path onto a base URL without doubling or dropping the
     slash. A `path` that is already an absolute `http://` or `https://`
-    URL is returned unchanged.
+    URL is returned unchanged; `target-url` decides whether it may be sent.
 
     **Example**
 
@@ -179,13 +180,51 @@ meta {
 }
 fn (base: Str, path: Str): Str {
   cond {
-    or(starts-with(path, "https://"), starts-with(path, "http://")) => { path }
+    is-full-url(path) => { path }
     => {
       suffix if(starts-with(path, "/"), path, `/${path}`)
       `${normalize-base-url(base)}${suffix}`
     }
   }
 }
+
+refused-url-error fn (url: Str, ep: Endpoint): Any {
+  parts url-parts(url)
+  destination if(is-some(parts), `${parts.scheme}://${parts.host}`, "a URL whose host cannot be read safely")
+  err(`openai: refusing to send credentials to ${destination}. A full URL must be on the call's base URL (${ep.base-url}), or the call's opts must carry their own api-key.`)
+}
+
+target-url
+meta {
+    doc: """
+    The URL to send a request to, for `path` on `ep` (pure). A relative path
+    is joined onto the base URL. A full URL passes when it is on the base URL
+    or when `ep` holds no credentials, and otherwise only when `own-key` says
+    the key came from the call's own `opts`. An Err for anything else, and
+    always for a URL whose host can't be read safely.
+
+    **Example**
+
+    ```hot
+    ep ::openai::api/endpoint("https://api.openai.com/v1", "k")
+    ::openai::api/target-url(ep, "/models", false)                     // => "https://api.openai.com/v1/models"
+    is-err(::openai::api/target-url(ep, "https://evil.example/", false))  // => true
+    ```
+    """
+}
+fn (ep: Endpoint, path: Str, own-key: Bool): Str {
+  no-credentials and(is-null(non-blank(ep.api-key)), is-empty(or(ep.headers, {})))
+  cond {
+    not(is-full-url(path)) => { join-url(ep.base-url, path) }
+    is-null(url-parts(path)) => { refused-url-error(path, ep) }
+    or(own-key, or(no-credentials, is-on-root(path, ep.base-url))) => { path }
+    => { refused-url-error(path, ep) }
+  }
+}
+
+// ============================================================================
+// Endpoints
+// ============================================================================
 
 Endpoint
 meta {
@@ -203,7 +242,8 @@ meta {
 
     An `Endpoint` is explicit: functions that take one never read the
     `openai.api.key` or `openai.base.url` ctx variables. Build one with
-    `endpoint(...)`, or `default-endpoint()` for the ctx-configured OpenAI.
+    `endpoint(...)`, or `resolve(opts)` for `opts` over ctx over defaults.
+    Any typed function takes one as `{endpoint: ep}` in its `opts`.
     """
 }
 type {
@@ -216,7 +256,8 @@ endpoint
 meta {
     doc: """
     Build an explicit `Endpoint` from a base URL, an optional API key and
-    optional extra headers. Reads no ctx.
+    optional extra headers. Reads no ctx. The key is masked in the run's call
+    records. A blank base URL is an Err, so a key can't end up at a default.
 
     **Example**
 
@@ -231,17 +272,179 @@ meta {
     """
 }
 fn
-(base-url: Str): Endpoint {
+(base-url: Str?): Endpoint {
   endpoint(base-url, null, null)
 },
-(base-url: Str, api-key: Str?): Endpoint {
+(base-url: Str?, api-key: Str?): Endpoint {
   endpoint(base-url, api-key, null)
 },
-(base-url: Str, api-key: Str?, headers: Map?): Endpoint {
-  Endpoint({
-    base-url: normalize-base-url(base-url),
-    api-key: api-key,
-    headers: headers
+(base-url: Str?, api-key: Str?, headers: Map?): Endpoint {
+  ::ctx/mark-secret(api-key)
+  cond {
+    is-null(non-blank(base-url)) => { err("openai: an Endpoint needs a base URL.") }
+    => {
+      Endpoint({
+        base-url: normalize-base-url(base-url),
+        api-key: api-key,
+        headers: headers
+      })
+    }
+  }
+}
+
+explicit-endpoint
+meta {
+    doc: """
+    Internal: the `Endpoint` in `opts.endpoint`, or an Err when it isn't one or
+    comes with keys it would override. A Map with a `base-url` counts: the
+    hot-ai run loop hands `provider-opts` on as plain Maps.
+    """
+}
+fn (opts: Map): Endpoint {
+  ep get(opts, "endpoint")
+  cond {
+    not(or(is-type(ep, Endpoint), is-map(ep))) => {
+      err("openai: endpoint in the call's opts must be an ::openai::api/Endpoint. Build one with ::openai::api/endpoint, or pass base-url and api-key.")
+    }
+
+    or(in("api-key", keys(opts)), in("base-url", keys(opts))) => {
+      err("openai: endpoint in the call's opts can't be combined with api-key or base-url. Put them in the Endpoint.")
+    }
+    => { endpoint(ep.base-url, ep.api-key, ep.headers) }
+  }
+}
+
+with-opts
+meta {
+    doc: """
+    `ep` with a call's `opts` applied (pure), for a provider whose endpoint is
+    already built:
+
+    - `endpoint` in `opts` replaces `ep`.
+    - `api-key` replaces the key. Present but null or blank is an Err.
+    - `base-url` replaces the URL. Without `api-key` it is an Err when `ep`
+      holds a key, which never goes to a per-call URL. A keyless `ep` stays
+      keyless. `ep`'s headers don't follow to a new URL either.
+
+    Empty `opts` give `ep` unchanged. `resolve-from` builds on this, so the
+    rules live in one place.
+
+    **Example**
+
+    ```hot
+    groq ::openai::api/endpoint("https://api.groq.com/openai/v1", "ctx-key")
+    ::openai::api/with-opts(groq, {api-key: "tenant-key"}).api-key  // => "tenant-key"
+    is-err(::openai::api/with-opts(groq, {base-url: "https://x"}))  // => true
+    ```
+    """
+}
+fn (ep: Endpoint, opts: Map): Endpoint {
+  has-own-key in("api-key", keys(opts))
+  own-key non-blank(get(opts, "api-key"))
+  per-call-url non-blank(get(opts, "base-url"))
+  cond {
+    in("endpoint", keys(opts)) => { explicit-endpoint(opts) }
+
+    and(has-own-key, is-null(own-key)) => {
+      err("openai: api-key in the call's opts is blank. Pass the key, or leave api-key out to use the configured one.")
+    }
+
+    and(is-some(per-call-url), and(not(has-own-key), is-some(non-blank(ep.api-key)))) => {
+      err("openai: base-url in the call's opts needs api-key in opts too. The configured key is never sent to a per-call base URL.")
+    }
+
+    and(is-some(per-call-url), is-null(url-parts(trim(or(per-call-url, ""))))) => {
+      err("openai: base-url in the call's opts is not a plain http(s) URL. Userinfo, backslashes and control characters are refused.")
+    }
+    => {
+      Endpoint({
+        base-url: if(is-some(per-call-url), normalize-base-url(per-call-url), ep.base-url),
+        api-key: if(has-own-key, own-key, ep.api-key),
+        headers: if(is-some(per-call-url), null, ep.headers)
+      })
+    }
+  }
+}
+
+resolve-from
+meta {
+    doc: """
+    The one resolver, pure: the `Endpoint` for a call from `opts` first, then
+    `ctx-values` (a Map of context variables), then defaults. An Err when no
+    API key is set, when `api-key` in `opts` is blank (never a fallback to ctx,
+    so a tenant with a missing key can't run on the project's key), or when
+    `opts` has a `base-url` but no `api-key` (the ctx key is never sent to a
+    per-call URL). `{endpoint: ep}` is the explicit form: `ep` as it is,
+    keyless or not, with no ctx involved.
+    Exposed for testing; `resolve` feeds it the context.
+
+    **Example**
+
+    ```hot
+    ::openai::api/resolve-from({api-key: "k"}, {}).base-url  // => "https://api.openai.com/v1"
+    ```
+    """
+}
+fn (opts: Map, ctx-values: Map): Endpoint {
+  has-endpoint in("endpoint", keys(opts))
+  url-without-key and(is-some(non-blank(get(opts, "base-url"))), not(in("api-key", keys(opts))))
+  configured Endpoint({
+    base-url: normalize-base-url(get(ctx-values, "openai.base.url")),
+    api-key: non-blank(get(ctx-values, "openai.api.key"))
+  })
+  cond {
+    and(url-without-key, not(has-endpoint)) => {
+      err("openai: base-url in the call's opts needs api-key in opts too. The openai.api.key ctx key is never sent to a per-call base URL. For a keyless server, pass {endpoint: ::openai::api/endpoint(url)}.")
+    }
+    => {
+      resolved with-opts(configured, opts)
+      cond {
+        is-err(resolved) => { resolved }
+        has-endpoint => { resolved }
+        is-null(non-blank(resolved.api-key)) => {
+          err("openai: no API key. Set openai.api.key in Context Variables, or pass {api-key: ...} in the call's opts.")
+        }
+        => { resolved }
+      }
+    }
+  }
+}
+
+resolve
+meta {
+    doc: """
+    The `Endpoint` for one call: `opts` over ctx over defaults (see
+    `resolve-from`). With an `api-key` in `opts`, the ctx key is not read, and
+    a blank one is an Err rather than a fallback to ctx. With an `endpoint` in
+    `opts`, ctx is not read at all. Nothing is written to ctx, and a key from
+    `opts` is masked in the run's call records.
+
+    **Example**
+
+    ```hot
+    ::openai::api/resolve({api-key: "tenant-key"}).base-url  // => "https://api.openai.com/v1"
+    local ::openai::api/endpoint("http://localhost:11434/v1")
+    ::openai::api/resolve({endpoint: local}).api-key         // => null
+    ```
+    """,
+    ctx: {
+        "openai.api.key": {required: false},
+        "openai.base.url": {required: false, default: "https://api.openai.com/v1", secret: false}
+    }
+}
+fn
+(): Endpoint {
+  resolve({})
+},
+(opts: Map): Endpoint {
+  options or(opts, {})
+  ::ctx/mark-secret(options.api-key)
+  ::ctx/mark-secret(options.endpoint.api-key)
+  has-endpoint in("endpoint", keys(options))
+  has-own-key or(has-endpoint, in("api-key", keys(options)))
+  resolve-from(options, {
+    "openai.api.key": if(has-own-key, null, ::ctx/get("openai.api.key")),
+    "openai.base.url": if(has-endpoint, null, ::ctx/get("openai.base.url"))
   })
 }
 
@@ -249,7 +452,8 @@ default-endpoint
 meta {
     doc: """
     The ctx-configured OpenAI endpoint: `openai.base.url` (default
-    `https://api.openai.com/v1`) with the `openai.api.key` key.
+    `https://api.openai.com/v1`) with the `openai.api.key` key. An Err when no
+    key is set. The same as `resolve({})`.
 
     **Example**
 
@@ -258,49 +462,68 @@ meta {
     ep.base-url  // => "https://api.openai.com/v1"
     ```
     """,
-    ctx: {"openai.api.key": {}}
+    ctx: {
+        "openai.api.key": {required: false},
+        "openai.base.url": {required: false, default: "https://api.openai.com/v1", secret: false}
+    }
 }
 fn (): Endpoint {
-  endpoint(base-url(), ::ctx/get("openai.api.key"), null)
+  resolve({})
+}
+
+base-url
+meta {
+    doc: """
+    The base URL calls go to: `opts.base-url`, then the `openai.base.url` ctx
+    variable, then `https://api.openai.com/v1` (`::openai/BASE_URL`). A
+    trailing slash is dropped, so `https://gateway.example.com/v1/` works too.
+
+    Set it to route the whole package through a gateway or proxy that
+    speaks the OpenAI API. To call several OpenAI-compatible servers from
+    one program, build an `Endpoint` per server instead.
+
+    **Example**
+
+    ```hot
+    ::openai::api/base-url()                                        // => "https://api.openai.com/v1"
+    ::openai::api/base-url({base-url: "https://gw.example.com/v1"}) // => "https://gw.example.com/v1"
+    ```
+    """,
+    ctx: {"openai.base.url": {required: false, default: "https://api.openai.com/v1", secret: false}}
+}
+fn
+(): Str {
+  base-url({})
+},
+(opts: Map): Str {
+  normalize-base-url(or(non-blank(get(or(opts, {}), "base-url")), ::ctx/get("openai.base.url")))
 }
 
 endpoint-headers
 meta {
     doc: """
     The headers an `Endpoint` request sends: `Authorization: Bearer <key>`
-    when the endpoint has a non-empty key, `Content-Type: application/json`
+    when the endpoint has a non-blank key, `Content-Type: application/json`
     when `json-body` is true, then the endpoint's own headers, then
     `additional-headers` (later entries win).
     """
 }
 fn (ep: Endpoint, additional-headers: Map?, json-body: Bool): Map {
-  key or(ep.api-key, "")
-  auth if(is-empty(key), {}, {Authorization: `Bearer ${key}`})
+  key non-blank(ep.api-key)
+  auth if(is-null(key), {}, {Authorization: `Bearer ${key}`})
   content-type if(json-body, {Content-Type: "application/json"}, {})
   {...auth, ...content-type, ...or(ep.headers, {}), ...or(additional-headers, {})}
 }
 
-build-endpoint-request
+build-request
 meta {
     doc: """
-    Build (without sending) the `HttpRequest` for an `Endpoint` call.
-    `path` is joined onto the endpoint's base URL. A Map or typed record
-    `body` is sent as JSON; `Bytes` as-is; `""` or null sends no body.
-    Exposed for testing; `endpoint-request` sends it.
-
-    **Example**
-
-    ```hot
-    req ::openai::api/build-endpoint-request(
-        ::openai::api/endpoint("http://localhost:11434/v1"),
-        "POST", "/chat/completions", {}, {model: "llama3.2", messages: []}
-    )
-    req.url  // => "http://localhost:11434/v1/chat/completions"
-    ```
+    The outgoing `HttpRequest` to the final `url` with `ep`'s credentials and
+    headers, pure. A Map or typed record `body` is sent as JSON; `Bytes` as-is;
+    `""` or null sends no body. Exposed for testing.
     """
 }
-fn (ep: Endpoint, method: Str, path: Str, additional-headers: Map?, body: Any): HttpRequest {
-  url join-url(ep.base-url, path)
+fn (ep: Endpoint, method: Str, url: Str, additional-headers: Map?, body: Any): HttpRequest {
   match body {
     "" | Null => {
       HttpRequest({method, url, headers: endpoint-headers(ep, additional-headers, false)})
@@ -318,6 +541,50 @@ fn (ep: Endpoint, method: Str, path: Str, additional-headers: Map?, body: Any): 
         body: to-json(untype(body))
       })
     }
+  }
+}
+
+build-endpoint-request
+meta {
+    doc: """
+    Build (without sending) the `HttpRequest` for an `Endpoint` call, or an Err
+    when `path` is a full URL `target-url` refuses. `path` is joined onto the
+    endpoint's base URL. Exposed for testing; `endpoint-request` sends it.
+
+    **Example**
+
+    ```hot
+    req ::openai::api/build-endpoint-request(
+        ::openai::api/endpoint("http://localhost:11434/v1"),
+        "POST", "/chat/completions", {}, {model: "llama3.2", messages: []}
+    )
+    req.url  // => "http://localhost:11434/v1/chat/completions"
+    ```
+    """
+}
+fn (ep: Endpoint, method: Str, path: Str, additional-headers: Map?, body: Any): HttpRequest {
+  url target-url(ep, path, false)
+  cond {
+    is-err(url) => { url }
+    => { build-request(ep, method, url, additional-headers, body) }
+  }
+}
+
+send
+meta { doc: """Internal: send a built request, or pass its Err along.""" }
+fn (req: Result): HttpResponse {
+  cond {
+    is-err(req) => { req }
+    => { ::hot::http/request(req) }
+  }
+}
+
+send-stream
+meta { doc: """Internal: send a built streaming request, or pass its Err along.""" }
+fn (req: Result, format: Str): StreamingHttpResponse {
+  cond {
+    is-err(req) => { req }
+    => { ::hot::http/request-stream(req, format) }
   }
 }
 
@@ -345,7 +612,8 @@ fn
   endpoint-request(ep, method, path, additional-headers, "")
 },
 (ep: Endpoint, method: Str, path: Str, additional-headers: Map, body: Any): HttpResponse {
-  ::hot::http/request(build-endpoint-request(ep, method, path, additional-headers, body))
+  ::ctx/mark-secret(ep.api-key)
+  send(build-endpoint-request(ep, method, path, additional-headers, body))
 }
 
 endpoint-request-stream
@@ -371,17 +639,122 @@ fn
   endpoint-request-stream(ep, method, path, additional-headers, body, "sse")
 },
 (ep: Endpoint, method: Str, path: Str, additional-headers: Map, body: Any, format: Str): StreamingHttpResponse {
-  ::hot::http/request-stream(build-endpoint-request(ep, method, path, additional-headers, body), format)
+  ::ctx/mark-secret(ep.api-key)
+  send-stream(build-endpoint-request(ep, method, path, additional-headers, body), format)
 }
 
 endpoint-response
 meta {
     doc: """
     Unwrap an `Endpoint` response: the decoded body on 2xx, otherwise an
-    Err carrying `HttpError`. The body is returned as a plain Map so
-    servers that omit OpenAI-only fields still parse.
+    Err carrying `HttpError`. An Err from the request passes through. The
+    body is returned as a plain Map so servers that omit OpenAI-only fields
+    still parse.
     """
 }
-fn (response: HttpResponse): Any {
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn (response: Result): Any {
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response.body }
+    => { err(HttpError(response)) }
+  }
+}
+
+// ============================================================================
+// Requests
+// ============================================================================
+
+resolved-request
+meta {
+    doc: """
+    Internal: the `HttpRequest` for `url` under a call's `opts` (see `resolve`
+    and `target-url`), or an Err naming what was refused.
+    """
+}
+fn (method: Str, url: Str, additional-headers: Map, body: Any, opts: Map): HttpRequest {
+  options or(opts, {})
+  ep resolve(options)
+  cond {
+    is-err(ep) => { ep }
+    => {
+      final-url target-url(ep, url, in("api-key", keys(options)))
+      cond {
+        is-err(final-url) => { final-url }
+        => { build-request(ep, method, final-url, additional-headers, body) }
+      }
+    }
+  }
+}
+
+request
+meta {
+    doc: """
+    Make an HTTP request with pre-filled service headers. `url` is a path
+    under the call's base URL (`/models`), or a full URL. Additional headers
+    can be provided to merge/override defaults.
+
+    The key comes from ctx (`openai.api.key`) by default. The 5th argument can
+    be an explicit key, or an `opts` Map (see `resolve`). A full URL off the
+    base URL is an Err unless the call passes its own key. The typed functions
+    in this package go through here.
+
+    **Example**
+
+    ```hot
+    response ::openai::api/request("GET", "/models")
+    response ::openai::api/request("GET", "/models", {}, "", {api-key: "tenant-key"})
+    ```
+    """,
+    ctx: {
+        "openai.api.key": {required: false},
+        "openai.base.url": {required: false, default: "https://api.openai.com/v1", secret: false}
+    }
+}
+fn
+(method: Str, url: Str): HttpResponse {
+  request(method, url, {}, "")
+},
+(method: Str, url: Str, additional-headers: Map): HttpResponse {
+  request(method, url, additional-headers, "")
+},
+// 4-arity: use ctx api key (default)
+(method: Str, url: Str, additional-headers: Map, body: Any): HttpResponse {
+  request(method, url, additional-headers, body, {})
+},
+// 5-arity: explicit api key override
+(method: Str, url: Str, additional-headers: Map, body: Any, api-key: Str): HttpResponse {
+  request(method, url, additional-headers, body, {api-key: api-key})
+},
+// 5-arity: per-call opts (see `resolve`)
+(method: Str, url: Str, additional-headers: Map, body: Any, opts: Map): HttpResponse {
+  send(resolved-request(method, url, additional-headers, body, opts))
+}
+
+request-stream
+meta {
+    doc: """
+    Make a streaming HTTP request with pre-filled service headers. Returns a
+    response with an iterator body for SSE streams. `url` and the key work as
+    in `request`; the 6th argument can be an explicit key, or an `opts` Map.
+    """,
+    ctx: {
+        "openai.api.key": {required: false},
+        "openai.base.url": {required: false, default: "https://api.openai.com/v1", secret: false}
+    }
+}
+fn
+(method: Str, url: Str, additional-headers: Map, body: Any): StreamingHttpResponse {
+  request-stream(method, url, additional-headers, body, "sse")
+},
+// 5-arity: use ctx api key (default)
+(method: Str, url: Str, additional-headers: Map, body: Any, format: Str): StreamingHttpResponse {
+  request-stream(method, url, additional-headers, body, format, {})
+},
+// 6-arity: explicit api key override
+(method: Str, url: Str, additional-headers: Map, body: Any, format: Str, api-key: Str): StreamingHttpResponse {
+  request-stream(method, url, additional-headers, body, format, {api-key: api-key})
+},
+// 6-arity: per-call opts (see `resolve`)
+(method: Str, url: Str, additional-headers: Map, body: Any, format: Str, opts: Map): StreamingHttpResponse {
+  send-stream(resolved-request(method, url, additional-headers, body, opts), format)
 }

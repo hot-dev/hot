@@ -16,6 +16,20 @@ meta {
     completions wire format, calls `::openai::chat/complete`, and
     normalizes the response into a `::ai::chat/ChatReply` so that
     `run-loop` does not need to know about OpenAI's specifics.
+
+    `chat-with-tools` and `chat-with-tools-stream` also take a trailing
+    `opts` Map (see `::openai::api/resolve`), which makes them fit the
+    `chat-opts-fn` and `chat-stream-opts-fn` slots, so
+    `ChatOptions.provider-opts` works through the run loop:
+
+    ```hot
+    opts ::ai::chat/ChatOptions({
+        chat-opts-fn: ::openai::chat-tools/chat-with-tools,
+        model: "gpt-4o-mini",
+        provider-opts: {api-key: tenant-key}
+    })
+    answer ::ai::chat/run-loop(opts, "What is 17 + 25?")
+    ```
     """
 }
 
@@ -332,8 +346,12 @@ meta {
     ```
     """
 }
-fn (model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?): ::ai-chat/ChatReply {
+fn
+(model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?): ::ai-chat/ChatReply {
     chat-with-tools-options(model, messages, system, tools, DEFAULT_REQUEST_OPTIONS)
+},
+(model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, opts: Map): ::ai-chat/ChatReply {
+    chat-with-tools-options(model, messages, system, tools, DEFAULT_REQUEST_OPTIONS, opts)
 }
 
 chat-with-tools-options
@@ -345,13 +363,17 @@ meta {
     session needs model-specific request controls.
     """
 }
-fn (model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, options: ChatRequestOptions): ::ai-chat/ChatReply {
+fn
+(model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, options: ChatRequestOptions): ::ai-chat/ChatReply {
+    chat-with-tools-options(model, messages, system, tools, options, {})
+},
+(model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, options: ChatRequestOptions, opts: Map): ::ai-chat/ChatReply {
     body build-chat-body(model, messages, system, tools, options, false)
-    response ::oai-chat/complete(::oai-chat/ChatCompletionRequest(body))
+    response ::oai-chat/complete(::oai-chat/ChatCompletionRequest(body), opts)
 
-    match response {
-        Result.Err => { err(response) }
-        Result.Ok => { parse-chat-reply(response) }
+    cond {
+        is-err(response) => { response }
+        => { parse-chat-reply(response) }
     }
 }
 
@@ -387,9 +409,9 @@ fn (ep: ::openai::api/Endpoint, model: Str, messages: Vec<::ai-chat/Message>, sy
     body build-chat-body(model, messages, system, tools, options, false)
     response ::oai-chat/complete-with(ep, body)
 
-    match response {
-        Result.Err => { err(response) }
-        Result.Ok => { parse-chat-reply(response) }
+    cond {
+        is-err(response) => { response }
+        => { parse-chat-reply(response) }
     }
 }
 
@@ -661,7 +683,8 @@ meta {
       every event during streaming.
     """
 }
-fn (model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, on-delta: Fn): ::ai-chat/ChatReply {
+fn
+(model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, on-delta: Fn): ::ai-chat/ChatReply {
     chat-with-tools-stream-options(
         model,
         messages,
@@ -670,15 +693,30 @@ fn (model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-
         on-delta,
         DEFAULT_REQUEST_OPTIONS
     )
+},
+(model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, on-delta: Fn, opts: Map): ::ai-chat/ChatReply {
+    chat-with-tools-stream-options(
+        model,
+        messages,
+        system,
+        tools,
+        on-delta,
+        DEFAULT_REQUEST_OPTIONS,
+        opts
+    )
 }
 
 chat-with-tools-stream-options
 meta {
     doc: "Streaming `chat-with-tools` with explicit output and reasoning controls."
 }
-fn (model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, on-delta: Fn, options: ChatRequestOptions): ::ai-chat/ChatReply {
+fn
+(model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, on-delta: Fn, options: ChatRequestOptions): ::ai-chat/ChatReply {
+    chat-with-tools-stream-options(model, messages, system, tools, on-delta, options, {})
+},
+(model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, on-delta: Fn, options: ChatRequestOptions, opts: Map): ::ai-chat/ChatReply {
     body build-chat-body(model, messages, system, tools, options, true)
-    response ::oai-chat/complete-stream(::oai-chat/ChatCompletionRequest(body))
+    response ::oai-chat/complete-stream(::oai-chat/ChatCompletionRequest(body), opts)
     consume-stream(response, on-delta)
 }
 
@@ -705,11 +743,16 @@ meta {
     and the aggregated `ChatReply`, then emit the final `Stop` delta.
     """
 }
-fn (response: Any, on-delta: Fn): ::ai-chat/ChatReply {
-    final-state drain-openai-stream(response.body, on-delta, EMPTY_STREAM_STATE)
-    emit-tool-use-ends(final-state, on-delta)
-    reply finalize-stream-state(final-state)
+fn (response: Result, on-delta: Fn): ::ai-chat/ChatReply {
+    cond {
+        is-err(response) => { response }
+        => {
+            final-state drain-openai-stream(response.body, on-delta, EMPTY_STREAM_STATE)
+            emit-tool-use-ends(final-state, on-delta)
+            reply finalize-stream-state(final-state)
 
-    on-delta(ReplyDelta.Stop(StreamStop({reason: reply.stop-reason, usage: reply.usage})))
-    reply
+            on-delta(ReplyDelta.Stop(StreamStop({reason: reply.stop-reason, usage: reply.usage})))
+            reply
+        }
+    }
 }

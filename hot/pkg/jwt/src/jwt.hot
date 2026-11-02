@@ -38,6 +38,7 @@ meta {
     """
 }
 
+::ctx ::hot::ctx
 ::b64 ::hot::base64
 ::hmac ::hot::hmac
 ::crypto ::hot::crypto
@@ -68,6 +69,9 @@ meta {
     and a shared secret; pass `"RS256"` and a PEM private key (PKCS#8
     `BEGIN PRIVATE KEY` or PKCS#1 `BEGIN RSA PRIVATE KEY`) for RSA.
 
+    The key and the signed token are masked in the run's call records. The
+    token comes back unchanged.
+
     **Example**
 
     ```hot
@@ -89,13 +93,14 @@ fn
   sign(claims, key, "HS256")
 },
 (claims: Map, key: Str, algorithm: Str): Str {
+  ::ctx/mark-secret(key)
   header encode-segment({alg: algorithm, typ: "JWT"})
   payload encode-segment(claims)
   signing-input `${header}.${payload}`
   cond {
     eq(algorithm, "HS256") => {
       signature ::b64/encode-url(::hmac/hmac-sha256-bytes(key, signing-input))
-      `${signing-input}.${signature}`
+      ::ctx/mark-secret(`${signing-input}.${signature}`)
     }
 
     eq(algorithm, "RS256") => {
@@ -103,7 +108,7 @@ fn
       match raw {
         Result.Err => { err(raw) }
 
-        _ => { `${signing-input}.${::b64/encode-url(raw)}` }
+        _ => { ::ctx/mark-secret(`${signing-input}.${::b64/encode-url(raw)}`) }
       }
     }
     => { err(`jwt: unsupported algorithm '${algorithm}' (use HS256 or RS256)`) }
@@ -229,6 +234,7 @@ meta {
     60), `issuer` (expected `iss`), `audience` (expected `aud`), `max-age`
     (reject tokens whose `iat` is more than this many seconds old; the
     token must carry `iat`), `now` (override the clock, mainly for tests).
+    The shared secret is masked in the run's call records.
 
     **Example**
 
@@ -243,6 +249,7 @@ fn
   verify(token, secret, {})
 },
 (token: Str, secret: Str, options: Map): Any {
+  ::ctx/mark-secret(secret)
   decoded decode(token)
   cond {
     is-err(decoded) => { decoded }

@@ -28,13 +28,14 @@ The provider is chosen per call. `options.provider` wins, then `crm.provider`, t
 
 ## Per-call credentials
 
-`options` also takes a section per provider, so one run can act for many accounts and parallel flows don't share credentials. Each section is passed as that package's `opts`, so its keys are the package's own (see `hot.dev/hubspot` and `hot.dev/salesforce`). Per-call credentials are masked in call records, and nothing from them is written to ctx.
+`options` also takes a section per provider, so one run can act for many accounts and parallel flows don't share credentials. Each section is passed as that package's `opts`, so its keys are the package's own (see `hot.dev/hubspot`, `hot.dev/salesforce` and `hot.dev/attio`). Per-call credentials are masked in call records, and nothing from them is written to ctx.
 
 ```hot
 tenant {
   provider: "hubspot",
   hubspot: {token: "pat-tenant-b"},
-  salesforce: {access-token: "00D...", instance-url: "https://tenant-b.my.salesforce.com"}
+  salesforce: {access-token: "00D...", instance-url: "https://tenant-b.my.salesforce.com"},
+  attio: {api-key: "tenant-b-attio-key"}
 }
 
 contact ::crm/find-contact("ada@example.com", tenant)
@@ -44,7 +45,6 @@ same ::crm/find-contact("ada@example.com", {...tenant, provider: "salesforce"})
 
 - The section of the provider in use applies. Without `provider`, the first section in HubSpot, Salesforce, Attio order picks the provider, ahead of `crm.provider`. A `Contact` or `Deal` you pass in still uses its own `provider`, with that provider's section.
 - A section that is present but not a Map is an error, and so is any credential its package refuses, such as a blank `token`. Neither falls back to context.
-- An `attio` section is an error for now, because `hot.dev/attio` has no per-call credentials in this release. Attio calls use `attio.api.key`.
 
 ## Quick start
 

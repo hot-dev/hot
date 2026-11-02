@@ -181,6 +181,9 @@ fn () {
     assert(not(is-null(reg.chat-stream-fn)), "chat-stream-fn wired")
     assert-eq(::q/BASE_URL, reg.meta.base-url)
     assert(not(contains(to-json(reg.meta), "sk-test")), "key never copied into meta")
+    assert(not(in("compatible", keys(reg.meta))), "identity lives in variant")
+    assert(not(is-null(reg.chat-opts-fn)), "chat-opts-fn wired")
+    assert(not(is-null(reg.chat-stream-opts-fn)), "chat-stream-opts-fn wired")
 
     registry ::ai-chat/with-providers([reg])
     found ::ai-chat/resolve-registration(::ai-chat/ChatOptions({model: "qwen3.7-plus", providers: registry}))
@@ -192,4 +195,257 @@ meta ["test"]
 fn () {
     assert-eq("kimi-k3", ::openai::compatible/strip-model-prefix("qwen/kimi-k3", ::qai/MODEL_PREFIX))
     assert-eq("qwen3.8-max", ::openai::compatible/strip-model-prefix("qwen3.8-max", ::qai/MODEL_PREFIX))
+}
+
+test-provider-identity-survives-a-typed-field-and-the-registry
+meta ["test"]
+fn () {
+    registry ::ai-chat/with-providers([::qai/provider-for(::api/endpoint-for("intl", null, "sk-test"), null)])
+    found ::ai-chat/resolve-registration(::ai-chat/ChatOptions({model: "qwen3.7-plus", providers: registry}))
+    assert(is-type(found.variant, ::ai-chat/Provider), "still a Provider")
+    assert-eq("Qwen", found.variant.name, "with its own variant")
+    assert-eq(::qai/QWEN_PROVIDER, found.variant)
+    assert(ne(::ai-chat/Provider.OpenAi, found.variant), "never OpenAI")
+    openai ::ai-chat/resolve-registration(::ai-chat/ChatOptions({model: "gpt-4o", providers: registry}))
+    assert-eq(::ai-chat/Provider.OpenAi, openai.variant, "OpenAI itself is untouched")
+}
+
+// ============================================================================
+// Per-call credentials
+// ============================================================================
+
+// Port 1 refuses connections, so a call that used these opts fails at the
+// connection, naming this URL, and no request leaves the machine.
+OFFLINE {api-key: "sk-tenant", base-url: "http://127.0.0.1:1/v1"}
+
+CTX {"qwen.api.key": "sk-ctx", "qwen.region": "cn"}
+
+assert-reached-offline-url
+meta {
+    doc: """The call got as far as the HTTP layer, against the `base-url` from opts."""
+}
+fn (call: Fn, label: Str) {
+    result ::hot::internal::exec/contain(call)
+    assert(is-err(result), `${label}: a refused connection is an Err`)
+    assert(contains(Str(err-value(result)), "http://127.0.0.1:1/"), `${label}: reached the opts base-url, got ${Str(err-value(result))}`)
+}
+
+test-resolve-ctx-used-when-opts-empty
+meta ["test"]
+fn () {
+    r ::api/resolve-from({}, CTX)
+    assert-eq("sk-ctx", r.api-key)
+    assert-eq(::q/BASE_URL_CN, r.base-url)
+}
+
+test-resolve-opts-override-ctx
+meta ["test"]
+fn () {
+    r ::api/resolve-from({api-key: "sk-tenant"}, CTX)
+    assert-eq("sk-tenant", r.api-key)
+    assert-eq(::q/BASE_URL_CN, r.base-url, "a key on its own keeps the configured site")
+    us ::api/resolve-from({api-key: "sk-tenant", region: "us"}, CTX)
+    assert-eq(::q/BASE_URL_US, us.base-url)
+}
+
+test-resolve-workspace-and-region
+meta ["test"]
+fn () {
+    both ::api/resolve-from({api-key: "k", region: "eu", workspace-id: "llm-abc"}, CTX)
+    assert-eq("https://llm-abc.eu-central-1.maas.aliyuncs.com/compatible-mode/v1", both.base-url)
+    workspace ::api/resolve-from({api-key: "k", workspace-id: "llm-abc"}, CTX)
+    assert-eq("https://llm-abc.cn-beijing.maas.aliyuncs.com/compatible-mode/v1", workspace.base-url, "a workspace uses the configured region")
+    region ::api/resolve-from({api-key: "k", region: "us"}, {"qwen.workspace.id": "ctx-ws", "qwen.base.url": "https://ctx.example.com/v1"})
+    assert-eq(::q/BASE_URL_US, region.base-url, "a per-call region ignores the configured workspace and base URL")
+    url ::api/resolve-from({api-key: "k", base-url: "https://proxy.example.com/v1/", region: "us"}, CTX)
+    assert-eq("https://proxy.example.com/v1", url.base-url, "base-url wins")
+}
+
+test-resolve-missing-key-is-a-clear-error
+meta ["test"]
+fn () {
+    r ::api/resolve-from({}, {})
+    assert(is-err(r))
+    assert(contains(err-value(r), "qwen.api.key"), "naming the ctx key")
+    assert(contains(err-value(r), "api-key"), "and the opts key")
+}
+
+test-resolve-blank-key-is-an-error-not-a-fallback
+meta ["test"]
+fn () {
+    for-each([null, "", "   "], (blank) {
+        r ::api/resolve-from({api-key: blank}, CTX)
+        assert(is-err(r), "a blank key in opts is an Err, with a ctx key available")
+        assert(contains(err-value(r), "api-key"))
+        assert(not(contains(err-value(r), "sk-ctx")))
+    })
+}
+
+test-resolve-per-call-host-without-key-is-an-error
+meta ["test"]
+fn () {
+    for-each([{key: "base-url", value: "https://x.example.com/v1"}, {key: "region", value: "us"}, {key: "workspace-id", value: "ws1"}], (entry) {
+        r ::api/resolve-from(assoc({}, entry.key, entry.value), CTX)
+        assert(is-err(r), `${entry.key} never gets the ctx key`)
+        assert(contains(err-value(r), entry.key), "naming it")
+        assert(contains(err-value(r), "api-key"), "and api-key")
+        assert(not(contains(err-value(r), "sk-ctx")))
+    })
+}
+
+test-host-building-input-is-strict
+meta ["test"]
+fn () {
+    for-each(["evil.example/x", "a.b", "ws@evil", "ws/../x", "ws\\x", "ws x", "-ws", "ws-", "ws\n", ""], (id) {
+        assert(not(::q/is-workspace-id(id)), `'${id}' is no workspace id`)
+    })
+    assert(::q/is-workspace-id("llm-abc123"))
+    assert(::q/is-workspace-id("WS1"))
+
+    bad-workspace ::api/resolve-from({api-key: "k", workspace-id: "evil.example/x?"}, CTX)
+    assert(is-err(bad-workspace), "refused in opts")
+    assert(contains(err-value(bad-workspace), "workspace"))
+    assert(is-err(::q/resolve-base-url(null, "us", "evil.example/x?")), "and from ctx")
+    assert(is-err(::api/resolve-from({}, {"qwen.api.key": "k", "qwen.workspace.id": "a.b"})), "through the resolver too")
+    assert(is-err(::api/endpoint-for("us", "evil.example/x?", "k")), "and for an explicit endpoint")
+
+    bad-region ::api/resolve-from({api-key: "k", region: "evil.example/x?"}, CTX)
+    assert(is-err(bad-region), "a region must be a known one")
+    assert(contains(err-value(bad-region), "qwen.region"))
+
+    bad-url ::api/resolve-from({api-key: "k", base-url: "https://u:p@evil.example/v1"}, CTX)
+    assert(is-err(bad-url), "a malformed per-call base URL is refused")
+}
+
+test-resolve-live-ctx-and-no-ctx-writes
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"qwen.api.key": "sk-ctx-live", "qwen.region": null})
+    assert-eq("sk-ctx-live", ::api/resolve().api-key, "ctx is used when opts is empty")
+    assert-eq("sk-marked-tenant-key", ::api/resolve({api-key: "sk-marked-tenant-key"}).api-key, "opts win, and marking keeps the value")
+    assert-eq("sk-ctx-live", ::hot::ctx/get("qwen.api.key"), "a per-call key is not written to ctx")
+    ::hot::ctx/set({"qwen.api.key": null})
+    assert(is-err(::api/endpoint()), "no key at all is an Err")
+}
+
+test-resolve-explicit-endpoint-reads-no-ctx
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"qwen.api.key": "sk-ctx-live"})
+    r ::api/resolve({endpoint: ::openai::api/endpoint("http://localhost:1/v1")})
+    ::hot::ctx/set({"qwen.api.key": null})
+    assert-eq("http://localhost:1/v1", r.base-url)
+    assert(is-null(r.api-key), "a keyless Endpoint stays keyless")
+}
+
+test-functions-take-opts
+meta ["test"]
+fn () {
+    request ::chat/ChatCompletionRequest({model: "m", messages: [::chat/user-message("hi")]})
+    assert-reached-offline-url(() { ::chat/complete(request, OFFLINE) }, "complete")
+    assert-reached-offline-url(() { ::chat/complete-stream(request, OFFLINE) }, "complete-stream")
+    assert-reached-offline-url(() { ::chat/chat("m", "hi", OFFLINE) }, "chat")
+    assert-reached-offline-url(() { ::chat/chat("m", "hi", "be brief", OFFLINE) }, "chat with a system prompt")
+    assert-reached-offline-url(() { ::chat/chat("m", "hi", "be brief", 10, OFFLINE) }, "chat with a ceiling")
+    assert-reached-offline-url(() { ::models/list(OFFLINE) }, "models/list")
+    assert-reached-offline-url(() { ::models/get("m", OFFLINE) }, "models/get")
+    embedding ::emb/EmbeddingRequest({input: "a", model: "m"})
+    assert-reached-offline-url(() { ::emb/create(embedding, OFFLINE) }, "embeddings/create")
+    assert-reached-offline-url(() { ::emb/embed("a", OFFLINE) }, "embed")
+    assert-reached-offline-url(() { ::emb/embed("a", "m", OFFLINE) }, "embed with a model")
+    assert-reached-offline-url(() { ::emb/embed-batch(["a"], OFFLINE) }, "embed-batch")
+    assert-reached-offline-url(() { ::emb/embed-batch(["a"], "m", OFFLINE) }, "embed-batch with a model")
+    assert-reached-offline-url(() { ::api/request("GET", "/models", {}, "", OFFLINE) }, "api/request")
+    assert-reached-offline-url(() { ::api/request-stream("GET", "/models", {}, "", OFFLINE) }, "api/request-stream")
+}
+
+test-existing-arities-keep-working-from-ctx
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"qwen.api.key": "sk-ctx-live", "qwen.base.url": "http://127.0.0.1:1/v1"})
+    request ::chat/ChatCompletionRequest({model: "m", messages: [::chat/user-message("hi")]})
+    assert-reached-offline-url(() { ::chat/complete(request) }, "complete")
+    assert-reached-offline-url(() { ::chat/complete-stream(request) }, "complete-stream")
+    assert-reached-offline-url(() { ::chat/chat("m", "hi") }, "chat 2")
+    assert-reached-offline-url(() { ::chat/chat("m", "hi", "sys") }, "chat 3")
+    assert-reached-offline-url(() { ::chat/chat("m", "hi", null, null) }, "chat 4")
+    assert-reached-offline-url(() { ::models/list() }, "models/list")
+    assert-reached-offline-url(() { ::models/get("m") }, "models/get")
+    assert-reached-offline-url(() { ::emb/embed("a") }, "embed 1")
+    assert-reached-offline-url(() { ::emb/embed("a", "m") }, "embed 2")
+    assert-reached-offline-url(() { ::emb/embed-batch(["a"]) }, "embed-batch 1")
+    assert-reached-offline-url(() { ::emb/embed-batch(["a"], "m") }, "embed-batch 2")
+    assert-reached-offline-url(() { ::api/request("GET", "/models") }, "request 2")
+    assert-reached-offline-url(() { ::api/request("POST", "/x", {}, {a: 1}) }, "request 4")
+    assert-reached-offline-url(() { ::api/request-stream("POST", "/x", {}, {a: 1}) }, "request-stream 4")
+    assert-reached-offline-url(() { ::ai-chat/run-loop(::ai-chat/ChatOptions({chat-fn: ::qai/chat-fn(null), model: "qwen3.8-flash"}), "hi") }, "the plain chat-fn slot")
+    ::hot::ctx/set({"qwen.api.key": null, "qwen.base.url": null})
+}
+
+test-functions-return-resolver-errors
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"qwen.api.key": "sk-ctx-live"})
+    blank {api-key: ""}
+    attempts [
+        () { ::chat/complete(::chat/ChatCompletionRequest({model: "m", messages: []}), blank) },
+        () { ::chat/complete-stream(::chat/ChatCompletionRequest({model: "m", messages: []}), blank) },
+        () { ::chat/chat("m", "hi", blank) },
+        () { ::models/list(blank) },
+        () { ::models/get("m", blank) },
+        () { ::emb/create(::emb/EmbeddingRequest({input: "a", model: "m"}), blank) },
+        () { ::emb/embed("a", blank) },
+        () { ::emb/embed-batch(["a"], blank) },
+        () { ::api/request("GET", "/models", {}, "", blank) },
+        () { ::api/request-stream("GET", "/models", {}, "", blank) }
+    ]
+    for-each(attempts, (attempt) {
+        result attempt()
+        assert(is-err(result), "a blank key is an Err")
+        assert(contains(err-value(result), "api-key"), `naming the key, got ${Str(err-value(result))}`)
+    })
+    ::hot::ctx/set({"qwen.api.key": null})
+}
+
+test-run-loop-provider-opts-reach-the-request
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"qwen.api.key": null, "qwen.region": null})
+    opts ::ai-chat/ChatOptions({
+        model: "qwen3.8-flash",
+        providers: ::ai-chat/with-providers([::qai/provider()]),
+        provider-opts: OFFLINE
+    })
+    assert-reached-offline-url(() { ::ai-chat/run-loop(opts, "hi") }, "registry run-loop")
+    assert-reached-offline-url(() { ::ai-chat/run-loop-stream(opts, "hi") }, "registry run-loop-stream")
+
+    direct ::ai-chat/ChatOptions({chat-opts-fn: ::qai/chat-opts-fn(null), model: "qwen3.8-flash", provider-opts: OFFLINE})
+    assert-reached-offline-url(() { ::ai-chat/run-loop(direct, "hi") }, "bound run-loop")
+    stream ::ai-chat/ChatOptions({chat-stream-opts-fn: ::qai/chat-stream-opts-fn(null), model: "qwen3.8-flash", provider-opts: OFFLINE})
+    assert-reached-offline-url(() { ::ai-chat/run-loop-stream(stream, "hi") }, "bound run-loop-stream")
+}
+
+test-opts-fn-applies-region-and-refuses-a-bare-one
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"qwen.api.key": "sk-ctx-live", "qwen.region": null})
+    chat ::qai/chat-opts-fn(null)
+    msgs [::ai-chat/user-message("hi")]
+    bare chat("qwen3.8-flash", msgs, null, null, {region: "us"})
+    bad chat("qwen3.8-flash", msgs, null, null, {api-key: "k", workspace-id: "evil.example/x?"})
+    ::hot::ctx/set({"qwen.api.key": null})
+    assert(is-err(bare), "a per-call region never gets the ctx key")
+    assert(contains(err-value(bare), "region"))
+    assert(is-err(bad), "host-building input is checked")
+    assert(contains(err-value(bad), "workspace"))
+}
+
+test-ctx-provider-without-a-key-fails-at-the-call
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"qwen.api.key": null, "qwen.region": null})
+    chat ::qai/chat-fn(null)
+    result chat("qwen3.8-flash", [::ai-chat/user-message("hi")], null, null)
+    assert(is-err(result), "a clear Err, not an unauthenticated request")
+    assert(contains(err-value(result), "qwen.api.key"))
 }

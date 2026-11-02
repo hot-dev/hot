@@ -164,9 +164,17 @@ meta {
     ```
     """
 }
-fn (request: ChatCompletionRequest): ChatCompletionResponse {
-    response api-request("POST", `${::openai::api/base-url()}/chat/completions`, {}, request)
-    if(is-ok-response(response), ChatCompletionResponse(response.body), err(HttpError(response)))
+fn
+(request: ChatCompletionRequest): ChatCompletionResponse {
+    complete(request, {})
+},
+(request: ChatCompletionRequest, opts: Map): ChatCompletionResponse {
+    response api-request("POST", "/chat/completions", {}, request, opts)
+    cond {
+        is-err(response) => { response }
+        is-ok-response(response) => { ChatCompletionResponse(response.body) }
+        => { err(HttpError(response)) }
+    }
 }
 
 // ============================================================================
@@ -217,11 +225,16 @@ meta {
     ```
     """
 }
-fn (request: ChatCompletionRequest): StreamingChatResponse {
+fn
+(request: ChatCompletionRequest): StreamingChatResponse {
+    complete-stream(request, {})
+},
+(request: ChatCompletionRequest, opts: Map): StreamingChatResponse {
     // Force stream: true
     streaming-request {...untype(request), stream: true}
-    response api-request-stream("POST", `${::openai::api/base-url()}/chat/completions`, {}, streaming-request, "sse")
+    response api-request-stream("POST", "/chat/completions", {}, streaming-request, "sse", opts)
     cond {
+        is-err(response) => { response }
         gte(response.status, 400) => { err(HttpError(response)) }
         => { StreamingChatResponse(response) }
     }
@@ -286,6 +299,7 @@ fn (ep: ::openai::api/Endpoint, request: Map): StreamingChatResponse {
     streaming-request {...untype(request), stream: true}
     response ::openai::api/endpoint-request-stream(ep, "POST", "/chat/completions", {}, streaming-request, "sse")
     cond {
+        is-err(response) => { response }
         gte(response.status, 400) => { err(HttpError(response)) }
         => { StreamingChatResponse(response) }
     }
@@ -321,16 +335,31 @@ meta {
     ```hot
     response ::openai::chat/chat("gpt-4o-mini", "Tell me a story.", "You are a storyteller.", 200)
     ```
+
+    **Example - With a per-call key**
+
+    ```hot
+    response ::openai::chat/chat("gpt-4o-mini", "What is 1+1?", {api-key: tenant-key})
+    ```
     """
 }
 fn
 (model: Str, message: Str): Str {
-    chat(model, message, null, null)
+    chat(model, message, null, null, {})
+},
+(model: Str, message: Str, opts: Map): Str {
+    chat(model, message, null, null, opts)
 },
 (model: Str, message: Str, system: Str): Str {
-    chat(model, message, system, null)
+    chat(model, message, system, null, {})
+},
+(model: Str, message: Str, system: Str, opts: Map): Str {
+    chat(model, message, system, null, opts)
 },
 (model: Str, message: Str, system: Str?, max-tokens: Int?): Str {
+    chat(model, message, system, max-tokens, {})
+},
+(model: Str, message: Str, system: Str?, max-tokens: Int?, opts: Map): Str {
     messages cond {
         is-null(system) => {
             [Message({role: "user", content: message})]
@@ -349,11 +378,11 @@ fn
         max_completion_tokens: or(max-tokens, 1024)
     }
 
-    result complete(ChatCompletionRequest(request))
+    result complete(ChatCompletionRequest(request), opts)
 
-    match result {
-        Result.Err => { err(result) }
-        Result.Ok => {
+    cond {
+        is-err(result) => { result }
+        => {
             first-choice result.choices[0]
             or(first-choice.message.content, "")
         }

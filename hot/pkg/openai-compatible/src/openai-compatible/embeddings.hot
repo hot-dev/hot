@@ -44,6 +44,10 @@ meta {
     ```
     """
 }
-fn (p: CompatibleProvider, request: EmbeddingsRequest): Map {
-    ::compat/create-embeddings(p, embeddings-body(request))
+fn
+(p: CompatibleProvider, request: EmbeddingsRequest): Map {
+    create-embeddings(p, request, {})
+},
+(p: CompatibleProvider, request: EmbeddingsRequest, opts: Map): Map {
+    ::compat/create-embeddings(p, embeddings-body(request), opts)
 }

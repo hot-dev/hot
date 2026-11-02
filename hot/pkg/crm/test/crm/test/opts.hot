@@ -11,6 +11,7 @@ Deal ::crm/Deal
 
 HUBSPOT_BLANK {provider: "hubspot", hubspot: {token: ""}}
 SALESFORCE_BLANK {provider: "salesforce", salesforce: {access-token: ""}}
+ATTIO_BLANK {provider: "attio", attio: {api-key: ""}}
 
 refused fn (result: Result, key: Str): Bool {
     and(is-err(result), contains(err-message(result), key), contains(err-message(result), "blank or null"))
@@ -48,13 +49,33 @@ meta ["test"] fn () {
     assert(contains(err-message(other), "not a Map"))
 }
 
-test-attio-section-is-an-error-not-a-fallback
+test-attio-section-picks-attio
+meta ["test"] fn () {
+    assert-eq("attio", ::crm/resolve-provider({attio: {api-key: "tenant-attio-key"}}))
+}
+
+test-blank-attio-key-is-an-error-not-a-fallback
 meta ["test"] fn () {
     ::ctx/set("attio.api.key", "ctx-attio-key")
-    result ::crm/find-contact("a@b.co", {attio: {api-key: "tenant-attio-key"}})
+    result ::crm/find-contact("a@b.co", ATTIO_BLANK)
     ::ctx/set("attio.api.key", null)
-    assert(is-err(result))
-    assert(contains(err-message(result), "hot.dev/attio has no per-call credentials"))
+    assert(refused(result, "api-key"))
+}
+
+test-per-call-attio-key-reaches-attio
+meta ["test"] fn () {
+    // `base-url` with no `api-key` is refused only in attio's own resolver,
+    // and with the key in the same section it is accepted: an unroutable
+    // host answers with a network Err, not attio's "without api-key" one,
+    // so the section's key is what the call went out with.
+    ::ctx/set("attio.api.key", "ctx-attio-key")
+    no-key ::crm/find-contact("a@b.co", {provider: "attio", attio: {base-url: "http://127.0.0.1:1/v2"}})
+    with-key ::crm/find-contact("a@b.co", {provider: "attio", attio: {api-key: "tenant-attio-key", base-url: "http://127.0.0.1:1/v2"}})
+    ::ctx/set("attio.api.key", null)
+    assert(is-err(no-key))
+    assert(contains(err-message(no-key), "without api-key"))
+    assert(is-err(with-key))
+    assert(not(contains(err-message(with-key), "api-key")), "the key in the section satisfied attio's resolver")
 }
 
 test-attio-section-is-ignored-for-other-providers
@@ -95,6 +116,28 @@ meta ["test"] fn () {
     assert(refused(::crm/upsert-deal({name: "d"}, SALESFORCE_BLANK), "access-token"))
     assert(refused(::crm/upsert-deal({id: "1", stage: "s"}, SALESFORCE_BLANK), "access-token"))
     assert(refused(::crm/move-stage("1", "s", SALESFORCE_BLANK), "access-token"))
+}
+
+test-sections-reach-attio
+meta ["test"] fn () {
+    assert(refused(::crm/upsert-contact({email: "a@b.co"}, ATTIO_BLANK), "api-key"))
+    assert(refused(::crm/upsert-contact({email: "a@b.co", first-name: "A"}, ATTIO_BLANK), "api-key"))
+    assert(refused(::crm/upsert-contact({email: "a@b.co", company: "Acme"}, ATTIO_BLANK), "api-key"))
+    assert(refused(::crm/find-contact("a@b.co", ATTIO_BLANK), "api-key"))
+    assert(refused(::crm/log-activity("a@b.co", "hi", ATTIO_BLANK), "api-key"))
+    assert(refused(::crm/list-activities("a@b.co", ATTIO_BLANK), "api-key"))
+    assert(refused(::crm/upsert-company({domain: "a.co"}, ATTIO_BLANK), "api-key"))
+    assert(refused(::crm/find-company("a.co", ATTIO_BLANK), "api-key"))
+    assert(refused(::crm/find-deals({}, ATTIO_BLANK), "api-key"))
+    assert(refused(::crm/upsert-deal({name: "d"}, ATTIO_BLANK), "api-key"))
+    assert(refused(::crm/upsert-deal({id: "1", stage: "s"}, ATTIO_BLANK), "api-key"))
+    assert(refused(::crm/move-stage("1", "s", ATTIO_BLANK), "api-key"))
+
+    contact Contact({id: "1", provider: "attio", raw: null})
+    deal Deal({id: "1", provider: "attio", raw: null})
+    assert(refused(::crm/log-activity(contact, "hi", ATTIO_BLANK), "api-key"))
+    assert(refused(::crm/list-activities(contact, ATTIO_BLANK), "api-key"))
+    assert(refused(::crm/move-stage(deal, "s", ATTIO_BLANK), "api-key"))
 }
 
 test-a-record-uses-its-own-providers-section

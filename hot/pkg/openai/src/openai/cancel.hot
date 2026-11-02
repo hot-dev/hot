@@ -246,9 +246,17 @@ cancel-batch
 meta {
     doc: """POST /batches/{batch_id}/cancel - Cancel an in-progress batch. The batch status will change to "cancelling"."""
 }
-fn (request: CancelBatchRequest): CancelBatchResponse {
-  response api-request("POST", `${::openai::api/base-url()}/batches/${request.batch-id}/cancel`)
-  if(is-ok-response(response), CancelBatchResponse(response.body), err(HttpError(response)))
+fn
+(request: CancelBatchRequest): CancelBatchResponse {
+  cancel-batch(request, {})
+},
+(request: CancelBatchRequest, opts: Map): CancelBatchResponse {
+  response api-request("POST", `/batches/${request.batch-id}/cancel`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { CancelBatchResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 CancelEvalRunRequest type {
@@ -278,9 +286,17 @@ cancel-eval-run
 meta {
     doc: """POST /evals/{eval_id}/runs/{run_id} - Cancel an in-progress evaluation run."""
 }
-fn (request: CancelEvalRunRequest): CancelEvalRunResponse {
-  response api-request("POST", `${::openai::api/base-url()}/evals/${request.eval-id}/runs/${request.run-id}`)
-  if(is-ok-response(response), CancelEvalRunResponse(response.body), err(HttpError(response)))
+fn
+(request: CancelEvalRunRequest): CancelEvalRunResponse {
+  cancel-eval-run(request, {})
+},
+(request: CancelEvalRunRequest, opts: Map): CancelEvalRunResponse {
+  response api-request("POST", `/evals/${request.eval-id}/runs/${request.run-id}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { CancelEvalRunResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 CancelFineTuningJobRequest type {
@@ -314,9 +330,17 @@ cancel-finetuning
 meta {
     doc: """POST /fine_tuning/jobs/{fine_tuning_job_id}/cancel - Cancel an in-progress fine-tuning job."""
 }
-fn (request: CancelFineTuningJobRequest): CancelFineTuningJobResponse {
-  response api-request("POST", `${::openai::api/base-url()}/fine_tuning/jobs/${request.fine-tuning-job-id}/cancel`)
-  if(is-ok-response(response), CancelFineTuningJobResponse(response.body), err(HttpError(response)))
+fn
+(request: CancelFineTuningJobRequest): CancelFineTuningJobResponse {
+  cancel-finetuning(request, {})
+},
+(request: CancelFineTuningJobRequest, opts: Map): CancelFineTuningJobResponse {
+  response api-request("POST", `/fine_tuning/jobs/${request.fine-tuning-job-id}/cancel`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { CancelFineTuningJobResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 CancelResponseRequest type {
@@ -331,9 +355,17 @@ cancel-response
 meta {
     doc: """POST /responses/{response_id}/cancel - Cancel an in-progress model response."""
 }
-fn (request: CancelResponseRequest): CancelResponseResponse {
-  response api-request("POST", `${::openai::api/base-url()}/responses/${request.response-id}/cancel`)
-  if(is-ok-response(response), CancelResponseResponse(response.body), err(HttpError(response)))
+fn
+(request: CancelResponseRequest): CancelResponseResponse {
+  cancel-response(request, {})
+},
+(request: CancelResponseRequest, opts: Map): CancelResponseResponse {
+  response api-request("POST", `/responses/${request.response-id}/cancel`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { CancelResponseResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 CancelRunRequest type {
@@ -376,9 +408,17 @@ cancel-run
 meta {
     doc: """POST /threads/{thread_id}/runs/{run_id}/cancel - Cancel an in-progress assistant run."""
 }
-fn (request: CancelRunRequest): CancelRunResponse {
-  response api-request("POST", `${::openai::api/base-url()}/threads/${request.thread-id}/runs/${request.run-id}/cancel`)
-  if(is-ok-response(response), CancelRunResponse(response.body), err(HttpError(response)))
+fn
+(request: CancelRunRequest): CancelRunResponse {
+  cancel-run(request, {})
+},
+(request: CancelRunRequest, opts: Map): CancelRunResponse {
+  response api-request("POST", `/threads/${request.thread-id}/runs/${request.run-id}/cancel`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { CancelRunResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 CancelUploadRequest type {
@@ -402,9 +442,17 @@ cancel-upload
 meta {
     doc: """POST /uploads/{upload_id}/cancel - Cancel an in-progress multi-part upload."""
 }
-fn (request: CancelUploadRequest): CancelUploadResponse {
-  response api-request("POST", `${::openai::api/base-url()}/uploads/${request.upload-id}/cancel`)
-  if(is-ok-response(response), CancelUploadResponse(response.body), err(HttpError(response)))
+fn
+(request: CancelUploadRequest): CancelUploadResponse {
+  cancel-upload(request, {})
+},
+(request: CancelUploadRequest, opts: Map): CancelUploadResponse {
+  response api-request("POST", `/uploads/${request.upload-id}/cancel`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { CancelUploadResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 CancelVectorStoreFileBatchRequest type {
@@ -426,7 +474,15 @@ cancel-vector-store-file-batch
 meta {
     doc: """POST /vector_stores/{vector_store_id}/file_batches/{batch_id}/cancel - Cancel vector store file batch"""
 }
-fn (request: CancelVectorStoreFileBatchRequest): CancelVectorStoreFileBatchResponse {
-  response api-request("POST", `${::openai::api/base-url()}/vector_stores/${request.vector-store-id}/file_batches/${request.batch-id}/cancel`)
-  if(is-ok-response(response), CancelVectorStoreFileBatchResponse(response.body), err(HttpError(response)))
+fn
+(request: CancelVectorStoreFileBatchRequest): CancelVectorStoreFileBatchResponse {
+  cancel-vector-store-file-batch(request, {})
+},
+(request: CancelVectorStoreFileBatchRequest, opts: Map): CancelVectorStoreFileBatchResponse {
+  response api-request("POST", `/vector_stores/${request.vector-store-id}/file_batches/${request.batch-id}/cancel`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { CancelVectorStoreFileBatchResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

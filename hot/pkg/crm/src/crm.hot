@@ -15,15 +15,14 @@ meta {
 
     **Per-call credentials**: `options` also takes a section per provider,
     passed as that package's `opts`: `hubspot: {token: ...}`, `salesforce:
-    {access-token: ..., instance-url: ...}`. They are masked in call
-    records and never written to ctx, so one run can act for many
-    accounts. The section of the provider in use applies; without
-    `provider`, the first section in hubspot, salesforce, attio order
-    picks it. A section that is not a Map is an Err, and so are `opts` its
-    package refuses (see `::hubspot::api/resolve` and
-    `::salesforce::api/resolve`), never a fallback to context. An `attio`
-    section is an Err for now: `hot.dev/attio` has no per-call credentials
-    in this release.
+    {access-token: ..., instance-url: ...}`, `attio: {api-key: ...}`. They
+    are masked in call records and never written to ctx, so one run can
+    act for many accounts. The section of the provider in use applies;
+    without `provider`, the first section in hubspot, salesforce, attio
+    order picks it. A section that is not a Map is an Err, and so are
+    `opts` its package refuses (see `::hubspot::api/resolve`,
+    `::salesforce::api/resolve` and `::attio::api/resolve`), never a
+    fallback to context.
 
     **Quick start**
 
@@ -240,11 +239,10 @@ fn (options: Map, provider: Str): Map {
 check-section
 meta {
     doc: """
-    `provider` when its section of `options` can be used, else an Err: a
-    section that is present but not a Map, or a non-empty `attio` section,
-    which `hot.dev/attio` can't honor yet. Neither falls back to context,
-    so a tenant's missing credentials never run on the project's. Exposed
-    for testing.
+    `provider` when its section of `options` can be used, else an Err for
+    a section that is present but not a Map. That never falls back to
+    context, so a tenant's missing credentials never run on the project's.
+    Exposed for testing.
     """
 }
 fn (options: Map, provider: Str): Str {
@@ -253,10 +251,6 @@ fn (options: Map, provider: Str): Str {
   cond {
     and(in(provider, keys(options)), not(is-map(section))) => {
       err(`crm: ${provider} is in the call's options but is not a Map of credentials. Pass a Map, or leave ${provider} out to use context.`)
-    }
-
-    and(eq(provider, "attio"), is-map(section), not(is-empty(section))) => {
-      err("crm: the attio section in the call's options can't be honored: hot.dev/attio has no per-call credentials in this release. Leave it out to use attio.api.key.")
     }
     => { provider }
   }
@@ -330,7 +324,7 @@ fn
     is-err(missing) => { missing }
     eq(provider, "hubspot") => { ::crm::hubspot/upsert-contact(fields, provider-opts(options, provider)) }
     eq(provider, "salesforce") => { ::crm::salesforce/upsert-contact(fields, provider-opts(options, provider)) }
-    => { ::crm::attio/upsert-contact(fields) }
+    => { ::crm::attio/upsert-contact(fields, provider-opts(options, provider)) }
   }
 }
 
@@ -348,7 +342,7 @@ fn
     is-err(provider) => { provider }
     eq(provider, "hubspot") => { ::crm::hubspot/find-contact(email, provider-opts(options, provider)) }
     eq(provider, "salesforce") => { ::crm::salesforce/find-contact(email, provider-opts(options, provider)) }
-    => { ::crm::attio/find-contact(email) }
+    => { ::crm::attio/find-contact(email, provider-opts(options, provider)) }
   }
 }
 
@@ -393,7 +387,7 @@ fn
         is-err(provider) => { provider }
         eq(provider, "hubspot") => { ::crm::hubspot/log-activity(resolved.id, body, options, provider-opts(options, provider)) }
         eq(provider, "salesforce") => { ::crm::salesforce/log-activity(resolved.id, body, options, provider-opts(options, provider)) }
-        eq(provider, "attio") => { ::crm::attio/log-activity(resolved.id, body, options) }
+        eq(provider, "attio") => { ::crm::attio/log-activity(resolved.id, body, options, provider-opts(options, provider)) }
         => { err(`crm: unknown provider '${provider}' on contact`) }
       }
     }
@@ -419,7 +413,7 @@ fn
         is-err(provider) => { provider }
         eq(provider, "hubspot") => { ::crm::hubspot/list-activities(resolved.id, limit, provider-opts(options, provider)) }
         eq(provider, "salesforce") => { ::crm::salesforce/list-activities(resolved.id, limit, provider-opts(options, provider)) }
-        eq(provider, "attio") => { ::crm::attio/list-activities(resolved.id, limit) }
+        eq(provider, "attio") => { ::crm::attio/list-activities(resolved.id, limit, provider-opts(options, provider)) }
         => { err(`crm: unknown provider '${provider}' on contact`) }
       }
     }
@@ -459,7 +453,7 @@ fn
     is-null(domain) => { err("crm: upsert-company needs 'domain'") }
     eq(provider, "hubspot") => { ::crm::hubspot/upsert-company(normalized, provider-opts(options, provider)) }
     eq(provider, "salesforce") => { ::crm::salesforce/upsert-company(normalized, provider-opts(options, provider)) }
-    => { ::crm::attio/upsert-company(normalized) }
+    => { ::crm::attio/upsert-company(normalized, provider-opts(options, provider)) }
   }
 }
 
@@ -479,7 +473,7 @@ fn
     is-null(normalized) => { null }
     eq(provider, "hubspot") => { ::crm::hubspot/find-company(normalized, provider-opts(options, provider)) }
     eq(provider, "salesforce") => { ::crm::salesforce/find-company(normalized, provider-opts(options, provider)) }
-    => { ::crm::attio/find-company(normalized) }
+    => { ::crm::attio/find-company(normalized, provider-opts(options, provider)) }
   }
 }
 
@@ -506,7 +500,7 @@ fn
     is-err(provider) => { provider }
     eq(provider, "hubspot") => { ::crm::hubspot/find-deals(criteria, provider-opts(options, provider)) }
     eq(provider, "salesforce") => { ::crm::salesforce/find-deals(criteria, provider-opts(options, provider)) }
-    => { ::crm::attio/find-deals(criteria) }
+    => { ::crm::attio/find-deals(criteria, provider-opts(options, provider)) }
   }
 }
 
@@ -514,7 +508,7 @@ create-deal fn (provider: Str, fields: Map, options: Map): Deal {
   cond {
     eq(provider, "hubspot") => { ::crm::hubspot/create-deal(fields, provider-opts(options, provider)) }
     eq(provider, "salesforce") => { ::crm::salesforce/create-deal(fields, provider-opts(options, provider)) }
-    => { ::crm::attio/create-deal(fields) }
+    => { ::crm::attio/create-deal(fields, provider-opts(options, provider)) }
   }
 }
 
@@ -522,7 +516,7 @@ update-deal fn (provider: Str, id: Str, fields: Map, options: Map): Deal {
   cond {
     eq(provider, "hubspot") => { ::crm::hubspot/update-deal(id, fields, provider-opts(options, provider)) }
     eq(provider, "salesforce") => { ::crm::salesforce/update-deal(id, fields, provider-opts(options, provider)) }
-    => { ::crm::attio/update-deal(id, fields) }
+    => { ::crm::attio/update-deal(id, fields, provider-opts(options, provider)) }
   }
 }
 
@@ -603,6 +597,6 @@ fn
     is-err(provider) => { provider }
     eq(provider, "hubspot") => { ::crm::hubspot/move-stage(id, stage, provider-opts(options, provider)) }
     eq(provider, "salesforce") => { ::crm::salesforce/move-stage(id, stage, provider-opts(options, provider)) }
-    => { ::crm::attio/move-stage(id, stage) }
+    => { ::crm::attio/move-stage(id, stage, provider-opts(options, provider)) }
   }
 }

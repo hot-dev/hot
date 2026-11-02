@@ -19,8 +19,12 @@ meta {
     ```
     """
 }
-fn (p: CompatibleProvider): Map {
-    ::compat/list-models(p)
+fn
+(p: CompatibleProvider): Map {
+    list-models(p, {})
+},
+(p: CompatibleProvider, opts: Map): Map {
+    ::compat/list-models(p, opts)
 }
 
 model-path
@@ -45,6 +49,14 @@ get-model
 meta {
     doc: """GET /models/{model}: one model's metadata, or an Err carrying `HttpError`. Not every provider implements it."""
 }
-fn (p: CompatibleProvider, model: Str): Map {
-    ::api/endpoint-response(::api/endpoint-request(p.endpoint, "GET", model-path(p, model)))
+fn
+(p: CompatibleProvider, model: Str): Map {
+    get-model(p, model, {})
+},
+(p: CompatibleProvider, model: Str, opts: Map): Map {
+    ep ::compat/resolve(p, opts)
+    cond {
+        is-err(ep) => { ep }
+        => { ::api/endpoint-response(::api/endpoint-request(ep, "GET", model-path(p, model))) }
+    }
 }
