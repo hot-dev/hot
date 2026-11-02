@@ -53,17 +53,14 @@ meta ["test"] fn () {
     assert(ends-with(e.message, `${join(map(range(0, 300), (i) { "é" }), "")}...`), "300 characters, none cut in two")
 }
 
-test-http-error-from-a-plain-response-map
+test-http-error-from-a-response
 meta ["test"] fn () {
-    // What ::hot::http/request returns: a plain Map, with body-bytes
-    wire {status: 404, headers: {"retry-after": "7"}, body: DRIVE_404, body-bytes: Bytes("raw")}
-    response ::api/as-response(wire)
+    response ::hot::http/HttpResponse({status: 404, headers: {"retry-after": "7"}, body: DRIVE_404, body-bytes: Bytes("raw")})
     e ::api/HttpError(response)
     assert-eq("google: HTTP 404 NOT_FOUND (notFound): File not found: 1AbC.", e.message, "the arrow runs")
     assert-eq(7, e.retry-after)
     assert-eq(Bytes("raw"), get(response, "body-bytes"), "the raw bytes stay readable")
     assert-eq("7", get(response.headers, "retry-after"))
-    assert(is-err(::api/as-response(err("::hot::http/request: request failed"))), "an Err stays an Err")
     assert(contains(err-message(::api/unwrap(response)), "notFound"))
 }
 
