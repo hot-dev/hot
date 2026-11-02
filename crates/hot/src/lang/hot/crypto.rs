@@ -5,6 +5,7 @@
 // SCRAM authentication handshake.
 
 use crate::lang::hot::r#type::HotResult;
+use crate::lang::runtime::vm::VirtualMachine;
 use crate::val::Val;
 use aws_lc_rs::pbkdf2;
 use std::num::NonZeroU32;
@@ -23,6 +24,14 @@ fn get_bytes_from_arg(fn_name: &str, arg_name: &str, arg: &Val) -> Result<Vec<u8
             fn_name, arg_name
         ))),
     }
+}
+
+pub fn pbkdf2_hmac_sha256_secret(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
+    crate::lang::hot::ctx::with_secret_key(vm, args, pbkdf2_hmac_sha256)
+}
+
+pub fn rsa_sha256_sign_secret(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
+    crate::lang::hot::ctx::with_secret_key(vm, args, rsa_sha256_sign)
 }
 
 /// PBKDF2 key derivation with HMAC-SHA256 (the SCRAM-SHA-256 `Hi()` function).

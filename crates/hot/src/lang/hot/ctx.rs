@@ -185,6 +185,25 @@ pub fn hash_secret_value_recursive(value: &Val, hashes: &mut ahash::AHashSet<u64
 /// value, and, where long enough, inside strings. Registered during a call, it
 /// also masks that call's and its parents' records, which aren't final until
 /// they stop.
+/// Run a native whose first argument is a key and whose result is a credential
+/// made with it: a signature, an HMAC, a derived key. Neither gets into the
+/// run's records, and nor does the result once encoded, whether or not the
+/// code calling it could mark them.
+pub(crate) fn with_secret_key(
+    vm: &mut VirtualMachine,
+    args: &[Val],
+    native: fn(&[Val]) -> HotResult<Val>,
+) -> HotResult<Val> {
+    if let Some(key) = args.first() {
+        vm.register_secret_key(key);
+    }
+    let result = native(args);
+    if let HotResult::Ok(output) = &result {
+        vm.register_minted_secret(output);
+    }
+    result
+}
+
 pub fn register_secret(vm: &mut VirtualMachine, value: &Val) {
     vm.register_secret_value(value);
 }
