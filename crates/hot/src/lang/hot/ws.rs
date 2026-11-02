@@ -356,7 +356,7 @@ async fn ws_connect_async(url: &str, headers: &IndexMap<Val, Val>) -> HotResult<
     conn_map.insert(Val::from("$ws"), Val::Box(Box::new(handle)));
     conn_map.insert(Val::from("$ws_rx"), Val::Box(Box::new(rx_holder)));
 
-    HotResult::Ok(Val::Map(Box::new(conn_map)))
+    HotResult::Ok(Val::map(conn_map))
 }
 
 /// Send a message over an open WebSocket connection.
@@ -615,7 +615,7 @@ mod tests {
     fn test_val_to_message_map() {
         let mut map = IndexMap::new();
         map.insert(Val::from("type"), Val::from("test"));
-        let val = Val::Map(Box::new(map));
+        let val = Val::map(map);
         let msg = val_to_message(&val);
         assert!(matches!(msg, Message::Text(_)));
     }

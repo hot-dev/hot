@@ -94,7 +94,7 @@ pub fn children(args: &[Val]) -> HotResult<Val> {
         }
     }
 
-    HotResult::Ok(Val::Vec(results))
+    HotResult::Ok(Val::vec(results))
 }
 
 /// Get text content from an element (concatenates all text nodes)
@@ -185,7 +185,7 @@ fn get_content(val: &Val) -> Result<Vec<Val>, String> {
         Val::Map(m) => {
             let key = Val::from("content");
             match m.get(&key) {
-                Some(Val::Vec(v)) => Ok(v.clone()),
+                Some(Val::Vec(v)) => Ok(v.to_vec()),
                 Some(_) => Err("content field must be a Vec".to_string()),
                 None => Ok(vec![]),
             }
@@ -344,9 +344,9 @@ fn parse_attributes(e: &BytesStart) -> Result<IndexMap<Val, Val>, String> {
 fn build_xml_val(tag: &str, attrs: IndexMap<Val, Val>, content: Vec<Val>) -> Val {
     let mut map = IndexMap::new();
     map.insert(Val::from("tag"), Val::from(tag.to_string()));
-    map.insert(Val::from("attrs"), Val::Map(Box::new(attrs)));
-    map.insert(Val::from("content"), Val::Vec(content));
-    Val::Map(Box::new(map))
+    map.insert(Val::from("attrs"), Val::map(attrs));
+    map.insert(Val::from("content"), Val::vec(content));
+    Val::map(map)
 }
 
 fn serialize_xml(val: &Val) -> Result<String, String> {
@@ -387,7 +387,7 @@ fn serialize_element<W: std::io::Write>(writer: &mut Writer<W>, val: &Val) -> Re
 
             let content_key = Val::from("content");
             let content = match m.get(&content_key) {
-                Some(Val::Vec(v)) => v.clone(),
+                Some(Val::Vec(v)) => v.to_vec(),
                 Some(_) => return Err("content must be a Vec".to_string()),
                 None => Vec::new(),
             };

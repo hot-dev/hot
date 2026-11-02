@@ -9,7 +9,7 @@ use super::coll::{OnErrDisposition, apply_onerr_disposition, parse_onerr_disposi
 /// Extract arguments from a Vec value
 fn extract_args_vec(args_val: &Val) -> Result<Vec<Val>, Val> {
     match args_val {
-        Val::Vec(vec) => Ok(vec.clone()),
+        Val::Vec(vec) => Ok(vec.to_vec()),
         _ => Err(Val::from(format!(
             "Arguments must be a Vec, got {:?}",
             args_val
@@ -126,7 +126,7 @@ fn wrap_preserved_call_result(val: Val, disposition: OnErrDisposition) -> Val {
         let mut raw = indexmap::IndexMap::new();
         raw.insert(Val::from("$type"), Val::from("Raw"));
         raw.insert(Val::from("$val"), val);
-        Val::Map(Box::new(raw))
+        Val::map(raw)
     } else {
         val
     }
@@ -151,7 +151,7 @@ pub fn namespaces(
             }
         })
         .collect();
-    HotResult::Ok(Val::Vec(vals))
+    HotResult::Ok(Val::vec(vals))
 }
 
 /// List functions in a given namespace
@@ -225,7 +225,7 @@ pub fn functions_in_namespace(
         })
         .collect();
 
-    HotResult::Ok(Val::Vec(names))
+    HotResult::Ok(Val::vec(names))
 }
 
 // Dynamic function calling (moved from function.rs)

@@ -83,7 +83,7 @@ fn request_with_policy(
 
         headers = match map.get(&Val::from("headers")) {
             Some(Val::Map(m)) => m.clone(),
-            Some(Val::Null) | None => Box::new(IndexMap::new()),
+            Some(Val::Null) | None => std::sync::Arc::new(IndexMap::new()),
             _ => {
                 return HotResult::Err(err_val(
                     "::hot::http/request: headers must be a map".to_string(),
@@ -393,7 +393,7 @@ async fn make_http_request(
     // Build response map
     let mut response_map: IndexMap<Val, Val> = IndexMap::new();
     response_map.insert(Val::from("status"), Val::Int(status));
-    response_map.insert(Val::from("headers"), Val::Map(Box::new(response_headers)));
+    response_map.insert(Val::from("headers"), Val::map(response_headers));
     response_map.insert(Val::from("body"), body_val);
     response_map.insert(Val::from("body-bytes"), body_bytes_val);
 
@@ -685,7 +685,7 @@ impl HttpStreamIterator {
             event_map.insert(Val::from("id"), Val::from(id_str));
         }
 
-        Some(Val::Map(Box::new(event_map)))
+        Some(Val::map(event_map))
     }
 
     /// Parse NDJSON (newline-delimited JSON) chunk
@@ -718,7 +718,7 @@ impl HttpStreamIterator {
         } else if objects.len() == 1 {
             objects.pop().unwrap()
         } else {
-            Val::Vec(objects)
+            Val::vec(objects)
         }
     }
 }
@@ -814,7 +814,7 @@ fn request_stream_with_policy(
 
         headers = match map.get(&Val::from("headers")) {
             Some(Val::Map(m)) => m.clone(),
-            Some(Val::Null) | None => Box::new(IndexMap::new()),
+            Some(Val::Null) | None => std::sync::Arc::new(IndexMap::new()),
             _ => {
                 return HotResult::Err(err_val(
                     "::hot::http/request-stream: headers must be a map".to_string(),
@@ -981,7 +981,7 @@ async fn make_streaming_request(
     // Build response map with iterator as body
     let mut response_map: IndexMap<Val, Val> = IndexMap::new();
     response_map.insert(Val::from("status"), Val::Int(status));
-    response_map.insert(Val::from("headers"), Val::Map(Box::new(response_headers)));
+    response_map.insert(Val::from("headers"), Val::map(response_headers));
     response_map.insert(Val::from("body"), Val::Box(Box::new(iter_box)));
 
     HotResult::Ok(Val::constructed(
@@ -1508,7 +1508,9 @@ mod tests {
                         // Handle both single values and vectors (multiple lines in one chunk)
                         match value {
                             Val::Null => continue,
-                            Val::Vec(items) => objects.extend(items),
+                            Val::Vec(items) => {
+                                objects.extend(std::sync::Arc::unwrap_or_clone(items))
+                            }
                             other => objects.push(other),
                         }
                     }
@@ -1596,7 +1598,7 @@ mod tests {
                 Val::from("POST"),
                 Val::from(url),
                 Val::map_empty(),
-                Val::Map(Box::new(body_map)),
+                Val::map(body_map),
             ]);
             unwrap_result(result)
         })
@@ -1638,11 +1640,11 @@ mod tests {
 
         let mut body_map: IndexMap<Val, Val> = IndexMap::new();
         body_map.insert(Val::from("greeting"), Val::from("hello"));
-        req_map.insert(Val::from("body"), Val::Map(Box::new(body_map)));
+        req_map.insert(Val::from("body"), Val::map(body_map));
         // headers omitted — should default to empty
 
         let response = tokio::task::spawn_blocking(move || {
-            let result = request(&[Val::Map(Box::new(req_map))]);
+            let result = request(&[Val::map(req_map)]);
             unwrap_result(result)
         })
         .await
@@ -1684,14 +1686,14 @@ mod tests {
 
         let mut headers_map: IndexMap<Val, Val> = IndexMap::new();
         headers_map.insert(Val::from("x-custom-header"), Val::from("test-value"));
-        req_map.insert(Val::from("headers"), Val::Map(Box::new(headers_map)));
+        req_map.insert(Val::from("headers"), Val::map(headers_map));
 
         let mut body_map: IndexMap<Val, Val> = IndexMap::new();
         body_map.insert(Val::from("data"), Val::from("test"));
-        req_map.insert(Val::from("body"), Val::Map(Box::new(body_map)));
+        req_map.insert(Val::from("body"), Val::map(body_map));
 
         let response = tokio::task::spawn_blocking(move || {
-            let result = request(&[Val::Map(Box::new(req_map))]);
+            let result = request(&[Val::map(req_map)]);
             unwrap_result(result)
         })
         .await
@@ -1734,14 +1736,14 @@ mod tests {
 
         let mut body_map: IndexMap<Val, Val> = IndexMap::new();
         body_map.insert(Val::from("msg"), Val::from("wrapped"));
-        inner_map.insert(Val::from("body"), Val::Map(Box::new(body_map)));
+        inner_map.insert(Val::from("body"), Val::map(body_map));
 
         let mut req_map: IndexMap<Val, Val> = IndexMap::new();
         req_map.insert(Val::from("$type"), Val::from("::hot::http/HttpRequest"));
-        req_map.insert(Val::from("$val"), Val::Map(Box::new(inner_map)));
+        req_map.insert(Val::from("$val"), Val::map(inner_map));
 
         let response = tokio::task::spawn_blocking(move || {
-            let result = request(&[Val::Map(Box::new(req_map))]);
+            let result = request(&[Val::map(req_map)]);
             unwrap_result(result)
         })
         .await

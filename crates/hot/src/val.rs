@@ -128,7 +128,7 @@ pub(crate) fn with_type_of(original: &Val, fields: Val) -> Val {
             (key.clone(), value)
         })
         .collect();
-    Val::Map(Box::new(wrapper))
+    Val::map(wrapper)
 }
 
 pub use crate::val;
@@ -170,9 +170,11 @@ pub enum Val {
     /// Str variant uses Arc<str> for cheap cloning of strings
     Str(Arc<str>),
     Bool(bool),
-    Vec(Vec<Val>),
-    /// Map variant uses Box to reduce enum size (IndexMap is ~48 bytes, Box is 8 bytes)
-    Map(Box<IndexMap<Val, Val>>),
+    /// Vec and Map share their storage, so a clone costs the same at any size.
+    /// A write goes through `Arc::make_mut`, which copies only while another
+    /// value still holds the storage, so every value keeps its contents.
+    Vec(Arc<Vec<Val>>),
+    Map(Arc<IndexMap<Val, Val>>),
     Box(Box<dyn ValBox>),
     Byte(u8),
     Bytes(Vec<u8>),
@@ -490,7 +492,7 @@ impl ValType for bool {
 
 impl<T: ValType> ValType for Vec<T> {
     fn val(&self) -> Val {
-        Val::Vec(self.iter().map(|x| x.val()).collect())
+        Val::vec(self.iter().map(|x| x.val()).collect())
     }
 }
 
@@ -500,7 +502,7 @@ impl<K: ValType, V: ValType> ValType for IndexMap<K, V> {
         for (k, v) in self.iter() {
             map.insert(k.val(), v.val());
         }
-        Val::Map(Box::new(map))
+        Val::map(map)
     }
 }
 
@@ -1056,7 +1058,7 @@ impl From<Vec<u8>> for Val {
 // Implementation of From<IndexMap<Val, Val>> for Val
 impl From<IndexMap<Val, Val>> for Val {
     fn from(m: IndexMap<Val, Val>) -> Self {
-        Val::Map(Box::new(m))
+        Val::map(m)
     }
 }
 
@@ -1090,7 +1092,7 @@ impl From<MapEntries> for Val {
         for MapEntry(k, v) in entries.0 {
             map.insert(k, v);
         }
-        Val::Map(Box::new(map))
+        Val::map(map)
     }
 }
 
@@ -1116,21 +1118,21 @@ impl<K: Into<Val>, V: Into<Val>> From<Vec<(K, V)>> for MapEntries {
 // Implementation of From<Vec<&str>> for Val
 impl From<Vec<&str>> for Val {
     fn from(v: Vec<&str>) -> Self {
-        Val::Vec(v.into_iter().map(Val::from).collect())
+        Val::vec(v.into_iter().map(Val::from).collect())
     }
 }
 
 // Implementation of From<Vec<i64>> for Val
 impl From<Vec<i64>> for Val {
     fn from(v: Vec<i64>) -> Self {
-        Val::Vec(v.into_iter().map(Val::from).collect())
+        Val::vec(v.into_iter().map(Val::from).collect())
     }
 }
 
 // Keep the specific implementation for Vec<Val> to avoid unnecessary conversions
 impl From<Vec<Val>> for Val {
     fn from(v: Vec<Val>) -> Self {
-        Val::Vec(v)
+        Val::vec(v)
     }
 }
 
@@ -1140,7 +1142,7 @@ impl From<Vec<(Val, Val)>> for Val {
         for (k, v) in pairs {
             map.insert(k, v);
         }
-        Val::Map(Box::new(map))
+        Val::map(map)
     }
 }
 
@@ -1194,7 +1196,7 @@ impl Serialize for Val {
             }
             Val::Vec(v) => {
                 let mut seq = serializer.serialize_seq(Some(v.len()))?;
-                for item in v {
+                for item in v.iter() {
                     seq.serialize_element(item)?;
                 }
                 seq.end()
@@ -1417,7 +1419,7 @@ fn serde_json_to_val(value: serde_json::Value) -> Val {
             }
         }
         serde_json::Value::String(s) => Val::from(s),
-        serde_json::Value::Array(arr) => Val::Vec(arr.into_iter().map(serde_json_to_val).collect()),
+        serde_json::Value::Array(arr) => Val::vec(arr.into_iter().map(serde_json_to_val).collect()),
         serde_json::Value::Object(obj) => {
             // Check for $box tag
             if obj.contains_key("$box")
@@ -1486,7 +1488,7 @@ fn serde_json_to_val(value: serde_json::Value) -> Val {
                                 map.insert(Val::from(k.clone()), serde_json_to_val(v.clone()));
                             }
                         }
-                        return Val::Map(Box::new(map));
+                        return Val::map(map);
                     }
                 }
             }
@@ -1496,7 +1498,7 @@ fn serde_json_to_val(value: serde_json::Value) -> Val {
             for (k, v) in obj {
                 map.insert(Val::from(k), serde_json_to_val(v));
             }
-            Val::Map(Box::new(map))
+            Val::map(map)
         }
     }
 }
@@ -1519,12 +1521,12 @@ macro_rules! val {
 
     // Empty vector
     ([]) => {
-        $crate::val::Val::Vec(vec![])
+        $crate::val::Val::vec(vec![])
     };
 
     // Vector with elements - use vector muncher
     ([ $($tt:tt)+ ]) => {
-        $crate::val::Val::Vec($crate::val_internal!(@vector [] $($tt)+))
+        $crate::val::Val::vec($crate::val_internal!(@vector [] $($tt)+))
     };
 
     // Empty map
@@ -1537,7 +1539,7 @@ macro_rules! val {
         {
             let mut map = $crate::val::indexmap::IndexMap::new();
             $crate::val_internal!(@map map () ($($tt)+) ($($tt)+));
-            $crate::val::Val::Map(Box::new(map))
+            $crate::val::Val::map(map)
         }
     };
 
@@ -1686,7 +1688,7 @@ impl<const N: usize> From<[(Val, Val); N]> for Val {
         for (k, v) in pairs {
             map.insert(k, v);
         }
-        Val::Map(Box::new(map))
+        Val::map(map)
     }
 }
 
@@ -1711,20 +1713,30 @@ impl Val {
         ToString::to_string(&result)
     }
 
+    /// A Vec value holding `items`.
+    pub fn vec(items: Vec<Val>) -> Self {
+        Val::Vec(Arc::new(items))
+    }
+
+    /// A Map value holding `entries`.
+    pub fn map(entries: IndexMap<Val, Val>) -> Self {
+        Val::Map(Arc::new(entries))
+    }
+
     /// Creates a new empty map value
     pub fn map_empty() -> Self {
-        Val::Map(Box::new(IndexMap::new()))
+        Val::map(IndexMap::new())
     }
 
     pub fn vec_empty() -> Self {
-        Val::Vec(vec![])
+        Val::vec(vec![])
     }
 
     /// Creates a map with a single key-value pair
     pub fn map_with_kv(key: impl Into<Val>, value: impl Into<Val>) -> Self {
         let mut map = IndexMap::new();
         map.insert(key.into(), value.into());
-        Val::Map(Box::new(map))
+        Val::map(map)
     }
 
     /// Creates a map from an iterator of key-value pairs
@@ -1736,13 +1748,13 @@ impl Val {
         for (k, v) in entries {
             map.insert(k, v);
         }
-        Val::Map(Box::new(map))
+        Val::map(map)
     }
 
     /// Creates a Val::Map from an IndexMap (boxes the map internally)
     #[inline]
     pub fn new_map(map: IndexMap<Val, Val>) -> Self {
-        Val::Map(Box::new(map))
+        Val::map(map)
     }
 
     /// Get a new IndexMap for internal use
@@ -1765,9 +1777,9 @@ impl Val {
                     .iter()
                     .map(|(k, v)| (k.resolve_boxes(), v.resolve_boxes()))
                     .collect();
-                Val::Map(Box::new(resolved))
+                Val::map(resolved)
             }
-            Val::Vec(v) => Val::Vec(v.iter().map(|item| item.resolve_boxes()).collect()),
+            Val::Vec(v) => Val::vec(v.iter().map(|item| item.resolve_boxes()).collect()),
             Val::Box(b) => {
                 if let Some(func_ref) = b
                     .as_any()
@@ -1807,9 +1819,9 @@ impl Val {
                     .iter()
                     .map(|(key, value)| (key.to_hot_data_repr(), value.to_hot_data_repr()))
                     .collect();
-                Val::Map(Box::new(mapped))
+                Val::map(mapped)
             }
-            Val::Vec(v) => Val::Vec(v.iter().map(|item| item.to_hot_data_repr()).collect()),
+            Val::Vec(v) => Val::vec(v.iter().map(|item| item.to_hot_data_repr()).collect()),
             Val::Box(b) => Self::box_to_hot_data_repr(b.as_ref()),
             _ => self.clone(),
         }
@@ -1819,14 +1831,14 @@ impl Val {
         let mut map = indexmap::IndexMap::new();
         map.insert(Val::from("$type"), Val::from(type_name.to_string()));
         map.insert(Val::from("$val"), value);
-        Val::Map(Box::new(map))
+        Val::map(map)
     }
 
     fn lambda_info_data(lambda: &crate::lang::bytecode::LambdaInfo) -> Val {
         let mut meta = indexmap::IndexMap::new();
         meta.insert(
             Val::from("parameters"),
-            Val::Vec(lambda.parameters.iter().cloned().map(Val::from).collect()),
+            Val::vec(lambda.parameters.iter().cloned().map(Val::from).collect()),
         );
         meta.insert(Val::from("lazy"), Val::Bool(lambda.is_lazy_param));
 
@@ -1858,10 +1870,10 @@ impl Val {
             .collect();
 
         if !captures.is_empty() {
-            meta.insert(Val::from("captures"), Val::Map(Box::new(captures)));
+            meta.insert(Val::from("captures"), Val::map(captures));
         }
 
-        Val::Map(Box::new(meta))
+        Val::map(meta)
     }
 
     fn simple_lazy_capture_value(lambda: &crate::lang::bytecode::LambdaInfo) -> Option<Val> {
@@ -1956,7 +1968,7 @@ impl Val {
             let mut meta = indexmap::IndexMap::new();
             meta.insert(
                 Val::from("parameters"),
-                Val::Vec(lambda.parameters.iter().cloned().map(Val::from).collect()),
+                Val::vec(lambda.parameters.iter().cloned().map(Val::from).collect()),
             );
             meta.insert(Val::from("lazy"), Val::Bool(lambda.is_lazy_param));
 
@@ -1967,7 +1979,7 @@ impl Val {
                 );
             }
 
-            return Self::typed_hot_data_value("::hot::type/Fn", Val::Map(Box::new(meta)))
+            return Self::typed_hot_data_value("::hot::type/Fn", Val::map(meta))
                 .format_hot_display(0);
         }
 
@@ -2445,9 +2457,9 @@ impl Val {
             match val {
                 Val::Vec(vec) => {
                     let mut result = Vec::new();
-                    for item in vec {
+                    for item in vec.iter() {
                         if let Val::Str(s) = item {
-                            result.push(ToString::to_string(&*s));
+                            result.push(ToString::to_string(&**s));
                         }
                     }
                     result
@@ -2465,9 +2477,9 @@ impl Val {
             .and_then(|val| match val {
                 Val::Vec(vec) => {
                     let mut result = Vec::new();
-                    for item in vec {
+                    for item in vec.iter() {
                         if let Val::Str(s) = item {
-                            result.push(ToString::to_string(&*s));
+                            result.push(ToString::to_string(&**s));
                         }
                     }
                     Some(result)
@@ -2641,12 +2653,12 @@ impl Val {
                         if let Some(Val::Map(val_map)) = map.get(&Val::from("$val")) {
                             let mut new_val_map = (**val_map).clone(); // Clone inner IndexMap
                             new_val_map.insert(key, value);
-                            new_indexmap.insert(Val::from("$val"), Val::Map(Box::new(new_val_map)));
+                            new_indexmap.insert(Val::from("$val"), Val::map(new_val_map));
                         } else {
                             // $val doesn't exist or isn't a map, create it
                             let mut new_val_map = IndexMap::new();
                             new_val_map.insert(key, value);
-                            new_indexmap.insert(Val::from("$val"), Val::Map(Box::new(new_val_map)));
+                            new_indexmap.insert(Val::from("$val"), Val::map(new_val_map));
                         }
                     } else {
                         // Normal behavior: set the key directly
@@ -2667,18 +2679,16 @@ impl Val {
                                     existing.set_by_deep_path_parts(remaining_parts, value);
                                 let mut new_val_map = (**val_map).clone();
                                 new_val_map.insert(key, updated_field);
-                                new_indexmap
-                                    .insert(Val::from("$val"), Val::Map(Box::new(new_val_map)));
-                                return Val::Map(Box::new(new_indexmap));
+                                new_indexmap.insert(Val::from("$val"), Val::map(new_val_map));
+                                return Val::map(new_indexmap);
                             } else {
                                 // Field doesn't exist in $val, create it
                                 let new_field =
                                     Val::map_empty().set_by_deep_path_parts(remaining_parts, value);
                                 let mut new_val_map = (**val_map).clone();
                                 new_val_map.insert(key, new_field);
-                                new_indexmap
-                                    .insert(Val::from("$val"), Val::Map(Box::new(new_val_map)));
-                                return Val::Map(Box::new(new_indexmap));
+                                new_indexmap.insert(Val::from("$val"), Val::map(new_val_map));
+                                return Val::map(new_indexmap);
                             }
                         }
 
@@ -2695,11 +2705,11 @@ impl Val {
                     new_indexmap.insert(key, next_val);
                 }
 
-                Val::Map(Box::new(new_indexmap))
+                Val::map(new_indexmap)
             }
             Val::Vec(vec) => {
                 if let Ok(index) = current_part.parse::<usize>() {
-                    let mut new_vec = vec.clone();
+                    let mut new_vec = vec.to_vec();
 
                     // Ensure the vector is big enough
                     if index >= new_vec.len() {
@@ -2716,7 +2726,7 @@ impl Val {
                             new_vec[index].set_by_deep_path_parts(remaining_parts, value);
                     }
 
-                    Val::Vec(new_vec)
+                    Val::vec(new_vec)
                 } else {
                     // If we can't parse the index, create a map instead
                     let mut new_indexmap = IndexMap::new();
@@ -2731,7 +2741,7 @@ impl Val {
                         );
                     }
 
-                    Val::Map(Box::new(new_indexmap))
+                    Val::map(new_indexmap)
                 }
             }
             _ => {
@@ -2751,7 +2761,7 @@ impl Val {
                             Val::map_empty().set_by_deep_path_parts(remaining_parts, value)
                         };
                     }
-                    Val::Vec(new_vec)
+                    Val::vec(new_vec)
                 } else {
                     // Create a new map
                     let mut new_indexmap = IndexMap::new();
@@ -2771,7 +2781,7 @@ impl Val {
                         new_indexmap.insert(key, next_val);
                     }
 
-                    Val::Map(Box::new(new_indexmap))
+                    Val::map(new_indexmap)
                 }
             }
         }
@@ -2817,10 +2827,10 @@ impl Val {
 
                 // Fast path: if one map is empty, return the other
                 if map1.is_empty() {
-                    return Val::Map(map2.clone()); // map2 is already Box<IndexMap>
+                    return Val::Map(map2.clone());
                 }
                 if map2.is_empty() {
-                    return Val::Map(map1.clone()); // map1 is already Box<IndexMap>
+                    return Val::Map(map1.clone());
                 }
 
                 // Check for overlapping keys to optimize the common case
@@ -2873,7 +2883,7 @@ impl Val {
                 //     );
                 // }
 
-                Val::Map(Box::new(result))
+                Val::map(result)
             }
             // For any other combination, the second value overwrites the first
             (_, other_val) => other_val.clone(),
@@ -2986,14 +2996,14 @@ impl Val {
     pub fn constructed(type_name: &str, fields: IndexMap<Val, Val>) -> Self {
         let mut map = IndexMap::with_capacity(2);
         map.insert(Val::from("$type"), Val::from(type_name.to_string()));
-        map.insert(Val::from("$val"), Val::Map(Box::new(fields)));
-        Val::Map(Box::new(map))
+        map.insert(Val::from("$val"), Val::map(fields));
+        Val::map(map)
     }
 
     pub fn typed_map(type_name: &str, content: IndexMap<Val, Val>) -> Self {
         let mut map = content;
         map.insert(Val::from("$type"), Val::from(type_name.to_string()));
-        Val::Map(Box::new(map))
+        Val::map(map)
     }
 
     /// Check if a value has a specific type
@@ -3017,7 +3027,7 @@ impl Val {
         let mut result_map = IndexMap::new();
         result_map.insert(Val::from("$type"), Val::from("::hot::type/Result.Ok"));
         result_map.insert(Val::from("$val"), value);
-        Val::Map(Box::new(result_map))
+        Val::map(result_map)
     }
 
     /// Create a Result.Err variant from error value
@@ -3026,7 +3036,7 @@ impl Val {
         let mut result_map = IndexMap::new();
         result_map.insert(Val::from("$type"), Val::from("::hot::type/Result.Err"));
         result_map.insert(Val::from("$val"), value);
-        Val::Map(Box::new(result_map))
+        Val::map(result_map)
     }
 
     /// Check if this is a Result.Ok variant
@@ -3223,16 +3233,16 @@ mod tests {
 
         // Test Bytes <-> Vec equality
         let bytes_val = Val::Bytes(vec![10, 20, 30]);
-        let vec_val = Val::Vec(vec![Val::Int(10), Val::Int(20), Val::Int(30)]);
+        let vec_val = Val::vec(vec![Val::Int(10), Val::Int(20), Val::Int(30)]);
         assert_eq!(bytes_val, vec_val);
         assert_eq!(vec_val, bytes_val);
 
         // Test with mixed byte/int vec
-        let mixed_vec = Val::Vec(vec![Val::Byte(10), Val::Int(20), Val::Byte(30)]);
+        let mixed_vec = Val::vec(vec![Val::Byte(10), Val::Int(20), Val::Byte(30)]);
         assert_eq!(bytes_val, mixed_vec);
 
         // Test with out of range int in vec - should not be equal
-        let invalid_vec = Val::Vec(vec![Val::Int(10), Val::Int(256), Val::Int(30)]);
+        let invalid_vec = Val::vec(vec![Val::Int(10), Val::Int(256), Val::Int(30)]);
         assert_ne!(bytes_val, invalid_vec);
     }
 
@@ -3357,7 +3367,7 @@ mod tests {
         let mut map = IndexMap::new();
         map.insert(Val::from("key"), Val::from(123));
         let map_val = Val::from(map.clone());
-        assert_eq!(map_val, Val::Map(Box::new(map)));
+        assert_eq!(map_val, Val::map(map));
 
         // Option - Some
         let some_val = Val::from(Some(42i64));
@@ -3657,8 +3667,8 @@ mod tests {
         settings_map.insert(Val::from("theme"), Val::from("light"));
 
         let mut user_map = IndexMap::new();
-        user_map.insert(Val::from("profile"), Val::Map(Box::new(profile_map)));
-        user_map.insert(Val::from("settings"), Val::Map(Box::new(settings_map)));
+        user_map.insert(Val::from("profile"), Val::map(profile_map));
+        user_map.insert(Val::from("settings"), Val::map(settings_map));
 
         // Create post 1
         let mut post1_map = IndexMap::new();
@@ -3670,13 +3680,13 @@ mod tests {
         post2_map.insert(Val::from("id"), Val::Int(2));
         post2_map.insert(Val::from("title"), Val::from("World"));
 
-        let posts_vec = vec![Val::Map(Box::new(post1_map)), Val::Map(Box::new(post2_map))];
+        let posts_vec = vec![Val::map(post1_map), Val::map(post2_map)];
 
         let mut root_map = IndexMap::new();
-        root_map.insert(Val::from("user"), Val::Map(Box::new(user_map)));
-        root_map.insert(Val::from("posts"), Val::Vec(posts_vec));
+        root_map.insert(Val::from("user"), Val::map(user_map));
+        root_map.insert(Val::from("posts"), Val::vec(posts_vec));
 
-        let val = Val::Map(Box::new(root_map));
+        let val = Val::map(root_map);
 
         // Basic path access
         assert_eq!(val.get("user.profile.name"), Some(Val::from("John")));
@@ -3704,20 +3714,20 @@ mod tests {
         profile_map.insert(Val::from("age"), Val::Int(30));
 
         let mut user_map = IndexMap::new();
-        user_map.insert(Val::from("profile"), Val::Map(Box::new(profile_map)));
+        user_map.insert(Val::from("profile"), Val::map(profile_map));
 
         // Create post 1
         let mut post1_map = IndexMap::new();
         post1_map.insert(Val::from("id"), Val::Int(1));
         post1_map.insert(Val::from("title"), Val::from("Hello"));
 
-        let posts_vec = vec![Val::Map(Box::new(post1_map))];
+        let posts_vec = vec![Val::map(post1_map)];
 
         let mut root_map = IndexMap::new();
-        root_map.insert(Val::from("user"), Val::Map(Box::new(user_map)));
-        root_map.insert(Val::from("posts"), Val::Vec(posts_vec));
+        root_map.insert(Val::from("user"), Val::map(user_map));
+        root_map.insert(Val::from("posts"), Val::vec(posts_vec));
 
-        let val = Val::Map(Box::new(root_map));
+        let val = Val::map(root_map);
 
         // Update existing value
         let updated = val.set("user.profile.name", Val::from("Jane"));
@@ -3738,7 +3748,7 @@ mod tests {
         post2_map.insert(Val::from("id"), Val::Int(2));
         post2_map.insert(Val::from("title"), Val::from("New Post"));
 
-        let updated = updated.set("posts.1", Val::Map(Box::new(post2_map)));
+        let updated = updated.set("posts.1", Val::map(post2_map));
         assert_eq!(updated.get("posts.1.id"), Some(Val::Int(2)));
         assert_eq!(updated.get("posts.1.title"), Some(Val::from("New Post")));
 
@@ -4345,7 +4355,7 @@ mod tests {
         map.insert(Val::from("boxed"), boxed_val);
         map.insert(Val::from("normal"), Val::Int(123));
 
-        let map_val = Val::Map(Box::new(map));
+        let map_val = Val::map(map);
 
         // Downcast the value in the map
         if let Val::Map(m) = &map_val {
@@ -4435,13 +4445,13 @@ mod tests {
         assert!(Val::from("").is_truthy()); // Empty string is truthy in Hot
 
         // All vectors are truthy, including empty vectors
-        assert!(Val::Vec(vec![Val::Int(1)]).is_truthy());
-        assert!(Val::Vec(vec![]).is_truthy()); // Empty vector is truthy in Hot
+        assert!(Val::vec(vec![Val::Int(1)]).is_truthy());
+        assert!(Val::vec(vec![]).is_truthy()); // Empty vector is truthy in Hot
 
         // All maps are truthy, including empty maps
         let mut map = IndexMap::new();
         map.insert(Val::from("key"), Val::Int(1));
-        assert!(Val::Map(Box::new(map)).is_truthy());
+        assert!(Val::map(map).is_truthy());
         assert!(Val::map_empty().is_truthy()); // Empty map is truthy in Hot
 
         // Only Null is falsy (besides Bool(false))
@@ -4650,9 +4660,9 @@ mod tests {
         let mut field_data = IndexMap::new();
         field_data.insert(Val::from("a"), Val::Int(42));
         field_data.insert(Val::from("b"), Val::from("hello"));
-        struct_instance.insert(Val::from("$val"), Val::Map(Box::new(field_data)));
+        struct_instance.insert(Val::from("$val"), Val::map(field_data));
 
-        let struct_val = Val::Map(Box::new(struct_instance));
+        let struct_val = Val::map(struct_instance);
 
         // Test direct field access (should work without $val now)
         assert_eq!(struct_val.get("a"), Some(Val::Int(42)));
@@ -4801,26 +4811,26 @@ mod tests {
 
     #[test]
     fn test_val_roundtrip_vec() {
-        assert_roundtrip(&Val::Vec(vec![]), "empty vec");
+        assert_roundtrip(&Val::vec(vec![]), "empty vec");
         assert_roundtrip(
-            &Val::Vec(vec![Val::Int(1), Val::Int(2), Val::Int(3)]),
+            &Val::vec(vec![Val::Int(1), Val::Int(2), Val::Int(3)]),
             "vec of ints",
         );
         assert_roundtrip(
-            &Val::Vec(vec![Val::from("a"), Val::from("b")]),
+            &Val::vec(vec![Val::from("a"), Val::from("b")]),
             "vec of strings",
         );
         // Nested vec
         assert_roundtrip(
-            &Val::Vec(vec![
-                Val::Vec(vec![Val::Int(1), Val::Int(2)]),
-                Val::Vec(vec![Val::Int(3), Val::Int(4)]),
+            &Val::vec(vec![
+                Val::vec(vec![Val::Int(1), Val::Int(2)]),
+                Val::vec(vec![Val::Int(3), Val::Int(4)]),
             ]),
             "nested vec",
         );
         // Mixed types
         assert_roundtrip(
-            &Val::Vec(vec![
+            &Val::vec(vec![
                 Val::Int(1),
                 Val::from("hello"),
                 Val::Bool(true),
@@ -4840,7 +4850,7 @@ mod tests {
         let mut string_key_map = IndexMap::new();
         string_key_map.insert(Val::from("name"), Val::from("Alice"));
         string_key_map.insert(Val::from("age"), Val::Int(30));
-        assert_roundtrip(&Val::Map(Box::new(string_key_map)), "map with string keys");
+        assert_roundtrip(&Val::map(string_key_map), "map with string keys");
     }
 
     #[test]
@@ -4851,7 +4861,7 @@ mod tests {
         int_key_map.insert(Val::Int(1), Val::from("one"));
         int_key_map.insert(Val::Int(2), Val::from("two"));
 
-        let json = serde_json::to_string(&Val::Map(Box::new(int_key_map))).unwrap();
+        let json = serde_json::to_string(&Val::map(int_key_map)).unwrap();
         let deserialized: Val = serde_json::from_str(&json).unwrap();
 
         // Check that the values are accessible (keys become strings in JSON)
@@ -4872,14 +4882,14 @@ mod tests {
         inner_map.insert(Val::from("y"), Val::Int(20));
 
         let mut outer_map = IndexMap::new();
-        outer_map.insert(Val::from("point"), Val::Map(Box::new(inner_map)));
+        outer_map.insert(Val::from("point"), Val::map(inner_map));
         outer_map.insert(
             Val::from("tags"),
-            Val::Vec(vec![Val::from("a"), Val::from("b")]),
+            Val::vec(vec![Val::from("a"), Val::from("b")]),
         );
         outer_map.insert(Val::from("active"), Val::Bool(true));
 
-        assert_roundtrip(&Val::Map(Box::new(outer_map)), "deeply nested structure");
+        assert_roundtrip(&Val::map(outer_map), "deeply nested structure");
     }
 
     #[test]
@@ -4891,12 +4901,12 @@ mod tests {
             Val::Dec(D256::from_str("1.5", Context::default()).unwrap()),
             Val::from("test"),
             Val::Bool(true),
-            Val::Vec(vec![Val::Int(1)]),
-            Val::Map(Box::new({
+            Val::vec(vec![Val::Int(1)]),
+            Val::map({
                 let mut m = IndexMap::new();
                 m.insert(Val::from("key"), Val::Int(1));
                 m
-            })),
+            }),
             // Val::Box is special - tested separately
             Val::Byte(42),
             Val::Bytes(vec![1, 2, 3]),
@@ -5047,7 +5057,7 @@ mod tests {
             src: None,
         })))));
 
-        let vec_val = Val::Vec(vec![Val::from("plain"), ast_box, Val::Int(42)]);
+        let vec_val = Val::vec(vec![Val::from("plain"), ast_box, Val::Int(42)]);
         let resolved = vec_val.resolve_boxes();
 
         if let Val::Vec(items) = resolved {
