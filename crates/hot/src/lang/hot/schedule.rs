@@ -83,7 +83,7 @@ pub fn create_schedule(
 
     // Extract args (should be a Vec)
     let fn_args = match &args[1] {
-        Val::Vec(v) => v.clone(),
+        Val::Vec(v) => v.to_vec(),
         Val::Null => Vec::new(),
         other => {
             return HotResult::Err(Val::from(format!(
@@ -200,7 +200,7 @@ pub fn create_schedule(
         None
     } else {
         Some(
-            serde_json::to_value(Val::Vec(fn_args.clone()).to_hot_data_repr())
+            serde_json::to_value(Val::vec(fn_args.clone()).to_hot_data_repr())
                 .unwrap_or(serde_json::Value::Null),
         )
     };

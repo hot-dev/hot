@@ -908,8 +908,8 @@ pub fn await_task(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
 
     let mut result_map = IndexMap::new();
     result_map.insert(Val::from("$type"), Val::from("::hot::task/TaskResult"));
-    result_map.insert(Val::from("$val"), Val::Map(Box::new(val_map)));
-    let result = Val::Map(Box::new(result_map));
+    result_map.insert(Val::from("$val"), Val::map(val_map));
+    let result = Val::map(result_map);
 
     HotResult::Ok(result)
 }

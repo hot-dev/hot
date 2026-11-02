@@ -84,7 +84,7 @@ fn url_to_uri_map(parsed: &Url) -> Val {
         }
     }
 
-    Val::Map(Box::new(map))
+    Val::map(map)
 }
 
 /// Reconstruct a URI string from a Uri typed map.
@@ -295,7 +295,7 @@ pub fn decode_query(args: &[Val]) -> HotResult<Val> {
         map.insert(Val::from(key.as_ref()), Val::from(value.as_ref()));
     }
 
-    HotResult::Ok(Val::Map(Box::new(map)))
+    HotResult::Ok(Val::map(map))
 }
 
 /// Parse a URI string into a Uri typed map.
@@ -600,7 +600,7 @@ mod tests {
         map.insert(Val::from("city"), Val::from("Salt Lake City"));
         map.insert(Val::from("days"), Val::Int(3));
 
-        let result = encode_query(&[Val::Map(Box::new(map))]);
+        let result = encode_query(&[Val::map(map)]);
         match result {
             HotResult::Ok(Val::Str(s)) => {
                 assert!(s.contains("city=Salt+Lake+City"));
@@ -699,7 +699,7 @@ mod tests {
         parts.insert(Val::from("host"), Val::from("example.com"));
         parts.insert(Val::from("path"), Val::from("/users"));
 
-        let result = build(&[Val::Map(Box::new(parts))]);
+        let result = build(&[Val::map(parts)]);
         match result {
             HotResult::Ok(Val::Str(s)) => assert_eq!(&*s, "https://example.com/users"),
             _ => panic!("Expected built URI string"),
@@ -716,9 +716,9 @@ mod tests {
         parts.insert(Val::from("scheme"), Val::from("https"));
         parts.insert(Val::from("host"), Val::from("example.com"));
         parts.insert(Val::from("path"), Val::from("/users"));
-        parts.insert(Val::from("query"), Val::Map(Box::new(query)));
+        parts.insert(Val::from("query"), Val::map(query));
 
-        let result = build(&[Val::Map(Box::new(parts))]);
+        let result = build(&[Val::map(parts)]);
         match result {
             HotResult::Ok(Val::Str(s)) => {
                 assert!(s.starts_with("https://example.com/users?"));
@@ -737,7 +737,7 @@ mod tests {
         parts.insert(Val::from("port"), Val::Int(8080));
         parts.insert(Val::from("path"), Val::from("/api"));
 
-        let result = build(&[Val::Map(Box::new(parts))]);
+        let result = build(&[Val::map(parts)]);
         match result {
             HotResult::Ok(Val::Str(s)) => assert_eq!(&*s, "https://example.com:8080/api"),
             _ => panic!("Expected built URI string"),
@@ -829,7 +829,7 @@ mod tests {
         map.insert(Val::from("name"), Val::from("Alice & Bob"));
         map.insert(Val::from("q"), Val::from("hello=world"));
 
-        let encoded = encode_query(&[Val::Map(Box::new(map))]);
+        let encoded = encode_query(&[Val::map(map)]);
         let encoded_str = match &encoded {
             HotResult::Ok(Val::Str(s)) => s.clone(),
             _ => panic!("Expected encoded string"),
