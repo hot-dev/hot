@@ -169,7 +169,7 @@ fn create_direct_file_meta(path: &str, metadata: &std::fs::Metadata) -> Val {
     map.insert(Val::from("created-at"), Val::Int(created_at));
     map.insert(Val::from("updated-at"), Val::Int(updated_at));
 
-    Val::Map(Box::new(map))
+    Val::map(map)
 }
 
 // ============================================================================
@@ -230,7 +230,7 @@ fn write_file_direct(path: &str, contents: &str) -> HotResult<Val> {
                     map.insert(Val::from("path"), Val::from(path.to_string()));
                     map.insert(Val::from("size"), Val::Int(contents.len() as i64));
                     map.insert(Val::from("storage-backend"), Val::from("direct"));
-                    HotResult::Ok(Val::Map(Box::new(map)))
+                    HotResult::Ok(Val::map(map))
                 }
             }
         }
@@ -268,7 +268,7 @@ fn write_file_bytes_direct(path: &str, contents: &[u8]) -> HotResult<Val> {
                     map.insert(Val::from("path"), Val::from(path.to_string()));
                     map.insert(Val::from("size"), Val::Int(contents.len() as i64));
                     map.insert(Val::from("storage-backend"), Val::from("direct"));
-                    HotResult::Ok(Val::Map(Box::new(map)))
+                    HotResult::Ok(Val::map(map))
                 }
             }
         }
@@ -332,7 +332,7 @@ fn list_files_direct(prefix: &str) -> HotResult<Val> {
     };
 
     if !search_dir.exists() {
-        return HotResult::Ok(Val::Vec(vec![]));
+        return HotResult::Ok(Val::vec(vec![]));
     }
 
     let mut files = Vec::new();
@@ -375,7 +375,7 @@ fn list_files_direct(prefix: &str) -> HotResult<Val> {
         return HotResult::Err(Val::from(format!("Failed to list files: {}", e)));
     }
 
-    HotResult::Ok(Val::Vec(files))
+    HotResult::Ok(Val::vec(files))
 }
 
 // ============================================================================
@@ -768,7 +768,7 @@ fn list_files_internal(
     match block_on_file_op(file_storage.list_files(prefix, ctx)) {
         Ok(files) => {
             let vals: Vec<Val> = files.iter().map(|f| f.to_val()).collect();
-            HotResult::Ok(Val::Vec(vals))
+            HotResult::Ok(Val::vec(vals))
         }
         Err(e) => HotResult::Err(Val::from(e)),
     }

@@ -111,14 +111,14 @@ fn set_path(current: Val, keys: &[String], value: Val) -> Result<Val, String> {
         return Ok(value);
     };
     let mut map = match current {
-        Val::Map(map) => *map,
+        Val::Map(map) => std::sync::Arc::unwrap_or_clone(map),
         Val::Null => IndexMap::new(),
         other => return Err(format!("'{}' is set on a {}, not a map", key, other)),
     };
     let key = Val::from(key.as_str());
     let child = map.get(&key).cloned().unwrap_or(Val::Null);
     map.insert(key, set_path(child, rest, value)?);
-    Ok(Val::Map(Box::new(map)))
+    Ok(Val::map(map))
 }
 
 #[cfg(test)]

@@ -70,7 +70,7 @@ impl FileMetadata {
             Val::from("updated-at"),
             Val::Int(self.updated_at.timestamp()),
         );
-        Val::Map(Box::new(map))
+        Val::map(map)
     }
 
     /// Create from database FileRecord

@@ -179,7 +179,7 @@ fn (value: Str): Str { value }
             let barrier = &barrier;
             handles.push(scope.spawn(move || {
                 barrier.wait();
-                let expected = Val::Vec(vec![Val::from(marker), Val::from(marker)]);
+                let expected = Val::vec(vec![Val::from(marker), Val::from(marker)]);
                 assert_eq!(
                     success(call(cache.clone(), "initialized")),
                     Val::from(marker)
@@ -187,13 +187,13 @@ fn (value: Str): Str { value }
                 assert_eq!(success(call(cache.clone(), "inspect")), expected);
                 assert_eq!(
                     success(call(cache.clone(), "parallel-inspect")),
-                    Val::Vec(vec![expected.clone(); 2]),
+                    Val::vec(vec![expected.clone(); 2]),
                 );
-                let mapped = Val::Vec(vec![expected; 8]);
+                let mapped = Val::vec(vec![expected; 8]);
                 assert_eq!(success(call(cache.clone(), "mapped-inspect")), mapped);
                 assert_eq!(
                     success(call(cache.clone(), "nested-inspect")),
-                    Val::Vec(vec![mapped; 2]),
+                    Val::vec(vec![mapped; 2]),
                 );
                 denied(call(cache.clone(), "foreign-tool"));
                 denied(call(cache.clone(), "foreign-skill"));
@@ -262,12 +262,12 @@ answer [base, skills]
         Some(conf()),
     );
     vm.execute().unwrap();
-    let empty_pair = Val::Vec(vec![Val::Vec(vec![]), Val::Vec(vec![])]);
+    let empty_pair = Val::vec(vec![Val::vec(vec![]), Val::vec(vec![])]);
     for (name, count) in [("parallel-all", 2), ("mapped-all", 8)] {
         let result = success(
             vm.call_function_bypassing_unified_lookup(&format!("::tenant/{name}"), &[])
                 .map_err(|error| error.to_string()),
         );
-        assert_eq!(result, Val::Vec(vec![empty_pair.clone(); count]));
+        assert_eq!(result, Val::vec(vec![empty_pair.clone(); count]));
     }
 }

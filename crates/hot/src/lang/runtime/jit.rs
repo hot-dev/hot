@@ -3116,7 +3116,7 @@ unsafe extern "C" fn hot_jit_make_vec(args_ptr: *const i64, args_count: i64) -> 
         let raw = unsafe { *args_ptr.add(i * 2 + 1) };
         elements.push(unsafe { decode_helper_val(kind, raw) });
     }
-    new_owned_val(Val::Vec(elements))
+    new_owned_val(Val::vec(elements))
 }
 
 /// JIT helper: call a hotlib (Rust-native) function by name with a Vec of args.
@@ -3336,7 +3336,7 @@ unsafe extern "C" fn hot_jit_ensure_result(val_ptr: i64) -> i64 {
     let mut map = indexmap::IndexMap::new();
     map.insert(Val::from("$type"), Val::from("::hot::type/Result.Ok"));
     map.insert(Val::from("$val"), val);
-    new_owned_val(Val::Map(Box::new(map)))
+    new_owned_val(Val::map(map))
 }
 
 /// JIT helper: set an element in a collection (map or vec).
@@ -3356,15 +3356,15 @@ unsafe extern "C" fn hot_jit_set_element(
         Val::Map(map) => {
             let mut new_map = (**map).clone();
             new_map.insert(index_val.clone(), value_val.clone());
-            new_owned_val(Val::Map(Box::new(new_map)))
+            new_owned_val(Val::map(new_map))
         }
         Val::Vec(vec) => {
             if let Val::Int(idx) = index_val {
                 let idx = *idx;
                 if idx >= 0 && (idx as usize) < vec.len() {
-                    let mut new_vec = vec.clone();
+                    let mut new_vec = vec.to_vec();
                     new_vec[idx as usize] = value_val.clone();
-                    new_owned_val(Val::Vec(new_vec))
+                    new_owned_val(Val::vec(new_vec))
                 } else {
                     new_owned_val(Val::err(Val::Str(
                         format!("Vector index {} out of bounds (length: {})", idx, vec.len())
@@ -3447,13 +3447,13 @@ unsafe extern "C" fn hot_jit_vec_push(vec_ptr: i64, elem_ptr: i64) -> i64 {
     let elem_val = unsafe { &*(elem_ptr as *const Val) };
     match vec_val {
         Val::Vec(vec) => {
-            let mut new_vec = vec.clone();
+            let mut new_vec = vec.to_vec();
             new_vec.push(elem_val.clone());
-            new_owned_val(Val::Vec(new_vec))
+            new_owned_val(Val::vec(new_vec))
         }
         _ => {
             let new_vec = vec![elem_val.clone()];
-            new_owned_val(Val::Vec(new_vec))
+            new_owned_val(Val::vec(new_vec))
         }
     }
 }
@@ -3726,7 +3726,7 @@ unsafe extern "C" fn hot_jit_make_vec_with_spread(
         let val = unsafe { decode_helper_val(kind, raw) };
         if (mask >> i) & 1 == 1 {
             match val {
-                Val::Vec(inner) => elements.extend(inner),
+                Val::Vec(inner) => elements.extend(Arc::unwrap_or_clone(inner)),
                 Val::Null => {}
                 other => elements.push(other),
             }
@@ -3734,7 +3734,7 @@ unsafe extern "C" fn hot_jit_make_vec_with_spread(
             elements.push(val);
         }
     }
-    new_owned_val(Val::Vec(elements))
+    new_owned_val(Val::vec(elements))
 }
 
 /// JIT helper: store a value in a global namespace variable.
@@ -4015,7 +4015,7 @@ unsafe fn hot_jit_call_with_spread_body(
         };
         if (mask >> i) & 1 == 1 {
             if let Val::Vec(elements) = &val {
-                for elem in elements {
+                for elem in elements.iter() {
                     expanded_args.push(elem.clone());
                 }
             } else {
@@ -4788,7 +4788,7 @@ fn vm_error_to_owned_val(err: VmError, error_capture_active: bool) -> i64 {
     if error_capture_active {
         let mut m = indexmap::IndexMap::new();
         m.insert(Val::from("error"), Val::from(err.to_string()));
-        return new_owned_val(Val::Map(Box::new(m)));
+        return new_owned_val(Val::map(m));
     }
     let vm_ptr = get_jit_vm_ptr();
     if vm_ptr.is_null() {
@@ -5017,8 +5017,8 @@ fn emit_empty_accumulator(
     modifier: FlowResultModifier,
 ) -> cranelift_codegen::ir::Value {
     let empty = match modifier {
-        FlowResultModifier::Map => new_owned_val(Val::Map(Box::new(indexmap::IndexMap::new()))),
-        FlowResultModifier::Vec => new_owned_val(Val::Vec(Vec::new())),
+        FlowResultModifier::Map => new_owned_val(Val::map(indexmap::IndexMap::new())),
+        FlowResultModifier::Vec => new_owned_val(Val::vec(Vec::new())),
         FlowResultModifier::One => {
             unreachable!("flow accumulator only created for Map/Vec modifiers")
         }
@@ -7824,7 +7824,7 @@ impl<'a> EmitCtx<'a> {
                 let (src_ptr, src_temp) = self.owned_operand(builder, *src)?;
                 let ok_key = new_owned_val(Val::Str("ok".into()));
                 let key_ptr = builder.ins().iconst(types::I64, ok_key);
-                let empty_map = new_owned_val(Val::Map(Box::new(indexmap::IndexMap::new())));
+                let empty_map = new_owned_val(Val::map(indexmap::IndexMap::new()));
                 let map_ptr = builder.ins().iconst(types::I64, empty_map);
                 if let Ok(idx) = self.remap_reg(*dest) {
                     self.compile_time_owned.insert(idx);
@@ -12937,7 +12937,7 @@ mod tests {
 
         let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
         let mut vm = make_test_vm(program, conf);
-        let input = Val::Vec(vec![val!(1), val!(2), val!(3)]);
+        let input = Val::vec(vec![val!(1), val!(2), val!(3)]);
 
         assert_eq!(
             vm.execute_compiled_user_function(0, std::slice::from_ref(&input))
@@ -12992,8 +12992,8 @@ mod tests {
             vm.execute_compiled_user_function(
                 0,
                 &[
-                    Val::Vec(vec![val!(1), val!(2)]),
-                    Val::Vec(vec![val!(1), val!(2)])
+                    Val::vec(vec![val!(1), val!(2)]),
+                    Val::vec(vec![val!(1), val!(2)])
                 ]
             )
             .unwrap(),
@@ -13003,8 +13003,8 @@ mod tests {
             vm.execute_compiled_user_function(
                 0,
                 &[
-                    Val::Vec(vec![val!(1), val!(2)]),
-                    Val::Vec(vec![val!(1), val!(3)])
+                    Val::vec(vec![val!(1), val!(2)]),
+                    Val::vec(vec![val!(1), val!(3)])
                 ]
             )
             .unwrap(),
@@ -13061,7 +13061,7 @@ mod tests {
         let mut vm = make_test_vm(program, conf);
 
         assert_eq!(
-            vm.execute_compiled_user_function(0, &[Val::Vec(vec![])])
+            vm.execute_compiled_user_function(0, &[Val::vec(vec![])])
                 .unwrap(),
             val!(1)
         );
@@ -17300,8 +17300,8 @@ mod tests {
         payload.insert(val!(0), val!("old"));
         let mut wrapper = IndexMap::new();
         wrapper.insert(Val::from("$type"), Val::from("::test/Tagged"));
-        wrapper.insert(Val::from("$val"), Val::Map(Box::new(payload)));
-        let args = [Val::Map(Box::new(wrapper)), val!(0), val!("new")];
+        wrapper.insert(Val::from("$val"), Val::map(payload));
+        let args = [Val::map(wrapper), val!(0), val!("new")];
         let program = dynamic_dot_set_program();
         let mut interpreter = make_test_vm(
             program.clone(),
@@ -17336,8 +17336,8 @@ mod tests {
         let mut wrapper = IndexMap::new();
         wrapper.insert(Val::from("$type"), Val::from("::hot::run/Failure"));
         wrapper.insert(Val::from("$origin"), val!({"name": "test"}));
-        wrapper.insert(Val::from("$val"), Val::Map(Box::new(payload)));
-        let args = [Val::Map(Box::new(wrapper)), val!("rewritten")];
+        wrapper.insert(Val::from("$val"), Val::map(payload));
+        let args = [Val::map(wrapper), val!("rewritten")];
         let program = static_dot_set_program("message");
         let mut interpreter = make_test_vm(
             program.clone(),

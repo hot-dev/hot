@@ -2023,7 +2023,7 @@ fn merge_alias_meta_for_docs(
                     merged.insert(k.clone(), v.clone());
                 }
                 Some(Meta {
-                    val: Val::Map(Box::new(merged)),
+                    val: Val::map(merged),
                 })
             }
             // Non-map meta on either side: alias wins wholesale.

@@ -141,14 +141,14 @@ impl TryFrom<TaggedVal> for Val {
             }
             TaggedVal::Vec { v } => {
                 let vec: Result<Vec<Val>, String> = v.into_iter().map(Val::try_from).collect();
-                Ok(Val::Vec(vec?))
+                Ok(Val::vec(vec?))
             }
             TaggedVal::Map { entries } => {
                 let map: Result<IndexMap<Val, Val>, String> = entries
                     .into_iter()
                     .map(|(k, v)| Ok((Val::try_from(k)?, Val::try_from(v)?)))
                     .collect();
-                Ok(Val::Map(Box::new(map?)))
+                Ok(Val::map(map?))
             }
             TaggedVal::Box { content } => {
                 // Try to reconstruct FunctionRef first
@@ -1708,7 +1708,7 @@ mod tests {
         let mut map = IndexMap::new();
         map.insert(Val::Int(1), Val::from("one"));
         map.insert(Val::Int(2), Val::from("two"));
-        assert_val_roundtrip(&Val::Map(Box::new(map)), "map with int keys");
+        assert_val_roundtrip(&Val::map(map), "map with int keys");
     }
 
     #[test]
@@ -1776,7 +1776,7 @@ mod tests {
                 function_name: Some("my-fn".to_string()),
             }))),
             args: vec![FnCallArg {
-                value: Value::Val(Val::Map(Box::new(map.clone())), None),
+                value: Value::Val(Val::map(map.clone()), None),
                 lazy: false,
                 spread: false,
                 src: None,
@@ -1824,7 +1824,7 @@ mod tests {
                 type_annotation: None,
                 src: None,
             },
-            Value::Val(Val::Map(Box::new(map)), None),
+            Value::Val(Val::map(map), None),
         );
 
         let ns = Namespace {
@@ -1876,7 +1876,7 @@ mod tests {
                 type_annotation: None,
                 src: None,
             },
-            Value::Val(Val::Map(Box::new(map)), None),
+            Value::Val(Val::map(map), None),
         );
 
         namespaces.insert(

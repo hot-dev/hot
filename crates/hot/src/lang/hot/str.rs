@@ -25,7 +25,7 @@ pub fn split(args: &[Val]) -> HotResult<Val> {
         };
 
         let parts: Vec<Val> = string.split(&**delimiter).map(Val::from).collect();
-        HotResult::Ok(Val::Vec(parts))
+        HotResult::Ok(Val::vec(parts))
     }
 }
 

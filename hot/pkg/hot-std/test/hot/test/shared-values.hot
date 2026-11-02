@@ -1,0 +1,155 @@
+::hot::test::shared-values ns
+meta ["test"]
+
+// Vec and Map values share their storage until one of them is written, so
+// reading a large collection costs the same as reading a small one. These
+// tests hold the other half of that: a write, through any path, leaves every
+// other holder of the value as it was.
+
+Rec type {
+    k: Str,
+    v: Str
+}
+
+same fn (x) { x }
+
+add-key fn (m: Map): Map { assoc(m, "added", true) }
+
+set-by-path fn (m) {
+    m.nested.b 99
+    m
+}
+
+test-assoc-leaves-the-original
+meta ["test"] fn () {
+    m {a: 1, nested: {b: 2}}
+    changed assoc(m, "a", 99)
+    assert-eq(1, m.a)
+    assert-eq(99, changed.a)
+    assert-eq(2, changed.nested.b)
+}
+
+test-a-write-in-a-callee-leaves-the-caller
+meta ["test"] fn () {
+    m {a: 1, nested: {b: 2}}
+    assert-eq(true, add-key(m).added)
+    assert-eq(null, get(m, "added"))
+    assert-eq(99, set-by-path(m).nested.b)
+    assert-eq(2, m.nested.b)
+}
+
+test-deep-path-assignment-leaves-other-names
+meta ["test"] fn () {
+    m {nested: {b: 2}}
+    other m
+    other.nested.b 3
+    other.nested.c 4
+    assert-eq(2, m.nested.b)
+    assert-eq(null, m.nested.c)
+    assert-eq(3, other.nested.b)
+    assert-eq(4, other.nested.c)
+}
+
+test-a-write-to-a-nested-value-leaves-its-holders
+meta ["test"] fn () {
+    inner {x: 1}
+    a {inner: inner}
+    b {inner, tag: "b"}
+    changed update(a, "inner", (m) { assoc(m, "x", 2) })
+    assert-eq(2, changed.inner.x)
+    assert-eq(1, a.inner.x)
+    assert-eq(1, b.inner.x)
+    assert-eq(1, inner.x)
+    assert-eq(5, assoc-in(a, ["inner", "x"], 5).inner.x)
+    assert-eq(6, update-in(a, ["inner", "x"], add(%, 5)).inner.x)
+    assert-eq(1, a.inner.x)
+}
+
+test-a-captured-value-stays-as-it-was-captured
+meta ["test"] fn () {
+    m {a: 1}
+    reader () { m.a }
+    m assoc(m, "a", 2)
+    assert-eq(1, reader())
+    assert-eq(2, m.a)
+    each map([10, 20], (n) { assoc(m, "a", n) })
+    assert-eq([10, 20], map(each, %.a))
+    assert-eq(2, m.a)
+}
+
+test-vec-writes-leave-the-original
+meta ["test"] fn () {
+    v [1, 2, 3]
+    more [...v, 4]
+    joined concat(v, [9])
+    set assoc-in(v, [0], 100)
+    assert-eq([1, 2, 3], v)
+    assert-eq([1, 2, 3, 4], more)
+    assert-eq([1, 2, 3, 9], joined)
+    assert-eq([100, 2, 3], set)
+    assert-eq([1, 2, 3], same(v))
+    assert-eq([3, 2, 1], reverse(v))
+    assert-eq([1, 2, 3], v)
+}
+
+test-sorting-a-value-leaves-its-other-holders
+meta ["test"] fn () {
+    v [3, 1, 2]
+    held {v: v}
+    assert-eq([1, 2, 3], sort(v))
+    assert-eq([3, 1, 2], v)
+    assert-eq([3, 1, 2], held.v)
+}
+
+test-each-reduce-step-keeps-its-own-value
+meta ["test"] fn () {
+    steps reduce([1, 2, 3], (acc, n) {
+        latest if(is-empty(acc), {}, last(acc))
+        [...acc, assoc(latest, `k${n}`, n)]
+    }, [])
+    assert-eq(1, length(steps[0]))
+    assert-eq(2, length(steps[1]))
+    assert-eq(3, length(steps[2]))
+    assert-eq(null, get(steps[0], "k2"))
+}
+
+test-parallel-branches-write-their-own-values
+meta ["test"] fn () {
+    m {a: 1, nested: {b: 2}}
+    out parallel {
+        left assoc-in(m, ["nested", "b"], 10)
+        right assoc-in(m, ["nested", "b"], 20)
+    }
+
+    assert-eq(10, out.left.nested.b)
+    assert-eq(20, out.right.nested.b)
+    assert-eq(2, m.nested.b)
+}
+
+test-a-typed-value-keeps-its-type-and-its-holders
+meta ["test"] fn () {
+    rec Rec(k: "a", v: "b")
+    held [rec]
+    changed assoc(rec, "v", "c")
+    assert(is-type(changed, Rec), "assoc keeps the type")
+    assert-eq("c", changed.v)
+    assert-eq("b", rec.v)
+    assert-eq("b", held[0].v)
+    same-rec same(rec)
+    same-rec.v "d"
+    assert-eq("d", same-rec.v)
+    assert-eq("b", rec.v)
+}
+
+test-a-nested-value-read-out-is-its-own-value
+meta ["test"] fn () {
+    m {nested: {b: 2}, list: [1, 2]}
+    nested m.nested
+    nested.b 3
+    list get(m, "list")
+    grown [...list, 3]
+    assert-eq(3, nested.b)
+    assert-eq(2, m.nested.b)
+    assert-eq([1, 2, 3], grown)
+    assert-eq([1, 2], m.list)
+}

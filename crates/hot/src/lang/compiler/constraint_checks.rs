@@ -145,7 +145,7 @@ fn walk_val<'v>(val: &'v Val, visit: &mut dyn FnMut(&'v Value)) {
             }
         }
         Val::Vec(items) => {
-            for item in items {
+            for item in items.iter() {
                 walk_val(item, visit);
             }
         }
@@ -1270,7 +1270,7 @@ impl<'a> Index<'a> {
                 Some((key, literal.clone()))
             })
             .collect();
-        let candidate = Val::Map(Box::new(known.clone()));
+        let candidate = Val::map(known.clone());
         if let Some(failed) = self.literal_fails(ns, record, &candidate, 0) {
             let fields = known
                 .iter()
@@ -1560,7 +1560,7 @@ impl Evaluator<'_, '_> {
                 Val::Int(_) | Val::Dec(_) | Val::Str(_) | Val::Bool(_) | Val::Null => {
                     Some(val.clone())
                 }
-                Val::Vec(items) => Some(Val::Vec(
+                Val::Vec(items) => Some(Val::vec(
                     items
                         .iter()
                         .map(|item| match item {

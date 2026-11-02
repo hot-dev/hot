@@ -154,7 +154,7 @@ fn entry_to_val(entry: &ToolSchemaEntry) -> Val {
     if let Some(dn) = &entry.display_name {
         map.insert(Val::from("display-name"), Val::from(dn.as_str()));
     }
-    Val::Map(Box::new(map))
+    Val::map(map)
 }
 
 /// `::hot::internal::mcp/schema-from-fn(f: Fn): Map`
@@ -248,7 +248,7 @@ pub fn invoke_with_input(
 
     let input_map = match input {
         Val::Map(m) => m.clone(),
-        Val::Null => Box::new(IndexMap::new()),
+        Val::Null => Arc::new(IndexMap::new()),
         other => {
             return HotResult::Err(Val::from(format!(
                 "::hot::internal::mcp/invoke-with-input: input must be a Map (got {:?})",
@@ -365,7 +365,7 @@ pub fn all_tool_schemas(args: &[Val]) -> HotResult<Val> {
     }
     with_registry(|g| {
         let out: Vec<Val> = g.entries.values().map(entry_to_val).collect();
-        HotResult::Ok(Val::Vec(out))
+        HotResult::Ok(Val::vec(out))
     })
 }
 
@@ -382,14 +382,14 @@ mod tests {
         props.insert(Val::from("query"), {
             let mut p = IndexMap::new();
             p.insert(Val::from("type"), Val::from("string"));
-            Val::Map(Box::new(p))
+            Val::map(p)
         });
         let mut input_schema = IndexMap::new();
         input_schema.insert(Val::from("type"), Val::from("object"));
-        input_schema.insert(Val::from("properties"), Val::Map(Box::new(props)));
+        input_schema.insert(Val::from("properties"), Val::map(props));
         ToolSchemaEntry {
             name: name.to_string(),
-            input_schema: Val::Map(Box::new(input_schema)),
+            input_schema: Val::map(input_schema),
             output_schema: None,
             description: Some("a search tool".to_string()),
             display_name: None,

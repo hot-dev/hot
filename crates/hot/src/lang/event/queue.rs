@@ -412,7 +412,7 @@ impl From<EventMessage> for Message {
             }
         });
         if let (Val::Map(map), Some(original_urls)) = (&mut body, original_urls) {
-            map.insert(Val::from("webhook_original_urls"), original_urls);
+            Arc::make_mut(map).insert(Val::from("webhook_original_urls"), original_urls);
         }
 
         Message {
@@ -484,7 +484,7 @@ impl TryFrom<Message> for EventMessage {
                 .and_then(|hints| crate::webhook_url::event_data_original_url_hints(&hints))
                 .unwrap_or_else(|| crate::val!({}));
             if let Val::Map(map) = &mut hints {
-                map.insert(Val::from("event_id"), Val::from(event_id.to_string()));
+                Arc::make_mut(map).insert(Val::from("event_id"), Val::from(event_id.to_string()));
             }
             hints
         });
@@ -1312,7 +1312,7 @@ mod tests {
         });
         let data = crate::val!({
             "fn": "::durable/handler",
-            "args": Val::Vec(vec![Val::Null, request.clone()]),
+            "args": Val::vec(vec![Val::Null, request.clone()]),
             "caller": request
         });
         let event = Event::new(

@@ -160,7 +160,7 @@ pub fn hash_secret_value_recursive(value: &Val, hashes: &mut ahash::AHashSet<u64
             }
         }
         Val::Vec(vec) => {
-            for child in vec {
+            for child in vec.iter() {
                 hash_secret_value_recursive(child, hashes);
             }
         }

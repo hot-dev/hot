@@ -815,18 +815,18 @@ impl DatabaseEngineEventEmitterProcessor {
         // If not a direct match, recursively scan compound types
         match val {
             Val::Map(map) => {
-                let masked_map: indexmap::IndexMap<Val, Val> = map
+                let masked_map: indexmap::IndexMap<Val, Val> = Arc::unwrap_or_clone(map)
                     .into_iter()
                     .map(|(k, v)| (k, Self::mask_secrets_in_val(v, secret_hashes)))
                     .collect();
-                Val::Map(Box::new(masked_map))
+                Val::map(masked_map)
             }
             Val::Vec(vec) => {
-                let masked_vec: Vec<Val> = vec
+                let masked_vec: Vec<Val> = Arc::unwrap_or_clone(vec)
                     .into_iter()
                     .map(|v| Self::mask_secrets_in_val(v, secret_hashes))
                     .collect();
-                Val::Vec(masked_vec)
+                Val::vec(masked_vec)
             }
             // Leaf values that weren't a direct match - return as-is
             other => other,
@@ -1170,7 +1170,7 @@ mod tests {
             result_params: Vec::new(),
         };
 
-        let args = Val::Vec(vec![
+        let args = Val::vec(vec![
             Val::Box(Box::new(FunctionRef::new("::hot::math/add".to_string()))),
             Val::Box(Box::new(lazy_thunk)),
         ]);

@@ -12486,7 +12486,7 @@ handler fn () { initialized }
         let request = val!({"original-url":raw_url,"body":"authoritative body"});
         let original = val!({
             "fn":"::durable/handler",
-            "args": Val::Vec(vec![request.clone()]),
+            "args": Val::vec(vec![request.clone()]),
             "caller":request
         });
         let stored = hot::webhook_url::redact_event_data_original_urls(&original);
@@ -12525,7 +12525,7 @@ handler fn () { initialized }
                         event_type: "hot:call".into(),
                         event_data: val!({
                             "fn":"::untrusted/handler",
-                            "args":Val::Vec(vec![hint_request.clone()]),
+                            "args":Val::vec(vec![hint_request.clone()]),
                             "caller":hint_request
                         }),
                         event_time: chrono::Utc::now(),
