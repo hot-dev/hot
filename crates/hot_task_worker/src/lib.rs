@@ -30,6 +30,7 @@ use executor::ExecutorError;
 use base64::Engine;
 use base64::engine::general_purpose;
 use hot::data::serialization::Serialization;
+use hot::db::usage::AccountTaskUsage;
 use hot::db::{
     self, Build, DatabasePool, DatabaseScope, Env, MaintenanceOperation, Project, Task, TaskStatus,
 };
@@ -54,8 +55,7 @@ use tokio::sync::{Mutex, Semaphore, mpsc};
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
-type UsageStatsCache =
-    Arc<Mutex<HashMap<Uuid, (std::time::Instant, hot::db::subscription::OrgUsageStats)>>>;
+type UsageStatsCache = Arc<Mutex<HashMap<Uuid, (std::time::Instant, AccountTaskUsage)>>>;
 
 static USAGE_STATS_LOCKS: std::sync::OnceLock<Mutex<HashMap<Uuid, std::sync::Weak<Mutex<()>>>>> =
     std::sync::OnceLock::new();
@@ -75,61 +75,59 @@ async fn usage_stats_org_lock(org_id: Uuid) -> Arc<Mutex<()>> {
     lock
 }
 
-async fn fresh_cached_usage(
-    cache: &UsageStatsCache,
-    org_id: &Uuid,
-) -> Option<hot::db::subscription::OrgUsageStats> {
+async fn fresh_cached_usage(cache: &UsageStatsCache, org_id: &Uuid) -> Option<AccountTaskUsage> {
     let cache = cache.lock().await;
     cache
         .get(org_id)
         .filter(|(ts, _)| ts.elapsed() < USAGE_STATS_CACHE_TTL)
-        .map(|(_, stats)| stats.clone())
+        .map(|(_, usage)| *usage)
 }
 
+/// The account's task usage from the counters claim admission enforces, so the
+/// cost does not depend on its history. `None` when usage is unknown, including
+/// while the counters are moving to a new billing period.
 async fn cached_usage_stats(
     db: &DatabasePool,
     org_id: Uuid,
     period_start: chrono::DateTime<chrono::Utc>,
-    retention_days: i32,
     cache: &UsageStatsCache,
-) -> Option<hot::db::subscription::OrgUsageStats> {
+) -> Option<AccountTaskUsage> {
     let org_id = hot::db::Org::billing_owner_id_for(db, &org_id).await.ok()?;
     let scoped_db = db.with_scope(DatabaseScope::Maintenance {
         operation: MaintenanceOperation::Billing,
         org_id: Some(org_id),
     });
     let db = &scoped_db;
-    if let Some(stats) = fresh_cached_usage(cache, &org_id).await {
-        return Some(stats);
+    if let Some(usage) = fresh_cached_usage(cache, &org_id).await {
+        return Some(usage);
     }
 
     let org_lock = usage_stats_org_lock(org_id).await;
     let _guard = org_lock.lock().await;
-    if let Some(stats) = fresh_cached_usage(cache, &org_id).await {
-        return Some(stats);
+    if let Some(usage) = fresh_cached_usage(cache, &org_id).await {
+        return Some(usage);
     }
 
-    let stats = match tokio::time::timeout(
+    let usage = match tokio::time::timeout(
         DB_CALL_TIMEOUT,
-        hot::db::subscription::OrgUsageStats::calculate_account(
-            db,
-            &org_id,
-            period_start,
-            retention_days,
-        ),
+        hot::db::usage::account_task_usage(db, &org_id, period_start),
     )
     .await
     {
-        Ok(Ok(stats)) => stats,
+        Ok(Ok(Some(usage))) => usage,
+        Ok(Ok(None)) => {
+            tracing::debug!(org_id = %org_id, "Usage counters are moving to a new billing period");
+            return None;
+        }
         Ok(Err(e)) => {
-            tracing::warn!(org_id = %org_id, "Failed to calculate org usage: {}", e);
+            tracing::warn!(org_id = %org_id, "Failed to read org usage: {}", e);
             return None;
         }
         Err(_) => {
             tracing::warn!(
                 org_id = %org_id,
                 timeout_secs = DB_CALL_TIMEOUT.as_secs(),
-                "Org usage calculation timed out"
+                "Org usage read timed out"
             );
             return None;
         }
@@ -137,8 +135,8 @@ async fn cached_usage_stats(
     cache
         .lock()
         .await
-        .insert(org_id, (std::time::Instant::now(), stats.clone()));
-    Some(stats)
+        .insert(org_id, (std::time::Instant::now(), usage));
+    Some(usage)
 }
 
 const USAGE_STATS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
@@ -147,7 +145,7 @@ const USAGE_STATS_CACHE_TTL: std::time::Duration = std::time::Duration::from_sec
 /// minutes are already used up. `None` when usage is unknown.
 fn exhausted_free_plan_message(
     features: &hot::db::features::Features,
-    usage: Option<&hot::db::subscription::OrgUsageStats>,
+    usage: Option<&AccountTaskUsage>,
 ) -> Option<String> {
     let usage = usage?;
     let cus_limit = features.compute_units_per_month();
@@ -158,7 +156,7 @@ fn exhausted_free_plan_message(
         ));
     }
     let minutes_limit = i64::from(features.task_minutes_per_month());
-    let minutes_used = usage.task_duration_ms / 60_000;
+    let minutes_used = usage.duration_ms / 60_000;
     if minutes_limit > 0 && minutes_used >= minutes_limit {
         return Some(format!(
             "Monthly task minutes exhausted ({}/{}). Upgrade your plan.",
@@ -3153,14 +3151,7 @@ async fn process_container_task(
                     subscription.current_period_start,
                     subscription.current_period_end,
                 );
-                cached_usage_stats(
-                    &db,
-                    *oid,
-                    period_start,
-                    features.call_retention_days(),
-                    &usage_stats_cache,
-                )
-                .await
+                cached_usage_stats(&db, *oid, period_start, &usage_stats_cache).await
             } else {
                 None
             };
@@ -6201,15 +6192,7 @@ async fn check_cus_thresholds_inner(
             .and_then(|s| s.current_period_end),
     );
 
-    let Some(usage) = cached_usage_stats(
-        db,
-        org_id,
-        period_start,
-        features.call_retention_days(),
-        usage_stats_cache,
-    )
-    .await
-    else {
+    let Some(usage) = cached_usage_stats(db, org_id, period_start, usage_stats_cache).await else {
         return;
     };
 
@@ -8023,6 +8006,40 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn usage_checks_read_the_counters_and_cache_them_per_account() {
+        let db = hot::db::test_db().await;
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        let finish_task = |units: i64| {
+            sqlx::query("INSERT INTO task(task_id,env_id,stream_id,build_id,function_name,task_type,task_status_id,result,duration_ms,stop_time) VALUES(?,?,?,?,'::usage/task','container',3,?,60000,?)")
+                .bind(Uuid::now_v7()).bind(data.env_id).bind(data.stream_id).bind(data.build_id)
+                .bind(serde_json::json!({"compute-units":units}).to_string()).bind(chrono::Utc::now())
+                .execute(pool)
+        };
+        finish_task(7).await.unwrap();
+        let cache: UsageStatsCache = Arc::new(Mutex::new(HashMap::new()));
+        let period = chrono::Utc::now() - chrono::Duration::days(1);
+        let read = || cached_usage_stats(&db, data.org_id, period, &cache);
+        let expected = AccountTaskUsage {
+            compute_units: 7,
+            duration_ms: 60_000,
+        };
+        assert_eq!(read().await, Some(expected));
+        finish_task(5).await.unwrap();
+        assert_eq!(read().await, Some(expected), "served from the cache");
+        cache.lock().await.clear();
+        assert_eq!(
+            read().await,
+            Some(AccountTaskUsage {
+                compute_units: 12,
+                duration_ms: 120_000,
+            })
+        );
     }
 
     #[tokio::test]
@@ -10656,19 +10673,9 @@ mod tests {
             })),
             None,
         );
-        let usage = |compute_units, task_duration_ms| hot::db::subscription::OrgUsageStats {
-            runs_this_period: 0,
-            file_storage_bytes: 0,
-            team_members_count: 0,
-            call_storage_bytes: 0,
-            call_count: 0,
-            oldest_call_time: None,
-            store_storage_bytes: 0,
-            blob_storage_bytes: 0,
-            tasks_this_period: 0,
-            task_duration_ms,
+        let usage = |compute_units, duration_ms| AccountTaskUsage {
             compute_units,
-            active_schedules: 0,
+            duration_ms,
         };
         // Claim-time admission still enforces the limits against the counters.
         assert_eq!(exhausted_free_plan_message(&features, None), None);

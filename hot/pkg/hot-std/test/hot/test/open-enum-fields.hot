@@ -1,0 +1,55 @@
+::hot::test::open-enum-fields ns
+meta ["test"]
+
+// A variant another namespace enrolls in an open enum by arrow keeps its
+// identity when stored in a field typed as that enum, and reads as itself.
+
+::reg ::hot::test::open-enum-fields::registry
+
+Compat type {
+    name: Str
+}
+
+Compat -> ::reg/Provider.Compat
+
+registration fn (name: Str): ::reg/Registration {
+    ::reg/Registration({variant: ::reg/Provider.Compat({name,}), label: name})
+}
+
+TOP ::reg/Registration({variant: ::reg/Provider.Compat({name: "top"}), label: "top"})
+
+test-arrow-variant-keeps-identity-in-typed-field
+meta ["test"] fn () {
+    r registration("local")
+    assert(is-type(r.variant, ::reg/Provider), "the field holds a Provider")
+    assert-eq("compat", ::reg/describe(r.variant), "match sees the enrolled variant")
+    assert-eq("local", r.variant.name, "the payload survives")
+    assert-eq("compat", ::reg/describe(TOP.variant), "a top-level registration keeps it too")
+    assert-eq(
+        "::hot::test::open-enum-fields::registry/Provider.Compat({name: \"local\"})",
+        Str(r.variant),
+        "Str shows the variant and its payload, not an empty body"
+    )
+}
+
+test-source-value-coerces-into-enum-field
+meta ["test"] fn () {
+    r ::reg/Registration({variant: Compat({name: "auto"}), label: "auto"})
+    assert-eq("compat", ::reg/describe(r.variant), "a Compat value is enrolled through the arrow")
+    assert-eq("auto", r.variant.name, "the payload survives")
+}
+
+::hot::test::open-enum-fields::registry ns
+
+Provider enum open { Builtin }
+
+Registration type {
+    variant: Provider,
+    label: Str
+}
+
+describe fn match (p: Provider): Str {
+    Provider.Builtin => { "builtin" }
+    Provider.Compat => { "compat" }
+    _ => { "other" }
+}
