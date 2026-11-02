@@ -47,5 +47,9 @@ fn
 },
 (request: ActivateBounceRequest, opts: Map): ActivateBounceResponse {
   response api-request("PUT", `${::postmark/BASE_URL}/bounces/${request.bounceid}/activate`, {}, "", opts)
-  if(is-ok-response(response), ActivateBounceResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ActivateBounceResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

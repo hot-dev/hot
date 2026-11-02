@@ -98,8 +98,9 @@ to-result
 meta {
     doc: """Return the response body for a 2xx (`null` for 204 No Content), otherwise an `Err(HttpError)`. Exposed for testing; every endpoint uses it."""
 }
-fn (response: HttpResponse): Any {
+fn (response: Result): Any {
   cond {
+    is-err(response) => { response }
     eq(response.status, 204) => { null }
     is-ok-response(response) => { response.body }
     => { err(HttpError(response)) }
@@ -110,8 +111,12 @@ to-ok
 meta {
     doc: """Return `true` for a 2xx response, otherwise an `Err(HttpError)`. Used by endpoints that return 204 No Content."""
 }
-fn (response: HttpResponse): Bool {
-  if(is-ok-response(response), true, err(HttpError(response)))
+fn (response: Result): Bool {
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { true }
+    => { err(HttpError(response)) }
+  }
 }
 
 // ============================================================================

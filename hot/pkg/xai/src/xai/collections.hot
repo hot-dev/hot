@@ -167,7 +167,11 @@ fn (request: CreateCollectionRequest): Collection | HttpError {
 },
 (request: CreateCollectionRequest, opts: Map): Collection | HttpError {
     response management-call("POST", `/v1/collections`, {}, request, opts)
-    if(is-ok-response(response), Collection(response.body), err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { Collection(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 list
@@ -192,7 +196,11 @@ fn (): CollectionListResponse | HttpError {
 },
 (opts: Map): CollectionListResponse | HttpError {
     response management-call("GET", `/v1/collections`, {}, "", opts)
-    if(is-ok-response(response), CollectionListResponse(response.body), err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { CollectionListResponse(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 get
@@ -214,7 +222,11 @@ fn (collection-id: Str): Collection | HttpError {
 },
 (collection-id: Str, opts: Map): Collection | HttpError {
     response management-call("GET", `/v1/collections/${collection-id}`, {}, "", opts)
-    if(is-ok-response(response), Collection(response.body), err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { Collection(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 update
@@ -238,7 +250,11 @@ fn (collection-id: Str, request: UpdateCollectionRequest): Collection | HttpErro
 },
 (collection-id: Str, request: UpdateCollectionRequest, opts: Map): Collection | HttpError {
     response management-call("PATCH", `/v1/collections/${collection-id}`, {}, request, opts)
-    if(is-ok-response(response), Collection(response.body), err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { Collection(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 delete
@@ -258,7 +274,11 @@ fn (collection-id: Str): Map | HttpError {
 },
 (collection-id: Str, opts: Map): Map | HttpError {
     response management-call("DELETE", `/v1/collections/${collection-id}`, {}, "", opts)
-    if(is-ok-response(response), ok(response.body), err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { ok(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 // ============================================================================
@@ -300,7 +320,11 @@ fn (collection-id: Str, file-id: Str): Document | HttpError {
     }
 
     response management-call("POST", `/v1/collections/${collection-id}/documents`, {}, body, opts)
-    if(is-ok-response(response), Document(response.body), err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { Document(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 remove-document
@@ -320,7 +344,11 @@ fn (collection-id: Str, file-id: Str): Map | HttpError {
 },
 (collection-id: Str, file-id: Str, opts: Map): Map | HttpError {
     response management-call("DELETE", `/v1/collections/${collection-id}/documents/${file-id}`, {}, "", opts)
-    if(is-ok-response(response), ok(response.body), err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { ok(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 // ============================================================================
@@ -383,7 +411,11 @@ fn
 
     // Search uses regular API key, not management key
     response api-call("POST", "/documents/search", {}, final-body, opts)
-    if(is-ok-response(response), SearchResponse(response.body), err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { SearchResponse(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 // ============================================================================

@@ -338,7 +338,11 @@ fn (request: ModelsListRequest): ModelsListResponse {
 },
 (request: ModelsListRequest, opts: Map): ModelsListResponse {
   response api-call("GET", `/v1/models?pageSize=${request.page-size}&pageToken=${request.page-token}`, {}, "", opts)
-  if(is-ok-response(response), ModelsListResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ModelsListResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ModelsGetRequest type {
@@ -385,7 +389,11 @@ fn (request: ModelsGetRequest): ModelsGetResponse {
 },
 (request: ModelsGetRequest, opts: Map): ModelsGetResponse {
   response api-call("GET", `/v1/models/${request.model}`, {}, "", opts)
-  if(is-ok-response(response), ModelsGetResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ModelsGetResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ModelsGenerateContentRequest type {
@@ -431,7 +439,11 @@ fn (model: Str, request: ModelsGenerateContentRequest): ModelsGenerateContentRes
 },
 (model: Str, request: ModelsGenerateContentRequest, opts: Map): ModelsGenerateContentResponse {
   response api-call("POST", `/v1/models/${model}:generateContent`, {}, request, opts)
-  if(is-ok-response(response), ModelsGenerateContentResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ModelsGenerateContentResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ModelsStreamGenerateContentRequest type {
@@ -475,7 +487,11 @@ fn (model: Str, alt: Str, request: ModelsStreamGenerateContentRequest): ModelsSt
 },
 (model: Str, alt: Str, request: ModelsStreamGenerateContentRequest, opts: Map): ModelsStreamGenerateContentResponse {
   response api-call("POST", `/v1/models/${model}:streamGenerateContent?alt=${alt}`, {}, request, opts)
-  if(is-ok-response(response), ModelsStreamGenerateContentResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ModelsStreamGenerateContentResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ModelsCountTokensRequest type {
@@ -513,7 +529,11 @@ fn (model: Str, request: ModelsCountTokensRequest): ModelsCountTokensResponse {
 },
 (model: Str, request: ModelsCountTokensRequest, opts: Map): ModelsCountTokensResponse {
   response api-call("POST", `/v1/models/${model}:countTokens`, {}, request, opts)
-  if(is-ok-response(response), ModelsCountTokensResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ModelsCountTokensResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ModelsEmbedContentRequest type {
@@ -564,7 +584,11 @@ fn (model: Str, request: ModelsEmbedContentRequest): ModelsEmbedContentResponse 
 },
 (model: Str, request: ModelsEmbedContentRequest, opts: Map): ModelsEmbedContentResponse {
   response api-call("POST", `/v1/models/${model}:embedContent`, {}, request, opts)
-  if(is-ok-response(response), ModelsEmbedContentResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ModelsEmbedContentResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ModelsBatchEmbedContentsRequest type {
@@ -606,5 +630,9 @@ fn (model: Str, request: ModelsBatchEmbedContentsRequest): ModelsBatchEmbedConte
 },
 (model: Str, request: ModelsBatchEmbedContentsRequest, opts: Map): ModelsBatchEmbedContentsResponse {
   response api-call("POST", `/v1/models/${model}:batchEmbedContents`, {}, request, opts)
-  if(is-ok-response(response), ModelsBatchEmbedContentsResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ModelsBatchEmbedContentsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

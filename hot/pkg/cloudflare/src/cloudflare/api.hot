@@ -336,8 +336,9 @@ check-response
 meta {
     doc: """Return the response when it succeeded, or an Err carrying `HttpError` for a non-2xx status or a `success: false` envelope."""
 }
-fn (response: HttpResponse): HttpResponse {
+fn (response: Result): HttpResponse {
   cond {
+    is-err(response) => { response }
     not(is-ok-response(response)) => { err(HttpError(response)) }
     is-failed-envelope(response.body) => { err(HttpError(response)) }
     => { response }

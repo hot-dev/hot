@@ -87,6 +87,7 @@ fn
         response send-signed("POST", url, "sns", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { SubscribeResponse({
                 subscription_arn: response.body.SubscriptionArn
             }) }
@@ -131,6 +132,7 @@ fn
         response send-signed("POST", url, "sns", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { { success: true } }
             => { AwsError(response) }
         }
@@ -174,6 +176,7 @@ fn
         response send-signed("POST", url, "sns", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { SubscribeResponse({
                 subscription_arn: response.body.SubscriptionArn
             }) }
@@ -221,6 +224,7 @@ fn
         response send-signed("POST", url, "sns", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { ListSubscriptionsResponse({
                 subscriptions: cond {
                     is-null(response.body.Subscriptions) => { [] }
@@ -285,6 +289,7 @@ fn
         response send-signed("POST", url, "sns", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { ListSubscriptionsResponse({
                 subscriptions: cond {
                     is-null(response.body.Subscriptions) => { [] }
@@ -343,6 +348,7 @@ fn
         response send-signed("POST", url, "sns", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { GetSubscriptionAttributesResponse({
                 attributes: if(is-null(response.body.Attributes), {}, response.body.Attributes)
             }) }
@@ -396,6 +402,7 @@ fn
         response send-signed("POST", url, "sns", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { { success: true } }
             => { AwsError(response) }
         }

@@ -82,6 +82,7 @@ fn
         response send-signed("POST", url, "sqs", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { CreateQueueResponse({
                 queue_url: response.body.QueueUrl
             }) }
@@ -126,6 +127,7 @@ fn
         response send-signed("POST", url, "sqs", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { { success: true } }
             => { AwsError(response) }
         }
@@ -166,6 +168,7 @@ fn
         response send-signed("POST", url, "sqs", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { GetQueueUrlResponse({
                 queue_url: response.body.QueueUrl
             }) }
@@ -213,6 +216,7 @@ fn
         response send-signed("POST", url, "sqs", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { ListQueuesResponse({
                 queue_urls: if(is-null(response.body.QueueUrls), [], response.body.QueueUrls)
             }) }
@@ -264,6 +268,7 @@ fn
         response send-signed("POST", url, "sqs", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { GetQueueAttributesResponse({
                 attributes: if(is-null(response.body.Attributes), {}, response.body.Attributes)
             }) }
@@ -309,6 +314,7 @@ fn
         response send-signed("POST", url, "sqs", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { { success: true } }
             => { AwsError(response) }
         }

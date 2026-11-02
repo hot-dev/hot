@@ -232,7 +232,11 @@ fn
 },
 (request: GetDeliveryStatsRequest, opts: Map): GetDeliveryStatsResponse {
   response api-request("GET", `${::postmark/BASE_URL}/deliverystats`, {}, "", opts)
-  if(is-ok-response(response), GetDeliveryStatsResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { GetDeliveryStatsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 GetBouncesRequest type {
@@ -282,7 +286,11 @@ fn
 },
 (request: GetBouncesRequest, opts: Map): GetBouncesResponse {
   response api-request("GET", `${::postmark/BASE_URL}/bounces?count=${request.count}&offset=${request.offset}&type=${request.type-param}&inactive=${request.inactive}&emailFilter=${request.email-filter}&messageID=${request.message-id}&tag=${request.tag}&todate=${request.todate}&fromdate=${request.fromdate}`, {}, "", opts)
-  if(is-ok-response(response), GetBouncesResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { GetBouncesResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 GetSingleBounceRequest type {
@@ -316,7 +324,11 @@ fn
 },
 (request: GetSingleBounceRequest, opts: Map): GetSingleBounceResponse {
   response api-request("GET", `${::postmark/BASE_URL}/bounces/${request.bounceid}`, {}, "", opts)
-  if(is-ok-response(response), GetSingleBounceResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { GetSingleBounceResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 GetOutboundMessageDetailsRequest type {
@@ -354,7 +366,11 @@ fn
 },
 (request: GetOutboundMessageDetailsRequest, opts: Map): GetOutboundMessageDetailsResponse {
   response api-request("GET", `${::postmark/BASE_URL}/messages/outbound/${request.messageid}/details`, {}, "", opts)
-  if(is-ok-response(response), GetOutboundMessageDetailsResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { GetOutboundMessageDetailsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 GetOutboundMessageDumpRequest type {
@@ -374,7 +390,11 @@ fn
 },
 (request: GetOutboundMessageDumpRequest, opts: Map): GetOutboundMessageDumpResponse {
   response api-request("GET", `${::postmark/BASE_URL}/messages/outbound/${request.messageid}/dump`, {}, "", opts)
-  if(is-ok-response(response), GetOutboundMessageDumpResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { GetOutboundMessageDumpResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 GetInboundMessageDetailsRequest type {
@@ -415,7 +435,11 @@ fn
 },
 (request: GetInboundMessageDetailsRequest, opts: Map): GetInboundMessageDetailsResponse {
   response api-request("GET", `${::postmark/BASE_URL}/messages/inbound/${request.messageid}/details`, {}, "", opts)
-  if(is-ok-response(response), GetInboundMessageDetailsResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { GetInboundMessageDetailsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 GetOpensForSingleOutboundMessageRequest type {
@@ -438,7 +462,11 @@ fn
 },
 (request: GetOpensForSingleOutboundMessageRequest, opts: Map): GetOpensForSingleOutboundMessageResponse {
   response api-request("GET", `${::postmark/BASE_URL}/messages/outbound/opens/${request.messageid}?count=${request.count}&offset=${request.offset}`, {}, "", opts)
-  if(is-ok-response(response), GetOpensForSingleOutboundMessageResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { GetOpensForSingleOutboundMessageResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 GetClicksForSingleOutboundMessageRequest type {
@@ -461,7 +489,11 @@ fn
 },
 (request: GetClicksForSingleOutboundMessageRequest, opts: Map): GetClicksForSingleOutboundMessageResponse {
   response api-request("GET", `${::postmark/BASE_URL}/messages/outbound/clicks/${request.messageid}?count=${request.count}&offset=${request.offset}`, {}, "", opts)
-  if(is-ok-response(response), GetClicksForSingleOutboundMessageResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { GetClicksForSingleOutboundMessageResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 GetSingleTemplateRequest type {
@@ -488,7 +520,11 @@ fn
 },
 (request: GetSingleTemplateRequest, opts: Map): GetSingleTemplateResponse {
   response api-request("GET", `${::postmark/BASE_URL}/templates/${request.template-id-or-alias}`, {}, "", opts)
-  if(is-ok-response(response), GetSingleTemplateResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { GetSingleTemplateResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 GetOutboundOverviewStatisticsRequest type {
@@ -527,7 +563,11 @@ fn
 },
 (request: GetOutboundOverviewStatisticsRequest, opts: Map): GetOutboundOverviewStatisticsResponse {
   response api-request("GET", `${::postmark/BASE_URL}/stats/outbound?tag=${request.tag}&fromdate=${request.fromdate}&todate=${request.todate}`, {}, "", opts)
-  if(is-ok-response(response), GetOutboundOverviewStatisticsResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { GetOutboundOverviewStatisticsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 GetSentCountsRequest type {
@@ -552,7 +592,11 @@ fn
 },
 (request: GetSentCountsRequest, opts: Map): GetSentCountsResponse {
   response api-request("GET", `${::postmark/BASE_URL}/stats/outbound/sends?tag=${request.tag}&fromdate=${request.fromdate}&todate=${request.todate}`, {}, "", opts)
-  if(is-ok-response(response), GetSentCountsResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { GetSentCountsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 GetBounceCountsRequest type {
@@ -580,7 +624,11 @@ fn
 },
 (request: GetBounceCountsRequest, opts: Map): GetBounceCountsResponse {
   response api-request("GET", `${::postmark/BASE_URL}/stats/outbound/bounces?tag=${request.tag}&fromdate=${request.fromdate}&todate=${request.todate}`, {}, "", opts)
-  if(is-ok-response(response), GetBounceCountsResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { GetBounceCountsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 GetSpamComplaintsRequest type {
@@ -605,7 +653,11 @@ fn
 },
 (request: GetSpamComplaintsRequest, opts: Map): GetSpamComplaintsResponse {
   response api-request("GET", `${::postmark/BASE_URL}/stats/outbound/spam?tag=${request.tag}&fromdate=${request.fromdate}&todate=${request.todate}`, {}, "", opts)
-  if(is-ok-response(response), GetSpamComplaintsResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { GetSpamComplaintsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 GetTrackedEmailCountsRequest type {
@@ -630,7 +682,11 @@ fn
 },
 (request: GetTrackedEmailCountsRequest, opts: Map): GetTrackedEmailCountsResponse {
   response api-request("GET", `${::postmark/BASE_URL}/stats/outbound/tracked?tag=${request.tag}&fromdate=${request.fromdate}&todate=${request.todate}`, {}, "", opts)
-  if(is-ok-response(response), GetTrackedEmailCountsResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { GetTrackedEmailCountsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 GetOutboundOpenCountsRequest type {
@@ -654,7 +710,11 @@ fn
 },
 (request: GetOutboundOpenCountsRequest, opts: Map): GetOutboundOpenCountsResponse {
   response api-request("GET", `${::postmark/BASE_URL}/stats/outbound/opens?tag=${request.tag}&fromdate=${request.fromdate}&todate=${request.todate}`, {}, "", opts)
-  if(is-ok-response(response), GetOutboundOpenCountsResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { GetOutboundOpenCountsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 GetOutboundOpenCountsByPlatformRequest type {
@@ -682,7 +742,11 @@ fn
 },
 (request: GetOutboundOpenCountsByPlatformRequest, opts: Map): GetOutboundOpenCountsByPlatformResponse {
   response api-request("GET", `${::postmark/BASE_URL}/stats/outbound/opens/platforms?tag=${request.tag}&fromdate=${request.fromdate}&todate=${request.todate}`, {}, "", opts)
-  if(is-ok-response(response), GetOutboundOpenCountsByPlatformResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { GetOutboundOpenCountsByPlatformResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 GetOutboundOpenCountsByEmailClientRequest type {
@@ -708,7 +772,11 @@ fn
 },
 (request: GetOutboundOpenCountsByEmailClientRequest, opts: Map): GetOutboundOpenCountsByEmailClientResponse {
   response api-request("GET", `${::postmark/BASE_URL}/stats/outbound/opens/emailclients?tag=${request.tag}&fromdate=${request.fromdate}&todate=${request.todate}`, {}, "", opts)
-  if(is-ok-response(response), GetOutboundOpenCountsByEmailClientResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { GetOutboundOpenCountsByEmailClientResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 GetOutboundClickCountsRequest type {
@@ -732,7 +800,11 @@ fn
 },
 (request: GetOutboundClickCountsRequest, opts: Map): GetOutboundClickCountsResponse {
   response api-request("GET", `${::postmark/BASE_URL}/stats/outbound/clicks?tag=${request.tag}&fromdate=${request.fromdate}&todate=${request.todate}`, {}, "", opts)
-  if(is-ok-response(response), GetOutboundClickCountsResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { GetOutboundClickCountsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 GetOutboundClickCountsByBrowserFamilyRequest type {
@@ -756,7 +828,11 @@ fn
 },
 (request: GetOutboundClickCountsByBrowserFamilyRequest, opts: Map): GetOutboundClickCountsByBrowserFamilyResponse {
   response api-request("GET", `${::postmark/BASE_URL}/stats/outbound/clicks/browserfamilies?tag=${request.tag}&fromdate=${request.fromdate}&todate=${request.todate}`, {}, "", opts)
-  if(is-ok-response(response), GetOutboundClickCountsByBrowserFamilyResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { GetOutboundClickCountsByBrowserFamilyResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 GetOutboundClickCountsByPlatformRequest type {
@@ -784,7 +860,11 @@ fn
 },
 (request: GetOutboundClickCountsByPlatformRequest, opts: Map): GetOutboundClickCountsByPlatformResponse {
   response api-request("GET", `${::postmark/BASE_URL}/stats/outbound/clicks/platforms?tag=${request.tag}&fromdate=${request.fromdate}&todate=${request.todate}`, {}, "", opts)
-  if(is-ok-response(response), GetOutboundClickCountsByPlatformResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { GetOutboundClickCountsByPlatformResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 GetOutboundClickCountsByLocationRequest type {
@@ -808,7 +888,11 @@ fn
 },
 (request: GetOutboundClickCountsByLocationRequest, opts: Map): GetOutboundClickCountsByLocationResponse {
   response api-request("GET", `${::postmark/BASE_URL}/stats/outbound/clicks/location?tag=${request.tag}&fromdate=${request.fromdate}&todate=${request.todate}`, {}, "", opts)
-  if(is-ok-response(response), GetOutboundClickCountsByLocationResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { GetOutboundClickCountsByLocationResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 // No parameters required for this GET request
@@ -858,6 +942,7 @@ fn
 (request: GetCurrentServerConfigurationRequest, opts: Map): GetCurrentServerConfigurationResponse {
   response api-request("GET", `${::postmark/BASE_URL}/server`, {}, "", opts)
   cond {
+    is-err(response) => { response }
     is-ok-response(response) => {
       ::hot::ctx/mark-secret(response.body.ApiTokens)
       GetCurrentServerConfigurationResponse(response.body)

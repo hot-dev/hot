@@ -83,6 +83,7 @@ fn
         response send-signed("GET", url, "s3", resolved, {}, "")
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { parse-list-buckets-response(::api/body-text(response.body)) }
             => { err(AwsError(response)) }
         }
@@ -125,6 +126,7 @@ fn
         response send-signed("PUT", url, "s3", resolved, {}, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { CreateBucketResponse({
                 location: ::aws::core/response-header(response, "Location")
             }) }
@@ -164,6 +166,7 @@ fn
         response send-signed("DELETE", url, "s3", resolved, {}, "")
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { true }
             => { AwsError(response) }
         }
@@ -195,6 +198,7 @@ fn
         response send-signed("HEAD", url, "s3", resolved, {}, "")
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { HeadBucketResponse({
                 exists: true,
                 region: ::aws::core/response-header(response, "x-amz-bucket-region")

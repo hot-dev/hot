@@ -209,7 +209,11 @@ fn (request: CreateResponseRequest): CreateResponseResponse {
 },
 (request: CreateResponseRequest, opts: Map): CreateResponseResponse {
     response api-call("POST", `/responses`, {}, request, opts)
-    if(is-ok-response(response), CreateResponseResponse(response.body), err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { CreateResponseResponse(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 // ============================================================================
@@ -292,7 +296,11 @@ fn (response-id: Str): CreateResponseResponse {
 },
 (response-id: Str, opts: Map): CreateResponseResponse {
     response api-call("GET", `/responses/${response-id}`, {}, "", opts)
-    if(is-ok-response(response), CreateResponseResponse(response.body), err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { CreateResponseResponse(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 // ============================================================================
@@ -316,7 +324,11 @@ fn (response-id: Str): Map {
 },
 (response-id: Str, opts: Map): Map {
     response api-call("DELETE", `/responses/${response-id}`, {}, "", opts)
-    if(is-ok-response(response), ok(response.body), err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { ok(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 // ============================================================================

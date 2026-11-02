@@ -81,6 +81,7 @@ fn
         response send-signed("POST", url, "dynamodb", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { PutItemResponse({
                 attributes: response.body.Attributes,
                 consumed_capacity: response.body.ConsumedCapacity
@@ -140,6 +141,7 @@ fn
         response send-signed("POST", url, "dynamodb", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { GetItemResponse({
                 item: response.body.Item,
                 consumed_capacity: response.body.ConsumedCapacity
@@ -205,6 +207,7 @@ fn
         response send-signed("POST", url, "dynamodb", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { DeleteItemResponse({
                 attributes: response.body.Attributes,
                 consumed_capacity: response.body.ConsumedCapacity
@@ -272,6 +275,7 @@ fn
         response send-signed("POST", url, "dynamodb", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { UpdateItemResponse({
                 attributes: response.body.Attributes,
                 consumed_capacity: response.body.ConsumedCapacity

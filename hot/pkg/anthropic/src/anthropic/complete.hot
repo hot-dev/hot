@@ -81,5 +81,9 @@ fn (request: CompletePostRequest): CompletePostResponse {
 },
 (request: CompletePostRequest, opts: Map): CompletePostResponse {
   response api-call("POST", `/v1/complete`, {}, request, opts)
-  if(is-ok-response(response), CompletePostResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { CompletePostResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

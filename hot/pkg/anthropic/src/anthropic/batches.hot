@@ -83,7 +83,11 @@ fn (request: CreateBatchRequest): MessageBatch {
 },
 (request: CreateBatchRequest, opts: Map): MessageBatch {
     response api-call("POST", `/v1/messages/batches`, {}, request, opts)
-    if(is-ok-response(response), MessageBatch(response.body), err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { MessageBatch(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 list
@@ -114,14 +118,22 @@ fn
 },
 (opts: Map): BatchesListResponse {
     response api-call("GET", `/v1/messages/batches`, {}, "", opts)
-    if(is-ok-response(response), BatchesListResponse(response.body), err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { BatchesListResponse(response.body) }
+      => { err(HttpError(response)) }
+    }
 },
 (limit: Int): BatchesListResponse {
     list(limit, {})
 },
 (limit: Int, opts: Map): BatchesListResponse {
     response api-call("GET", `/v1/messages/batches?limit=${limit}`, {}, "", opts)
-    if(is-ok-response(response), BatchesListResponse(response.body), err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { BatchesListResponse(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 get
@@ -144,7 +156,11 @@ fn (batch_id: Str): MessageBatch {
 },
 (batch_id: Str, opts: Map): MessageBatch {
     response api-call("GET", `/v1/messages/batches/${batch_id}`, {}, "", opts)
-    if(is-ok-response(response), MessageBatch(response.body), err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { MessageBatch(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 cancel
@@ -166,7 +182,11 @@ fn (batch_id: Str): MessageBatch {
 },
 (batch_id: Str, opts: Map): MessageBatch {
     response api-call("POST", `/v1/messages/batches/${batch_id}/cancel`, {}, "", opts)
-    if(is-ok-response(response), MessageBatch(response.body), err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { MessageBatch(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 results
@@ -188,5 +208,9 @@ fn (batch_id: Str): Any {
 },
 (batch_id: Str, opts: Map): Any {
     response api-call("GET", `/v1/messages/batches/${batch_id}/results`, {}, "", opts)
-    if(is-ok-response(response), response.body, err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { response.body }
+      => { err(HttpError(response)) }
+    }
 }

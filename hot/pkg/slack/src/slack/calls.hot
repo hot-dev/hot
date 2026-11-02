@@ -36,7 +36,11 @@ fn
 },
 (request: CallsAddRequest, opts: Map): CallsAddResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/calls.add`, {}, request, opts)
-  if(is-ok-response(response), CallsAddResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { CallsAddResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 CallsEndRequest type {
@@ -60,7 +64,11 @@ fn
 },
 (request: CallsEndRequest, opts: Map): CallsEndResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/calls.end`, {}, request, opts)
-  if(is-ok-response(response), CallsEndResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { CallsEndResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 CallsInfoRequest type {
@@ -84,7 +92,11 @@ fn
 },
 (request: CallsInfoRequest, opts: Map): CallsInfoResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/calls.info?id=${request.id}`, {}, "", opts)
-  if(is-ok-response(response), CallsInfoResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { CallsInfoResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 CallsUpdateRequest type {
@@ -111,7 +123,11 @@ fn
 },
 (request: CallsUpdateRequest, opts: Map): CallsUpdateResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/calls.update`, {}, request, opts)
-  if(is-ok-response(response), CallsUpdateResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { CallsUpdateResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 // ============================================================================
@@ -139,7 +155,11 @@ fn
 },
 (request: CallsParticipantsAddRequest, opts: Map): CallsParticipantsAddResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/calls.participants.add`, {}, request, opts)
-  if(is-ok-response(response), CallsParticipantsAddResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { CallsParticipantsAddResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 CallsParticipantsRemoveRequest type {
@@ -163,7 +183,11 @@ fn
 },
 (request: CallsParticipantsRemoveRequest, opts: Map): CallsParticipantsRemoveResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/calls.participants.remove`, {}, request, opts)
-  if(is-ok-response(response), CallsParticipantsRemoveResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { CallsParticipantsRemoveResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 // ============================================================================
@@ -205,5 +229,9 @@ fn
 },
 (request: RtmConnectRequest, opts: Map): RtmConnectResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/rtm.connect?batch_presence_aware=${or(request.batch_presence_aware, "")}&presence_sub=${or(request.presence_sub, "")}`, {}, "", opts)
-  if(is-ok-response(response), RtmConnectResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { RtmConnectResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

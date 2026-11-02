@@ -28,7 +28,11 @@ fn
 },
 (request: FilesDeleteRequest, opts: Map): FilesDeleteResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/files.delete`, {}, request, opts)
-  if(is-ok-response(response), FilesDeleteResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { FilesDeleteResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 FilesInfoRequest type {
@@ -59,7 +63,11 @@ fn
 },
 (request: FilesInfoRequest, opts: Map): FilesInfoResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/files.info?file=${request.file}&count=${or(request.count, "")}&page=${or(request.page, "")}&limit=${or(request.limit, "")}&cursor=${or(request.cursor, "")}`, {}, "", opts)
-  if(is-ok-response(response), FilesInfoResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { FilesInfoResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 FilesListRequest type {
@@ -102,7 +110,11 @@ fn
 },
 (request: FilesListRequest, opts: Map): FilesListResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/files.list`, {}, request, opts)
-  if(is-ok-response(response), FilesListResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { FilesListResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 FilesRevokePublicURLRequest type {
@@ -126,7 +138,11 @@ fn
 },
 (request: FilesRevokePublicURLRequest, opts: Map): FilesRevokePublicURLResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/files.revokePublicURL`, {}, request, opts)
-  if(is-ok-response(response), FilesRevokePublicURLResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { FilesRevokePublicURLResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 FilesSharedPublicURLRequest type {
@@ -150,7 +166,11 @@ fn
 },
 (request: FilesSharedPublicURLRequest, opts: Map): FilesSharedPublicURLResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/files.sharedPublicURL`, {}, request, opts)
-  if(is-ok-response(response), FilesSharedPublicURLResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { FilesSharedPublicURLResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 FilesUploadRequest type {
@@ -181,7 +201,11 @@ fn
 },
 (request: FilesUploadRequest, opts: Map): FilesUploadResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/files.upload`, {}, request, opts)
-  if(is-ok-response(response), FilesUploadResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { FilesUploadResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 // ============================================================================
@@ -209,7 +233,11 @@ fn
 },
 (request: FilesCommentsDeleteRequest, opts: Map): FilesCommentsDeleteResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/files.comments.delete`, {}, request, opts)
-  if(is-ok-response(response), FilesCommentsDeleteResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { FilesCommentsDeleteResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 // ============================================================================
@@ -242,7 +270,11 @@ fn
 },
 (request: FilesRemoteAddRequest, opts: Map): FilesRemoteAddResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/files.remote.add`, {}, request, opts)
-  if(is-ok-response(response), FilesRemoteAddResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { FilesRemoteAddResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 FilesRemoteInfoRequest type {
@@ -267,7 +299,11 @@ fn
 },
 (request: FilesRemoteInfoRequest, opts: Map): FilesRemoteInfoResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/files.remote.info?file=${or(request.file, "")}&external_id=${or(request.external_id, "")}`, {}, "", opts)
-  if(is-ok-response(response), FilesRemoteInfoResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { FilesRemoteInfoResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 FilesRemoteListRequest type {
@@ -296,7 +332,11 @@ fn
 },
 (request: FilesRemoteListRequest, opts: Map): FilesRemoteListResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/files.remote.list?channel=${or(request.channel, "")}&ts_from=${or(request.ts_from, "")}&ts_to=${or(request.ts_to, "")}&limit=${or(request.limit, "")}&cursor=${or(request.cursor, "")}`, {}, "", opts)
-  if(is-ok-response(response), FilesRemoteListResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { FilesRemoteListResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 FilesRemoteRemoveRequest type {
@@ -320,7 +360,11 @@ fn
 },
 (request: FilesRemoteRemoveRequest, opts: Map): FilesRemoteRemoveResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/files.remote.remove`, {}, request, opts)
-  if(is-ok-response(response), FilesRemoteRemoveResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { FilesRemoteRemoveResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 FilesRemoteShareRequest type {
@@ -346,7 +390,11 @@ fn
 },
 (request: FilesRemoteShareRequest, opts: Map): FilesRemoteShareResponse {
   response api-request("GET", `${::slack::core/BASE_URL}/files.remote.share?file=${or(request.file, "")}&external_id=${or(request.external_id, "")}&channels=${request.channels}`, {}, "", opts)
-  if(is-ok-response(response), FilesRemoteShareResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { FilesRemoteShareResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 FilesRemoteUpdateRequest type {
@@ -376,5 +424,9 @@ fn
 },
 (request: FilesRemoteUpdateRequest, opts: Map): FilesRemoteUpdateResponse {
   response api-request("POST", `${::slack::core/BASE_URL}/files.remote.update`, {}, request, opts)
-  if(is-ok-response(response), FilesRemoteUpdateResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { FilesRemoteUpdateResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

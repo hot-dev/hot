@@ -49,7 +49,11 @@ fn
 },
 (request: ListTemplatesRequest, opts: Map): ListTemplatesResponse {
   response api-request("GET", `${::postmark/BASE_URL}/templates?Count=${request.count}&Offset=${request.offset}`, {}, "", opts)
-  if(is-ok-response(response), ListTemplatesResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ListTemplatesResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ListInboundRulesRequest type {
@@ -85,5 +89,9 @@ fn
 },
 (request: ListInboundRulesRequest, opts: Map): ListInboundRulesResponse {
   response api-request("GET", `${::postmark/BASE_URL}/triggers/inboundrules?count=${request.count}&offset=${request.offset}`, {}, "", opts)
-  if(is-ok-response(response), ListInboundRulesResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ListInboundRulesResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

@@ -93,6 +93,7 @@ fn
         response send-signed("GET", url, "bedrock", resolved, headers, "")
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { ListFoundationModelsResponse({
                 models: cond {
                     is-null(response.body.modelSummaries) => { [] }
@@ -155,6 +156,7 @@ fn
         response send-signed("GET", url, "bedrock", resolved, headers, "")
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { GetFoundationModelResponse({
                 model: cond {
                     is-null(response.body.modelDetails) => { null }
