@@ -705,3 +705,11 @@ fn () {
     assert-eq(42, tr.content)
     assert-eq("x", tr.tool-call-id)
 }
+
+test-a-failed-provider-call-is-an-err-from-the-loop
+meta ["test"] fn () {
+    failing (model: Str, messages: Any, system: Any, tools: Any, opts: Map) { err({status: 401}) }
+    result ::ai::chat/run-loop(::ai::chat/ChatOptions({chat-opts-fn: failing, model: "m", provider-opts: {}}), "hi")
+    assert(is-err(result), "the caller can branch on it")
+    assert-eq(401, err-value(result).status)
+}

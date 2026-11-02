@@ -2,7 +2,7 @@
 
 hot.pkg.mcp {
   name: "hot.dev/mcp",
-  version: "1.4.0",
+  version: "1.5.0",
   hot-min-version: "2.0.3",
   description: "MCP 2026-07-28 and legacy client with discovery, tools, resources, prompts, subscriptions, multi-round input, SSE streaming, and an AI tool bridge.",
   author: "Hot Dev",

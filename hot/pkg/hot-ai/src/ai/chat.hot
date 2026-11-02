@@ -509,7 +509,7 @@ fn (opts: ChatOptions, prompt: Str, system: Str?): Any {
     cond {
         not(is-null(opts.chat-opts-fn)) => {
             reply opts.chat-opts-fn(opts.model, [user-message(prompt)], system, null, or(opts.provider-opts, {}))
-            or(reply.text, "")
+            if(is-err(reply), reply, or(reply.text, ""))
         }
         => {
             reject-provider-opts(opts, "ChatOptions.chat-fn")
@@ -1463,8 +1463,9 @@ fn cond (opts: ChatOptions, messages: Vec<Message>, tools: Vec<::ai::tool/Tool>,
         iteration add(sub(max-iter, remaining), 1)
         check-budget(opts, messages, tools)
         reply dispatch-chat(opts, messages, tools)
-        calls or(reply.tool-calls, [])
+        calls if(is-err(reply), [], or(reply.tool-calls, []))
         cond {
+            is-err(reply) => { reply }
             is-empty(calls) => {
                 emit-step(opts, iteration, reply, null)
                 or(reply.text, "")
@@ -1601,8 +1602,9 @@ fn cond (opts: ChatOptions, messages: Vec<Message>, tools: Vec<::ai::tool/Tool>,
         iteration add(sub(max-iter, remaining), 1)
         check-budget(opts, messages, tools)
         reply dispatch-chat-stream(opts, messages, tools, on-delta)
-        calls or(reply.tool-calls, [])
+        calls if(is-err(reply), [], or(reply.tool-calls, []))
         cond {
+            is-err(reply) => { reply }
             is-empty(calls) => {
                 emit-step(opts, iteration, reply, null)
                 or(reply.text, "")
