@@ -1,0 +1,247 @@
+::increase::events ns
+meta {
+    doc: """
+    Events and Event Subscriptions. Every change in Increase produces an
+    Event (`{id, category, associated_object_type, associated_object_id,
+    created_at}`); Event Subscriptions deliver them to your webhook URL.
+    Events are deliberately thin: re-fetch the object they point at with
+    `fetch-associated-object` before acting, and make your handler
+    idempotent on the event `id` (deliveries can repeat). Events stay
+    listable for 30 days, so a periodic `list-events` poll in ascending
+    order backstops missed webhooks.
+    """
+}
+
+::api ::increase::api
+seg ::increase::api/seg
+
+// ---------------------------------------------------------------------------
+// Events
+// ---------------------------------------------------------------------------
+
+list-events
+meta {
+    doc: """
+    GET /events: one page of Events, newest first by default. Filters:
+    `associated_object_id`, `"category.in"` (e.g.
+    `["ach_transfer.updated"]`), `created_at`, `order_by: {field:
+    "created_at", direction: "ascending"}` (for polling from a stored
+    cursor), `limit`, `cursor`.
+
+    **Example**
+
+    ```hot
+    page ::increase::events/list-events({"category.in": ["ach_transfer.updated"], order_by: {field: "created_at", direction: "ascending"}})
+    ```
+    """
+}
+fn
+(): Map {
+  list-events({})
+},
+(params: Map): Map {
+  list-events(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/list-page("/events", params, opts)
+}
+
+get-event
+meta {
+    doc: """GET /events/{event_id}: retrieve an Event."""
+}
+fn
+(event-id: Str): Map {
+  get-event(event-id, {})
+},
+(event-id: Str, opts: Map): Map {
+  ::api/call("GET", `/events/${seg(event-id)}`, {}, opts)
+}
+
+Event
+meta {
+    doc: """The fields of an Increase Event that a handler routes on. `category` is e.g. `"ach_transfer.updated"`; `associated_object_type` and `associated_object_id` name the object to re-fetch."""
+}
+type {
+    id: Str?,
+    category: Str?,
+    associated_object_type: Str?,
+    associated_object_id: Str?,
+    created_at: Str?
+}
+
+parse-event
+meta {
+    doc: """
+    The routing fields of an Event payload (a decoded Map, or the raw
+    JSON text of a webhook body), as an `Event`. Fields Increase didn't
+    send are null. Errs when the body isn't a JSON object.
+
+    **Example**
+
+    ```hot
+    e ::increase::events/parse-event("{\\"id\\":\\"event_001\\",\\"category\\":\\"ach_transfer.updated\\",\\"associated_object_type\\":\\"ach_transfer\\",\\"associated_object_id\\":\\"ach_transfer_uoxatyh3lt5evrsdvo7q\\",\\"created_at\\":\\"2026-11-01T12:00:00Z\\",\\"type\\":\\"event\\"}")
+    e.category   // => "ach_transfer.updated"
+    ```
+    """
+}
+fn (payload: Any): Event {
+  decoded cond {
+    is-str(payload) => { from-json(payload) }
+    is-bytes(payload) => { from-json(Str(payload)) }
+    => { payload }
+  }
+
+  cond {
+    is-err(decoded) => { err("increase: the event body is not valid JSON") }
+    not(is-map(decoded)) => { err("increase: the event body is not a JSON object") }
+    => {
+      Event({
+        id: get(decoded, "id"),
+        category: get(decoded, "category"),
+        associated_object_type: get(decoded, "associated_object_type"),
+        associated_object_id: get(decoded, "associated_object_id"),
+        created_at: get(decoded, "created_at")
+      })
+    }
+  }
+}
+
+resource-name
+meta {
+    doc: """The API collection for an object type: `"ach_transfer"` is `"ach_transfers"`, `"entity"` is `"entities"`, `"lockbox_address"` is `"lockbox_addresses"`, `"inbound_real_time_payments_request_for_payment"` is `"inbound_real_time_payments_requests_for_payment"`. Exposed for testing."""
+}
+fn (object-type: Str): Str {
+  cond {
+    ends-with(object-type, "_request_for_payment") => {
+      `${slice(object-type, 0, sub(length(object-type), length("_request_for_payment")))}_requests_for_payment`
+    }
+
+    ends-with(object-type, "y") => { `${slice(object-type, 0, sub(length(object-type), 1))}ies` }
+    ends-with(object-type, "s") => { `${object-type}es` }
+    => { `${object-type}s` }
+  }
+}
+
+object-path
+meta {
+    doc: """The retrieve path for an Event's associated object, e.g. `/ach_transfers/ach_transfer_uoxatyh3lt5evrsdvo7q`, or an Err when the event names no object. Exposed for testing."""
+}
+fn (event: Any): Str {
+  e untype(event)
+  object-type get(e, "associated_object_type")
+  object-id get(e, "associated_object_id")
+  cond {
+    or(not(is-str(object-type)), not(is-str(object-id))) => { err("increase: the event has no associated object") }
+    or(is-empty(object-type), is-empty(object-id)) => { err("increase: the event has no associated object") }
+    => { `/${resource-name(object-type)}/${seg(object-id)}` }
+  }
+}
+
+fetch-associated-object
+meta {
+    doc: """
+    Re-fetch the object an Event points at (GET by
+    `associated_object_type` and `associated_object_id`). This is the
+    current state of the object, which is what a handler should act on.
+    A few object types have no retrieve endpoint; those come back as the
+    API's `HttpError`.
+
+    **Example**
+
+    ```hot
+    e ::increase::events/parse-event(request.body)
+    transfer ::increase::events/fetch-associated-object(e)
+    transfer.status   // => "submitted"
+    ```
+    """
+}
+fn
+(event: Any): Map {
+  fetch-associated-object(event, {})
+},
+(event: Any, opts: Map): Map {
+  path object-path(event)
+  if(is-err(path), path, ::api/call("GET", path, {}, opts))
+}
+
+// ---------------------------------------------------------------------------
+// Event subscriptions
+// ---------------------------------------------------------------------------
+
+create-event-subscription
+meta {
+    doc: """
+    POST /event_subscriptions: deliver Events to a webhook `url`.
+    Optional: `selected_event_categories` (`[{event_category:
+    "ach_transfer.updated"}]`; omit for every category), `shared_secret`
+    (the key Increase signs deliveries with; omit for a random one),
+    `status` (`"active"` or `"disabled"`), `oauth_connection_id`. Store
+    the secret as `increase.webhook.secret`.
+
+    **Example**
+
+    ```hot
+    ::increase::events/create-event-subscription({url: "https://example.com/increase/webhook"},
+      {idempotency-key: "webhook-main"})
+    ```
+    """
+}
+fn
+(params: Map): Map {
+  create-event-subscription(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/create("/event_subscriptions", params, ["url"], opts, "create-event-subscription")
+}
+
+get-event-subscription
+meta {
+    doc: """GET /event_subscriptions/{event_subscription_id}: retrieve an Event Subscription."""
+}
+fn
+(event-subscription-id: Str): Map {
+  get-event-subscription(event-subscription-id, {})
+},
+(event-subscription-id: Str, opts: Map): Map {
+  ::api/call("GET", `/event_subscriptions/${seg(event-subscription-id)}`, {}, opts)
+}
+
+list-event-subscriptions
+meta {
+    doc: """GET /event_subscriptions: one page of Event Subscriptions. Filters: `idempotency_key`, `limit`, `cursor`."""
+}
+fn
+(): Map {
+  list-event-subscriptions({})
+},
+(params: Map): Map {
+  list-event-subscriptions(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/list-page("/event_subscriptions", params, opts)
+}
+
+update-event-subscription
+meta {
+    doc: """PATCH /event_subscriptions/{event_subscription_id}: set `status` to `"active"`, `"disabled"` (pause deliveries) or `"deleted"` (permanent)."""
+}
+fn
+(event-subscription-id: Str, status: Str): Map {
+  update-event-subscription(event-subscription-id, status, {})
+},
+(event-subscription-id: Str, status: Str, opts: Map): Map {
+  ::api/call("PATCH", `/event_subscriptions/${seg(event-subscription-id)}`, {status: status}, opts)
+}
+
+delete-event-subscription
+meta {
+    doc: """Delete an Event Subscription (`PATCH {status: "deleted"}`; Increase has no DELETE endpoint). Permanent."""
+}
+fn
+(event-subscription-id: Str): Map {
+  delete-event-subscription(event-subscription-id, {})
+},
+(event-subscription-id: Str, opts: Map): Map {
+  update-event-subscription(event-subscription-id, "deleted", opts)
+}

@@ -1,0 +1,391 @@
+::persona::webhooks ns
+meta {
+    doc: """
+    Persona webhooks: `Persona-Signature` verification, event parsing,
+    and webhook endpoint management.
+
+    Persona signs each delivery with HMAC-SHA256 over `${t}.${raw_body}`
+    and sends `Persona-Signature: t=<unix>,v1=<hex>`. While a secret is
+    being rotated the header holds one space-separated `t=...,v1=...` set
+    per active secret; any matching set verifies. The timestamp is signed,
+    so `verify-request` also rejects deliveries older (or newer) than a
+    replay window, 300 seconds by default.
+
+    Deliveries can repeat and arrive out of order: dedupe on the event id
+    and order by `created-at`. Persona retries failed deliveries (non-2xx
+    or slower than 5 s) up to 7 times over about 2 days.
+
+    See https://docs.withpersona.com/webhooks-best-practices.
+    """
+}
+
+::api ::persona::api
+
+::ctx ::hot::ctx
+::hmac ::hot::hmac
+::time ::hot::time
+
+seg ::persona::api/seg
+
+DEFAULT_TOLERANCE_SECONDS 300
+
+// ---------------------------------------------------------------------------
+// Signature verification
+// ---------------------------------------------------------------------------
+
+parse-signature-set fn (text: Str): Map {
+  reduce(split(text, ","), (acc, part) {
+    kv split(trim(part), "=")
+    cond {
+      lt(length(kv), 2) => { acc }
+      eq(kv[0], "t") => { {...acc, t: kv[1]} }
+      eq(kv[0], "v1") => { {...acc, v1: concat(acc.v1, [kv[1]])} }
+      => { acc }
+    }
+  }, {t: "", v1: []})
+}
+
+parse-signature-header
+meta {
+    doc: """
+    Parse a `Persona-Signature` header into its signature sets:
+    `[{t: Str, v1: Vec<Str>}]`. Sets are separated by whitespace (one per
+    active secret during rotation); unknown schemes are ignored.
+
+    **Example**
+
+    ```hot
+    ::persona::webhooks/parse-signature-header("t=1700000000,v1=aa t=1700000000,v1=bb")
+    // => [{t: "1700000000", v1: ["aa"]}, {t: "1700000000", v1: ["bb"]}]
+    ```
+    """
+}
+fn (header: Str): Vec {
+  sets filter(split(trim(header), " "), (s) { not(is-empty(trim(s))) })
+  map(sets, parse-signature-set)
+}
+
+signed-payload fn (timestamp: Str, raw-body: Str | Bytes): Str | Bytes {
+  if(is-bytes(raw-body), concat(Bytes(`${timestamp}.`), raw-body), `${timestamp}.${raw-body}`)
+}
+
+set-matches fn (set: Map, secret: Str, raw-body: Str | Bytes, tolerance-seconds: Int): Bool {
+  cond {
+    is-empty(set.t) => { false }
+    is-empty(set.v1) => { false }
+    => {
+      expected ::hmac/hmac-sha256(secret, signed-payload(set.t, raw-body))
+      valid reduce(set.v1, (acc, sig) { or(acc, secure-compare(expected, lowercase(sig))) }, false)
+      cond {
+        not(valid) => { false }
+        // The signature is what makes the timestamp trustworthy, so the
+        // replay check runs only after it verifies.
+        eq(tolerance-seconds, 0) => { true }
+        => { ::time/within-seconds-of-now(set.t, tolerance-seconds) }
+      }
+    }
+  }
+}
+
+verify-signature
+meta {
+    doc: """Verify a `Persona-Signature` header value against a raw body and secret, with a replay window in seconds (0 skips the timestamp check). Fails closed on an empty secret or header. The secret is masked in call records. Exposed for testing; `verify-request` reads the header and body from the request."""
+}
+fn (header: Str, raw-body: Str | Bytes, secret: Str, tolerance-seconds: Int): Bool {
+  cond {
+    // An empty key would make every signature forgeable: fail closed.
+    is-empty(secret) => { false }
+    is-empty(trim(header)) => { false }
+    => {
+      ::ctx/mark-secret(secret)
+      some(parse-signature-header(header), (set) { set-matches(set, secret, raw-body, tolerance-seconds) })
+    }
+  }
+}
+
+verify-request
+meta {
+    ctx: {"persona.webhook.secret": {required: false}},
+    doc: """
+    Verify an inbound Persona webhook: HMAC-SHA256 over
+    `${t}.${raw_body}` (`::hot::http/raw-body`), constant-time compared
+    against every `v1` in every signature set, with the signed timestamp
+    within `tolerance-seconds` of now (default 300; 0 skips the check).
+
+    Uses `persona.webhook.secret` by default and fails when it is unset;
+    an empty explicit secret never verifies.
+
+    **Example**
+
+    ```hot
+    persona-webhook
+    meta {webhook: {service: "persona", path: "/persona/webhook"}, secret-headers: ["persona-signature"]}
+    fn (request) {
+      if(not(::persona::webhooks/verify-request(request)),
+        ::hot::http/HttpResponse({status: 401, body: "invalid signature"}),
+        ::hot::http/HttpResponse({status: 200, body: {received: true}}))
+    }
+    ```
+    """
+}
+fn
+(request: Map): Bool {
+  secret or(::ctx/get("persona.webhook.secret"), "")
+  if(is-empty(secret),
+    fail("persona.webhook.secret is not set. Add the webhook's secret (wbhsec_...) in Context Variables to verify webhook requests.")
+  )
+  verify-request(request, secret)
+},
+(request: Map, secret: Str): Bool {
+  verify-request(request, secret, DEFAULT_TOLERANCE_SECONDS)
+},
+(request: Map, secret: Str, tolerance-seconds: Int): Bool {
+  headers or(get(request, "headers"), {})
+  header or(get(headers, "persona-signature"), or(get(headers, "Persona-Signature"), ""))
+  verify-signature(Str(header), ::hot::http/raw-body(request), secret, tolerance-seconds)
+}
+
+// ---------------------------------------------------------------------------
+// Events
+// ---------------------------------------------------------------------------
+
+parse-event
+meta {
+    doc: """
+    Flatten a webhook body (or an event from `::persona::events`) into
+    `{id, name, created-at, object-type, object-id, object, included}`:
+    `name` is e.g. `"inquiry.approved"` or `"report/watchlist.ready"`,
+    `object` is the resource the event is about (`payload.data`) and
+    `included` its related objects (empty unless the webhook's included
+    allowlist adds them). Works with any key inflection.
+
+    **Example**
+
+    ```hot
+    e ::persona::webhooks/parse-event(::persona::events/get-event("evt_..."))
+    e.name       // "inquiry.completed"
+    e.object-id  // "inq_..."
+    ```
+    """
+}
+fn (body: Any): Map {
+  event ::api/resource(body)
+  payload or(::api/attr(event, "payload"), {})
+  object if(is-map(payload), get(payload, "data"), null)
+  {
+    id: if(is-map(event), get(event, "id"), null),
+    name: ::api/attr(event, "name"),
+    created-at: ::api/attr(event, "created-at"),
+    object-type: if(is-map(object), get(object, "type"), null),
+    object-id: if(is-map(object), get(object, "id"), null),
+    object: object,
+    included: if(is-map(payload), or(get(payload, "included"), []), [])
+  }
+}
+
+event-document
+meta {
+    doc: """The event's object as a JSON:API document `{data, included}`, so the `::persona::decisions` and `::persona::api` helpers that take a document work on it directly."""
+}
+fn (event: Map): Map {
+  {data: event.object, included: or(event.included, [])}
+}
+
+construct-event
+meta {
+    ctx: {"persona.webhook.secret": {required: false}},
+    doc: """
+    Verify a webhook request (see `verify-request`) and return the parsed
+    event (see `parse-event`), or an Err when the signature is invalid or
+    stale.
+
+    **Example**
+
+    ```hot
+    persona-webhook
+    meta {webhook: {service: "persona", path: "/persona/webhook"}, secret-headers: ["persona-signature"]}
+    fn (request) {
+      event ::persona::webhooks/construct-event(request)
+      cond {
+        is-err(event) => { ::hot::http/HttpResponse({status: 401, body: "invalid signature"}) }
+        => {
+          // Dedupe on event.id, then hand the inquiry to the reviewer agent
+          ::hot::http/HttpResponse({status: 200, body: {received: true}})
+        }
+      }
+    }
+    ```
+    """
+}
+fn
+(request: Map): Map {
+  secret or(::ctx/get("persona.webhook.secret"), "")
+  if(is-empty(secret),
+    fail("persona.webhook.secret is not set. Add the webhook's secret (wbhsec_...) in Context Variables to verify webhook requests.")
+  )
+  construct-event(request, secret, DEFAULT_TOLERANCE_SECONDS)
+},
+(request: Map, secret: Str): Map {
+  construct-event(request, secret, DEFAULT_TOLERANCE_SECONDS)
+},
+(request: Map, secret: Str, tolerance-seconds: Int): Map {
+  cond {
+    not(verify-request(request, secret, tolerance-seconds)) => { err("Persona webhook signature verification failed") }
+    is-map(get(request, "body")) => { parse-event(request.body) }
+    => {
+      raw ::hot::http/raw-body(request)
+      parsed from-json(if(is-bytes(raw), Str(raw), raw))
+      if(is-err(parsed), err("Persona webhook body is not JSON"), parse-event(parsed))
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Webhook endpoints
+// ---------------------------------------------------------------------------
+
+list-webhooks
+meta {
+    doc: """GET /webhooks - One page of webhook endpoints. `opts` takes `page-size`, `after`, `before`."""
+}
+fn
+(): Map {
+  list-webhooks({}, {})
+},
+(opts: Map): Map {
+  list-webhooks(opts, {})
+},
+(opts: Map, options: Map): Map {
+  ::api/list-page("/webhooks", {}, opts, options)
+}
+
+mark-signing-secrets
+meta {
+    doc: """Mask the signing secrets in a webhook response's `attributes.secrets` in call records and return the response unchanged. An Err passes through. Exposed for testing."""
+}
+fn (response: Result): Any {
+  cond {
+    is-err(response) => { response }
+    => {
+      secrets ::api/attr(response, "secrets")
+      if(is-some(secrets), ::ctx/mark-secret(secrets))
+      response
+    }
+  }
+}
+
+create-webhook
+meta {
+    doc: """
+    POST /webhooks - Register a webhook endpoint. `enabled-events` lists
+    event names (`["*"]` for all). `opts`: `description`, `api-version`
+    (default `::persona/API_VERSION`), `api-key-inflection`,
+    `included-allowlist`, `relationship-allowlist`,
+    `file-access-token-expires-in`, `custom-http-headers`. Persona's create
+    example returns `status: "disabled"`, so call `enable-webhook`. The response's
+    `attributes.secrets` holds the signing secret; store it as
+    `persona.webhook.secret`.
+
+    **Example**
+
+    ```hot
+    hook ::persona::webhooks/create-webhook("kyc-agent", "https://myapp.hot.dev/persona/webhook",
+      ["inquiry.completed", "inquiry.approved", "inquiry.declined", "inquiry.marked-for-review"])
+    ::persona::webhooks/enable-webhook(hook.data.id)
+    ```
+    """
+}
+fn
+(name: Str, url: Str, enabled-events: Vec<Str>): Map {
+  create-webhook(name, url, enabled-events, {}, {})
+},
+(name: Str, url: Str, enabled-events: Vec<Str>, opts: Map): Map {
+  create-webhook(name, url, enabled-events, ::api/without-request-options(opts), opts)
+},
+(name: Str, url: Str, enabled-events: Vec<Str>, opts: Map, options: Map): Map {
+  attributes {
+    ...opts,
+    name: name,
+    url: url,
+    enabled-events: enabled-events,
+    api-version: or(get(opts, "api-version"), ::persona/API_VERSION)
+  }
+
+  mark-signing-secrets(::api/send("POST", "/webhooks", {}, ::api/document(null, attributes, {}), options))
+}
+
+get-webhook
+meta {
+    doc: """GET /webhooks/{id} - Retrieve a webhook endpoint."""
+}
+fn
+(webhook-id: Str): Map {
+  get-webhook(webhook-id, {})
+},
+(webhook-id: Str, options: Map): Map {
+  ::api/send("GET", `/webhooks/${seg(webhook-id)}`, {}, null, options)
+}
+
+update-webhook
+meta {
+    doc: """PATCH /webhooks/{id} - Update a webhook endpoint's attributes (`url`, `enabled-events`, `name`, ...)."""
+}
+fn
+(webhook-id: Str, attributes: Map): Map {
+  update-webhook(webhook-id, attributes, {})
+},
+(webhook-id: Str, attributes: Map, options: Map): Map {
+  ::api/send("PATCH", `/webhooks/${seg(webhook-id)}`, {}, ::api/document(null, attributes, {}), options)
+}
+
+webhook-action fn (webhook-id: Str, name: Str, meta-block: Map, options: Map): Map {
+  ::api/send("POST", `/webhooks/${seg(webhook-id)}/${name}`, {}, ::api/meta-document(meta-block), options)
+}
+
+enable-webhook
+meta {
+    doc: """POST /webhooks/{id}/enable - Start deliveries."""
+}
+fn
+(webhook-id: Str): Map {
+  webhook-action(webhook-id, "enable", {}, {})
+},
+(webhook-id: Str, options: Map): Map {
+  webhook-action(webhook-id, "enable", {}, options)
+}
+
+disable-webhook
+meta {
+    doc: """POST /webhooks/{id}/disable - Pause deliveries."""
+}
+fn
+(webhook-id: Str): Map {
+  webhook-action(webhook-id, "disable", {}, {})
+},
+(webhook-id: Str, options: Map): Map {
+  webhook-action(webhook-id, "disable", {}, options)
+}
+
+archive-webhook
+meta {
+    doc: """POST /webhooks/{id}/archive - Archive a webhook endpoint."""
+}
+fn
+(webhook-id: Str): Map {
+  webhook-action(webhook-id, "archive", {}, {})
+},
+(webhook-id: Str, options: Map): Map {
+  webhook-action(webhook-id, "archive", {}, options)
+}
+
+rotate-secret
+meta {
+    doc: """POST /webhooks/{id}/rotate-secret - Issue a new signing secret. The old one keeps signing for `expires-in-seconds` (0, the default, expires it now), so deliveries carry one signature set per secret meanwhile. The new secret is in `attributes.secrets`; update `persona.webhook.secret`."""
+}
+fn
+(webhook-id: Str, expires-in-seconds: Int): Map {
+  rotate-secret(webhook-id, expires-in-seconds, {})
+},
+(webhook-id: Str, expires-in-seconds: Int, options: Map): Map {
+  mark-signing-secrets(webhook-action(webhook-id, "rotate-secret", {expires-in-seconds: expires-in-seconds}, options))
+}

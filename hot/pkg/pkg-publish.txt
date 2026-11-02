@@ -128,5 +128,19 @@ dropbox
 box
 documents
 
+# KYC, KYB & Compliance
+persona
+middesk
+sumsub
+cipherowl
+sanctions
+company-registry
+
+# Banking & Accounting
+increase
+modern-treasury
+quickbooks
+xero
+
 # Standard Library (bundled with CLI, but docs are published)
 hot-std

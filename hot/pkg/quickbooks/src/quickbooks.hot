@@ -1,0 +1,100 @@
+::quickbooks ns
+meta {
+    doc: """
+    QuickBooks Online Accounting API (v3) bindings, built for agentic
+    finance ops: reconciliation, invoicing, AP/AR and reporting.
+
+    - `::quickbooks::oauth` - authorize URL, code exchange, refresh
+      (the refresh token rotates: persist the one each refresh returns),
+      revoke, and callback parsing
+    - `::quickbooks::auth` - credential resolution (context or per-call
+      `opts`), the per-run access-token cache, and the opt-in
+      `::hot::store`-backed token keeper
+    - `::quickbooks::api` - the request helpers, environment and realm
+      handling, the pinned `minorversion`, `HttpError` with Intuit's
+      `Fault` parsed and `intuit_tid` surfaced, and `is-retryable`
+    - `::quickbooks::entities` - create, get, sparse update, delete, void
+      and deactivate for every supported entity, plus send and PDF
+    - `::quickbooks::query` - the SQL-like query endpoint with safe
+      literals, STARTPOSITION/MAXRESULTS paging and collect-all
+    - `::quickbooks::reports` - ProfitAndLoss, BalanceSheet, CashFlow,
+      aged receivables and payables, GeneralLedger, TransactionList and a
+      row flattener
+    - `::quickbooks::batch` - up to 30 operations in one call
+    - `::quickbooks::cdc` - change data capture for sync
+    - `::quickbooks::webhooks` - `intuit-signature` verification and
+      event parsing (legacy `eventNotifications` and CloudEvents)
+    - `::quickbooks::company` - CompanyInfo and Preferences
+
+    **Setup** (Context Variables):
+
+    | Variable | Secret | Meaning |
+    |---|---|---|
+    | `quickbooks.client.id` | no | Your app's OAuth client id |
+    | `quickbooks.client.secret` | yes | Your app's OAuth client secret |
+    | `quickbooks.refresh.token` | yes | A company's refresh token (rotates) |
+    | `quickbooks.access.token` | yes | A ready access token (skips refresh) |
+    | `quickbooks.realm.id` | no | The company id (realmId) |
+    | `quickbooks.environment` | no | `sandbox` or `production` (default) |
+    | `quickbooks.minorversion` | no | Overrides `MINOR_VERSION` |
+    | `quickbooks.token.store` | no | Store name for the token keeper (opt-in) |
+    | `quickbooks.webhook.verifier` | yes | The webhook verifier token |
+
+    **Quick start**
+
+    ```hot
+    ::qb ::quickbooks::entities
+    ::q ::quickbooks::query
+
+    open ::q/query-all(`select * from Invoice where Balance > '0' and TxnDate >= ${::q/literal("2026-01-01")}`)
+    invoice ::qb/get-entity("Invoice", "130")
+    ::qb/send-entity("Invoice", invoice.Id, "ap@customer.example")
+    ```
+    """
+}
+
+// ---------------------------------------------------------------------------
+// Hosts
+// ---------------------------------------------------------------------------
+
+SANDBOX_BASE_URL "https://sandbox-quickbooks.api.intuit.com"
+PRODUCTION_BASE_URL "https://quickbooks.api.intuit.com"
+ENVIRONMENTS ["sandbox", "production"]
+DEFAULT_ENVIRONMENT "production"
+
+// ---------------------------------------------------------------------------
+// OAuth 2.0 (https://developer.api.intuit.com/.well-known/openid_configuration)
+// ---------------------------------------------------------------------------
+
+AUTHORIZE_URL "https://appcenter.intuit.com/connect/oauth2"
+TOKEN_URL "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer"
+REVOKE_URL "https://developer.api.intuit.com/v2/oauth2/tokens/revoke"
+
+SCOPE_ACCOUNTING "com.intuit.quickbooks.accounting"
+SCOPE_PAYMENTS "com.intuit.quickbooks.payment"
+
+// ---------------------------------------------------------------------------
+// API version
+// ---------------------------------------------------------------------------
+
+MINOR_VERSION
+meta {
+    doc: """
+    The `minorversion` query parameter sent on every Accounting API call.
+    Intuit retired minor versions 1-74 on 1 August 2025: requests that
+    omit the parameter or ask for an older one are served as 75. This
+    package pins 75 explicitly so responses do not depend on that
+    fallback. Override with the `quickbooks.minorversion` context
+    variable or `opts.minorversion`; values below
+    `MIN_MINOR_VERSION` are rejected.
+    """
+}
+"75"
+
+MIN_MINOR_VERSION 75
+
+// The query endpoint returns at most 1000 rows per page.
+MAX_RESULTS 1000
+
+// The batch endpoint accepts at most 30 operations per request.
+MAX_BATCH_ITEMS 30

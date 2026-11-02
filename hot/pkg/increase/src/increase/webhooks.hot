@@ -1,0 +1,97 @@
+::increase::webhooks ns
+meta {
+    ctx: {"increase.webhook.secret": {required: false}},
+    doc: """
+    Verify Increase webhook deliveries. Increase signs with Standard
+    Webhooks (`webhook-id`, `webhook-timestamp`, `webhook-signature`; see
+    `::increase::standard-webhooks`), keyed with the raw bytes of the
+    Event Subscription's `shared_secret`, as Increase's own SDKs do.
+    Deliveries older or newer than five minutes are rejected.
+
+    After verifying, parse the Event with `::increase::events/parse-event`
+    and re-fetch its object with `fetch-associated-object`; return 2xx
+    fast and process asynchronously. Increase retries failed deliveries
+    for about three days (not at all in the sandbox), so deduplicate on
+    the `webhook-id` header (the Event id).
+    """
+}
+
+::ctx ::hot::ctx
+::sw ::increase::standard-webhooks
+
+signing-key
+meta {
+    doc: """The HMAC key for an Increase shared secret: its raw UTF-8 bytes. Increase's SDKs verify with `new Webhook("whsec_" + base64(secret))`, which decodes back to these bytes. Exposed for testing."""
+}
+fn (secret: Str): Bytes {
+  ::ctx/mark-secret(Bytes(::ctx/mark-secret(secret)))
+}
+
+verify-request
+meta {
+    ctx: {"increase.webhook.secret": {required: false}},
+    doc: """
+    True when an inbound request is a genuine, fresh Increase delivery.
+    The 1-arity form reads `increase.webhook.secret` and fails the run
+    when it is unset; an explicit empty secret never verifies. The
+    3-arity form sets the tolerance in seconds (default 300).
+
+    **Example**
+
+    ```hot
+    increase-webhook
+    meta {webhook: {service: "increase", path: "/increase/webhook"}}
+    fn (request) {
+      cond {
+        not(::increase::webhooks/verify-request(request)) => {
+          ::hot::http/HttpResponse({status: 401, body: "invalid signature"})
+        }
+        => {
+          event ::increase::events/parse-event(::hot::http/raw-body(request))
+          // enqueue event.id / event.category for processing
+          ::hot::http/HttpResponse({status: 200, body: {received: true}})
+        }
+      }
+    }
+    ```
+    """
+}
+fn
+(request: Map): Bool {
+  secret Str(or(::ctx/get("increase.webhook.secret"), ""))
+  if(is-empty(secret),
+    fail("increase.webhook.secret is not set. Add the event subscription's shared secret in Context Variables to verify webhooks.")
+  )
+  verify-request(request, secret)
+},
+(request: Map, secret: Str): Bool {
+  verify-request(request, secret, ::sw/DEFAULT_TOLERANCE_SECONDS)
+},
+(request: Map, secret: Str, tolerance-seconds: Int): Bool {
+  ::ctx/mark-secret(secret)
+  cond {
+    // An empty key would make every signature forgeable: fail closed.
+    is-empty(secret) => { false }
+    => { ::sw/verify-request(request, signing-key(secret), tolerance-seconds) }
+  }
+}
+
+construct-event
+meta {
+    ctx: {"increase.webhook.secret": {required: false}},
+    doc: """Verify a delivery (see `verify-request`) and return its `::increase::events/Event`, or an Err when the signature or timestamp doesn't verify. The 2-arity form takes an explicit secret."""
+}
+fn
+(request: Map): Any {
+  secret Str(or(::ctx/get("increase.webhook.secret"), ""))
+  if(is-empty(secret),
+    fail("increase.webhook.secret is not set. Add the event subscription's shared secret in Context Variables to verify webhooks.")
+  )
+  construct-event(request, secret)
+},
+(request: Map, secret: Str): Any {
+  cond {
+    not(verify-request(request, secret)) => { err("increase: webhook signature verification failed") }
+    => { ::increase::events/parse-event(::hot::http/raw-body(request)) }
+  }
+}

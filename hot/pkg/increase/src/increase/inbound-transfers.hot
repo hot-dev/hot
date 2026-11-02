@@ -1,0 +1,201 @@
+::increase::inbound-transfers ns
+meta {
+    doc: """
+    Money arriving from other banks: inbound ACH transfers (credits and
+    debits against your account numbers), inbound wires, inbound
+    Real-Time Payments and inbound FedNow transfers. Inbound ACH debits
+    can be declined or returned, inbound wires reversed, and inbound RTP
+    transfers returned. Returns, declines and reversals send money back,
+    so they need an `idempotency-key` like any other money movement.
+
+    Inbound objects carry the sender's account and routing numbers: don't
+    log them. Follow `inbound_ach_transfer.created` (and the wire, RTP and
+    FedNow equivalents) events rather than polling.
+    """
+}
+
+::api ::increase::api
+seg ::increase::api/seg
+
+// ---------------------------------------------------------------------------
+// Inbound ACH
+// ---------------------------------------------------------------------------
+
+list-inbound-ach-transfers
+meta {
+    doc: """GET /inbound_ach_transfers: one page of Inbound ACH Transfers. Filters: `account_id`, `account_number_id`, `"status.in"` (`pending`, `declined`, `accepted`, `returned`), `created_at`, `limit`, `cursor`."""
+}
+fn
+(): Map {
+  list-inbound-ach-transfers({})
+},
+(params: Map): Map {
+  list-inbound-ach-transfers(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/list-page("/inbound_ach_transfers", params, opts)
+}
+
+get-inbound-ach-transfer
+meta {
+    doc: """GET /inbound_ach_transfers/{id}: retrieve an Inbound ACH Transfer."""
+}
+fn
+(inbound-ach-transfer-id: Str): Map {
+  get-inbound-ach-transfer(inbound-ach-transfer-id, {})
+},
+(inbound-ach-transfer-id: Str, opts: Map): Map {
+  ::api/call("GET", `/inbound_ach_transfers/${seg(inbound-ach-transfer-id)}`, {}, opts)
+}
+
+decline-inbound-ach-transfer
+meta {
+    doc: """
+    POST /inbound_ach_transfers/{id}/decline: decline a `pending` Inbound
+    ACH Transfer before it settles. `reason` is an ACH return reason such
+    as `"insufficient_funds"`, `"authorization_revoked_by_customer"`,
+    `"payment_stopped"` or
+    `"customer_advised_unauthorized_improper_ineligible_or_incomplete"`
+    (null lets Increase pick). Needs an `idempotency-key`.
+    """
+}
+fn (inbound-ach-transfer-id: Str, reason: Str?, opts: Map): Map {
+  ::api/move-money(`/inbound_ach_transfers/${seg(inbound-ach-transfer-id)}/decline`, {reason: reason}, [], false, opts, "decline-inbound-ach-transfer")
+}
+
+return-inbound-ach-transfer
+meta {
+    doc: """
+    POST /inbound_ach_transfers/{id}/transfer_return: return an
+    `accepted` Inbound ACH Transfer, e.g. a debit your customer disputes.
+    `reason` is required (see `decline-inbound-ach-transfer`). Needs an
+    `idempotency-key`.
+
+    **Example**
+
+    ```hot
+    ::increase::inbound-transfers/return-inbound-ach-transfer("inbound_ach_transfer_tdrwqr3fq9gnnq49odev", "payment_stopped",
+      {idempotency-key: "return-inbound-ach-tdrwqr"})
+    ```
+    """
+}
+fn (inbound-ach-transfer-id: Str, reason: Str, opts: Map): Map {
+  ::api/move-money(`/inbound_ach_transfers/${seg(inbound-ach-transfer-id)}/transfer_return`, {reason: reason}, ["reason"], false, opts, "return-inbound-ach-transfer")
+}
+
+create-notification-of-change
+meta {
+    doc: """POST /inbound_ach_transfers/{id}/create_notification_of_change: tell the originator to use corrected details next time. `params`: `updated_account_number` and/or `updated_routing_number` (sensitive; never logged by this package)."""
+}
+fn
+(inbound-ach-transfer-id: Str, params: Map): Map {
+  create-notification-of-change(inbound-ach-transfer-id, params, {})
+},
+(inbound-ach-transfer-id: Str, params: Map, opts: Map): Map {
+  ::api/call("POST", `/inbound_ach_transfers/${seg(inbound-ach-transfer-id)}/create_notification_of_change`, params, opts)
+}
+
+// ---------------------------------------------------------------------------
+// Inbound wires
+// ---------------------------------------------------------------------------
+
+list-inbound-wire-transfers
+meta {
+    doc: """GET /inbound_wire_transfers: one page of Inbound Wire Transfers. Filters: `account_id`, `account_number_id`, `"status.in"` (`pending`, `accepted`, `declined`, `reversed`), `wire_drawdown_request_id`, `created_at`, `limit`, `cursor`."""
+}
+fn
+(): Map {
+  list-inbound-wire-transfers({})
+},
+(params: Map): Map {
+  list-inbound-wire-transfers(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/list-page("/inbound_wire_transfers", params, opts)
+}
+
+get-inbound-wire-transfer
+meta {
+    doc: """GET /inbound_wire_transfers/{id}: retrieve an Inbound Wire Transfer."""
+}
+fn
+(inbound-wire-transfer-id: Str): Map {
+  get-inbound-wire-transfer(inbound-wire-transfer-id, {})
+},
+(inbound-wire-transfer-id: Str, opts: Map): Map {
+  ::api/call("GET", `/inbound_wire_transfers/${seg(inbound-wire-transfer-id)}`, {}, opts)
+}
+
+reverse-inbound-wire-transfer
+meta {
+    doc: """POST /inbound_wire_transfers/{id}/reverse: send an inbound wire back. `reason` is `"duplicate"`, `"creditor_request"` or `"transaction_forbidden"`. Needs an `idempotency-key`."""
+}
+fn (inbound-wire-transfer-id: Str, reason: Str, opts: Map): Map {
+  ::api/move-money(`/inbound_wire_transfers/${seg(inbound-wire-transfer-id)}/reverse`, {reason: reason}, ["reason"], false, opts, "reverse-inbound-wire-transfer")
+}
+
+// ---------------------------------------------------------------------------
+// Inbound Real-Time Payments and FedNow
+// ---------------------------------------------------------------------------
+
+list-inbound-rtp-transfers
+meta {
+    doc: """GET /inbound_real_time_payments_transfers: one page of Inbound Real-Time Payments Transfers. Filters: `account_id`, `account_number_id`, `created_at`, `limit`, `cursor`."""
+}
+fn
+(): Map {
+  list-inbound-rtp-transfers({})
+},
+(params: Map): Map {
+  list-inbound-rtp-transfers(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/list-page("/inbound_real_time_payments_transfers", params, opts)
+}
+
+get-inbound-rtp-transfer
+meta {
+    doc: """GET /inbound_real_time_payments_transfers/{id}: retrieve an Inbound Real-Time Payments Transfer."""
+}
+fn
+(inbound-rtp-transfer-id: Str): Map {
+  get-inbound-rtp-transfer(inbound-rtp-transfer-id, {})
+},
+(inbound-rtp-transfer-id: Str, opts: Map): Map {
+  ::api/call("GET", `/inbound_real_time_payments_transfers/${seg(inbound-rtp-transfer-id)}`, {}, opts)
+}
+
+return-inbound-rtp-transfer
+meta {
+    doc: """POST /inbound_real_time_payments_transfers/{id}/return: return a received Real-Time Payment to its sender as a new outbound transfer. `params` may set `amount` (cents; default the full amount). Needs an `idempotency-key`."""
+}
+fn (inbound-rtp-transfer-id: Str, params: Map, opts: Map): Map {
+  ::api/move-money(`/inbound_real_time_payments_transfers/${seg(inbound-rtp-transfer-id)}/return`, params, [], false, opts, "return-inbound-rtp-transfer")
+}
+
+list-inbound-fednow-transfers
+meta {
+    doc: """GET /inbound_fednow_transfers: one page of Inbound FedNow Transfers. Filters: `account_id`, `account_number_id`, `created_at`, `limit`, `cursor`."""
+}
+fn
+(): Map {
+  list-inbound-fednow-transfers({})
+},
+(params: Map): Map {
+  list-inbound-fednow-transfers(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/list-page("/inbound_fednow_transfers", params, opts)
+}
+
+get-inbound-fednow-transfer
+meta {
+    doc: """GET /inbound_fednow_transfers/{id}: retrieve an Inbound FedNow Transfer."""
+}
+fn
+(inbound-fednow-transfer-id: Str): Map {
+  get-inbound-fednow-transfer(inbound-fednow-transfer-id, {})
+},
+(inbound-fednow-transfer-id: Str, opts: Map): Map {
+  ::api/call("GET", `/inbound_fednow_transfers/${seg(inbound-fednow-transfer-id)}`, {}, opts)
+}

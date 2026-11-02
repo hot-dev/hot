@@ -1,0 +1,301 @@
+::sumsub::test::api ns
+meta ["test"]
+
+::api ::sumsub::api
+
+HttpError ::sumsub::api/HttpError
+
+// Vectors computed independently with Python's hmac module. The secret is
+// the example secret from Sumsub's official AppTokenUsageExamples repo.
+SECRET "Hej2ch71kG2kTd1iIUDZFNsO5C1lh5Gq"
+APP_TOKEN "sbx:uY0CgwELmgUAEyl4hNWxLngb.0WSeQeiYny4WEqmAALEAiK2qTC96fBad"
+
+// ============================================================================
+// Signing
+// ============================================================================
+
+test-string-to-sign
+meta ["test"] fn () {
+    assert-eq("1607551635POST/resources/accessTokens/sdk", ::api/string-to-sign(1607551635, "post", "/resources/accessTokens/sdk"))
+    assert-eq("1607551635GET/resources/applicants/123?fields=info", ::api/string-to-sign("1607551635", "GET", "/resources/applicants/123?fields=info"))
+}
+
+test-sign-docs-example
+meta ["test"] fn () {
+    // The string-to-sign example from docs.sumsub.com (body with spaces, as given).
+    body "{\"ttlInSecs\": 600, \"userId\": \"johndoeID\", \"levelName\": \"basic-kyc-level\"}"
+    assert-eq("4154753970520f46cc3b69a7d2557a22cc431212d3c4588dec104c832802374d",
+        ::api/sign(SECRET, 1607551635, "POST", "/resources/accessTokens/sdk", body))
+}
+
+test-sign-get-includes-query
+meta ["test"] fn () {
+    expected "bbeda1a148beccdb42621ca549cd2dfe4ad4b6f1c665ec83f6f5533a3e9c9ccc"
+    assert-eq(expected, ::api/sign(SECRET, 1607551635, "GET", "/resources/applicants/123?fields=info", ""))
+    assert-eq(expected, ::api/sign(SECRET, 1607551635, "get", "/resources/applicants/123?fields=info", null), "null body and lowercase method sign the same")
+    assert(ne(expected, ::api/sign(SECRET, 1607551635, "GET", "/resources/applicants/123", "")), "the query is part of the signature")
+}
+
+test-sign-compact-json-body
+meta ["test"] fn () {
+    body ::api/encode-body({externalUserId: "user-42", email: null, fixedInfo: {country: "GBR", dob: null}})
+    assert-eq("{\"externalUserId\":\"user-42\",\"fixedInfo\":{\"country\":\"GBR\"}}", body)
+    assert-eq("8bbe235225b20b58e48dd2b4871dc8f1a1168998f42b6ac41ea4454af95c321e",
+        ::api/sign(SECRET, 1700000000, "POST", "/resources/applicants?levelName=basic-kyc-level", body))
+}
+
+test-sign-non-ascii-body-is-over-its-utf8-bytes
+meta ["test"] fn () {
+    // hmac.new(SECRET, b"1700000000POST/resources/applicants" + body.encode(), hashlib.sha256).hexdigest()
+    body """{"name":"José 日本"}"""
+    assert-eq("c4278257899a4414f4fbb27d64a117e0070fb571975e79f71b773c43cf73d318", ::api/sign(SECRET, 1700000000, "POST", "/resources/applicants", body))
+    assert-eq("c4278257899a4414f4fbb27d64a117e0070fb571975e79f71b773c43cf73d318", ::api/sign(SECRET, 1700000000, "POST", "/resources/applicants", Bytes(body)), "the same bytes")
+    assert-eq(body, ::api/encode-body({name: "José 日本"}), "to-json keeps the characters, so the signed text is the sent text")
+    req ::api/build-request("POST", "/resources/applicants", ::api/encode-body({name: "José 日本"}), null, {}, {app-token: APP_TOKEN, secret-key: SECRET}, 1700000000)
+    assert-eq(body, req.body, "the body is sent as signed")
+    assert-eq("c4278257899a4414f4fbb27d64a117e0070fb571975e79f71b773c43cf73d318", get(req.headers, "X-App-Access-Sig"))
+}
+
+test-sign-bytes-body
+meta ["test"] fn () {
+    // A Bytes body is signed byte for byte (non-UTF-8 bytes included).
+    prefix-bytes ::api/sign(SECRET, 1607551635, "GET", "/resources/applicants/123?fields=info", Bytes(""))
+    assert-eq("bbeda1a148beccdb42621ca549cd2dfe4ad4b6f1c665ec83f6f5533a3e9c9ccc", prefix-bytes, "empty Bytes equals no body")
+}
+
+test-auth-headers
+meta ["test"] fn () {
+    h ::api/auth-headers(APP_TOKEN, SECRET, 1607551635, "GET", "/resources/applicants/123?fields=info", "")
+    assert-eq(APP_TOKEN, get(h, "X-App-Token"))
+    assert-eq("1607551635", get(h, "X-App-Access-Ts"), "seconds, as text")
+    assert-eq("bbeda1a148beccdb42621ca549cd2dfe4ad4b6f1c665ec83f6f5533a3e9c9ccc", get(h, "X-App-Access-Sig"))
+}
+
+test-build-request
+meta ["test"] fn () {
+    req ::api/build-request("get", "/resources/applicants/123?fields=info", "", null, {}, {app-token: APP_TOKEN, secret-key: SECRET}, 1607551635)
+    assert-eq("GET", req.method)
+    assert-eq("https://api.sumsub.com/resources/applicants/123?fields=info", req.url)
+    assert-eq("application/json", get(req.headers, "Content-Type"), "JSON content type even without a body")
+    assert-eq("bbeda1a148beccdb42621ca549cd2dfe4ad4b6f1c665ec83f6f5533a3e9c9ccc", get(req.headers, "X-App-Access-Sig"))
+    assert-eq("", req.body)
+}
+
+test-build-request-auth-headers-win
+meta ["test"] fn () {
+    req ::api/build-request("POST", "/x", "{}", "text/plain", {X-App-Access-Sig: "forged", X-Extra: "1"}, {app-token: APP_TOKEN, secret-key: SECRET}, 1)
+    assert-eq("text/plain", get(req.headers, "Content-Type"))
+    assert-eq("1", get(req.headers, "X-Extra"))
+    assert-eq(::api/sign(SECRET, 1, "POST", "/x", "{}"), get(req.headers, "X-App-Access-Sig"), "extra headers can't replace the signature")
+}
+
+// ============================================================================
+// Bodies, paths, queries
+// ============================================================================
+
+test-compact-is-recursive
+meta ["test"] fn () {
+    out ::api/compact({a: 1, b: null, c: {d: null, e: "x"}, f: [{g: null, h: 2}], applicant: {}})
+    assert-eq({a: 1, c: {e: "x"}, f: [{h: 2}], applicant: {}}, out)
+}
+
+test-encode-body
+meta ["test"] fn () {
+    assert-eq("", ::api/encode-body(null))
+    assert-eq("", ::api/encode-body(""))
+    assert-eq("[\"vip\",\"pep\"]", ::api/encode-body(["vip", "pep"]))
+    raw ::hot::hex/decode("ff00")
+    assert(is-bytes(::api/encode-body(raw)), "Bytes pass through")
+}
+
+test-seg-and-query
+meta ["test"] fn () {
+    assert-eq("ada%40example.com", ::api/seg("ada@example.com"))
+    assert-eq("a%2Fb", ::api/seg("a/b"))
+    assert-eq("?levelName=basic-kyc-level", ::api/query({levelName: "basic-kyc-level", lang: null}))
+    assert-eq("", ::api/query({lang: null}))
+}
+
+test-header-case-insensitive
+meta ["test"] fn () {
+    assert-eq("img-1", ::api/header({"x-image-id": "img-1"}, "X-Image-Id"))
+    assert-eq("img-1", ::api/header({"X-Image-Id": "img-1"}, "x-image-id"))
+    assert(is-null(::api/header({}, "x-image-id")))
+    assert(is-null(::api/header(null, "x-image-id")))
+}
+
+// ============================================================================
+// Resolver (opts first, then ctx, then defaults; never writes ctx)
+// ============================================================================
+
+test-resolve-missing-credentials
+meta ["test"] fn () {
+    assert(is-err(::api/resolve({})), "unset credentials err instead of sending an unsigned request")
+    assert(is-err(::api/resolve({app-token: APP_TOKEN})), "an opts app-token without its secret key errs")
+}
+
+test-resolve-blank-credential-is-an-err-naming-the-key
+meta ["test"] fn () {
+    ::hot::ctx/set({"sumsub.app.token": "ctx-tok", "sumsub.secret.key": "ctx-secret"})
+    blank ::api/resolve({app-token: "  ", secret-key: "tenant-secret"})
+    assert(is-err(blank), "a blank token never falls back to context")
+    assert(contains(err-value(blank), "app-token"), "names the key")
+    no-secret ::api/resolve({app-token: "tenant-tok", secret-key: null})
+    assert(is-err(no-secret), "a null secret never falls back to context")
+    assert(contains(err-value(no-secret), "secret-key"), "names the key")
+    assert(is-err(::api/resolve({secret-key: ""})), "empty secret key")
+    only-secret ::api/resolve({secret-key: "tenant-secret"})
+    assert(is-err(only-secret), "an opts secret key is not paired with a context token")
+    assert(contains(err-value(only-secret), "app-token"))
+    ::hot::ctx/set({"sumsub.app.token": null, "sumsub.secret.key": null})
+}
+
+test-resolve-per-call-url-needs-per-call-credentials
+meta ["test"] fn () {
+    ::hot::ctx/set({"sumsub.app.token": "ctx-tok", "sumsub.secret.key": "ctx-secret"})
+    alone ::api/resolve({base-url: "https://proxy.example"})
+    assert(is-err(alone), "context credentials never sign for a per-call URL")
+    assert(contains(err-value(alone), "base-url"), "names base-url")
+    assert(contains(err-value(alone), "app-token"), "names the credential")
+    assert-eq("https://api.sumsub.com", ::api/resolve({}).base-url)
+    ::hot::ctx/set({"sumsub.app.token": null, "sumsub.secret.key": null})
+}
+
+test-resolve-marks-and-returns-credentials-unchanged
+meta ["test"] fn () {
+    r ::api/resolve({app-token: "sbx:marked-token", secret-key: "marked-secret-key"})
+    assert-eq("sbx:marked-token", r.app-token)
+    assert-eq("marked-secret-key", r.secret-key)
+}
+
+test-resolve-opts-only
+meta ["test"] fn () {
+    r ::api/resolve({app-token: "tenant-tok", secret-key: "tenant-secret", level-name: "kyc"})
+    assert-eq("tenant-tok", r.app-token)
+    assert-eq("tenant-secret", r.secret-key)
+    assert-eq("https://api.sumsub.com", r.base-url)
+    assert-eq("kyc", r.level-name)
+}
+
+test-resolve-opts-override-ctx-without-writing-it
+meta ["test"] fn () {
+    ::hot::ctx/set({"sumsub.app.token": "ctx-tok", "sumsub.secret.key": "ctx-secret", "sumsub.base.url": "https://ctx.example"})
+    from-ctx ::api/resolve({})
+    assert-eq("ctx-tok", from-ctx.app-token, "ctx is used when opts is empty")
+    assert-eq("ctx-secret", from-ctx.secret-key)
+    assert-eq("https://ctx.example", from-ctx.base-url)
+    from-opts ::api/resolve({app-token: "tenant-tok", secret-key: "tenant-secret", base-url: "https://opts.example"})
+    assert-eq("tenant-tok", from-opts.app-token, "opts credentials win")
+    assert-eq("tenant-secret", from-opts.secret-key)
+    assert-eq("https://opts.example", from-opts.base-url)
+    assert(is-err(::api/resolve({app-token: "tenant-tok"})), "ctx secret is not mixed with an opts token")
+    assert-eq("ctx-tok", ::hot::ctx/get("sumsub.app.token"), "resolve never writes ctx")
+    assert-eq("ctx-secret", ::hot::ctx/get("sumsub.secret.key"))
+    ::hot::ctx/set({"sumsub.app.token": null, "sumsub.secret.key": null, "sumsub.base.url": null})
+}
+
+test-build-request-base-url
+meta ["test"] fn () {
+    req ::api/build-request("GET", "/resources/x", "", null, {}, {app-token: "t", secret-key: "s", base-url: "https://proxy.example"}, 1)
+    assert-eq("https://proxy.example/resources/x", req.url)
+}
+
+// ============================================================================
+// Errors
+// ============================================================================
+
+test-http-error-lifts-sumsub-fields
+meta ["test"] fn () {
+    response ::hot::http/HttpResponse({
+        status: 401,
+        headers: {},
+        body: {description: "Request signature mismatch", code: 401, correlationId: "req-f677f", errorCode: 4003, errorName: "app-token-signature mismatch"}
+    })
+    e HttpError(response)
+    assert-eq(401, e.status)
+    assert-eq(4003, e.error-code)
+    assert-eq("app-token-signature mismatch", e.error-name)
+    assert-eq("req-f677f", e.correlation-id)
+    assert-eq("Request signature mismatch", e.description)
+    assert(contains(e.message, "HTTP 401"))
+    assert(contains(e.message, "errorCode 4003"))
+    assert(contains(e.message, "req-f677f"))
+    assert(::api/is-error-code(e, 4003))
+    assert(not(::api/is-error-code(e, 4004)))
+}
+
+test-http-error-message-has-no-description
+meta ["test"] fn () {
+    // Sumsub descriptions can echo submitted data; the message must not.
+    response ::hot::http/HttpResponse({
+        status: 400,
+        headers: {"retry-after": "7"},
+        body: {description: "Invalid dob 1815-12-10 for Ada Lovelace", code: 400}
+    })
+    e HttpError(response)
+    assert(not(contains(e.message, "Lovelace")), "no PII in the message")
+    assert(not(contains(e.message, "1815")), "no PII in the message")
+    assert-eq(7, e.retry-after)
+    assert(is-null(e.error-code))
+}
+
+test-http-error-text-body
+meta ["test"] fn () {
+    e HttpError(::hot::http/HttpResponse({status: 502, headers: {}, body: "Bad Gateway"}))
+    assert-eq(502, e.status)
+    assert-eq("sumsub: request failed with HTTP 502", e.message)
+    assert(is-null(e.description))
+}
+
+test-int-or-null-never-errs
+meta ["test"] fn () {
+    assert-eq(12, ::api/int-or-null("12"))
+    assert-eq(12, ::api/int-or-null(12))
+    assert(is-null(::api/int-or-null("Wed, 21 Oct 2015 07:28:00 GMT")))
+    assert(is-null(::api/int-or-null(null)))
+}
+
+test-unwrap
+meta ["test"] fn () {
+    assert-eq({ok: 1}, ::api/unwrap(::hot::http/HttpResponse({status: 200, headers: {}, body: {ok: 1}})))
+    assert(is-null(::api/unwrap(::hot::http/HttpResponse({status: 200, headers: {}, body: ""}))))
+    out ::api/unwrap(::hot::http/HttpResponse({status: 409, headers: {}, body: {description: "dup", code: 409, errorCode: 1000}}))
+    assert(is-err(out))
+    e if-err(out, (x) { x })
+    assert-eq(1000, e.error-code)
+}
+
+// ============================================================================
+// Offset pagination
+// ============================================================================
+
+test-page-envelope
+meta ["test"] fn () {
+    wrapped {list: {items: [1, 2], totalItems: 5, pageInfo: {limit: 2, offset: 0}}}
+    assert-eq([1, 2], ::api/page-items(wrapped))
+    assert-eq([3], ::api/page-items({items: [3], totalItems: 3}))
+    assert-eq([], ::api/page-items({}))
+    assert-eq([], ::api/page-items(null))
+}
+
+test-next-offset
+meta ["test"] fn () {
+    assert-eq(2, ::api/next-offset({list: {items: [1, 2], totalItems: 5}}, 0))
+    assert-eq(4, ::api/next-offset({list: {items: [3, 4], totalItems: 5}}, 2))
+    assert(is-null(::api/next-offset({list: {items: [5], totalItems: 5}}, 4)), "last page")
+    assert(is-null(::api/next-offset({list: {items: [], totalItems: 5}}, 6)), "empty page stops")
+    assert-eq(2, ::api/next-offset({items: [1, 2]}, 0), "no total: keep going while pages are non-empty")
+}
+
+PAGES [[1, 2], [3, 4], [5]]
+
+fake-fetch fn (offset: Int, size: Int): Map {
+    index div(offset, 2)
+    {list: {items: if(lt(index, length(PAGES)), PAGES[index], []), totalItems: 5}}
+}
+
+test-collect-offset
+meta ["test"] fn () {
+    assert-eq([1, 2, 3, 4, 5], ::api/collect-offset(fake-fetch, 0, 2, 100, []))
+    assert-eq([1, 2, 3], ::api/collect-offset(fake-fetch, 0, 2, 3, []), "limit caps the result")
+}

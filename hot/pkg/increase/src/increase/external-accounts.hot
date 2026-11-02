@@ -1,0 +1,93 @@
+::increase::external-accounts ns
+meta {
+    doc: """
+    External Accounts: saved counterparty bank accounts (routing and
+    account number) that ACH, RTP and FedNow transfers can send to by
+    `external_account_id`. Increase has no delete; archive one with
+    `update-external-account(id, {status: "archived"})`.
+
+    The create body holds a full account and routing number: never log it.
+    """
+}
+
+::api ::increase::api
+seg ::increase::api/seg
+
+create-external-account
+meta {
+    doc: """
+    POST /external_accounts: save a counterparty account. `params` needs
+    `account_number`, `routing_number` and `description`; optional
+    `account_holder` (`"business"`, `"individual"`, `"unknown"`) and
+    `funding` (`"checking"`, `"savings"`, `"general_ledger"`, `"other"`).
+
+    **Example**
+
+    ```hot
+    ::increase::external-accounts/create-external-account({
+      routing_number: "101050001",
+      account_number: "987654321",
+      description: "Landlord",
+      account_holder: "business"
+    }, {idempotency-key: "vendor-17-bank"})
+    ```
+    """
+}
+fn
+(params: Map): Map {
+  create-external-account(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/create("/external_accounts", params, ["account_number", "routing_number", "description"], opts, "create-external-account")
+}
+
+get-external-account
+meta {
+    doc: """GET /external_accounts/{external_account_id}: retrieve an External Account."""
+}
+fn
+(external-account-id: Str): Map {
+  get-external-account(external-account-id, {})
+},
+(external-account-id: Str, opts: Map): Map {
+  ::api/call("GET", `/external_accounts/${seg(external-account-id)}`, {}, opts)
+}
+
+list-external-accounts
+meta {
+    doc: """GET /external_accounts: one page of External Accounts. Filters: `"status.in"` (`active`, `archived`), `routing_number`, `idempotency_key`, `limit`, `cursor`."""
+}
+fn
+(): Map {
+  list-external-accounts({})
+},
+(params: Map): Map {
+  list-external-accounts(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/list-page("/external_accounts", params, opts)
+}
+
+update-external-account
+meta {
+    doc: """PATCH /external_accounts/{external_account_id}: change `description`, `account_holder`, `funding`, or `status` (`"archived"` retires it; Increase has no delete)."""
+}
+fn
+(external-account-id: Str, params: Map): Map {
+  update-external-account(external-account-id, params, {})
+},
+(external-account-id: Str, params: Map, opts: Map): Map {
+  ::api/call("PATCH", `/external_accounts/${seg(external-account-id)}`, params, opts)
+}
+
+archive-external-account
+meta {
+    doc: """Archive an External Account (`PATCH {status: "archived"}`), the closest thing Increase has to a delete."""
+}
+fn
+(external-account-id: Str): Map {
+  archive-external-account(external-account-id, {})
+},
+(external-account-id: Str, opts: Map): Map {
+  update-external-account(external-account-id, {status: "archived"}, opts)
+}

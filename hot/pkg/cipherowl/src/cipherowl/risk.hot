@@ -1,0 +1,266 @@
+::cipherowl::risk ns
+meta {
+    doc: """
+    Risk reasons (SRR API): a 0-100 risk score with a band and its
+    breakdown, the matched risk categories with direct/indirect
+    exposure, and the full evidence behind a verdict. Plus chain
+    capabilities: which networks support screening, reporting and
+    research.
+
+    Options: `config` and `hops` (0 to 8) as for screening;
+    `riskProfile` for `risk-score` only.
+    """
+}
+
+::api ::cipherowl::api
+
+seg ::cipherowl::api/seg
+query ::cipherowl::api/query
+
+reason-path
+meta {
+    doc: """`/api/reason/v2/chains/{chain}/addresses/{address}/{kind}` plus the query, with chain, address and hops validated. Exposed for testing."""
+}
+fn (chain: Str, address: Str, kind: Str, options: Map): Str {
+  c ::api/validate-chain(chain)
+  a if(is-err(c), c, ::api/validate-address(c, address))
+  hops if(is-err(a), a, ::api/validate-hops(get(options, "hops")))
+  config get(options, "config")
+  cond {
+    is-err(hops) => { hops }
+    => {
+      q query({
+        config: if(is-empty(or(config, "")), null, config),
+        riskProfile: if(eq(kind, "risk-score"), get(options, "riskProfile"), null),
+        hops: hops
+      })
+      `/api/reason/v2/chains/${seg(c)}/addresses/${seg(a)}/${kind}${q}`
+    }
+  }
+}
+
+risk-score
+meta {
+    doc: """
+    A deterministic 0-100 risk score (normalize it with `parse-score`,
+    which also turns "Severe Risk" into "severe"): `{chain,
+    requested-chain, address, config,
+    riskProfile, riskScore, riskBand ("Low Risk" | "Medium Risk" |
+    "High Risk" | "Severe Risk"), breakdown: [{category, direction
+    ("DIRECT" | "SEND" | "RECEIVE"), hops, usdValue, riskContribution}],
+    timestamp, version}`.
+
+    **Example**
+
+    ```hot
+    score ::cipherowl::risk/risk-score("evm", "0x93df2c9c8786242b8fdca3f96b3914b8b4a9f704", {config: "co-sandbox"})
+    score.riskBand
+    ```
+    """
+}
+fn
+(chain: Str, address: Str): Map {
+  risk-score(chain, address, {}, {})
+},
+(chain: Str, address: Str, options: Map): Map {
+  risk-score(chain, address, options, {})
+},
+(chain: Str, address: Str, options: Map, opts: Map): Map {
+  path reason-path(chain, address, "risk-score", options)
+  if(is-err(path), path, ::api/with-requested-chain(::api/request("GET", path, "", opts), chain))
+}
+
+risk-breakdown
+meta {
+    doc: """The matched risk categories: `{chain, address, config, risks: [{type ("DIRECT" | "INDIRECT"), category, direction, percentage, hops, totalUsdValue}], version}`."""
+}
+fn
+(chain: Str, address: Str): Map {
+  risk-breakdown(chain, address, {}, {})
+},
+(chain: Str, address: Str, options: Map): Map {
+  risk-breakdown(chain, address, options, {})
+},
+(chain: Str, address: Str, options: Map, opts: Map): Map {
+  path reason-path(chain, address, "risk-breakdown", options)
+  if(is-err(path), path, ::api/with-requested-chain(::api/request("GET", path, "", opts), chain))
+}
+
+risk-detail
+meta {
+    doc: """
+    The evidence (normalize it with `parse-detail`): `{chain,
+    requested-chain, address, config, foundRisk, reasons:
+    [{category, direction, hops, totalUsdValue, totalPercentage,
+    firstExposureTimestamp, lastExposureTimestamp, paths, label,
+    standardLabel, ...}], version}`. `totalUsdValue` can be the string
+    `"Infinity"` for a directly flagged address; `paths` lists the
+    counterparty addresses on each exposure path.
+    """
+}
+fn
+(chain: Str, address: Str): Map {
+  risk-detail(chain, address, {}, {})
+},
+(chain: Str, address: Str, options: Map): Map {
+  risk-detail(chain, address, options, {})
+},
+(chain: Str, address: Str, options: Map, opts: Map): Map {
+  path reason-path(chain, address, "detail", options)
+  if(is-err(path), path, ::api/with-requested-chain(::api/request("GET", path, "", opts), chain))
+}
+
+chain-capabilities
+meta {
+    doc: """`{capabilities: {<network>: {chainClass, screening, reporting, research}}}`. `chainClass` is the chain to pass as `{chain}` elsewhere (e.g. `ethereum` → `evm`)."""
+}
+fn
+(): Map {
+  chain-capabilities({})
+},
+(opts: Map): Map {
+  ::api/request("GET", "/api/chain-capabilities/v1", "", opts)
+}
+
+networks-for-chain
+meta {
+    doc: """The network names in a `chain-capabilities` result whose `chainClass` is `chain`. Pure."""
+}
+fn (capabilities: Any, chain: Str): Vec<Str> {
+  caps or(get(or(capabilities, {}), "capabilities"), {})
+  sort(filter(keys(caps), (k) { eq(get(get(caps, k), "chainClass"), chain) }))
+}
+
+chain-class-of
+meta {
+    doc: """The chain class for `chain` from a `chain-capabilities` result: `chain` itself when it is already a class in `::cipherowl/CHAINS`, the network's `chainClass` when listed, otherwise `chain` unchanged (CipherOwl's 400 then names the supported set). Pure. Exposed for testing."""
+}
+fn (chain: Str, capabilities: Any): Str {
+  c lowercase(trim(chain))
+  caps or(get(or(capabilities, {}), "capabilities"), {})
+  listed get(or(get(caps, c), {}), "chainClass")
+  cond {
+    in(c, ::cipherowl/CHAINS) => { c }
+    and(is-str(listed), not(is-empty(or(listed, "")))) => { listed }
+    => { c }
+  }
+}
+
+chain-class
+meta {
+    doc: """
+    The chain class to use for `chain` on the Report API, which (unlike
+    screening and risk reasons) rejects a specific chain such as `base`
+    and wants its class (`evm`). A class passes through without a call;
+    anything else costs one `chain-capabilities` request.
+    """
+}
+fn
+(chain: Str): Str {
+  chain-class(chain, {})
+},
+(chain: Str, opts: Map): Str {
+  c lowercase(trim(chain))
+  cond {
+    in(c, ::cipherowl/CHAINS) => { c }
+    => {
+      caps chain-capabilities(opts)
+      if(is-err(caps), caps, chain-class-of(c, caps))
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Parsing (pure)
+// ---------------------------------------------------------------------------
+
+direction-of
+meta {
+    doc: """A direction in lowercase: `send`, `receive`, `direct`, or `unspecified` for anything else. Exposed for testing."""
+}
+fn (value: Any): Str {
+  word if(is-str(value), lowercase(trim(value)), "")
+  if(in(word, ["send", "receive", "direct"]), word, "unspecified")
+}
+
+epoch-seconds-or-null
+meta {
+    doc: """Unix seconds from CipherOwl's exposure timestamps, which arrive as strings (`"1652499489"`); null when absent or not numeric. Exposed for testing."""
+}
+fn (value: Any): Int? {
+  n ::api/number-or-null(value)
+  if(is-int(n), n, null)
+}
+
+parse-score
+meta {
+    doc: """
+    Normalize a `risk-score` result: `{chain, requested-chain, address,
+    config, risk-profile, score (0-100), band ("low" | "medium" | "high"
+    | "severe", or null when unrecognized), band-label (CipherOwl's
+    spelling), breakdown, computed-at}`. `breakdown` items are
+    `{category, direction, hops, usd-value, contribution}`, largest
+    contribution first. `computed-at` is when the score was computed,
+    not when the exposure happened.
+    """
+}
+fn (body: Any): Map {
+  b if(is-map(body), body, {})
+  items map(filter(or(get(b, "breakdown"), []), is-map), (i) {
+    {
+      category: Str(or(get(i, "category"), "unspecified")),
+      direction: direction-of(get(i, "direction")),
+      hops: or(::api/number-or-null(get(i, "hops")), 0),
+      usd-value: ::api/number-or-null(get(i, "usdValue")),
+      contribution: or(::api/number-or-null(get(i, "riskContribution")), 0)
+    }
+  })
+  {
+    chain: get(b, "chain"),
+    requested-chain: get(b, "requested-chain"),
+    address: get(b, "address"),
+    config: get(b, "config"),
+    risk-profile: get(b, "riskProfile"),
+    score: ::api/number-or-null(get(b, "riskScore")),
+    band: ::api/normalize-band(get(b, "riskBand")),
+    band-label: get(b, "riskBand"),
+    breakdown: reverse(sort-by(items, (i) { i.contribution })),
+    computed-at: get(b, "timestamp")
+  }
+}
+
+parse-reason
+meta {
+    doc: """Normalize one detail reason: `{category, direction, hops, total-usd-value (null for "Infinity"), total-percentage, first-exposure-at, last-exposure-at (Unix seconds), paths (each a Vec of addresses, risk source first), partial (paths is a sample), label, standard-label}`. Exposed for testing."""
+}
+fn (raw: Map): Map {
+  {
+    category: Str(or(get(raw, "category"), "unspecified")),
+    direction: direction-of(get(raw, "direction")),
+    hops: ::api/number-or-null(get(raw, "hops")),
+    total-usd-value: ::api/number-or-null(get(raw, "totalUsdValue")),
+    total-percentage: ::api/number-or-null(get(raw, "totalPercentage")),
+    first-exposure-at: epoch-seconds-or-null(get(raw, "firstExposureTimestamp")),
+    last-exposure-at: epoch-seconds-or-null(get(raw, "lastExposureTimestamp")),
+    paths: map(filter(or(get(raw, "paths"), []), is-map), (p) { filter(or(get(p, "addresses"), []), is-str) }),
+    partial: eq(get(raw, "isPartialSet"), true),
+    label: get(raw, "label"),
+    standard-label: get(raw, "standardLabel")
+  }
+}
+
+parse-detail
+meta {
+    doc: """Normalize a `risk-detail` result: `{chain, requested-chain, address, config, found-risk, reasons}` with each reason from `parse-reason`. The paths are counterparty addresses: wallet-risk evidence to keep with the case, not in logs."""
+}
+fn (body: Any): Map {
+  b if(is-map(body), body, {})
+  {
+    chain: get(b, "chain"),
+    requested-chain: get(b, "requested-chain"),
+    address: get(b, "address"),
+    config: get(b, "config"),
+    found-risk: eq(get(b, "foundRisk"), true),
+    reasons: map(filter(or(get(b, "reasons"), []), is-map), (r) { parse-reason(r) })
+  }
+}

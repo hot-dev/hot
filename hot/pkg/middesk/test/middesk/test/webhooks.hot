@@ -1,0 +1,86 @@
+::middesk::test::webhooks ns
+meta ["test"]
+
+::webhooks ::middesk::webhooks
+
+// Vector generated independently with Python:
+//   hmac.new(b"mdsk_whsec_test", BODY, hashlib.sha256).hexdigest()
+BODY """{"object":"event","id":"evt_m1","type":"business.updated","data":{"object":{"id":"biz_1","status":"in_review"}}}"""
+SECRET "mdsk_whsec_test"
+SIG "b0b37d5612f332e495e4453aa871c1f28b9cebac7476f0433c161df0ccc66346"
+
+request-with fn (sig: Str, body: Str): Map {
+  {headers: {x-middesk-signature-256: sig}, body-raw: body}
+}
+
+test-python-vector
+meta ["test"] fn () {
+    assert(::webhooks/verify-signature(SIG, BODY, SECRET), "independent vector verifies")
+    assert(::webhooks/verify-request(request-with(SIG, BODY), SECRET), "through the request")
+}
+
+test-uppercase-hex
+meta ["test"] fn () {
+    assert(::webhooks/verify-request(request-with(uppercase(SIG), BODY), SECRET), "hex case is ignored")
+}
+
+test-bytes-body
+meta ["test"] fn () {
+    req {headers: {x-middesk-signature-256: SIG}, body-raw: "lossy", body-bytes: Bytes(BODY)}
+    assert(::webhooks/verify-request(req, SECRET), "body-bytes are preferred")
+}
+
+test-tampered-body
+meta ["test"] fn () {
+    assert(not(::webhooks/verify-request(request-with(SIG, replace(BODY, "in_review", "approved")), SECRET)), "tampered body fails")
+}
+
+test-wrong-secret
+meta ["test"] fn () {
+    assert(not(::webhooks/verify-request(request-with(SIG, BODY), "other")), "wrong secret fails")
+}
+
+test-missing-signature
+meta ["test"] fn () {
+    assert(not(::webhooks/verify-request({headers: {}, body-raw: BODY}, SECRET)), "missing header fails")
+    assert(not(::webhooks/verify-request(request-with("", BODY), SECRET)), "empty header fails")
+    assert(not(::webhooks/verify-request({headers: {x-middesk-signature: SIG}, body-raw: BODY}, SECRET)), "the legacy SHA-1 header name is not accepted")
+}
+
+test-empty-secret-fails-closed
+meta ["test"] fn () {
+    assert(not(::webhooks/verify-request(request-with(SIG, BODY), "")), "an empty secret never verifies")
+}
+
+test-non-ascii-body-signs-its-utf8-bytes
+meta ["test"] fn () {
+    // hmac.new(SECRET, body.encode(), hashlib.sha256).hexdigest()
+    body """{"name":"José 日本"}"""
+    assert(::webhooks/verify-signature("5ee3d4a621ede3053cda09d55862b2ceb593c38ee7a0b699a8121a124fab6fbd", body, SECRET), "Str body")
+    assert(::webhooks/verify-signature("5ee3d4a621ede3053cda09d55862b2ceb593c38ee7a0b699a8121a124fab6fbd", Bytes(body), SECRET), "the same bytes")
+}
+
+test-mark-webhook-secret-returns-params-unchanged
+meta ["test"] fn () {
+    params {secret: "a-webhook-secret-value", include: "x"}
+    assert-eq(params, ::webhooks/mark-webhook-secret(params))
+    assert-eq({include: "x"}, ::webhooks/mark-webhook-secret({include: "x"}), "no secret")
+}
+
+test-construct-event
+meta ["test"] fn () {
+    e ::webhooks/construct-event(request-with(SIG, BODY), SECRET)
+    assert-eq("evt_m1", e.id)
+    assert-eq("business.updated", e.type)
+    assert-eq("biz_1", e.object-id)
+    assert-eq("in_review", e.object.status)
+    assert(is-err(::webhooks/construct-event(request-with("00", BODY), SECRET)), "bad signature is an Err")
+}
+
+test-parse-event-shapes
+meta ["test"] fn () {
+    e ::webhooks/parse-event({object: "event", id: "evt_2", type: "order.updated", account_id: "acct_1", created_at: "t", data: {object: {object: "order", id: "ord_1"}}})
+    assert-eq("order", e.object-type)
+    assert-eq("acct_1", e.account-id)
+    assert(is-null(::webhooks/parse-event("not a map").id), "garbage parses to nulls")
+}

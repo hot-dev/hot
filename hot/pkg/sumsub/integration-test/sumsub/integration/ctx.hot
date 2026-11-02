@@ -1,0 +1,26 @@
+::sumsub::integration::ctx ns
+
+::env ::hot::env
+
+// Credentials for the sumsub integration suite, from the environment.
+// Unset variables are skipped entirely, so absent credentials behave
+// exactly as if never configured. Use a sandbox App Token (sbx:...).
+::hot::ctx/set(filter-vals({
+    "sumsub.app.token": ::env/get("SUMSUB_APP_TOKEN", ""),
+    "sumsub.secret.key": ::env/get("SUMSUB_SECRET_KEY", ""),
+    "sumsub.level.name": ::env/get("SUMSUB_LEVEL_NAME", ""),
+}, (v) { not(is-empty(v)) }))
+
+configured
+meta {doc: """True when both App Token variables are set."""}
+fn (): Bool {
+    has (key) { is-some(::hot::ctx/get(key)) }
+    and(has("sumsub.app.token"), has("sumsub.secret.key"))
+}
+
+skip
+meta {doc: """Record a skip for a test that needs credentials."""}
+fn (): Bool {
+    println("SUMSUB_APP_TOKEN / SUMSUB_SECRET_KEY not set - skipping")
+    assert(true, "skipped: no Sumsub credentials")
+}

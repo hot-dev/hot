@@ -1,0 +1,81 @@
+::modern-treasury::test::webhooks ns
+meta ["test"]
+
+::webhooks ::modern-treasury::webhooks
+
+// Computed independently with Python: hmac.new(KEY, BODY, sha256).hexdigest()
+KEY "mt_webhook_key_for_tests"
+BODY """{"event":"completed","data":{"id":"8c0f4c1e-2b6f-4d7e-9b1a-3f2e8d4c5b6a","object":"payment_order","amount":10000,"status":"completed"}}"""
+SIGNATURE "3553bfb939ae2a6a2dcf4cd5a046919061f46f7521da7fdb6652ae0e63805070"
+
+request fn (signature: Str, body: Str): Map {
+    {
+        headers: {
+            x-signature: signature,
+            x-topic: "payment_order",
+            x-webhook-id: "wh_1",
+            x-event-id: "ev_1",
+            x-event-time: "2026-11-01T12:00:00.000000000Z",
+            x-live-mode: "false"
+        },
+        body-raw: body
+    }
+}
+
+test-sign-matches-python-vector
+meta ["test"] fn () {
+    assert-eq(SIGNATURE, ::webhooks/sign(KEY, BODY))
+}
+
+test-verify-signature
+meta ["test"] fn () {
+    assert(::webhooks/verify-signature(BODY, SIGNATURE, KEY))
+    assert(::webhooks/verify-signature(BODY, uppercase(SIGNATURE), KEY), "hex case doesn't matter")
+    assert(::webhooks/verify-signature(Bytes(BODY), SIGNATURE, KEY), "a Bytes body verifies")
+    assert(not(::webhooks/verify-signature(`${BODY} `, SIGNATURE, KEY)), "tampered body")
+    assert(not(::webhooks/verify-signature(BODY, SIGNATURE, "other_key")), "wrong key")
+    assert(not(::webhooks/verify-signature(BODY, "", KEY)), "missing signature")
+    assert(not(::webhooks/verify-signature(BODY, "not-hex", KEY)), "malformed signature")
+    assert(not(::webhooks/verify-signature(BODY, SIGNATURE, "")), "an empty key never verifies")
+}
+
+test-verify-request
+meta ["test"] fn () {
+    assert(::webhooks/verify-request(request(SIGNATURE, BODY), KEY))
+    assert(::webhooks/verify-request({...request(SIGNATURE, BODY), headers: {X-Signature: SIGNATURE}}, KEY), "header names ignore case")
+    assert(not(::webhooks/verify-request({body-raw: BODY}, KEY)), "no X-Signature")
+    assert(not(::webhooks/verify-request(request(SIGNATURE, BODY), "")), "empty key")
+    assert(not(::webhooks/verify-request({...request(SIGNATURE, BODY), body-raw: """{"event":"completed"}"""}, KEY)), "a different body")
+}
+
+// Computed with Python over the UTF-8 bytes, and over bytes that aren't UTF-8.
+MULTIBYTE_BODY """{"note":"Café €5 日本語"}"""
+MULTIBYTE_SIGNATURE "faaa6016df24128c15a8e2385f917de43661a9cee825a0f34157f60478d9a3e2"
+BINARY_SIGNATURE "a44af091a97e71bc78fb69b5742f3dbf4b68d7996b5afefb7fe0e68818cffbbe"
+
+test-verify-covers-raw-bytes
+meta ["test"] fn () {
+    assert(::webhooks/verify-request(request(MULTIBYTE_SIGNATURE, MULTIBYTE_BODY), KEY), "a multibyte Str body is signed over its UTF-8 bytes")
+    assert(::webhooks/verify-request({...request(MULTIBYTE_SIGNATURE, "lossy"), body-bytes: Bytes(MULTIBYTE_BODY)}, KEY), "body-bytes wins over body-raw")
+    assert(::webhooks/verify-request({...request(BINARY_SIGNATURE, "lossy"), body-bytes: Bytes([123, 255, 254, 0, 125])}, KEY), "a body that isn't UTF-8 verifies")
+}
+
+test-parse-event
+meta ["test"] fn () {
+    e ::webhooks/parse-event(request(SIGNATURE, BODY))
+    assert-eq("payment_order", e.topic)
+    assert-eq("completed", e.event)
+    assert-eq("8c0f4c1e-2b6f-4d7e-9b1a-3f2e8d4c5b6a", e.id)
+    assert-eq("wh_1", e.webhook_id)
+    assert-eq("ev_1", e.event_id)
+    assert-eq(false, e.live_mode)
+    assert-eq(10000, e.data.amount)
+    assert(is-err(::webhooks/parse-event(request(SIGNATURE, "nope"))), "a non-JSON body errs")
+}
+
+test-construct-event
+meta ["test"] fn () {
+    e ::webhooks/construct-event(request(SIGNATURE, BODY), KEY)
+    assert-eq("completed", e.event)
+    assert(is-err(::webhooks/construct-event(request("00", BODY), KEY)), "an unverified request is an Err")
+}

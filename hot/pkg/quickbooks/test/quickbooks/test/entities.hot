@@ -1,0 +1,224 @@
+::quickbooks::test::entities ns
+meta ["test"]
+
+::qb ::quickbooks::entities
+::q ::quickbooks::query
+::b ::quickbooks::batch
+::cdc ::quickbooks::cdc
+::co ::quickbooks::company
+
+// ---------------------------------------------------------------------------
+// Entities
+// ---------------------------------------------------------------------------
+
+test-canonical-names
+meta ["test"] fn () {
+    assert-eq("Invoice", ::qb/canonical-name("invoice"))
+    assert-eq("BillPayment", ::qb/canonical-name(" billpayment "))
+    assert-eq("JournalEntry", ::qb/canonical-name("JournalEntry"))
+    assert(is-err(::qb/canonical-name("Widget")), "unknown entities err")
+    assert-eq("journalentry", ::qb/entity-info("journalEntry").path)
+}
+
+test-required-entities-present
+meta ["test"] fn () {
+    wanted ["Customer", "Vendor", "Item", "Account", "Invoice", "Payment", "Bill", "BillPayment", "Purchase",
+        "JournalEntry", "Estimate", "SalesReceipt", "CreditMemo", "Deposit", "Transfer", "TaxCode", "Class",
+        "Department", "Employee"]
+    for-each(wanted, (name) { assert(not(is-err(::qb/entity-info(name))), name) })
+}
+
+test-require-op
+meta ["test"] fn () {
+    assert(not(is-err(::qb/require-op("Invoice", "send"))))
+    no-delete ::qb/require-op("Customer", "delete")
+    assert(is-err(no-delete), "name lists cannot be deleted")
+    assert(contains(err-message(no-delete), "deactivate-entity"), "and the error says what to do")
+    assert(is-err(::qb/require-op("TaxCode", "create")), "TaxCode is read only")
+    assert(is-err(::qb/require-op("Bill", "pdf")))
+}
+
+test-sparse-body
+meta ["test"] fn () {
+    body ::qb/build-sparse-body("130", "2", {DueDate: "2026-12-31", Memo: null})
+    assert-eq({DueDate: "2026-12-31", Id: "130", SyncToken: "2", sparse: true}, body, "null fields are omitted")
+    assert-eq({Id: "130", SyncToken: "2"}, ::qb/build-delete-body("130", "2"))
+}
+
+test-void-request
+meta ["test"] fn () {
+    inv ::qb/void-request("Invoice", "130", "2")
+    assert-eq({operation: "void"}, inv.params)
+    assert-eq({Id: "130", SyncToken: "2"}, inv.body)
+    pay ::qb/void-request("Payment", "9", "0")
+    assert-eq({operation: "update", include: "void"}, pay.params)
+    assert-eq(true, pay.body.sparse)
+}
+
+test-entity-from
+meta ["test"] fn () {
+    assert-eq({Id: "1"}, ::qb/entity-from("Invoice", {Invoice: {Id: "1"}, time: "t"}))
+    assert-eq({x: 1}, ::qb/entity-from("Invoice", {x: 1}))
+}
+
+test-write-validation-errs-before-network
+meta ["test"] fn () {
+    assert(is-err(::qb/sparse-update("Invoice", "130", "", {DueDate: "2026-12-31"})), "missing SyncToken errs")
+    assert(is-err(::qb/update-entity("Invoice", {Id: "130"})), "full update needs a SyncToken")
+    assert(is-err(::qb/delete-entity("Customer", "1", "0")), "name lists cannot be deleted")
+    assert(is-err(::qb/deactivate-entity("Invoice", "1", "0")), "transactions cannot be deactivated")
+    assert(is-err(::qb/get-entity("Invoice", "")), "an Id is required")
+    assert(is-err(::qb/entity-pdf("Bill", "1")), "bills have no PDF endpoint")
+}
+
+// ---------------------------------------------------------------------------
+// Query
+// ---------------------------------------------------------------------------
+
+test-literal-escaping
+meta ["test"] fn () {
+    assert-eq("'Acme'", ::q/literal("Acme"))
+    assert-eq("'O\\'Brien'", ::q/literal("O'Brien"), "quotes are backslash-escaped")
+    assert-eq("'a\\\\b'", ::q/literal("a\\b"), "backslashes are escaped first")
+    assert-eq("'x\\\\\\' or Id > \\'0'", ::q/literal("x\\' or Id > '0"), "an injection attempt stays inside the literal")
+    assert-eq("'100'", ::q/literal(100))
+    assert-eq("'12.5'", ::q/literal(12.5))
+    assert-eq("true", ::q/literal(true))
+    assert-eq("('1', '2')", ::q/literal(["1", "2"]))
+    assert(is-err(::q/literal(null)))
+    assert(is-err(::q/literal([])))
+}
+
+test-condition-and-select
+meta ["test"] fn () {
+    assert-eq("DisplayName = 'O\\'Brien'", ::q/condition("DisplayName", "=", "O'Brien"))
+    assert-eq("Id in ('1', '2')", ::q/condition("Id", "IN", ["1", "2"]))
+    assert-eq("MetaData.LastUpdatedTime > '2026-10-01'", ::q/condition("MetaData.LastUpdatedTime", ">", "2026-10-01"))
+    assert(is-err(::q/condition("Name; drop", "=", "x")), "field names are checked")
+    assert(is-err(::q/condition("Name", "or", "x")), "operators are checked")
+    assert(is-err(::q/condition("Id", "in", "1")), "in needs a Vec")
+
+    assert-eq("select * from Invoice", ::q/select-from("Invoice"))
+    assert-eq(
+        "select * from Invoice where Balance > '0' and DueDate < '2026-11-01' orderby DueDate desc",
+        ::q/select-from("Invoice", [["Balance", ">", 0], ["DueDate", "<", "2026-11-01"]], "DueDate desc")
+    )
+    assert(is-err(::q/select-from("Invoice", [["Bad Field", "=", 1]])), "a bad condition errs")
+    assert(is-err(::q/select-from("Invoice", [["Memo", "=", null]])), "a null value errs")
+    assert-eq("select * from Bill where Id in ('1') and Active = true", ::q/select-from("Bill", [["Id", "in", ["1"]], "Active = true"]), "Str clauses pass through")
+    assert(is-err(::q/select-from("Invoice", [], "DueDate; delete")), "orderby is checked")
+}
+
+test-paging
+meta ["test"] fn () {
+    assert-eq("select * from Bill STARTPOSITION 1001 MAXRESULTS 1000", ::q/with-paging("select * from Bill ", 1001, 5000))
+    assert-eq("select * from Bill STARTPOSITION 1 MAXRESULTS 1", ::q/with-paging("select * from Bill", 0, 0))
+    assert(::q/has-paging("select * from Bill maxResults 10"))
+    assert(not(::q/has-paging("select * from Bill where Memo = 'max results'")))
+    assert-eq(1001, ::q/next-start(1, 1000, 1000), "a full page continues")
+    assert(is-null(::q/next-start(1, 1000, 999)), "a short page is the last")
+    assert(is-null(::q/next-start(1001, 1000, 0)), "an empty page is the last")
+    assert(is-err(::q/query-all("select * from Bill STARTPOSITION 1")), "query-all refuses explicit paging")
+}
+
+test-entity-of-and-to-page
+meta ["test"] fn () {
+    assert-eq("Invoice", ::q/entity-of("SELECT * FROM Invoice WHERE Balance > '0'"))
+    assert(is-null(::q/entity-of("nonsense")))
+    page ::q/to-page({QueryResponse: {Invoice: [{Id: "1"}, {Id: "2"}], startPosition: 1, maxResults: 2}, time: "t"}, "Invoice")
+    assert-eq(2, length(page.items))
+    assert-eq(1, page.start-position)
+    assert-eq(2, page.max-results)
+    empty ::q/to-page({QueryResponse: {}, time: "t"}, "Invoice")
+    assert-eq([], empty.items, "no rows means an empty Vec")
+    counted ::q/to-page({QueryResponse: {totalCount: 42}}, "Invoice")
+    assert-eq(42, counted.total-count)
+    other-case ::q/to-page({QueryResponse: {Item: [{Id: "9"}]}}, "item")
+    assert-eq(1, length(other-case.items), "rows are found whatever the entity's case")
+}
+
+// ---------------------------------------------------------------------------
+// Batch
+// ---------------------------------------------------------------------------
+
+test-batch-build
+meta ["test"] fn () {
+    body ::b/build-batch([
+        ::b/create-item("customer", {DisplayName: "Acme", Notes: null}),
+        ::b/delete-item("Bill", "88", 0, "del-88"),
+        ::b/query-item("select * from Vendor")
+    ])
+    items body.BatchItemRequest
+    assert-eq(3, length(items))
+    assert-eq({bId: "1", operation: "create", Customer: {DisplayName: "Acme"}}, items[0], "names are canonical, nulls dropped, bIds numbered")
+    assert-eq({bId: "del-88", operation: "delete", Bill: {Id: "88", SyncToken: "0"}}, items[1])
+    assert-eq({bId: "3", Query: "select * from Vendor"}, items[2])
+}
+
+test-batch-limits
+meta ["test"] fn () {
+    assert(is-err(::b/build-batch([])), "empty batches err")
+    many map(range(31), (i) { ::b/query-item("select * from Item") })
+    assert(is-err(::b/build-batch(many)), "more than 30 items err")
+    assert(not(is-err(::b/build-batch(slice(many, 0, 30)))), "30 is allowed")
+    assert(is-err(::b/build-batch([::b/query-item("q", "a"), ::b/query-item("q", "a")])), "duplicate bIds err")
+    bad ::b/build-batch([::b/query-item("q"), ::b/delete-item("Customer", "1", "0")])
+    assert(is-err(bad), "an invalid item fails the batch")
+    assert(contains(err-message(bad), "Customer does not support delete"), err-message(bad))
+    assert(is-err(::b/build-batch([::b/create-item("Widget", {})])), "unknown entities err")
+}
+
+test-batch-results
+meta ["test"] fn () {
+    results ::b/parse-results({BatchItemResponse: [
+        {bId: "1", Customer: {Id: "77", DisplayName: "Acme"}},
+        {bId: "2", Fault: {Error: [{Message: "Object Not Found", Detail: "Object Not Found : Something you're trying to use has been made inactive.", code: "610", element: ""}], type: "ValidationFault"}},
+        {bId: "3", QueryResponse: {Vendor: [{Id: "5"}]}}
+    ], time: "t"})
+    assert(results[0].ok)
+    assert-eq("Customer", results[0].entity)
+    assert-eq("77", results[0].value.Id)
+    assert(not(results[1].ok))
+    assert-eq("quickbooks: batch item 2 failed: ValidationFault: Object Not Found: Object Not Found : Something you're trying to use has been made inactive.", results[1].message)
+    assert-eq("610", results[1].errors[0].code)
+    assert-eq("QueryResponse", results[2].entity)
+}
+
+// ---------------------------------------------------------------------------
+// CDC
+// ---------------------------------------------------------------------------
+
+test-cdc-params
+meta ["test"] fn () {
+    assert-eq({entities: "Invoice,Payment", changedSince: "2026-10-31T00:00:00Z"}, ::cdc/build-params(["invoice", "Payment", "Invoice"], "2026-10-31T00:00:00Z"))
+    assert-eq({entities: "Customer,Vendor", changedSince: "2026-10-31"}, ::cdc/build-params("Customer, Vendor", "2026-10-31"))
+    assert-eq("2026-10-31T00:00:00-07:00", ::cdc/build-params("Bill", "2026-10-31T00:00:00-07:00").changedSince)
+    assert(is-err(::cdc/build-params(["Widget"], "2026-10-31")), "unknown entities err")
+    assert(is-err(::cdc/build-params([], "2026-10-31")), "entities are required")
+    assert(is-err(::cdc/build-params("Bill", "yesterday")), "timestamps are checked")
+}
+
+test-cdc-parse
+meta ["test"] fn () {
+    body {
+        CDCResponse: [{QueryResponse: [
+            {Invoice: [{Id: "1", SyncToken: "3"}, {Id: "2", status: "Deleted", domain: "QBO"}], startPosition: 1, maxResults: 2},
+            {Customer: [{Id: "9"}]}
+        ]}],
+        time: "2026-11-01T10:00:00.000-07:00"
+    }
+
+    out ::cdc/parse-changes(body)
+    assert-eq([{Id: "1", SyncToken: "3"}], out.changed.Invoice)
+    assert-eq(["2"], out.deleted.Invoice)
+    assert-eq([{Id: "9"}], out.changed.Customer)
+    assert(is-null(get(out.deleted, "Customer")))
+    assert-eq("2026-11-01T10:00:00.000-07:00", out.time)
+    assert-eq({changed: {}, deleted: {}, time: null}, ::cdc/parse-changes({}))
+}
+
+test-company-needs-realm
+meta ["test"] fn () {
+    ::hot::ctx/set("quickbooks.realm.id", "")
+    assert(is-err(::co/company-info({})), "no realm errs before any network call")
+}

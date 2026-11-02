@@ -1,0 +1,127 @@
+::quickbooks::test::auth ns
+meta ["test"]
+
+::auth ::quickbooks::auth
+
+APP {client-id: "ABcd123", client-secret: "s3cr3t"}
+
+clear-ctx fn () {
+    ::hot::ctx/set({
+        "quickbooks.access.token": "",
+        "quickbooks.refresh.token": "",
+        "quickbooks.token.store": "",
+        "quickbooks.client.id": "",
+        "quickbooks.client.secret": "",
+        "quickbooks.realm.id": ""
+    })
+}
+
+test-merge-sources
+meta ["test"] fn () {
+    ctx {refresh-token: "CTX-RT", client-id: "ctx-id", client-secret: "ctx-sec"}
+    from-ctx ::auth/merge-sources({}, ctx)
+    assert-eq("CTX-RT", from-ctx.refresh-token)
+    per-call ::auth/merge-sources({refresh-token: "TENANT-RT"}, ctx)
+    assert-eq("TENANT-RT", per-call.refresh-token, "opts credentials win")
+    assert-eq("ctx-id", per-call.client-id, "the app's id still falls back to context")
+    token ::auth/merge-sources({access-token: "AT"}, ctx)
+    assert(is-null(get(token, "refresh-token")), "context credentials are ignored when opts has one")
+}
+
+test-credentials-from
+meta ["test"] fn () {
+    assert-eq({kind: "token", token: "AT"}, ::auth/credentials-from({access-token: "AT", refresh-token: "RT"}, null), "access token first")
+    r ::auth/credentials-from({refresh-token: "RT", ...APP}, null)
+    assert-eq("refresh", r.kind)
+    assert-eq("RT", r.refresh-token)
+    k ::auth/credentials-from({token-store: "qb-tokens", refresh-token: "SEED", ...APP}, "9341453")
+    assert-eq("keeper", k.kind)
+    assert-eq("9341453", k.key, "keeper entries are keyed by realm")
+    assert-eq("SEED", k.seed-refresh-token)
+    keyed ::auth/credentials-from({token-store: "qb-tokens", token-store-key: "acme", ...APP}, "9341453")
+    assert-eq("acme", keyed.key)
+    assert(is-err(::auth/credentials-from({refresh-token: "RT"}, null)), "refresh needs the app credentials")
+    assert(is-err(::auth/credentials-from({token-store: "qb-tokens", ...APP}, null)), "the keeper needs a key")
+    assert(is-err(::auth/credentials-from({access-token: "", refresh-token: " "}, null)), "blanks are not credentials")
+    none ::auth/credentials-from({}, null)
+    assert(is-err(none))
+    assert(contains(err-message(none), "quickbooks.refresh.token"), "the error names the variables")
+}
+
+test-cache-key
+meta ["test"] fn () {
+    a ::auth/cache-key({kind: "refresh", client-id: "id", refresh-token: "RT1"})
+    b ::auth/cache-key({kind: "refresh", client-id: "id", refresh-token: "RT2"})
+    assert(starts-with(a, "quickbooks.token-cache."))
+    assert(ne(a, b), "different refresh tokens cache separately")
+    assert(not(contains(a, "RT1")), "the key is hashed, never the raw token")
+    assert(is-null(::auth/cache-key({kind: "token", token: "AT"})), "explicit tokens are never cached")
+}
+
+test-token-entry-and-freshness
+meta ["test"] fn () {
+    entry ::auth/token-entry({access-token: "AT", refresh-token: "RT2", expires-in: 3600}, 1000)
+    assert-eq("AT", entry.access-token)
+    assert-eq("RT2", entry.refresh-token)
+    assert-eq(add(1000, mul(3540, 1000)), entry.expires-at, "expiry is pulled in by a minute")
+    assert(::auth/is-fresh(entry, 2000))
+    assert(not(::auth/is-fresh(entry, entry.expires-at)), "expired at the margin")
+    assert(not(::auth/is-fresh(null, 0)))
+    assert(not(::auth/is-fresh({refresh-token: "RT"}, 0)), "a seed-only entry has no access token")
+}
+
+test-keeper-refresh-token
+meta ["test"] fn () {
+    assert-eq("STORED", ::auth/keeper-refresh-token({refresh-token: "STORED"}, "SEED"), "the stored (newest) token wins")
+    assert-eq("SEED", ::auth/keeper-refresh-token(null, "SEED"))
+    assert-eq("SEED", ::auth/keeper-refresh-token({refresh-token: ""}, "SEED"))
+    assert(is-null(::auth/keeper-refresh-token(null, null)))
+}
+
+test-bearer-uses-run-cache
+meta ["test"] fn () {
+    clear-ctx()
+    creds {kind: "refresh", refresh-token: "RT1", ...APP}
+    key ::auth/cache-key(creds)
+    ::hot::ctx/set-secret(key, {access-token: "CACHED-AT", expires-at: add(::quickbooks::oauth/now-ms(), 600000), refresh-token: "RT2"})
+    auth ::auth/bearer(creds)
+    assert-eq("CACHED-AT", auth.token, "a fresh cached token is reused without a refresh")
+    assert(auth.cached)
+    explicit ::auth/bearer({kind: "token", token: "AT"})
+    assert-eq("AT", explicit.token, "explicit access tokens pass straight through")
+    assert(not(explicit.cached))
+
+    assert-eq("RT2", ::auth/current-refresh-token({refresh-token: "RT1", ...APP}), "the rotated refresh token is reported")
+    assert(is-null(::auth/current-refresh-token({access-token: "AT"})), "access tokens have no refresh token")
+    assert-eq("RT9", ::auth/current-refresh-token({refresh-token: "RT9", ...APP}), "nothing cached: the configured one")
+
+    ::auth/evict(creds, key)
+    assert(not(::auth/is-fresh(::hot::ctx/get(key), 0)), "evict expires the cached access token")
+    assert-eq("RT2", ::hot::ctx/get(key).refresh-token, "but keeps the newest refresh token")
+    clear-ctx()
+}
+
+test-access-token-from-opts
+meta ["test"] fn () {
+    clear-ctx()
+    assert-eq("AT-1", ::auth/access-token({access-token: "AT-1"}))
+    assert(is-err(::auth/access-token({})), "nothing configured errs")
+}
+
+test-mark-entry-returns-the-entry-unchanged
+meta ["test"] fn () {
+    entry {access-token: "AT-VALUE", refresh-token: "RT-VALUE", expires-at: 1000}
+    assert-eq(entry, ::auth/mark-entry(entry))
+    assert(is-null(::auth/mark-entry(null)))
+}
+
+test-resolve-credentials-blank-never-falls-back
+meta ["test"] fn () {
+    ::hot::ctx/set({"quickbooks.access.token": "CTX-AT"})
+    blank ::auth/access-token({access-token: ""})
+    latest ::auth/current-refresh-token({refresh-token: ""})
+    clear-ctx()
+    assert(is-err(blank), "a blank access token never falls back to context")
+    assert(contains(err-message(blank), "access-token"), err-message(blank))
+    assert(is-null(latest))
+}

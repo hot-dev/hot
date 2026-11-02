@@ -1,0 +1,603 @@
+::sumsub::applicants ns
+meta {
+    doc: """
+    Applicants: create, fetch by id or by your `externalUserId`, review
+    status and per-step status, level changes, ID document upload
+    (multipart, signed byte for byte), reset, request a check, profile
+    and `fixedInfo` updates, activate/deactivate, external approve or
+    reject, tags, notes, and the sandbox review simulator.
+
+    Applicant data (names, dates of birth, document images) is personal
+    data. These functions never put it in error messages, but Hot's run
+    trace records function arguments and results, so treat run logs of
+    flows that call them as containing PII.
+    """
+}
+
+::api ::sumsub::api
+::ctx ::hot::ctx
+
+seg ::sumsub::api/seg
+query ::sumsub::api/query
+
+// ---------------------------------------------------------------------------
+// Create and fetch
+// ---------------------------------------------------------------------------
+
+level-or-default
+meta {
+    ctx: {"sumsub.level.name": {required: false, secret: false}},
+    doc: """`level-name` when set, otherwise `opts.level-name`, otherwise the `sumsub.level.name` context variable; an Err when none is set."""
+}
+fn
+(level-name: Str?): Str {
+  level-or-default(level-name, {})
+},
+(level-name: Str?, opts: Map): Str {
+  chosen or(level-name, or(get(opts, "level-name"), or(::ctx/get("sumsub.level.name"), "")))
+  if(is-empty(chosen), err("sumsub: no level name: pass one, set opts.level-name, or set sumsub.level.name"), chosen)
+}
+
+create-applicant-request
+meta {
+    doc: """
+    The request spec for creating an applicant. `applicant` takes
+    Sumsub's fields as is: `externalUserId` (required), `type`
+    (`"individual"` default or `"company"`), `email`, `phone`, `lang`,
+    `sourceKey`, `metadata` (`[{key, value}]`), and `fixedInfo`
+    (`firstName`, `lastName`, `dob` as `YYYY-MM-DD`, `country` and
+    `nationality` as ISO alpha-3, `addresses`, `tin`, ...). Unset fields
+    are dropped. Exposed for testing.
+    """
+}
+fn (level-name: Str, applicant: Map): Map {
+  external-id get(applicant, "externalUserId")
+  cond {
+    or(is-null(external-id), is-empty(Str(external-id))) => { err("sumsub: create-applicant needs an externalUserId") }
+    => { {method: "POST", path: `/resources/applicants${query({levelName: level-name})}`, body: ::api/compact(untype(applicant))} }
+  }
+}
+
+create-applicant
+meta {
+    doc: """
+    Create an applicant on a verification level. Returns the applicant
+    (`id`, `externalUserId`, `review`, `requiredIdDocs`, ...). Pass null
+    as the level to use `sumsub.level.name`.
+
+    **Example**
+
+    ```hot
+    applicant ::sumsub::applicants/create-applicant("basic-kyc-level", {
+      externalUserId: "user-42",
+      email: "ada@example.com",
+      fixedInfo: {firstName: "Ada", lastName: "Lovelace", country: "GBR"}
+    })
+    ```
+    """
+}
+fn
+(level-name: Str?, applicant: Map): Map {
+  create-applicant(level-name, applicant, {})
+},
+(level-name: Str?, applicant: Map, opts: Map): Map {
+  level level-or-default(level-name, opts)
+  if(is-err(level), level, ::api/call(create-applicant-request(level, applicant), opts))
+}
+
+get-applicant
+meta {
+    doc: """Fetch an applicant by Sumsub id (`GET /resources/applicants/{id}/one`)."""
+}
+fn
+(applicant-id: Str): Map {
+  get-applicant(applicant-id, {})
+},
+(applicant-id: Str, opts: Map): Map {
+  ::api/request("GET", `/resources/applicants/${seg(applicant-id)}/one`, "", opts)
+}
+
+external-user-path
+meta {
+    doc: """The path for an applicant addressed by your `externalUserId`. Exposed for testing."""
+}
+fn (external-user-id: Str): Str {
+  `/resources/applicants/-;externalUserId=${seg(external-user-id)}/one`
+}
+
+get-applicant-by-external-id
+meta {
+    doc: """Fetch an applicant by your `externalUserId`. A 404 Err when none exists; use `find-applicant-by-external-id` to test for existence."""
+}
+fn
+(external-user-id: Str): Map {
+  get-applicant-by-external-id(external-user-id, {})
+},
+(external-user-id: Str, opts: Map): Map {
+  ::api/request("GET", external-user-path(external-user-id), "", opts)
+}
+
+find-applicant-by-external-id
+meta {
+    doc: """`{exists, applicant?}` for your `externalUserId`, without a 404 when there is none (`GET /resources/applicants/-/byExternalUserId/{id}`)."""
+}
+fn
+(external-user-id: Str): Map {
+  find-applicant-by-external-id(external-user-id, {})
+},
+(external-user-id: Str, opts: Map): Map {
+  ::api/request("GET", `/resources/applicants/-/byExternalUserId/${seg(external-user-id)}`, "", opts)
+}
+
+// ---------------------------------------------------------------------------
+// Status and review
+// ---------------------------------------------------------------------------
+
+get-status
+meta {
+    doc: """
+    The applicant's review status: `reviewStatus` (`init`, `pending`,
+    `queued`, `onHold`, `awaitingService`, `awaitingUser`, `completed`),
+    `reviewResult` (`reviewAnswer` GREEN/RED, `reviewRejectType`
+    FINAL/RETRY, `rejectLabels`, comments), `levelName`, `attemptCnt`
+    and dates. Feed it to `::sumsub::decisions/review-outcome`.
+    """
+}
+fn
+(applicant-id: Str): Map {
+  get-status(applicant-id, {})
+},
+(applicant-id: Str, opts: Map): Map {
+  ::api/request("GET", `/resources/applicants/${seg(applicant-id)}/status`, "", opts)
+}
+
+get-required-docs-status
+meta {
+    doc: """Per-step status, keyed by step (`IDENTITY`, `SELFIE`, `PROOF_OF_RESIDENCE`, ...); each value is null (not submitted) or `{reviewResult, idDocType, country, imageIds, ...}`."""
+}
+fn
+(applicant-id: Str): Map {
+  get-required-docs-status(applicant-id, {})
+},
+(applicant-id: Str, opts: Map): Map {
+  ::api/request("GET", `/resources/applicants/${seg(applicant-id)}/requiredIdDocsStatus`, "", opts)
+}
+
+get-review-history
+meta {
+    doc: """Past review attempts for an applicant (`GET /resources/applicants/{id}/review/history`)."""
+}
+fn
+(applicant-id: Str): Any {
+  get-review-history(applicant-id, {})
+},
+(applicant-id: Str, opts: Map): Any {
+  ::api/request("GET", `/resources/applicants/${seg(applicant-id)}/review/history`, "", opts)
+}
+
+list-levels
+meta {
+    doc: """The verification levels configured for your account (`GET /resources/applicants/-/levels`)."""
+}
+fn
+(): Any {
+  list-levels({})
+},
+(opts: Map): Any {
+  ::api/request("GET", "/resources/applicants/-/levels", "", opts)
+}
+
+// ---------------------------------------------------------------------------
+// Level, reset, check
+// ---------------------------------------------------------------------------
+
+move-to-level-request
+meta {
+    doc: """The spec for moving an applicant to another level. The query parameter is `name` (not `levelName`). `doc-sets`, when not empty, limits the reset to those steps, e.g. `[{idDocSetType: "IDENTITY", resetOnlyIfUnsuitable: true}]`. Exposed for testing."""
+}
+fn (applicant-id: Str, level-name: Str, doc-sets: Vec): Map {
+  {
+    method: "POST",
+    path: `/resources/applicants/${seg(applicant-id)}/moveToLevel${query({name: level-name})}`,
+    body: if(is-empty(doc-sets), "", {docSets: doc-sets})
+  }
+}
+
+move-to-level
+meta {
+    doc: """Move an applicant to another verification level. Not allowed while the applicant is `pending`, `queued` or `onHold`. Returns the applicant."""
+}
+fn
+(applicant-id: Str, level-name: Str): Map {
+  move-to-level(applicant-id, level-name, [], {})
+},
+(applicant-id: Str, level-name: Str, doc-sets: Vec): Map {
+  move-to-level(applicant-id, level-name, doc-sets, {})
+},
+(applicant-id: Str, level-name: Str, doc-sets: Vec, opts: Map): Map {
+  ::api/call(move-to-level-request(applicant-id, level-name, doc-sets), opts)
+}
+
+reset-applicant
+meta {
+    doc: """Reset an applicant to `init`, deactivating its documents. Not allowed while `pending`, `queued` or `prechecked`; Sumsub advises against resetting a FINAL rejection."""
+}
+fn
+(applicant-id: Str): Map {
+  reset-applicant(applicant-id, {})
+},
+(applicant-id: Str, opts: Map): Map {
+  ::api/request("POST", `/resources/applicants/${seg(applicant-id)}/reset`, "", opts)
+}
+
+reset-step
+meta {
+    doc: """Reset one verification step (`idDocSetType`, e.g. `"IDENTITY"`, `"SELFIE"`)."""
+}
+fn
+(applicant-id: Str, id-doc-set-type: Str): Map {
+  reset-step(applicant-id, id-doc-set-type, {})
+},
+(applicant-id: Str, id-doc-set-type: Str, opts: Map): Map {
+  ::api/request("POST", `/resources/applicants/${seg(applicant-id)}/resetStep/${seg(id-doc-set-type)}`, "", opts)
+}
+
+request-check-request
+meta {
+    doc: """The spec for submitting an applicant for review; `reason` is optional and dropped when null. Exposed for testing."""
+}
+fn (applicant-id: Str, reason: Str?): Map {
+  {method: "POST", path: `/resources/applicants/${seg(applicant-id)}/status/pending${query({reason: reason})}`, body: ""}
+}
+
+request-check
+meta {
+    doc: """Submit the applicant for review once its documents are in (`POST .../status/pending`). A 409 means steps are still missing. The result arrives later: on the `applicantReviewed` webhook, or by polling `get-status` from a schedule."""
+}
+fn
+(applicant-id: Str): Map {
+  request-check(applicant-id, null, {})
+},
+(applicant-id: Str, reason: Str?): Map {
+  request-check(applicant-id, reason, {})
+},
+(applicant-id: Str, reason: Str?, opts: Map): Map {
+  ::api/call(request-check-request(applicant-id, reason), opts)
+}
+
+// ---------------------------------------------------------------------------
+// ID documents (multipart)
+// ---------------------------------------------------------------------------
+
+clean-filename fn (filename: Str): Str {
+  filename |> replace("\"", "%22") |> replace("\r", "") |> replace("\n", "")
+}
+
+id-doc-body
+meta {
+    doc: """
+    The `multipart/form-data` body for an ID document upload, as Bytes:
+    a `metadata` part with the JSON metadata, then (when `file` is not
+    null) a `content` part with the file. Sumsub accepts no other parts.
+    `file` is `{filename, content: Bytes, content_type?}`. Exposed for
+    testing; `add-id-document` signs and sends exactly these bytes.
+    """
+}
+fn (metadata: Map, file: Map?, boundary: Str): Bytes {
+  meta-json to-json(::api/compact(untype(metadata)))
+  meta-part Bytes(`--${boundary}\r\nContent-Disposition: form-data; name="metadata"\r\n\r\n${meta-json}\r\n`)
+  with-file cond {
+    is-null(file) => { meta-part }
+    => {
+      name clean-filename(or(get(file, "filename"), "document"))
+      content-type or(get(file, "content_type"), or(::hot::mime/from-path(name), "application/octet-stream"))
+      raw get(file, "content")
+      content if(is-bytes(raw), raw, Bytes(Str(raw)))
+      concat(
+        meta-part,
+        Bytes(`--${boundary}\r\nContent-Disposition: form-data; name="content"; filename="${name}"\r\nContent-Type: ${content-type}\r\n\r\n`),
+        content,
+        Bytes("\r\n")
+      )
+    }
+  }
+
+  concat(with-file, Bytes(`--${boundary}--\r\n`))
+}
+
+add-id-document
+meta {
+    doc: """
+    Upload an identity document (`POST .../info/idDoc`). `metadata`
+    takes `idDocType` (e.g. `PASSPORT`, `ID_CARD`, `DRIVERS`,
+    `RESIDENCE_PERMIT`, `UTILITY_BILL`, `SELFIE`, `COMPANY_DOC`) and
+    `country` (alpha-3), both required, plus optional `idDocSubType`
+    (`FRONT_SIDE`/`BACK_SIDE`), `number`, `issuedDate`, `validUntil`,
+    `firstName`, `lastName`, `dob`. `file` is `{filename, content:
+    Bytes, content_type?}` (e.g. from `::hot::file/read-file-bytes`), or
+    null for metadata only. `opts.return-warnings` (default true)
+    asks Sumsub for `errors`/`warnings` about image quality.
+
+    Returns `{document, image-id}`: Sumsub's document metadata and the
+    `X-Image-Id` of the stored image (null for metadata only). The file
+    bytes are never logged by this package, but they do pass through the
+    run trace as an argument.
+
+    **Example**
+
+    ```hot
+    passport ::hot::file/read-file-bytes("passport.jpg")
+    out ::sumsub::applicants/add-id-document("65f0c1e2a3b4c5d6e7f80912",
+      {idDocType: "PASSPORT", country: "GBR"},
+      {filename: "passport.jpg", content: passport, content_type: "image/jpeg"},
+      {})
+    out.image-id
+    ```
+    """
+}
+fn
+(applicant-id: Str, metadata: Map, file: Map?): Map {
+  add-id-document(applicant-id, metadata, file, {})
+},
+(applicant-id: Str, metadata: Map, file: Map?, opts: Map): Map {
+  cond {
+    or(is-null(get(metadata, "idDocType")), is-null(get(metadata, "country"))) => {
+      err("sumsub: add-id-document needs metadata.idDocType and metadata.country")
+    }
+    => {
+      boundary `hotsumsub${::hot::random/random-string(24)}`
+      body id-doc-body(metadata, file, boundary)
+      warnings ne(get(opts, "return-warnings"), false)
+      response ::api/send(
+        "POST",
+        `/resources/applicants/${seg(applicant-id)}/info/idDoc`,
+        body,
+        `multipart/form-data; boundary=${boundary}`,
+        {X-Return-Doc-Warnings: if(warnings, "true", "false")},
+        opts
+      )
+      document ::api/unwrap(response)
+      {document: document, image-id: ::api/header(response.headers, "x-image-id")}
+    }
+  }
+}
+
+list-documents
+meta {
+    doc: """The applicant's uploaded documents and images (`GET .../info/idDocs`)."""
+}
+fn
+(applicant-id: Str): Any {
+  list-documents(applicant-id, {})
+},
+(applicant-id: Str, opts: Map): Any {
+  ::api/request("GET", `/resources/applicants/${seg(applicant-id)}/info/idDocs`, "", opts)
+}
+
+// ---------------------------------------------------------------------------
+// Updates and presence
+// ---------------------------------------------------------------------------
+
+update-fixed-info
+meta {
+    doc: """Overwrite `fixedInfo` fields you supply (`PATCH .../fixedInfo`); fields you omit are kept. Fires `applicantPersonalInfoChanged`."""
+}
+fn
+(applicant-id: Str, fields: Map): Map {
+  update-fixed-info(applicant-id, fields, {})
+},
+(applicant-id: Str, fields: Map, opts: Map): Map {
+  ::api/request("PATCH", `/resources/applicants/${seg(applicant-id)}/fixedInfo`, fields, opts)
+}
+
+update-applicant-request
+meta {
+    doc: """The spec for a profile update (`email`, `phone`, `lang`, `sourceKey`, `metadata`, ...). Exposed for testing."""
+}
+fn (applicant-id: Str, fields: Map): Map {
+  {method: "PATCH", path: "/resources/applicants", body: {...::api/compact(untype(fields)), id: applicant-id}}
+}
+
+update-applicant
+meta {
+    doc: """Update top-level profile fields: `email`, `phone`, `lang`, `sourceKey`, `metadata`, `registrationDate`."""
+}
+fn
+(applicant-id: Str, fields: Map): Map {
+  update-applicant(applicant-id, fields, {})
+},
+(applicant-id: Str, fields: Map, opts: Map): Map {
+  ::api/call(update-applicant-request(applicant-id, fields), opts)
+}
+
+deactivate-applicant
+meta {
+    doc: """Deactivate an applicant (it can no longer be verified); returns the applicant with `deleted: true`."""
+}
+fn
+(applicant-id: Str): Map {
+  deactivate-applicant(applicant-id, {})
+},
+(applicant-id: Str, opts: Map): Map {
+  ::api/request("PATCH", `/resources/applicants/${seg(applicant-id)}/presence/deactivated`, "", opts)
+}
+
+activate-applicant
+meta {doc: """Re-activate a deactivated applicant."""}
+fn
+(applicant-id: Str): Map {
+  activate-applicant(applicant-id, {})
+},
+(applicant-id: Str, opts: Map): Map {
+  ::api/request("PATCH", `/resources/applicants/${seg(applicant-id)}/presence/activated`, "", opts)
+}
+
+approve-applicant
+meta {
+    doc: """Approve from your own system (`POST .../-/approve`), with optional `options.note` and `options.tags`. A temporary 409 carries `retry-after`; let a handler `retry` policy re-run it."""
+}
+fn
+(applicant-id: Str, options: Map): Map {
+  approve-applicant(applicant-id, options, {})
+},
+(applicant-id: Str, options: Map, opts: Map): Map {
+  ::api/request("POST", `/resources/applicants/${seg(applicant-id)}/-/approve`, ::api/compact(untype(options)), opts)
+}
+
+reject-applicant
+meta {
+    doc: """Reject from your own system (`POST .../-/reject`). `options` takes `note`, `tags` and `reasons` (`{fraud, finance, regulation, abuse, device, manual}`, each a Vec of Sumsub's external rejection reasons)."""
+}
+fn
+(applicant-id: Str, options: Map): Map {
+  reject-applicant(applicant-id, options, {})
+},
+(applicant-id: Str, options: Map, opts: Map): Map {
+  ::api/request("POST", `/resources/applicants/${seg(applicant-id)}/-/reject`, ::api/compact(untype(options)), opts)
+}
+
+// ---------------------------------------------------------------------------
+// Tags
+// ---------------------------------------------------------------------------
+
+add-tags
+meta {
+    doc: """Add tags to an applicant (at most 30 per applicant). Read them back from `get-applicant(...).tags`; there is no tag list endpoint."""
+}
+fn
+(applicant-id: Str, tags: Vec<Str>): Map {
+  add-tags(applicant-id, tags, {})
+},
+(applicant-id: Str, tags: Vec<Str>, opts: Map): Map {
+  ::api/request("POST", `/resources/applicants/${seg(applicant-id)}/tags/add`, tags, opts)
+}
+
+set-tags
+meta {doc: """Replace all of an applicant's tags."""}
+fn
+(applicant-id: Str, tags: Vec<Str>): Map {
+  set-tags(applicant-id, tags, {})
+},
+(applicant-id: Str, tags: Vec<Str>, opts: Map): Map {
+  ::api/request("POST", `/resources/applicants/${seg(applicant-id)}/tags`, tags, opts)
+}
+
+remove-tags
+meta {doc: """Remove these tags from an applicant."""}
+fn
+(applicant-id: Str, tags: Vec<Str>): Map {
+  remove-tags(applicant-id, tags, {})
+},
+(applicant-id: Str, tags: Vec<Str>, opts: Map): Map {
+  ::api/request("DELETE", `/resources/applicants/${seg(applicant-id)}/tags`, tags, opts)
+}
+
+// ---------------------------------------------------------------------------
+// Notes
+// ---------------------------------------------------------------------------
+
+NOTES_PATH "/resources/api/applicants/notes"
+
+list-notes-request
+meta {doc: """The spec for one page of an applicant's notes. Exposed for testing."""}
+fn (applicant-id: Str, offset: Int, limit: Int): Map {
+  {method: "GET", path: `${NOTES_PATH}${query({applicantId: applicant-id, offset: offset, limit: limit})}`, body: ""}
+}
+
+list-notes
+meta {
+    doc: """One page of an applicant's notes: `{list: {items, totalItems, pageInfo}}`. Read the items with `::sumsub::api/page-items` and the next offset with `::sumsub::api/next-offset`."""
+}
+fn
+(applicant-id: Str): Map {
+  list-notes(applicant-id, 0, 100, {})
+},
+(applicant-id: Str, offset: Int, limit: Int): Map {
+  list-notes(applicant-id, offset, limit, {})
+},
+(applicant-id: Str, offset: Int, limit: Int, opts: Map): Map {
+  ::api/call(list-notes-request(applicant-id, offset, limit), opts)
+}
+
+list-all-notes
+meta {doc: """Collect up to `limit` notes across pages."""}
+fn
+(applicant-id: Str, limit: Int): Vec {
+  list-all-notes(applicant-id, limit, {})
+},
+(applicant-id: Str, limit: Int, opts: Map): Vec {
+  ::api/collect-offset((offset, size) { list-notes(applicant-id, offset, size, opts) }, 0, min(100, max(1, limit)), limit, [])
+}
+
+add-note
+meta {
+    doc: """Add a note to an applicant, with optional tags. Notes are visible to your dashboard users; keep PII out of them unless your policy allows it."""
+}
+fn
+(applicant-id: Str, note: Str): Map {
+  add-note(applicant-id, note, null, {})
+},
+(applicant-id: Str, note: Str, tags: Vec?): Map {
+  add-note(applicant-id, note, tags, {})
+},
+(applicant-id: Str, note: Str, tags: Vec?, opts: Map): Map {
+  ::api/request("POST", NOTES_PATH, {applicantId: applicant-id, note: note, tags: tags}, opts)
+}
+
+update-note
+meta {doc: """Edit a note by its id."""}
+fn
+(applicant-id: Str, note-id: Str, note: Str, tags: Vec?): Map {
+  update-note(applicant-id, note-id, note, tags, {})
+},
+(applicant-id: Str, note-id: Str, note: Str, tags: Vec?, opts: Map): Map {
+  ::api/request("PATCH", NOTES_PATH, {id: note-id, applicantId: applicant-id, note: note, tags: tags}, opts)
+}
+
+delete-note
+meta {doc: """Delete a note by its id."""}
+fn
+(applicant-id: Str, note-id: Str): Any {
+  delete-note(applicant-id, note-id, {})
+},
+(applicant-id: Str, note-id: Str, opts: Map): Any {
+  ::api/request("DELETE", NOTES_PATH, {id: note-id, applicantId: applicant-id}, opts)
+}
+
+// ---------------------------------------------------------------------------
+// Sandbox
+// ---------------------------------------------------------------------------
+
+simulate-review-request
+meta {
+    doc: """The spec for the sandbox review simulator. `result` is `{reviewAnswer: "GREEN"}` or `{reviewAnswer: "RED", reviewRejectType: "RETRY" | "FINAL", rejectLabels: [...], moderationComment?, clientComment?}`. `rejectLabels` defaults to `[]`. Exposed for testing."""
+}
+fn (applicant-id: Str, result: Map): Map {
+  body ::api/compact(untype(result))
+  {
+    method: "POST",
+    path: `/resources/applicants/${seg(applicant-id)}/status/testCompleted`,
+    body: {rejectLabels: [], ...body}
+  }
+}
+
+simulate-review
+meta {
+    doc: """
+    Sandbox only: complete the applicant's review with the result you
+    choose, firing `applicantReviewed`. Production returns 400.
+
+    **Example**
+
+    ```hot
+    ::sumsub::applicants/simulate-review("65f0c1e2a3b4c5d6e7f80912", {reviewAnswer: "GREEN"})
+    ```
+    """
+}
+fn
+(applicant-id: Str, result: Map): Map {
+  simulate-review(applicant-id, result, {})
+},
+(applicant-id: Str, result: Map, opts: Map): Map {
+  ::api/call(simulate-review-request(applicant-id, result), opts)
+}

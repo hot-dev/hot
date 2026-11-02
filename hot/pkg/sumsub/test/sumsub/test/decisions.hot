@@ -1,0 +1,70 @@
+::sumsub::test::decisions ns
+meta ["test"]
+
+::decisions ::sumsub::decisions
+
+test-approved
+meta ["test"] fn () {
+    out ::decisions/review-outcome({reviewStatus: "completed", reviewResult: {reviewAnswer: "GREEN"}})
+    assert-eq("approved", out.outcome)
+    assert-eq(false, out.final)
+    assert-eq(false, out.can-retry)
+    assert-eq([], out.reject-labels)
+}
+
+test-declined-final
+meta ["test"] fn () {
+    out ::decisions/review-outcome({
+        reviewStatus: "completed",
+        reviewResult: {reviewAnswer: "RED", reviewRejectType: "FINAL", rejectLabels: ["FORGERY", "SPAM"], clientComment: "internal", moderationComment: "shown"}
+    })
+    assert-eq("declined", out.outcome)
+    assert-eq(true, out.final)
+    assert-eq(false, out.can-retry)
+    assert-eq(true, out.fraud, "FORGERY is a fraud label")
+    assert-eq(["FORGERY", "SPAM"], out.reject-labels)
+    assert-eq("internal", out.client-comment)
+}
+
+test-declined-retry
+meta ["test"] fn () {
+    out ::decisions/review-outcome({reviewStatus: "completed", reviewResult: {reviewAnswer: "RED", reviewRejectType: "RETRY", rejectLabels: ["BAD_SELFIE"]}})
+    assert-eq("declined", out.outcome)
+    assert-eq(false, out.final)
+    assert-eq(true, out.can-retry)
+    assert-eq(false, out.fraud)
+}
+
+test-declined-without-reject-type-is-final
+meta ["test"] fn () {
+    out ::decisions/review-outcome({reviewStatus: "completed", reviewResult: {reviewAnswer: "RED"}})
+    assert-eq(true, out.final, "no RETRY means no resubmission")
+}
+
+test-pending-states
+meta ["test"] fn () {
+    for-each(["init", "pending", "queued", "prechecked", "onHold", "awaitingService", "awaitingUser"], (status) {
+        out ::decisions/review-outcome({reviewStatus: status, reviewResult: {reviewAnswer: "GREEN"}})
+        assert-eq("pending", out.outcome, `${status} is not a final approval`)
+    })
+    assert-eq(true, ::decisions/review-outcome({reviewStatus: "onHold"}).on-hold)
+}
+
+test-unknown-is-never-approved
+meta ["test"] fn () {
+    assert-eq("pending", ::decisions/review-outcome({}).outcome)
+    assert-eq("pending", ::decisions/review-outcome(null).outcome)
+    assert-eq("pending", ::decisions/review-outcome({reviewStatus: "completed", reviewResult: {reviewAnswer: "YELLOW"}}).outcome)
+    assert-eq("pending", ::decisions/review-outcome({reviewStatus: "completed"}).outcome)
+    assert(not(::decisions/is-approved("GREEN")))
+}
+
+test-nested-review-applicant-and-transaction
+meta ["test"] fn () {
+    applicant {id: "a1", review: {reviewStatus: "completed", reviewResult: {reviewAnswer: "GREEN"}, levelName: "kyc"}}
+    assert(::decisions/is-approved(applicant))
+    txn {id: "t1", scoringResult: {action: "reject"}, review: {reviewStatus: "completed", reviewResult: {reviewAnswer: "RED", reviewRejectType: "FINAL"}}}
+    assert-eq("declined", ::decisions/review-outcome(txn).outcome)
+    held {id: "t2", review: {reviewStatus: "onHold"}}
+    assert-eq("pending", ::decisions/review-outcome(held).outcome)
+}

@@ -1,0 +1,59 @@
+::persona::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration tests (live Persona sandbox, read-only)
+// =============================================================================
+// Requires ctx: persona.api.key (PERSONA_API_KEY, a persona_sandbox_ key).
+// Optional: persona.inquiry-template-id (PERSONA_INQUIRY_TEMPLATE_ID) to
+// filter by a template. Every test only reads. Without credentials each
+// test records a skip and passes.
+// Run with: hot test -p pkg-integration-persona
+
+configured fn (): Bool {
+    is-some(::hot::ctx/get("persona.api.key"))
+}
+
+skip fn (): Bool {
+    println("PERSONA_API_KEY not set - skipping")
+    assert(true, "skipped: no Persona credentials")
+}
+
+test-list-inquiries
+meta ["test"] fn () {
+    cond {
+        not(configured()) => { skip() }
+        => {
+            page ::persona::inquiries/list-inquiries({}, {page-size: 2})
+            assert(is-vec(page.data), "should return a data array")
+            assert(lte(length(page.data), 2), "page-size caps the page")
+            assert(is-map(page.links), "list pages carry links")
+        }
+    }
+}
+
+test-list-inquiries-by-template
+meta ["test"] fn () {
+    template ::hot::ctx/get("persona.inquiry-template-id")
+    cond {
+        not(configured()) => { skip() }
+        is-null(template) => { skip() }
+        => {
+            page ::persona::inquiries/list-inquiries({inquiry-template-id: template}, {page-size: 5})
+            assert(is-vec(page.data), "filtered list returns data")
+            decisions map(page.data, (i) { ::persona::decisions/inquiry-decision(i).decision })
+            assert(all(decisions, (d) { in(d, ["approved", "declined", "needs-review", "pending", "failed"]) }), "every inquiry normalizes")
+        }
+    }
+}
+
+test-list-events
+meta ["test"] fn () {
+    cond {
+        not(configured()) => { skip() }
+        => {
+            page ::persona::events/list-events({}, {page-size: 2})
+            assert(is-vec(page.data), "events list returns data")
+        }
+    }
+}

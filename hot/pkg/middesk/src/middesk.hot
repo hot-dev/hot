@@ -1,0 +1,60 @@
+::middesk ns
+meta {
+    doc: """
+    Middesk business verification (KYB) bindings for agentic onboarding:
+    create a business with the orders you need, wait for the
+    `business.updated` webhook, read the report, then approve or reject.
+
+    - `::middesk::businesses` creates, reads, lists and updates
+      businesses, sets their status, and reads the review, policy
+      results, timeline and PDF report
+    - `::middesk::orders` adds products to a business (liens,
+      litigations, bankruptcies, website and industry, KYC, ...)
+    - `::middesk::documents` lists documents and downloads them as Bytes
+    - `::middesk::monitoring` turns ongoing monitoring on and off
+    - `::middesk::webhooks` verifies `X-Middesk-Signature-256`, parses
+      events, and manages webhook endpoints
+    - `::middesk::decisions` summarizes a business report into a compact
+      record of what passed, what failed, the review tasks and a
+      `needs-review` flag
+    - `::middesk::api` holds the transport, page-number pagination and
+      the `call` escape hatch
+
+    **Setup**: context variables
+    - `middesk.api.key`: a sandbox (`mk_test_...`) or production
+      (`mk_live_...`) key. The key decides the host: `mk_test_` keys go to
+      `api-sandbox.middesk.com`, `mk_live_` keys to `api.middesk.com`.
+    - `middesk.env`: optional, `"sandbox"` or `"production"`, for keys
+      without a recognizable prefix (a mismatch with the prefix is an Err)
+    - `middesk.webhook.secret`: the secret you set on the webhook endpoint
+
+    **Quick start**
+
+    ```hot
+    ::businesses ::middesk::businesses
+
+    biz ::businesses/create-business({
+      name: "Acme Robotics LLC",
+      tin: {tin: "123410000"},
+      addresses: [{address_line1: "123 Main St", city: "Austin", state: "TX", postal_code: "78701"}]
+    })
+    // ...wait for the business.updated webhook...
+    report ::businesses/get-business(biz.id)
+    ::middesk::decisions/summarize(report)
+    ```
+    """
+}
+
+ENVIRONMENTS
+meta {
+    doc: """Middesk base URLs by environment (no trailing slash). Keys only work against their own environment's host."""
+}
+{
+  sandbox: "https://api-sandbox.middesk.com/v1",
+  production: "https://api.middesk.com/v1"
+}
+
+DEFAULT_ENV "sandbox"
+
+// Page size for the collect helpers.
+DEFAULT_PER_PAGE 25

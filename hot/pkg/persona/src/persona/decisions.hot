@@ -1,0 +1,279 @@
+::persona::decisions ns
+meta {
+    doc: """
+    Decision helpers: normalize Persona statuses into one vocabulary an
+    agent (or a rule) can act on.
+
+    | decision | meaning |
+    |---|---|
+    | `approved` | passed; nothing to do |
+    | `declined` | failed a check or was declined; don't onboard |
+    | `needs-review` | a person (or a reviewer agent) must look |
+    | `pending` | still running or waiting on the end user |
+    | `failed` | the process itself failed, expired or errored; retry or restart |
+
+    Every helper is pure and deterministic: the same document always
+    gives the same record, with `reasons` sorted. Reasons name statuses,
+    checks and report types, never the user's data.
+
+    Unknown statuses map to `needs-review`, so a new Persona status can
+    never be read as an approval.
+    """
+}
+
+::api ::persona::api
+
+Decision
+meta {
+    doc: """
+    A normalized decision.
+
+    - `decision`: `approved | declined | needs-review | pending | failed`
+    - `final`: true for `approved` and `declined` set by Persona or a
+      reviewer (nothing further will change it on its own)
+    - `status`: the raw Persona status
+    - `object-type`, `object-id`: what was decided
+    - `reasons`: short machine-readable reasons, sorted, e.g.
+      `["verification/government-id failed: id_expired"]`
+    """
+}
+type {
+    decision: Str,
+    final: Bool,
+    status: Str?,
+    object-type: Str?,
+    object-id: Str?,
+    reasons: Vec<Str>
+}
+
+make fn (doc: Any, decision: Str, reasons: Vec): Decision {
+  r ::api/resource(doc)
+  Decision({
+    decision: decision,
+    final: in(decision, ["approved", "declined"]),
+    status: ::api/attr(doc, "status"),
+    object-type: if(is-map(r), get(r, "type"), null),
+    object-id: if(is-map(r), get(r, "id"), null),
+    reasons: sort(distinct(filter(reasons, is-some)))
+  })
+}
+
+status-of fn (doc: Any): Str {
+  Str(or(::api/attr(doc, "status"), ""))
+}
+
+// ---------------------------------------------------------------------------
+// Verifications and reports (also used for inquiry reasons)
+// ---------------------------------------------------------------------------
+
+verification-decision
+meta {
+    doc: """
+    Normalize a verification: `passed`/`confirmed` → approved, `failed` →
+    declined (reasons are the failed check names),
+    `initiated`/`submitted`/`requires_retry` → pending,
+    `tentatively_passed`/`tentatively_failed` → needs-review,
+    `canceled`/`skipped` → failed.
+    """
+}
+fn (doc: Any): Decision {
+  s status-of(doc)
+  t or(get(or(::api/resource(doc), {}), "type"), "verification")
+  failed-checks ::persona::verifications/failed-checks(doc)
+  cond {
+    in(s, ["passed", "confirmed"]) => { make(doc, "approved", []) }
+    eq(s, "failed") => {
+      make(doc, "declined", if(is-empty(failed-checks), [`${t} failed`], [`${t} failed: ${join(failed-checks, ", ")}`]))
+    }
+
+    in(s, ["initiated", "submitted"]) => { make(doc, "pending", []) }
+    eq(s, "requires_retry") => { make(doc, "pending", [`${t} requires retry`]) }
+    in(s, ["tentatively_passed", "tentatively_failed"]) => { make(doc, "needs-review", [`${t} ${s}`]) }
+    in(s, ["canceled", "skipped"]) => { make(doc, "failed", [`${t} ${s}`]) }
+    => { make(doc, "needs-review", [`${t} unknown status: ${s}`]) }
+  }
+}
+
+report-decision
+meta {
+    doc: """Normalize a report: `pending` → pending, `errored` → failed, `ready` with `has-match` → needs-review (a match always needs a look), `ready` without a match → approved."""
+}
+fn (doc: Any): Decision {
+  s status-of(doc)
+  t or(get(or(::api/resource(doc), {}), "type"), "report")
+  cond {
+    eq(s, "pending") => { make(doc, "pending", []) }
+    eq(s, "errored") => { make(doc, "failed", [`${t} errored`]) }
+    and(eq(s, "ready"), ::persona::reports/has-match(doc)) => { make(doc, "needs-review", [`${t} has a match`]) }
+    eq(s, "ready") => { make(doc, "approved", []) }
+    => { make(doc, "needs-review", [`${t} unknown status: ${s}`]) }
+  }
+}
+
+included-reasons
+meta {
+    doc: """Reasons from the verifications and reports included in an inquiry document: failed or retry-needed verifications (with their failed check names) and reports with a match or an error. Exposed for testing."""
+}
+fn (doc: Any): Vec<Str> {
+  verifications ::api/included(doc, "verification")
+  reports ::api/included(doc, "report")
+  v-reasons reduce(verifications, (acc, v) {
+    d verification-decision(v)
+    if(in(d.decision, ["declined", "needs-review", "failed"]), concat(acc, d.reasons), acc)
+  }, [])
+
+  r-reasons reduce(reports, (acc, r) {
+    d report-decision(r)
+    if(in(d.decision, ["needs-review", "failed"]), concat(acc, d.reasons), acc)
+  }, [])
+
+  concat(v-reasons, r-reasons)
+}
+
+// ---------------------------------------------------------------------------
+// Inquiries
+// ---------------------------------------------------------------------------
+
+inquiry-decision
+meta {
+    doc: """
+    Normalize an inquiry (fetch it with `include: ["verifications",
+    "reports"]` for richer reasons):
+
+    - `approved` → approved; `declined` → declined
+    - `needs_review` → needs-review
+    - `completed` (the user finished but no workflow or reviewer has
+      decided) → needs-review, or `opts.completed-as` (e.g. `"approved"`
+      when your template has no decisioning workflow)
+    - `created`, `pending` → pending
+    - `failed`, `expired` → failed (resume or start a new inquiry)
+
+    Reasons come from failed verifications and matching reports in
+    `included`, plus the status for failed and expired inquiries.
+
+    **Example**
+
+    ```hot
+    doc ::persona::inquiries/get-inquiry("inq_...", {include: ["verifications", "reports"]})
+    d ::persona::decisions/inquiry-decision(doc)
+    d.decision   // "needs-review"
+    d.reasons    // ["report/watchlist has a match"]
+    ```
+    """
+}
+fn
+(doc: Any): Decision {
+  inquiry-decision(doc, {})
+},
+(doc: Any, opts: Map): Decision {
+  s status-of(doc)
+  reasons included-reasons(doc)
+  completed-as or(get(opts, "completed-as"), "needs-review")
+  cond {
+    eq(s, "approved") => { make(doc, "approved", reasons) }
+    eq(s, "declined") => { make(doc, "declined", reasons) }
+    eq(s, "needs_review") => { make(doc, "needs-review", reasons) }
+    eq(s, "completed") => {
+      make(doc, completed-as, if(eq(completed-as, "needs-review"), concat(reasons, ["inquiry completed without a decision"]), reasons))
+    }
+
+    in(s, ["created", "pending"]) => { make(doc, "pending", reasons) }
+    eq(s, "failed") => { make(doc, "failed", concat(reasons, ["inquiry failed"])) }
+    eq(s, "expired") => { make(doc, "failed", concat(reasons, ["inquiry expired"])) }
+    => { make(doc, "needs-review", concat(reasons, [`inquiry unknown status: ${s}`])) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Transactions and cases
+// ---------------------------------------------------------------------------
+
+transaction-decision
+meta {
+    doc: """Normalize a transaction (KYB): `approved`, `declined`, `needs_review` map directly, `errored` → failed, `created`/`pending` → pending, and any custom status → needs-review."""
+}
+fn (doc: Any): Decision {
+  s status-of(doc)
+  cond {
+    eq(s, "approved") => { make(doc, "approved", []) }
+    eq(s, "declined") => { make(doc, "declined", []) }
+    eq(s, "needs_review") => { make(doc, "needs-review", []) }
+    eq(s, "errored") => { make(doc, "failed", ["transaction errored"]) }
+    in(s, ["created", "pending"]) => { make(doc, "pending", []) }
+    => { make(doc, "needs-review", [`transaction status: ${s}`]) }
+  }
+}
+
+case-decision
+meta {
+    doc: """Normalize a case. Case statuses are configured per template, so this reads them case-insensitively: `approved` → approved, `declined`/`rejected` → declined, anything else (open, pending, in review, ...) → pending until a reviewer resolves it."""
+}
+fn (doc: Any): Decision {
+  s lowercase(status-of(doc))
+  cond {
+    eq(s, "approved") => { make(doc, "approved", []) }
+    in(s, ["declined", "rejected"]) => { make(doc, "declined", []) }
+    => { make(doc, "pending", [`case status: ${status-of(doc)}`]) }
+  }
+}
+
+decide
+meta {
+    doc: """Normalize any supported resource by its JSON:API `type`: `inquiry`, `report/*`, `verification/*`, `transaction` or `case`. Other types give needs-review."""
+}
+fn (doc: Any): Decision {
+  r ::api/resource(doc)
+  t Str(or(if(is-map(r), get(r, "type"), null), ""))
+  cond {
+    eq(t, "inquiry") => { inquiry-decision(doc) }
+    starts-with(t, "report/") => { report-decision(doc) }
+    starts-with(t, "verification/") => { verification-decision(doc) }
+    eq(t, "transaction") => { transaction-decision(doc) }
+    eq(t, "case") => { case-decision(doc) }
+    => { make(doc, "needs-review", [`unsupported object type: ${t}`]) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Compact summary
+// ---------------------------------------------------------------------------
+
+inquiry-summary
+meta {
+    doc: """
+    A compact, LLM-friendly record of an inquiry document: the decision,
+    plus one line per included verification and report, sorted by type
+    and id. No PII: only ids, types, statuses, failed check names and
+    match flags.
+
+    **Example**
+
+    ```hot
+    ::persona::decisions/inquiry-summary(::persona::inquiries/get-inquiry("inq_...", {include: ["verifications", "reports"]}))
+    // => {id: "inq_...", status: "completed", decision: "needs-review", reasons: [...],
+    //     verifications: [{id, type: "verification/government-id", status: "passed", failed-checks: []}],
+    //     reports: [{id, type: "report/watchlist", status: "ready", has-match: true}]}
+    ```
+    """
+}
+fn (doc: Any): Map {
+  d inquiry-decision(doc)
+  by-type (items) { sort-by(items, (x) { `${x.type}|${x.id}` }) }
+  verifications map(::api/included(doc, "verification"), (v) {
+    {id: get(v, "id"), type: get(v, "type"), status: ::api/attr(v, "status"), failed-checks: ::persona::verifications/failed-checks(v)}
+  })
+
+  reports map(::api/included(doc, "report"), (r) {
+    {id: get(r, "id"), type: get(r, "type"), status: ::api/attr(r, "status"), has-match: ::persona::reports/has-match(r)}
+  })
+
+  {
+    id: d.object-id,
+    status: d.status,
+    decision: d.decision,
+    final: d.final,
+    reasons: d.reasons,
+    verifications: by-type(verifications),
+    reports: by-type(reports)
+  }
+}

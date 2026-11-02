@@ -1,0 +1,11 @@
+::persona::integration::ctx ns
+
+::env ::hot::env
+
+// Credentials for the persona integration suite. Unset environment
+// variables are skipped entirely, so absent credentials behave exactly as
+// if never configured. Use a sandbox key (persona_sandbox_...).
+::hot::ctx/set(filter-vals({
+    "persona.api.key": ::env/get("PERSONA_API_KEY", ""),
+    "persona.inquiry-template-id": ::env/get("PERSONA_INQUIRY_TEMPLATE_ID", ""),
+}, (v) { not(is-empty(v)) }))

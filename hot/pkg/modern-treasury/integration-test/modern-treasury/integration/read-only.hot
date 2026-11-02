@@ -1,0 +1,44 @@
+::modern-treasury::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration tests (live Modern Treasury sandbox, read-only)
+// =============================================================================
+// Requires MODERN_TREASURY_ORG_ID and MODERN_TREASURY_API_KEY from a
+// sandbox organization (free sign-up at app.moderntreasury.com/sign_up).
+// Every test only reads. Without credentials each test records a skip
+// and passes.
+// Run with: hot test --project pkg-integration-modern-treasury
+
+::ctx ::modern-treasury::integration::ctx
+
+test-ping
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip() }
+        => { assert-eq("pong", ::modern-treasury::api/ping().ping, "credentials authenticate") }
+    }
+}
+
+test-list-internal-accounts
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip() }
+        => {
+            page ::modern-treasury::internal-accounts/list-internal-accounts({per_page: 2})
+            assert(is-vec(page.items), "a page of internal accounts")
+            assert(lte(length(page.items), 2), "per_page caps the page")
+        }
+    }
+}
+
+test-list-payment-orders-and-counterparties
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip() }
+        => {
+            assert(is-vec(::modern-treasury::payment-orders/list-payment-orders({per_page: 1}).items), "payment orders list")
+            assert(is-vec(::modern-treasury::counterparties/list-counterparties({per_page: 1}).items), "counterparties list")
+        }
+    }
+}

@@ -1,0 +1,94 @@
+::increase::rtp-transfers ns
+meta {
+    doc: """
+    Real-Time Payments transfers over The Clearing House RTP network:
+    instant, final, available around the clock. The receiving bank must
+    be on RTP (check with `/routing_numbers`). Use `require_approval: true`.
+    """
+}
+
+::api ::increase::api
+seg ::increase::api/seg
+
+create-rtp-transfer
+meta {
+    doc: """
+    POST /real_time_payments_transfers: create a Real-Time Payments Transfer. Moves money: `opts` must carry an
+    `idempotency-key` (the call errs without one and sends nothing), and
+    the call is never retried. `params` needs `amount`, `creditor_name`, `source_account_number_id`, `unstructured_remittance_information`.
+
+    The destination is `external_account_id` or `account_number` plus
+    `routing_number`. Optional: `debtor_name`, `ultimate_creditor_name`,
+    `ultimate_debtor_name`, `inbound_real_time_payments_request_for_payment_id`.
+
+    **Example**
+
+    ```hot
+    ::increase::rtp-transfers/create-rtp-transfer({
+      source_account_number_id: "account_number_v18nkfqm6afpsrvy82b2",
+      external_account_id: "external_account_ukk55lr923a3ac0pp7iv",
+      amount: 5000,
+      creditor_name: "Ian Crease",
+      unstructured_remittance_information: "Invoice 42",
+      require_approval: true
+    }, {idempotency-key: "invoice-42-rtp"})
+    ```
+
+    Set `require_approval: true` (or the `increase.transfers.require-approval`
+    context variable) so a person approves the transfer before it is sent.
+    """
+}
+fn (params: Map, opts: Map): Map {
+  ::api/move-money("/real_time_payments_transfers", params, ["amount", "creditor_name", "source_account_number_id", "unstructured_remittance_information"], true, opts, "create-rtp-transfer")
+}
+
+get-rtp-transfer
+meta {
+    doc: """GET /real_time_payments_transfers/{id}: retrieve a Real-Time Payments Transfer."""
+}
+fn
+(transfer-id: Str): Map {
+  get-rtp-transfer(transfer-id, {})
+},
+(transfer-id: Str, opts: Map): Map {
+  ::api/call("GET", `/real_time_payments_transfers/${seg(transfer-id)}`, {}, opts)
+}
+
+list-rtp-transfers
+meta {
+    doc: """GET /real_time_payments_transfers: one page of Real-Time Payments Transfers (`{data, next_cursor}`). Filters: `account_id`, `external_account_id`, `"status.in"`, `idempotency_key`, `created_at: {after, before, on_or_after, on_or_before}`, `limit`, `cursor`."""
+}
+fn
+(): Map {
+  list-rtp-transfers({})
+},
+(params: Map): Map {
+  list-rtp-transfers(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/list-page("/real_time_payments_transfers", params, opts)
+}
+
+approve-rtp-transfer
+meta {
+    doc: """POST /real_time_payments_transfers/{id}/approve: approve a Real-Time Payments Transfer in `pending_approval`. Approving releases the transfer to be sent: agents must not approve on their own; leave it to a person (in the Increase dashboard, or through your own approval step that calls this)."""
+}
+fn
+(transfer-id: Str): Map {
+  approve-rtp-transfer(transfer-id, {})
+},
+(transfer-id: Str, opts: Map): Map {
+  ::api/call("POST", `/real_time_payments_transfers/${seg(transfer-id)}/approve`, {}, opts)
+}
+
+cancel-rtp-transfer
+meta {
+    doc: """POST /real_time_payments_transfers/{id}/cancel: cancel a Real-Time Payments Transfer that is still `pending_approval`."""
+}
+fn
+(transfer-id: Str): Map {
+  cancel-rtp-transfer(transfer-id, {})
+},
+(transfer-id: Str, opts: Map): Map {
+  ::api/call("POST", `/real_time_payments_transfers/${seg(transfer-id)}/cancel`, {}, opts)
+}

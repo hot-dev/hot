@@ -1,0 +1,30 @@
+::sanctions::integration::ctx ns
+
+::env ::hot::env
+
+// Live smoke tests download public list files, so they only run when
+// SANCTIONS_LIVE=1. OPENSANCTIONS_API_KEY (optional) enables the
+// OpenSanctions /match smoke test. Unset variables are skipped entirely.
+::hot::ctx/set(filter-vals({
+    "sanctions.opensanctions.api-key": ::env/get("OPENSANCTIONS_API_KEY", ""),
+    "sanctions.opensanctions.base-url": ::env/get("OPENSANCTIONS_BASE_URL", ""),
+}, (v) { not(is-empty(v)) }))
+
+live
+meta {doc: """True when SANCTIONS_LIVE=1: the list downloads may run."""}
+fn (): Bool {
+    eq(::env/get("SANCTIONS_LIVE", ""), "1")
+}
+
+configured
+meta {doc: """True when SANCTIONS_LIVE=1 and an OpenSanctions key is set."""}
+fn (): Bool {
+    and(live(), is-some(::hot::ctx/get("sanctions.opensanctions.api-key")))
+}
+
+skip
+meta {doc: """Record a skip and pass."""}
+fn (why: Str): Bool {
+    println(`sanctions integration: ${why} - skipping`)
+    assert(true, `skipped: ${why}`)
+}

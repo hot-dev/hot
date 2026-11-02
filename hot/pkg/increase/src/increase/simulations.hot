@@ -1,0 +1,277 @@
+::increase::simulations ns
+meta {
+    doc: """
+    Sandbox simulations: make the sandbox do what the outside world would
+    (settle or return an ACH transfer, send an inbound ACH or wire,
+    authorize a card, deposit a check). Every function here errs before
+    sending anything unless the call's environment is `"sandbox"`
+    (`increase.environment`, or `environment` in `opts`), so a
+    simulation can never reach production. No money moves in the sandbox.
+    See https://increase.com/documentation/api/simulations.
+    """
+}
+
+::api ::increase::api
+seg ::increase::api/seg
+
+simulate
+meta {
+    doc: """POST a simulation `path` after checking the sandbox guard and the `required` fields. The functions below are built on it; use it for simulations they don't cover, e.g. `simulate("/simulations/interest_payments", {account_id: "...", amount: 1000}, ["account_id", "amount"], {}, "interest payment")`."""
+}
+fn (path: Str, params: Map, required: Vec, opts: Map, operation: Str): Map {
+  env ::api/environment-of(opts)
+  body ::api/require-fields(::api/compact(params), required, operation)
+  cond {
+    is-err(env) => { env }
+    => {
+      allowed ::api/require-sandbox(env, operation)
+      cond {
+        is-err(allowed) => { allowed }
+        is-err(body) => { body }
+        => { ::api/call("POST", path, body, opts) }
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Outbound transfers
+// ---------------------------------------------------------------------------
+
+settle-ach-transfer
+meta {
+    doc: """
+    Simulate the Federal Reserve settling a submitted ACH Transfer.
+    `params`: `inbound_funds_hold_behavior` (`"release_immediately"` or
+    `"release_on_default_schedule"`).
+
+    **Example**
+
+    ```hot
+    ::increase::simulations/settle-ach-transfer("ach_transfer_uoxatyh3lt5evrsdvo7q")
+    ```
+    """
+}
+fn
+(ach-transfer-id: Str): Map {
+  settle-ach-transfer(ach-transfer-id, {}, {})
+},
+(ach-transfer-id: Str, params: Map, opts: Map): Map {
+  simulate(`/simulations/ach_transfers/${seg(ach-transfer-id)}/settle`, params, [], opts, "settle-ach-transfer")
+}
+
+return-ach-transfer
+meta {
+    doc: """Simulate the receiving bank returning an ACH Transfer. `params`: `reason` (an ACH return reason such as `"insufficient_fund"` or `"no_account"`; default `"no_account"`)."""
+}
+fn
+(ach-transfer-id: Str): Map {
+  return-ach-transfer(ach-transfer-id, {}, {})
+},
+(ach-transfer-id: Str, params: Map, opts: Map): Map {
+  simulate(`/simulations/ach_transfers/${seg(ach-transfer-id)}/return`, params, [], opts, "return-ach-transfer")
+}
+
+submit-ach-transfer
+meta {
+    doc: """Simulate submitting an ACH Transfer to the Federal Reserve (normally done in batches during the day)."""
+}
+fn
+(ach-transfer-id: Str): Map {
+  submit-ach-transfer(ach-transfer-id, {})
+},
+(ach-transfer-id: Str, opts: Map): Map {
+  simulate(`/simulations/ach_transfers/${seg(ach-transfer-id)}/submit`, {}, [], opts, "submit-ach-transfer")
+}
+
+submit-wire-transfer
+meta {
+    doc: """Simulate submitting a Wire Transfer to Fedwire."""
+}
+fn
+(wire-transfer-id: Str): Map {
+  submit-wire-transfer(wire-transfer-id, {})
+},
+(wire-transfer-id: Str, opts: Map): Map {
+  simulate(`/simulations/wire_transfers/${seg(wire-transfer-id)}/submit`, {}, [], opts, "submit-wire-transfer")
+}
+
+complete-rtp-transfer
+meta {
+    doc: """Simulate the RTP network completing (or, with `params.rejection: {reject_reason_code}`, rejecting) a Real-Time Payments Transfer."""
+}
+fn
+(rtp-transfer-id: Str): Map {
+  complete-rtp-transfer(rtp-transfer-id, {}, {})
+},
+(rtp-transfer-id: Str, params: Map, opts: Map): Map {
+  simulate(`/simulations/real_time_payments_transfers/${seg(rtp-transfer-id)}/complete`, params, [], opts, "complete-rtp-transfer")
+}
+
+complete-fednow-transfer
+meta {
+    doc: """Simulate FedNow completing (or, with `params.rejection: {reject_reason_code}`, rejecting) a FedNow Transfer."""
+}
+fn
+(fednow-transfer-id: Str): Map {
+  complete-fednow-transfer(fednow-transfer-id, {}, {})
+},
+(fednow-transfer-id: Str, params: Map, opts: Map): Map {
+  simulate(`/simulations/fednow_transfers/${seg(fednow-transfer-id)}/complete`, params, [], opts, "complete-fednow-transfer")
+}
+
+mail-check-transfer
+meta {
+    doc: """Simulate Increase mailing a physical Check Transfer."""
+}
+fn
+(check-transfer-id: Str): Map {
+  mail-check-transfer(check-transfer-id, {})
+},
+(check-transfer-id: Str, opts: Map): Map {
+  simulate(`/simulations/check_transfers/${seg(check-transfer-id)}/mail`, {}, [], opts, "mail-check-transfer")
+}
+
+// ---------------------------------------------------------------------------
+// Inbound transfers
+// ---------------------------------------------------------------------------
+
+create-inbound-ach-transfer
+meta {
+    doc: """
+    Simulate another bank sending an ACH transfer to one of your Account
+    Numbers. `params` needs `account_number_id` and `amount` (positive
+    for a credit, negative for a debit); optional `company_name`,
+    `company_entry_description`, `standard_entry_class_code`,
+    `resolve_at`, `addenda`.
+
+    **Example**
+
+    ```hot
+    ::increase::simulations/create-inbound-ach-transfer({account_number_id: "account_number_v18nkfqm6afpsrvy82b2", amount: 1000})
+    ```
+    """
+}
+fn
+(params: Map): Map {
+  create-inbound-ach-transfer(params, {})
+},
+(params: Map, opts: Map): Map {
+  simulate("/simulations/inbound_ach_transfers", params, ["account_number_id", "amount"], opts, "create-inbound-ach-transfer")
+}
+
+create-inbound-wire-transfer
+meta {
+    doc: """Simulate an inbound wire to one of your Account Numbers. `params` needs `account_number_id` and `amount`; optional `creditor_name`, `debtor_name`, `unstructured_remittance_information` and the other Fedwire fields."""
+}
+fn
+(params: Map): Map {
+  create-inbound-wire-transfer(params, {})
+},
+(params: Map, opts: Map): Map {
+  simulate("/simulations/inbound_wire_transfers", params, ["account_number_id", "amount"], opts, "create-inbound-wire-transfer")
+}
+
+create-inbound-rtp-transfer
+meta {
+    doc: """Simulate an inbound Real-Time Payments transfer. `params` needs `account_number_id` and `amount`; optional `debtor_name`, `unstructured_remittance_information`, `request_for_payment_id`."""
+}
+fn
+(params: Map): Map {
+  create-inbound-rtp-transfer(params, {})
+},
+(params: Map, opts: Map): Map {
+  simulate("/simulations/inbound_real_time_payments_transfers", params, ["account_number_id", "amount"], opts, "create-inbound-rtp-transfer")
+}
+
+create-inbound-fednow-transfer
+meta {
+    doc: """Simulate an inbound FedNow transfer. `params` needs `account_number_id` and `amount`; optional `debtor_name`, `unstructured_remittance_information`."""
+}
+fn
+(params: Map): Map {
+  create-inbound-fednow-transfer(params, {})
+},
+(params: Map, opts: Map): Map {
+  simulate("/simulations/inbound_fednow_transfers", params, ["account_number_id", "amount"], opts, "create-inbound-fednow-transfer")
+}
+
+// ---------------------------------------------------------------------------
+// Cards
+// ---------------------------------------------------------------------------
+
+authorize-card
+meta {
+    doc: """
+    Simulate a card authorization. `params` needs `amount` (cents) and
+    usually `card_id`; optional `merchant_descriptor`,
+    `merchant_category_code`, `merchant_city`, `merchant_country`,
+    `decline_reason`, `event_subscription_id` (to exercise Real-Time
+    Decisions). Returns `{pending_transaction, declined_transaction}`.
+
+    **Example**
+
+    ```hot
+    auth ::increase::simulations/authorize-card({card_id: "card_oubs0hwk5rn6knuecxg2", amount: 1000, merchant_descriptor: "COFFEE SHOP"})
+    ```
+    """
+}
+fn
+(params: Map): Map {
+  authorize-card(params, {})
+},
+(params: Map, opts: Map): Map {
+  simulate("/simulations/card_authorizations", params, ["amount"], opts, "authorize-card")
+}
+
+settle-card
+meta {
+    doc: """Simulate settling a card authorization. `params` needs `card_id`; optional `pending_transaction_id` and `amount`."""
+}
+fn
+(params: Map): Map {
+  settle-card(params, {})
+},
+(params: Map, opts: Map): Map {
+  simulate("/simulations/card_settlements", params, ["card_id"], opts, "settle-card")
+}
+
+// ---------------------------------------------------------------------------
+// Check deposits
+// ---------------------------------------------------------------------------
+
+submit-check-deposit
+meta {
+    doc: """Simulate the Federal Reserve accepting a Check Deposit. `params` may set `scan: {account_number, routing_number, serial_number}` (the MICR line read off the check)."""
+}
+fn
+(check-deposit-id: Str): Map {
+  submit-check-deposit(check-deposit-id, {}, {})
+},
+(check-deposit-id: Str, params: Map, opts: Map): Map {
+  simulate(`/simulations/check_deposits/${seg(check-deposit-id)}/submit`, params, [], opts, "submit-check-deposit")
+}
+
+return-check-deposit
+meta {
+    doc: """Simulate the paying bank returning a submitted Check Deposit."""
+}
+fn
+(check-deposit-id: Str): Map {
+  return-check-deposit(check-deposit-id, {})
+},
+(check-deposit-id: Str, opts: Map): Map {
+  simulate(`/simulations/check_deposits/${seg(check-deposit-id)}/return`, {}, [], opts, "return-check-deposit")
+}
+
+reject-check-deposit
+meta {
+    doc: """Simulate Increase rejecting a Check Deposit (e.g. an unreadable image)."""
+}
+fn
+(check-deposit-id: Str): Map {
+  reject-check-deposit(check-deposit-id, {})
+},
+(check-deposit-id: Str, opts: Map): Map {
+  simulate(`/simulations/check_deposits/${seg(check-deposit-id)}/reject`, {}, [], opts, "reject-check-deposit")
+}

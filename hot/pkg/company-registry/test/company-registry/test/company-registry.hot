@@ -1,0 +1,374 @@
+::company-registry::test::company-registry ns
+meta ["test"]
+
+::fx ::company-registry::test::fixtures
+::api ::company-registry::api
+::gleif ::company-registry::gleif
+::sec ::company-registry::sec
+::ch ::company-registry::companies-house
+::cr ::company-registry
+
+HttpResponse ::hot::http/HttpResponse
+
+// ============================================================================
+// Settings resolver
+// ============================================================================
+
+test-resolve-defaults
+meta ["test"]
+fn () {
+    cfg ::api/resolve({})
+    assert-eq("https://api.gleif.org/api/v1", cfg.gleif-base-url)
+    assert-eq("https://api.company-information.service.gov.uk", cfg.companies-house-base-url)
+    assert-eq("https://document-api.company-information.service.gov.uk", cfg.document-base-url)
+    assert-eq(null, cfg.user-agent)
+    assert-eq(null, cfg.api-key)
+    assert-eq(["gleif"], cfg.sources, "only sources with credentials by default")
+}
+
+test-resolve-opts-override
+meta ["test"]
+fn () {
+    cfg ::api/resolve({user-agent: "Acme ops@acme.test", api-key: "k-test", companies-house-base-url: "https://api-sandbox.company-information.service.gov.uk/"})
+    assert-eq("Acme ops@acme.test", cfg.user-agent)
+    assert-eq("k-test", cfg.api-key)
+    assert-eq("https://api-sandbox.company-information.service.gov.uk", cfg.companies-house-base-url)
+    assert-eq(["gleif", "sec", "companies-house"], cfg.sources)
+    assert-eq(["sec"], ::api/resolve({sources: "sec"}).sources)
+    assert-eq(null, ::hot::ctx/get("company-registry.companies-house.api-key"), "per-call keys are never written to ctx")
+}
+
+test-blank-credential-is-an-err-naming-the-key
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"company-registry.companies-house.api-key": "ctx-key", "company-registry.sec.user-agent": "Ctx ops@ctx.test"})
+    for-each(["api-key", "user-agent"], (k) {
+      for-each(["", "  ", null], (v) {
+        out ::api/resolve(assoc({}, k, v))
+        assert(is-err(out), `blank ${k} never falls back to context`)
+        assert(::hot::str/contains(err-message(out), k), `the Err names ${k}`)
+      })
+    })
+    ::hot::ctx/set({"company-registry.companies-house.api-key": null, "company-registry.sec.user-agent": null})
+}
+
+test-blank-credential-reaches-every-caller-as-an-err
+meta ["test"]
+fn () {
+    assert(is-err(::ch/company("00445790", {api-key: ""})), "Companies House")
+    assert(is-err(::sec/submissions(320193, {user-agent: ""})), "SEC")
+    assert(is-err(::gleif/search("x", {api-key: ""})), "GLEIF")
+    assert(is-err(::company-registry/lookup("x", {api-key: ""})), "lookup")
+}
+
+test-keyed-url-needs-a-per-call-key
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"company-registry.companies-house.api-key": "ctx-key"})
+    for-each(["companies-house-base-url", "document-base-url"], (k) {
+      out ::api/resolve(assoc({}, k, "https://proxy.example"))
+      assert(is-err(out), `the context key never goes to ${k}`)
+      assert(::hot::str/contains(err-message(out), k), `names ${k}`)
+      assert(::hot::str/contains(err-message(out), "api-key"), "names api-key")
+      assert(is-ok(::api/resolve(assoc({api-key: "t"}, k, "https://proxy.example"))), "fine with a per-call key")
+    })
+    assert-eq("https://gleif.example", ::api/resolve({gleif-base-url: "https://gleif.example/"}).gleif-base-url, "GLEIF takes no credential")
+    ::hot::ctx/set({"company-registry.companies-house.api-key": null})
+}
+
+test-resolve-marks-and-returns-credentials-unchanged
+meta ["test"]
+fn () {
+    cfg ::api/resolve({api-key: "marked-ch-key", user-agent: "Marked Co marked@acme.test"})
+    assert-eq("marked-ch-key", cfg.api-key)
+    assert-eq("Marked Co marked@acme.test", cfg.user-agent)
+}
+
+test-missing-credentials-are-errors
+meta ["test"]
+fn () {
+    ua ::api/require-user-agent(::api/resolve({}))
+    assert(is-err(ua), "SEC needs a user-agent")
+    assert(::hot::str/contains(err-message(ua), "company-registry.sec.user-agent"), "names the ctx key")
+    assert(is-err(::api/require-api-key(::api/resolve({}))), "Companies House needs a key")
+    assert(is-err(::sec/submissions(320193, {})), "fails before any request")
+    assert(is-err(::ch/company("00445790", {})), "fails before any request")
+}
+
+// ============================================================================
+// Transport helpers
+// ============================================================================
+
+test-query-string-drops-unset
+meta ["test"]
+fn () {
+    assert-eq("?q=apple+inc", ::api/query-string({q: "apple inc", page: null, field: ""}))
+    assert-eq("", ::api/query-string({a: null}))
+    assert-eq("?filter%5Bfulltext%5D=a%26b", ::api/query-string({"filter[fulltext]": "a&b"}))
+}
+
+test-path-segment
+meta ["test"]
+fn () {
+    assert-eq("a%2Fb%20c", ::api/path-segment("a/b c"))
+    assert-eq("42", ::api/path-segment(42))
+}
+
+test-http-error-gleif
+meta ["test"]
+fn () {
+    response HttpResponse({status: 404, headers: {}, body: {errors: [{status: "404", title: "Resource not found", detail: "Related resource not found"}]}})
+    e untype(::api/http-error("gleif", response, "https://api.gleif.org/api/v1/x"))
+    assert-eq("gleif: HTTP 404: Related resource not found", e.message)
+    assert(::api/is-not-found(e), "404")
+}
+
+test-http-error-companies-house-rate-limit
+meta ["test"]
+fn () {
+    response HttpResponse({status: 429, headers: {retry-after: "120"}, body: {errors: [{error: "rate-limit-exceeded", type: "ch:service"}]}})
+    e untype(::api/http-error("companies-house", response, "https://api.company-information.service.gov.uk/search/companies"))
+    assert-eq(120, e.retry-after)
+    assert-eq("companies-house: HTTP 429: rate-limit-exceeded", e.message)
+    bare untype(::api/http-error("sec", HttpResponse({status: 403, headers: {retry-after: "soon"}, body: null}), "https://data.sec.gov/x"))
+    assert-eq(null, bare.retry-after, "non-numeric Retry-After is ignored")
+    assert-eq("sec: HTTP 403 for https://data.sec.gov/x", bare.message)
+}
+
+test-columns-to-rows
+meta ["test"]
+fn () {
+    rows ::api/columns-to-rows({a: [1, 2, 3], b: ["x", "y", "z"], c: [true]}, 2)
+    assert-eq([{a: 1, b: "x", c: true}, {a: 2, b: "y", c: null}], rows)
+    assert-eq([], ::api/columns-to-rows({}, 5))
+}
+
+// ============================================================================
+// GLEIF
+// ============================================================================
+
+test-gleif-params
+meta ["test"]
+fn () {
+    assert-eq({"page[size]": null, "page[number]": null}, ::gleif/page-params({}))
+    assert-eq({"page[size]": 200, "page[number]": 3}, ::gleif/page-params({page-size: 500, page: 3}), "page size capped at 200")
+    assert-eq({"filter[entity.status]": "ACTIVE"}, ::gleif/filter-params({"entity.status": "ACTIVE"}))
+    p ::gleif/search-params("apple inc", {page-size: 10, filters: {"entity.legalAddress.country": "US"}})
+    assert-eq("?filter%5Bfulltext%5D=apple+inc&filter%5Bentity.legalAddress.country%5D=US&page%5Bsize%5D=10", ::api/query-string(p))
+}
+
+test-gleif-lei
+meta ["test"]
+fn () {
+    assert-eq("/lei-records/HWUPKR0MPOU8FGXBT394", ::gleif/lei-path(" hwupkr0mpou8fgxbt394 "))
+    assert(::gleif/is-lei("HWUPKR0MPOU8FGXBT394"), "Apple Inc.")
+    assert(::gleif/is-lei("549300G81RQKP7XW2N18"), "Apple Operations International")
+    assert(not(::gleif/is-lei("HWUPKR0MPOU8FGXBT395")), "bad check digits")
+    assert(not(::gleif/is-lei("APPLE")), "too short")
+}
+
+test-gleif-completions-and-paging
+meta ["test"]
+fn () {
+    assert-eq([{name: "Apple Inc.", lei: "HWUPKR0MPOU8FGXBT394"}], ::gleif/completions(::fx/GLEIF_FUZZY))
+    assert-eq([], ::gleif/completions(null))
+    assert-eq(2, ::gleif/next-page(::fx/GLEIF_PAGE))
+    assert-eq(null, ::gleif/next-page(::fx/GLEIF_LAST_PAGE))
+    assert-eq(null, ::gleif/next-page({}))
+}
+
+test-gleif-collect-follows-pages
+meta ["test"]
+fn () {
+    fetch (o) {
+      n o.page
+      {data: [`p${n}-a`, `p${n}-b`], meta: {pagination: {currentPage: n, lastPage: 3}}}
+    }
+
+    assert-eq(["p1-a", "p1-b", "p2-a", "p2-b", "p3-a", "p3-b"], ::gleif/collect(fetch, {}, 100))
+    assert-eq(["p1-a", "p1-b", "p2-a"], ::gleif/collect(fetch, {}, 3))
+}
+
+// ============================================================================
+// SEC
+// ============================================================================
+
+test-sec-cik
+meta ["test"]
+fn () {
+    assert-eq("0000320193", ::sec/pad-cik(320193))
+    assert-eq("0000320193", ::sec/pad-cik("CIK0000320193"))
+    assert-eq("0000320193", ::sec/pad-cik(" 320193 "))
+    assert-eq("320193", ::sec/cik-digits("0000320193"))
+    assert(is-err(::sec/cik-digits("12345678901")), "more than ten digits")
+    assert(is-err(::sec/cik-digits("AAPL")), "not a CIK")
+}
+
+test-sec-urls
+meta ["test"]
+fn () {
+    assert-eq("https://data.sec.gov/submissions/CIK0000320193.json", ::sec/submissions-url(320193))
+    assert-eq("https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json", ::sec/company-facts-url("320193"))
+    assert-eq("https://data.sec.gov/api/xbrl/companyconcept/CIK0000320193/us-gaap/AccountsPayableCurrent.json", ::sec/company-concept-url(320193, "us-gaap", "AccountsPayableCurrent"))
+    assert-eq("https://data.sec.gov/api/xbrl/frames/us-gaap/AccountsPayableCurrent/USD/CY2019Q1I.json", ::sec/frames-url("us-gaap", "AccountsPayableCurrent", "USD", "CY2019Q1I"))
+    assert-eq("000032019324000123", ::sec/accession-plain("0000320193-24-000123"))
+    assert-eq("https://www.sec.gov/Archives/edgar/data/320193/000032019324000123/aapl-20240928.htm", ::sec/filing-document-url("0000320193", "0000320193-24-000123", "aapl-20240928.htm"))
+    assert-eq("https://www.sec.gov/Archives/edgar/data/320193/000114036126041201/xslF345X06/form4.xml", ::sec/filing-document-url(320193, "0001140361-26-041201", "xslF345X06/form4.xml"), "sub-paths keep their slashes")
+    assert-eq("https://www.sec.gov/Archives/edgar/data/320193/000032019324000123/0000320193-24-000123-index.htm", ::sec/filing-index-url(320193, "0000320193-24-000123"))
+}
+
+test-sec-tickers
+meta ["test"]
+fn () {
+    rows ::sec/parse-tickers(::fx/SEC_TICKERS)
+    assert-eq(4, length(rows))
+    assert-eq({cik: "0000320193", ticker: "AAPL", title: "Apple Inc."}, ::sec/find-ticker(rows, "aapl"))
+    assert-eq(null, ::sec/find-ticker(rows, "ZZZZ"))
+    assert-eq(["AAPL", "APLE"], map(::sec/search-tickers(rows, "apple", 5), (r) { r.ticker }))
+    assert-eq(1, length(::sec/search-tickers(rows, "apple", 1)))
+}
+
+test-sec-recent-filings
+meta ["test"]
+fn () {
+    all ::sec/recent-filings(::fx/SEC_SUBMISSIONS, 10, {})
+    assert-eq(3, length(all))
+    assert-eq("0001140361-26-041201", first(all).accessionNumber)
+    assert-eq("https://www.sec.gov/Archives/edgar/data/320193/000114036126041201/xslF345X06/form4.xml", first(all).url)
+    tenk ::sec/recent-filings(::fx/SEC_SUBMISSIONS, 10, {forms: ["10-K"]})
+    assert-eq(1, length(tenk))
+    assert-eq("https://www.sec.gov/Archives/edgar/data/320193/000032019325000079/aapl-20250927.htm", first(tenk).url)
+    assert-eq(1, length(::sec/recent-filings(::fx/SEC_SUBMISSIONS, 1, {})))
+}
+
+test-sec-full-text-params
+meta ["test"]
+fn () {
+    p ::sec/full-text-params("\"climate risk\"", {forms: ["10-K", "10-Q"], start-date: "2025-01-01", end-date: "2025-03-31", ciks: [320193]})
+    assert-eq("?q=%22climate+risk%22&forms=10-K%2C10-Q&ciks=0000320193&dateRange=custom&startdt=2025-01-01&enddt=2025-03-31", ::api/query-string(p))
+    assert-eq("?q=x", ::api/query-string(::sec/full-text-params("x", {})), "unset options omitted")
+}
+
+// ============================================================================
+// Companies House
+// ============================================================================
+
+test-ch-auth-header
+meta ["test"]
+fn () {
+    // python: base64.b64encode(b"my-ch-key:")
+    assert-eq("Basic bXktY2gta2V5Og==", ::ch/auth-header("my-ch-key"))
+}
+
+test-ch-company-number
+meta ["test"]
+fn () {
+    assert-eq("00000006", ::ch/company-number("6"))
+    assert-eq("00445790", ::ch/company-number(" 445790 "))
+    assert-eq("SC123456", ::ch/company-number("sc123456"))
+    assert-eq("SC001234", ::ch/company-number("SC1234"))
+    assert-eq("OC301540", ::ch/company-number("OC301540"))
+    assert(is-err(::ch/company-number("../etc")), "rejected")
+}
+
+test-ch-links-and-paging
+meta ["test"]
+fn () {
+    assert-eq("AbC123", ::ch/officer-id-from-link("/officers/AbC123/appointments"))
+    assert-eq(null, ::ch/officer-id-from-link(null))
+    assert-eq("abc-123_X", ::ch/document-id("https://frontend-doc-api.company-information.service.gov.uk/document/abc-123_X"))
+    assert-eq("abc123", ::ch/document-id("https://document-api.company-information.service.gov.uk/document/abc123/content"))
+    assert-eq("abc123", ::ch/document-id("abc123"))
+    assert-eq(null, ::ch/document-id("not a link"))
+    assert-eq({items_per_page: null, start_index: null}, ::ch/page-params({}))
+    assert-eq(35, ::ch/next-start({start_index: 0, items: range(0, 35), total_results: 80}))
+    assert-eq(null, ::ch/next-start({start_index: 70, items: range(0, 10), total_results: 80}))
+    assert-eq(null, ::ch/next-start({start_index: 0, items: [], total_results: 80}))
+}
+
+test-ch-collect-follows-start-index
+meta ["test"]
+fn () {
+    fetch (o) {
+      s o.start-index
+      {start_index: s, items: [s, add(s, 1)], total_results: 5}
+    }
+
+    assert-eq([0, 1, 2, 3, 4, 5], ::ch/collect(fetch, {}, 100), "the last page may run past the total")
+    assert-eq([0, 1, 2], ::ch/collect(fetch, {}, 3))
+}
+
+// ============================================================================
+// Normalized Company records
+// ============================================================================
+
+test-from-gleif
+meta ["test"]
+fn () {
+    c untype(::cr/from-gleif(::fx/GLEIF_RECORD))
+    assert-eq("gleif", c.source)
+    assert-eq("APPLE OPERATIONS INTERNATIONAL LIMITED", c.name)
+    assert-eq({lei: "549300G81RQKP7XW2N18", registered-as: "76941"}, c.identifiers, "null bic omitted")
+    assert-eq("IE", c.jurisdiction)
+    assert-eq("active", c.status)
+    assert-eq("1980-08-06", c.incorporation-date)
+    assert-eq(2, length(c.addresses))
+    a first(c.addresses)
+    assert-eq("legal", a.kind)
+    assert-eq(["HOLLYHILL INDUSTRIAL ESTATE", "HOLLYHILL"], a.lines)
+    assert-eq("T23 YK84", a.postal-code)
+    assert-eq([], c.parents)
+}
+
+test-from-sec
+meta ["test"]
+fn () {
+    c untype(::cr/from-sec(::fx/SEC_SUBMISSIONS))
+    assert-eq("Apple Inc.", c.name)
+    assert-eq({cik: "0000320193", tickers: ["AAPL"], ein: "942404110"}, c.identifiers)
+    assert-eq("US-CA", c.jurisdiction)
+    assert-eq(["business", "mailing"], map(c.addresses, (a) { a.kind }))
+    assert-eq("US", first(c.addresses).country)
+}
+
+test-from-sec-ticker
+meta ["test"]
+fn () {
+    c untype(::cr/from-sec-ticker({cik: "0000320193", ticker: "AAPL", title: "Apple Inc."}))
+    assert-eq({cik: "0000320193", tickers: ["AAPL"]}, c.identifiers)
+}
+
+test-from-companies-house
+meta ["test"]
+fn () {
+    c untype(::cr/from-companies-house(::fx/CH_PROFILE))
+    assert-eq("TESCO PLC", c.name)
+    assert-eq({uk-company-number: "00445790"}, c.identifiers)
+    assert-eq("GB-EAW", c.jurisdiction)
+    assert-eq("active", c.status)
+    assert-eq("1947-11-27", c.incorporation-date)
+    a first(c.addresses)
+    assert-eq("registered-office", a.kind)
+    assert-eq(["Tesco House, Shire Park", "Kestrel Way"], a.lines)
+    assert-eq("Welwyn Garden City", a.city)
+    s untype(::cr/from-companies-house(::fx/CH_SEARCH_ITEM))
+    assert-eq("TESCO PLC", s.name, "search items use title")
+    assert-eq("GB", s.jurisdiction)
+    assert-eq(["Tesco House", "Shire Park, Kestrel Way"], first(s.addresses).lines)
+}
+
+test-lookup-unknown-source
+meta ["test"]
+fn () {
+    out ::cr/lookup("Acme", {sources: ["nowhere"]})
+    assert-eq([], out.companies)
+    assert-eq("nowhere", first(out.errors).source)
+}
+
+test-lookup-missing-credentials-reported
+meta ["test"]
+fn () {
+    out ::cr/lookup("Acme", {sources: ["sec", "companies-house"]})
+    assert-eq([], out.companies)
+    assert-eq(["sec", "companies-house"], map(out.errors, (e) { e.source }), "each source fails on its own")
+}

@@ -1,0 +1,217 @@
+::xero::test::oauth ns
+meta ["test"]
+
+::oauth ::xero::oauth
+::auth ::xero::auth
+::uri ::hot::uri
+
+APP {client-id: "XERO-CLIENT", client-secret: "xero-secret"}
+
+clear-ctx fn () {
+    ::hot::ctx/set({
+        "xero.access.token": "",
+        "xero.refresh.token": "",
+        "xero.token.store": "",
+        "xero.token.store-key": "",
+        "xero.custom-connection": "",
+        "xero.scopes": "",
+        "xero.client.id": "",
+        "xero.client.secret": "",
+        "xero.tenant.id": ""
+    })
+}
+
+// ---------------------------------------------------------------------------
+// OAuth
+// ---------------------------------------------------------------------------
+
+test-basic-auth-vector
+meta ["test"] fn () {
+    // base64("XERO-CLIENT:xero-secret") generated independently with Python
+    assert-eq("Basic WEVSTy1DTElFTlQ6eGVyby1zZWNyZXQ=", ::oauth/basic-auth("XERO-CLIENT", "xero-secret"))
+}
+
+test-authorize-url
+meta ["test"] fn () {
+    url ::oauth/authorize-url("XERO-CLIENT", "https://app.example.com/oauth/xero", ["offline_access", "accounting.invoices", "offline_access"], "csrf-1")
+    prefix "https://login.xero.com/identity/connect/authorize?"
+    assert(starts-with(url, prefix))
+    q ::uri/decode-query(slice(url, length(prefix), length(url)))
+    assert-eq("code", q.response_type)
+    assert-eq("XERO-CLIENT", q.client_id)
+    assert-eq("offline_access accounting.invoices", q.scope, "scopes are de-duplicated and space-joined")
+    assert-eq("csrf-1", q.state)
+    assert(is-null(get(q, "code_challenge")))
+}
+
+test-authorize-url-pkce
+meta ["test"] fn () {
+    // RFC 7636 appendix B vector
+    url ::oauth/authorize-url("id", "https://x.example/cb", "openid offline_access", "s", {code-verifier: "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"})
+    assert(contains(url, "code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"), url)
+    assert(contains(url, "code_challenge_method=S256"))
+    assert(is-err(::oauth/authorize-url("id", "https://x.example/cb", [], "s")), "a scope is required")
+    assert(is-err(::oauth/authorize-url("id", "https://x.example/cb", "openid", " ")), "a state is required")
+}
+
+test-finance-scopes
+meta ["test"] fn () {
+    assert(in("offline_access", ::xero/SCOPES_FINANCE_OPS), "refresh tokens need offline_access")
+    assert(in("accounting.invoices", ::xero/SCOPES_FINANCE_OPS), "granular scopes")
+    assert(not(in("accounting.transactions", ::xero/SCOPES_FINANCE_OPS)), "no deprecated broad scope")
+    assert(in("accounting.invoices.read", ::xero/SCOPES_READ_ONLY))
+}
+
+test-token-requests
+meta ["test"] fn () {
+    req ::oauth/build-token-request(::oauth/build-refresh-body("RT-1"), "XERO-CLIENT", "xero-secret")
+    assert-eq("https://identity.xero.com/connect/token", req.url)
+    assert-eq("Basic WEVSTy1DTElFTlQ6eGVyby1zZWNyZXQ=", req.headers.Authorization)
+    form ::uri/decode-query(req.body)
+    assert-eq({grant_type: "refresh_token", refresh_token: "RT-1"}, form, "no client credentials in the body")
+
+    pkce ::oauth/build-token-request(::oauth/build-exchange-body("CODE", "https://x.example/cb", "verifier-1"), "PKCE-APP", null)
+    assert(is-null(get(pkce.headers, "Authorization")), "PKCE apps have no secret")
+    pform ::uri/decode-query(pkce.body)
+    assert-eq("PKCE-APP", pform.client_id)
+    assert-eq("verifier-1", pform.code_verifier)
+    assert-eq("authorization_code", pform.grant_type)
+
+    assert-eq({grant_type: "client_credentials", scope: "accounting.invoices"}, ::oauth/build-client-credentials-body("accounting.invoices"))
+    assert-eq({grant_type: "client_credentials"}, ::oauth/build-client-credentials-body(""), "no scope means every granted scope")
+}
+
+test-revoke-request
+meta ["test"] fn () {
+    req ::oauth/build-revoke-request("RT-1", "XERO-CLIENT", "xero-secret")
+    assert-eq("https://identity.xero.com/connect/revocation", req.url)
+    assert-eq("token=RT-1", req.body)
+}
+
+test-token-set-rotation
+meta ["test"] fn () {
+    t ::oauth/token-set({access_token: "AT-2", refresh_token: "RT-2", expires_in: 1800, token_type: "Bearer", scope: "offline_access"}, "RT-1", 0)
+    assert-eq("RT-2", t.refresh-token)
+    assert(t.rotated)
+    assert-eq(1800000, t.expires-at)
+    cc ::oauth/token-set({access_token: "AT", expires_in: 1800}, null, 0)
+    assert(is-null(cc.refresh-token), "client credentials have no refresh token")
+    assert(not(cc.rotated))
+}
+
+test-token-error
+meta ["test"] fn () {
+    e ::oauth/token-error("xero: token refresh failed", {status: 400, body: {error: "invalid_grant"}})
+    assert-eq("xero: token refresh failed: invalid_grant", e.message)
+    assert-eq("invalid_grant", e.error-code)
+}
+
+test-app-credentials
+meta ["test"] fn () {
+    clear-ctx()
+    assert(is-err(::oauth/app-credentials({}, false)))
+    pkce ::oauth/app-credentials({client-id: "id"}, false)
+    assert(is-null(pkce.client-secret), "the secret is optional for PKCE")
+    assert(is-err(::oauth/app-credentials({client-id: "id"}, true)), "but required for client credentials")
+}
+
+test-app-credentials-blank-never-falls-back
+meta ["test"] fn () {
+    ::hot::ctx/set({"xero.client.id": "ctx-id", "xero.client.secret": "ctx-sec"})
+    from-ctx ::oauth/app-credentials({}, true)
+    secret ::oauth/app-credentials({client-secret: ""}, false)
+    secret-null ::oauth/app-credentials({client-secret: null}, false)
+    id ::oauth/app-credentials({client-id: "  "}, false)
+    refreshed ::oauth/refresh("RT", {client-secret: ""})
+    clear-ctx()
+    assert-eq("ctx-sec", from-ctx.client-secret)
+    assert(is-err(secret), "a blank secret never falls back to context")
+    assert(contains(err-message(secret), "client-secret"), err-message(secret))
+    assert(is-err(secret-null))
+    assert(contains(err-message(id), "client-id"), err-message(id))
+    assert(is-err(refreshed), "token calls check it before sending")
+}
+
+test-mark-tokens-returns-the-body-unchanged
+meta ["test"] fn () {
+    body {access_token: "AT-VALUE", refresh_token: "RT-VALUE", token_type: "Bearer", expires_in: 1800}
+    assert-eq(body, ::oauth/mark-tokens(body))
+    assert-eq({access_token: "AT-VALUE"}, ::oauth/mark-tokens({access_token: "AT-VALUE"}), "absent tokens are fine")
+}
+
+// ---------------------------------------------------------------------------
+// Auth
+// ---------------------------------------------------------------------------
+
+test-credentials-from
+meta ["test"] fn () {
+    assert-eq("token", ::auth/credentials-from({access-token: "AT", refresh-token: "RT"}).kind)
+    r ::auth/credentials-from({refresh-token: "RT", ...APP})
+    assert-eq("refresh", r.kind)
+    k ::auth/credentials-from({token-store: "xero-tokens", refresh-token: "SEED", ...APP})
+    assert-eq("keeper", k.kind)
+    assert-eq("default", k.key, "keeper entries default to one key per authorisation")
+    assert-eq("SEED", k.seed-refresh-token)
+    cc ::auth/credentials-from({custom-connection: "true", scopes: ["accounting.invoices.read"], ...APP})
+    assert-eq("client-credentials", cc.kind)
+    assert-eq("accounting.invoices.read", cc.scopes)
+    assert(is-err(::auth/credentials-from({custom-connection: true, client-id: "id"})), "a Custom Connection needs the secret")
+    assert(is-err(::auth/credentials-from({refresh-token: "RT"})), "refresh needs a client id")
+    none ::auth/credentials-from({})
+    assert(is-err(none))
+    assert(contains(err-message(none), "xero.refresh.token"))
+}
+
+test-merge-sources
+meta ["test"] fn () {
+    ctx {refresh-token: "CTX-RT", client-id: "ctx-id", client-secret: "ctx-sec"}
+    assert-eq("CTX-RT", ::auth/merge-sources({tenant-id: "x"}, ctx).refresh-token, "non-credential opts keep context")
+    m ::auth/merge-sources({refresh-token: "USER-RT"}, ctx)
+    assert-eq("USER-RT", m.refresh-token)
+    assert-eq("ctx-id", m.client-id)
+}
+
+test-cache-and-rotation
+meta ["test"] fn () {
+    clear-ctx()
+    creds {kind: "refresh", refresh-token: "RT1", ...APP}
+    key ::auth/cache-key(creds)
+    assert(not(contains(key, "RT1")), "cache keys are hashed")
+    ::hot::ctx/set-secret(key, {access-token: "CACHED", expires-at: add(::xero::oauth/now-ms(), 600000), refresh-token: "RT2"})
+    auth ::auth/bearer(creds)
+    assert-eq("CACHED", auth.token)
+    assert(auth.cached)
+    assert-eq("RT2", ::auth/current-refresh-token({refresh-token: "RT1", ...APP}), "the rotated token is reported for persisting")
+    assert(is-null(::auth/current-refresh-token({access-token: "AT"})))
+    ::auth/evict(creds, key)
+    assert(not(::auth/is-fresh(::hot::ctx/get(key), 0)))
+    assert-eq("RT2", ::auth/newest-refresh-token(::hot::ctx/get(key), "RT1"), "the newest refresh token survives eviction")
+    clear-ctx()
+}
+
+test-token-entry
+meta ["test"] fn () {
+    e ::auth/token-entry({access-token: "AT", refresh-token: "RT", expires-in: 1800}, 0)
+    assert-eq(mul(1740, 1000), e.expires-at)
+    assert(::auth/is-fresh(e, 1))
+    d ::auth/token-entry({access-token: "AT"}, 0)
+    assert-eq(mul(1740, 1000), d.expires-at, "Xero access tokens default to 30 minutes")
+}
+
+test-mark-entry-returns-the-entry-unchanged
+meta ["test"] fn () {
+    entry {access-token: "AT-VALUE", refresh-token: "RT-VALUE", expires-at: 1000}
+    assert-eq(entry, ::auth/mark-entry(entry))
+    assert(is-null(::auth/mark-entry(null)))
+}
+
+test-resolve-credentials-blank-never-falls-back
+meta ["test"] fn () {
+    ::hot::ctx/set({"xero.access.token": "CTX-AT"})
+    blank ::auth/access-token({access-token: ""})
+    latest ::auth/current-refresh-token({refresh-token: ""})
+    clear-ctx()
+    assert(is-err(blank), "a blank access token never falls back to context")
+    assert(contains(err-message(blank), "access-token"), err-message(blank))
+    assert(is-null(latest))
+}

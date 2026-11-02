@@ -1,0 +1,61 @@
+::modern-treasury::transactions ns
+meta {
+    doc: """Transactions: money movements as your bank reports them on an internal account (`posted` or pending), with the payment orders, expected payments and returns they reconcile to."""
+}
+
+::api ::modern-treasury::api
+seg ::modern-treasury::api/seg
+
+list-transactions
+meta {
+    doc: """
+    GET /api/transactions: one page (`{items, after_cursor, per_page}`).
+    Filters: `internal_account_id`, `posted` (Bool), `direction`,
+    `payment_type`, `counterparty_id`, `virtual_account_id`,
+    `vendor_id`, `description`, `as_of_date_start`, `as_of_date_end`,
+    `metadata`, `per_page`, `after_cursor`.
+
+    **Example**
+
+    ```hot
+    page ::modern-treasury::transactions/list-transactions({internal_account_id: "0f8e3719-3dfd-4613-9bbf-c0333781b59f", posted: true})
+    ```
+    """
+}
+fn
+(): Map {
+  list-transactions({})
+},
+(params: Map): Map {
+  list-transactions(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/list-page("/api/transactions", params, opts)
+}
+
+get-transaction
+meta {
+    doc: """GET /api/transactions/{id}: retrieve a transaction (`reconciled` says whether it matched)."""
+}
+fn
+(transaction-id: Str): Map {
+  get-transaction(transaction-id, {})
+},
+(transaction-id: Str, opts: Map): Map {
+  ::api/call("GET", `/api/transactions/${seg(transaction-id)}`, {}, opts)
+}
+
+list-line-items
+meta {
+    doc: """GET /api/transactions/{id}/line_items: one page of the line items a transaction is split into."""
+}
+fn
+(transaction-id: Str): Map {
+  list-line-items(transaction-id, {})
+},
+(transaction-id: Str, params: Map): Map {
+  list-line-items(transaction-id, params, {})
+},
+(transaction-id: Str, params: Map, opts: Map): Map {
+  ::api/list-page(`/api/transactions/${seg(transaction-id)}/line_items`, params, opts)
+}

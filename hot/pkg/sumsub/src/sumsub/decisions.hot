@@ -1,0 +1,121 @@
+::sumsub::decisions ns
+meta {
+    doc: """
+    Turn a Sumsub review into a decision your code can branch on:
+    `approved`, `declined` (final, or with a resubmission allowed) or
+    `pending`.
+
+    Works on everything that carries a review: `get-status` results,
+    applicants from `get-applicant` (under `review`), transactions from
+    `::sumsub::kyt` (under `review`), raw webhook payloads, and events
+    from `::sumsub::webhooks/parse-event`. Anything not clearly
+    completed-and-GREEN is never `approved`.
+    """
+}
+
+// reviewStatus values Sumsub documents (open).
+REVIEW_STATUSES ["init", "pending", "prechecked", "queued", "completed", "onHold", "awaitingService", "awaitingUser"]
+
+// Reject labels that make Sumsub take automatic action (fraud signals).
+FRAUD_LABELS ["FORGERY", "FRAUDULENT_PATTERNS", "DOCUMENT_TEMPLATE", "FRAUDULENT_LIVENESS", "STOLEN_DOCS", "BLOCKLIST"]
+
+review-of
+meta {
+    doc: """The flat review fields of `source`: `{status, answer, reject-type, labels, button-ids, moderation-comment, client-comment}`. Reads a parsed webhook event, a top-level `reviewStatus`/`reviewResult` (status, webhook payload) or a nested `review` (applicant, transaction). Exposed for testing."""
+}
+fn (source: Any): Map {
+  s if(is-map(source), source, {})
+  cond {
+    // A ::sumsub::webhooks/parse-event result.
+    is-some(get(s, "review-status")) => {
+      {
+        status: get(s, "review-status"),
+        answer: get(s, "review-answer"),
+        reject-type: get(s, "reject-type"),
+        labels: or(get(s, "reject-labels"), []),
+        button-ids: or(get(s, "button-ids"), []),
+        moderation-comment: get(s, "moderation-comment"),
+        client-comment: get(s, "client-comment")
+      }
+    }
+
+    is-some(get(s, "reviewStatus")) => { review-fields(s) }
+    is-map(get(s, "review")) => { review-fields(get(s, "review")) }
+    => { review-fields({}) }
+  }
+}
+
+review-fields fn (review: Map): Map {
+  result if(is-map(get(review, "reviewResult")), get(review, "reviewResult"), {})
+  {
+    status: get(review, "reviewStatus"),
+    answer: get(result, "reviewAnswer"),
+    reject-type: get(result, "reviewRejectType"),
+    labels: or(get(result, "rejectLabels"), []),
+    button-ids: or(get(result, "buttonIds"), []),
+    moderation-comment: get(result, "moderationComment"),
+    client-comment: get(result, "clientComment")
+  }
+}
+
+review-outcome
+meta {
+    doc: """
+    Map a review to `{outcome, final, can-retry, on-hold, fraud,
+    review-status, review-answer, reject-type, reject-labels,
+    button-ids, moderation-comment, client-comment}`:
+
+    - `outcome` is `"approved"` only for `reviewStatus` `completed` with
+      `reviewAnswer` `GREEN`; `"declined"` for `completed` with `RED`;
+      `"pending"` for everything else (`init`, `pending`, `queued`,
+      `onHold`, `awaitingService`, `awaitingUser`, a missing review, or
+      an unexpected answer).
+    - `final` is true for a decline without a resubmission
+      (`reviewRejectType` other than `RETRY`); `can-retry` is true for
+      `RETRY`, when the applicant may upload again.
+    - `on-hold` is true for `onHold` (a compliance officer must act).
+    - `fraud` is true when a reject label is one of `FRAUD_LABELS`.
+
+    `moderation-comment` may be shown to the applicant;
+    `client-comment` is for your team only.
+
+    **Example**
+
+    ```hot
+    outcome ::sumsub::decisions/review-outcome(::sumsub::applicants/get-status("65f0c1e2a3b4c5d6e7f80912"))
+    outcome.outcome
+    ```
+    """
+}
+fn (source: Any): Map {
+  r review-of(source)
+  completed eq(r.status, "completed")
+  outcome cond {
+    and(completed, eq(r.answer, "GREEN")) => { "approved" }
+    and(completed, eq(r.answer, "RED")) => { "declined" }
+    => { "pending" }
+  }
+
+  declined eq(outcome, "declined")
+  labels if(is-vec(r.labels), r.labels, [])
+  {
+    outcome: outcome,
+    final: and(declined, ne(r.reject-type, "RETRY")),
+    can-retry: and(declined, eq(r.reject-type, "RETRY")),
+    on-hold: eq(r.status, "onHold"),
+    fraud: not(is-empty(filter(labels, (l) { in(l, FRAUD_LABELS) }))),
+    review-status: r.status,
+    review-answer: r.answer,
+    reject-type: r.reject-type,
+    reject-labels: labels,
+    button-ids: r.button-ids,
+    moderation-comment: r.moderation-comment,
+    client-comment: r.client-comment
+  }
+}
+
+is-approved
+meta {doc: """True only for a completed GREEN review."""}
+fn (source: Any): Bool {
+  eq(review-outcome(source).outcome, "approved")
+}

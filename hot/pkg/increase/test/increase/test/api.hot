@@ -1,0 +1,488 @@
+::increase::test::api ns
+meta ["test"]
+
+::api ::increase::api
+
+HttpResponse ::hot::http/HttpResponse
+
+// ============================================================================
+// Environments
+// ============================================================================
+
+test-environment-base-urls
+meta ["test"] fn () {
+    assert-eq("https://sandbox.increase.com", ::api/environment-base-url("sandbox"))
+    assert-eq("https://api.increase.com", ::api/environment-base-url("production"))
+    assert-eq("https://api.increase.com", ::api/environment-base-url(" Production "), "case and whitespace are forgiven")
+}
+
+test-environment-base-url-rejects-unknown
+meta ["test"] fn () {
+    assert(is-err(::api/environment-base-url("prod")), "a typo never falls back to a host")
+    assert(is-err(::api/environment-base-url("live")), "live is not an Increase environment name")
+    assert(is-err(::api/environment-base-url("")), "empty errs")
+    assert(is-err(::api/environment-base-url("https://evil.example.com")), "a URL is not accepted")
+}
+
+test-current-environment
+meta ["test"] fn () {
+    assert-eq("sandbox", ::api/current-environment(), "sandbox when increase.environment is unset")
+    assert(::api/is-sandbox(), "unset is sandbox")
+
+    ::hot::ctx/set({"increase.environment": "PRODUCTION"})
+    prod ::api/current-environment()
+    prod-sandbox ::api/is-sandbox()
+    ::hot::ctx/set({"increase.environment": "staging"})
+    bad ::api/current-environment()
+    bad-sandbox ::api/is-sandbox()
+    ::hot::ctx/set({"increase.environment": ""})
+
+    assert-eq("production", prod)
+    assert(not(prod-sandbox), "production is not sandbox")
+    assert(is-err(bad), "an unknown environment errs")
+    assert(not(bad-sandbox), "an invalid environment is never treated as sandbox")
+    assert-eq("sandbox", ::api/current-environment(), "an empty value falls back to sandbox")
+}
+
+test-require-sandbox
+meta ["test"] fn () {
+    assert-eq(true, ::api/require-sandbox("sandbox", "settle"))
+    out ::api/require-sandbox("production", "settle-ach-transfer")
+    assert(is-err(out), "production is refused")
+    assert(contains(err-message(out), "settle-ach-transfer"), "the error names the operation")
+}
+
+test-environment-of-opts
+meta ["test"] fn () {
+    assert-eq("sandbox", ::api/environment-of({}))
+    assert-eq("production", ::api/environment-of({environment: "production"}))
+    assert(is-err(::api/environment-of({environment: "prod"})), "a bad override errs")
+}
+
+// ============================================================================
+// Resolver: opts first, then context, then defaults
+// ============================================================================
+
+test-resolve-uses-context-when-opts-are-empty
+meta ["test"] fn () {
+    ::hot::ctx/set({"increase.api.key": "ctx_key", "increase.environment": "production"})
+    settings ::api/resolve({})
+    ::hot::ctx/set({"increase.api.key": "", "increase.environment": ""})
+    assert-eq("ctx_key", settings.api-key)
+    assert-eq("production", settings.environment)
+    assert-eq("https://api.increase.com", settings.base-url)
+}
+
+test-resolve-opts-override-context
+meta ["test"] fn () {
+    ::hot::ctx/set({"increase.api.key": "ctx_key", "increase.environment": "production"})
+    settings ::api/resolve({api-key: "tenant_b_key", environment: "sandbox", idempotency-key: "k1"})
+    after-key ::hot::ctx/get("increase.api.key")
+    after-env ::hot::ctx/get("increase.environment")
+    ::hot::ctx/set({"increase.api.key": "", "increase.environment": ""})
+    assert-eq("tenant_b_key", settings.api-key, "an api-key in opts replaces the context key")
+    assert-eq("sandbox", settings.environment)
+    assert-eq("https://sandbox.increase.com", settings.base-url)
+    assert-eq("k1", settings.idempotency-key)
+    assert-eq("ctx_key", after-key, "resolve never writes per-call credentials to context")
+    assert-eq("production", after-env)
+}
+
+test-resolve-defaults-and-errors
+meta ["test"] fn () {
+    missing ::api/resolve({})
+    assert(is-err(missing), "no key anywhere is an error")
+    assert(contains(err-message(missing), "increase.api.key"), "and says where to set it")
+    defaulted ::api/resolve({api-key: "k"})
+    assert-eq("sandbox", defaulted.environment, "sandbox by default")
+    assert(is-err(::api/resolve({api-key: "k", environment: "prod"})), "a bad environment in opts errs")
+    assert(is-err(::api/resolve({api-key: "  "})), "a blank key is no key")
+}
+
+// ============================================================================
+// Idempotency and required fields
+// ============================================================================
+
+test-resolve-blank-option-never-falls-back
+meta ["test"] fn () {
+    ::hot::ctx/set({"increase.api.key": "ctx_key"})
+    empty ::api/resolve({api-key: ""})
+    spaces ::api/resolve({api-key: "   "})
+    nothing ::api/resolve({api-key: null})
+    env ::api/resolve({environment: ""})
+    env-null ::api/resolve({api-key: "k", environment: null})
+    ::hot::ctx/set({"increase.api.key": ""})
+    assert(is-err(empty), "a blank key never falls back to context")
+    assert(contains(err-message(empty), "api-key"), "and the error names the key")
+    assert(is-err(spaces))
+    assert(is-err(nothing), "a null key is blank too")
+    assert(contains(err-message(nothing), "api-key"))
+    assert(is-err(env), "a blank environment never falls back to context")
+    assert(contains(err-message(env), "environment"))
+    assert(is-err(env-null))
+}
+
+test-resolve-environment-needs-a-per-call-key
+meta ["test"] fn () {
+    ::hot::ctx/set({"increase.api.key": "ctx_key", "increase.environment": "production"})
+    to-sandbox ::api/resolve({environment: "sandbox"})
+    same ::api/resolve({environment: "Production"})
+    with-key ::api/resolve({api-key: "tenant_key", environment: "sandbox"})
+    simulated ::increase::simulations/settle-ach-transfer("ach_transfer_1", {}, {environment: "sandbox"})
+    ::hot::ctx/set({"increase.environment": ""})
+    to-production ::api/resolve({environment: "production"})
+    ::hot::ctx/set({"increase.environment": "staging"})
+    bad-context ::api/resolve({environment: "sandbox"})
+    bad-context-with-key ::api/resolve({api-key: "tenant_key", environment: "sandbox"})
+    ::hot::ctx/set({"increase.api.key": "", "increase.environment": ""})
+
+    assert(is-err(to-sandbox), "a production key never goes to the sandbox host")
+    assert(contains(err-message(to-sandbox), "environment"), "the error names both keys")
+    assert(contains(err-message(to-sandbox), "api-key"))
+    assert-eq("https://api.increase.com", same.base-url, "the configured environment needs no key")
+    assert-eq("https://sandbox.increase.com", with-key.base-url, "a per-call key may choose its environment")
+    assert-eq("tenant_key", with-key.api-key)
+    assert(is-err(simulated), "a simulation can't borrow a production key")
+    assert(is-err(to-production), "a key for the default sandbox never goes to production")
+    assert(is-err(bad-context), "an invalid increase.environment can't be compared, so it errs")
+    assert-eq("sandbox", bad-context-with-key.environment, "a per-call key doesn't depend on context")
+}
+
+test-resolve-returns-marked-values-unchanged
+meta ["test"] fn () {
+    settings ::api/resolve({api-key: "tenant_key_value", environment: "sandbox"})
+    assert-eq("tenant_key_value", settings.api-key, "marking a credential doesn't change it")
+    assert-eq("Bearer tenant_key_value", ::api/build-request("GET", "https://sandbox.increase.com/accounts", {}, {}, settings.api-key).headers.Authorization)
+}
+
+test-option-headers
+meta ["test"] fn () {
+    assert-eq({Idempotency-Key: "k1"}, ::api/option-headers({idempotency-key: "k1"}))
+    assert-eq({}, ::api/option-headers({}), "no header without a key")
+    assert-eq({}, ::api/option-headers({idempotency-key: ""}), "an empty key sends no header")
+}
+
+test-require-idempotency-key
+meta ["test"] fn () {
+    ok ::api/require-idempotency-key({idempotency-key: "invoice-42"}, "create-ach-transfer")
+    assert-eq("invoice-42", get(ok, "idempotency-key"))
+
+    missing ::api/require-idempotency-key({}, "create-ach-transfer")
+    assert(is-err(missing), "a missing key errs")
+    assert(contains(err-message(missing), "create-ach-transfer"), "names the operation")
+    assert(is-err(::api/require-idempotency-key({idempotency-key: "  "}, "x")), "a blank key errs")
+
+    long join(map(range(0, 201), (i) { "k" }), "")
+    assert(is-err(::api/require-idempotency-key({idempotency-key: long}, "x")), "a key over 200 characters errs")
+}
+
+test-require-fields
+meta ["test"] fn () {
+    params {account_id: "account_1", amount: 100}
+    assert-eq(params, ::api/require-fields(params, ["account_id", "amount"], "op"))
+    assert-eq(["statement_descriptor"], ::api/missing-fields(params, ["account_id", "amount", "statement_descriptor"]))
+
+    out ::api/require-fields({account_number: "123456789012", amount: 1}, ["account_id"], "create-ach-transfer")
+    assert(is-err(out), "missing fields err")
+    assert(contains(err-message(out), "account_id"), "names the missing field")
+    assert(not(contains(err-message(out), "123456789012")), "never echoes values")
+}
+
+test-apply-approval-default
+meta ["test"] fn () {
+    assert-eq({amount: 1, require_approval: true}, ::api/apply-approval-default({amount: 1}, true))
+    assert-eq({amount: 1, require_approval: false}, ::api/apply-approval-default({amount: 1, require_approval: false}, true), "an explicit false is respected")
+    assert-eq({amount: 1}, ::api/apply-approval-default({amount: 1}, false), "nothing added when not required")
+}
+
+test-approval-required-by-default
+meta ["test"] fn () {
+    assert(not(::api/approval-required-by-default()), "off when unset")
+    ::hot::ctx/set({"increase.transfers.require-approval": "true"})
+    on-str ::api/approval-required-by-default()
+    ::hot::ctx/set({"increase.transfers.require-approval": true})
+    on-bool ::api/approval-required-by-default()
+    ::hot::ctx/set({"increase.transfers.require-approval": ""})
+    assert(on-str, "\"true\" turns it on")
+    assert(on-bool, "true turns it on")
+}
+
+// ============================================================================
+// Bodies and query strings
+// ============================================================================
+
+test-compact-drops-nulls-recursively
+meta ["test"] fn () {
+    body ::api/compact({
+        account_id: "account_1",
+        amount: 0,
+        require_approval: false,
+        individual_name: null,
+        preferred_effective_date: {date: null, settlement_schedule: "same_day"},
+        addenda: {category: "freeform", freeform: {entries: [{payment_related_information: "x", extra: null}]}}
+    })
+    assert-eq({
+        account_id: "account_1",
+        amount: 0,
+        require_approval: false,
+        preferred_effective_date: {settlement_schedule: "same_day"},
+        addenda: {category: "freeform", freeform: {entries: [{payment_related_information: "x"}]}}
+    }, body, "nulls dropped at every level; 0 and false kept")
+    assert(not(contains(to-json(body), "null")), "no JSON nulls on the wire")
+}
+
+test-query-string-flat-and-empty
+meta ["test"] fn () {
+    assert-eq("", ::api/query-string({}))
+    assert-eq("", ::api/query-string({cursor: null, account_id: null}), "nulls are dropped")
+    assert-eq("?account_id=account_1&limit=10", ::api/query-string({account_id: "account_1", limit: 10, cursor: null}))
+}
+
+test-query-string-in-lists-and-nesting
+meta ["test"] fn () {
+    assert-eq("?status.in=open%2Cclosed", ::api/query-string({"status.in": ["open", "closed"]}), "vectors are comma lists")
+    assert-eq("?status.in=open", ::api/query-string({status: {in: ["open"]}}), "nested maps join with dots")
+    assert-eq("?created_at.after=2026-01-01T00%3A00%3A00Z&created_at.before=2026-02-01T00%3A00%3A00Z",
+        ::api/query-string({created_at: {after: "2026-01-01T00:00:00Z", before: "2026-02-01T00:00:00Z", on_or_after: null}}))
+    assert-eq("?order_by.field=created_at&order_by.direction=ascending",
+        ::api/query-string({order_by: {field: "created_at", direction: "ascending"}}))
+    assert-eq("", ::api/query-string({"status.in": []}), "an empty vector is dropped")
+}
+
+test-query-string-encodes-values
+meta ["test"] fn () {
+    assert-eq("?idempotency_key=a%26b%3Dc%20d", ::api/query-string({idempotency_key: "a&b=c d"}))
+    assert-eq("?include_deleted=false", ::api/query-string({include_deleted: false}), "false is kept")
+}
+
+test-seg-encodes-path-ids
+meta ["test"] fn () {
+    assert-eq("account_in71c4amph0vgo2qllky", ::api/seg("account_in71c4amph0vgo2qllky"))
+    assert-eq("..%2Fentities", ::api/seg("../entities"), "a slash can't change the endpoint")
+    assert-eq("a%3Fb%3Dc", ::api/seg("a?b=c"))
+}
+
+// ============================================================================
+// Request building
+// ============================================================================
+
+test-build-request-post
+meta ["test"] fn () {
+    req ::api/build-request("post", "https://sandbox.increase.com/account_transfers",
+        {account_id: "account_1", amount: 100, description: "x", require_approval: null},
+        {Idempotency-Key: "k1"}, "test_key")
+    assert-eq("POST", req.method)
+    assert-eq("https://sandbox.increase.com/account_transfers", req.url)
+    assert-eq("Bearer test_key", req.headers.Authorization)
+    assert-eq("application/json", req.headers.Content-Type)
+    assert-eq("application/json", req.headers.Accept)
+    assert-eq("k1", get(req.headers, "Idempotency-Key"))
+    assert-eq({account_id: "account_1", amount: 100, description: "x"}, from-json(req.body))
+    assert(not(contains(req.body, "require_approval")), "unset optionals are omitted")
+}
+
+test-build-request-without-body
+meta ["test"] fn () {
+    req ::api/build-request("POST", "https://sandbox.increase.com/ach_transfers/ach_1/approve", {}, {}, "test_key")
+    assert-eq("", req.body, "no body for an action without params")
+    assert(is-null(get(req.headers, "Content-Type")), "no Content-Type without a body")
+    assert(is-null(get(req.headers, "Idempotency-Key")), "no idempotency header unless given")
+
+    get-req ::api/build-request("GET", "https://sandbox.increase.com/accounts?limit=1", {}, {}, "test_key")
+    assert-eq("GET", get-req.method)
+    assert-eq("", get-req.body)
+}
+
+test-response-body
+meta ["test"] fn () {
+    assert(is-null(::api/response-body("")), "empty text is null")
+    assert(is-null(::api/response-body("  ")))
+    assert-eq({id: "x"}, ::api/response-body({id: "x"}))
+}
+
+test-call-without-api-key-errs-before-sending
+meta ["test"] fn () {
+    out ::api/call("GET", "/accounts")
+    assert(is-err(out), "no key, no request")
+    assert(contains(err-message(out), "increase.api.key"), "names the missing context variable")
+}
+
+test-call-with-bad-environment-errs-before-sending
+meta ["test"] fn () {
+    out ::api/call("GET", "/accounts", {}, {api-key: "test_key", environment: "prod"})
+    typed ::increase::accounts/list-accounts({}, {api-key: "test_key", environment: "prod"})
+    assert(is-err(typed), "typed functions take the same opts")
+    assert(is-err(out), "an invalid environment never sends")
+}
+
+// ============================================================================
+// Errors and redaction
+// ============================================================================
+
+test-redact-text
+meta ["test"] fn () {
+    assert-eq("acct ****9012 rt ****0001", ::api/redact-text("acct 123456789012 rt 101050001"))
+    assert-eq("amount 1000000 too high", ::api/redact-text("amount 1000000 too high"), "seven digits stay")
+    assert-eq("account_in71c4amph0vgo2qllky", ::api/redact-text("account_in71c4amph0vgo2qllky"), "ids are unchanged")
+}
+
+test-redact-sensitive-keys
+meta ["test"] fn () {
+    out ::api/redact({
+        account_number: "987654321",
+        routing_number: "101050001",
+        nested: [{primary_account_number: "4242424242424242", last4: "4242"}],
+        description: "paid from 123456789012",
+        status: 400,
+        account_number_id: "account_number_1",
+        empty: null
+    })
+    assert-eq("[redacted]", out.account_number)
+    assert-eq("[redacted]", out.routing_number)
+    assert-eq("[redacted]", out.nested[0].primary_account_number)
+    assert-eq("4242", out.nested[0].last4)
+    assert-eq("paid from ****9012", out.description)
+    assert-eq(400, out.status)
+    assert-eq("account_number_1", out.account_number_id, "ids that merely mention account_number are kept")
+    assert(is-null(out.empty))
+}
+
+test-http-error-invalid-operation
+meta ["test"] fn () {
+    response HttpResponse({
+        status: 409,
+        headers: {content-type: "application/problem+json"},
+        body: {
+            status: 409,
+            type: "invalid_operation_error",
+            title: "The action you specified can't be performed on the object in its current state.",
+            detail: null
+        }
+    })
+    e ::api/HttpError(response)
+    assert-eq(409, e.status)
+    assert-eq("invalid_operation_error", e.type)
+    assert-eq("increase: HTTP 409 invalid_operation_error: The action you specified can't be performed on the object in its current state.", e.message)
+    assert(::api/is-error-type(err(e), "invalid_operation_error"), "is-error-type reads a Result.Err")
+    assert(not(::api/is-error-type(err(e), "rate_limited_error")))
+}
+
+test-http-error-invalid-parameters-redacts
+meta ["test"] fn () {
+    response HttpResponse({
+        status: 400,
+        headers: {},
+        body: {
+            status: 400,
+            type: "invalid_parameters_error",
+            title: "Invalid parameters.",
+            detail: "Routing number 101050001 is not valid for account 123456789012.",
+            errors: [{field: "routing_number", routing_number: "101050001", message: "invalid"}]
+        }
+    })
+    e ::api/HttpError(response)
+    assert-eq("invalid_parameters_error", e.type)
+    assert-eq("Routing number ****0001 is not valid for account ****9012.", e.detail)
+    assert-eq("[redacted]", e.errors[0].routing_number)
+    assert-eq("routing_number", e.errors[0].field)
+    assert(not(contains(e.message, "123456789012")), "the message never carries a full account number")
+    assert(not(contains(to-json(untype(e)), "101050001")), "nothing in the error carries the routing number")
+}
+
+test-http-error-idempotency-conflict-and-rate-limit
+meta ["test"] fn () {
+    conflict ::api/HttpError(HttpResponse({
+        status: 409,
+        headers: {},
+        body: {status: 409, type: "idempotency_key_already_used_error", title: "The idempotency key submitted has already been used.", detail: null, resource_id: "ach_transfer_uoxatyh3lt5evrsdvo7q"}
+    }))
+    assert-eq("ach_transfer_uoxatyh3lt5evrsdvo7q", conflict.resource_id)
+
+    limited ::api/HttpError(HttpResponse({
+        status: 429,
+        headers: {retry-after: "7"},
+        body: {status: 429, type: "rate_limited_error", title: "You've hit the rate limit.", detail: null}
+    }))
+    assert-eq(7, limited.retry_after, "Retry-After header when the body has none")
+
+    from-body ::api/HttpError(HttpResponse({
+        status: 429,
+        headers: {retry-after: "7"},
+        body: {status: 429, type: "rate_limited_error", title: "Slow down.", detail: null, retry_after: 3}
+    }))
+    assert-eq(3, from-body.retry_after, "the body's retry_after wins")
+}
+
+test-http-error-unauthorized-and-non-json
+meta ["test"] fn () {
+    unauthorized ::api/HttpError(HttpResponse({
+        status: 401,
+        headers: {},
+        body: "{\"status\":401,\"type\":\"invalid_api_key_error\",\"title\":\"Invalid API key.\",\"detail\":\"Invalid API key: No Authorization header provided.\",\"reason\":\"no_header\"}"
+    }))
+    assert-eq("invalid_api_key_error", unauthorized.type, "a JSON text body is decoded")
+    assert-eq("no_header", unauthorized.reason)
+    assert-eq("increase: HTTP 401 invalid_api_key_error: Invalid API key. Invalid API key: No Authorization header provided.", unauthorized.message)
+
+    gateway ::api/HttpError(HttpResponse({status: 502, headers: {}, body: "Bad Gateway"}))
+    assert-eq("increase: HTTP 502: Bad Gateway", gateway.message)
+    assert(is-null(gateway.type))
+    assert(is-null(gateway.retry_after))
+}
+
+test-parse-int
+meta ["test"] fn () {
+    assert-eq(5, ::api/parse-int(5))
+    assert-eq(12, ::api/parse-int(" 12 "))
+    assert(is-null(::api/parse-int("Wed, 21 Oct 2026 07:28:00 GMT")), "an HTTP date is not seconds")
+    assert(is-null(::api/parse-int("abc")), "never halts on bad input")
+    assert(is-null(::api/parse-int(null)))
+}
+
+// ============================================================================
+// Pagination
+// ============================================================================
+
+test-next-cursor
+meta ["test"] fn () {
+    assert-eq("djE6", ::api/next-cursor({data: [{id: "a"}], next_cursor: "djE6"}))
+    assert(is-null(::api/next-cursor({data: [], next_cursor: null})), "null on the last page")
+    assert(is-null(::api/next-cursor({data: [], next_cursor: ""})))
+    assert(is-null(::api/next-cursor(null)))
+}
+
+test-next-page-params-keeps-filters
+meta ["test"] fn () {
+    params {account_id: "account_1", "status.in": ["open"], limit: 2}
+    next ::api/next-page-params(params, {data: [{id: "t1"}, {id: "t2"}], next_cursor: "djE6"})
+    assert-eq({account_id: "account_1", "status.in": ["open"], limit: 2, cursor: "djE6"}, next, "Increase needs the same filters on every page")
+    assert(is-null(::api/next-page-params(params, {data: [{id: "t3"}], next_cursor: null})))
+}
+
+fake-pages fn (params: Map): Map {
+    cursor get(params, "cursor")
+    cond {
+        is-null(cursor) => { {data: [{id: "a"}, {id: "b"}], next_cursor: "c1"} }
+        eq(cursor, "c1") => { {data: [{id: "c"}, {id: "d"}], next_cursor: "c2"} }
+        => { {data: [{id: "e"}], next_cursor: null} }
+    }
+}
+
+test-collect-pages-follows-cursors
+meta ["test"] fn () {
+    all ::api/collect-pages(fake-pages, {account_id: "account_1"}, 0, [], 0)
+    assert-eq(["a", "b", "c", "d", "e"], map(all, %.id), "every page until next_cursor is null")
+
+    capped ::api/collect-pages(fake-pages, {}, 3, [], 0)
+    assert-eq(["a", "b", "c"], map(capped, %.id), "stops at the limit")
+}
+
+test-collect-pages-returns-page-errors
+meta ["test"] fn () {
+    failing (params) {
+        if(is-null(get(params, "cursor")), {data: [{id: "a"}], next_cursor: "c1"}, err("increase: HTTP 500"))
+    }
+
+    out ::api/collect-pages(failing, {}, 0, [], 0)
+    assert(is-err(out), "an Err on a later page is returned")
+}
