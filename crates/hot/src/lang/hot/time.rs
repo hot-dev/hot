@@ -25,7 +25,7 @@ fn create_temporal_map(type_name: &str, data: IndexMap<Val, Val>) -> Val {
     for (k, v) in data {
         map.insert(k, v);
     }
-    Val::Map(Box::new(map))
+    Val::map(map)
 }
 
 /// Nanoseconds since the Unix epoch by the system clock.
@@ -455,7 +455,7 @@ fn duration_to_val(d: &TemporalDuration) -> Val {
     m.insert(Val::from("milliseconds"), to_dec_i64(d.milliseconds()));
     m.insert(Val::from("microseconds"), to_dec_i128(d.microseconds()));
     m.insert(Val::from("nanoseconds"), to_dec_i128(d.nanoseconds()));
-    Val::Map(Box::new(m))
+    Val::map(m)
 }
 
 /// Convert a temporal_rs::PlainDateTime back into a Hot PlainDateTime map.
@@ -607,7 +607,7 @@ pub fn millisecond_constructor(args: &[Val]) -> HotResult<Val> {
     let mut result = IndexMap::new();
     result.insert(Val::from("$type"), Val::from("::hot::time/Millisecond"));
     result.insert(Val::from("$val"), args[0].clone());
-    HotResult::Ok(Val::Map(Box::new(result)))
+    HotResult::Ok(Val::map(result))
 }
 
 /// Create a Second typed object
@@ -617,7 +617,7 @@ pub fn second_constructor(args: &[Val]) -> HotResult<Val> {
     let mut result = IndexMap::new();
     result.insert(Val::from("$type"), Val::from("::hot::time/Second"));
     result.insert(Val::from("$val"), args[0].clone());
-    HotResult::Ok(Val::Map(Box::new(result)))
+    HotResult::Ok(Val::map(result))
 }
 
 /// Create a Minute typed object
@@ -627,7 +627,7 @@ pub fn minute_constructor(args: &[Val]) -> HotResult<Val> {
     let mut result = IndexMap::new();
     result.insert(Val::from("$type"), Val::from("::hot::time/Minute"));
     result.insert(Val::from("$val"), args[0].clone());
-    HotResult::Ok(Val::Map(Box::new(result)))
+    HotResult::Ok(Val::map(result))
 }
 
 /// Create an Hour typed object
@@ -637,7 +637,7 @@ pub fn hour_constructor(args: &[Val]) -> HotResult<Val> {
     let mut result = IndexMap::new();
     result.insert(Val::from("$type"), Val::from("::hot::time/Hour"));
     result.insert(Val::from("$val"), args[0].clone());
-    HotResult::Ok(Val::Map(Box::new(result)))
+    HotResult::Ok(Val::map(result))
 }
 
 /// Create a Day typed object
@@ -647,7 +647,7 @@ pub fn day_constructor(args: &[Val]) -> HotResult<Val> {
     let mut result = IndexMap::new();
     result.insert(Val::from("$type"), Val::from("::hot::time/Day"));
     result.insert(Val::from("$val"), args[0].clone());
-    HotResult::Ok(Val::Map(Box::new(result)))
+    HotResult::Ok(Val::map(result))
 }
 
 /// Create a Week typed object
@@ -657,7 +657,7 @@ pub fn week_constructor(args: &[Val]) -> HotResult<Val> {
     let mut result = IndexMap::new();
     result.insert(Val::from("$type"), Val::from("::hot::time/Week"));
     result.insert(Val::from("$val"), args[0].clone());
-    HotResult::Ok(Val::Map(Box::new(result)))
+    HotResult::Ok(Val::map(result))
 }
 
 /// Create a Month typed object
@@ -667,7 +667,7 @@ pub fn month_constructor(args: &[Val]) -> HotResult<Val> {
     let mut result = IndexMap::new();
     result.insert(Val::from("$type"), Val::from("::hot::time/Month"));
     result.insert(Val::from("$val"), args[0].clone());
-    HotResult::Ok(Val::Map(Box::new(result)))
+    HotResult::Ok(Val::map(result))
 }
 
 /// Create a Year typed object
@@ -677,7 +677,7 @@ pub fn year_constructor(args: &[Val]) -> HotResult<Val> {
     let mut result = IndexMap::new();
     result.insert(Val::from("$type"), Val::from("::hot::time/Year"));
     result.insert(Val::from("$val"), args[0].clone());
-    HotResult::Ok(Val::Map(Box::new(result)))
+    HotResult::Ok(Val::map(result))
 }
 
 /// Create a Nanosecond typed object
@@ -687,7 +687,7 @@ pub fn nanosecond_constructor(args: &[Val]) -> HotResult<Val> {
     let mut result = IndexMap::new();
     result.insert(Val::from("$type"), Val::from("::hot::time/Nanosecond"));
     result.insert(Val::from("$val"), args[0].clone());
-    HotResult::Ok(Val::Map(Box::new(result)))
+    HotResult::Ok(Val::map(result))
 }
 
 /// Create a Microsecond typed object
@@ -697,7 +697,7 @@ pub fn microsecond_constructor(args: &[Val]) -> HotResult<Val> {
     let mut result = IndexMap::new();
     result.insert(Val::from("$type"), Val::from("::hot::time/Microsecond"));
     result.insert(Val::from("$val"), args[0].clone());
-    HotResult::Ok(Val::Map(Box::new(result)))
+    HotResult::Ok(Val::map(result))
 }
 
 // Removed instant_constructor - Hot type-based overloads now handle dispatch correctly
@@ -804,7 +804,7 @@ pub fn now_plain_date(_args: &[Val]) -> HotResult<Val> {
     m.insert(Val::from("year"), Val::Int(today.year() as i64));
     m.insert(Val::from("month"), Val::Int(today.month() as i64));
     m.insert(Val::from("day"), Val::Int(today.day() as i64));
-    HotResult::Ok(Val::Map(Box::new(m)))
+    HotResult::Ok(Val::map(m))
 }
 
 /// Current local time as PlainTime (hour, minute, second)
@@ -815,7 +815,7 @@ pub fn now_plain_time(_args: &[Val]) -> HotResult<Val> {
     m.insert(Val::from("hour"), Val::Int(now.hour() as i64));
     m.insert(Val::from("minute"), Val::Int(now.minute() as i64));
     m.insert(Val::from("second"), Val::Int(now.second() as i64));
-    HotResult::Ok(Val::Map(Box::new(m)))
+    HotResult::Ok(Val::map(m))
 }
 
 /// Current local date-time as PlainDateTime
@@ -829,7 +829,7 @@ pub fn now_plain_date_time(_args: &[Val]) -> HotResult<Val> {
     m.insert(Val::from("hour"), Val::Int(now.hour() as i64));
     m.insert(Val::from("minute"), Val::Int(now.minute() as i64));
     m.insert(Val::from("second"), Val::Int(now.second() as i64));
-    HotResult::Ok(Val::Map(Box::new(m)))
+    HotResult::Ok(Val::map(m))
 }
 /// A Hot error unless `year`, `month` and `day` name a real ISO date.
 fn check_iso_date(year: i64, month: i64, day: i64) -> Result<(), Val> {
@@ -888,7 +888,7 @@ pub fn plain_date_constructor(args: &[Val]) -> HotResult<Val> {
     m.insert(Val::from("year"), Val::Int(year));
     m.insert(Val::from("month"), Val::Int(month));
     m.insert(Val::from("day"), Val::Int(day));
-    HotResult::Ok(Val::Map(Box::new(m)))
+    HotResult::Ok(Val::map(m))
 }
 
 /// Create a PlainTime(hour, minute, second)
@@ -914,7 +914,7 @@ pub fn plain_time_constructor(args: &[Val]) -> HotResult<Val> {
     m.insert(Val::from("hour"), Val::Int(hour));
     m.insert(Val::from("minute"), Val::Int(minute));
     m.insert(Val::from("second"), Val::Int(second));
-    HotResult::Ok(Val::Map(Box::new(m)))
+    HotResult::Ok(Val::map(m))
 }
 
 /// Create a PlainDateTime(year, month, day, hour, minute, second)
@@ -958,7 +958,7 @@ pub fn plain_datetime_constructor(args: &[Val]) -> HotResult<Val> {
     m.insert(Val::from("hour"), Val::Int(hour));
     m.insert(Val::from("minute"), Val::Int(minute));
     m.insert(Val::from("second"), Val::Int(second));
-    HotResult::Ok(Val::Map(Box::new(m)))
+    HotResult::Ok(Val::map(m))
 }
 
 /// Create a Duration(value: map or string)
@@ -997,7 +997,7 @@ pub fn duration_constructor(args: &[Val]) -> HotResult<Val> {
             ] {
                 m.insert(Val::from(k.to_string()), norm(k));
             }
-            HotResult::Ok(Val::Map(Box::new(m)))
+            HotResult::Ok(Val::map(m))
         }
         Val::Str(s) => {
             // Parse ISO 8601 duration string using temporal_rs
@@ -1017,7 +1017,7 @@ pub fn duration_constructor(args: &[Val]) -> HotResult<Val> {
                     m.insert(Val::from("milliseconds"), to_dec_i64(d.milliseconds()));
                     m.insert(Val::from("microseconds"), to_dec_i128(d.microseconds()));
                     m.insert(Val::from("nanoseconds"), to_dec_i128(d.nanoseconds()));
-                    HotResult::Ok(Val::Map(Box::new(m)))
+                    HotResult::Ok(Val::map(m))
                 }
                 Err(_) => HotResult::Err(Val::from("Invalid ISO 8601 duration string")),
             }
@@ -1195,7 +1195,7 @@ pub fn instant_from_plain_date(args: &[Val]) -> HotResult<Val> {
 
             let mut instant_map = IndexMap::new();
             instant_map.insert(Val::from("epochNanoseconds"), Val::Int(timestamp));
-            HotResult::Ok(Val::Map(Box::new(instant_map)))
+            HotResult::Ok(Val::map(instant_map))
         }
         None => HotResult::Err(Val::from("Invalid date values")),
     }
@@ -1266,7 +1266,7 @@ pub fn instant_from_plain_time(args: &[Val]) -> HotResult<Val> {
 
             let mut instant_map = IndexMap::new();
             instant_map.insert(Val::from("epochNanoseconds"), Val::Int(timestamp));
-            HotResult::Ok(Val::Map(Box::new(instant_map)))
+            HotResult::Ok(Val::map(instant_map))
         }
         None => HotResult::Err(Val::from("Invalid time values")),
     }
@@ -1348,7 +1348,7 @@ pub fn instant_from_plain_date_time(args: &[Val]) -> HotResult<Val> {
                 let mut instant_map = IndexMap::new();
                 instant_map.insert(Val::from("$type"), Val::from("::hot::time/Instant"));
                 instant_map.insert(Val::from("epochNanoseconds"), Val::Int(timestamp));
-                HotResult::Ok(Val::Map(Box::new(instant_map)))
+                HotResult::Ok(Val::map(instant_map))
             }
             None => HotResult::Err(Val::from("Invalid time values")),
         },
@@ -1388,7 +1388,7 @@ pub fn parse_duration(args: &[Val]) -> HotResult<Val> {
             data.insert(Val::from("milliseconds"), to_dec_i64(d.milliseconds()));
             data.insert(Val::from("microseconds"), to_dec_i128(d.microseconds()));
             data.insert(Val::from("nanoseconds"), to_dec_i128(d.nanoseconds()));
-            HotResult::Ok(Val::Map(Box::new(data)))
+            HotResult::Ok(Val::map(data))
         }
         Err(_) => HotResult::Err(Val::from("Unable to parse ISO 8601 duration")),
     }
@@ -1437,7 +1437,7 @@ pub fn duration(args: &[Val]) -> HotResult<Val> {
         };
         data.insert(Val::from(field), Val::Dec(amount));
     }
-    HotResult::Ok(Val::Map(Box::new(data)))
+    HotResult::Ok(Val::map(data))
 }
 
 /// Create a PlainDate from year, month, day
@@ -1468,7 +1468,7 @@ pub fn plain_date(args: &[Val]) -> HotResult<Val> {
     data.insert(Val::from("month"), Val::Int(month));
     data.insert(Val::from("day"), Val::Int(day));
     data.insert(Val::from("calendar"), Val::from("iso8601"));
-    HotResult::Ok(Val::Map(Box::new(data)))
+    HotResult::Ok(Val::map(data))
 }
 
 /// Create a PlainTime from hour, minute, second
@@ -1505,7 +1505,7 @@ pub fn plain_time(args: &[Val]) -> HotResult<Val> {
     data.insert(Val::from("millisecond"), Val::Int(0));
     data.insert(Val::from("microsecond"), Val::Int(0));
     data.insert(Val::from("nanosecond"), Val::Int(0));
-    HotResult::Ok(Val::Map(Box::new(data)))
+    HotResult::Ok(Val::map(data))
 }
 
 /// Create a PlainDateTime from year, month, day, hour, minute, second
@@ -1568,7 +1568,7 @@ pub fn plain_date_time(args: &[Val]) -> HotResult<Val> {
     data.insert(Val::from("nanosecond"), Val::Int(0));
     data.insert(Val::from("calendar"), Val::from("iso8601"));
 
-    HotResult::Ok(Val::Map(Box::new(data)))
+    HotResult::Ok(Val::map(data))
 }
 
 // ---------------------------------------------------------------------------
@@ -1602,7 +1602,7 @@ fn zoned_datetime_to_val(zdt: &TemporalZonedDateTime) -> Val {
         Val::from("calendar"),
         Val::from(zdt.calendar().identifier().to_string()),
     );
-    Val::Map(Box::new(data))
+    Val::map(data)
 }
 
 /// Parse an IXDTF string into a ZonedDateTime.
@@ -1806,7 +1806,7 @@ pub fn to_plain_date_time_from_zdt(args: &[Val]) -> HotResult<Val> {
             data.insert(Val::from(*key), v.clone());
         }
     }
-    HotResult::Ok(Val::Map(Box::new(data)))
+    HotResult::Ok(Val::map(data))
 }
 
 /// Extract PlainDate from a ZonedDateTime.
@@ -1825,7 +1825,7 @@ pub fn to_plain_date_from_zdt(args: &[Val]) -> HotResult<Val> {
             data.insert(Val::from(*key), v.clone());
         }
     }
-    HotResult::Ok(Val::Map(Box::new(data)))
+    HotResult::Ok(Val::map(data))
 }
 
 /// Extract PlainTime from a ZonedDateTime.
@@ -1851,7 +1851,7 @@ pub fn to_plain_time_from_zdt(args: &[Val]) -> HotResult<Val> {
             data.insert(Val::from(*key), v.clone());
         }
     }
-    HotResult::Ok(Val::Map(Box::new(data)))
+    HotResult::Ok(Val::map(data))
 }
 
 /// Extract Instant from a ZonedDateTime.

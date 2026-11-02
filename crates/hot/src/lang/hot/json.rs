@@ -136,7 +136,7 @@ fn convert_json_value_to_val(v: &serde_json::Value, depth: usize) -> Result<Val,
             for item in arr.iter() {
                 out.push(convert_json_value_to_val(item, depth + 1)?);
             }
-            Val::Vec(out)
+            Val::vec(out)
         }
         serde_json::Value::Object(map) => {
             if let Some(serde_json::Value::String(type_name)) = map.get("$type") {
@@ -161,7 +161,7 @@ fn convert_json_value_to_val(v: &serde_json::Value, depth: usize) -> Result<Val,
                     convert_json_value_to_val(v, depth + 1)?,
                 );
             }
-            Val::Map(Box::new(out))
+            Val::map(out)
         }
     })
 }

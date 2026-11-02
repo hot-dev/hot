@@ -487,7 +487,7 @@ fn run(args: &[Val], fn_name: &str, mode: RunMode) -> Result<Val, String> {
         _ => return Err("sql must be a string".to_string()),
     };
     let params = match &args[2] {
-        Val::Vec(v) => v.clone(),
+        Val::Vec(v) => v.to_vec(),
         Val::Null => Vec::new(),
         _ => return Err("params must be a Vec".to_string()),
     };
@@ -512,7 +512,7 @@ fn run(args: &[Val], fn_name: &str, mode: RunMode) -> Result<Val, String> {
                     let mut out = indexmap::IndexMap::new();
                     out.insert(Val::from("rows-affected"), Val::Int(changes));
                     out.insert(Val::from("last-insert-id"), Val::Int(last_id));
-                    return Ok(Val::Map(Box::new(out)));
+                    return Ok(Val::map(out));
                 }
                 _ => return Err(last_errmsg(db)),
             }
@@ -540,9 +540,9 @@ fn run(args: &[Val], fn_name: &str, mode: RunMode) -> Result<Val, String> {
                         for c in 0..col_count {
                             row.insert(names[c as usize].clone(), column_value(stmt.ptr, c));
                         }
-                        rows.push(Val::Map(Box::new(row)));
+                        rows.push(Val::map(row));
                     }
-                    ffi::SQLITE_DONE => return Ok(Val::Vec(rows)),
+                    ffi::SQLITE_DONE => return Ok(Val::vec(rows)),
                     _ => return Err(last_errmsg(db)),
                 }
             }

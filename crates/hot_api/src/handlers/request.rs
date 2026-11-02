@@ -8,6 +8,7 @@ use ahash::AHashSet;
 use axum::http::HeaderMap;
 use hot::val::Val;
 use std::collections::HashMap;
+use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::auth::AuthContext;
@@ -85,7 +86,7 @@ pub fn build_call_event_data(function_name: &str, args: Val, caller: Option<Val>
     if let Some(caller_val) = caller
         && let Val::Map(ref mut map) = event_data
     {
-        map.insert(Val::from("caller"), caller_val);
+        Arc::make_mut(map).insert(Val::from("caller"), caller_val);
     }
     event_data
 }
@@ -94,7 +95,7 @@ pub fn build_call_event_data(function_name: &str, args: Val, caller: Option<Val>
 /// authenticate exact-build routing against the database copy of the event.
 pub fn bind_call_event_to_build(event_data: &mut Val, build_id: Uuid) {
     if let Val::Map(map) = event_data {
-        map.insert(
+        Arc::make_mut(map).insert(
             Val::from("_hot_target_build_id"),
             Val::from(build_id.to_string()),
         );
@@ -170,6 +171,7 @@ pub fn build_request_val(
     let Val::Map(ref mut request_map) = request_val else {
         return request_val;
     };
+    let request_map = Arc::make_mut(request_map);
 
     // Providers like Twilio and HubSpot sign the exact URL they were configured
     // with; `url` is a rewritten internal path, so verifiers need this instead.
@@ -183,6 +185,7 @@ pub fn build_request_val(
     // Headers (keys are already lowercase in axum's HeaderMap)
     let mut headers_val = hot::val!({});
     if let Val::Map(ref mut headers_map) = headers_val {
+        let headers_map = Arc::make_mut(headers_map);
         for (key, value) in headers.iter() {
             if let Ok(v) = value.to_str() {
                 headers_map.insert(
@@ -197,6 +200,7 @@ pub fn build_request_val(
     // Query params
     let mut query_val = hot::val!({});
     if let Val::Map(ref mut query_map) = query_val {
+        let query_map = Arc::make_mut(query_map);
         for (key, value) in query_params.iter() {
             query_map.insert(Val::from(key.clone()), Val::from(value.clone()));
         }
@@ -235,7 +239,7 @@ pub fn build_request_val(
             if let Some(ref name) = service_key.name
                 && let Val::Map(ref mut ck_map) = ck_val
             {
-                ck_map.insert(Val::from("name"), Val::from(name.clone()));
+                Arc::make_mut(ck_map).insert(Val::from("name"), Val::from(name.clone()));
             }
 
             if let Ok(encryption) =
@@ -244,12 +248,12 @@ pub fn build_request_val(
             {
                 let meta_val: Val = serde_json::from_value(meta).unwrap_or(Val::Null);
                 if let Val::Map(ref mut ck_map) = ck_val {
-                    ck_map.insert(Val::from("meta"), meta_val);
+                    Arc::make_mut(ck_map).insert(Val::from("meta"), meta_val);
                 }
             }
 
             if let Val::Map(ref mut auth_map) = auth_val {
-                auth_map.insert(Val::from("service-key"), ck_val);
+                Arc::make_mut(auth_map).insert(Val::from("service-key"), ck_val);
             }
         }
 
@@ -469,7 +473,7 @@ mod tests {
 
     #[test]
     fn test_build_call_event_data_with_caller() {
-        let args = Val::Vec(vec![Val::from("arg1")]);
+        let args = Val::vec(vec![Val::from("arg1")]);
         let caller = Val::from("caller-val");
         let event_data = build_call_event_data("::ns/fn", args, Some(caller));
 
@@ -488,7 +492,7 @@ mod tests {
 
     #[test]
     fn test_build_call_event_data_without_caller() {
-        let args = Val::Vec(vec![]);
+        let args = Val::vec(vec![]);
         let event_data = build_call_event_data("::ns/fn", args, None);
 
         if let Val::Map(ref map) = event_data {
@@ -502,7 +506,7 @@ mod tests {
     #[test]
     fn test_bind_call_event_to_exact_build() {
         let build_id = Uuid::now_v7();
-        let mut event_data = build_call_event_data("::ns/fn", Val::Vec(vec![]), None);
+        let mut event_data = build_call_event_data("::ns/fn", Val::vec(vec![]), None);
         bind_call_event_to_build(&mut event_data, build_id);
 
         let Val::Map(map) = event_data else {

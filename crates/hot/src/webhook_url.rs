@@ -12,6 +12,7 @@
 //! placeholder.
 
 use crate::val::Val;
+use std::sync::Arc;
 
 /// Key under which webhook requests carry the caller-requested URL.
 pub const ORIGINAL_URL_KEY: &str = "original-url";
@@ -62,8 +63,9 @@ pub fn redact_event_data_original_urls(event_data: &Val) -> Val {
     let Val::Map(map) = &mut out else {
         return out;
     };
+    let map = Arc::make_mut(map);
     if let Some(Val::Vec(args)) = map.get_mut(&Val::from("args")) {
-        for arg in args.iter_mut() {
+        for arg in Arc::make_mut(args).iter_mut() {
             redact_request_original_url(arg);
         }
     }
@@ -75,7 +77,7 @@ pub fn redact_event_data_original_urls(event_data: &Val) -> Val {
 
 fn redact_request_original_url(request: &mut Val) {
     if let Val::Map(map) = request
-        && let Some(value) = map.get_mut(&Val::from(ORIGINAL_URL_KEY))
+        && let Some(value) = Arc::make_mut(map).get_mut(&Val::from(ORIGINAL_URL_KEY))
         && let Val::Str(url) = &*value
     {
         *value = Val::from(redact_url_token(url));
@@ -96,13 +98,14 @@ pub(crate) fn event_data_original_url_hints(event_data: &Val) -> Option<Val> {
     let Val::Map(map) = &mut hints else {
         unreachable!();
     };
+    let map = Arc::make_mut(map);
     if let Some(Val::Vec(args)) = map_get(event_data, "args") {
         let args: Vec<Val> = args
             .iter()
             .map(|arg| request_hint(arg).unwrap_or(Val::Null))
             .collect();
         if args.iter().any(|arg| !matches!(arg, Val::Null)) {
-            map.insert(Val::from("args"), Val::Vec(args));
+            map.insert(Val::from("args"), Val::vec(args));
         }
     }
     if let Some(caller) = map_get(event_data, "caller").and_then(request_hint) {
@@ -123,8 +126,9 @@ pub fn restore_event_data_original_urls(hydrated: &mut Val, envelope: &Val) {
     let Val::Map(map) = hydrated else {
         return;
     };
+    let map = Arc::make_mut(map);
     if let Some(Val::Vec(args)) = map.get_mut(&Val::from("args")) {
-        for (i, arg) in args.iter_mut().enumerate() {
+        for (i, arg) in Arc::make_mut(args).iter_mut().enumerate() {
             let envelope_arg = match map_get(envelope, "args") {
                 Some(Val::Vec(envelope_args)) => envelope_args.get(i),
                 _ => None,
@@ -166,6 +170,7 @@ fn restore_request_original_url(request: &mut Val, envelope_request: Option<&Val
         })
         .filter(|url| redact_url_token(url) == stored);
 
+    let map = Arc::make_mut(map);
     match raw {
         Some(url) => {
             map.insert(key, Val::from(url));
@@ -209,11 +214,11 @@ mod tests {
             "url": "/webhook/twilio/sms"
         });
         if let (Val::Map(map), Some(url)) = (&mut request, url) {
-            map.insert(Val::from(ORIGINAL_URL_KEY), Val::from(url));
+            Arc::make_mut(map).insert(Val::from(ORIGINAL_URL_KEY), Val::from(url));
         }
         crate::val!({
             "fn": "::app/handle",
-            "args": Val::Vec(vec![request.clone()]),
+            "args": Val::vec(vec![request.clone()]),
             "caller": request
         })
     }

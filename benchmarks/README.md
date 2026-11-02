@@ -12,6 +12,7 @@ Benchmarks comparing Hot against Python, JavaScript, and TypeScript for common o
 6. **JIT Lazy/Flow Safety Shapes** - Hot-only JIT safety microbenchmarks
 7. **Deep Recursion** - Hot-only regression guards: tail recursion through `if()` (TCO / JIT native loop) and non-tail `cond` recursion (re-entrant register correctness — check the printed result, not just the time)
 8. **Constraints** - Hot-only: the cost of `where` checks at function boundaries, in `bench-constraints.hot`
+9. **Large Reads** - Hot-only regression guard: reading a large Map or Vec must cost the same at every size, in `bench-large-reads.hot`. Compare the lines for each `n`; they should not grow with it
 
 ## Running the Benchmarks
 
@@ -44,8 +45,8 @@ hot run --emitter.type none hot/src/benchmarks/bench.hot
 ```
 
 `hot run` loads every file under `hot/src`, so this command (and
-`run-all.py`) also runs `bench-constraints.hot` and `bench-fib-jit.hot`. Their
-lines print before the main Hot results. The constraints benchmark reports
+`run-all.py`) also runs `bench-constraints.hot`, `bench-fib-jit.hot` and
+`bench-large-reads.hot`. Their lines print before the main Hot results. The constraints benchmark reports
 microseconds per call. It has no equivalent in the other languages, so it
 stays out of the comparison table.
 

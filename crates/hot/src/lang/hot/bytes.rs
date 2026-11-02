@@ -250,7 +250,7 @@ pub fn crc32(args: &[Val]) -> HotResult<Val> {
         Val::Str(s) => s.as_bytes().to_vec(),
         Val::Vec(v) => {
             let mut result = Vec::new();
-            for val in v {
+            for val in v.iter() {
                 match val {
                     Val::Int(i) => {
                         if *i >= 0 && *i <= 255 {
@@ -575,7 +575,7 @@ pub fn to_vec(args: &[Val]) -> HotResult<Val> {
     };
 
     let vec: Vec<Val> = bytes.iter().map(|b| Val::Int(*b as i64)).collect();
-    HotResult::Ok(Val::Vec(vec))
+    HotResult::Ok(Val::vec(vec))
 }
 
 #[cfg(test)]

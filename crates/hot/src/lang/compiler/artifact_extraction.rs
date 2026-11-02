@@ -198,7 +198,7 @@ fn merge_alias_meta(target_meta: Option<&Val>, alias_meta: &Val) -> Val {
             for (k, v) in alias_map.iter() {
                 merged.insert(k.clone(), v.clone());
             }
-            Val::Map(Box::new(merged))
+            Val::map(merged)
         }
         // Target has no map meta (e.g. None or non-Map): just use the
         // alias meta as-is.

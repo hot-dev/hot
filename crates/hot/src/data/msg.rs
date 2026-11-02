@@ -344,7 +344,7 @@ mod tests {
             }
         }
 
-        Val::Vec(strings)
+        Val::vec(strings)
     }
 
     // Creates a message body with numeric entries
@@ -358,7 +358,7 @@ mod tests {
                 numbers.push(crate::val!(i as f64 / 3.0));
             }
         }
-        Val::Vec(numbers)
+        Val::vec(numbers)
     }
 
     // Creates a message body with mixed data types
@@ -380,7 +380,7 @@ mod tests {
                 }
             }
         }
-        Val::Vec(items)
+        Val::vec(items)
     }
 
     // Creates a message body with repeating pattern data (highly compressible)
@@ -399,7 +399,7 @@ mod tests {
             items.push(pattern[i as usize % pattern.len()].clone());
         }
 
-        Val::Vec(items)
+        Val::vec(items)
     }
 
     // Creates a test message with the given body content

@@ -1068,7 +1068,7 @@ impl Resolver {
     fn collect_val_local_variables(&mut self, val: &Val) -> CompilerResult<()> {
         match val {
             Val::Vec(elements) => {
-                for element in elements {
+                for element in elements.iter() {
                     self.collect_val_local_variables(element)?;
                 }
             }
@@ -1095,7 +1095,7 @@ impl Resolver {
     fn validate_val_references(&mut self, val: &Val) -> CompilerResult<()> {
         match val {
             Val::Vec(elements) => {
-                for element in elements {
+                for element in elements.iter() {
                     self.validate_val_references(element)?;
                 }
             }
@@ -1341,7 +1341,7 @@ impl Resolver {
     ) -> crate::val::Val {
         use crate::val::Val;
         match val {
-            Val::Map(map) => Val::Map(Box::new(
+            Val::Map(map) => Val::map(
                 map.iter()
                     .map(|(key, value)| {
                         let type_ref = top_level
@@ -1352,8 +1352,8 @@ impl Resolver {
                         )
                     })
                     .collect(),
-            )),
-            Val::Vec(items) => Val::Vec(
+            ),
+            Val::Vec(items) => Val::vec(
                 items
                     .iter()
                     .map(|item| self.resolve_meta_val(scope, ns, item, false, type_ref))

@@ -2743,7 +2743,7 @@ fn (): Str { "unused" }
         .unwrap();
         assert_eq!(
             result,
-            crate::val::Val::Vec(vec![
+            crate::val::Val::vec(vec![
                 crate::val::Val::from("acme"),
                 crate::val::Val::from("other")
             ])

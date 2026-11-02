@@ -72,5 +72,5 @@ pub fn get_all(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         map.insert(Val::from(key), Val::from(value));
     }
 
-    HotResult::Ok(Val::Map(Box::new(map)))
+    HotResult::Ok(Val::map(map))
 }

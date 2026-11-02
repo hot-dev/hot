@@ -2215,7 +2215,7 @@ impl Compiler {
                         let alias_value_reg = self.allocate_register();
                         let alias_constant = self
                             .program
-                            .add_constant(Constant::Val(Val::Map(Box::new(alias_map))));
+                            .add_constant(Constant::Val(Val::map(alias_map)));
                         self.emit_instruction(Instruction::LoadConst {
                             dest: alias_value_reg,
                             constant: alias_constant,
@@ -2875,7 +2875,7 @@ impl Compiler {
                     if compiled_elements.is_empty() {
                         // Empty vector
                         let empty_vector_constant =
-                            self.program.add_constant(Constant::Val(Val::Vec(vec![])));
+                            self.program.add_constant(Constant::Val(Val::vec(vec![])));
                         self.emit_instruction(Instruction::LoadConst {
                             dest: dest_reg,
                             constant: empty_vector_constant,
@@ -5193,7 +5193,7 @@ impl Compiler {
                 }
             }
             Val::Vec(vec) => {
-                for v in vec {
+                for v in vec.iter() {
                     self.collect_free_variables_in_val_for_value(v, free_vars);
                 }
             }
@@ -5716,7 +5716,7 @@ impl Compiler {
                     associated_type_info
                         .insert(Val::from("$type"), Val::from(resolved_type_ref.clone()));
                     // Mark this as a nested type reference (no $all_fields means VM will call the constructor)
-                    Val::Map(Box::new(associated_type_info))
+                    Val::map(associated_type_info)
                 }
             };
             let associated_type_info_constant = self
@@ -6051,22 +6051,22 @@ impl Compiler {
             }
 
             if !fields_info.is_empty() {
-                type_info.insert(Val::from("$fields"), Val::Map(Box::new(fields_info)));
+                type_info.insert(Val::from("$fields"), Val::map(fields_info));
             }
 
             if !required_fields.is_empty() {
-                type_info.insert(Val::from("$required"), Val::Vec(required_fields));
+                type_info.insert(Val::from("$required"), Val::vec(required_fields));
             }
 
             // Always set $all_fields (even if empty) to distinguish top-level type_info
             // from nested type references which only have $type
-            type_info.insert(Val::from("$all_fields"), Val::Vec(all_fields));
+            type_info.insert(Val::from("$all_fields"), Val::vec(all_fields));
         } else {
             // No fields defined - still mark as top-level type_info with empty $all_fields
-            type_info.insert(Val::from("$all_fields"), Val::Vec(vec![]));
+            type_info.insert(Val::from("$all_fields"), Val::vec(vec![]));
         }
 
-        Val::Map(Box::new(type_info))
+        Val::map(type_info)
     }
 
     fn build_field_type_info_from_expr(&self, type_expr: &TypeExpr, include_builtin: bool) -> Val {
@@ -6083,13 +6083,13 @@ impl Compiler {
                 }
 
                 let mut union_info = indexmap::IndexMap::new();
-                union_info.insert(Val::from("$union"), Val::Vec(members));
-                Val::Map(Box::new(union_info))
+                union_info.insert(Val::from("$union"), Val::vec(members));
+                Val::map(union_info)
             }
             TypeExpr::Optional(inner) => {
                 let mut info = self.build_field_type_info_from_expr(inner, true);
                 if let Val::Map(map) = &mut info {
-                    map.insert(Val::from("$optional"), Val::Bool(true));
+                    std::sync::Arc::make_mut(map).insert(Val::from("$optional"), Val::Bool(true));
                 }
                 info
             }
@@ -6101,7 +6101,7 @@ impl Compiler {
                     if !Self::is_empty_map(&item_type_info) {
                         vec_info.insert(Val::from("$item_type"), item_type_info);
                     }
-                    Val::Map(Box::new(vec_info))
+                    Val::map(vec_info)
                 } else {
                     Val::map_empty()
                 }
@@ -6137,7 +6137,7 @@ impl Compiler {
             TypeExpr::Literal(lit) => {
                 let mut type_info = indexmap::IndexMap::new();
                 type_info.insert(Val::from("$literal"), Val::from(lit.to_string()));
-                Val::Map(Box::new(type_info))
+                Val::map(type_info)
             }
             TypeExpr::Generic(name, _) => self.build_custom_type_info(name),
         }
@@ -6156,13 +6156,13 @@ impl Compiler {
 
         let mut type_info = indexmap::IndexMap::new();
         type_info.insert(Val::from("$type"), Val::from(qualified_name));
-        Val::Map(Box::new(type_info))
+        Val::map(type_info)
     }
 
     fn simple_type_info(type_name: &str) -> Val {
         let mut type_info = indexmap::IndexMap::new();
         type_info.insert(Val::from("$type"), Val::from(type_name));
-        Val::Map(Box::new(type_info))
+        Val::map(type_info)
     }
 
     pub(super) fn type_expr_allows_null(type_expr: &TypeExpr) -> bool {
@@ -7602,7 +7602,7 @@ impl Compiler {
                 }
             }
             Val::Vec(vec) => {
-                for v in vec {
+                for v in vec.iter() {
                     self.collect_free_variables_in_val(v, free_vars, bound_vars);
                 }
             }
@@ -8174,9 +8174,9 @@ impl Compiler {
             let mut levels_vec = Vec::new();
             for level in &dependency_levels {
                 let level_vec: Vec<Val> = level.iter().map(|s| Val::from(s.clone())).collect();
-                levels_vec.push(Val::Vec(level_vec));
+                levels_vec.push(Val::vec(level_vec));
             }
-            Val::Vec(levels_vec)
+            Val::vec(levels_vec)
         };
         let metadata_constant = self
             .program
