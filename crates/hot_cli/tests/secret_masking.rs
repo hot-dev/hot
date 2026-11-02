@@ -28,6 +28,9 @@ const OAUTH_ACCESS: &str = "SENTINEL-OAUTH-ACCESS-CCCCC";
 const OAUTH_REFRESH: &str = "SENTINEL-OAUTH-REFRESH-DDDDD";
 const OAUTH_COOKIE: &str = "SENTINEL-OAUTH-COOKIE-EEEEE";
 const FAILURE: &str = "SENTINEL-FAILURE-FFFFF";
+const FAILURE_BYTES: &str = "SENTINEL-FAILURE-BYTES-GGGGG";
+const FAILURE_RESPONSE: &str = "SENTINEL-FAILURE-RESPONSE-HHHHH";
+const UNMARKED_BYTES: &str = "SENTINEL-UNMARKED-BYTES-IIIII";
 
 const SENTINELS: &[&str] = &[
     DECLARED,
@@ -45,6 +48,16 @@ const SENTINELS: &[&str] = &[
     OAUTH_REFRESH,
     OAUTH_COOKIE,
     FAILURE,
+    FAILURE_BYTES,
+    FAILURE_RESPONSE,
+    UNMARKED_BYTES,
+];
+
+/// Programs that end in an Err, which a failure's message has to render.
+const RETURNS_ERR: &[&str] = &[
+    "::secrets/fails-with-bytes()",
+    "::secrets/fails-with-response()",
+    "::secrets/fails-with-unmarked-bytes()",
 ];
 
 const PROGRAM: &str = r#"::secrets ns
@@ -162,6 +175,20 @@ fails fn (): Any {
     key ::hot::ctx/mark-secret("SENTINEL-FAILURE-FFFFF")
     fail(`request failed for Bearer ${key}`)
 }
+
+fails-with-bytes fn (): Any {
+    key ::hot::ctx/mark-secret("SENTINEL-FAILURE-BYTES-GGGGG")
+    err({status: 400, body-bytes: Bytes(`x ${key} y`), nested: [{raw: Bytes(key)}]})
+}
+
+fails-with-response fn (): Any {
+    key ::hot::ctx/mark-secret("SENTINEL-FAILURE-RESPONSE-HHHHH")
+    err(::hot::http/request("POST", `${base()}/refuse`, {"X-Thing": key}, "hello"))
+}
+
+fails-with-unmarked-bytes fn (): Any {
+    err({status: 400, body-bytes: Bytes("{\"access_token\":\"SENTINEL-UNMARKED-BYTES-IIIII\"}")})
+}
 "#;
 
 fn hot_binary() -> &'static Path {
@@ -205,7 +232,7 @@ fn run_hot(dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> Output {
 }
 
 /// A server answering the program's requests: a token exchange, an echo of
-/// what it was sent, and a slow answer.
+/// what it was sent, a refusal that repeats it, and a slow answer.
 fn serve() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -236,14 +263,19 @@ fn serve() -> String {
                             r#"{{"access_token":"{OAUTH_ACCESS}","refresh_token":"{OAUTH_REFRESH}","token_type":"bearer","expires_in":3600}}"#
                         ),
                     )
-                } else if line.contains("/echo") {
+                } else if line.contains("/echo") || line.contains("/refuse") {
                     // What a provider's error page may repeat back.
                     (String::new(), request)
                 } else {
                     (String::new(), "ok".to_string())
                 };
+                let status = if line.contains("/refuse") {
+                    "400 Bad Request"
+                } else {
+                    "200 OK"
+                };
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
                 stream.write_all(response.as_bytes()).ok();
@@ -489,18 +521,23 @@ fn run_program(dir: &Path, envs: &[(&str, &str)], what: &str) {
     };
     let succeeded = run("::secrets/all()");
     assert_ran(&succeeded, what, true);
-    let failed = run("::secrets/fails()");
-    assert_ran(&failed, what, false);
-    let output = String::from_utf8_lossy(&failed.stderr);
-    assert!(
-        output.contains("request failed for Bearer <secret>"),
-        "{what}: the failure should be reported, masked: {output}"
-    );
-    let printed = format!(
-        "{}{}{}",
+    let mut printed = format!(
+        "{}{}",
         String::from_utf8_lossy(&succeeded.stdout),
         String::from_utf8_lossy(&succeeded.stderr),
-        output
+    );
+    let failed = run("::secrets/fails()");
+    assert_ran(&failed, what, false);
+    printed.push_str(&String::from_utf8_lossy(&failed.stderr));
+    for entry in RETURNS_ERR {
+        let returned = run(entry);
+        assert_ran(&returned, what, true);
+        printed.push_str(&String::from_utf8_lossy(&returned.stdout));
+        printed.push_str(&String::from_utf8_lossy(&returned.stderr));
+    }
+    assert!(
+        printed.contains("request failed for Bearer <secret>"),
+        "{what}: the failure should be reported, masked: {printed}"
     );
     assert!(
         found_in(&printed, &needles()).is_empty(),
@@ -646,7 +683,7 @@ async fn sentinels_reach_no_column_of_any_table_on_postgres() {
         let path = dir.path().to_path_buf();
         let (run_db, run_fixture, run_base) = (db.clone(), fixture.clone(), base.clone());
         let run_emitter = emitter.clone();
-        let (succeeded, failed) = tokio::task::spawn_blocking(move || {
+        let (succeeded, failed, returned) = tokio::task::spawn_blocking(move || {
             let run = |entry: &str| {
                 run_program_in_process(
                     &path,
@@ -658,12 +695,23 @@ async fn sentinels_reach_no_column_of_any_table_on_postgres() {
                     entry,
                 )
             };
-            (run("::secrets/all()"), run("::secrets/fails()"))
+            (
+                run("::secrets/all()"),
+                run("::secrets/fails()"),
+                RETURNS_ERR
+                    .iter()
+                    .map(|entry| run(entry))
+                    .collect::<Vec<_>>(),
+            )
         })
         .await
         .unwrap();
         succeeded.unwrap_or_else(|error| panic!("{what}: {error}"));
         assert!(failed.is_err(), "{what}: the program should fail");
+        for result in returned {
+            let result = result.unwrap_or_else(|error| panic!("{what}: {error}"));
+            assert!(result.is_err(), "{what}: should end in an Err: {result}");
+        }
         hot::lang::emitter::EngineEventEmitter::shutdown(&*emitter)
             .await
             .unwrap();
