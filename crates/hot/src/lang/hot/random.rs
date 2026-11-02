@@ -170,7 +170,7 @@ fn get_bytes_from_arg(arg: &Val) -> Result<Vec<u8>, String> {
         Val::Bytes(b) => Ok(b.clone()),
         Val::Vec(vec) => {
             let mut result = Vec::new();
-            for val in vec {
+            for val in vec.iter() {
                 match val {
                     Val::Byte(b) => result.push(*b),
                     _ => {

@@ -1999,7 +1999,7 @@ f fn (n: Int): Str {
         };
         let mut m = indexmap::IndexMap::new();
         m.insert(Val::from("count"), Val::Int(7));
-        let record = PureValue::Other(Val::Map(Box::new(m)));
+        let record = PureValue::Other(Val::map(m));
         assert_eq!(
             eval_expr(&field, std::slice::from_ref(&record)),
             EvalOutcome::Value(PureValue::Int(7))
@@ -2137,7 +2137,7 @@ f fn (n: Int): Int {
             .expect("fn f");
         let plan = &detect_pipelines(&func.instructions, &prog)[0];
         // range(1, 11) = [1..10]; evens 2,4,6,8,10; squares 4,16,36,64,100; sum=220.
-        let source = Val::Vec((1..=10).map(Val::Int).collect());
+        let source = Val::vec((1..=10).map(Val::Int).collect());
         assert_eq!(
             run_pipeline(plan, &source),
             FusedRun::Produced(Val::Int(220))
@@ -2164,9 +2164,9 @@ f fn (xs: Vec): Int {
             .find(|f| f.name.ends_with("/f"))
             .expect("fn f");
         let plan = &detect_pipelines(&func.instructions, &prog)[0];
-        let plain = Val::Vec(vec![Val::Int(1), Val::Int(2), Val::Int(3)]);
+        let plain = Val::vec(vec![Val::Int(1), Val::Int(2), Val::Int(3)]);
         assert_eq!(run_pipeline(plan, &plain), FusedRun::Produced(Val::Int(3)));
-        let with_err = Val::Vec(vec![
+        let with_err = Val::vec(vec![
             Val::Int(1),
             Val::err(Val::from("Division by zero")),
             Val::Int(3),
@@ -2295,7 +2295,7 @@ f fn (n: Int): Int {
         );
         let plan = &plans[0];
         assert_eq!(plan.stages.len(), 3);
-        let source = Val::Vec((1..=10).map(Val::Int).collect());
+        let source = Val::vec((1..=10).map(Val::Int).collect());
         assert_eq!(
             run_pipeline(plan, &source),
             FusedRun::Produced(Val::Int(220))
@@ -2319,7 +2319,7 @@ f fn (n: Int): Int {
             .find(|f| f.name.ends_with("/f"))
             .expect("fn f");
         let plan = &detect_pipelines(&func.instructions, &prog)[0];
-        let source = Val::Vec(vec![Val::Int(2), Val::from("oops"), Val::Int(4)]);
+        let source = Val::vec(vec![Val::Int(2), Val::from("oops"), Val::Int(4)]);
         assert_eq!(run_pipeline(plan, &source), FusedRun::Deopt);
     }
 
@@ -2342,13 +2342,13 @@ f fn (n: Int): Bool {
         let plan = &detect_pipelines(&func.instructions, &prog)[0];
         assert_eq!(plan.stages.len(), 2);
         assert_eq!(plan.stages[1].stage, HofStage::Some);
-        let source = Val::Vec((1..=5).map(Val::Int).collect());
+        let source = Val::vec((1..=5).map(Val::Int).collect());
         assert_eq!(
             run_pipeline(plan, &source),
             FusedRun::Produced(Val::Bool(true))
         );
 
-        let source = Val::Vec((1..=3).map(Val::Int).collect());
+        let source = Val::vec((1..=3).map(Val::Int).collect());
         assert_eq!(
             run_pipeline(plan, &source),
             FusedRun::Produced(Val::Bool(false))
@@ -2374,13 +2374,13 @@ f fn (n: Int): Bool {
         let plan = &detect_pipelines(&func.instructions, &prog)[0];
         assert_eq!(plan.stages.len(), 2);
         assert_eq!(plan.stages[1].stage, HofStage::All);
-        let source = Val::Vec((1..=5).map(Val::Int).collect());
+        let source = Val::vec((1..=5).map(Val::Int).collect());
         assert_eq!(
             run_pipeline(plan, &source),
             FusedRun::Produced(Val::Bool(true))
         );
 
-        let source = Val::Vec(vec![Val::Int(1), Val::Int(-1), Val::Int(3)]);
+        let source = Val::vec(vec![Val::Int(1), Val::Int(-1), Val::Int(3)]);
         assert_eq!(
             run_pipeline(plan, &source),
             FusedRun::Produced(Val::Bool(false))
@@ -2417,7 +2417,7 @@ f fn (n: Int): Int {
     fn record(count: i64) -> Val {
         let mut m = indexmap::IndexMap::new();
         m.insert(Val::from("count"), Val::Int(count));
-        Val::Map(Box::new(m))
+        Val::map(m)
     }
 
     #[test]
@@ -2439,7 +2439,7 @@ f fn (rows: Vec<Map>): Int {
             .expect("fn f");
         let plan = &detect_pipelines(&func.instructions, &prog)[0];
         // counts: 3, -1 (dropped), 0 (dropped), 5  -> 3 + 5 = 8
-        let source = Val::Vec(vec![record(3), record(-1), record(0), record(5)]);
+        let source = Val::vec(vec![record(3), record(-1), record(0), record(5)]);
         assert_eq!(run_pipeline(plan, &source), FusedRun::Produced(Val::Int(8)));
     }
 
@@ -2495,7 +2495,7 @@ f fn (items: Vec<Str>): Str {
             string_reduce_builder(plan.stages.last().expect("terminal")).is_some(),
             "string concat reduce should use the builder specialization"
         );
-        let source = Val::Vec(vec![Val::from("a"), Val::from("b"), Val::from("c")]);
+        let source = Val::vec(vec![Val::from("a"), Val::from("b"), Val::from("c")]);
         assert_eq!(
             run_pipeline(plan, &source),
             FusedRun::Produced(Val::from("a!b!c!"))
@@ -2517,7 +2517,7 @@ f fn (items: Vec<Int>): Str {
             .find(|f| f.name.ends_with("/f"))
             .expect("fn f");
         let plan = &detect_pipelines(&func.instructions, &prog)[0];
-        let source = Val::Vec(vec![Val::Int(1), Val::Int(2), Val::Int(3)]);
+        let source = Val::vec(vec![Val::Int(1), Val::Int(2), Val::Int(3)]);
         assert_eq!(
             run_pipeline(plan, &source),
             FusedRun::Produced(Val::from("123"))
@@ -2539,7 +2539,7 @@ f fn (items: Vec): Str {
             .find(|f| f.name.ends_with("/f"))
             .expect("fn f");
         let plan = &detect_pipelines(&func.instructions, &prog)[0];
-        let source = Val::Vec(vec![Val::Null, Val::from("ok")]);
+        let source = Val::vec(vec![Val::Null, Val::from("ok")]);
         assert_eq!(
             run_pipeline(plan, &source),
             FusedRun::Produced(Val::from("item=;item=ok;"))
@@ -2561,7 +2561,7 @@ f fn (items: Vec<Map>): Str {
             .find(|f| f.name.ends_with("/f"))
             .expect("fn f");
         let plan = &detect_pipelines(&func.instructions, &prog)[0];
-        let source = Val::Vec(vec![record(1)]);
+        let source = Val::vec(vec![record(1)]);
         assert_eq!(run_pipeline(plan, &source), FusedRun::Deopt);
     }
 }

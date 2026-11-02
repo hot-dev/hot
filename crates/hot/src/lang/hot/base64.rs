@@ -85,7 +85,7 @@ fn get_bytes_from_arg(arg: &Val) -> Result<Vec<u8>, String> {
         Val::Bytes(bytes) => Ok(bytes.clone()),
         Val::Vec(vec) => {
             let mut result = Vec::new();
-            for val in vec {
+            for val in vec.iter() {
                 match val {
                     Val::Byte(b) => result.push(*b),
                     _ => {
@@ -138,7 +138,7 @@ mod tests {
             Val::Byte(108),
             Val::Byte(111),
         ];
-        let result = encode(&[Val::Vec(byte_vec)]);
+        let result = encode(&[Val::vec(byte_vec)]);
         match result {
             HotResult::Ok(Val::Str(encoded)) => {
                 assert_eq!(&*encoded, "SGVsbG8=");

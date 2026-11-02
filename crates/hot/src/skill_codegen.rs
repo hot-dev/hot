@@ -998,7 +998,7 @@ mod tests {
 
     #[test]
     fn meta_value_inline_vec() {
-        let v = Val::Vec(vec![Val::from("reply"), Val::from("copy")]);
+        let v = Val::vec(vec![Val::from("reply"), Val::from("copy")]);
         assert_eq!(format_meta_value(&v, 1), "[\"reply\", \"copy\"]");
     }
 
@@ -1350,12 +1350,12 @@ mod tests {
         let mut skills_map = indexmap::IndexMap::new();
         let mut codegen_map = indexmap::IndexMap::new();
         codegen_map.insert(Val::from("enabled"), Val::Bool(false));
-        skills_map.insert(Val::from("codegen"), Val::Map(Box::new(codegen_map)));
-        my_proj.insert(Val::from("skills"), Val::Map(Box::new(skills_map)));
-        project_map.insert(Val::from("default"), Val::Map(Box::new(my_proj.clone())));
-        project_map.insert(Val::from("my-proj"), Val::Map(Box::new(my_proj)));
-        conf_map.insert(Val::from("project"), Val::Map(Box::new(project_map)));
-        let conf = Val::Map(Box::new(conf_map));
+        skills_map.insert(Val::from("codegen"), Val::map(codegen_map));
+        my_proj.insert(Val::from("skills"), Val::map(skills_map));
+        project_map.insert(Val::from("default"), Val::map(my_proj.clone()));
+        project_map.insert(Val::from("my-proj"), Val::map(my_proj));
+        conf_map.insert(Val::from("project"), Val::map(project_map));
+        let conf = Val::map(conf_map);
 
         let opts2 = opts_from_conf(&conf, "my-proj");
         assert!(!opts2.enabled);
@@ -1372,13 +1372,13 @@ mod tests {
 
         codegen_map.insert(
             Val::from("paths"),
-            Val::Vec(vec![Val::from("./skills"), Val::from("./agent/resources")]),
+            Val::vec(vec![Val::from("./skills"), Val::from("./agent/resources")]),
         );
-        skills_map.insert(Val::from("codegen"), Val::Map(Box::new(codegen_map)));
-        my_proj.insert(Val::from("skills"), Val::Map(Box::new(skills_map)));
-        project_map.insert(Val::from("my-proj"), Val::Map(Box::new(my_proj)));
-        conf_map.insert(Val::from("project"), Val::Map(Box::new(project_map)));
-        let conf = Val::Map(Box::new(conf_map));
+        skills_map.insert(Val::from("codegen"), Val::map(codegen_map));
+        my_proj.insert(Val::from("skills"), Val::map(skills_map));
+        project_map.insert(Val::from("my-proj"), Val::map(my_proj));
+        conf_map.insert(Val::from("project"), Val::map(project_map));
+        let conf = Val::map(conf_map);
 
         let opts = opts_from_conf(&conf, "my-proj");
         assert_eq!(
@@ -1399,23 +1399,20 @@ mod tests {
         let mut resources = indexmap::IndexMap::new();
         resources.insert(
             Val::from("paths"),
-            Val::Vec(vec![Val::from(res_root.to_string_lossy().to_string())]),
+            Val::vec(vec![Val::from(res_root.to_string_lossy().to_string())]),
         );
 
         let mut project = indexmap::IndexMap::new();
-        project.insert(Val::from("resources"), Val::Map(Box::new(resources)));
-        project.insert(
-            Val::from("deps"),
-            Val::Map(Box::new(indexmap::IndexMap::new())),
-        );
+        project.insert(Val::from("resources"), Val::map(resources));
+        project.insert(Val::from("deps"), Val::map(indexmap::IndexMap::new()));
 
         let mut projects = indexmap::IndexMap::new();
-        projects.insert(Val::from("my-proj"), Val::Map(Box::new(project)));
+        projects.insert(Val::from("my-proj"), Val::map(project));
 
         let mut conf = indexmap::IndexMap::new();
-        conf.insert(Val::from("project"), Val::Map(Box::new(projects)));
+        conf.insert(Val::from("project"), Val::map(projects));
 
-        let report = run_skill_codegen_from_conf(&Val::Map(Box::new(conf)), "my-proj", &[]);
+        let report = run_skill_codegen_from_conf(&Val::map(conf), "my-proj", &[]);
         assert!(report.created.is_empty(), "{:?}", report);
         assert_eq!(report.errors.len(), 1, "{:?}", report);
         assert!(
@@ -1430,21 +1427,18 @@ mod tests {
         let mut deps = indexmap::IndexMap::new();
         deps.insert(
             Val::from("hot.dev/hot-ai"),
-            Val::Map(Box::new(indexmap::IndexMap::new())),
+            Val::map(indexmap::IndexMap::new()),
         );
 
         let mut project = indexmap::IndexMap::new();
-        project.insert(Val::from("deps"), Val::Map(Box::new(deps)));
+        project.insert(Val::from("deps"), Val::map(deps));
 
         let mut projects = indexmap::IndexMap::new();
-        projects.insert(Val::from("my-proj"), Val::Map(Box::new(project)));
+        projects.insert(Val::from("my-proj"), Val::map(project));
 
         let mut conf = indexmap::IndexMap::new();
-        conf.insert(Val::from("project"), Val::Map(Box::new(projects)));
+        conf.insert(Val::from("project"), Val::map(projects));
 
-        assert!(project_declares_hot_ai(
-            &Val::Map(Box::new(conf)),
-            "my-proj"
-        ));
+        assert!(project_declares_hot_ai(&Val::map(conf), "my-proj"));
     }
 }

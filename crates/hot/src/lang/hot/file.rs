@@ -332,7 +332,7 @@ fn list_files_direct(prefix: &str) -> HotResult<Val> {
     };
 
     if !search_dir.exists() {
-        return HotResult::Ok(Val::Vec(vec![]));
+        return HotResult::Ok(Val::vec(vec![]));
     }
 
     let mut files = Vec::new();
@@ -375,7 +375,7 @@ fn list_files_direct(prefix: &str) -> HotResult<Val> {
         return HotResult::Err(Val::from(format!("Failed to list files: {}", e)));
     }
 
-    HotResult::Ok(Val::Vec(files))
+    HotResult::Ok(Val::vec(files))
 }
 
 // ============================================================================
@@ -768,7 +768,7 @@ fn list_files_internal(
     match block_on_file_op(file_storage.list_files(prefix, ctx)) {
         Ok(files) => {
             let vals: Vec<Val> = files.iter().map(|f| f.to_val()).collect();
-            HotResult::Ok(Val::Vec(vals))
+            HotResult::Ok(Val::vec(vals))
         }
         Err(e) => HotResult::Err(Val::from(e)),
     }

@@ -225,7 +225,7 @@ pub fn next(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     result_map.insert(Val::from("value"), value);
     result_map.insert(Val::from("done"), Val::Bool(done));
 
-    HotResult::Ok(Val::Map(Box::new(result_map)))
+    HotResult::Ok(Val::map(result_map))
 }
 
 /// Collect all values from an iterator into a vector
@@ -262,7 +262,7 @@ pub fn collect(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         }
     }
 
-    HotResult::Ok(Val::Vec(results))
+    HotResult::Ok(Val::vec(results))
 }
 
 /// Check if a value is an iterator
@@ -323,7 +323,7 @@ impl HotIterator for MapIterator {
         } else {
             let (key, value) = self.pairs[self.index].clone();
             self.index += 1;
-            Ok((Val::Vec(vec![key, value]), false))
+            Ok((Val::vec(vec![key, value]), false))
         }
     }
 }
@@ -412,7 +412,7 @@ pub fn iter(args: &[Val]) -> HotResult<Val> {
 
     let iter_box = match &args[0] {
         Val::Vec(v) => {
-            let iterator = VecIterator::new(v.clone());
+            let iterator = VecIterator::new(v.to_vec());
             IteratorBox::new(Box::new(iterator))
         }
         Val::Map(m) => {

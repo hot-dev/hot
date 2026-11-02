@@ -135,7 +135,7 @@ fn vector_from_val(value: Val, expected_dimensions: Option<u32>) -> Result<Vec<f
     };
 
     let mut out = Vec::with_capacity(items.len());
-    for item in items {
+    for item in std::sync::Arc::unwrap_or_clone(items) {
         let n = match item {
             Val::Int(i) => i as f32,
             Val::Dec(d) => d.to_string().parse::<f32>().map_err(|e| {
@@ -181,7 +181,7 @@ fn batch_vectors_from_val(
         ));
     }
 
-    items
+    std::sync::Arc::unwrap_or_clone(items)
         .into_iter()
         .map(|item| vector_from_val(item, expected_dimensions))
         .collect()
@@ -292,7 +292,7 @@ fn embed_values(
             return Ok(vec![None; values.len()]);
         }
 
-        let batch_result = call_fn_with_vm(vm, embed_batch_fn, &[Val::Vec(texts)]);
+        let batch_result = call_fn_with_vm(vm, embed_batch_fn, &[Val::vec(texts)]);
         let vectors = match batch_result {
             Ok(value) => {
                 batch_vectors_from_val(value, text_positions.len(), config.embedding_dimensions)
@@ -385,7 +385,7 @@ fn entry_to_val(entry: &store::StoreEntry) -> Val {
     let mut map = IndexMap::new();
     map.insert(Val::from("key"), json_to_val(entry.key.clone()));
     map.insert(Val::from("value"), json_to_val(entry.value.clone()));
-    Val::Map(Box::new(map))
+    Val::map(map)
 }
 
 fn search_result_to_val(result: &store::SearchResult) -> Val {
@@ -396,7 +396,7 @@ fn search_result_to_val(result: &store::SearchResult) -> Val {
         Val::from("score"),
         Val::Dec(fastnum::D256::from(result.score)),
     );
-    Val::Map(Box::new(map))
+    Val::map(map)
 }
 
 // ---------------------------------------------------------------------------
@@ -582,7 +582,7 @@ pub fn keys(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         // Like `keys(store)`, every matching key unless a limit is given.
         opts.limit = opts.limit.or(Some(i64::MAX as usize));
         return match block_on(store.list_info(&config.name, opts)) {
-            Ok(infos) => HotResult::Ok(Val::Vec(
+            Ok(infos) => HotResult::Ok(Val::vec(
                 infos
                     .into_iter()
                     .map(|info| json_to_val(info.key))
@@ -593,7 +593,7 @@ pub fn keys(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     }
 
     match block_on(store.keys(&config.name)) {
-        Ok(ks) => HotResult::Ok(Val::Vec(ks.into_iter().map(json_to_val).collect())),
+        Ok(ks) => HotResult::Ok(Val::vec(ks.into_iter().map(json_to_val).collect())),
         Err(e) => HotResult::Err(Val::from(e)),
     }
 }
@@ -606,7 +606,7 @@ pub fn vals(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     };
 
     match block_on(store.vals(&config.name)) {
-        Ok(vs) => HotResult::Ok(Val::Vec(vs.into_iter().map(json_to_val).collect())),
+        Ok(vs) => HotResult::Ok(Val::vec(vs.into_iter().map(json_to_val).collect())),
         Err(e) => HotResult::Err(Val::from(e)),
     }
 }
@@ -721,7 +721,7 @@ pub fn list(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     };
 
     match block_on(store.list(&config.name, opts)) {
-        Ok(entries) => HotResult::Ok(Val::Vec(entries.iter().map(entry_to_val).collect())),
+        Ok(entries) => HotResult::Ok(Val::vec(entries.iter().map(entry_to_val).collect())),
         Err(e) => HotResult::Err(Val::from(e)),
     }
 }
@@ -781,7 +781,7 @@ pub fn search(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     };
 
     match block_on(store.search(&config.name, Some(&query), query_embedding, options)) {
-        Ok(results) => HotResult::Ok(Val::Vec(results.iter().map(search_result_to_val).collect())),
+        Ok(results) => HotResult::Ok(Val::vec(results.iter().map(search_result_to_val).collect())),
         Err(e) => HotResult::Err(Val::from(e)),
     }
 }
@@ -811,7 +811,7 @@ pub fn filter(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
             Err(e) => return HotResult::Err(Val::from(e)),
         }
     }
-    HotResult::Ok(Val::Vec(results))
+    HotResult::Ok(Val::vec(results))
 }
 
 pub fn find_first(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
@@ -932,7 +932,7 @@ pub fn slice(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     };
 
     match block_on(store.list(&config.name, opts)) {
-        Ok(entries) => HotResult::Ok(Val::Vec(entries.iter().map(entry_to_val).collect())),
+        Ok(entries) => HotResult::Ok(Val::vec(entries.iter().map(entry_to_val).collect())),
         Err(e) => HotResult::Err(Val::from(e)),
     }
 }
@@ -969,19 +969,19 @@ mod tests {
 
     #[test]
     fn vector_from_val_accepts_numeric_vec() {
-        let vector = vector_from_val(Val::Vec(vec![Val::Int(1), Val::Int(2)]), Some(2)).unwrap();
+        let vector = vector_from_val(Val::vec(vec![Val::Int(1), Val::Int(2)]), Some(2)).unwrap();
         assert_eq!(vector, vec![1.0, 2.0]);
     }
 
     #[test]
     fn vector_from_val_rejects_dimension_mismatch() {
-        let err = vector_from_val(Val::Vec(vec![Val::Int(1)]), Some(2)).unwrap_err();
+        let err = vector_from_val(Val::vec(vec![Val::Int(1)]), Some(2)).unwrap_err();
         assert!(err.contains("expected 2"));
     }
 
     #[test]
     fn batch_vectors_from_val_validates_count() {
-        let batch = Val::Vec(vec![Val::Vec(vec![Val::Int(1), Val::Int(2)])]);
+        let batch = Val::vec(vec![Val::vec(vec![Val::Int(1), Val::Int(2)])]);
         let err = batch_vectors_from_val(batch, 2, Some(2)).unwrap_err();
         assert!(err.contains("expected 2"));
     }

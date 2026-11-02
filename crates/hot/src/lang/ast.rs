@@ -785,7 +785,7 @@ impl HotAst {
                     }).collect();
 
                         val!({
-                            "args": Val::Vec(args),
+                            "args": Val::vec(args),
                             "variadic": fn_def.args.variadic,
                             "arity": fn_def.args.args.len() as i64,
                         })
@@ -794,7 +794,7 @@ impl HotAst {
 
                 metadata = metadata.merge(&val!({
                     "value_type": "function",
-                    "signatures": Val::Vec(signatures),
+                    "signatures": Val::vec(signatures),
                 }));
             }
             Value::TypeDef(type_def) => {
@@ -818,7 +818,7 @@ impl HotAst {
                         }).collect();
 
                             val!({
-                                "args": Val::Vec(args),
+                                "args": Val::vec(args),
                                 "variadic": fn_def.args.variadic,
                                 "arity": fn_def.args.args.len() as i64,
                             })
@@ -826,7 +826,7 @@ impl HotAst {
                         .collect();
 
                     type_meta = type_meta.merge(&val!({
-                        "constructor_signatures": Val::Vec(constructor_sigs),
+                        "constructor_signatures": Val::vec(constructor_sigs),
                     }));
                 }
 
