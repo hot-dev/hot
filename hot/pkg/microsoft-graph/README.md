@@ -120,6 +120,8 @@ sync-user fn (user-id: Str): Bool {
 }
 ```
 
+Store values are plain text, so anyone who can read this store can read the refresh tokens. Restrict who can.
+
 `::microsoft::graph::oauth/refresh-access-token(client-id, refresh-token, opts)` redeems one explicitly and returns the full token response, `refresh_token` included. A revoked or expired refresh token fails with `error-code: "invalid_grant"`: send the user through sign-in again.
 
 ### Token cache

@@ -67,7 +67,7 @@ openssl pkcs8 -in encrypted.pem -out box-key.pem   # enter boxAppSettings.appAut
 
 Box access tokens last about 60 minutes. A refresh token lasts 60 days and works **once**: every refresh returns a new pair and kills the old refresh token. Lose the new one and the user has to authorize again. The package offers two ways to keep it.
 
-**The keeper (recommended).** Tokens live in a `::hot::store` Map, one entry per account. Save the pair after the consent callback, then pass `{account}` per call (or set `box.oauth.account`):
+**The keeper (recommended).** Tokens live in a `::hot::store` Map, one entry per account, as plain text: anyone who can read the store can read them, so restrict who can. Save the pair after the consent callback, then pass `{account}` per call (or set `box.oauth.account`):
 
 ```hot
 ::oauth ::box::oauth
