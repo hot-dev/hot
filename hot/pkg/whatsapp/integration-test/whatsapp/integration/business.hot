@@ -6,21 +6,21 @@ WHATSAPP_TEST_PHONE_NUMBER_ID ::hot::env/get("WHATSAPP_TEST_PHONE_NUMBER_ID", ""
 test-get-phone-number
 meta ["test"]
 fn () {
-  assert(WHATSAPP_TEST_PHONE_NUMBER_ID, "Set WHATSAPP_TEST_PHONE_NUMBER_ID in .env")
+  if(::whatsapp::integration::ctx/configured(["WHATSAPP_TEST_PHONE_NUMBER_ID"]), {
+    response ::whatsapp::business/get-phone-number(WHATSAPP_TEST_PHONE_NUMBER_ID)
 
-  response ::whatsapp::business/get-phone-number(WHATSAPP_TEST_PHONE_NUMBER_ID)
-
-  assert(response.display_phone_number, "should return display_phone_number")
-  assert(response.verified_name, "should return verified_name")
-  assert(response.quality_rating, "should return quality_rating")
+    assert(response.display_phone_number, "should return display_phone_number")
+    assert(response.verified_name, "should return verified_name")
+    assert(response.quality_rating, "should return quality_rating")
+  }, null)
 }
 
 test-get-business-profile
 meta ["test"]
 fn () {
-  assert(WHATSAPP_TEST_PHONE_NUMBER_ID, "Set WHATSAPP_TEST_PHONE_NUMBER_ID in .env")
+  if(::whatsapp::integration::ctx/configured(["WHATSAPP_TEST_PHONE_NUMBER_ID"]), {
+    response ::whatsapp::business/get-business-profile(WHATSAPP_TEST_PHONE_NUMBER_ID)
 
-  response ::whatsapp::business/get-business-profile(WHATSAPP_TEST_PHONE_NUMBER_ID)
-
-  assert(response.data, "should return data array")
+    assert(response.data, "should return data array")
+  }, null)
 }

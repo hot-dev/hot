@@ -1,0 +1,273 @@
+::google::sheets::values ns
+meta {
+    doc: """
+    Cell values: read one range or many, overwrite, append, clear, the
+    batch forms of each, and records on top (`read-records`,
+    `write-records`, `append-records`).
+
+    **Reading options** (`get-values`, `batch-get-values`):
+    `valueRenderOption` (`FORMATTED_VALUE` default, `UNFORMATTED_VALUE`,
+    `FORMULA`), `dateTimeRenderOption` (`SERIAL_NUMBER` default,
+    `FORMATTED_STRING`; ignored for `FORMATTED_VALUE`), `majorDimension`
+    (`ROWS` default, `COLUMNS`).
+
+    **Writing options** (`update-values`, `append-values`,
+    `batch-update-values`): `valueInputOption` (`USER_ENTERED` by
+    default here, so numbers, dates and formulas parse as if typed;
+    `RAW` stores strings as is), `includeValuesInResponse`,
+    `responseValueRenderOption`, `responseDateTimeRenderOption`, and for
+    `append-values` `insertDataOption` (`OVERWRITE` default,
+    `INSERT_ROWS`). `majorDimension` sets the body's orientation.
+
+    **Scopes.** Reads use `spreadsheets.readonly`, writes `spreadsheets`;
+    `drive.file` works for spreadsheets the app created or the user
+    opened with it.
+    """
+}
+
+::sheets ::google::sheets
+::records ::google::sheets::records
+
+// Options that go in the request body rather than the query string.
+BODY_KEYS ["majorDimension"]
+
+value-range
+meta {
+    doc: """A ValueRange body (pure): `{range, majorDimension, values}` with `majorDimension` from `opts` (default `ROWS`)."""
+}
+fn (range: Str, values: Vec, opts: Map): Map {
+  {range: range, majorDimension: or(get(opts, "majorDimension"), "ROWS"), values: values}
+}
+
+read-params
+meta {
+    doc: """The query parameters a read sends (pure): only the options you set (`valueRenderOption`, `dateTimeRenderOption`, `majorDimension`, `fields`, ...)."""
+}
+fn (opts: Map): Map {
+  ::sheets/query-params({}, opts)
+}
+
+write-params
+meta {
+    doc: """The query parameters a write sends (pure): `valueInputOption: "USER_ENTERED"` unless set, plus your options; `majorDimension` stays in the body."""
+}
+fn (opts: Map): Map {
+  ::sheets/query-params({valueInputOption: "USER_ENTERED"}, opts, BODY_KEYS)
+}
+
+// ---------------------------------------------------------------------------
+// Reading
+// ---------------------------------------------------------------------------
+
+get-values
+meta {
+    doc: """
+    GET /{id}/values/{range} - read a range in A1 notation (e.g.
+    `"Sheet1!A1:C10"`, `"Leads"` for a whole sheet, or a named range).
+    Returns `{range, majorDimension, values?}`; `values` is absent when
+    the range is empty. Scope: `spreadsheets.readonly`.
+
+    ```hot
+    raw ::google::sheets::values/get-values(id, "Data!A2:D", {valueRenderOption: "UNFORMATTED_VALUE"})
+    ```
+    """
+}
+fn
+(spreadsheet-id: Str, range: Str): Map {
+  get-values(spreadsheet-id, range, {})
+},
+(spreadsheet-id: Str, range: Str, opts: Map): Map {
+  ::sheets/json(::sheets/READ_SCOPE, "GET", ::sheets/url(::sheets/values-path(spreadsheet-id, range), read-params(opts)), "", opts)
+}
+
+batch-get-values
+meta {
+    doc: """GET /{id}/values:batchGet - read several ranges in one call. Returns `{spreadsheetId, valueRanges: [...]}` in request order. Same options as `get-values`. Scope: `spreadsheets.readonly`."""
+}
+fn
+(spreadsheet-id: Str, ranges: Vec): Map {
+  batch-get-values(spreadsheet-id, ranges, {})
+},
+(spreadsheet-id: Str, ranges: Vec, opts: Map): Map {
+  params {...read-params(opts), ranges: ranges}
+  ::sheets/json(::sheets/READ_SCOPE, "GET", ::sheets/url(`/${::sheets/encode-id(spreadsheet-id)}/values:batchGet`, params), "", opts)
+}
+
+read-records
+meta {
+    doc: """
+    Read a range whose first row is a header and return one Map per row
+    (`::google::sheets::records/rows-to-records`). Uses
+    `valueRenderOption: "UNFORMATTED_VALUE"` unless set, so numbers come
+    back as numbers. Scope: `spreadsheets.readonly`.
+
+    ```hot
+    leads ::google::sheets::values/read-records(id, "Leads!A:F")
+    filter(leads, (l) { eq(l.status, "new") })
+    ```
+    """
+}
+fn
+(spreadsheet-id: Str, range: Str): Vec {
+  read-records(spreadsheet-id, range, {})
+},
+(spreadsheet-id: Str, range: Str, opts: Map): Vec {
+  rendered if(is-some(get(opts, "valueRenderOption")), opts, {...opts, valueRenderOption: "UNFORMATTED_VALUE"})
+  result get-values(spreadsheet-id, range, {...rendered, majorDimension: "ROWS"})
+  if(is-err(result), result, ::records/rows-to-records(get(result, "values")))
+}
+
+// ---------------------------------------------------------------------------
+// Writing
+// ---------------------------------------------------------------------------
+
+update-values
+meta {
+    doc: """
+    PUT /{id}/values/{range} - overwrite a range with rows (a Vec of
+    Vecs). Returns `{updatedRange, updatedRows, updatedColumns,
+    updatedCells, updatedData?}`. See the namespace doc for options.
+    Scope: `spreadsheets`.
+    """
+}
+fn
+(spreadsheet-id: Str, range: Str, values: Vec): Map {
+  update-values(spreadsheet-id, range, values, {})
+},
+(spreadsheet-id: Str, range: Str, values: Vec, opts: Map): Map {
+  ::sheets/json(::sheets/SCOPE, "PUT", ::sheets/url(::sheets/values-path(spreadsheet-id, range), write-params(opts)),
+    value-range(range, values, opts), opts)
+}
+
+append-values
+meta {
+    doc: """
+    POST /{id}/values/{range}:append - append rows after the last row of
+    the table found at `range` (e.g. `"Log!A:C"`). `insertDataOption:
+    "INSERT_ROWS"` inserts new rows instead of overwriting empty ones.
+    Returns `{tableRange, updates}`. Scope: `spreadsheets`.
+
+    ```hot
+    ::google::sheets::values/append-values(id, "Log!A:C", [["2026-11-01", "deploy", "ok"]], {insertDataOption: "INSERT_ROWS"})
+    ```
+    """
+}
+fn
+(spreadsheet-id: Str, range: Str, values: Vec): Map {
+  append-values(spreadsheet-id, range, values, {})
+},
+(spreadsheet-id: Str, range: Str, values: Vec, opts: Map): Map {
+  ::sheets/json(::sheets/SCOPE, "POST", ::sheets/url(::sheets/values-path(spreadsheet-id, range, "append"), write-params(opts)),
+    value-range(range, values, opts), opts)
+}
+
+batch-update-body
+meta {
+    doc: """
+    The `values:batchUpdate` body (pure). `data` is a Vec of
+    `{range, values, majorDimension?}` or a Map of range to rows.
+    `valueInputOption` defaults to `USER_ENTERED`; the response options
+    are copied from `opts` when set.
+    """
+}
+fn (data: Any, opts: Map): Map {
+  ranges if(is-map(data),
+    map(keys(data), (r) { {range: r, majorDimension: "ROWS", values: get(data, r)} }),
+    map(data, (d) { {range: d.range, majorDimension: or(get(d, "majorDimension"), "ROWS"), values: d.values} }))
+  ::sheets/compact({
+    valueInputOption: or(get(opts, "valueInputOption"), "USER_ENTERED"),
+    data: ranges,
+    includeValuesInResponse: get(opts, "includeValuesInResponse"),
+    responseValueRenderOption: get(opts, "responseValueRenderOption"),
+    responseDateTimeRenderOption: get(opts, "responseDateTimeRenderOption")
+  })
+}
+
+batch-update-values
+meta {
+    doc: """
+    POST /{id}/values:batchUpdate - write several ranges in one call.
+
+    ```hot
+    ::google::sheets::values/batch-update-values(id, {"Summary!B2": [[42]], "Summary!B3": [["=SUM(Data!C:C)"]]})
+    ```
+
+    Returns `{totalUpdatedCells, responses, ...}`. Scope: `spreadsheets`.
+    """
+}
+fn
+(spreadsheet-id: Str, data: Any): Map {
+  batch-update-values(spreadsheet-id, data, {})
+},
+(spreadsheet-id: Str, data: Any, opts: Map): Map {
+  ::sheets/json(::sheets/SCOPE, "POST", ::sheets/url(`/${::sheets/encode-id(spreadsheet-id)}/values:batchUpdate`),
+    batch-update-body(data, opts), opts)
+}
+
+clear-values
+meta {
+    doc: """POST /{id}/values/{range}:clear - clear a range's values (formatting and validation are kept). Returns `{clearedRange}`. Scope: `spreadsheets`."""
+}
+fn
+(spreadsheet-id: Str, range: Str): Map {
+  clear-values(spreadsheet-id, range, {})
+},
+(spreadsheet-id: Str, range: Str, opts: Map): Map {
+  ::sheets/json(::sheets/SCOPE, "POST", ::sheets/url(::sheets/values-path(spreadsheet-id, range, "clear")), {}, opts)
+}
+
+batch-clear-values
+meta {
+    doc: """POST /{id}/values:batchClear - clear several ranges. Returns `{clearedRanges}`. Scope: `spreadsheets`."""
+}
+fn
+(spreadsheet-id: Str, ranges: Vec): Map {
+  batch-clear-values(spreadsheet-id, ranges, {})
+},
+(spreadsheet-id: Str, ranges: Vec, opts: Map): Map {
+  ::sheets/json(::sheets/SCOPE, "POST", ::sheets/url(`/${::sheets/encode-id(spreadsheet-id)}/values:batchClear`), {ranges: ranges}, opts)
+}
+
+// ---------------------------------------------------------------------------
+// Records
+// ---------------------------------------------------------------------------
+
+write-records
+meta {
+    doc: """
+    Overwrite `range` with a header row (`columns`, default every key in
+    order of first appearance) and one row per record. Clear the old
+    data first with `clear-values` if the new table is shorter. Scope:
+    `spreadsheets`.
+    """
+}
+fn
+(spreadsheet-id: Str, range: Str, records: Vec): Map {
+  write-records(spreadsheet-id, range, records, ::records/record-columns(records), {})
+},
+(spreadsheet-id: Str, range: Str, records: Vec, columns: Vec): Map {
+  write-records(spreadsheet-id, range, records, columns, {})
+},
+(spreadsheet-id: Str, range: Str, records: Vec, columns: Vec, opts: Map): Map {
+  update-values(spreadsheet-id, range, ::records/records-to-grid(records, columns), opts)
+}
+
+append-records
+meta {
+    doc: """
+    Append records below the table at `range`, one row each, cells in
+    `columns` order (match the sheet's header). Missing values are
+    written as empty cells. Scope: `spreadsheets`.
+
+    ```hot
+    ::google::sheets::values/append-records(id, "Leads!A:C", [{name: "Ada", email: "ada@example.com", source: "web"}], ["name", "email", "source"])
+    ```
+    """
+}
+fn
+(spreadsheet-id: Str, range: Str, records: Vec, columns: Vec): Map {
+  append-records(spreadsheet-id, range, records, columns, {})
+},
+(spreadsheet-id: Str, range: Str, records: Vec, columns: Vec, opts: Map): Map {
+  append-values(spreadsheet-id, range, ::records/records-to-rows(records, columns), opts)
+}

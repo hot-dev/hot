@@ -1,62 +1,180 @@
 ::hubspot::objects ns
 meta {
     doc: """
-    The generic CRM v3 objects surface. `object-type` is `"contacts"`,
-    `"companies"`, `"deals"`, `"tickets"`, or a custom object's fully
-    qualified name — every function here works uniformly across them.
-    The typed modules (`::hubspot::contacts`, ...) delegate here.
+    The generic CRM objects surface. `object-type` is `"contacts"`,
+    `"companies"`, `"deals"`, `"tickets"`, an activity type (`"notes"`,
+    `"tasks"`, `"calls"`, `"meetings"`, `"emails"`), or a custom object's
+    fully qualified name or type id. Every function here works uniformly
+    across them; the typed modules (`::hubspot::contacts`, ...) delegate
+    here. Paths use HubSpot's date-based versions
+    (`/crm/objects/2026-09/...`; see `::hubspot::api/api-version`).
     """
 }
 
 ::api ::hubspot::api
 query-string ::hubspot::api/query-string
+crm-path ::hubspot::api/crm-path
+segment ::hubspot::api/segment
+
+objects-path fn
+(object-type: Str, rest: Str): Str {
+  objects-path(object-type, rest, {})
+},
+(object-type: Str, rest: Str, opts: Map): Str {
+  crm-path("objects", `/${segment(object-type)}${rest}`, opts)
+}
+
+// ============================================================================
+// Single records
+// ============================================================================
 
 get-object
 meta {
-    doc: """GET /crm/v3/objects/{type}/{id} - One record. The 3-arity form selects which `properties` to return (Vec of names)."""
+    doc: """
+    GET /crm/objects/{version}/{type}/{id} - One record. The 3-arity form
+    selects which `properties` to return (Vec of names). The 4-arity form
+    adds `options`: `idProperty` (look up by a unique property such as
+    `"email"` instead of the record id), `associations` (Vec of object
+    types whose associated ids to include), `propertiesWithHistory`, and
+    `archived`.
+
+    **Example**
+
+    ```hot
+    ::objects ::hubspot::objects
+
+    contact ::objects/get-object("contacts", "ada@example.com", ["firstname", "lastname"], {idProperty: "email", associations: ["companies"]})
+    ```
+    """
 }
 fn
 (object-type: Str, id: Str): Map {
-  ::api/json("GET", `/crm/v3/objects/${object-type}/${id}`)
+  get-object(object-type, id, {})
+},
+(object-type: Str, id: Str, opts: Map): Map {
+  ::api/json("GET", objects-path(object-type, `/${segment(id)}`, opts), opts)
 },
 (object-type: Str, id: Str, properties: Vec): Map {
-  ::api/json("GET", `/crm/v3/objects/${object-type}/${id}${query-string({properties: properties})}`)
+  ::api/json("GET", objects-path(object-type, `/${segment(id)}${query-string({properties: properties})}`))
+},
+(object-type: Str, id: Str, properties: Vec, options: Map): Map {
+  get-object(object-type, id, properties, options, {})
+},
+(object-type: Str, id: Str, properties: Vec, options: Map, opts: Map): Map {
+  params {
+    properties: properties,
+    propertiesWithHistory: get(options, "propertiesWithHistory"),
+    associations: get(options, "associations"),
+    idProperty: get(options, "idProperty"),
+    archived: get(options, "archived")
+  }
+
+  ::api/json("GET", objects-path(object-type, `/${segment(id)}${query-string(params)}`, opts), opts)
+}
+
+build-create-body
+meta {
+    doc: """The create payload `{properties, associations?}`. Each association is `{to: {id}, types: [{associationCategory, associationTypeId}]}`; build them with `::hubspot::objects/association-input`. Exposed for testing."""
+}
+fn (properties: Map, associations: Vec?): Map {
+  {properties: properties}
+    |> assoc-some("associations", if(or(is-null(associations), is-empty(associations)), null, associations))
+}
+
+association-input
+meta {
+    doc: """One create-time association: links the new record to record `to-id` with association type `type-id` (`HUBSPOT_DEFINED` category by default; pass `"USER_DEFINED"` for custom labels). See `::hubspot::engagements/association-type-id` for the activity ids."""
+}
+fn
+(to-id: Str, type-id: Int): Map {
+  association-input(to-id, type-id, "HUBSPOT_DEFINED")
+},
+(to-id: Str, type-id: Int, category: Str): Map {
+  {to: {id: to-id}, types: [{associationCategory: category, associationTypeId: type-id}]}
 }
 
 create-object
 meta {
-    doc: """POST /crm/v3/objects/{type} - Create a record from a properties Map."""
+    doc: """POST /crm/objects/{version}/{type} - Create a record from a properties Map. The 3-arity form also creates associations in the same call (Vec of `association-input` values)."""
 }
-fn (object-type: Str, properties: Map): Map {
-  ::api/json("POST", `/crm/v3/objects/${object-type}`, {}, {properties: properties})
+fn
+(object-type: Str, properties: Map): Map {
+  create-object(object-type, properties, {})
+},
+(object-type: Str, properties: Map, opts: Map): Map {
+  ::api/json("POST", objects-path(object-type, "", opts), {}, build-create-body(properties, null), opts)
+},
+(object-type: Str, properties: Map, associations: Vec): Map {
+  create-object(object-type, properties, associations, {})
+},
+(object-type: Str, properties: Map, associations: Vec, opts: Map): Map {
+  ::api/json("POST", objects-path(object-type, "", opts), {}, build-create-body(properties, associations), opts)
 }
 
 update-object
 meta {
-    doc: """PATCH /crm/v3/objects/{type}/{id} - Update the given properties of a record."""
+    doc: """PATCH /crm/objects/{version}/{type}/{id} - Update the given properties of a record. The 4-arity form addresses the record by a unique property (`id-property`, e.g. `"email"`) instead of its id. Set a property to `""` to clear it."""
 }
-fn (object-type: Str, id: Str, properties: Map): Map {
-  ::api/json("PATCH", `/crm/v3/objects/${object-type}/${id}`, {}, {properties: properties})
+fn
+(object-type: Str, id: Str, properties: Map): Map {
+  update-object(object-type, id, properties, {})
+},
+(object-type: Str, id: Str, properties: Map, opts: Map): Map {
+  ::api/json("PATCH", objects-path(object-type, `/${segment(id)}`, opts), {}, {properties: properties}, opts)
+},
+(object-type: Str, id: Str, properties: Map, id-property: Str): Map {
+  update-object(object-type, id, properties, id-property, {})
+},
+(object-type: Str, id: Str, properties: Map, id-property: Str, opts: Map): Map {
+  ::api/json("PATCH", objects-path(object-type, `/${segment(id)}${query-string({idProperty: id-property})}`, opts), {}, {properties: properties}, opts)
 }
 
 archive-object
 meta {
-    doc: """DELETE /crm/v3/objects/{type}/{id} - Archive a record (moves to the recycle bin)."""
+    doc: """DELETE /crm/objects/{version}/{type}/{id} - Archive a record (it moves to the recycle bin and can be restored for 90 days)."""
 }
-fn (object-type: Str, id: Str): Any {
-  ::api/json("DELETE", `/crm/v3/objects/${object-type}/${id}`)
+fn
+(object-type: Str, id: Str): Any {
+  archive-object(object-type, id, {})
+},
+(object-type: Str, id: Str, opts: Map): Any {
+  ::api/json("DELETE", objects-path(object-type, `/${segment(id)}`, opts), opts)
 }
+
+// ============================================================================
+// Listing and search
+// ============================================================================
 
 list-objects
 meta {
-    doc: """GET /crm/v3/objects/{type} - Page through records. `params`: `limit` (max 100), `after` (paging cursor), `properties` (Vec), `archived`. Returns `{results, paging?}`."""
+    doc: """GET /crm/objects/{version}/{type} - One page of records. `params`: `limit` (max 100), `after` (paging cursor), `properties` (Vec), `associations` (Vec), `archived`. Returns `{results, paging?}`; pass `::hubspot::api/next-after(page)` as `after` for the next page, or use `list-all-objects`."""
 }
 fn
 (object-type: Str): Map {
-  ::api/json("GET", `/crm/v3/objects/${object-type}`)
+  ::api/json("GET", objects-path(object-type, ""))
 },
 (object-type: Str, params: Map): Map {
-  ::api/json("GET", `/crm/v3/objects/${object-type}${query-string(params)}`)
+  list-objects(object-type, params, {})
+},
+(object-type: Str, params: Map, opts: Map): Map {
+  ::api/json("GET", objects-path(object-type, query-string(params), opts), opts)
+}
+
+list-all-objects
+meta {
+    doc: """Every record of a type across pages (100 per page), up to `max-pages` pages (default 10, so 1,000 records). `params` is as for `list-objects`, minus `after`/`limit`."""
+}
+fn
+(object-type: Str, params: Map): Vec {
+  list-all-objects(object-type, params, 10)
+},
+(object-type: Str, params: Map, max-pages: Int): Vec {
+  list-all-objects(object-type, params, max-pages, {})
+},
+(object-type: Str, params: Map, max-pages: Int, opts: Map): Vec {
+  ::api/paginate((after) {
+    list-objects(object-type, {...params, limit: 100, after: after}, opts)
+  }, max-pages)
 }
 
 build-search-body
@@ -64,15 +182,18 @@ meta {
     doc: """
     Build a CRM search body. `options`: `query` (free-text), `filters`
     (Vec of `{propertyName, operator, value}` — combined with AND),
-    `sorts`, `properties`, `limit`, `after`. Exposed for testing;
-    `search-objects` uses it.
+    `filterGroups` (Vec of `{filters}` groups combined with OR; overrides
+    `filters`), `sorts` (Vec of `{propertyName, direction}`), `properties`,
+    `limit` (max 200), `after`. Unset options are omitted. Exposed for
+    testing; `search-objects` uses it.
     """
 }
 fn (options: Map): Map {
   filters get(options, "filters")
+  groups or(get(options, "filterGroups"), if(is-null(filters), null, [{filters: filters}]))
   filter-vals({
     query: get(options, "query"),
-    filterGroups: if(is-null(filters), null, [{filters: filters}]),
+    filterGroups: groups,
     sorts: get(options, "sorts"),
     properties: get(options, "properties"),
     limit: get(options, "limit"),
@@ -83,9 +204,12 @@ fn (options: Map): Map {
 search-objects
 meta {
     doc: """
-    POST /crm/v3/objects/{type}/search - Search records. See
-    `build-search-body` for the options; operators include `EQ`, `NEQ`,
-    `GT`, `CONTAINS_TOKEN`, `HAS_PROPERTY`, `IN`.
+    POST /crm/objects/{version}/{type}/search - Search records. See
+    `build-search-body` for the options. Operators: `EQ`, `NEQ`, `LT`,
+    `LTE`, `GT`, `GTE`, `BETWEEN` (`value` + `highValue`), `IN`/`NOT_IN`
+    (`values`), `HAS_PROPERTY`, `NOT_HAS_PROPERTY`, `CONTAINS_TOKEN`,
+    `NOT_CONTAINS_TOKEN`. Search is eventually consistent: a record
+    created a moment ago may not match yet.
 
     **Example**
 
@@ -98,26 +222,220 @@ meta {
     ```
     """
 }
-fn (object-type: Str, options: Map): Map {
-  ::api/json("POST", `/crm/v3/objects/${object-type}/search`, {}, build-search-body(options))
+fn
+(object-type: Str, options: Map): Map {
+  search-objects(object-type, options, {})
+},
+(object-type: Str, options: Map, opts: Map): Map {
+  ::api/json("POST", objects-path(object-type, "/search", opts), {}, build-search-body(options), opts)
 }
+
+search-all-objects
+meta {
+    doc: """Run a search across pages (`limit` 200 per page) up to `max-pages` (default 5). HubSpot caps any search at 10,000 total results."""
+}
+fn
+(object-type: Str, options: Map): Vec {
+  search-all-objects(object-type, options, 5)
+},
+(object-type: Str, options: Map, max-pages: Int): Vec {
+  search-all-objects(object-type, options, max-pages, {})
+},
+(object-type: Str, options: Map, max-pages: Int, opts: Map): Vec {
+  ::api/paginate((after) {
+    search-objects(object-type, {...options, limit: 200, after: after}, opts)
+  }, max-pages)
+}
+
+// ============================================================================
+// Batch (max 100 inputs per call)
+// ============================================================================
+
+build-batch-read-body
+meta {
+    doc: """The batch-read payload. `options`: `properties`, `propertiesWithHistory` (both default to `[]`), and `idProperty` when the ids are values of a unique property. Exposed for testing."""
+}
+fn (ids: Vec, options: Map): Map {
+  {
+    inputs: map(ids, (id) { {id: Str(id)} }),
+    properties: or(get(options, "properties"), []),
+    propertiesWithHistory: or(get(options, "propertiesWithHistory"), [])
+  } |> assoc-some("idProperty", get(options, "idProperty"))
+}
+
+batch-read
+meta {
+    doc: """
+    POST /crm/objects/{version}/{type}/batch/read - Read up to 100 records
+    by id (or by a unique `idProperty`) in one call. Returns `{status,
+    results, errors?}`; missing ids show up in `errors`, not as a failure.
+
+    **Example**
+
+    ```hot
+    out ::hubspot::objects/batch-read("contacts", ["ada@example.com", "grace@example.com"], {
+      idProperty: "email",
+      properties: ["firstname", "lifecyclestage"]
+    })
+    out.results
+    ```
+    """
+}
+fn
+(object-type: Str, ids: Vec): Map {
+  batch-read(object-type, ids, {})
+},
+(object-type: Str, ids: Vec, options: Map): Map {
+  batch-read(object-type, ids, options, {})
+},
+(object-type: Str, ids: Vec, options: Map, opts: Map): Map {
+  ::api/json("POST", objects-path(object-type, "/batch/read", opts), {}, build-batch-read-body(ids, options), opts)
+}
+
+batch-create-input
+meta {
+    doc: """Normalize one batch-create input: a Map with a `properties` key passes through (so it can carry `associations`); a plain properties Map is wrapped as `{properties}`. Exposed for testing."""
+}
+fn (input: Map): Map {
+  if(in("properties", keys(input)), input, {properties: input})
+}
+
+batch-create
+meta {
+    doc: """POST /crm/objects/{version}/{type}/batch/create - Create up to 100 records. `inputs` is a Vec of properties Maps, or of `{properties, associations}` Maps. Returns `{status, results, errors?}`."""
+}
+fn
+(object-type: Str, inputs: Vec): Map {
+  batch-create(object-type, inputs, {})
+},
+(object-type: Str, inputs: Vec, opts: Map): Map {
+  ::api/json("POST", objects-path(object-type, "/batch/create", opts), {}, {inputs: map(inputs, batch-create-input)}, opts)
+}
+
+batch-update
+meta {
+    doc: """POST /crm/objects/{version}/{type}/batch/update - Update up to 100 records. `inputs` is a Vec of `{id, properties}` (add `idProperty` to address a record by a unique property)."""
+}
+fn
+(object-type: Str, inputs: Vec): Map {
+  batch-update(object-type, inputs, {})
+},
+(object-type: Str, inputs: Vec, opts: Map): Map {
+  ::api/json("POST", objects-path(object-type, "/batch/update", opts), {}, {inputs: inputs}, opts)
+}
+
+build-batch-upsert-body
+meta {
+    doc: """The batch-upsert payload: each `{id, properties}` record gains `idProperty`. Exposed for testing."""
+}
+fn (id-property: Str, records: Vec): Map {
+  {inputs: map(records, (r) { {id: Str(r.id), idProperty: id-property, properties: r.properties} })}
+}
+
+batch-upsert
+meta {
+    doc: """
+    POST /crm/objects/{version}/{type}/batch/upsert - Create-or-update up
+    to 100 records keyed by a unique property: `"email"` for contacts, or
+    any custom property created with `hasUniqueValue: true` (a company's
+    `domain` is not unique). `records` is a Vec of `{id, properties}`
+    where `id` is the unique property's value. Returns `{status, results}`; each result's
+    `new` is true when it was created.
+
+    **Example**
+
+    ```hot
+    ::hubspot::objects/batch-upsert("contacts", "email", [
+      {id: "ada@example.com", properties: {firstname: "Ada", lifecyclestage: "lead"}},
+      {id: "grace@example.com", properties: {firstname: "Grace"}}
+    ])
+    ```
+    """
+}
+fn
+(object-type: Str, id-property: Str, records: Vec): Map {
+  batch-upsert(object-type, id-property, records, {})
+},
+(object-type: Str, id-property: Str, records: Vec, opts: Map): Map {
+  ::api/json("POST", objects-path(object-type, "/batch/upsert", opts), {}, build-batch-upsert-body(id-property, records), opts)
+}
+
+batch-archive
+meta {
+    doc: """POST /crm/objects/{version}/{type}/batch/archive - Archive up to 100 records by id. Returns null (204) on success."""
+}
+fn
+(object-type: Str, ids: Vec): Any {
+  batch-archive(object-type, ids, {})
+},
+(object-type: Str, ids: Vec, opts: Map): Any {
+  ::api/json("POST", objects-path(object-type, "/batch/archive", opts), {}, {inputs: map(ids, (id) { {id: Str(id)} })}, opts)
+}
+
+// ============================================================================
+// Associations
+// ============================================================================
 
 associate
 meta {
     doc: """
-    PUT /crm/v4/objects/{fromType}/{fromId}/associations/default/{toType}/{toId} -
-    Associate two records with the default association type (e.g. contact
-    ↔ company, deal ↔ contact).
+    PUT /crm/objects/{version}/{fromType}/{fromId}/associations/default/{toType}/{toId} -
+    Associate two records with the default (unlabeled) association type,
+    e.g. contact and company, or deal and contact.
     """
 }
-fn (from-type: Str, from-id: Str, to-type: Str, to-id: Str): Any {
-  ::api/json("PUT", `/crm/v4/objects/${from-type}/${from-id}/associations/default/${to-type}/${to-id}`, {}, {})
+fn
+(from-type: Str, from-id: Str, to-type: Str, to-id: Str): Any {
+  associate(from-type, from-id, to-type, to-id, {})
+},
+(from-type: Str, from-id: Str, to-type: Str, to-id: Str, opts: Map): Any {
+  ::api/json("PUT", objects-path(from-type, `/${segment(from-id)}/associations/default/${segment(to-type)}/${segment(to-id)}`, opts), opts)
+}
+
+associate-with-label
+meta {
+    doc: """
+    PUT /crm/objects/{version}/{type}/{id}/associations/{toType}/{toId} -
+    Associate two records with a specific association type: a
+    HUBSPOT_DEFINED id (e.g. 1 for a contact's primary company) or a
+    USER_DEFINED label id from your portal's association labels.
+    """
+}
+fn
+(from-type: Str, from-id: Str, to-type: Str, to-id: Str, type-id: Int): Map {
+  associate-with-label(from-type, from-id, to-type, to-id, type-id, "HUBSPOT_DEFINED")
+},
+(from-type: Str, from-id: Str, to-type: Str, to-id: Str, type-id: Int, category: Str): Map {
+  associate-with-label(from-type, from-id, to-type, to-id, type-id, category, {})
+},
+(from-type: Str, from-id: Str, to-type: Str, to-id: Str, type-id: Int, category: Str, opts: Map): Map {
+  ::api/json("PUT", objects-path(from-type, `/${segment(from-id)}/associations/${segment(to-type)}/${segment(to-id)}`, opts), {},
+    [{associationCategory: category, associationTypeId: type-id}], opts)
+}
+
+remove-association
+meta {
+    doc: """DELETE /crm/objects/{version}/{type}/{id}/associations/{toType}/{toId} - Remove every association between two records."""
+}
+fn
+(from-type: Str, from-id: Str, to-type: Str, to-id: Str): Any {
+  remove-association(from-type, from-id, to-type, to-id, {})
+},
+(from-type: Str, from-id: Str, to-type: Str, to-id: Str, opts: Map): Any {
+  ::api/json("DELETE", objects-path(from-type, `/${segment(from-id)}/associations/${segment(to-type)}/${segment(to-id)}`, opts), opts)
 }
 
 list-associations
 meta {
-    doc: """GET /crm/v4/objects/{type}/{id}/associations/{toType} - The records associated with one record."""
+    doc: """GET /crm/objects/{version}/{type}/{id}/associations/{toType} - The records associated with one record: `{results: [{toObjectId, associationTypes: [{category, typeId, label}]}], paging?}`. `params`: `limit` (max 500), `after`."""
 }
-fn (object-type: Str, id: Str, to-type: Str): Map {
-  ::api/json("GET", `/crm/v4/objects/${object-type}/${id}/associations/${to-type}`)
+fn
+(object-type: Str, id: Str, to-type: Str): Map {
+  list-associations(object-type, id, to-type, {})
+},
+(object-type: Str, id: Str, to-type: Str, params: Map): Map {
+  list-associations(object-type, id, to-type, params, {})
+},
+(object-type: Str, id: Str, to-type: Str, params: Map, opts: Map): Map {
+  ::api/json("GET", objects-path(object-type, `/${segment(id)}/associations/${segment(to-type)}${query-string(params)}`, opts), opts)
 }

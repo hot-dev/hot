@@ -2,10 +2,29 @@
 
 ::env ::hot::env
 
-// Placeholder credentials for the discord integration suite. Unset
-// environment variables are skipped entirely, so absent credentials
-// behave exactly as if never configured.
+// Credentials for the discord integration suite. Unset environment
+// variables are skipped entirely, so absent credentials behave exactly as
+// if never configured.
 ::hot::ctx/set(filter-vals({
     "discord.bot.token": ::env/get("DISCORD_BOT_TOKEN", ""),
     "discord.public.key": ::env/get("DISCORD_PUBLIC_KEY", ""),
 }, (v) { not(is-empty(v)) }))
+
+live
+meta {
+    doc: """
+    Run `body` only when DISCORD_BOT_TOKEN and every env var in `needs`
+    are set; otherwise print a skip line and pass. Keeps the suite green
+    without credentials.
+    """
+}
+fn (label: Str, needs: Vec<Str>, body: Fn) {
+    missing filter(concat(["DISCORD_BOT_TOKEN"], needs), (k) { is-empty(::env/get(k, "")) })
+    cond {
+        not(is-empty(missing)) => {
+            println(`${join(missing, ", ")} not set - skipping Discord ${label} test`)
+            assert(true, "Skipped - no credentials")
+        }
+        => { body() }
+    }
+}

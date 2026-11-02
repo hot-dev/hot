@@ -1,50 +1,88 @@
 ::telegram::integration::updates ns
 meta ["test"]
 
+::ctx ::telegram::integration::ctx
+::updates ::telegram::updates
+
+// Setting a webhook replaces the bot's real one, and Telegram never
+// reveals a webhook's secret_token, so a replaced webhook can't be
+// restored faithfully. The set/delete round trip therefore runs only when
+// TELEGRAM_TEST_WEBHOOK=1 AND the bot currently has no webhook; it then
+// deletes its temporary webhook (keeping pending updates). While it runs,
+// a getUpdates poller for the same bot gets 409 Conflict.
+ALLOW_WEBHOOK_TEST eq(::hot::env/get("TELEGRAM_TEST_WEBHOOK", ""), "1")
+
 test-get-webhook-info
 meta ["test"]
 fn () {
-  response ::telegram::updates/get-webhook-info()
+  cond {
+    not(::ctx/configured()) => { ::ctx/skip(::ctx/UNCONFIGURED) }
+    => {
+      response ::updates/get-webhook-info()
 
-  assert(is-some(response.pending_update_count), "getWebhookInfo should return pending_update_count")
+      assert(is-some(response.pending_update_count), "getWebhookInfo should return pending_update_count")
+    }
+  }
 }
 
 test-set-and-delete-webhook
 meta ["test"]
 fn () {
-  ::telegram::updates/set-webhook(::telegram::updates/SetWebhookRequest({
-    url: "https://hot-integration-test.example.com/webhook",
-    secret_token: "hot-test-secret",
-    allowed_updates: ["message", "callback_query"]
-  }))
+  cond {
+    not(::ctx/configured()) => { ::ctx/skip(::ctx/UNCONFIGURED) }
+    not(ALLOW_WEBHOOK_TEST) => { ::ctx/skip("set TELEGRAM_TEST_WEBHOOK=1 to run the webhook round trip") }
+    => {
+      before ::updates/get-webhook-info()
+      cond {
+        not(is-empty(or(before.url, ""))) => {
+          ::ctx/skip("the bot already has a webhook; not replacing it")
+        }
+        => {
+          ::updates/set-webhook(::updates/SetWebhookRequest({
+            url: "https://hot-integration-test.example.com/webhook",
+            secret_token: "hot-test-secret",
+            allowed_updates: ["message", "callback_query"]
+          }))
 
-  info ::telegram::updates/get-webhook-info()
-  assert-eq("https://hot-integration-test.example.com/webhook", info.url, "webhook url should match")
+          info ::updates/get-webhook-info()
 
-  ::telegram::updates/delete-webhook(::telegram::updates/DeleteWebhookRequest({
-    drop_pending_updates: false
-  }))
+          ::updates/delete-webhook(::updates/DeleteWebhookRequest({
+            drop_pending_updates: false
+          }))
 
-  cleared ::telegram::updates/get-webhook-info()
-  assert-eq("", cleared.url, "webhook url should be empty after delete")
+          assert-eq("https://hot-integration-test.example.com/webhook", info.url, "webhook url should match")
+
+          cleared ::updates/get-webhook-info()
+          assert-eq("", cleared.url, "webhook url should be empty after delete")
+        }
+      }
+    }
+  }
 }
 
+// getUpdates without an offset confirms nothing, so it doesn't consume
+// another poller's updates. It can't run while a webhook is set (Telegram
+// answers 409), and the bot's webhook is never removed to make it run.
 test-get-updates
 meta ["test"]
 fn () {
-  webhook-info ::telegram::updates/get-webhook-info()
   cond {
-    ne(webhook-info.url, "") => {
-      ::telegram::updates/delete-webhook(::telegram::updates/DeleteWebhookRequest({
-        drop_pending_updates: false
-      }))
+    not(::ctx/configured()) => { ::ctx/skip(::ctx/UNCONFIGURED) }
+    => {
+      webhook-info ::updates/get-webhook-info()
+      cond {
+        not(is-empty(or(webhook-info.url, ""))) => {
+          ::ctx/skip("the bot uses a webhook; getUpdates is unavailable")
+        }
+        => {
+          updates ::updates/get-updates(::updates/GetUpdatesRequest({
+            limit: 1,
+            timeout: 0
+          }))
+
+          assert(is-vec(updates), "getUpdates should return a Vec")
+        }
+      }
     }
   }
-
-  updates ::telegram::updates/get-updates(::telegram::updates/GetUpdatesRequest({
-    limit: 1,
-    timeout: 0
-  }))
-
-  assert(is-some(updates), "getUpdates should return a result")
 }

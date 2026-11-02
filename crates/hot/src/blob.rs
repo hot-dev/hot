@@ -31,6 +31,8 @@ pub const HASH_ALG_BLAKE3: &str = "blake3";
 /// original `Val` variant.
 pub const ENCODING_BYTES: &str = "bytes";
 pub const ENCODING_STRING: &str = "string";
+/// A whole value, as JSON. Restored to the value it held, not to a string.
+pub const ENCODING_JSON: &str = "json";
 
 #[derive(Error, Debug)]
 pub enum BlobError {
@@ -129,11 +131,83 @@ pub const SPILL_THRESHOLD_DEFAULT_BYTES: usize = 64 * 1024;
 /// while dedupe and compression make the spilled bytes cheap on disk.
 pub const SPILL_THRESHOLD_LOCAL_DEV_BYTES: usize = 16 * 1024;
 
+/// How much of a call's or run's value stays inline once its large leaves are
+/// spilled. A value over this has no leaf to spill that would help, like a Vec
+/// of many small Maps, and is stored whole as one blob.
+pub const MAX_INLINE_DEFAULT_BYTES: usize = 1024 * 1024;
+
+/// The most JSON Hot stores inline in a record, with blob storage or without.
+///
+/// PostgreSQL refuses a `jsonb` container over 256 MB, which fails every write
+/// in the batch and with them the run. `jsonb` can take six times the space of
+/// its text, as `[0,0,0,...]` does, so this is 256 MB over 8.
+pub const MAX_INLINE_HARD_LIMIT_BYTES: usize = 32 * 1024 * 1024;
+
+/// Typed-map `$type` tag for a value too large to record.
+pub const OMITTED_TYPE: &str = "::hot::blob/Omitted";
+
+/// What a record holds in place of a value that couldn't be kept: blob storage
+/// is off or failed, and the value is over [`MAX_INLINE_HARD_LIMIT_BYTES`].
+pub fn omitted_val(size: usize) -> Val {
+    let mut inner = IndexMap::new();
+    inner.insert(Val::from("size"), Val::Int(size as i64));
+    inner.insert(Val::from("reason"), Val::from("too large to record"));
+    let mut map = IndexMap::new();
+    map.insert(Val::from("$type"), Val::from(OMITTED_TYPE));
+    map.insert(Val::from("$val"), Val::map(inner));
+    Val::map(map)
+}
+
+/// The bytes of `json` outside strings of at least `threshold` bytes: what
+/// spilling its large leaves would leave inline. Reads the text rather than
+/// parsing it, since the values this matters for take gigabytes to parse.
+pub fn json_bytes_outside_large_strings(json: &str, threshold: usize) -> usize {
+    let bytes = json.as_bytes();
+    let mut large = 0;
+    let mut opened = None;
+    let mut position = 0;
+    while position < bytes.len() {
+        match bytes[position] {
+            b'"' => match opened.take() {
+                None => opened = Some(position + 1),
+                Some(start) if position - start >= threshold => large += position - start,
+                Some(_) => {}
+            },
+            b'\\' if opened.is_some() => position += 1,
+            _ => {}
+        }
+        position += 1;
+    }
+    bytes.len() - large
+}
+
+/// As [`json_bytes_outside_large_strings`], for a value not yet serialized.
+pub fn val_bytes_outside_large_leaves(val: &Val, threshold: usize) -> usize {
+    match val {
+        Val::Bytes(b) if b.len() >= threshold => 0,
+        Val::Str(s) if s.len() >= threshold => 0,
+        Val::Vec(v) => {
+            8 + v
+                .iter()
+                .map(|item| val_bytes_outside_large_leaves(item, threshold))
+                .sum::<usize>()
+        }
+        Val::Map(m) => {
+            8 + m
+                .iter()
+                .map(|(k, v)| estimate_val_size(k) + val_bytes_outside_large_leaves(v, threshold))
+                .sum::<usize>()
+        }
+        other => estimate_val_size(other),
+    }
+}
+
 /// Blob configuration, read from the `blob` section of hot config.
 #[derive(Debug, Clone)]
 pub struct BlobConfig {
     pub mode: BlobMode,
     pub spill_threshold_bytes: usize,
+    pub max_inline_bytes: usize,
     pub preview_max_bytes: usize,
     pub storage_prefix: String,
     pub rehydrate_max_refs: usize,
@@ -145,6 +219,7 @@ impl Default for BlobConfig {
         Self {
             mode: BlobMode::Disabled,
             spill_threshold_bytes: SPILL_THRESHOLD_DEFAULT_BYTES,
+            max_inline_bytes: MAX_INLINE_DEFAULT_BYTES,
             preview_max_bytes: 256,
             storage_prefix: "__hot/blobs".to_string(),
             rehydrate_max_refs: 1000,
@@ -195,6 +270,8 @@ impl BlobConfig {
         Self {
             mode,
             spill_threshold_bytes: get_usize("blob.spill.threshold-bytes", threshold_default),
+            max_inline_bytes: get_usize("blob.spill.max-inline-bytes", d.max_inline_bytes)
+                .min(MAX_INLINE_HARD_LIMIT_BYTES),
             preview_max_bytes: get_usize("blob.preview.max-bytes", d.preview_max_bytes),
             storage_prefix,
             rehydrate_max_refs: get_usize("blob.rehydrate.max-refs", d.rehydrate_max_refs),
@@ -486,6 +563,40 @@ impl BlobStore {
         Ok(val)
     }
 
+    /// Store a whole value, already masked and serialized, as one blob. Takes
+    /// the place of spilling its leaves, which would leave nothing to gain from
+    /// when the value is many small ones.
+    pub async fn spill_whole_json(
+        &self,
+        json: &str,
+        scope: BlobScope,
+        source: SpillSource,
+        source_id: Option<&str>,
+    ) -> Result<Val, BlobError> {
+        let mut stats = SpillStats {
+            spilled_leaves: 0,
+            spilled_bytes: 0,
+            json_paths: Vec::new(),
+        };
+        let blob_ref = self
+            .spill_leaf(
+                json.as_bytes(),
+                ENCODING_JSON,
+                &scope,
+                source,
+                source_id,
+                "$",
+                &mut stats,
+            )
+            .await?;
+        tracing::debug!(
+            source = source.as_str(),
+            bytes = stats.spilled_bytes,
+            "spilled whole value to blob storage"
+        );
+        Ok(blob_ref)
+    }
+
     fn spill_in_place<'a>(
         &'a self,
         val: &'a mut Val,
@@ -580,6 +691,7 @@ impl BlobStore {
         let db = self.scoped_db(scope);
         let content_type = match encoding {
             ENCODING_STRING => "text/plain",
+            ENCODING_JSON => "application/json",
             _ => "application/octet-stream",
         };
         let object = self.put_object(bytes, Some(content_type), scope).await?;
@@ -631,7 +743,7 @@ impl BlobStore {
             return None;
         }
         match encoding {
-            ENCODING_STRING => {
+            ENCODING_STRING | ENCODING_JSON => {
                 let text = std::str::from_utf8(bytes).ok()?;
                 let mut end = n.min(text.len());
                 while end > 0 && !text.is_char_boundary(end) {
@@ -828,6 +940,9 @@ impl BlobStore {
                         })?;
                         Val::from(text)
                     }
+                    ENCODING_JSON => serde_json::from_slice::<Val>(&bytes).map_err(|_| {
+                        BlobError::InvalidRef("json blob is not a valid value".to_string())
+                    })?,
                     _ => Val::bytes(bytes),
                 };
                 return Ok(());
@@ -1080,6 +1195,34 @@ mod tests {
     }
 
     #[test]
+    fn counts_the_json_large_strings_would_leave_behind() {
+        let measure = json_bytes_outside_large_strings;
+        assert_eq!(measure(r#"{"a":1}"#, 10), 7);
+        let long = "x".repeat(20);
+        let json = format!(r#"{{"a":"{long}","b":"short"}}"#);
+        assert_eq!(measure(&json, 10), json.len() - 20);
+        // An escaped quote doesn't end a string, and an escaped backslash
+        // doesn't escape the quote after it.
+        let json = format!(r#"["{long}\"{long}","\\",1]"#);
+        assert_eq!(measure(&json, 10), json.len() - 42);
+        assert_eq!(measure("", 10), 0);
+        assert_eq!(measure(r#""unterminated"#, 3), 13);
+    }
+
+    #[test]
+    fn counts_the_value_large_leaves_would_leave_behind() {
+        let measure = val_bytes_outside_large_leaves;
+        let long = Val::from("x".repeat(20));
+        assert_eq!(measure(&long, 10), 0);
+        assert_eq!(measure(&Val::bytes(vec![0; 20]), 10), 0);
+        assert_eq!(measure(&Val::from("short"), 10), 5);
+        let many = Val::vec(vec![Val::from("short"); 4]);
+        assert_eq!(measure(&many, 10), 8 + 4 * 5);
+        let map = crate::val!({"key": long});
+        assert_eq!(measure(&map, 10), 8 + 3);
+    }
+
+    #[test]
     fn test_estimate_val_size() {
         assert_eq!(estimate_val_size(&Val::bytes(vec![0u8; 100])), 100);
         assert_eq!(estimate_val_size(&Val::from("hello")), 5);
@@ -1219,6 +1362,65 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rehydrated, original);
+    }
+
+    #[tokio::test]
+    async fn test_spill_whole_json_restores_the_value() {
+        let (store, scope, _tmp) = test_store().await;
+        let rows: Vec<Val> = (0..50)
+            .map(|i| crate::val!({"id": i, "note": "a \"quoted\" note", "zip": "02134"}))
+            .collect();
+        let original = Val::vec(rows);
+        let json = serde_json::to_string(&original).unwrap();
+
+        let spilled = store
+            .spill_whole_json(&json, scope, SpillSource::CallReturn, Some("c1"))
+            .await
+            .unwrap();
+        let blob_ref = BlobRefVal::from_val(&spilled).unwrap().expect("a blob ref");
+        assert_eq!(blob_ref.encoding, ENCODING_JSON);
+        assert_eq!(blob_ref.size as usize, json.len());
+        assert_eq!(blob_ref.content_type.as_deref(), Some("application/json"));
+        assert!(json.starts_with(blob_ref.preview.as_deref().unwrap()));
+
+        let budget = RehydrateBudget::from_config(store.config());
+        let restored = store
+            .rehydrate_blob_refs(spilled.clone(), scope, budget)
+            .await
+            .unwrap();
+        assert_eq!(restored, original);
+
+        // The JSON read path gives what an inline payload would have.
+        let as_json: serde_json::Value = serde_json::to_value(&spilled).unwrap();
+        let restored = store.rehydrate_json(as_json, scope, budget).await.unwrap();
+        assert_eq!(restored, serde_json::to_value(&original).unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_rehydrating_a_bad_json_blob_is_an_error() {
+        let (store, scope, _tmp) = test_store().await;
+        let spilled = store
+            .spill_whole_json("not json", scope, SpillSource::CallReturn, Some("c1"))
+            .await
+            .unwrap();
+        let budget = RehydrateBudget::from_config(store.config());
+        assert!(matches!(
+            store.rehydrate_blob_refs(spilled, scope, budget).await,
+            Err(BlobError::InvalidRef(_))
+        ));
+    }
+
+    #[test]
+    fn test_max_inline_config_cannot_pass_the_hard_limit() {
+        let conf = crate::val!({"blob": {"spill": {"max-inline-bytes": 1_000_000_000}}});
+        assert_eq!(
+            BlobConfig::from_conf(&conf).max_inline_bytes,
+            MAX_INLINE_HARD_LIMIT_BYTES
+        );
+        assert_eq!(
+            BlobConfig::from_conf(&Val::map_empty()).max_inline_bytes,
+            MAX_INLINE_DEFAULT_BYTES
+        );
     }
 
     #[tokio::test]

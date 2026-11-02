@@ -1,22 +1,153 @@
 ::google::test::calendar ns
 meta ["test"]
 
-// Hermetic wiring tests: with no google.* context configured, every call
-// must surface google-core's no-credentials Err — proving the cross-
-// namespace call path (calendar -> api -> auth) resolves end to end.
+::cal ::google::calendar
+::events ::google::calendar::events
+::sync ::google::calendar::sync
+::cals ::google::calendar::calendars
+::acl ::google::calendar::acl
+
+test-paths-encode-every-segment
+meta ["test"] fn () {
+    assert-eq("/calendars/team%40group.calendar.google.com/events", ::cal/calendar-path("team@group.calendar.google.com", "/events"))
+    assert-eq("/calendars/en.usa%23holiday%40group.v.calendar.google.com", ::cal/calendar-path("en.usa#holiday@group.v.calendar.google.com"))
+    assert-eq("/calendars/primary/events/abc_20261103T150000Z%2Fx/instances", ::cal/event-path("primary", "abc_20261103T150000Z/x", "/instances"))
+    assert-eq("https://www.googleapis.com/calendar/v3/calendars/primary/events?singleEvents=true&eventTypes=default&eventTypes=focusTime",
+      ::cal/url(::cal/calendar-path("primary", "/events"), {singleEvents: true, eventTypes: ["default", "focusTime"], q: null}))
+}
+
+test-event-time
+meta ["test"] fn () {
+    assert-eq({date: "2026-11-03"}, ::events/event-time("2026-11-03"), "a date is all day")
+    assert-eq({dateTime: "2026-11-03T09:00:00-06:00"}, ::events/event-time("2026-11-03T09:00:00-06:00"), "no timeZone unless given")
+    assert-eq({dateTime: "2026-11-03T09:00:00", timeZone: "America/Chicago"}, ::events/event-time("2026-11-03T09:00:00", "America/Chicago"))
+    assert-eq({date: "2026-11-03"}, ::events/event-time({date: "2026-11-03"}, "UTC"), "Maps pass through")
+}
+
+test-build-event
+meta ["test"] fn () {
+    e ::events/build-event({summary: "Standup", start: "2026-11-02T09:00:00", end: "2026-11-02T09:15:00", time-zone: "America/Chicago",
+      attendees: ["ada@example.com", {email: "bob@example.com", optional: true}], meet: true, meet-request-id: "req-1", reminders-minutes: [5], location: null})
+    assert-eq("Standup", e.summary)
+    assert-eq({dateTime: "2026-11-02T09:00:00", timeZone: "America/Chicago"}, e.start)
+    assert-eq([{email: "ada@example.com"}, {email: "bob@example.com", optional: true}], e.attendees)
+    assert-eq({createRequest: {requestId: "req-1", conferenceSolutionKey: {type: "hangoutsMeet"}}}, e.conferenceData)
+    assert-eq({useDefault: false, overrides: [{method: "popup", minutes: 5}]}, e.reminders)
+    assert(not(in("location", keys(e))), "null fields are dropped")
+    assert(not(in("time-zone", keys(e))), "shorthand keys are not sent")
+    assert(not(in("meet", keys(e))))
+    plain ::events/build-event({summary: "x", start: "2026-11-03", end: "2026-11-04"})
+    assert-eq({summary: "x", start: {date: "2026-11-03"}, end: {date: "2026-11-04"}}, plain, "no attendees, conference or reminders unless asked")
+}
+
+test-meet-helpers
+meta ["test"] fn () {
+    m ::events/meet-request()
+    assert-eq("hangoutsMeet", m.createRequest.conferenceSolutionKey.type)
+    assert-eq(36, length(m.createRequest.requestId), "a UUID request id by default")
+    assert-eq("https://meet.google.com/abc-defg-hij", ::events/meet-link({hangoutLink: "https://meet.google.com/abc-defg-hij"}))
+    assert-eq("https://meet.google.com/x", ::events/meet-link({conferenceData: {entryPoints: [{entryPointType: "phone", uri: "tel:+1"}, {entryPointType: "video", uri: "https://meet.google.com/x"}]}}))
+    assert(is-null(::events/meet-link({summary: "no conference"})))
+}
+
+test-write-params
+meta ["test"] fn () {
+    assert-eq({}, ::events/write-params({summary: "x"}, {}), "nothing is sent unless needed or asked")
+    assert-eq({conferenceDataVersion: 1}, ::events/write-params(::events/with-meet({summary: "x"}), {}), "Meet requests turn on conferenceDataVersion")
+    assert-eq({supportsAttachments: true, sendUpdates: "all", maxAttendees: 10}, ::events/write-params({attachments: [{fileUrl: "https://drive.google.com/x"}]}, {sendUpdates: "all", maxAttendees: 10, token: "ya29.secret"}))
+    assert-eq({conferenceDataVersion: 0}, ::events/write-params(::events/with-meet({}), {conferenceDataVersion: 0}), "an explicit option wins")
+    assert(is-err(::events/write-params({}, {sendUpdates: "everyone"})), "unknown sendUpdates values are rejected")
+    assert-eq({sendUpdates: "none"}, ::events/notify-params({sendUpdates: "none"}))
+}
+
+test-sync-params
+meta ["test"] fn () {
+    full ::sync/sync-params(null, null, {singleEvents: true, timeMin: "2026-01-01T00:00:00Z", token: "t"})
+    assert-eq({maxResults: 2500, showDeleted: true, singleEvents: true, timeMin: "2026-01-01T00:00:00Z"}, full)
+    inc ::sync/sync-params("sync-1", "page-2", {singleEvents: true, timeMin: "2026-01-01T00:00:00Z", q: "x", orderBy: "startTime", resync: false})
+    assert-eq({maxResults: 2500, syncToken: "sync-1", pageToken: "page-2", singleEvents: true}, inc, "filters the API refuses with syncToken are dropped")
+}
+
+test-summarize-events
+meta ["test"] fn () {
+    set ::sync/summarize-events([{id: "a", status: "confirmed"}, {id: "b", status: "cancelled"}, {id: "c", status: "tentative"}], "next-1", false, 2)
+    assert-eq(["a", "c"], map(set.changed, (e) { e.id }))
+    assert-eq(["b"], set.cancelled-ids)
+    assert-eq("next-1", set.next-sync-token)
+    assert(not(set.full-sync))
+}
+
+test-sync-token-expired
+meta ["test"] fn () {
+    gone err(::google::api/HttpError(::hot::http/HttpResponse({status: 410, headers: {}, body: {error: {code: 410, message: "Sync token is no longer valid, a full sync is required.", errors: [{reason: "fullSyncRequired"}]}}})))
+    assert(::sync/is-sync-token-expired(gone))
+    assert(not(::sync/is-sync-token-expired(err(::google::api/HttpError(::hot::http/HttpResponse({status: 404, headers: {}, body: ""}))))))
+    assert(not(::sync/is-sync-token-expired({items: []})))
+}
+
+test-build-channel
+meta ["test"] fn () {
+    ch ::sync/build-channel("https://api.example.com/hook", {channel-id: "ch-1", channel-token: "tok", expires-in-ms: 1000, channel-params: {ttl: "3600"}}, 5000)
+    assert-eq({id: "ch-1", type: "web_hook", address: "https://api.example.com/hook", token: "tok", expiration: "6000", params: {ttl: "3600"}}, ch)
+    bare ::sync/build-channel("https://api.example.com/hook", {}, 0)
+    assert(not(in("token", keys(bare))))
+    assert(not(in("expiration", keys(bare))))
+    assert(is-err(::sync/build-channel("http://insecure", {}, 0)))
+}
+
+request fn (token: Str?): Map {
+  base {"x-goog-channel-id": "ch-1", "x-goog-resource-id": "res-9", "x-goog-resource-state": "exists", "x-goog-message-number": "7"}
+  {method: "POST", url: "/calendar/hook", headers: if(is-null(token), base, {...base, "x-goog-channel-token": token}), body-raw: ""}
+}
+
+test-notifications
+meta ["test"] fn () {
+    n ::sync/parse-notification(request("s1"))
+    assert-eq("res-9", n.resource-id)
+    assert-eq("exists", n.resource-state)
+    assert-eq(7, n.message-number)
+    assert(not(n.is-sync))
+    assert(::sync/parse-notification({headers: {"X-Goog-Resource-State": "sync"}}).is-sync, "header names are case-insensitive")
+    assert(::sync/verify-channel-token(request("s1"), "s1"), "valid token")
+    assert(not(::sync/verify-channel-token(request("s2"), "s1")), "tampered token")
+    assert(not(::sync/verify-channel-token(request(null), "s1")), "missing header")
+    assert(not(::sync/verify-channel-token(request(""), "")), "empty expected token fails closed")
+    assert(not(::sync/verify-channel-token(request("x"), null)), "null expected token fails closed")
+    assert(not(::sync/verify-channel-token(request("x"), "  ")), "blank expected token fails closed")
+    assert(is-err(::sync/verify-notification(request("bad"), "s1")))
+    assert-eq("ch-1", ::sync/verify-notification(request("s1"), "s1").channel-id)
+}
+
+test-free-busy-and-calendar-bodies
+meta ["test"] fn () {
+    b ::cals/build-free-busy("2026-11-03T13:00:00Z", "2026-11-03T22:00:00Z", ["ada@example.com", "bob@example.com"], {})
+    assert-eq({timeMin: "2026-11-03T13:00:00Z", timeMax: "2026-11-03T22:00:00Z", items: [{id: "ada@example.com"}, {id: "bob@example.com"}]}, b)
+    assert-eq("UTC", ::cals/build-free-busy("a", "b", [], {timeZone: "UTC"}).timeZone)
+    response {calendars: {"ada@example.com": {busy: [{start: "s", end: "e"}]}, "x@example.com": {errors: [{domain: "global", reason: "notFound"}]}}}
+    assert-eq([{start: "s", end: "e"}], ::cals/busy-periods(response, "ada@example.com"))
+    assert(is-err(::cals/busy-periods(response, "x@example.com")))
+    assert(contains(err-message(::cals/busy-periods(response, "x@example.com")), "notFound"))
+    assert(is-err(::cals/busy-periods(response, "nobody@example.com")))
+    assert-eq({summary: "Ops"}, ::cals/build-calendar("Ops", {}))
+    assert-eq({summary: "Ops", timeZone: "Europe/Paris"}, ::cals/build-calendar("Ops", {timeZone: "Europe/Paris", description: null}))
+}
+
+test-acl-rules
+meta ["test"] fn () {
+    assert-eq({role: "reader", scope: {type: "user", value: "ada@example.com"}}, ::acl/build-rule("reader", "user", "ada@example.com"))
+    assert-eq({role: "freeBusyReader", scope: {type: "default"}}, ::acl/build-rule("freeBusyReader", "default", null))
+    assert(is-err(::acl/build-rule("editor", "user", "a@b")), "unknown role")
+    assert(is-err(::acl/build-rule("reader", "team", "a@b")), "unknown scope type")
+    assert(is-err(::acl/build-rule("reader", "domain", "")), "a domain rule needs a value")
+}
 
 test-calls-surface-no-credentials-err
 meta ["test"] fn () {
-    calendars ::google::calendar/list-calendars()
+    calendars ::cals/list-calendars()
     assert(is-err(calendars), "list-calendars without credentials errs")
     assert(contains(err-message(calendars), "no credentials"), "the auth error reaches the caller")
-
-    events ::google::calendar/list-events("primary")
-    assert(is-err(events), "list-events without credentials errs")
-
-    created ::google::calendar/create-event("primary", {summary: "x", start: {date: "2030-01-01"}, end: {date: "2030-01-02"}})
-    assert(is-err(created), "create-event without credentials errs")
-
-    quick ::google::calendar/quick-add("primary", "lunch tomorrow at noon")
-    assert(is-err(quick), "quick-add without credentials errs")
+    assert(is-err(::events/list-events("primary")))
+    assert(is-err(::events/create-event("primary", {summary: "x", start: {date: "2030-01-01"}, end: {date: "2030-01-02"}})))
+    assert(is-err(::events/quick-add("primary", "lunch tomorrow at noon")))
+    assert(is-err(::events/create-event("primary", {}, {sendUpdates: "bogus"})), "bad options fail before any request")
 }

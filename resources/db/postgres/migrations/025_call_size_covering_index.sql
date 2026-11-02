@@ -1,0 +1,12 @@
+-- no-transaction
+-- Hourly usage reconciliation sums a whole environment's `size`. Reading it from
+-- the trace heap reads nearly the whole table, because each row holds its
+-- arguments and return value. With `size` in the index the sum reads about 5% of
+-- that. Counting calls and the oldest call, which already read this index, are
+-- unaffected, and 026 drops the narrower index this replaces.
+--
+-- A plain CREATE INDEX blocks trace writes for the whole build, so this runs
+-- outside a transaction, which is also why it is the only statement here. A
+-- failed build leaves an invalid index that IF NOT EXISTS would accept;
+-- `run_migrations` drops one before retrying. See CONCURRENT_INDEXES there.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS call_env_start_time_size_idx ON hot.call(env_id, start_time) INCLUDE (size);

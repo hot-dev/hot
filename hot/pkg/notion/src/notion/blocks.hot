@@ -6,8 +6,12 @@ get-children
 meta {
     doc: """GET /blocks/{id}/children - A page's (or block's) content blocks. Returns `{results, has_more, next_cursor}`."""
 }
-fn (block-id: Str): Map {
-  ::api/json("GET", `/blocks/${block-id}/children`)
+fn
+(block-id: Str): Map {
+  get-children(block-id, {})
+},
+(block-id: Str, opts: Map): Map {
+  ::api/json("GET", `/blocks/${block-id}/children`, {}, "", opts)
 }
 
 append-children
@@ -26,16 +30,24 @@ meta {
     ```
     """
 }
-fn (block-id: Str, children: Vec): Map {
-  ::api/json("PATCH", `/blocks/${block-id}/children`, {}, {children: children})
+fn
+(block-id: Str, children: Vec): Map {
+  append-children(block-id, children, {})
+},
+(block-id: Str, children: Vec, opts: Map): Map {
+  ::api/json("PATCH", `/blocks/${block-id}/children`, {}, {children: children}, opts)
 }
 
 delete-block
 meta {
     doc: """DELETE /blocks/{id} - Move a block to the trash."""
 }
-fn (block-id: Str): Map {
-  ::api/json("DELETE", `/blocks/${block-id}`)
+fn
+(block-id: Str): Map {
+  delete-block(block-id, {})
+},
+(block-id: Str, opts: Map): Map {
+  ::api/json("DELETE", `/blocks/${block-id}`, {}, "", opts)
 }
 
 search
@@ -56,9 +68,15 @@ fn
 (query: Str): Map {
   ::api/json("POST", "/search", {}, {query: query})
 },
+(query: Str, opts: Map): Map {
+  ::api/json("POST", "/search", {}, {query: query}, opts)
+},
 (query: Str, object-type: Str): Map {
+  search(query, object-type, {})
+},
+(query: Str, object-type: Str, opts: Map): Map {
   ::api/json("POST", "/search", {}, {
     query: query,
     filter: {property: "object", value: object-type}
-  })
+  }, opts)
 }

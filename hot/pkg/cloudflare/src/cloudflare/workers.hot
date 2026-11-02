@@ -1,0 +1,172 @@
+::cloudflare::workers ns
+meta {
+    doc: """
+    Cloudflare Workers: list, deploy (single ES module), fetch, and delete
+    scripts, and manage zone routes. Deploying replaces the script and
+    creates a new version and deployment in one step. For multi-module
+    bundles, static assets, or secrets, use `wrangler deploy`.
+    """,
+    ctx: {"cloudflare.token": {required: false}, "cloudflare.account.id": {required: false, secret: false}}
+}
+
+::api ::cloudflare::api
+
+// The compatibility date used when a deploy doesn't name one. Pin your
+// own in `options.compatibility_date` for reproducible behaviour.
+DEFAULT_COMPATIBILITY_DATE "2025-09-01"
+
+script-suffix fn (name: Str): Str {
+  `/workers/scripts/${::api/seg(name)}`
+}
+
+list-scripts
+meta {
+    doc: """GET /accounts/{account_id}/workers/scripts - Every Worker script in the account (`id` is the script name). Not paginated."""
+}
+fn
+(): Vec {
+  list-scripts({})
+},
+(opts: Map): Vec {
+  ::api/account-json("GET", "/workers/scripts", "", opts)
+}
+
+get-script-settings
+meta {
+    doc: """GET .../workers/scripts/{name}/settings - A script's bindings, compatibility date and flags, and observability settings."""
+}
+fn
+(name: Str): Map {
+  get-script-settings(name, {})
+},
+(name: Str, opts: Map): Map {
+  ::api/account-json("GET", `${script-suffix(name)}/settings`, "", opts)
+}
+
+script-metadata
+meta {
+    doc: """
+    The `metadata` part for a module upload. `options` may set
+    `compatibility_date`, `compatibility_flags`, `bindings`
+    (`[{type: "plain_text", name, text}, {type: "kv_namespace", name, namespace_id}, …]`),
+    `keep_bindings`, `observability`, and `tags`; unset fields are
+    omitted. Exposed for testing.
+    """
+}
+fn
+(main-module: Str, options: Map): Map {
+  {
+    main_module: main-module,
+    compatibility_date: or(get(options, "compatibility_date"), DEFAULT_COMPATIBILITY_DATE)
+  }
+    |> assoc-some("compatibility_flags", get(options, "compatibility_flags"))
+    |> assoc-some("bindings", get(options, "bindings"))
+    |> assoc-some("keep_bindings", get(options, "keep_bindings"))
+    |> assoc-some("observability", get(options, "observability"))
+    |> assoc-some("tags", get(options, "tags"))
+}
+
+deploy-parts
+meta {
+    doc: """The multipart parts for a module upload: the JSON `metadata` part and the module itself as `application/javascript+module`. Exposed for testing."""
+}
+fn
+(main-module: Str, code: Str, options: Map): Vec {
+  [
+    {name: "metadata", value: to-json(script-metadata(main-module, options)), content_type: "application/json"},
+    {name: main-module, filename: main-module, value: code, content_type: "application/javascript+module"}
+  ]
+}
+
+deploy-module
+meta {
+    doc: """
+    PUT /accounts/{account_id}/workers/scripts/{name} - Upload `code` as
+    a single ES module Worker (`export default { fetch(request, env) {…} }`)
+    and deploy it. `options` as in `script-metadata`, plus `main_module`
+    (the part name, default `"worker.js"`). Returns the script record.
+    The Worker still needs a route, custom domain, or workers.dev
+    subdomain to receive traffic.
+
+    **Example**
+
+    ```hot
+    ::cloudflare::workers/deploy-module("hello", "export default { fetch() { return new Response('hi') } }", {
+      bindings: [{type: "plain_text", name: "GREETING", text: "hi"}]
+    })
+    ```
+    """
+}
+fn
+(name: Str, code: Str): Map {
+  deploy-module(name, code, {})
+},
+(name: Str, code: Str, options: Map): Map {
+  deploy-module(name, code, options, {})
+},
+(name: Str, code: Str, options: Map, opts: Map): Map {
+  main-module or(get(options, "main_module"), "worker.js")
+  path ::api/account-path(script-suffix(name), opts)
+  cond {
+    is-err(path) => { path }
+    => { ::api/send-multipart("PUT", path, deploy-parts(main-module, code, options), opts) }
+  }
+}
+
+delete-script
+meta {
+    doc: """DELETE .../workers/scripts/{name} - Delete a script. The 2-arity form with `force: true` also deletes it when other Workers bind to it."""
+}
+fn
+(name: Str): Any {
+  delete-script(name, false)
+},
+(name: Str, force: Bool): Any {
+  delete-script(name, force, {})
+},
+(name: Str, opts: Map): Any {
+  delete-script(name, false, opts)
+},
+(name: Str, force: Bool, opts: Map): Any {
+  ::api/account-json("DELETE", `${script-suffix(name)}${::api/query({force: if(force, true, null)})}`, "", opts)
+}
+
+// ---------------------------------------------------------------------------
+// Routes (zone-scoped)
+// ---------------------------------------------------------------------------
+
+list-routes
+meta {
+    doc: """GET /zones/{zone_id}/workers/routes - A zone's Worker routes: `[{id, pattern, script}]`."""
+}
+fn
+(zone-id: Str): Vec {
+  list-routes(zone-id, {})
+},
+(zone-id: Str, opts: Map): Vec {
+  ::api/json("GET", `/zones/${::api/seg(zone-id)}/workers/routes`, "", opts)
+}
+
+create-route
+meta {
+    doc: """POST /zones/{zone_id}/workers/routes - Route `pattern` (e.g. `"example.com/api/*"`) to the Worker `script`. Returns `{id, pattern, script}`."""
+}
+fn
+(zone-id: Str, pattern: Str, script: Str): Map {
+  create-route(zone-id, pattern, script, {})
+},
+(zone-id: Str, pattern: Str, script: Str, opts: Map): Map {
+  ::api/json("POST", `/zones/${::api/seg(zone-id)}/workers/routes`, {pattern: pattern, script: script}, opts)
+}
+
+delete-route
+meta {
+    doc: """DELETE /zones/{zone_id}/workers/routes/{route_id} - Remove a route."""
+}
+fn
+(zone-id: Str, route-id: Str): Any {
+  delete-route(zone-id, route-id, {})
+},
+(zone-id: Str, route-id: Str, opts: Map): Any {
+  ::api/json("DELETE", `/zones/${::api/seg(zone-id)}/workers/routes/${::api/seg(route-id)}`, "", opts)
+}

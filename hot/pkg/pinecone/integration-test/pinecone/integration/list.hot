@@ -1,11 +1,19 @@
 ::pinecone::integration ns
 meta ["test"]
 
-// Requires ctx: pinecone.api.key
+// Requires PINECONE_API_KEY; skips without it. Read-only: lists the
+// project's indexes.
 // Run with: hot test --project pkg-integration-pinecone
+
+::ctx ::pinecone::integration::ctx
 
 test-list-indexes
 meta ["test"] fn () {
-    out ::pinecone::indexes/list-indexes()
-    assert(is-some(out.indexes), "should return an indexes array")
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip(::ctx/UNCONFIGURED) }
+        => {
+            out ::pinecone::indexes/list-indexes()
+            assert(is-vec(out.indexes), "should return an indexes array")
+        }
+    }
 }

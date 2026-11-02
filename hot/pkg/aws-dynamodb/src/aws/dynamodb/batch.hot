@@ -2,13 +2,12 @@
 
 // DynamoDB batch operations
 
-http-request ::hot::http/request
 HttpResponse ::hot::http/HttpResponse
 is-ok-response ::hot::http/is-ok-response
 
-get-credentials ::aws::core/get-credentials
-get-region ::aws::core/get-region
-sign-request ::aws::core/sign-request
+resolve ::aws::core/resolve
+send-signed ::aws::core/send-signed
+service-url ::aws::core/service-url
 AwsError ::aws::core/AwsError
 
 // Batch get response
@@ -42,34 +41,35 @@ meta {
     ```
     """
 }
-fn (request_items: Map): BatchGetResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
+fn
+(request_items: Map, opts: Map): BatchGetResponse | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        url `${service-url(resolved, "dynamodb")}/`
 
-    url `https://dynamodb.${region}.amazonaws.com/`
+        body to-json({
+            RequestItems: request_items
+        })
 
-    body to-json({
-        RequestItems: request_items
+        headers {
+            "Content-Type": "application/x-amz-json-1.0",
+            "X-Amz-Target": "DynamoDB_20120810.BatchGetItem"
+        }
+
+        response send-signed("POST", url, "dynamodb", resolved, headers, body)
+
+        cond {
+            is-err(response) => { response }
+            is-ok-response(response) => { BatchGetResponse({
+                responses: if(is-null(response.body.Responses), {}, response.body.Responses),
+                unprocessed_keys: response.body.UnprocessedKeys,
+                consumed_capacity: response.body.ConsumedCapacity
+            }) }
+            => { err(AwsError(response)) }
+        }
     })
-
-    headers {
-        "Content-Type": "application/x-amz-json-1.0",
-        "X-Amz-Target": "DynamoDB_20120810.BatchGetItem",
-        "Host": `dynamodb.${region}.amazonaws.com`
-    }
-
-    signed-headers sign-request("POST", url, region, "dynamodb", credentials, headers, body)
-
-    response http-request("POST", url, signed-headers, body)
-
-    cond {
-        is-ok-response(response) => { BatchGetResponse({
-            responses: if(is-null(response.body.Responses), {}, response.body.Responses),
-            unprocessed_keys: response.body.UnprocessedKeys,
-            consumed_capacity: response.body.ConsumedCapacity
-        }) }
-        => { err(AwsError(response)) }
-    }
+},
+(request_items: Map): BatchGetResponse | AwsError {
+    batch-get-item(request_items, {})
 }
 
 // Batch write items to multiple tables
@@ -97,33 +97,34 @@ meta {
     ```
     """
 }
-fn (request_items: Map): BatchWriteResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
+fn
+(request_items: Map, opts: Map): BatchWriteResponse | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        url `${service-url(resolved, "dynamodb")}/`
 
-    url `https://dynamodb.${region}.amazonaws.com/`
+        body to-json({
+            RequestItems: request_items
+        })
 
-    body to-json({
-        RequestItems: request_items
+        headers {
+            "Content-Type": "application/x-amz-json-1.0",
+            "X-Amz-Target": "DynamoDB_20120810.BatchWriteItem"
+        }
+
+        response send-signed("POST", url, "dynamodb", resolved, headers, body)
+
+        cond {
+            is-err(response) => { response }
+            is-ok-response(response) => { BatchWriteResponse({
+                unprocessed_items: response.body.UnprocessedItems,
+                consumed_capacity: response.body.ConsumedCapacity
+            }) }
+            => { err(AwsError(response)) }
+        }
     })
-
-    headers {
-        "Content-Type": "application/x-amz-json-1.0",
-        "X-Amz-Target": "DynamoDB_20120810.BatchWriteItem",
-        "Host": `dynamodb.${region}.amazonaws.com`
-    }
-
-    signed-headers sign-request("POST", url, region, "dynamodb", credentials, headers, body)
-
-    response http-request("POST", url, signed-headers, body)
-
-    cond {
-        is-ok-response(response) => { BatchWriteResponse({
-            unprocessed_items: response.body.UnprocessedItems,
-            consumed_capacity: response.body.ConsumedCapacity
-        }) }
-        => { err(AwsError(response)) }
-    }
+},
+(request_items: Map): BatchWriteResponse | AwsError {
+    batch-write-item(request_items, {})
 }
 
 // Helper to create a batch get request for a single table

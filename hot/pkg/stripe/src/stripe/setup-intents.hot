@@ -1,0 +1,174 @@
+::stripe::setup-intents ns
+meta {
+    doc: """SetupIntents: save a customer's payment method for later off-session charges (subscriptions, invoices, usage billing) without charging now, handling authentication up front. See https://docs.stripe.com/api/setup_intents."""
+}
+
+api-call ::stripe::api/call
+seg ::stripe::api/encode-id
+RequestOptions ::stripe::api/RequestOptions
+
+// ============================================================================
+// Setup Intents
+// ============================================================================
+
+CreateSetupIntentRequest type {
+  customer: Str?,
+  payment_method: Str?,
+  allowed_payment_method_types: Vec<Str>?,
+  excluded_payment_method_types: Vec<Str>?,
+  automatic_payment_methods: Map?,
+  payment_method_options: Map?,
+  payment_method_configuration: Str?,
+  usage: Str?,
+  confirm: Bool?,
+  return_url: Str?,
+  mandate_data: Map?,
+  description: Str?,
+  metadata: Map?,
+  on_behalf_of: Str?,
+  expand: Vec<Str>?
+}
+
+create-setup-intent
+meta {
+    doc: """
+POST /v1/setup_intents - Create a SetupIntent. `usage` is "off_session" (default: charge later without the customer) or "on_session". Hand `client_secret` to Stripe.js to collect and confirm the payment method, or confirm server-side with a `payment_method`. On success the payment method is attached to `customer`.
+
+**Example**
+
+```hot
+::si ::stripe::setup-intents
+
+intent ::si/create-setup-intent(::si/CreateSetupIntentRequest({
+  customer: "cus_...",
+  automatic_payment_methods: {enabled: true}
+}))
+intent.client_secret  // => "seti_..._secret_..." (pass to Stripe.js)
+```
+"""
+}
+fn
+(request: CreateSetupIntentRequest): Map {
+  create-setup-intent(request, RequestOptions({}))
+},
+(request: CreateSetupIntentRequest, options: RequestOptions | Map): Map {
+  api-call("POST", "/v1/setup_intents", request, options)
+}
+
+get-setup-intent
+meta {
+    doc: """GET /v1/setup_intents/{intent} - Retrieve a SetupIntent by ID. Optional `params` such as `{expand: ["payment_method"]}`."""
+}
+fn
+(setup-intent: Str): Map {
+  get-setup-intent(setup-intent, {})
+},
+(setup-intent: Str, params: Map): Map {
+  get-setup-intent(setup-intent, params, {})
+},
+(setup-intent: Str, params: Map, opts: Map): Map {
+  api-call("GET", `/v1/setup_intents/${seg(setup-intent)}`, params, opts)
+}
+
+UpdateSetupIntentRequest type {
+  customer: Str?,
+  payment_method: Str?,
+  allowed_payment_method_types: Vec<Str>?,
+  excluded_payment_method_types: Vec<Str>?,
+  payment_method_options: Map?,
+  payment_method_configuration: Str?,
+  description: Str?,
+  metadata: Map?,
+  expand: Vec<Str>?
+}
+
+update-setup-intent
+meta {
+    doc: """POST /v1/setup_intents/{intent} - Update a SetupIntent that hasn't been confirmed."""
+}
+fn
+(setup-intent: Str, request: UpdateSetupIntentRequest): Map {
+  update-setup-intent(setup-intent, request, RequestOptions({}))
+},
+(setup-intent: Str, request: UpdateSetupIntentRequest, options: RequestOptions | Map): Map {
+  api-call("POST", `/v1/setup_intents/${seg(setup-intent)}`, request, options)
+}
+
+ConfirmSetupIntentRequest type {
+  payment_method: Str?,
+  return_url: Str?,
+  mandate_data: Map?,
+  payment_method_options: Map?,
+  expand: Vec<Str>?
+}
+
+confirm-setup-intent
+meta {
+    doc: """
+POST /v1/setup_intents/{intent}/confirm - Confirm a SetupIntent server-side. `status` becomes "succeeded", or "requires_action" when the customer must authenticate (finish with Stripe.js).
+
+**Example**
+
+```hot
+::si ::stripe::setup-intents
+
+done ::si/confirm-setup-intent("seti_...",
+  ::si/ConfirmSetupIntentRequest({payment_method: "pm_card_visa"}))
+done.status  // => "succeeded"
+```
+"""
+}
+fn
+(setup-intent: Str): Map {
+  confirm-setup-intent(setup-intent, ConfirmSetupIntentRequest({}), RequestOptions({}))
+},
+(setup-intent: Str, request: ConfirmSetupIntentRequest): Map {
+  confirm-setup-intent(setup-intent, request, RequestOptions({}))
+},
+(setup-intent: Str, request: ConfirmSetupIntentRequest, options: RequestOptions | Map): Map {
+  api-call("POST", `/v1/setup_intents/${seg(setup-intent)}/confirm`, request, options)
+}
+
+cancel-setup-intent
+meta {
+    doc: """POST /v1/setup_intents/{intent}/cancel - Cancel a SetupIntent that hasn't succeeded. Optional `cancellation-reason`: "abandoned", "requested_by_customer", or "duplicate"."""
+}
+fn
+(setup-intent: Str): Map {
+  cancel-setup-intent(setup-intent, {})
+},
+(setup-intent: Str, opts: Map): Map {
+  api-call("POST", `/v1/setup_intents/${seg(setup-intent)}/cancel`, {}, opts)
+},
+(setup-intent: Str, cancellation-reason: Str): Map {
+  cancel-setup-intent(setup-intent, cancellation-reason, {})
+},
+(setup-intent: Str, cancellation-reason: Str, opts: Map): Map {
+  api-call("POST", `/v1/setup_intents/${seg(setup-intent)}/cancel`, {cancellation_reason: cancellation-reason}, opts)
+}
+
+ListSetupIntentsRequest type {
+  customer: Str?,
+  payment_method: Str?,
+  attach_to_self: Bool?,
+  created: Any?,
+  limit: Int?,
+  starting_after: Str?,
+  ending_before: Str?,
+  expand: Vec<Str>?
+}
+
+list-setup-intents
+meta {
+    doc: """GET /v1/setup_intents - List SetupIntents. Filter by `customer` or `payment_method`."""
+}
+fn
+(): Map {
+  list-setup-intents(ListSetupIntentsRequest({}))
+},
+(request: ListSetupIntentsRequest): Map {
+  list-setup-intents(request, {})
+},
+(request: ListSetupIntentsRequest, opts: Map): Map {
+  api-call("GET", "/v1/setup_intents", request, opts)
+}

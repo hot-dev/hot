@@ -69,7 +69,15 @@ meta {
     ```
     """
 }
-fn (request: TestTemplateContentRequest): TestTemplateContentResponse {
-  response api-request("POST", `${::postmark/BASE_URL}/templates/validate`, {}, request)
-  if(is-ok-response(response), TestTemplateContentResponse(response.body), err(HttpError(response)))
+fn
+(request: TestTemplateContentRequest): TestTemplateContentResponse {
+  test-template-content(request, {})
+},
+(request: TestTemplateContentRequest, opts: Map): TestTemplateContentResponse {
+  response api-request("POST", `${::postmark/BASE_URL}/templates/validate`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { TestTemplateContentResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

@@ -6,14 +6,22 @@ get-authenticated
 meta {
     doc: """GET /user - The authenticated user (login, id, plan). The cheapest way to smoke-test a token."""
 }
-fn (): Map {
-  ::api/json("GET", "/user")
+fn
+(): Map {
+  get-authenticated({})
+},
+(opts: Map): Map {
+  ::api/json("GET", "/user", {}, "", opts)
 }
 
 get-user
 meta {
     doc: """GET /users/{username} - A user's public profile."""
 }
-fn (username: Str): Map {
-  ::api/json("GET", `/users/${username}`)
+fn
+(username: Str): Map {
+  get-user(username, {})
+},
+(username: Str, opts: Map): Map {
+  ::api/json("GET", `/users/${username}`, {}, "", opts)
 }

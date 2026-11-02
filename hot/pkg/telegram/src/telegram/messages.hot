@@ -1,6 +1,7 @@
 ::telegram::messages ns
 
 api-request ::telegram::api/request
+InputFile ::telegram::api/InputFile
 
 // ============================================================================
 // Send Messages
@@ -14,9 +15,13 @@ SendMessageRequest type {
   link_preview_options: Map?,
   disable_notification: Bool?,
   protect_content: Bool?,
+  allow_paid_broadcast: Bool?,
+  message_effect_id: Str?,
   reply_parameters: Map?,
   reply_markup: Map?,
-  message_thread_id: Int?
+  message_thread_id: Int?,
+  direct_messages_topic_id: Int?,
+  business_connection_id: Str?
 }
 
 send-message
@@ -44,49 +49,71 @@ response ::messages/send-message(::messages/SendMessageRequest({
 ```
 """
 }
-fn (request: SendMessageRequest): Map {
-  api-request("sendMessage", untype(request))
+fn
+(request: SendMessageRequest): Map {
+  send-message(request, {})
+},
+(request: SendMessageRequest, opts: Map): Map {
+  api-request("sendMessage", untype(request), opts)
 }
 
 ForwardMessageRequest type {
   chat_id: Any,
   from_chat_id: Any,
   message_id: Int,
+  video_start_timestamp: Int?,
   disable_notification: Bool?,
   protect_content: Bool?,
-  message_thread_id: Int?
+  message_effect_id: Str?,
+  message_thread_id: Int?,
+  direct_messages_topic_id: Int?
 }
 
 forward-message
 meta {
     doc: """forwardMessage - Forward a message from one chat to another. The forwarded message shows the original sender."""
 }
-fn (request: ForwardMessageRequest): Map {
-  api-request("forwardMessage", untype(request))
+fn
+(request: ForwardMessageRequest): Map {
+  forward-message(request, {})
+},
+(request: ForwardMessageRequest, opts: Map): Map {
+  api-request("forwardMessage", untype(request), opts)
 }
 
 CopyMessageRequest type {
   chat_id: Any,
   from_chat_id: Any,
   message_id: Int,
+  video_start_timestamp: Int?,
   caption: Str?,
   parse_mode: Str?,
+  caption_entities: Vec<Map>?,
+  show_caption_above_media: Bool?,
   disable_notification: Bool?,
   protect_content: Bool?,
+  allow_paid_broadcast: Bool?,
+  message_effect_id: Str?,
   reply_parameters: Map?,
   reply_markup: Map?,
-  message_thread_id: Int?
+  message_thread_id: Int?,
+  direct_messages_topic_id: Int?
 }
 
 copy-message
 meta {
     doc: """copyMessage - Copy a message without the "Forwarded from" attribution. Returns the new message ID rather than the full message object."""
 }
-fn (request: CopyMessageRequest): Map {
-  api-request("copyMessage", untype(request))
+fn
+(request: CopyMessageRequest): Map {
+  copy-message(request, {})
+},
+(request: CopyMessageRequest, opts: Map): Map {
+  api-request("copyMessage", untype(request), opts)
 }
 
 EditMessageTextRequest type {
+  business_connection_id: Str?,
   chat_id: Any?,
   message_id: Int?,
   inline_message_id: Str?,
@@ -115,17 +142,23 @@ editMessageText - Edit a text message. Provide either `chat_id` + `message_id` f
 ```
 """
 }
-fn (request: EditMessageTextRequest): Any {
-  api-request("editMessageText", untype(request))
+fn
+(request: EditMessageTextRequest): Any {
+  edit-message-text(request, {})
+},
+(request: EditMessageTextRequest, opts: Map): Any {
+  api-request("editMessageText", untype(request), opts)
 }
 
 EditMessageCaptionRequest type {
+  business_connection_id: Str?,
   chat_id: Any?,
   message_id: Int?,
   inline_message_id: Str?,
   caption: Str?,
   parse_mode: Str?,
   caption_entities: Vec<Map>?,
+  show_caption_above_media: Bool?,
   reply_markup: Map?
 }
 
@@ -133,11 +166,16 @@ edit-message-caption
 meta {
     doc: """editMessageCaption - Edit the caption of a photo, video, document, or animation message."""
 }
-fn (request: EditMessageCaptionRequest): Any {
-  api-request("editMessageCaption", untype(request))
+fn
+(request: EditMessageCaptionRequest): Any {
+  edit-message-caption(request, {})
+},
+(request: EditMessageCaptionRequest, opts: Map): Any {
+  api-request("editMessageCaption", untype(request), opts)
 }
 
 EditMessageReplyMarkupRequest type {
+  business_connection_id: Str?,
   chat_id: Any?,
   message_id: Int?,
   inline_message_id: Str?,
@@ -148,8 +186,12 @@ edit-message-reply-markup
 meta {
     doc: """editMessageReplyMarkup - Edit the reply markup (inline keyboard) of a message."""
 }
-fn (request: EditMessageReplyMarkupRequest): Any {
-  api-request("editMessageReplyMarkup", untype(request))
+fn
+(request: EditMessageReplyMarkupRequest): Any {
+  edit-message-reply-markup(request, {})
+},
+(request: EditMessageReplyMarkupRequest, opts: Map): Any {
+  api-request("editMessageReplyMarkup", untype(request), opts)
 }
 
 DeleteMessageRequest type {
@@ -161,8 +203,12 @@ delete-message
 meta {
     doc: """deleteMessage - Delete a message. Bots can delete messages they sent, messages in private chats, and messages in groups/channels where they have delete permissions."""
 }
-fn (request: DeleteMessageRequest): Bool {
-  api-request("deleteMessage", untype(request))
+fn
+(request: DeleteMessageRequest): Bool {
+  delete-message(request, {})
+},
+(request: DeleteMessageRequest, opts: Map): Bool {
+  api-request("deleteMessage", untype(request), opts)
 }
 
 DeleteMessagesRequest type {
@@ -174,31 +220,45 @@ delete-messages
 meta {
     doc: """deleteMessages - Delete multiple messages at once (up to 100). Messages must be from the same chat and no older than 48 hours."""
 }
-fn (request: DeleteMessagesRequest): Bool {
-  api-request("deleteMessages", untype(request))
+fn
+(request: DeleteMessagesRequest): Bool {
+  delete-messages(request, {})
+},
+(request: DeleteMessagesRequest, opts: Map): Bool {
+  api-request("deleteMessages", untype(request), opts)
 }
 
 // ============================================================================
 // Media Messages
 // ============================================================================
 
-SendPhotoRequest type {
+SendPhotoRequest
+meta {
+    doc: """`photo` is a file_id, an HTTP URL Telegram fetches, or an `InputFile` (bytes, uploaded as multipart; up to 10 MB)."""
+}
+type {
   chat_id: Any,
-  photo: Str,
+  photo: Str | InputFile,
   caption: Str?,
   parse_mode: Str?,
+  caption_entities: Vec<Map>?,
+  show_caption_above_media: Bool?,
   has_spoiler: Bool?,
   disable_notification: Bool?,
   protect_content: Bool?,
+  allow_paid_broadcast: Bool?,
+  message_effect_id: Str?,
   reply_parameters: Map?,
   reply_markup: Map?,
-  message_thread_id: Int?
+  message_thread_id: Int?,
+  direct_messages_topic_id: Int?,
+  business_connection_id: Str?
 }
 
 send-photo
 meta {
     doc: """
-sendPhoto - Send a photo. `photo` can be a file_id (to resend), an HTTP URL, or a file path for upload.
+sendPhoto - Send a photo. `photo` can be a file_id (to resend), an HTTP URL, or an `InputFile` to upload bytes.
 
 **Example**
 
@@ -210,100 +270,154 @@ response ::messages/send-photo(::messages/SendPhotoRequest({
   photo: "https://example.com/image.jpg",
   caption: "Check out this image!"
 }))
+
+// Upload bytes (multipart/form-data)
+png ::hot::file/read-file-bytes("chart.png")
+response ::messages/send-photo(::messages/SendPhotoRequest({
+  chat_id: 123456789,
+  photo: ::telegram::api/input-file(png, "chart.png", "image/png")
+}))
 ```
 """
 }
-fn (request: SendPhotoRequest): Map {
-  api-request("sendPhoto", untype(request))
+fn
+(request: SendPhotoRequest): Map {
+  send-photo(request, {})
+},
+(request: SendPhotoRequest, opts: Map): Map {
+  api-request("sendPhoto", untype(request), opts)
 }
 
 SendDocumentRequest type {
   chat_id: Any,
-  document: Str,
+  document: Str | InputFile,
+  thumbnail: Str | InputFile | Null,
   caption: Str?,
   parse_mode: Str?,
+  caption_entities: Vec<Map>?,
+  disable_content_type_detection: Bool?,
   disable_notification: Bool?,
   protect_content: Bool?,
+  allow_paid_broadcast: Bool?,
+  message_effect_id: Str?,
   reply_parameters: Map?,
   reply_markup: Map?,
-  message_thread_id: Int?
+  message_thread_id: Int?,
+  direct_messages_topic_id: Int?,
+  business_connection_id: Str?
 }
 
 send-document
 meta {
-    doc: """sendDocument - Send a document (file). `document` can be a file_id, HTTP URL, or file path. Files up to 50 MB."""
+    doc: """sendDocument - Send a general file. `document` can be a file_id, an HTTP URL, or an `InputFile` to upload bytes (up to 50 MB)."""
 }
-fn (request: SendDocumentRequest): Map {
-  api-request("sendDocument", untype(request))
+fn
+(request: SendDocumentRequest): Map {
+  send-document(request, {})
+},
+(request: SendDocumentRequest, opts: Map): Map {
+  api-request("sendDocument", untype(request), opts)
 }
 
 SendVideoRequest type {
   chat_id: Any,
-  video: Str,
+  video: Str | InputFile,
   duration: Int?,
   width: Int?,
   height: Int?,
+  thumbnail: Str | InputFile | Null,
+  cover: Str | InputFile | Null,
+  start_timestamp: Int?,
   caption: Str?,
   parse_mode: Str?,
+  caption_entities: Vec<Map>?,
+  show_caption_above_media: Bool?,
   has_spoiler: Bool?,
   supports_streaming: Bool?,
   disable_notification: Bool?,
   protect_content: Bool?,
+  allow_paid_broadcast: Bool?,
+  message_effect_id: Str?,
   reply_parameters: Map?,
   reply_markup: Map?,
-  message_thread_id: Int?
+  message_thread_id: Int?,
+  direct_messages_topic_id: Int?,
+  business_connection_id: Str?
 }
 
 send-video
 meta {
-    doc: """sendVideo - Send a video. `video` can be a file_id, HTTP URL, or file path. Videos up to 50 MB."""
+    doc: """sendVideo - Send an MPEG4 video. `video` can be a file_id, an HTTP URL, or an `InputFile` to upload bytes (up to 50 MB)."""
 }
-fn (request: SendVideoRequest): Map {
-  api-request("sendVideo", untype(request))
+fn
+(request: SendVideoRequest): Map {
+  send-video(request, {})
+},
+(request: SendVideoRequest, opts: Map): Map {
+  api-request("sendVideo", untype(request), opts)
 }
 
 SendAudioRequest type {
   chat_id: Any,
-  audio: Str,
+  audio: Str | InputFile,
   caption: Str?,
   parse_mode: Str?,
+  caption_entities: Vec<Map>?,
   duration: Int?,
   performer: Str?,
   title: Str?,
+  thumbnail: Str | InputFile | Null,
   disable_notification: Bool?,
   protect_content: Bool?,
+  allow_paid_broadcast: Bool?,
+  message_effect_id: Str?,
   reply_parameters: Map?,
   reply_markup: Map?,
-  message_thread_id: Int?
+  message_thread_id: Int?,
+  direct_messages_topic_id: Int?,
+  business_connection_id: Str?
 }
 
 send-audio
 meta {
-    doc: """sendAudio - Send an audio file (displayed as a music player). `audio` can be a file_id, HTTP URL, or file path. Up to 50 MB."""
+    doc: """sendAudio - Send an MP3 or M4A file to show in the music player. `audio` can be a file_id, an HTTP URL, or an `InputFile` to upload bytes (up to 50 MB)."""
 }
-fn (request: SendAudioRequest): Map {
-  api-request("sendAudio", untype(request))
+fn
+(request: SendAudioRequest): Map {
+  send-audio(request, {})
+},
+(request: SendAudioRequest, opts: Map): Map {
+  api-request("sendAudio", untype(request), opts)
 }
 
 SendVoiceRequest type {
   chat_id: Any,
-  voice: Str,
+  voice: Str | InputFile,
   caption: Str?,
   parse_mode: Str?,
+  caption_entities: Vec<Map>?,
   duration: Int?,
   disable_notification: Bool?,
   protect_content: Bool?,
+  allow_paid_broadcast: Bool?,
+  message_effect_id: Str?,
   reply_parameters: Map?,
   reply_markup: Map?,
-  message_thread_id: Int?
+  message_thread_id: Int?,
+  direct_messages_topic_id: Int?,
+  business_connection_id: Str?
 }
 
 send-voice
 meta {
-    doc: """sendVoice - Send a voice message (OGG encoded with OPUS). Displayed as a waveform in the chat."""
+    doc: """sendVoice - Send a voice message (OGG/OPUS, MP3, or M4A). `voice` can be a file_id, an HTTP URL, or an `InputFile` to upload bytes."""
 }
-fn (request: SendVoiceRequest): Map {
-  api-request("sendVoice", untype(request))
+fn
+(request: SendVoiceRequest): Map {
+  send-voice(request, {})
+},
+(request: SendVoiceRequest, opts: Map): Map {
+  api-request("sendVoice", untype(request), opts)
 }
 
 SendLocationRequest type {
@@ -316,17 +430,25 @@ SendLocationRequest type {
   proximity_alert_radius: Int?,
   disable_notification: Bool?,
   protect_content: Bool?,
+  allow_paid_broadcast: Bool?,
+  message_effect_id: Str?,
   reply_parameters: Map?,
   reply_markup: Map?,
-  message_thread_id: Int?
+  message_thread_id: Int?,
+  direct_messages_topic_id: Int?,
+  business_connection_id: Str?
 }
 
 send-location
 meta {
     doc: """sendLocation - Send a point on the map. Set `live_period` (60-86400 seconds) for a live location that updates."""
 }
-fn (request: SendLocationRequest): Map {
-  api-request("sendLocation", untype(request))
+fn
+(request: SendLocationRequest): Map {
+  send-location(request, {})
+},
+(request: SendLocationRequest, opts: Map): Map {
+  api-request("sendLocation", untype(request), opts)
 }
 
 SendContactRequest type {
@@ -337,45 +459,64 @@ SendContactRequest type {
   vcard: Str?,
   disable_notification: Bool?,
   protect_content: Bool?,
+  allow_paid_broadcast: Bool?,
+  message_effect_id: Str?,
   reply_parameters: Map?,
   reply_markup: Map?,
-  message_thread_id: Int?
+  message_thread_id: Int?,
+  direct_messages_topic_id: Int?,
+  business_connection_id: Str?
 }
 
 send-contact
 meta {
     doc: """sendContact - Send a phone contact."""
 }
-fn (request: SendContactRequest): Map {
-  api-request("sendContact", untype(request))
+fn
+(request: SendContactRequest): Map {
+  send-contact(request, {})
+},
+(request: SendContactRequest, opts: Map): Map {
+  api-request("sendContact", untype(request), opts)
 }
 
 SendPollRequest type {
   chat_id: Any,
   question: Str,
+  question_parse_mode: Str?,
   options: Vec<Map>,
   is_anonymous: Bool?,
   type: Str?,
   allows_multiple_answers: Bool?,
-  correct_option_id: Int?,
+  allows_revoting: Bool?,
+  shuffle_options: Bool?,
+  correct_option_ids: Vec<Int>?,
   explanation: Str?,
   explanation_parse_mode: Str?,
   open_period: Int?,
   close_date: Int?,
   is_closed: Bool?,
+  description: Str?,
   disable_notification: Bool?,
   protect_content: Bool?,
+  allow_paid_broadcast: Bool?,
+  message_effect_id: Str?,
   reply_parameters: Map?,
   reply_markup: Map?,
-  message_thread_id: Int?
+  message_thread_id: Int?,
+  business_connection_id: Str?
 }
 
 send-poll
 meta {
-    doc: """sendPoll - Send a poll. Each option in `options` is `{text: "Option text"}`. Set `type: "quiz"` for quiz mode with a `correct_option_id`."""
+    doc: """sendPoll - Send a poll with 1-12 options, each `{text: "Option text"}`. Set `type: "quiz"` for quiz mode with `correct_option_ids` (0-based, increasing)."""
 }
-fn (request: SendPollRequest): Map {
-  api-request("sendPoll", untype(request))
+fn
+(request: SendPollRequest): Map {
+  send-poll(request, {})
+},
+(request: SendPollRequest, opts: Map): Map {
+  api-request("sendPoll", untype(request), opts)
 }
 
 SendDiceRequest type {
@@ -383,31 +524,44 @@ SendDiceRequest type {
   emoji: Str?,
   disable_notification: Bool?,
   protect_content: Bool?,
+  allow_paid_broadcast: Bool?,
+  message_effect_id: Str?,
   reply_parameters: Map?,
   reply_markup: Map?,
-  message_thread_id: Int?
+  message_thread_id: Int?,
+  direct_messages_topic_id: Int?,
+  business_connection_id: Str?
 }
 
 send-dice
 meta {
     doc: """sendDice - Send an animated dice/emoji. `emoji` can be a die, dart, basketball, football, bowling, or slot machine emoji. Default is die."""
 }
-fn (request: SendDiceRequest): Map {
-  api-request("sendDice", untype(request))
+fn
+(request: SendDiceRequest): Map {
+  send-dice(request, {})
+},
+(request: SendDiceRequest, opts: Map): Map {
+  api-request("sendDice", untype(request), opts)
 }
 
 SendChatActionRequest type {
   chat_id: Any,
   action: Str,
-  message_thread_id: Int?
+  message_thread_id: Int?,
+  business_connection_id: Str?
 }
 
 send-chat-action
 meta {
     doc: """sendChatAction - Show a typing indicator or upload status. `action`: "typing", "upload_photo", "record_video", "upload_video", "record_voice", "upload_voice", "upload_document", "find_location", "record_video_note", "upload_video_note"."""
 }
-fn (request: SendChatActionRequest): Bool {
-  api-request("sendChatAction", untype(request))
+fn
+(request: SendChatActionRequest): Bool {
+  send-chat-action(request, {})
+},
+(request: SendChatActionRequest, opts: Map): Bool {
+  api-request("sendChatAction", untype(request), opts)
 }
 
 // ============================================================================
@@ -432,13 +586,217 @@ answerCallbackQuery - Respond to a callback query from an inline keyboard button
 ```hot
 ::messages ::telegram::messages
 
-::messages/answer-callback-query(::messages/AnswerCallbackQueryRequest({
-  callback_query_id: event.callback_query.id,
-  text: "Button pressed!"
+on-callback fn (update: Map): Bool {
+  ::messages/answer-callback-query(::messages/AnswerCallbackQueryRequest({
+    callback_query_id: update.callback_query.id,
+    text: "Button pressed!"
+  }))
+}
+```
+"""
+}
+fn
+(request: AnswerCallbackQueryRequest): Bool {
+  answer-callback-query(request, {})
+},
+(request: AnswerCallbackQueryRequest, opts: Map): Bool {
+  api-request("answerCallbackQuery", untype(request), opts)
+}
+
+// ============================================================================
+// Albums and media edits
+// ============================================================================
+
+SendMediaGroupRequest
+meta {
+    doc: """
+    `media` is 2-10 InputMedia objects (`{type: "photo" | "video" | "document" | "audio", media, caption?, ...}`). Each `media` (and `thumbnail`/`cover`) may be a file_id, a URL, or an `InputFile`; files are uploaded in one multipart request and referenced with `attach://`. Documents and audio can only be grouped with their own type.
+    """
+}
+type {
+  chat_id: Any,
+  media: Vec<Map>,
+  disable_notification: Bool?,
+  protect_content: Bool?,
+  allow_paid_broadcast: Bool?,
+  message_effect_id: Str?,
+  reply_parameters: Map?,
+  message_thread_id: Int?,
+  direct_messages_topic_id: Int?,
+  business_connection_id: Str?
+}
+
+send-media-group
+meta {
+    doc: """
+sendMediaGroup - Send 2-10 photos, videos, documents, or audios as an album. Returns the Vec of sent messages.
+
+**Example**
+
+```hot
+::messages ::telegram::messages
+::api ::telegram::api
+
+album ::messages/send-media-group(::messages/SendMediaGroupRequest({
+  chat_id: 123456789,
+  media: [
+    {type: "photo", media: "https://example.com/a.jpg", caption: "Before"},
+    {type: "photo", media: ::api/input-file(::hot::file/read-file-bytes("after.jpg"), "after.jpg", "image/jpeg")}
+  ]
+}))
+length(album)  // => 2
+```
+"""
+}
+fn
+(request: SendMediaGroupRequest): Vec<Map> {
+  send-media-group(request, {})
+},
+(request: SendMediaGroupRequest, opts: Map): Vec<Map> {
+  api-request("sendMediaGroup", untype(request), opts)
+}
+
+EditMessageMediaRequest
+meta {
+    doc: """`media` is one InputMedia object; its `media` may be a file_id, URL, or `InputFile`. Identify the message with `chat_id` + `message_id`, or `inline_message_id`."""
+}
+type {
+  business_connection_id: Str?,
+  chat_id: Any?,
+  message_id: Int?,
+  inline_message_id: Str?,
+  media: Map,
+  reply_markup: Map?
+}
+
+edit-message-media
+meta {
+    doc: """
+editMessageMedia - Replace a message's photo, video, document, audio, or animation (or turn a text message into media). Returns the edited message, or `true` for inline messages.
+
+**Example**
+
+```hot
+::messages ::telegram::messages
+
+::messages/edit-message-media(::messages/EditMessageMediaRequest({
+  chat_id: 123456789,
+  message_id: 42,
+  media: {type: "photo", media: "https://example.com/updated.png", caption: "Updated chart"}
 }))
 ```
 """
 }
-fn (request: AnswerCallbackQueryRequest): Bool {
-  api-request("answerCallbackQuery", untype(request))
+fn
+(request: EditMessageMediaRequest): Any {
+  edit-message-media(request, {})
+},
+(request: EditMessageMediaRequest, opts: Map): Any {
+  api-request("editMessageMedia", untype(request), opts)
+}
+
+// ============================================================================
+// Reactions and polls
+// ============================================================================
+
+SetMessageReactionRequest type {
+  chat_id: Any,
+  message_id: Int,
+  reaction: Vec<Map>?,
+  is_big: Bool?
+}
+
+set-message-reaction
+meta {
+    doc: """
+setMessageReaction - Set the bot's reactions on a message. Each reaction is `{type: "emoji", emoji: "👍"}` (from Telegram's allowed set) or `{type: "custom_emoji", custom_emoji_id}`. Pass an empty `reaction` Vec to remove the bot's reaction. Bots can set one reaction per message.
+
+**Example**
+
+```hot
+::messages ::telegram::messages
+
+::messages/set-message-reaction(::messages/SetMessageReactionRequest({
+  chat_id: 123456789,
+  message_id: 42,
+  reaction: [{type: "emoji", emoji: "👍"}]
+}))
+```
+"""
+}
+fn
+(request: SetMessageReactionRequest): Bool {
+  set-message-reaction(request, {})
+},
+(request: SetMessageReactionRequest, opts: Map): Bool {
+  api-request("setMessageReaction", untype(request), opts)
+}
+
+StopPollRequest type {
+  business_connection_id: Str?,
+  chat_id: Any,
+  message_id: Int,
+  reply_markup: Map?
+}
+
+stop-poll
+meta {
+    doc: """stopPoll - Close a poll the bot sent. Returns the final Poll with vote counts."""
+}
+fn
+(request: StopPollRequest): Map {
+  stop-poll(request, {})
+},
+(request: StopPollRequest, opts: Map): Map {
+  api-request("stopPoll", untype(request), opts)
+}
+
+// ============================================================================
+// Inline mode
+// ============================================================================
+
+AnswerInlineQueryRequest
+meta {
+    doc: """`results` is up to 50 InlineQueryResult objects, e.g. `{type: "article", id: "1", title, input_message_content: {message_text}}`. `next_offset` enables paging; `button` shows a button above the results."""
+}
+type {
+  inline_query_id: Str,
+  results: Vec<Map>,
+  cache_time: Int?,
+  is_personal: Bool?,
+  next_offset: Str?,
+  button: Map?
+}
+
+answer-inline-query
+meta {
+    doc: """
+answerInlineQuery - Answer an `inline_query` update (a user typing `@yourbot query`). Requires inline mode enabled in BotFather.
+
+**Example**
+
+```hot
+::messages ::telegram::messages
+
+on-inline fn (update: Map): Bool {
+  ::messages/answer-inline-query(::messages/AnswerInlineQueryRequest({
+    inline_query_id: update.inline_query.id,
+    results: [{
+      type: "article",
+      id: "echo",
+      title: `Echo: ${update.inline_query.query}`,
+      input_message_content: {message_text: update.inline_query.query}
+    }],
+    cache_time: 0
+  }))
+}
+```
+"""
+}
+fn
+(request: AnswerInlineQueryRequest): Bool {
+  answer-inline-query(request, {})
+},
+(request: AnswerInlineQueryRequest, opts: Map): Bool {
+  api-request("answerInlineQuery", untype(request), opts)
 }

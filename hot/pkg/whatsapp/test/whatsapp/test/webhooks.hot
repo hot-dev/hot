@@ -67,3 +67,121 @@ fn () {
     result ::webhooks/verify-challenge(query, "my-token")
     assert(is-err(result), "wrong verify token should return an error")
 }
+
+test-verify-rejects-tampered-body
+meta ["test"]
+fn () {
+    request {headers: {x-hub-signature-256: `sha256=${TEST_SIGNATURE}`}, body-raw: """{"object":"page"}"""}
+    assert(not(::webhooks/verify-request(request, TEST_SECRET)), "tampered body should fail")
+}
+
+test-verify-prefers-body-bytes
+meta ["test"]
+fn () {
+    // raw-body uses body-bytes when present (non-UTF-8 bodies); the signature
+    // covers those bytes, not the lossy body-raw.
+    request {headers: {x-hub-signature-256: `sha256=${TEST_SIGNATURE}`}, body-raw: "lossy", body-bytes: Bytes(TEST_BODY)}
+    assert(::webhooks/verify-request(request, TEST_SECRET), "signature over body-bytes should verify")
+}
+
+test-verify-empty-secret-fails-closed
+meta ["test"]
+fn () {
+    sig ::hot::hmac/hmac-sha256("", TEST_BODY)
+    assert(not(::webhooks/verify-request(make-request(`sha256=${sig}`), "")), "empty secret never verifies")
+}
+
+test-verify-fresh-signature
+meta ["test"]
+fn () {
+    body """{"entry":[]}"""
+    sig ::hot::hmac/hmac-sha256("s3cret", body)
+    request {headers: {x-hub-signature-256: `sha256=${sig}`}, body-raw: body}
+    assert(::webhooks/verify-request(request, "s3cret"))
+}
+
+test-verify-challenge-rejects-wrong-mode
+meta ["test"]
+fn () {
+    query {"hub.mode": "unsubscribe", "hub.verify_token": "my-token", "hub.challenge": "c"}
+    assert(is-err(::webhooks/verify-challenge(query, "my-token")))
+}
+
+test-verify-challenge-rejects-missing-challenge
+meta ["test"]
+fn () {
+    query {"hub.mode": "subscribe", "hub.verify_token": "my-token"}
+    assert(is-err(::webhooks/verify-challenge(query, "my-token")))
+}
+
+test-verify-challenge-empty-token-fails-closed
+meta ["test"]
+fn () {
+    query {"hub.mode": "subscribe", "hub.verify_token": "", "hub.challenge": "c"}
+    assert(is-err(::webhooks/verify-challenge(query, "")), "an empty configured token must not match an empty query token")
+    assert(is-err(::webhooks/verify-challenge({"hub.mode": "subscribe", "hub.challenge": "c"}, "my-token")), "missing token fails")
+}
+
+// ============================================================================
+// Payload helpers
+// ============================================================================
+
+INBOUND {
+    object: "whatsapp_business_account",
+    entry: [{
+        id: "WABA",
+        changes: [{
+            field: "messages",
+            value: {
+                messaging_product: "whatsapp",
+                metadata: {display_phone_number: "15550001111", phone_number_id: "PNID"},
+                contacts: [{profile: {name: "Ada"}, wa_id: "15551234567"}],
+                messages: [
+                    {from: "15551234567", id: "wamid.1", timestamp: "1700000000", type: "text", text: {body: "hi"}},
+                    {from: "15557654321", id: "wamid.2", timestamp: "1700000001", type: "image", image: {id: "m1", mime_type: "image/jpeg"}}
+                ]
+            }
+        }]
+    }]
+}
+
+STATUS_UPDATE {
+    object: "whatsapp_business_account",
+    entry: [{id: "WABA", changes: [{field: "messages", value: {
+        metadata: {phone_number_id: "PNID"},
+        statuses: [{id: "wamid.9", status: "delivered", timestamp: "1700000002", recipient_id: "15551234567"}]
+    }}]}]
+}
+
+test-extract-messages
+meta ["test"]
+fn () {
+    messages ::webhooks/extract-messages(INBOUND)
+    assert-eq(2, length(messages))
+    m first(messages)
+    assert-eq("hi", m.text.body)
+    assert-eq("PNID", m.phone_number_id)
+    assert-eq("Ada", m.contact.profile.name)
+    assert(not(in("contact", keys(last(messages)))), "no matching contact entry means no contact key")
+    assert-eq("m1", last(messages).image.id)
+    assert-eq([], ::webhooks/extract-statuses(INBOUND))
+}
+
+test-extract-statuses
+meta ["test"]
+fn () {
+    statuses ::webhooks/extract-statuses(STATUS_UPDATE)
+    assert-eq(1, length(statuses))
+    assert-eq("delivered", first(statuses).status)
+    assert-eq("PNID", first(statuses).phone_number_id)
+    assert-eq([], ::webhooks/extract-messages(STATUS_UPDATE))
+}
+
+test-extract-tolerates-other-shapes
+meta ["test"]
+fn () {
+    assert-eq([], ::webhooks/extract-messages({}))
+    assert-eq([], ::webhooks/extract-messages("not a payload"))
+    other {entry: [{changes: [{field: "account_update", value: {messages: [{id: "x"}]}}]}]}
+    assert-eq([], ::webhooks/extract-messages(other), "only the messages field counts")
+}

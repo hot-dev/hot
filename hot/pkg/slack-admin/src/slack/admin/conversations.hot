@@ -1,0 +1,643 @@
+::slack::admin::conversations ns
+meta {
+    doc: """
+    `admin.conversations.*`: create, archive, delete, rename, invite,
+    search and look up channels across an Enterprise organization; bulk
+    archive/delete/move; sharing between workspaces; posting preferences;
+    custom retention; IDP-group access restrictions; and EKM channel info.
+
+    Scopes: `admin.conversations:read` for reads, `admin.conversations:write`
+    for changes (plus Channel Management rights for the installing admin).
+
+    **Example**
+
+    ```hot
+    ::conversations ::slack::admin::conversations
+
+    hits ::conversations/search(::conversations/SearchRequest({query: "incident", limit: 20}))
+    ::conversations/archive(::conversations/ArchiveRequest({channel_id: first(hits.conversations).id}))
+    ```
+    """
+}
+
+::api ::slack::admin::api
+
+ArchiveRequest type {
+  channel_id: Str
+}
+
+archive
+meta {
+    doc: """
+    admin.conversations.archive - Archive a public or private channel.
+
+    Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: ArchiveRequest): Map {
+  archive(request, {})
+},
+(request: ArchiveRequest, opts: Map): Map {
+  ::api/call("admin.conversations.archive", request, opts)
+}
+
+UnarchiveRequest type {
+  channel_id: Str
+}
+
+unarchive
+meta {
+    doc: """
+    admin.conversations.unarchive - Unarchive a public or private channel.
+
+    Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: UnarchiveRequest): Map {
+  unarchive(request, {})
+},
+(request: UnarchiveRequest, opts: Map): Map {
+  ::api/call("admin.conversations.unarchive", request, opts)
+}
+
+BulkArchiveRequest type {
+  channel_ids: Vec<Str>
+}
+
+bulk-archive
+meta {
+    doc: """
+    admin.conversations.bulkArchive - Archive up to 100 channels in one background job. Returns `bulk_action_id`; channels that could not be queued are in `not_added`.
+
+    Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: BulkArchiveRequest): Map {
+  bulk-archive(request, {})
+},
+(request: BulkArchiveRequest, opts: Map): Map {
+  ::api/call("admin.conversations.bulkArchive", request, opts)
+}
+
+BulkDeleteRequest type {
+  channel_ids: Vec<Str>
+}
+
+bulk-delete
+meta {
+    doc: """
+    admin.conversations.bulkDelete - Permanently delete up to 100 channels in one background job. Returns `bulk_action_id` and `not_added`. Irreversible.
+
+    Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: BulkDeleteRequest): Map {
+  bulk-delete(request, {})
+},
+(request: BulkDeleteRequest, opts: Map): Map {
+  ::api/call("admin.conversations.bulkDelete", request, opts)
+}
+
+BulkMoveRequest type {
+  channel_ids: Vec<Str>,
+  target_team_id: Str
+}
+
+bulk-move
+meta {
+    doc: """
+    admin.conversations.bulkMove - Move up to 100 public channels to the workspace `target_team_id` in one background job.
+
+    Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: BulkMoveRequest): Map {
+  bulk-move(request, {})
+},
+(request: BulkMoveRequest, opts: Map): Map {
+  ::api/call("admin.conversations.bulkMove", request, opts)
+}
+
+ConvertToPrivateRequest type {
+  channel_id: Str,
+  name: Str?
+}
+
+convert-to-private
+meta {
+    doc: """
+    admin.conversations.convertToPrivate - Convert a public channel to private. `name` is only used when converting a group DM.
+
+    Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: ConvertToPrivateRequest): Map {
+  convert-to-private(request, {})
+},
+(request: ConvertToPrivateRequest, opts: Map): Map {
+  ::api/call("admin.conversations.convertToPrivate", request, opts)
+}
+
+ConvertToPublicRequest type {
+  channel_id: Str
+}
+
+convert-to-public
+meta {
+    doc: """
+    admin.conversations.convertToPublic - Convert a private channel to public.
+
+    Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: ConvertToPublicRequest): Map {
+  convert-to-public(request, {})
+},
+(request: ConvertToPublicRequest, opts: Map): Map {
+  ::api/call("admin.conversations.convertToPublic", request, opts)
+}
+
+CreateRequest type {
+  name: Str,
+  is_private: Bool,
+  description: Str?,
+  org_wide: Bool?,
+  team_id: Str?
+}
+
+create
+meta {
+    doc: """
+    admin.conversations.create - Create a channel. Pass `team_id` for a single workspace, or `org_wide: true` for an org-wide channel. Returns `channel_id`.
+
+    Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: CreateRequest): Map {
+  create(request, {})
+},
+(request: CreateRequest, opts: Map): Map {
+  ::api/call("admin.conversations.create", request, opts)
+}
+
+DeleteConversationRequest type {
+  channel_id: Str
+}
+
+delete-conversation
+meta {
+    doc: """
+    admin.conversations.delete - Permanently delete a public or private channel. Irreversible.
+
+    Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: DeleteConversationRequest): Map {
+  delete-conversation(request, {})
+},
+(request: DeleteConversationRequest, opts: Map): Map {
+  ::api/call("admin.conversations.delete", request, opts)
+}
+
+DisconnectSharedRequest type {
+  channel_id: Str,
+  leaving_team_ids: Vec<Str>?
+}
+
+disconnect-shared
+meta {
+    doc: """
+    admin.conversations.disconnectShared - Disconnect a connected channel from one or more workspaces (`leaving_team_ids`, optional when only two teams share it).
+
+    Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: DisconnectSharedRequest): Map {
+  disconnect-shared(request, {})
+},
+(request: DisconnectSharedRequest, opts: Map): Map {
+  ::api/call("admin.conversations.disconnectShared", request, opts)
+}
+
+GetConversationPrefsRequest type {
+  channel_id: Str
+}
+
+get-conversation-prefs
+meta {
+    doc: """
+    admin.conversations.getConversationPrefs - Get a channel's posting preferences (`prefs.who_can_post`, `prefs.can_thread`).
+
+    Scope: `admin.conversations:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: GetConversationPrefsRequest): Map {
+  get-conversation-prefs(request, {})
+},
+(request: GetConversationPrefsRequest, opts: Map): Map {
+  ::api/call("admin.conversations.getConversationPrefs", request, opts)
+}
+
+SetConversationPrefsRequest type {
+  channel_id: Str,
+  prefs: Map
+}
+
+set-conversation-prefs
+meta {
+    doc: """
+    admin.conversations.setConversationPrefs - Set a channel's posting preferences, e.g. `prefs: {who_can_post: "type:admin,user:U1234"}`. The Map is sent as the stringified JSON Slack expects.
+
+    Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: SetConversationPrefsRequest): Map {
+  set-conversation-prefs(request, {})
+},
+(request: SetConversationPrefsRequest, opts: Map): Map {
+  ::api/call("admin.conversations.setConversationPrefs", request, opts)
+}
+
+GetCustomRetentionRequest type {
+  channel_id: Str
+}
+
+get-custom-retention
+meta {
+    doc: """
+    admin.conversations.getCustomRetention - Get a channel's custom message retention (`duration_days`, `is_policy_enabled`).
+
+    Scope: `admin.conversations:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: GetCustomRetentionRequest): Map {
+  get-custom-retention(request, {})
+},
+(request: GetCustomRetentionRequest, opts: Map): Map {
+  ::api/call("admin.conversations.getCustomRetention", request, opts)
+}
+
+SetCustomRetentionRequest type {
+  channel_id: Str,
+  duration_days: Int
+}
+
+set-custom-retention
+meta {
+    doc: """
+    admin.conversations.setCustomRetention - Set a channel's custom message retention in days.
+
+    Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: SetCustomRetentionRequest): Map {
+  set-custom-retention(request, {})
+},
+(request: SetCustomRetentionRequest, opts: Map): Map {
+  ::api/call("admin.conversations.setCustomRetention", request, opts)
+}
+
+RemoveCustomRetentionRequest type {
+  channel_id: Str
+}
+
+remove-custom-retention
+meta {
+    doc: """
+    admin.conversations.removeCustomRetention - Remove a channel's custom retention so the org/workspace policy applies.
+
+    Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: RemoveCustomRetentionRequest): Map {
+  remove-custom-retention(request, {})
+},
+(request: RemoveCustomRetentionRequest, opts: Map): Map {
+  ::api/call("admin.conversations.removeCustomRetention", request, opts)
+}
+
+GetTeamsRequest type {
+  channel_id: Str,
+  cursor: Str?,
+  limit: Int?
+}
+
+get-teams
+meta {
+    doc: """
+    admin.conversations.getTeams - List the workspaces a channel is connected to (`team_ids`).
+
+    Scope: `admin.conversations:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `get-teams-all`.
+    """
+}
+fn
+(request: GetTeamsRequest): Map {
+  get-teams(request, {})
+},
+(request: GetTeamsRequest, opts: Map): Map {
+  ::api/call("admin.conversations.getTeams", request, opts)
+}
+
+get-teams-all
+meta {
+    doc: """
+    Every `team_ids` entry from `admin.conversations.getTeams`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    """
+}
+fn
+(request: GetTeamsRequest): Vec {
+  get-teams-all(request, 1000)
+},
+(request: GetTeamsRequest, max-items: Int): Vec {
+  get-teams-all(request, max-items, {})
+},
+(request: GetTeamsRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.conversations.getTeams", request, "team_ids", max-items, opts)
+}
+
+SetTeamsRequest type {
+  channel_id: Str,
+  team_id: Str?,
+  target_team_ids: Vec<Str>?,
+  org_channel: Bool?
+}
+
+set-teams
+meta {
+    doc: """
+    admin.conversations.setTeams - Set the workspaces a channel is shared to (`target_team_ids`), or make it org-wide with `org_channel: true`.
+
+    Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: SetTeamsRequest): Map {
+  set-teams(request, {})
+},
+(request: SetTeamsRequest, opts: Map): Map {
+  ::api/call("admin.conversations.setTeams", request, opts)
+}
+
+InviteRequest type {
+  channel_id: Str,
+  user_ids: Vec<Str>
+}
+
+invite
+meta {
+    doc: """
+    admin.conversations.invite - Invite up to 1000 users to a channel.
+
+    Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: InviteRequest): Map {
+  invite(request, {})
+},
+(request: InviteRequest, opts: Map): Map {
+  ::api/call("admin.conversations.invite", request, opts)
+}
+
+RenameRequest type {
+  channel_id: Str,
+  name: Str
+}
+
+rename
+meta {
+    doc: """
+    admin.conversations.rename - Rename a channel.
+
+    Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: RenameRequest): Map {
+  rename(request, {})
+},
+(request: RenameRequest, opts: Map): Map {
+  ::api/call("admin.conversations.rename", request, opts)
+}
+
+LookupRequest type {
+  team_ids: Vec<Str>,
+  last_message_activity_before: Int,
+  max_member_count: Int?,
+  cursor: Str?,
+  limit: Int?
+}
+
+lookup
+meta {
+    doc: """
+    admin.conversations.lookup - Find public channels whose last message is older than `last_message_activity_before` (Unix seconds), optionally with at most `max_member_count` members. Returns `channel_ids`; a starting point for archiving stale channels.
+
+    Scope: `admin.conversations:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `lookup-all`.
+    """
+}
+fn
+(request: LookupRequest): Map {
+  lookup(request, {})
+},
+(request: LookupRequest, opts: Map): Map {
+  ::api/call("admin.conversations.lookup", request, opts)
+}
+
+lookup-all
+meta {
+    doc: """
+    Every `channel_ids` entry from `admin.conversations.lookup`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    """
+}
+fn
+(request: LookupRequest): Vec {
+  lookup-all(request, 1000)
+},
+(request: LookupRequest, max-items: Int): Vec {
+  lookup-all(request, max-items, {})
+},
+(request: LookupRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.conversations.lookup", request, "channel_ids", max-items, opts)
+}
+
+SearchRequest type {
+  query: Str?,
+  team_ids: Vec<Str>?,
+  connected_team_ids: Vec<Str>?,
+  search_channel_types: Vec<Str>?,
+  sort: Str?,
+  sort_dir: Str?,
+  total_count_only: Bool?,
+  cursor: Str?,
+  limit: Int?
+}
+
+search
+meta {
+    doc: """
+    admin.conversations.search - Search channels across the org. `search_channel_types` e.g. `["private", "exclude_archived"]`; `sort` is `relevant`, `name`, `member_count` or `created`.
+
+    Scope: `admin.conversations:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `search-all`.
+    """
+}
+fn
+(): Map {
+  search(SearchRequest({}))
+},
+(request: SearchRequest): Map {
+  search(request, {})
+},
+(request: SearchRequest, opts: Map): Map {
+  ::api/call("admin.conversations.search", request, opts)
+}
+
+search-all
+meta {
+    doc: """
+    Every `conversations` entry from `admin.conversations.search`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    """
+}
+fn
+(): Vec {
+  search-all(SearchRequest({}), 1000)
+},
+(request: SearchRequest): Vec {
+  search-all(request, 1000)
+},
+(request: SearchRequest, max-items: Int): Vec {
+  search-all(request, max-items, {})
+},
+(request: SearchRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.conversations.search", request, "conversations", max-items, opts)
+}
+
+RestrictAccessAddGroupRequest type {
+  channel_id: Str,
+  group_id: Str,
+  team_id: Str?
+}
+
+restrict-access-add-group
+meta {
+    doc: """
+    admin.conversations.restrictAccess.addGroup - Add an IDP group to a private channel's allowlist. `team_id` is required for channels tied to one workspace.
+
+    Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: RestrictAccessAddGroupRequest): Map {
+  restrict-access-add-group(request, {})
+},
+(request: RestrictAccessAddGroupRequest, opts: Map): Map {
+  ::api/call("admin.conversations.restrictAccess.addGroup", request, opts)
+}
+
+RestrictAccessListGroupsRequest type {
+  channel_id: Str,
+  team_id: Str?
+}
+
+restrict-access-list-groups
+meta {
+    doc: """
+    admin.conversations.restrictAccess.listGroups - List the IDP groups linked to a private channel (`group_ids`).
+
+    Scope: `admin.conversations:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: RestrictAccessListGroupsRequest): Map {
+  restrict-access-list-groups(request, {})
+},
+(request: RestrictAccessListGroupsRequest, opts: Map): Map {
+  ::api/call("admin.conversations.restrictAccess.listGroups", request, opts)
+}
+
+RestrictAccessRemoveGroupRequest type {
+  channel_id: Str,
+  group_id: Str,
+  team_id: Str?
+}
+
+restrict-access-remove-group
+meta {
+    doc: """
+    admin.conversations.restrictAccess.removeGroup - Remove an IDP group from a private channel's allowlist.
+
+    Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: RestrictAccessRemoveGroupRequest): Map {
+  restrict-access-remove-group(request, {})
+},
+(request: RestrictAccessRemoveGroupRequest, opts: Map): Map {
+  ::api/call("admin.conversations.restrictAccess.removeGroup", request, opts)
+}
+
+EkmListOriginalConnectedChannelInfoRequest type {
+  channel_ids: Vec<Str>?,
+  team_ids: Vec<Str>?,
+  cursor: Str?,
+  limit: Int?
+}
+
+ekm-list-original-connected-channel-info
+meta {
+    doc: """
+    admin.conversations.ekm.listOriginalConnectedChannelInfo - List the original connected channel info for EKM-disconnected channels.
+
+    Scope: `admin.conversations:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `ekm-list-original-connected-channel-info-all`.
+    """
+}
+fn
+(): Map {
+  ekm-list-original-connected-channel-info(EkmListOriginalConnectedChannelInfoRequest({}))
+},
+(request: EkmListOriginalConnectedChannelInfoRequest): Map {
+  ekm-list-original-connected-channel-info(request, {})
+},
+(request: EkmListOriginalConnectedChannelInfoRequest, opts: Map): Map {
+  ::api/call("admin.conversations.ekm.listOriginalConnectedChannelInfo", request, opts)
+}
+
+ekm-list-original-connected-channel-info-all
+meta {
+    doc: """
+    Every `channels` entry from `admin.conversations.ekm.listOriginalConnectedChannelInfo`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    """
+}
+fn
+(): Vec {
+  ekm-list-original-connected-channel-info-all(EkmListOriginalConnectedChannelInfoRequest({}), 1000)
+},
+(request: EkmListOriginalConnectedChannelInfoRequest): Vec {
+  ekm-list-original-connected-channel-info-all(request, 1000)
+},
+(request: EkmListOriginalConnectedChannelInfoRequest, max-items: Int): Vec {
+  ekm-list-original-connected-channel-info-all(request, max-items, {})
+},
+(request: EkmListOriginalConnectedChannelInfoRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.conversations.ekm.listOriginalConnectedChannelInfo", request, "channels", max-items, opts)
+}

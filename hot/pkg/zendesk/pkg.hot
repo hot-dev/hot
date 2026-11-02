@@ -3,12 +3,12 @@
 hot.pkg.zendesk {
   name: "hot.dev/zendesk",
   version: "0.1.0",
-  hot-min-version: "2.6.0",
-  description: "Zendesk Support bindings for Hot. Tickets, comments, search, and users.",
+  hot-min-version: "3.0.2",
+  description: "Zendesk Support API bindings for Hot. Tickets with cursor pagination, comments, merge, tags, fields, CSAT and incremental export; users; organizations; views; macros; search and search export; side conversations; and signed webhook verification. API token or OAuth auth.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
-  tags: ["support", "zendesk"],
+  tags: ["zendesk", "support", "helpdesk"],
   deps: {},
   src-paths: ["src/"],
   test-paths: ["test/"]

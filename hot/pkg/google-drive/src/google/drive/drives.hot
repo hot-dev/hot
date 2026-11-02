@@ -1,0 +1,87 @@
+::google::drive::drives ns
+meta {
+    doc: """
+    Shared drives and the `about` resource (user, quota, upload limit and
+    the export/import formats this account supports).
+
+    To work inside a shared drive, list its files with
+    `::google::drive::files/list-files({driveId: drive.id})`; every files
+    call already sends `supportsAllDrives=true`.
+
+    **Scopes.** `drive.readonly` for listing; `about` works with any Drive
+    scope.
+    """
+}
+
+::drive ::google::drive
+::api ::google::api
+
+ABOUT_FIELDS "user(displayName,emailAddress,permissionId),storageQuota,maxUploadSize,exportFormats,importFormats,canCreateDrives"
+
+list-drives
+meta {
+    doc: """GET /drives - one page of the user's shared drives (`{drives, nextPageToken?}`). Options: `q` (e.g. `"name contains 'Eng'"`), `pageSize` (max 100), `pageToken`, `useDomainAdminAccess` (admins: every drive in the domain), `fields`, credentials."""
+}
+fn
+(): Map {
+  list-drives({})
+},
+(opts: Map): Map {
+  ::drive/json(::drive/READ_SCOPE, "GET", ::drive/url("/drives", ::drive/query-params({}, opts)), "", opts)
+}
+
+list-all-drives
+meta {doc: """Every shared drive the user can see (follows `nextPageToken`)."""}
+fn
+(): Vec {
+  list-all-drives({})
+},
+(opts: Map): Vec {
+  ::api/collect-pages((token) { list-drives({pageSize: 100, ...opts, pageToken: token}) }, "drives")
+}
+
+get-drive
+meta {
+    doc: """GET /drives/{id} - one shared drive. Options: `useDomainAdminAccess`, `fields`, credentials."""
+}
+fn
+(drive-id: Str): Map {
+  get-drive(drive-id, {})
+},
+(drive-id: Str, opts: Map): Map {
+  ::drive/json(::drive/READ_SCOPE, "GET", ::drive/url(`/drives/${::drive/encode-id(drive-id)}`, ::drive/query-params({}, opts)), "", opts)
+}
+
+about
+meta {
+    doc: """
+    GET /about - the user, storage quota, `maxUploadSize`, and the
+    `exportFormats` / `importFormats` maps. Drive requires `fields`; the
+    default is `ABOUT_FIELDS`. A Str argument is a `fields` value; a Map
+    is `opts`.
+    """
+}
+fn
+(): Map {
+  about({})
+},
+(fields: Str): Map {
+  about({fields: fields})
+},
+(opts: Map): Map {
+  params ::drive/query-params({fields: ABOUT_FIELDS}, opts)
+  ::drive/json(::drive/READ_SCOPE, "GET", ::drive/url("/about", params), "", opts)
+}
+
+export-formats
+meta {
+    doc: """The account's live export map from `about`: `{google-mime: [export-mime, ...]}`. Use it to check `::google::drive::content/EXPORT_FORMATS` against what Drive offers."""
+}
+fn
+(): Map {
+  export-formats({})
+},
+(opts: Map): Map {
+  result about({...opts, fields: "exportFormats"})
+  if(is-err(result), result, or(result.exportFormats, {}))
+}

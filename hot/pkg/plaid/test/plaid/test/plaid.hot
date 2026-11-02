@@ -1,9 +1,270 @@
 ::plaid::test ns
 meta ["test"]
 
+::api ::plaid::api
+::link ::plaid::link
+::transactions ::plaid::transactions
+::sandbox ::plaid::sandbox
+
+HttpResponse ::hot::http/HttpResponse
+
+// ============================================================================
+// Environments, version header
+// ============================================================================
+
 test-env-base-urls
 meta ["test"] fn () {
-    assert-eq("https://sandbox.plaid.com", ::plaid/env-base-url("sandbox"))
-    assert-eq("https://production.plaid.com", ::plaid/env-base-url("production"))
-    assert-eq("https://sandbox.plaid.com", ::plaid/env-base-url("bogus"), "unknown env falls back to sandbox")
+    assert-eq("https://sandbox.plaid.com", ::api/env-base-url("sandbox"))
+    assert-eq("https://production.plaid.com", ::api/env-base-url("production"))
+    assert-eq("https://production.plaid.com", ::api/env-base-url(" Production "), "case and whitespace are forgiven")
+}
+
+test-env-base-url-rejects-unknown
+meta ["test"] fn () {
+    assert(is-err(::api/env-base-url("prodution")), "a typo no longer falls back to sandbox")
+    assert(is-err(::api/env-base-url("development")), "development was decommissioned in 2024")
+    assert(is-err(::api/env-base-url("")), "empty env errs")
+}
+
+test-current-env-and-version
+meta ["test"] fn () {
+    assert-eq("sandbox", ::api/current-env(), "sandbox when plaid.env is unset")
+    assert-eq("2020-09-14", ::api/plaid-version(), "Plaid-Version defaults to the current API version")
+
+    ::hot::ctx/set({"plaid.env": "production", "plaid.version": "2099-01-01"})
+    env ::api/current-env()
+    version ::api/plaid-version()
+    ::hot::ctx/set({"plaid.env": "", "plaid.version": ""})
+    assert-eq("production", env)
+    assert-eq("2099-01-01", version, "plaid.version overrides the header")
+    assert-eq("sandbox", ::api/current-env(), "an empty plaid.env falls back to sandbox")
+}
+
+// ============================================================================
+// Body building
+// ============================================================================
+
+test-compact-drops-unset
+meta ["test"] fn () {
+    out ::api/compact({access_token: "access-x", cursor: null, count: 0, include: false, options: null})
+    assert-eq({access_token: "access-x", count: 0, include: false}, out, "nulls dropped; 0 and false kept")
+    assert-eq({access_token: "a"}, ::api/compact({access_token: "a", options: {}}), "an empty options object is dropped")
+    assert-eq({access_token: "a", options: {account_ids: ["x"]}}, ::api/compact({access_token: "a", options: {account_ids: ["x"]}}))
+}
+
+test-with-credentials
+meta ["test"] fn () {
+    body ::api/with-credentials({access_token: "access-x", options: null}, "cid", "sec")
+    assert-eq({client_id: "cid", secret: "sec", access_token: "access-x"}, body)
+    assert(not(contains(to-json(body), "null")), "no JSON nulls on the wire")
+}
+
+// ============================================================================
+// Errors
+// ============================================================================
+
+test-http-error-lifts-plaid-fields
+meta ["test"] fn () {
+    response HttpResponse({
+        status: 400,
+        headers: {content-type: "application/json"},
+        body: {
+            error_type: "ITEM_ERROR",
+            error_code: "ITEM_LOGIN_REQUIRED",
+            error_message: "the login details of this item have changed",
+            display_message: "Please reconnect your account",
+            request_id: "HNTDNrA8F1shFEW",
+            documentation_url: "https://plaid.com/docs/errors/item/#item_login_required"
+        }
+    })
+    e ::api/HttpError(response)
+    assert-eq(400, e.status)
+    assert-eq("ITEM_ERROR", e.error_type)
+    assert-eq("ITEM_LOGIN_REQUIRED", e.error_code)
+    assert-eq("Please reconnect your account", e.display_message)
+    assert-eq("HNTDNrA8F1shFEW", e.request_id)
+    assert(is-null(e.suggested_action))
+    assert(::api/is-error-code(e, "ITEM_LOGIN_REQUIRED"))
+    assert(not(::api/is-error-code(e, "INVALID_FIELD")))
+}
+
+test-http-error-non-json-body
+meta ["test"] fn () {
+    e ::api/HttpError(HttpResponse({status: 502, headers: {}, body: "Bad Gateway"}))
+    assert-eq(502, e.status)
+    assert-eq("Bad Gateway", e.body)
+    assert(is-null(e.error_code), "no Plaid fields on a non-JSON body")
+}
+
+// ============================================================================
+// Link token request
+// ============================================================================
+
+test-link-token-defaults
+meta ["test"] fn () {
+    body ::link/build-link-token-request("user-42", "My App", {})
+    assert-eq("My App", body.client_name)
+    assert-eq({client_user_id: "user-42"}, body.user)
+    assert-eq(["transactions"], body.products)
+    assert-eq(["US"], body.country_codes)
+    assert-eq("en", body.language)
+    assert(not(in("webhook", keys(body))), "unset options are omitted")
+    assert(not(in("redirect_uri", keys(body))))
+}
+
+test-link-token-options
+meta ["test"] fn () {
+    body ::link/build-link-token-request("user-42", "My App", {
+        products: ["auth"],
+        optional_products: ["identity"],
+        country_codes: ["US", "CA"],
+        webhook: "https://example.com/plaid/webhook",
+        redirect_uri: "https://example.com/oauth",
+        user: {email_address: "ada@example.com"},
+        transactions: {days_requested: 730},
+        android_package_name: null
+    })
+    assert-eq(["auth"], body.products)
+    assert-eq(["identity"], body.optional_products)
+    assert-eq(["US", "CA"], body.country_codes)
+    assert-eq("https://example.com/plaid/webhook", body.webhook)
+    assert-eq("https://example.com/oauth", body.redirect_uri)
+    assert-eq({email_address: "ada@example.com", client_user_id: "user-42"}, body.user, "user fields merge with client_user_id")
+    assert-eq(730, body.transactions.days_requested)
+    assert(not(in("android_package_name", keys(body))), "explicit nulls are dropped too")
+}
+
+test-link-token-update-mode
+meta ["test"] fn () {
+    body ::link/build-link-token-request("user-42", "My App", {access_token: "access-sandbox-1"})
+    assert-eq("access-sandbox-1", body.access_token)
+    assert(not(in("products", keys(body))), "update mode omits products")
+    assert-eq(["US"], body.country_codes)
+}
+
+// ============================================================================
+// Transactions sync
+// ============================================================================
+
+test-sync-request
+meta ["test"] fn () {
+    assert-eq({access_token: "a"}, ::transactions/build-sync-request("a", null, {}), "first sync omits the cursor")
+    assert-eq({access_token: "a"}, ::transactions/build-sync-request("a", "", {}), "an empty cursor counts as none")
+    body ::transactions/build-sync-request("a", "c1", {count: 500, options: {include_original_description: true}})
+    assert-eq("c1", body.cursor)
+    assert-eq(500, body.count)
+    assert-eq(true, body.options.include_original_description)
+}
+
+test-merge-sync-page
+meta ["test"] fn () {
+    acc ::transactions/merge-sync-page(
+        {added: [1], modified: [], removed: [], accounts: [], next_cursor: null, has_more: true, pages: 1},
+        {added: [2, 3], modified: [4], removed: [{transaction_id: "t9"}], accounts: [{account_id: "acc"}], next_cursor: "c2", has_more: false}
+    )
+    assert-eq([1, 2, 3], acc.added)
+    assert-eq([4], acc.modified)
+    assert-eq("t9", first(acc.removed).transaction_id)
+    assert-eq("c2", acc.next_cursor)
+    assert-eq(false, acc.has_more)
+    assert-eq(2, acc.pages)
+}
+
+// Pages keyed by cursor: null -> c1 -> c2 (done).
+fake-pages {
+    start: {added: ["a"], modified: [], removed: [], next_cursor: "c1", has_more: true},
+    c1: {added: ["b"], modified: ["m"], removed: [], next_cursor: "c2", has_more: true},
+    c2: {added: ["c"], modified: [], removed: ["r"], next_cursor: "c3", has_more: false}
+}
+
+fake-fetch fn (cursor: Str?): Map {
+    get(fake-pages, or(cursor, "start"))
+}
+
+test-sync-all-follows-has-more
+meta ["test"] fn () {
+    out ::transactions/sync-all-with(fake-fetch, null, {})
+    assert-eq(["a", "b", "c"], out.added)
+    assert-eq(["m"], out.modified)
+    assert-eq(["r"], out.removed)
+    assert-eq("c3", out.next_cursor, "the final cursor is the one to persist")
+    assert-eq(false, out.has_more)
+    assert-eq(3, out.pages)
+}
+
+test-sync-all-page-budget
+meta ["test"] fn () {
+    out ::transactions/sync-all-with(fake-fetch, null, {max-pages: 2})
+    assert-eq(["a", "b"], out.added)
+    assert-eq(true, out.has_more, "stopping early keeps has_more true")
+    assert-eq("c2", out.next_cursor, "with a cursor to resume from")
+}
+
+mutation-error fn (): Any {
+    err(::api/HttpError(HttpResponse({
+        status: 400,
+        headers: {},
+        body: {error_type: "TRANSACTIONS_ERROR", error_code: "TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION", error_message: "underlying transaction data changed"}
+    })))
+}
+
+test-sync-all-restarts-on-mutation
+meta ["test"] fn () {
+    // c1 fails once with the mutation error, then succeeds. The loop must
+    // restart from the first cursor and not double-count page one.
+    ::hot::ctx/set("plaid-test-calls", 0)
+    flaky (cursor) {
+        n add(or(::hot::ctx/get("plaid-test-calls"), 0), 1)
+        ::hot::ctx/set("plaid-test-calls", n)
+        cond {
+            and(eq(cursor, "c1"), eq(n, 2)) => { mutation-error() }
+            => { fake-fetch(cursor) }
+        }
+    }
+
+    out ::transactions/sync-all-with(flaky, null, {})
+    assert-eq(["a", "b", "c"], out.added, "restarted from the start, no duplicates")
+    assert-eq("c3", out.next_cursor)
+}
+
+test-sync-all-restart-limit-and-other-errors
+meta ["test"] fn () {
+    always-mutating (cursor) {
+        cond {
+            eq(cursor, "c1") => { mutation-error() }
+            => { fake-fetch(cursor) }
+        }
+    }
+
+    out ::transactions/sync-all-with(always-mutating, null, {max-restarts: 2})
+    assert(is-err(out), "gives up after max-restarts")
+
+    broken (cursor) { err(::api/HttpError(HttpResponse({status: 400, headers: {}, body: {error_code: "ITEM_LOGIN_REQUIRED"}}))) }
+    failed ::transactions/sync-all-with(broken, "c0", {})
+    assert(is-err(failed), "other errors are returned, not retried")
+    e if-err(failed, (x) { x })
+    assert-eq("ITEM_LOGIN_REQUIRED", e.error_code)
+}
+
+// ============================================================================
+// Sandbox guard
+// ============================================================================
+
+test-sandbox-guard
+meta ["test"] fn () {
+    assert-eq(true, ::sandbox/require-sandbox(), "sandbox is the default env")
+    ::hot::ctx/set("plaid.env", "production")
+    guarded ::sandbox/require-sandbox()
+    ::hot::ctx/set("plaid.env", "")
+    assert(is-err(guarded), "sandbox helpers refuse to run against production")
+}
+
+test-sandbox-helpers-stop-at-the-guard
+meta ["test"] fn () {
+    production {client-id: "tenant-id-000", secret: "tenant-secret-000", environment: "production"}
+    assert(is-err(::sandbox/require-sandbox(production)), "a per-call environment counts")
+    assert-eq(true, ::sandbox/require-sandbox({environment: " Sandbox "}))
+    out ::sandbox/reset-login("access-sandbox-1", production)
+    assert(is-err(out))
+    assert(contains(err-message(out), "sandbox"), "stopped locally, not by a request to Plaid")
 }

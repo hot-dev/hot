@@ -1,0 +1,211 @@
+::hubspot::test::crm ns
+meta ["test"]
+
+::api ::hubspot::api
+::objects ::hubspot::objects
+::engagements ::hubspot::engagements
+::pipelines ::hubspot::pipelines
+::properties ::hubspot::properties
+::lists ::hubspot::lists
+
+// ============================================================================
+// Paths, encoding, responses
+// ============================================================================
+
+test-crm-path-uses-date-version
+meta ["test"] fn () {
+    v ::api/api-version()
+    assert-eq(`/crm/objects/${v}/contacts/1`, ::api/crm-path("objects", "/contacts/1"))
+    assert-eq("2026-09", ::api/DEFAULT_API_VERSION)
+}
+
+test-segment-encodes
+meta ["test"] fn () {
+    assert-eq("a%2Fb", ::api/segment("a/b"))
+    assert-eq("ada%40example.com", ::api/segment("ada@example.com"))
+}
+
+test-handle-response
+meta ["test"] fn () {
+    ok ::api/handle-response(::hot::http/HttpResponse({status: 200, headers: {}, body: {id: "1"}}))
+    assert-eq({id: "1"}, ok)
+    empty ::api/handle-response(::hot::http/HttpResponse({status: 204, headers: {}, body: ""}))
+    assert(is-null(empty), "204 unwraps to null")
+    bad ::api/handle-response(::hot::http/HttpResponse({status: 409, headers: {}, body: {status: "error", message: "Contact already exists", category: "CONFLICT"}}))
+    assert(is-err(bad))
+    e if-err(bad, (x) { x })
+    assert-eq(409, e.status)
+    assert-eq("Contact already exists", ::api/error-message(e))
+}
+
+test-error-message-non-map-body
+meta ["test"] fn () {
+    out ::api/handle-response(::hot::http/HttpResponse({status: 502, headers: {}, body: "Bad Gateway"}))
+    e if-err(out, (x) { x })
+    assert-eq("Bad Gateway", ::api/error-message(e))
+}
+
+// ============================================================================
+// Pagination (pure: the fetch function is a stub)
+// ============================================================================
+
+PAGES {
+    first: {results: [1, 2], paging: {next: {after: "c2", link: "..."}}},
+    c2: {results: [3, 4], paging: {next: {after: "c4"}}},
+    c4: {results: [5]}
+}
+
+test-next-after
+meta ["test"] fn () {
+    assert-eq("c2", ::api/next-after(PAGES.first))
+    assert(is-null(::api/next-after(PAGES.c4)))
+    assert(is-null(::api/next-after({results: []})))
+}
+
+test-paginate-follows-cursors
+meta ["test"] fn () {
+    all ::api/paginate((after) { get(PAGES, or(after, "first")) })
+    assert-eq([1, 2, 3, 4, 5], all)
+}
+
+test-paginate-respects-max-pages
+meta ["test"] fn () {
+    two ::api/paginate((after) { get(PAGES, or(after, "first")) }, 2)
+    assert-eq([1, 2, 3, 4], two)
+}
+
+// ============================================================================
+// Object bodies
+// ============================================================================
+
+test-create-body-omits-empty-associations
+meta ["test"] fn () {
+    assert-eq({properties: {email: "a@b.c"}}, ::objects/build-create-body({email: "a@b.c"}, null))
+    assert-eq({properties: {email: "a@b.c"}}, ::objects/build-create-body({email: "a@b.c"}, []))
+    with ::objects/build-create-body({name: "Acme"}, [::objects/association-input("42", 280)])
+    assoc first(with.associations)
+    assert-eq("42", assoc.to.id)
+    assert-eq([{associationCategory: "HUBSPOT_DEFINED", associationTypeId: 280}], assoc.types)
+}
+
+test-search-body-filter-groups-override
+meta ["test"] fn () {
+    groups [{filters: [{propertyName: "a", operator: "EQ", value: "1"}]}, {filters: [{propertyName: "b", operator: "EQ", value: "2"}]}]
+    body ::objects/build-search-body({filterGroups: groups, filters: [{propertyName: "ignored", operator: "EQ", value: "x"}], after: "100"})
+    assert-eq(2, length(body.filterGroups), "OR groups pass through")
+    assert-eq("100", body.after)
+    assert(not(in("limit", keys(body))))
+    assert(not(in("sorts", keys(body))))
+}
+
+test-batch-read-body
+meta ["test"] fn () {
+    body ::objects/build-batch-read-body(["1", 2], {properties: ["email"]})
+    assert-eq([{id: "1"}, {id: "2"}], body.inputs)
+    assert-eq(["email"], body.properties)
+    assert-eq([], body.propertiesWithHistory)
+    assert(not(in("idProperty", keys(body))), "unset idProperty omitted")
+    by-email ::objects/build-batch-read-body(["a@b.c"], {idProperty: "email"})
+    assert-eq("email", by-email.idProperty)
+}
+
+test-batch-create-input
+meta ["test"] fn () {
+    assert-eq({properties: {email: "a@b.c"}}, ::objects/batch-create-input({email: "a@b.c"}))
+    full {properties: {name: "Acme"}, associations: []}
+    assert-eq(full, ::objects/batch-create-input(full))
+}
+
+test-batch-upsert-body
+meta ["test"] fn () {
+    body ::objects/build-batch-upsert-body("email", [{id: "a@b.c", properties: {firstname: "Ada"}}])
+    assert-eq([{id: "a@b.c", idProperty: "email", properties: {firstname: "Ada"}}], body.inputs)
+}
+
+// ============================================================================
+// Activities
+// ============================================================================
+
+test-activity-association-type-ids
+meta ["test"] fn () {
+    assert-eq(204, ::engagements/association-type-id("tasks", "contacts"))
+    assert-eq(192, ::engagements/association-type-id("tasks", "companies"))
+    assert-eq(216, ::engagements/association-type-id("tasks", "deals"))
+    assert-eq(230, ::engagements/association-type-id("tasks", "tickets"))
+    assert-eq(194, ::engagements/association-type-id("calls", "contacts"))
+    assert-eq(182, ::engagements/association-type-id("calls", "companies"))
+    assert-eq(206, ::engagements/association-type-id("calls", "deals"))
+    assert-eq(200, ::engagements/association-type-id("meetings", "contacts"))
+    assert-eq(188, ::engagements/association-type-id("meetings", "companies"))
+    assert-eq(212, ::engagements/association-type-id("meetings", "deals"))
+    assert-eq(198, ::engagements/association-type-id("emails", "contacts"))
+    assert-eq(186, ::engagements/association-type-id("emails", "companies"))
+    assert-eq(210, ::engagements/association-type-id("emails", "deals"))
+    assert-eq(228, ::engagements/association-type-id("notes", "tickets"))
+}
+
+test-activity-body-defaults-timestamp
+meta ["test"] fn () {
+    body ::engagements/build-activity-body("tasks", {hs_task_subject: "Call back"},
+        [{type: "contacts", id: "1"}, {type: "deals", id: 2}], 1700000000000)
+    assert-eq(1700000000000, body.properties.hs_timestamp)
+    assert-eq("Call back", body.properties.hs_task_subject)
+    assert-eq(2, length(body.associations))
+    assert-eq("2", last(body.associations).to.id)
+    assert-eq(216, first(last(body.associations).types).associationTypeId)
+}
+
+test-activity-body-keeps-explicit-timestamp
+meta ["test"] fn () {
+    body ::engagements/build-activity-body("meetings", {hs_timestamp: "2026-11-02T15:00:00Z"}, [], 1)
+    assert-eq("2026-11-02T15:00:00Z", body.properties.hs_timestamp)
+    assert(not(in("associations", keys(body))), "no targets means no associations key")
+}
+
+// ============================================================================
+// Pipelines, properties, lists
+// ============================================================================
+
+PIPELINES {results: [
+    {id: "default", label: "Sales Pipeline", stages: [
+        {id: "appointmentscheduled", label: "Appointment Scheduled"},
+        {id: "contractsent", label: "Contract Sent"}
+    ]},
+    {id: "12345", label: "Renewals", stages: [{id: "67890", label: "Contract Sent"}]}
+]}
+
+test-find-stage-by-label-and-id
+meta ["test"] fn () {
+    by-label ::pipelines/find-stage-in(PIPELINES, "sales pipeline", "contract sent")
+    assert-eq({pipeline_id: "default", stage_id: "contractsent"}, {pipeline_id: by-label.pipeline_id, stage_id: by-label.stage_id})
+    by-id ::pipelines/find-stage-in(PIPELINES, "12345", "Contract Sent")
+    assert-eq("67890", by-id.stage_id, "same label in another pipeline resolves to that pipeline's id")
+    assert(is-null(::pipelines/find-stage-in(PIPELINES, "default", "Closed Won")))
+    assert(is-null(::pipelines/find-stage-in(PIPELINES, "nope", "Contract Sent")))
+}
+
+test-property-body-omits-nulls
+meta ["test"] fn () {
+    body ::properties/build-property-body({
+        name: "favorite_product", label: "Favorite product", type: "string",
+        fieldType: "text", groupName: "contactinformation", description: null
+    })
+    assert-eq(["fieldType", "groupName", "label", "name", "type"], sort(keys(body)))
+}
+
+test-list-object-type-ids
+meta ["test"] fn () {
+    assert-eq("0-1", ::lists/object-type-id("contacts"))
+    assert-eq("0-2", ::lists/object-type-id("companies"))
+    assert-eq("0-3", ::lists/object-type-id("deals"))
+    assert-eq("0-5", ::lists/object-type-id("tickets"))
+    assert-eq("2-999", ::lists/object-type-id("2-999"))
+}
+
+test-list-body
+meta ["test"] fn () {
+    body ::lists/build-list-body("Webinar", "contacts", "MANUAL", {})
+    assert-eq({name: "Webinar", objectTypeId: "0-1", processingType: "MANUAL"}, body)
+    dynamic ::lists/build-list-body("Leads", "contacts", "DYNAMIC", {filterBranch: {filterBranchType: "OR"}})
+    assert-eq("OR", dynamic.filterBranch.filterBranchType)
+}

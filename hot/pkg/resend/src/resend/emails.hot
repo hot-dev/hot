@@ -100,9 +100,17 @@ meta {
     ```
     """
 }
-fn (request: POSTEmailsRequest): POSTEmailsResponse {
-  response api-request("POST", `${::resend/BASE_URL}/emails`, {}, request)
-  if(is-ok-response(response), POSTEmailsResponse(response.body), err(HttpError(response)))
+fn
+(request: POSTEmailsRequest): POSTEmailsResponse {
+  send-email(request, {})
+},
+(request: POSTEmailsRequest, opts: Map): POSTEmailsResponse {
+  response api-request("POST", `${::resend/BASE_URL}/emails`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { POSTEmailsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 GETEmailsEmailIdRequest type {
@@ -142,9 +150,17 @@ meta {
     ```
     """
 }
-fn (request: GETEmailsEmailIdRequest): GETEmailsEmailIdResponse {
-  response api-request("GET", `${::resend/BASE_URL}/emails/${request.email-id}`)
-  if(is-ok-response(response), GETEmailsEmailIdResponse(response.body), err(HttpError(response)))
+fn
+(request: GETEmailsEmailIdRequest): GETEmailsEmailIdResponse {
+  retrieve-single-email(request, {})
+},
+(request: GETEmailsEmailIdRequest, opts: Map): GETEmailsEmailIdResponse {
+  response api-request("GET", `${::resend/BASE_URL}/emails/${request.email-id}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { GETEmailsEmailIdResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 PATCHEmailsEmailIdRequest type {
@@ -160,9 +176,17 @@ update-single-email
 meta {
     doc: """Update a scheduled email. Only emails that have not yet been sent can be updated."""
 }
-fn (request: PATCHEmailsEmailIdRequest): PATCHEmailsEmailIdResponse {
-  response api-request("PATCH", `${::resend/BASE_URL}/emails/${request.email-id}`)
-  if(is-ok-response(response), PATCHEmailsEmailIdResponse(response.body), err(HttpError(response)))
+fn
+(request: PATCHEmailsEmailIdRequest): PATCHEmailsEmailIdResponse {
+  update-single-email(request, {})
+},
+(request: PATCHEmailsEmailIdRequest, opts: Map): PATCHEmailsEmailIdResponse {
+  response api-request("PATCH", `${::resend/BASE_URL}/emails/${request.email-id}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { PATCHEmailsEmailIdResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 POSTEmailsEmailIdCancelRequest type {
@@ -187,9 +211,17 @@ POSTEmailsEmailIdCancelResponse type {
 
 cancel-schedule-email
 meta {doc: """Cancel a scheduled email that has not yet been sent."""}
-fn (request: POSTEmailsEmailIdCancelRequest): POSTEmailsEmailIdCancelResponse {
-  response api-request("POST", `${::resend/BASE_URL}/emails/${request.email-id}/cancel`)
-  if(is-ok-response(response), POSTEmailsEmailIdCancelResponse(response.body), err(HttpError(response)))
+fn
+(request: POSTEmailsEmailIdCancelRequest): POSTEmailsEmailIdCancelResponse {
+  cancel-schedule-email(request, {})
+},
+(request: POSTEmailsEmailIdCancelRequest, opts: Map): POSTEmailsEmailIdCancelResponse {
+  response api-request("POST", `${::resend/BASE_URL}/emails/${request.email-id}/cancel`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { POSTEmailsEmailIdCancelResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 POSTEmailsBatchResponse type {
@@ -223,7 +255,15 @@ meta {
     ```
     """
 }
-fn (emails: Vec<SendEmailRequest>): POSTEmailsBatchResponse {
-  response api-request("POST", `${::resend/BASE_URL}/emails/batch`, {}, emails)
-  if(is-ok-response(response), POSTEmailsBatchResponse(response.body), err(HttpError(response)))
+fn
+(emails: Vec<SendEmailRequest>): POSTEmailsBatchResponse {
+  send-batch-emails(emails, {})
+},
+(emails: Vec<SendEmailRequest>, opts: Map): POSTEmailsBatchResponse {
+  response api-request("POST", `${::resend/BASE_URL}/emails/batch`, {}, emails, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { POSTEmailsBatchResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

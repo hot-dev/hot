@@ -1,0 +1,392 @@
+::google::calendar::events ns
+meta {
+    doc: """
+    Events: list (every filter) and list-all, get, create, full update,
+    patch, delete, quick add from text, move to another calendar,
+    recurring-event instances, and pure builders for event bodies and
+    Google Meet links.
+
+    **Write options** (create, update, patch, delete, quick-add, move):
+    `sendUpdates` (`all`, `externalOnly`, `none`; who gets email about
+    the change, `none` when unset), and for create/update/patch
+    `conferenceDataVersion` (set to 1 automatically when the body has
+    `conferenceData`, which creating a Meet link needs),
+    `supportsAttachments` (set automatically when the body has
+    `attachments`), `maxAttendees`.
+
+    **Scopes.** Reads use `calendar.events.readonly`, writes
+    `calendar.events`; `calendar` and `calendar.readonly` also work, and
+    `calendar.events.owned` covers calendars the user owns.
+    """
+}
+
+::cal ::google::calendar
+::api ::google::api
+
+MAX_PAGE_SIZE 2500
+DATE_PATTERN "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+SEND_UPDATES ["all", "externalOnly", "none"]
+BUILD_KEYS ["start", "end", "time-zone", "attendees", "meet", "meet-request-id", "reminders-minutes"]
+
+// ---------------------------------------------------------------------------
+// Event builders (pure)
+// ---------------------------------------------------------------------------
+
+event-time
+meta {
+    doc: """
+    An EventDateTime from a Str (pure): a `YYYY-MM-DD` date gives
+    `{date}` (all day); anything else is an RFC 3339 `{dateTime}`, with
+    `timeZone` when `time-zone` is given. A Map passes through.
+
+    ```hot
+    ::google::calendar::events/event-time("2026-11-03")                                   // {date: "2026-11-03"}
+    ::google::calendar::events/event-time("2026-11-03T09:00:00-06:00", "America/Chicago")  // {dateTime, timeZone}
+    ```
+    """
+}
+fn
+(value: Any): Map {
+  event-time(value, null)
+},
+(value: Any, time-zone: Str?): Map {
+  cond {
+    is-map(value) => { value }
+    ::hot::regex/is-match(Str(value), DATE_PATTERN) => { {date: Str(value)} }
+    => { ::cal/compact({dateTime: Str(value), timeZone: time-zone}) }
+  }
+}
+
+attendee
+meta {
+    doc: """An attendee from an email Str or a Map (`{email, displayName?, optional?, responseStatus?}`) (pure)."""
+}
+fn (value: Any): Map {
+  if(is-map(value), value, {email: trim(Str(value))})
+}
+
+meet-request
+meta {
+    doc: """
+    `conferenceData` asking Google to create a Google Meet link (pure):
+    `{createRequest: {requestId, conferenceSolutionKey: {type:
+    "hangoutsMeet"}}}`. `request-id` makes retries idempotent (default
+    a new UUID). Needs `conferenceDataVersion=1`, which `create-event`,
+    `update-event` and `patch-event` add when they see `conferenceData`.
+    The link appears as `hangoutLink` once the request succeeds.
+    """
+}
+fn
+(): Map {
+  meet-request(Str(Uuid()))
+},
+(request-id: Str): Map {
+  {createRequest: {requestId: request-id, conferenceSolutionKey: {type: "hangoutsMeet"}}}
+}
+
+with-meet
+meta {doc: """An event body with a Meet `conferenceData` request added (pure)."""}
+fn
+(event: Map): Map {
+  {...event, conferenceData: meet-request()}
+},
+(event: Map, request-id: Str): Map {
+  {...event, conferenceData: meet-request(request-id)}
+}
+
+meet-link
+meta {
+    doc: """The Google Meet URL of an event: `hangoutLink`, else the first `video` entry point; null when there is none (or the conference is still pending)."""
+}
+fn (event: Map): Str? {
+  entries or(get(or(get(event, "conferenceData"), {}), "entryPoints"), [])
+  video find-first(entries, (e) { eq(get(e, "entryPointType"), "video") })
+  or(get(event, "hangoutLink"), if(is-null(video), null, get(video, "uri")))
+}
+
+build-event
+meta {
+    doc: """
+    An event body from friendlier fields (pure). Shorthands:
+
+    - `start`, `end` - Str (date or RFC 3339) or EventDateTime Map; see
+      `event-time`. `time-zone` (IANA) is applied to both.
+    - `attendees` - emails or attendee Maps (a single Str is one email)
+    - `meet: true` - request a Google Meet link (`meet-request-id` to set
+      its request id)
+    - `reminders-minutes` - popup reminders, e.g. `[10, 60]`, instead of
+      the calendar's defaults
+
+    Every other field is passed through as the API's own (`summary`,
+    `description`, `location`, `recurrence` like
+    `["RRULE:FREQ=WEEKLY;COUNT=10"]`, `visibility`, `transparency`,
+    `colorId`, `guestsCanModify`, `extendedProperties`, ...). Null
+    fields are dropped.
+
+    ```hot
+    ::google::calendar::events/build-event({
+      summary: "Standup",
+      start: "2026-11-02T09:00:00",
+      end: "2026-11-02T09:15:00",
+      time-zone: "America/Chicago",
+      recurrence: ["RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR"],
+      attendees: ["ada@example.com", {email: "bob@example.com", optional: true}],
+      meet: true,
+      reminders-minutes: [5]
+    })
+    ```
+    """
+}
+fn (fields: Map): Map {
+  tz get(fields, "time-zone")
+  start get(fields, "start")
+  end get(fields, "end")
+  people get(fields, "attendees")
+  minutes get(fields, "reminders-minutes")
+  passthrough filter-keys(fields, (k) { not(in(k, BUILD_KEYS)) })
+  ::cal/compact({
+    ...passthrough,
+    start: if(is-null(start), null, event-time(start, tz)),
+    end: if(is-null(end), null, event-time(end, tz)),
+    attendees: cond {
+      is-null(people) => { null }
+      is-vec(people) => { map(people, attendee) }
+      => { [attendee(people)] }
+    },
+    conferenceData: if(eq(get(fields, "meet"), true), meet-request(or(get(fields, "meet-request-id"), Str(Uuid()))), get(passthrough, "conferenceData")),
+    reminders: if(is-null(minutes), get(passthrough, "reminders"), {useDefault: false, overrides: map(minutes, (m) { {method: "popup", minutes: m} })})
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Parameters (pure)
+// ---------------------------------------------------------------------------
+
+write-params
+meta {
+    doc: """
+    The query parameters a create/update/patch sends for `event` (pure):
+    `conferenceDataVersion: 1` when the body has `conferenceData`,
+    `supportsAttachments: true` when it has `attachments`, then your
+    options (`sendUpdates`, `conferenceDataVersion`, `supportsAttachments`,
+    `maxAttendees`, ...). Unset options are omitted. An unknown
+    `sendUpdates` value is an Err.
+    """
+}
+fn (event: Map, opts: Map): Map {
+  send-updates get(opts, "sendUpdates")
+  cond {
+    and(is-some(send-updates), not(in(send-updates, SEND_UPDATES))) => {
+      err(`google-calendar: sendUpdates must be all, externalOnly or none, got ${to-json(send-updates)}`)
+    }
+    => {
+      ::cal/query-params({
+        conferenceDataVersion: if(is-some(get(event, "conferenceData")), 1, null),
+        supportsAttachments: if(is-some(get(event, "attachments")), true, null)
+      }, opts)
+    }
+  }
+}
+
+notify-params
+meta {
+    doc: """The query parameters of a delete, quick-add or move (pure): your options, with `sendUpdates` checked."""
+}
+fn (opts: Map): Map {
+  write-params({}, opts)
+}
+
+// ---------------------------------------------------------------------------
+// Listing and reading
+// ---------------------------------------------------------------------------
+
+list-events
+meta {
+    doc: """
+    GET /calendars/{id}/events - one page of events: `{items,
+    nextPageToken?, nextSyncToken?, timeZone, updated, ...}`.
+
+    Options (all of the API's): `timeMin`, `timeMax` (RFC 3339 with an
+    offset), `q` (text search), `singleEvents` (expand recurring events
+    into instances; required for `orderBy: "startTime"`), `orderBy`
+    (`startTime`, `updated`), `maxResults` (default 250, max 2500),
+    `pageToken`, `showDeleted`, `showHiddenInvitations`, `updatedMin`,
+    `iCalUID`, `eventTypes` (a Vec, e.g. `["default", "outOfOffice"]`),
+    `privateExtendedProperty` / `sharedExtendedProperty`
+    (`"key=value"`, Vec for several), `timeZone`, `maxAttendees`,
+    `alwaysIncludeEmail`, `syncToken` (see `::google::calendar::sync`).
+    Scope: `calendar.events.readonly`.
+    """
+}
+fn
+(calendar-id: Str): Map {
+  list-events(calendar-id, {})
+},
+(calendar-id: Str, opts: Map): Map {
+  ::cal/json(::cal/EVENTS_READ_SCOPE, "GET", ::cal/url(::cal/calendar-path(calendar-id, "/events"), ::cal/query-params({}, opts)), "", opts)
+}
+
+list-all-events
+meta {
+    doc: """
+    Follow `nextPageToken` and return every matching event, or at most
+    `limit`. Same options as `list-events`; uses `maxResults: 2500` (or
+    `limit` when smaller) unless set. Scope: `calendar.events.readonly`.
+
+    ```hot
+    today ::google::calendar::events/list-all-events("primary", {
+      timeMin: "2026-11-03T00:00:00-06:00", timeMax: "2026-11-04T00:00:00-06:00",
+      singleEvents: true, orderBy: "startTime"
+    })
+    ```
+    """
+}
+fn
+(calendar-id: Str, opts: Map): Vec {
+  list-all-events(calendar-id, opts, null)
+},
+(calendar-id: Str, opts: Map, limit: Int?): Vec {
+  size if(is-some(limit), min(MAX_PAGE_SIZE, max(or(limit, 1), 1)), MAX_PAGE_SIZE)
+  sized if(is-some(get(opts, "maxResults")), opts, {...opts, maxResults: size})
+  ::api/collect-pages((token) { list-events(calendar-id, {...sized, pageToken: token}) }, "items", limit)
+}
+
+get-event
+meta {
+    doc: """GET /calendars/{id}/events/{eventId} - one event. Options: `timeZone`, `maxAttendees`, `alwaysIncludeEmail`. Scope: `calendar.events.readonly`."""
+}
+fn
+(calendar-id: Str, event-id: Str): Map {
+  get-event(calendar-id, event-id, {})
+},
+(calendar-id: Str, event-id: Str, opts: Map): Map {
+  ::cal/json(::cal/EVENTS_READ_SCOPE, "GET", ::cal/url(::cal/event-path(calendar-id, event-id), ::cal/query-params({}, opts)), "", opts)
+}
+
+list-instances
+meta {
+    doc: """GET /calendars/{id}/events/{eventId}/instances - one page of a recurring event's occurrences. Options: `timeMin`, `timeMax`, `originalStart`, `showDeleted`, `maxResults`, `pageToken`, `timeZone`, `maxAttendees`. Scope: `calendar.events.readonly`."""
+}
+fn
+(calendar-id: Str, event-id: Str): Map {
+  list-instances(calendar-id, event-id, {})
+},
+(calendar-id: Str, event-id: Str, opts: Map): Map {
+  ::cal/json(::cal/EVENTS_READ_SCOPE, "GET", ::cal/url(::cal/event-path(calendar-id, event-id, "/instances"), ::cal/query-params({}, opts)), "", opts)
+}
+
+list-all-instances
+meta {
+    doc: """Every occurrence of a recurring event (all pages), or at most `limit`; bound it with `timeMin`/`timeMax` for endless series. Scope: `calendar.events.readonly`."""
+}
+fn
+(calendar-id: Str, event-id: Str, opts: Map): Vec {
+  list-all-instances(calendar-id, event-id, opts, null)
+},
+(calendar-id: Str, event-id: Str, opts: Map, limit: Int?): Vec {
+  ::api/collect-pages((token) { list-instances(calendar-id, event-id, {...opts, pageToken: token}) }, "items", limit)
+}
+
+// ---------------------------------------------------------------------------
+// Writing
+// ---------------------------------------------------------------------------
+
+write fn (method: Str, path: Str, event: Map, opts: Map): Map {
+  body ::cal/compact(event)
+  params write-params(body, opts)
+  if(is-err(params), params, ::cal/json(::cal/EVENTS_SCOPE, method, ::cal/url(path, params), body, opts))
+}
+
+create-event
+meta {
+    doc: """
+    POST /calendars/{id}/events - create an event from an Event body
+    (`build-event` makes one): `summary`, `start`/`end`, `attendees`,
+    `conferenceData`, `recurrence`, `reminders`, ... Null fields are
+    dropped. Returns the event (with `id`, `htmlLink`, and `hangoutLink`
+    for Meet). Attendees are not emailed unless `sendUpdates: "all"`.
+    Scope: `calendar.events`.
+
+    ```hot
+    ::google::calendar::events/create-event("primary", ::google::calendar::events/with-meet({
+      summary: "Kickoff",
+      start: {dateTime: "2026-11-05T10:00:00-05:00"},
+      end: {dateTime: "2026-11-05T10:45:00-05:00"},
+      attendees: [{email: "ada@example.com"}]
+    }), {sendUpdates: "all"})
+    ```
+    """
+}
+fn
+(calendar-id: Str, event: Map): Map {
+  create-event(calendar-id, event, {})
+},
+(calendar-id: Str, event: Map, opts: Map): Map {
+  write("POST", ::cal/calendar-path(calendar-id, "/events"), event, opts)
+}
+
+update-event
+meta {
+    doc: """PUT /calendars/{id}/events/{eventId} - replace an event: fields you leave out are cleared, so start from `get-event`. Prefer `patch-event` to change a few fields. Scope: `calendar.events`."""
+}
+fn
+(calendar-id: Str, event-id: Str, event: Map): Map {
+  update-event(calendar-id, event-id, event, {})
+},
+(calendar-id: Str, event-id: Str, event: Map, opts: Map): Map {
+  write("PUT", ::cal/event-path(calendar-id, event-id), event, opts)
+}
+
+patch-event
+meta {
+    doc: """PATCH /calendars/{id}/events/{eventId} - change only the given fields (a Vec such as `attendees` is replaced whole). Scope: `calendar.events`."""
+}
+fn
+(calendar-id: Str, event-id: Str, changes: Map): Map {
+  patch-event(calendar-id, event-id, changes, {})
+},
+(calendar-id: Str, event-id: Str, changes: Map, opts: Map): Map {
+  write("PATCH", ::cal/event-path(calendar-id, event-id), changes, opts)
+}
+
+delete-event
+meta {
+    doc: """DELETE /calendars/{id}/events/{eventId} - cancel and remove an event (deleting one instance of a recurring event cancels just that occurrence). Options: `sendUpdates`. Returns true. Scope: `calendar.events`."""
+}
+fn
+(calendar-id: Str, event-id: Str): Bool {
+  delete-event(calendar-id, event-id, {})
+},
+(calendar-id: Str, event-id: Str, opts: Map): Bool {
+  params notify-params(opts)
+  if(is-err(params), params,
+    ::cal/done(::cal/json(::cal/EVENTS_SCOPE, "DELETE", ::cal/url(::cal/event-path(calendar-id, event-id), params), "", opts)))
+}
+
+quick-add
+meta {
+    doc: """POST /calendars/{id}/events/quickAdd - create an event from text, e.g. `"Lunch with Sam tomorrow at noon"` (parsed in the calendar's time zone; English works best). Options: `sendUpdates`. Scope: `calendar.events`."""
+}
+fn
+(calendar-id: Str, text: Str): Map {
+  quick-add(calendar-id, text, {})
+},
+(calendar-id: Str, text: Str, opts: Map): Map {
+  params notify-params(opts)
+  if(is-err(params), params,
+    ::cal/json(::cal/EVENTS_SCOPE, "POST", ::cal/url(::cal/calendar-path(calendar-id, "/events/quickAdd"), {...params, text: text}), "", opts))
+}
+
+move-event
+meta {
+    doc: """POST /calendars/{id}/events/{eventId}/move - move an event to the calendar `destination` (changes its organizer; only `default` events can move). Options: `sendUpdates`. Scope: `calendar.events`."""
+}
+fn
+(calendar-id: Str, event-id: Str, destination: Str): Map {
+  move-event(calendar-id, event-id, destination, {})
+},
+(calendar-id: Str, event-id: Str, destination: Str, opts: Map): Map {
+  params notify-params(opts)
+  if(is-err(params), params,
+    ::cal/json(::cal/EVENTS_SCOPE, "POST", ::cal/url(::cal/event-path(calendar-id, event-id, "/move"), {...params, destination: destination}), "", opts))
+}

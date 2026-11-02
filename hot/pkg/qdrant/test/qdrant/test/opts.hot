@@ -1,0 +1,155 @@
+::qdrant::test::opts ns
+meta ["test"]
+
+// Hermetic. These tests never leave the machine: DEAD_URL is a loopback port
+// nothing listens on, and a key with a newline is not a legal header value, so
+// the HTTP client refuses to build the request at all. The connection error
+// names the URL it tried, which proves the URL reached the client; "builder
+// error" proves the key did.
+
+::api ::qdrant::api
+::qd ::qdrant
+
+DEAD_URL "http://127.0.0.1:1"
+UNSENDABLE "opts\ncredential"
+BUILDER_ERROR "builder error"
+
+// One valid call to every function that calls the API, without its opts.
+every-call fn (): Vec {
+  [
+    {f: ::qd/list-collections, args: [], path: "/collections"},
+    {f: ::qd/create-collection, args: ["docs", 4, "Dot"], path: "/collections/docs"},
+    {f: ::qd/get-collection, args: ["docs"], path: "/collections/docs"},
+    {f: ::qd/delete-collection, args: ["docs"], path: "/collections/docs"},
+    {f: ::qd/upsert-points, args: ["docs", [{id: 1, vector: [0.1]}]], path: "/collections/docs/points?wait=true"},
+    {f: ::qd/search, args: ["docs", {vector: [0.1]}], path: "/collections/docs/points/search"},
+    {f: ::qd/get-points, args: ["docs", [1]], path: "/collections/docs/points"},
+    {f: ::qd/delete-points, args: ["docs", {points: [1]}], path: "/collections/docs/points/delete?wait=true"},
+    {f: ::qd/count-points, args: ["docs", {must: []}], path: "/collections/docs/points/count"}
+  ]
+}
+
+failure fn (f: Any, args: Vec): Str {
+  attempt ::hot::internal::exec/contain(f, args)
+  cond {
+    is-err(attempt) => { ::hot::type/err-message(err-value(attempt)) }
+    => { "no error" }
+  }
+}
+
+CTX {"qdrant.url": "https://ctx.example", "qdrant.api.key": "ctx-key"}
+
+test-resolve-opts-override-ctx
+meta ["test"] fn () {
+  r ::api/resolve-from({url: "https://tenant-b.example", api-key: "tenant-b-key"}, CTX)
+  assert-eq("https://tenant-b.example", r.url)
+  assert-eq("tenant-b-key", r.api-key)
+  assert-eq("https://ctx.example", ::api/resolve-from({api-key: "tenant-b-key"}, CTX).url, "a key alone keeps the context URL")
+}
+
+test-resolve-ctx-when-opts-empty
+meta ["test"] fn () {
+  assert-eq({url: "https://ctx.example", api-key: "ctx-key"}, ::api/resolve-from({}, CTX))
+}
+
+test-resolve-defaults-and-optional-key
+meta ["test"] fn () {
+  assert-eq({url: "http://localhost:6333", api-key: ""}, ::api/resolve-from({}, {}), "a local Qdrant needs no key")
+}
+
+test-resolve-per-call-url-never-borrows-the-ctx-key
+meta ["test"] fn () {
+  assert-eq("", ::api/resolve-from({url: "https://elsewhere.example"}, CTX).api-key)
+  assert-eq("", ::api/resolve-from({url: "https://elsewhere.example", api-key: ""}, CTX).api-key)
+  assert-eq("", ::api/resolve-from({api-key: null}, CTX).api-key, "an explicit empty key means no auth, not the context key")
+}
+
+test-resolve-reads-ctx-and-never-writes-it
+meta ["test"] fn () {
+  r ::api/resolve({url: "https://tenant-b.example", api-key: "tenant-b-key"})
+  assert-eq("tenant-b-key", r.api-key)
+  assert(is-null(::hot::ctx/get("qdrant.url")), "a per-call URL is not written to ctx")
+  assert(is-null(::hot::ctx/get("qdrant.api.key")), "a per-call key is not written to ctx")
+  ::hot::ctx/set("qdrant.url", "https://ctx.example")
+  ::hot::ctx/set("qdrant.api.key", "ctx-key")
+  from-ctx ::api/resolve({})
+  ::hot::ctx/set("qdrant.url", null)
+  ::hot::ctx/set("qdrant.api.key", null)
+  assert-eq({url: "https://ctx.example", api-key: "ctx-key"}, from-ctx)
+}
+
+test-raw-request-explicit-arity-still-works
+meta ["test"] fn () {
+  message failure(::qd/request, ["GET", "/collections", "", `${DEAD_URL}/`, ""])
+  assert(contains(message, `${DEAD_URL}/collections`), "the 5-arity form strips the trailing slash")
+}
+
+test-every-opts-arity-sends-to-the-opts-url
+meta ["test"] fn () {
+  for-each(every-call(), (call) {
+    message failure(call.f, concat(call.args, [{url: `${DEAD_URL}/`}]))
+    assert(contains(message, `${DEAD_URL}${call.path}`), `${call.f} tried: ${message}`)
+  })
+}
+
+test-every-opts-arity-takes-its-key-from-opts
+meta ["test"] fn () {
+  for-each(every-call(), (call) {
+    message failure(call.f, concat(call.args, [{url: DEAD_URL, api-key: UNSENDABLE}]))
+    assert(contains(message, BUILDER_ERROR), `${call.f} got: ${message}`)
+  })
+}
+
+test-every-opts-arity-keeps-the-ctx-key-from-a-per-call-url
+meta ["test"] fn () {
+  ::hot::ctx/set("qdrant.api.key", UNSENDABLE)
+  results map(every-call(), (call) {
+    {f: call.f, message: failure(call.f, concat(call.args, [{url: DEAD_URL}]))}
+  })
+  ::hot::ctx/set("qdrant.api.key", null)
+  for-each(results, (r) {
+    assert(not(contains(r.message, BUILDER_ERROR)), `${r.f} must not send the context key to another URL`)
+  })
+}
+
+test-every-existing-arity-still-uses-ctx
+meta ["test"] fn () {
+  ::hot::ctx/set("qdrant.url", DEAD_URL)
+  urls map(every-call(), (call) {
+    {f: call.f, path: call.path, message: failure(call.f, call.args)}
+  })
+  ::hot::ctx/set("qdrant.api.key", UNSENDABLE)
+  keys-used map(every-call(), (call) {
+    {f: call.f, message: failure(call.f, call.args)}
+  })
+  // The shorter create-collection and count-points arities
+  short-create failure(::qd/create-collection, ["docs", 4])
+  short-count failure(::qd/count-points, ["docs"])
+  ::hot::ctx/set("qdrant.url", null)
+  ::hot::ctx/set("qdrant.api.key", null)
+  for-each(urls, (r) {
+    assert(contains(r.message, `${DEAD_URL}${r.path}`), `${r.f} tried: ${r.message}`)
+  })
+  for-each(keys-used, (r) {
+    assert(contains(r.message, BUILDER_ERROR), `${r.f} got: ${r.message}`)
+  })
+  assert(contains(short-create, BUILDER_ERROR))
+  assert(contains(short-count, BUILDER_ERROR))
+}
+
+test-create-collection-opts-without-a-distance
+meta ["test"] fn () {
+  message failure(::qd/create-collection, ["docs", 4, {url: DEAD_URL}])
+  assert(contains(message, `${DEAD_URL}/collections/docs`), "opts in the distance position are opts")
+}
+
+test-count-points-opts-with-an-empty-filter
+meta ["test"] fn () {
+  message failure(::qd/count-points, ["docs", {}, {url: DEAD_URL}])
+  assert(contains(message, `${DEAD_URL}/collections/docs/points/count`))
+}
+
+test-resolve-marks-the-opts-credential-and-returns-it-unchanged
+meta ["test"] fn () {
+    assert-eq("tenant-credential-a", ::api/resolve({url: DEAD_URL, api-key: "tenant-credential-a"}).api-key)
+}

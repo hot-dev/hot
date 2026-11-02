@@ -4,7 +4,19 @@ meta ["test"]
 // =============================================================================
 // Integration Tests for Qwen Chat Completions API
 // =============================================================================
-// These tests require qwen.api.key (your DASHSCOPE_API_KEY) to be set in context.
+// These tests require qwen.api.key (your DASHSCOPE_API_KEY) to be set in context. Read-only; every test skips
+// without it. Run with: hot test --project pkg-integration-qwen
+
+skip fn (test-name: Str): Bool {
+    cond {
+        is-some(::hot::ctx/get("qwen.api.key")) => { false }
+        => {
+            tap(`[qwen] skipping ${test-name}: set DASHSCOPE_API_KEY to run`)
+            true
+        }
+    }
+}
+
 
 // -----------------------------------------------------------------------------
 // Basic completion tests
@@ -13,31 +25,41 @@ meta ["test"]
 test-chat-complete-simple
 meta ["test"]
 fn () {
-    response ::qwen::chat/complete(::qwen::chat/ChatCompletionRequest({
-        model: "qwen3.6-plus",
-        messages: [{role: "user", content: "Say 'Hello, Hot!' and nothing else."}],
-        max_tokens: 50
-    }))
+    cond {
+        skip("test-chat-complete-simple") => { assert(true) }
+        => {
+            response ::qwen::chat/complete(::qwen::chat/ChatCompletionRequest({
+                model: "qwen3.7-plus",
+                messages: [{role: "user", content: "Say 'Hello, Hot!' and nothing else."}],
+                max_tokens: 50
+            }))
 
-    assert(response.id, "Response should have an id")
-    assert(is-vec(response.choices), "Response should have choices")
-    assert(gt(length(response.choices), 0), "Should have at least one choice")
+            assert(response.id, "Response should have an id")
+            assert(is-vec(response.choices), "Response should have choices")
+            assert(gt(length(response.choices), 0), "Should have at least one choice")
+        }
+    }
 }
 
 test-chat-complete-with-system
 meta ["test"]
 fn () {
-    response ::qwen::chat/complete(::qwen::chat/ChatCompletionRequest({
-        model: "qwen3.6-plus",
-        messages: [
-            {role: "system", content: "You are a helpful math assistant. Always respond with just the number."},
-            {role: "user", content: "What is 2+2?"}
-        ],
-        max_tokens: 50
-    }))
+    cond {
+        skip("test-chat-complete-with-system") => { assert(true) }
+        => {
+            response ::qwen::chat/complete(::qwen::chat/ChatCompletionRequest({
+                model: "qwen3.7-plus",
+                messages: [
+                    {role: "system", content: "You are a helpful math assistant. Always respond with just the number."},
+                    {role: "user", content: "What is 2+2?"}
+                ],
+                max_tokens: 50
+            }))
 
-    assert(response.id, "Response should have an id")
-    assert(gt(length(response.choices), 0), "Should have at least one choice")
+            assert(response.id, "Response should have an id")
+            assert(gt(length(response.choices), 0), "Should have at least one choice")
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -47,18 +69,23 @@ fn () {
 test-chat-multi-turn
 meta ["test"]
 fn () {
-    response ::qwen::chat/complete(::qwen::chat/ChatCompletionRequest({
-        model: "qwen3.6-plus",
-        messages: [
-            {role: "user", content: "My name is Alice."},
-            {role: "assistant", content: "Nice to meet you, Alice!"},
-            {role: "user", content: "What is my name?"}
-        ],
-        max_tokens: 100
-    }))
+    cond {
+        skip("test-chat-multi-turn") => { assert(true) }
+        => {
+            response ::qwen::chat/complete(::qwen::chat/ChatCompletionRequest({
+                model: "qwen3.7-plus",
+                messages: [
+                    {role: "user", content: "My name is Alice."},
+                    {role: "assistant", content: "Nice to meet you, Alice!"},
+                    {role: "user", content: "What is my name?"}
+                ],
+                max_tokens: 100
+            }))
 
-    assert(response.id, "Response should have an id")
-    assert(gt(length(response.choices), 0), "Should have at least one choice")
+            assert(response.id, "Response should have an id")
+            assert(gt(length(response.choices), 0), "Should have at least one choice")
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -68,17 +95,22 @@ fn () {
 test-chat-complete-stream
 meta ["test"]
 fn () {
-    response ::qwen::chat/complete-stream(::qwen::chat/ChatCompletionRequest({
-        model: "qwen3.6-plus",
-        messages: [{role: "user", content: "Count from 1 to 3."}],
-        max_tokens: 50
-    }))
+    cond {
+        skip("test-chat-complete-stream") => { assert(true) }
+        => {
+            response ::qwen::chat/complete-stream(::qwen::chat/ChatCompletionRequest({
+                model: "qwen3.7-plus",
+                messages: [{role: "user", content: "Count from 1 to 3."}],
+                max_tokens: 50
+            }))
 
-    assert-eq(200, response.status, "Should get 200 status")
-    assert(response.body, "Should have body iterator")
+            assert-eq(200, response.status, "Should get 200 status")
+            assert(response.body, "Should have body iterator")
 
-    events collect(response.body)
-    assert(gt(length(events), 0), "Should receive streaming events")
+            events collect(response.body)
+            assert(gt(length(events), 0), "Should receive streaming events")
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -106,21 +138,57 @@ fn () {
 test-extract-response-text
 meta ["test"]
 fn () {
-    response ::qwen::chat/complete(::qwen::chat/ChatCompletionRequest({
-        model: "qwen3.6-plus",
-        messages: [{role: "user", content: "Say 'test'"}],
-        max_tokens: 50
-    }))
+    cond {
+        skip("test-extract-response-text") => { assert(true) }
+        => {
+            response ::qwen::chat/complete(::qwen::chat/ChatCompletionRequest({
+                model: "qwen3.7-plus",
+                messages: [{role: "user", content: "Say 'test'"}],
+                max_tokens: 50
+            }))
 
-    text ::qwen::chat/extract-response-text(response)
+            text ::qwen::chat/extract-response-text(response)
 
-    assert(is-str(text), "Extracted text should be a string")
+            assert(is-str(text), "Extracted text should be a string")
+        }
+    }
 }
 
 test-chat-convenience
 meta ["test"]
 fn () {
-    answer ::qwen::chat/chat("qwen3.6-plus", "Respond with only the word 'ok'.", "You are a terse assistant.")
+    cond {
+        skip("test-chat-convenience") => { assert(true) }
+        => {
+            answer ::qwen::chat/chat("qwen3.7-plus", "Respond with only the word 'ok'.", "You are a terse assistant.")
 
-    assert(is-str(answer), "chat() should return a string")
+            assert(is-str(answer), "chat() should return a string")
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// hot-ai run loop through the Qwen provider
+// -----------------------------------------------------------------------------
+
+add-ints
+meta {doc: "Add two integers."}
+fn (x: Int, y: Int): Int { add(x, y) }
+
+test-run-loop-with-tool
+meta ["test"]
+fn () {
+    cond {
+        skip("test-run-loop-with-tool") => { assert(true) }
+        => {
+            opts ::ai::chat/ChatOptions({
+                model: "qwen3.8-flash",
+                providers: ::ai::chat/with-providers([::qwen::ai/provider(::qwen::ai/QwenOptions({enable-thinking: false}))]),
+                tools: [::ai::tool/from-fn(add-ints)],
+                max-iterations: 3
+            })
+            answer ::ai::chat/run-loop(opts, "Use the add-ints tool to add 17 and 25, then reply with just the number.")
+            assert(contains(answer, "42"), "run-loop should use the tool and answer 42")
+        }
+    }
 }

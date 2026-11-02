@@ -1,12 +1,19 @@
 ::twilio::integration::calls ns
 meta ["test"]
 
+::ctx ::twilio::integration::ctx
+
 test-list-calls
 meta ["test"]
 fn () {
-  response ::twilio::calls/list-calls(::twilio::calls/ListCallsRequest({
-    PageSize: 5
-  }))
+  cond {
+    not(::ctx/configured()) => { ::ctx/skip(::ctx/UNCONFIGURED) }
+    => {
+      response ::twilio::calls/list-calls(::twilio::calls/ListCallsRequest({
+        PageSize: 5
+      }))
 
-  assert(response.calls, "list-calls should return calls array")
+      assert(is-vec(response.calls), "list-calls should return calls array")
+    }
+  }
 }

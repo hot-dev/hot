@@ -1,76 +1,272 @@
 ::discord::interactions ns
+meta {
+    doc: """
+    Interactions: handle Discord's signed interaction webhooks (verify,
+    answer PING with PONG, reply inline), respond through the callback
+    endpoint, manage the original response and followups, and register
+    application commands (global and per guild).
 
-api-request ::discord::api/request
-HttpError ::discord::api/HttpError
-is-ok-response ::hot::http/is-ok-response
+    The interaction routes (callback, `@original`, followups) are
+    authenticated by the interaction token, so they don't need
+    `discord.bot.token`. Interaction tokens stay valid for 15 minutes; the
+    initial response must arrive within 3 seconds.
+    """
+}
+
+::api ::discord::api
+
+seg ::discord::api/seg
+
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
 
 // ============================================================================
-// Interaction Responses
+// Constants
 // ============================================================================
-// When Discord sends an interaction (slash command, button, etc.), your
-// endpoint must respond within 3 seconds. These functions send that response.
-//
-// Response types:
-//   1 = PONG (for ping)
-//   4 = CHANNEL_MESSAGE_WITH_SOURCE (send a message)
-//   5 = DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE (ack, edit later)
-//   6 = DEFERRED_UPDATE_MESSAGE (for components, ack, edit later)
-//   7 = UPDATE_MESSAGE (for components, edit the original)
-//   8 = APPLICATION_COMMAND_AUTOCOMPLETE_RESULT
-//   9 = MODAL
+
+// Interaction types (interaction.type)
+PING 1
+APPLICATION_COMMAND 2
+MESSAGE_COMPONENT 3
+APPLICATION_COMMAND_AUTOCOMPLETE 4
+MODAL_SUBMIT 5
+
+// Interaction callback types (response.type)
+PONG 1
+CHANNEL_MESSAGE_WITH_SOURCE 4
+DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE 5
+DEFERRED_UPDATE_MESSAGE 6
+UPDATE_MESSAGE 7
+APPLICATION_COMMAND_AUTOCOMPLETE_RESULT 8
+MODAL 9
+LAUNCH_ACTIVITY 12
+
+// Message flag: only the invoking user sees the message
+EPHEMERAL 64
+
+// ============================================================================
+// Inline responses (returned from your webhook handler)
+// ============================================================================
+
+pong
+meta {doc: """The PONG response (`{type: 1}`) for Discord's PING."""}
+fn (): Map {
+  {type: PONG}
+}
+
+message-response
+meta {
+    doc: """
+    Reply with a message (callback type 4). `data` is message content:
+    `{content?, embeds?, components?, allowed_mentions?, flags?, ...}`.
+    The 2-arity form with `true` makes it ephemeral.
+
+    **Example**
+
+    ```hot
+    ::discord::interactions/message-response({content: "Pong!"})
+    ::discord::interactions/message-response({content: "Only you can see this"}, true)
+    ```
+    """
+}
+fn
+(data: Map): Map {
+  {type: CHANNEL_MESSAGE_WITH_SOURCE, data: data}
+},
+(data: Map, ephemeral: Bool): Map {
+  flags if(ephemeral, ::hot::bit/or(or(get(data, "flags"), 0), EPHEMERAL), get(data, "flags"))
+  {type: CHANNEL_MESSAGE_WITH_SOURCE, data: assoc-some(data, "flags", flags)}
+}
+
+deferred-response
+meta {
+    doc: """ACK now and show "thinking..." (callback type 5); finish later with `edit-original-interaction-response`. Pass `true` for an ephemeral reply."""
+}
+fn
+(): Map {
+  {type: DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE}
+},
+(ephemeral: Bool): Map {
+  if(ephemeral, {type: DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE, data: {flags: EPHEMERAL}}, {type: DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE})
+}
+
+update-message-response
+meta {
+    doc: """For component interactions: edit the message the component is on (callback type 7)."""
+}
+fn (data: Map): Map {
+  {type: UPDATE_MESSAGE, data: data}
+}
+
+deferred-update-response
+meta {
+    doc: """For component interactions: ACK without a loading state, edit later (callback type 6)."""
+}
+fn (): Map {
+  {type: DEFERRED_UPDATE_MESSAGE}
+}
+
+autocomplete-response
+meta {
+    doc: """Answer an autocomplete interaction with up to 25 `choices` (`[{name, value}]`, callback type 8)."""
+}
+fn (choices: Vec<Map>): Map {
+  {type: APPLICATION_COMMAND_AUTOCOMPLETE_RESULT, data: {choices: choices}}
+}
+
+modal-response
+meta {
+    doc: """Open a modal (callback type 9). `components` are the modal's label/text-input components."""
+}
+fn (custom-id: Str, title: Str, components: Vec<Map>): Map {
+  {type: MODAL, data: {custom_id: custom-id, title: title, components: components}}
+}
+
+option-value
+meta {
+    doc: """
+    Read a slash-command option by name from an interaction
+    (`interaction.data.options`, searching one level of subcommands).
+    Returns `null` when absent.
+
+    **Example**
+
+    ```hot
+    interaction {data: {name: "hello", options: [{name: "name", type: 3, value: "Ada"}]}}
+    who or(::discord::interactions/option-value(interaction, "name"), "world")  // => "Ada"
+    ```
+    """
+}
+fn (interaction: Map, name: Str): Any {
+  options or(get-in(interaction, ["data", "options"]), [])
+  nested mapcat(options, (o) { or(get(o, "options"), []) })
+  hit find-first(concat(options, nested), (o) { eq(get(o, "name"), name) })
+  if(is-null(hit), null, get(hit, "value"))
+}
+
+json-response fn (status: Int, body: Map): HttpResponse {
+  HttpResponse({status: status, headers: {content-type: "application/json"}, body: body})
+}
+
+handle-request
+meta {
+    doc: """
+    Run an interactions endpoint: verify the request (401 on failure),
+    answer PING with PONG, and otherwise call `handler` with the parsed
+    interaction and return its result as the inline JSON response. The
+    handler returns a response map such as `message-response(...)` or
+    `deferred-response()`. The 3-arity form takes an explicit public key
+    instead of `discord.public.key`.
+
+    **Example**
+
+    ```hot
+    ::interactions ::discord::interactions
+
+    on-discord
+    meta {webhook: {service: "discord", path: "/interactions", method: "POST"}}
+    fn (request: HttpRequest): HttpResponse {
+      ::interactions/handle-request(request, (interaction) {
+        cond {
+          eq(get-in(interaction, ["data", "name"]), "ping") => { ::interactions/message-response({content: "Pong!"}) }
+          => { ::interactions/message-response({content: "Unknown command"}, true) }
+        }
+      })
+    }
+    ```
+    """
+}
+fn
+(request: Map, handler: Fn): HttpResponse {
+  respond(request, ::discord::webhooks/verify-request(request), handler)
+},
+(request: Map, handler: Fn, public-key: Str): HttpResponse {
+  respond(request, ::discord::webhooks/verify-request(request, public-key), handler)
+}
+
+respond
+meta {
+    doc: """The dispatch step of `handle-request` after verification. Exposed for testing."""
+}
+fn (request: Map, verified: Bool, handler: Fn): HttpResponse {
+  interaction or(get(request, "body"), {})
+  cond {
+    not(verified) => { json-response(401, {error: "invalid request signature"}) }
+    eq(get(interaction, "type"), PING) => { json-response(200, pong()) }
+    => { json-response(200, handler(interaction)) }
+  }
+}
+
+// ============================================================================
+// Callback endpoint
+// ============================================================================
 
 CreateInteractionResponseRequest type {
   interaction_id: Str,
   interaction_token: Str,
   type: Int,
-  data: Map?
+  data: Map?,
+  with_response: Bool?,
+  files: Vec<::discord::api/FileUpload>?
 }
 
 create-interaction-response
 meta {
     doc: """
-POST /interactions/{interaction_id}/{interaction_token}/callback - Respond to an interaction. Must be called within 3 seconds. `type` determines the response behavior (4=message, 5=deferred, 7=update).
+    POST /interactions/{interaction_id}/{interaction_token}/callback -
+    Respond out of band instead of inline (within 3 seconds). `type` is a
+    callback type (4 message, 5 deferred, 6/7 component update, 8
+    autocomplete, 9 modal). `with_response: true` returns the
+    interaction callback object instead of `true`. `files` uploads
+    attachments with the response.
 
-**Example**
+    **Example**
 
-```hot
-::interactions ::discord::interactions
+    ```hot
+    ::interactions ::discord::interactions
 
-// Reply to a slash command
-::interactions/create-interaction-response(::interactions/CreateInteractionResponseRequest({
-  interaction_id: event.id,
-  interaction_token: event.token,
-  type: 4,
-  data: {content: "Hello from Hot!"}
-}))
-
-// Defer a response (show "thinking..." indicator, edit later)
-::interactions/create-interaction-response(::interactions/CreateInteractionResponseRequest({
-  interaction_id: event.id,
-  interaction_token: event.token,
-  type: 5
-}))
-```
-"""
+    ::interactions/create-interaction-response(::interactions/CreateInteractionResponseRequest({
+      interaction_id: "1700000000000000000",
+      interaction_token: "interaction-token",
+      type: 4,
+      data: {content: "Hello from Hot!"}
+    }))
+    ```
+    """
 }
-fn (request: CreateInteractionResponseRequest): Bool {
-  body {
-    type: request.type,
-    data: request.data
+fn
+(request: CreateInteractionResponseRequest): Any {
+  create-interaction-response(request, {})
+},
+(request: CreateInteractionResponseRequest, opts: Map): Any {
+  files or(request.files, [])
+  data cond {
+    and(not(is-empty(files)), is-null(get(or(request.data, {}), "attachments"))) => {
+      assoc(or(request.data, {}), "attachments", ::api/attachments-for(files))
+    }
+    => { request.data }
   }
 
-  response ::hot::http/request(::hot::http/HttpRequest({
-    method: "POST",
-    url: `${::discord::core/BASE_URL}/interactions/${request.interaction_id}/${request.interaction_token}/callback`,
-    headers: {Content-Type: "application/json"},
-    body: to-json(untype(body))
-  }))
-  if(is-ok-response(response), true, err(HttpError(response)))
+  result ::api/call("POST", `/interactions/${seg(request.interaction_id)}/${::api/token-seg(request.interaction_token)}/callback`, {
+    query: {with_response: request.with_response},
+    body: assoc-some({type: request.type}, "data", data),
+    files: files,
+    auth: false
+  }, opts)
+  cond {
+    is-err(result) => { result }
+    eq(request.with_response, true) => { result }
+    => { true }
+  }
 }
 
 // ============================================================================
-// Followup Messages (via webhook-style endpoints with application_id)
+// Original response and followups
 // ============================================================================
+
+original-path fn (application-id: Str, interaction-token: Str): Str {
+  `/webhooks/${seg(application-id)}/${::api/token-seg(interaction-token)}/messages/@original`
+}
 
 GetOriginalInteractionResponseRequest type {
   application_id: Str,
@@ -79,11 +275,14 @@ GetOriginalInteractionResponseRequest type {
 
 get-original-interaction-response
 meta {
-    doc: """GET /webhooks/{application_id}/{interaction_token}/messages/@original - Get the original interaction response message."""
+    doc: """GET /webhooks/{application_id}/{interaction_token}/messages/@original - The initial response message."""
 }
-fn (request: GetOriginalInteractionResponseRequest): Map {
-  response api-request("GET", `${::discord::core/BASE_URL}/webhooks/${request.application_id}/${request.interaction_token}/messages/@original`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: GetOriginalInteractionResponseRequest): Map {
+  get-original-interaction-response(request, {})
+},
+(request: GetOriginalInteractionResponseRequest, opts: Map): Map {
+  ::api/call("GET", original-path(request.application_id, request.interaction_token), {auth: false}, opts)
 }
 
 EditOriginalInteractionResponseRequest type {
@@ -91,38 +290,53 @@ EditOriginalInteractionResponseRequest type {
   interaction_token: Str,
   content: Str?,
   embeds: Vec<Map>?,
+  flags: Int?,
   allowed_mentions: Map?,
-  components: Vec<Map>?
+  components: Vec<Map>?,
+  attachments: Vec<Map>?,
+  poll: Map?,
+  files: Vec<::discord::api/FileUpload>?,
+  clear: Vec<Str>?
 }
 
 edit-original-interaction-response
 meta {
     doc: """
-PATCH /webhooks/{application_id}/{interaction_token}/messages/@original - Edit the original interaction response. Use this after sending a deferred response (type 5) to provide the actual content.
+    PATCH /webhooks/{application_id}/{interaction_token}/messages/@original -
+    Edit the initial response; this is how a deferred (type 5) reply gets
+    its content. Only fields you set are sent.
 
-**Example**
+    **Example**
 
-```hot
-::interactions ::discord::interactions
+    ```hot
+    ::interactions ::discord::interactions
 
-// After deferring, edit with the actual response
-::interactions/edit-original-interaction-response(::interactions/EditOriginalInteractionResponseRequest({
-  application_id: "123456789",
-  interaction_token: event.token,
-  content: "Here's your result after processing!"
-}))
-```
-"""
+    ::interactions/edit-original-interaction-response(::interactions/EditOriginalInteractionResponseRequest({
+      application_id: "1800000000000000000",
+      interaction_token: "interaction-token",
+      content: "Report ready",
+      files: [{filename: "report.csv", content: "a,b\n1,2\n"}]
+    }))
+    ```
+    """
 }
-fn (request: EditOriginalInteractionResponseRequest): Map {
-  body merge({}, {
-    content: request.content,
-    embeds: request.embeds,
-    allowed_mentions: request.allowed_mentions,
-    components: request.components
-  })
-  response api-request("PATCH", `${::discord::core/BASE_URL}/webhooks/${request.application_id}/${request.interaction_token}/messages/@original`, {}, body)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: EditOriginalInteractionResponseRequest): Map {
+  edit-original-interaction-response(request, {})
+},
+(request: EditOriginalInteractionResponseRequest, opts: Map): Map {
+  files or(request.files, [])
+  payload ::api/body(request, ["application_id", "interaction_token"])
+  final cond {
+    and(not(is-empty(files)), is-null(request.attachments)) => { assoc(payload, "attachments", ::api/attachments-for(files)) }
+    => { payload }
+  }
+
+  ::api/call("PATCH", original-path(request.application_id, request.interaction_token), {
+    body: final,
+    files: files,
+    auth: false
+  }, opts)
 }
 
 DeleteOriginalInteractionResponseRequest type {
@@ -132,11 +346,14 @@ DeleteOriginalInteractionResponseRequest type {
 
 delete-original-interaction-response
 meta {
-    doc: """DELETE /webhooks/{application_id}/{interaction_token}/messages/@original - Delete the original interaction response."""
+    doc: """DELETE /webhooks/{application_id}/{interaction_token}/messages/@original - Delete the initial response."""
 }
-fn (request: DeleteOriginalInteractionResponseRequest): Bool {
-  response api-request("DELETE", `${::discord::core/BASE_URL}/webhooks/${request.application_id}/${request.interaction_token}/messages/@original`)
-  if(is-ok-response(response), true, err(HttpError(response)))
+fn
+(request: DeleteOriginalInteractionResponseRequest): Bool {
+  delete-original-interaction-response(request, {})
+},
+(request: DeleteOriginalInteractionResponseRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", original-path(request.application_id, request.interaction_token), {auth: false}, opts)
 }
 
 CreateFollowupMessageRequest type {
@@ -147,24 +364,52 @@ CreateFollowupMessageRequest type {
   embeds: Vec<Map>?,
   allowed_mentions: Map?,
   components: Vec<Map>?,
-  flags: Int?
+  attachments: Vec<Map>?,
+  flags: Int?,
+  poll: Map?,
+  files: Vec<::discord::api/FileUpload>?
 }
 
 create-followup-message
 meta {
-    doc: """POST /webhooks/{application_id}/{interaction_token} - Create a followup message for an interaction. Set `flags: 64` for an ephemeral message (only visible to the user)."""
+    doc: """POST /webhooks/{application_id}/{interaction_token} - Send a followup message. `flags: 64` makes it ephemeral. Returns the message."""
 }
-fn (request: CreateFollowupMessageRequest): Map {
-  body merge({}, {
-    content: request.content,
-    tts: request.tts,
-    embeds: request.embeds,
-    allowed_mentions: request.allowed_mentions,
-    components: request.components,
-    flags: request.flags
-  })
-  response api-request("POST", `${::discord::core/BASE_URL}/webhooks/${request.application_id}/${request.interaction_token}`, {}, body)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: CreateFollowupMessageRequest): Map {
+  create-followup-message(request, {})
+},
+(request: CreateFollowupMessageRequest, opts: Map): Map {
+  files or(request.files, [])
+  payload ::api/body(request, ["application_id", "interaction_token"])
+  final cond {
+    and(not(is-empty(files)), is-null(request.attachments)) => { assoc(payload, "attachments", ::api/attachments-for(files)) }
+    => { payload }
+  }
+
+  ::api/call("POST", `/webhooks/${seg(request.application_id)}/${::api/token-seg(request.interaction_token)}`, {
+    query: {wait: true},
+    body: final,
+    files: files,
+    auth: false
+  }, opts)
+}
+
+GetFollowupMessageRequest type {
+  application_id: Str,
+  interaction_token: Str,
+  message_id: Str
+}
+
+get-followup-message
+meta {
+    doc: """GET /webhooks/{application_id}/{interaction_token}/messages/{message_id} - A followup message."""
+}
+fn
+(request: GetFollowupMessageRequest): Map {
+  get-followup-message(request, {})
+},
+(request: GetFollowupMessageRequest, opts: Map): Map {
+  ::api/call("GET", `/webhooks/${seg(request.application_id)}/${::api/token-seg(request.interaction_token)}/messages/${seg(request.message_id)}`, {auth: false}, opts)
 }
 
 EditFollowupMessageRequest type {
@@ -173,23 +418,29 @@ EditFollowupMessageRequest type {
   message_id: Str,
   content: Str?,
   embeds: Vec<Map>?,
+  flags: Int?,
   allowed_mentions: Map?,
-  components: Vec<Map>?
+  components: Vec<Map>?,
+  attachments: Vec<Map>?,
+  poll: Map?,
+  files: Vec<::discord::api/FileUpload>?,
+  clear: Vec<Str>?
 }
 
 edit-followup-message
 meta {
-    doc: """PATCH /webhooks/{application_id}/{interaction_token}/messages/{message_id} - Edit a followup message."""
+    doc: """PATCH /webhooks/{application_id}/{interaction_token}/messages/{message_id} - Edit a followup message. Only fields you set are sent."""
 }
-fn (request: EditFollowupMessageRequest): Map {
-  body merge({}, {
-    content: request.content,
-    embeds: request.embeds,
-    allowed_mentions: request.allowed_mentions,
-    components: request.components
-  })
-  response api-request("PATCH", `${::discord::core/BASE_URL}/webhooks/${request.application_id}/${request.interaction_token}/messages/${request.message_id}`, {}, body)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: EditFollowupMessageRequest): Map {
+  edit-followup-message(request, {})
+},
+(request: EditFollowupMessageRequest, opts: Map): Map {
+  ::api/call("PATCH", `/webhooks/${seg(request.application_id)}/${::api/token-seg(request.interaction_token)}/messages/${seg(request.message_id)}`, {
+    body: ::api/body(request, ["application_id", "interaction_token", "message_id"]),
+    files: or(request.files, []),
+    auth: false
+  }, opts)
 }
 
 DeleteFollowupMessageRequest type {
@@ -202,14 +453,31 @@ delete-followup-message
 meta {
     doc: """DELETE /webhooks/{application_id}/{interaction_token}/messages/{message_id} - Delete a followup message."""
 }
-fn (request: DeleteFollowupMessageRequest): Bool {
-  response api-request("DELETE", `${::discord::core/BASE_URL}/webhooks/${request.application_id}/${request.interaction_token}/messages/${request.message_id}`)
-  if(is-ok-response(response), true, err(HttpError(response)))
+fn
+(request: DeleteFollowupMessageRequest): Bool {
+  delete-followup-message(request, {})
+},
+(request: DeleteFollowupMessageRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `/webhooks/${seg(request.application_id)}/${::api/token-seg(request.interaction_token)}/messages/${seg(request.message_id)}`, {auth: false}, opts)
 }
 
 // ============================================================================
-// Application Commands (Slash Commands)
+// Application commands
 // ============================================================================
+// Global commands are available everywhere the app is installed; guild
+// commands appear only in that guild and update instantly. `type`:
+// 1 CHAT_INPUT (slash), 2 USER and 3 MESSAGE (context menus), 4 PRIMARY_ENTRY_POINT.
+// `contexts` (0 guild, 1 bot DM, 2 private channel) and
+// `integration_types` (0 guild install, 1 user install) replace the
+// deprecated `dm_permission`.
+
+global-commands-path fn (application-id: Str): Str {
+  `/applications/${seg(application-id)}/commands`
+}
+
+guild-commands-path fn (application-id: Str, guild-id: Str): Str {
+  `/applications/${seg(application-id)}/guilds/${seg(guild-id)}/commands`
+}
 
 GetGlobalCommandsRequest type {
   application_id: Str,
@@ -218,74 +486,108 @@ GetGlobalCommandsRequest type {
 
 get-global-commands
 meta {
-    doc: """GET /applications/{application_id}/commands - List all global application commands. These are available in every guild the app is installed in."""
+    doc: """GET /applications/{application_id}/commands - Every global command."""
 }
-fn (request: GetGlobalCommandsRequest): Vec<Map> {
-  response api-request("GET", `${::discord::core/BASE_URL}/applications/${request.application_id}/commands?with_localizations=${or(request.with_localizations, "")}`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: GetGlobalCommandsRequest): Vec<Map> {
+  get-global-commands(request, {})
+},
+(request: GetGlobalCommandsRequest, opts: Map): Vec<Map> {
+  ::api/call("GET", global-commands-path(request.application_id), {query: {with_localizations: request.with_localizations}}, opts)
 }
 
 CreateGlobalCommandRequest type {
   application_id: Str,
   name: Str,
+  name_localizations: Map?,
   description: Str?,
+  description_localizations: Map?,
   options: Vec<Map>?,
-  type: Int?,
-  dm_permission: Bool?,
   default_member_permissions: Str?,
-  nsfw: Bool?
+  dm_permission: Bool?,
+  integration_types: Vec<Int>?,
+  contexts: Vec<Int>?,
+  type: Int?,
+  nsfw: Bool?,
+  handler: Int?
 }
 
 create-global-command
 meta {
     doc: """
-POST /applications/{application_id}/commands - Create a global slash command. Takes up to 1 hour to propagate. `type`: 1=CHAT_INPUT (slash), 2=USER (context menu), 3=MESSAGE (context menu).
+    POST /applications/{application_id}/commands - Create (or overwrite by
+    name) a global command. Returns 201 for new, 200 for an update. A
+    CHAT_INPUT command needs a `description`.
 
-**Example**
+    **Example**
 
-```hot
-::interactions ::discord::interactions
+    ```hot
+    ::interactions ::discord::interactions
 
-::interactions/create-global-command(::interactions/CreateGlobalCommandRequest({
-  application_id: "123456789",
-  name: "hello",
-  description: "Say hello from Hot!",
-  options: [{
-    name: "name",
-    description: "Who to greet",
-    type: 3,
-    required: false
-  }]
-}))
-```
-"""
+    ::interactions/create-global-command(::interactions/CreateGlobalCommandRequest({
+      application_id: "1800000000000000000",
+      name: "hello",
+      description: "Say hello from Hot",
+      options: [{name: "name", description: "Who to greet", type: 3, required: false}],
+      contexts: [0, 1]
+    }))
+    ```
+    """
 }
-fn (request: CreateGlobalCommandRequest): Map {
-  body merge({}, {
-    name: request.name,
-    description: request.description,
-    options: request.options,
-    type: request.type,
-    dm_permission: request.dm_permission,
-    default_member_permissions: request.default_member_permissions,
-    nsfw: request.nsfw
-  })
-  response api-request("POST", `${::discord::core/BASE_URL}/applications/${request.application_id}/commands`, {}, body)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: CreateGlobalCommandRequest): Map {
+  create-global-command(request, {})
+},
+(request: CreateGlobalCommandRequest, opts: Map): Map {
+  ::api/call("POST", global-commands-path(request.application_id), {body: ::api/body(request, ["application_id"])}, opts)
 }
 
-BulkOverwriteGlobalCommandsRequest type {
+GetGlobalCommandRequest type {
   application_id: Str,
-  commands: Vec<Map>
+  command_id: Str
 }
 
-bulk-overwrite-global-commands
+get-global-command
 meta {
-    doc: """PUT /applications/{application_id}/commands - Overwrite all global commands. This replaces the entire set. Useful for syncing commands on deploy."""
+    doc: """GET /applications/{application_id}/commands/{command_id} - One global command."""
 }
-fn (request: BulkOverwriteGlobalCommandsRequest): Vec<Map> {
-  response api-request("PUT", `${::discord::core/BASE_URL}/applications/${request.application_id}/commands`, {}, request.commands)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: GetGlobalCommandRequest): Map {
+  get-global-command(request, {})
+},
+(request: GetGlobalCommandRequest, opts: Map): Map {
+  ::api/call("GET", `${global-commands-path(request.application_id)}/${seg(request.command_id)}`, {}, opts)
+}
+
+EditGlobalCommandRequest type {
+  application_id: Str,
+  command_id: Str,
+  name: Str?,
+  name_localizations: Map?,
+  description: Str?,
+  description_localizations: Map?,
+  options: Vec<Map>?,
+  default_member_permissions: Str?,
+  dm_permission: Bool?,
+  integration_types: Vec<Int>?,
+  contexts: Vec<Int>?,
+  nsfw: Bool?,
+  handler: Int?,
+  clear: Vec<Str>?
+}
+
+edit-global-command
+meta {
+    doc: """PATCH /applications/{application_id}/commands/{command_id} - Change a global command. Only fields you set are sent; `clear: ["default_member_permissions"]` resets permissions to the default."""
+}
+fn
+(request: EditGlobalCommandRequest): Map {
+  edit-global-command(request, {})
+},
+(request: EditGlobalCommandRequest, opts: Map): Map {
+  ::api/call("PATCH", `${global-commands-path(request.application_id)}/${seg(request.command_id)}`, {
+    body: ::api/body(request, ["application_id", "command_id"])
+  }, opts)
 }
 
 DeleteGlobalCommandRequest type {
@@ -297,9 +599,49 @@ delete-global-command
 meta {
     doc: """DELETE /applications/{application_id}/commands/{command_id} - Delete a global command."""
 }
-fn (request: DeleteGlobalCommandRequest): Bool {
-  response api-request("DELETE", `${::discord::core/BASE_URL}/applications/${request.application_id}/commands/${request.command_id}`)
-  if(is-ok-response(response), true, err(HttpError(response)))
+fn
+(request: DeleteGlobalCommandRequest): Bool {
+  delete-global-command(request, {})
+},
+(request: DeleteGlobalCommandRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `${global-commands-path(request.application_id)}/${seg(request.command_id)}`, {}, opts)
+}
+
+BulkOverwriteGlobalCommandsRequest type {
+  application_id: Str,
+  commands: Vec<Map>
+}
+
+bulk-overwrite-global-commands
+meta {
+    doc: """
+    PUT /applications/{application_id}/commands - Replace the whole set of
+    global commands (commands not listed are deleted). The usual way to
+    sync commands on deploy. Unset fields inside each command are dropped.
+
+    **Example**
+
+    ```hot
+    ::interactions ::discord::interactions
+
+    ::interactions/bulk-overwrite-global-commands(::interactions/BulkOverwriteGlobalCommandsRequest({
+      application_id: "1800000000000000000",
+      commands: [
+        {name: "ping", description: "Check the bot is alive"},
+        {name: "report", description: "Generate the daily report"}
+      ]
+    }))
+    ```
+    """
+}
+fn
+(request: BulkOverwriteGlobalCommandsRequest): Vec<Map> {
+  bulk-overwrite-global-commands(request, {})
+},
+(request: BulkOverwriteGlobalCommandsRequest, opts: Map): Vec<Map> {
+  ::api/call("PUT", global-commands-path(request.application_id), {
+    body: map(request.commands, (c) { ::api/body(c, []) })
+  }, opts)
 }
 
 GetGuildCommandsRequest type {
@@ -310,39 +652,105 @@ GetGuildCommandsRequest type {
 
 get-guild-commands
 meta {
-    doc: """GET /applications/{application_id}/guilds/{guild_id}/commands - List application commands for a specific guild. Guild commands are available immediately (no propagation delay)."""
+    doc: """GET /applications/{application_id}/guilds/{guild_id}/commands - The app's commands in one guild."""
 }
-fn (request: GetGuildCommandsRequest): Vec<Map> {
-  response api-request("GET", `${::discord::core/BASE_URL}/applications/${request.application_id}/guilds/${request.guild_id}/commands?with_localizations=${or(request.with_localizations, "")}`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: GetGuildCommandsRequest): Vec<Map> {
+  get-guild-commands(request, {})
+},
+(request: GetGuildCommandsRequest, opts: Map): Vec<Map> {
+  ::api/call("GET", guild-commands-path(request.application_id, request.guild_id), {query: {with_localizations: request.with_localizations}}, opts)
 }
 
 CreateGuildCommandRequest type {
   application_id: Str,
   guild_id: Str,
   name: Str,
+  name_localizations: Map?,
   description: Str?,
+  description_localizations: Map?,
   options: Vec<Map>?,
-  type: Int?,
   default_member_permissions: Str?,
+  type: Int?,
   nsfw: Bool?
 }
 
 create-guild-command
 meta {
-    doc: """POST /applications/{application_id}/guilds/{guild_id}/commands - Create a guild-specific command. Guild commands are available immediately (no 1-hour delay like globals)."""
+    doc: """POST /applications/{application_id}/guilds/{guild_id}/commands - Create (or overwrite by name) a guild command. Available immediately, which makes guild commands the way to test."""
 }
-fn (request: CreateGuildCommandRequest): Map {
-  body merge({}, {
-    name: request.name,
-    description: request.description,
-    options: request.options,
-    type: request.type,
-    default_member_permissions: request.default_member_permissions,
-    nsfw: request.nsfw
-  })
-  response api-request("POST", `${::discord::core/BASE_URL}/applications/${request.application_id}/guilds/${request.guild_id}/commands`, {}, body)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: CreateGuildCommandRequest): Map {
+  create-guild-command(request, {})
+},
+(request: CreateGuildCommandRequest, opts: Map): Map {
+  ::api/call("POST", guild-commands-path(request.application_id, request.guild_id), {
+    body: ::api/body(request, ["application_id", "guild_id"])
+  }, opts)
+}
+
+GetGuildCommandRequest type {
+  application_id: Str,
+  guild_id: Str,
+  command_id: Str
+}
+
+get-guild-command
+meta {
+    doc: """GET /applications/{application_id}/guilds/{guild_id}/commands/{command_id} - One guild command."""
+}
+fn
+(request: GetGuildCommandRequest): Map {
+  get-guild-command(request, {})
+},
+(request: GetGuildCommandRequest, opts: Map): Map {
+  ::api/call("GET", `${guild-commands-path(request.application_id, request.guild_id)}/${seg(request.command_id)}`, {}, opts)
+}
+
+EditGuildCommandRequest type {
+  application_id: Str,
+  guild_id: Str,
+  command_id: Str,
+  name: Str?,
+  name_localizations: Map?,
+  description: Str?,
+  description_localizations: Map?,
+  options: Vec<Map>?,
+  default_member_permissions: Str?,
+  nsfw: Bool?,
+  clear: Vec<Str>?
+}
+
+edit-guild-command
+meta {
+    doc: """PATCH /applications/{application_id}/guilds/{guild_id}/commands/{command_id} - Change a guild command. Only fields you set are sent."""
+}
+fn
+(request: EditGuildCommandRequest): Map {
+  edit-guild-command(request, {})
+},
+(request: EditGuildCommandRequest, opts: Map): Map {
+  ::api/call("PATCH", `${guild-commands-path(request.application_id, request.guild_id)}/${seg(request.command_id)}`, {
+    body: ::api/body(request, ["application_id", "guild_id", "command_id"])
+  }, opts)
+}
+
+DeleteGuildCommandRequest type {
+  application_id: Str,
+  guild_id: Str,
+  command_id: Str
+}
+
+delete-guild-command
+meta {
+    doc: """DELETE /applications/{application_id}/guilds/{guild_id}/commands/{command_id} - Delete a guild command."""
+}
+fn
+(request: DeleteGuildCommandRequest): Bool {
+  delete-guild-command(request, {})
+},
+(request: DeleteGuildCommandRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `${guild-commands-path(request.application_id, request.guild_id)}/${seg(request.command_id)}`, {}, opts)
 }
 
 BulkOverwriteGuildCommandsRequest type {
@@ -353,9 +761,31 @@ BulkOverwriteGuildCommandsRequest type {
 
 bulk-overwrite-guild-commands
 meta {
-    doc: """PUT /applications/{application_id}/guilds/{guild_id}/commands - Overwrite all guild commands. This replaces the entire set for the specified guild."""
+    doc: """PUT /applications/{application_id}/guilds/{guild_id}/commands - Replace every command in one guild."""
 }
-fn (request: BulkOverwriteGuildCommandsRequest): Vec<Map> {
-  response api-request("PUT", `${::discord::core/BASE_URL}/applications/${request.application_id}/guilds/${request.guild_id}/commands`, {}, request.commands)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: BulkOverwriteGuildCommandsRequest): Vec<Map> {
+  bulk-overwrite-guild-commands(request, {})
+},
+(request: BulkOverwriteGuildCommandsRequest, opts: Map): Vec<Map> {
+  ::api/call("PUT", guild-commands-path(request.application_id, request.guild_id), {
+    body: map(request.commands, (c) { ::api/body(c, []) })
+  }, opts)
+}
+
+GetGuildCommandPermissionsRequest type {
+  application_id: Str,
+  guild_id: Str
+}
+
+get-guild-command-permissions
+meta {
+    doc: """GET /applications/{application_id}/guilds/{guild_id}/commands/permissions - Permission overrides for every command in a guild. (Editing them needs a user OAuth2 Bearer token, not a bot token.)"""
+}
+fn
+(request: GetGuildCommandPermissionsRequest): Vec<Map> {
+  get-guild-command-permissions(request, {})
+},
+(request: GetGuildCommandPermissionsRequest, opts: Map): Vec<Map> {
+  ::api/call("GET", `${guild-commands-path(request.application_id, request.guild_id)}/permissions`, {}, opts)
 }

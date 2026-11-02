@@ -1,9 +1,19 @@
 ::firecrawl::integration ns
 meta ["test"]
 
-// Requires ctx: firecrawl.api.key
+// Requires FIRECRAWL_API_KEY; skips without it. Read-only: scrapes
+// https://example.com (1 credit).
+// Run with: hot test --project pkg-integration-firecrawl
+
+::ctx ::firecrawl::integration::ctx
+
 test-scrape
 meta ["test"] fn () {
-    page ::firecrawl/scrape("https://example.com", {formats: ["markdown"]})
-    assert(contains(lowercase(page.markdown), "example"), "scraped content")
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip(::ctx/UNCONFIGURED) }
+        => {
+            page ::firecrawl/scrape("https://example.com", {formats: ["markdown"]})
+            assert(contains(lowercase(page.markdown), "example"), "scraped content")
+        }
+    }
 }

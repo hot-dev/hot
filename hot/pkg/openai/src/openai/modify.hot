@@ -209,9 +209,17 @@ modify-assistant
 meta {
     doc: """POST /assistants/{assistant_id} - Update an assistant's configuration (model, name, instructions, tools, etc.)."""
 }
-fn (assistant-id: Str, request: ModifyAssistantRequest): ModifyAssistantResponse {
-  response api-request("POST", `${::openai/BASE_URL}/assistants/${assistant-id}`, {}, request)
-  if(is-ok-response(response), ModifyAssistantResponse(response.body), err(HttpError(response)))
+fn
+(assistant-id: Str, request: ModifyAssistantRequest): ModifyAssistantResponse {
+  modify-assistant(assistant-id, request, {})
+},
+(assistant-id: Str, request: ModifyAssistantRequest, opts: Map): ModifyAssistantResponse {
+  response api-request("POST", `/assistants/${assistant-id}`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ModifyAssistantResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ModifyCertificateRequest type {
@@ -232,9 +240,17 @@ modify-certificate
 meta {
     doc: """POST /organization/certificates/{certificate_id} - Update the name of a certificate."""
 }
-fn (request: ModifyCertificateRequest): ModifyCertificateResponse {
-  response api-request("POST", `${::openai/BASE_URL}/organization/certificates/{certificate_id}`, {}, request)
-  if(is-ok-response(response), ModifyCertificateResponse(response.body), err(HttpError(response)))
+fn
+(request: ModifyCertificateRequest): ModifyCertificateResponse {
+  modify-certificate(request, {})
+},
+(request: ModifyCertificateRequest, opts: Map): ModifyCertificateResponse {
+  response api-request("POST", "/organization/certificates/{certificate_id}", {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ModifyCertificateResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ModifyThreadRequest type {
@@ -255,9 +271,17 @@ modify-thread
 meta {
     doc: """POST /threads/{thread_id} - Update a thread's tool resources or metadata."""
 }
-fn (thread-id: Str, request: ModifyThreadRequest): ModifyThreadResponse {
-  response api-request("POST", `${::openai/BASE_URL}/threads/${thread-id}`, {}, request)
-  if(is-ok-response(response), ModifyThreadResponse(response.body), err(HttpError(response)))
+fn
+(thread-id: Str, request: ModifyThreadRequest): ModifyThreadResponse {
+  modify-thread(thread-id, request, {})
+},
+(thread-id: Str, request: ModifyThreadRequest, opts: Map): ModifyThreadResponse {
+  response api-request("POST", `/threads/${thread-id}`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ModifyThreadResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ModifyMessageRequest type {
@@ -286,9 +310,17 @@ modify-message
 meta {
     doc: """POST /threads/{thread_id}/messages/{message_id} - Update a message's metadata."""
 }
-fn (thread-id: Str, message-id: Str, request: ModifyMessageRequest): ModifyMessageResponse {
-  response api-request("POST", `${::openai/BASE_URL}/threads/${thread-id}/messages/${message-id}`, {}, request)
-  if(is-ok-response(response), ModifyMessageResponse(response.body), err(HttpError(response)))
+fn
+(thread-id: Str, message-id: Str, request: ModifyMessageRequest): ModifyMessageResponse {
+  modify-message(thread-id, message-id, request, {})
+},
+(thread-id: Str, message-id: Str, request: ModifyMessageRequest, opts: Map): ModifyMessageResponse {
+  response api-request("POST", `/threads/${thread-id}/messages/${message-id}`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ModifyMessageResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ModifyRunRequest type {
@@ -328,9 +360,17 @@ ModifyRunResponse type {
 
 modify-run
 meta {doc: """POST /threads/{thread_id}/runs/{run_id} - Update a run's metadata."""}
-fn (thread-id: Str, run-id: Str, request: ModifyRunRequest): ModifyRunResponse {
-  response api-request("POST", `${::openai/BASE_URL}/threads/${thread-id}/runs/${run-id}`, {}, request)
-  if(is-ok-response(response), ModifyRunResponse(response.body), err(HttpError(response)))
+fn
+(thread-id: Str, run-id: Str, request: ModifyRunRequest): ModifyRunResponse {
+  modify-run(thread-id, run-id, request, {})
+},
+(thread-id: Str, run-id: Str, request: ModifyRunRequest, opts: Map): ModifyRunResponse {
+  response api-request("POST", `/threads/${thread-id}/runs/${run-id}`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ModifyRunResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 ModifyVectorStoreRequest type {
@@ -358,7 +398,15 @@ modify-vector-store
 meta {
     doc: """POST /vector_stores/{vector_store_id} - Update a vector store's name, expiration, or metadata."""
 }
-fn (vector-store-id: Str, request: ModifyVectorStoreRequest): ModifyVectorStoreResponse {
-  response api-request("POST", `${::openai/BASE_URL}/vector_stores/${vector-store-id}`, {}, request)
-  if(is-ok-response(response), ModifyVectorStoreResponse(response.body), err(HttpError(response)))
+fn
+(vector-store-id: Str, request: ModifyVectorStoreRequest): ModifyVectorStoreResponse {
+  modify-vector-store(vector-store-id, request, {})
+},
+(vector-store-id: Str, request: ModifyVectorStoreRequest, opts: Map): ModifyVectorStoreResponse {
+  response api-request("POST", `/vector_stores/${vector-store-id}`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ModifyVectorStoreResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

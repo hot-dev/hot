@@ -1,0 +1,57 @@
+::elevenlabs::sound ns
+meta {doc: """ElevenLabs sound effects: generate a sound from a text prompt."""}
+
+::api ::elevenlabs::api
+
+// Body fields of POST /v1/sound-generation; anything else in `options`
+// (output_format, enable_logging) goes on the query string.
+BODY_FIELDS ["duration_seconds", "prompt_influence", "loop", "model_id"]
+
+sound-effect-body
+meta {
+    doc: """The JSON body for `sound-effect`: `text` plus the body fields present in `options` (nulls omitted). Exposed for testing."""
+}
+fn (text: Str, options: Map): Map {
+  reduce(BODY_FIELDS, (acc, field) { assoc-some(acc, field, get(options, field)) }, {text: text})
+}
+
+sound-effect-path
+meta {
+    doc: """`/v1/sound-generation` plus the query params (`output_format`, `enable_logging`) present in `options`. Exposed for testing."""
+}
+fn (options: Map): Str {
+  `/v1/sound-generation${::api/query-string({
+    output_format: get(options, "output_format"),
+    enable_logging: get(options, "enable_logging")
+  })}`
+}
+
+sound-effect
+meta {
+    ctx: {"elevenlabs.api.key": {required: false}},
+    doc: """
+    POST /v1/sound-generation: generate a sound effect from a text
+    prompt. Returns audio `Bytes` (mp3 by default). `options`:
+    `duration_seconds` (0.5-30; the model picks when unset),
+    `prompt_influence` (0-1, default 0.3), `loop` (seamless loop),
+    `model_id` ("eleven_text_to_sound_v2" default, or
+    "eleven_text_to_sound_v3"), `output_format`.
+
+    **Example**
+
+    ```hot
+    audio ::elevenlabs::sound/sound-effect("Glass shattering on a tile floor", {duration_seconds: 2.5})
+    ::hot::file/write-file-bytes("glass.mp3", audio)
+    ```
+    """
+}
+fn
+(text: Str): Bytes {
+  sound-effect(text, {})
+},
+(text: Str, options: Map): Bytes {
+  sound-effect(text, options, {})
+},
+(text: Str, options: Map, opts: Map): Bytes {
+  ::api/bytes("POST", sound-effect-path(options), sound-effect-body(text, options), opts)
+}

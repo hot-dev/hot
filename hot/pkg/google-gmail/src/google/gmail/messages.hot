@@ -1,0 +1,561 @@
+::google::gmail::messages ns
+meta {
+    doc: """
+    Messages: send (with HTML, attachments and large-message upload),
+    reply and reply-all in thread, forward, list and search, get, label
+    changes (one or many), trash and untrash, and attachment download.
+
+    **Sending.** `send` builds the MIME message with
+    `::google::gmail::mime/build-message` (header-injection safe). Up to
+    5 MiB it is sent as the JSON `raw` field; larger messages (up to
+    Gmail's 35 MB limit) go through the media-upload endpoint
+    (`/upload/gmail/v1/users/me/messages/send?uploadType=multipart`). The
+    From address is the authenticated user unless `from` names one of
+    their send-as aliases.
+
+    **Scopes.** Sending uses `gmail.send`; reading, listing and
+    attachments `gmail.readonly`; label changes, trash and untrash
+    `gmail.modify`. `reply`, `reply-all` and `forward` read the original
+    first, so they need `gmail.readonly` (or `gmail.modify`) as well as
+    `gmail.send`. Defaults only matter for service accounts; override
+    with `google.scopes` or `opts.scopes`.
+    """
+}
+
+::gmail ::google::gmail
+::api ::google::api
+::mime ::google::gmail::mime
+::parse ::google::gmail::parse
+Email ::google::gmail::parse/Email
+
+// Above this many raw bytes, messages go through the upload endpoint.
+UPLOAD_THRESHOLD 5242880
+// Gmail's limit for a sent message (35 MB).
+MAX_MESSAGE_BYTES 36700160
+// messages.batchModify takes at most 1000 ids per call.
+BATCH_LIMIT 1000
+MAX_PAGE_SIZE 500
+
+SEND_LOCAL_KEYS ["thread-id", "threadId", "upload", "self-email", "boundary"]
+REPLY_HEADERS ["Subject", "From", "Reply-To", "To", "Cc", "Message-ID", "References"]
+
+// ---------------------------------------------------------------------------
+// Sending
+// ---------------------------------------------------------------------------
+
+send-body
+meta {
+    doc: """The JSON body for `messages.send` / `drafts.create` (pure): `{raw, threadId?}` with `raw` base64url encoded."""
+}
+fn (raw: Bytes, thread-id: Str?): Map {
+  ::gmail/compact({raw: ::mime/to-raw(raw), threadId: thread-id})
+}
+
+thread-id-of fn (opts: Map): Str? {
+  or(get(opts, "thread-id"), get(opts, "threadId"))
+}
+
+use-upload
+meta {
+    doc: """True when a raw message of `size` bytes should use the media-upload endpoint: over 5 MiB, or `opts.upload` is true."""
+}
+fn (size: Int, opts: Map): Bool {
+  or(eq(get(opts, "upload"), true), gt(size, UPLOAD_THRESHOLD))
+}
+
+send-raw
+meta {
+    doc: """
+    POST /users/me/messages/send - send a complete RFC 5322 message
+    (Bytes or Str, e.g. from `::google::gmail::mime/build-message`).
+    Options: `thread-id` (add it to a thread), `upload: true` (force the
+    upload endpoint). Returns the sent message `{id, threadId,
+    labelIds}`. Scope: `gmail.send`.
+    """
+}
+fn
+(raw: Any): Map {
+  send-raw(raw, {})
+},
+(raw: Any, opts: Map): Map {
+  bytes ::mime/to-bytes(raw)
+  size length(bytes)
+  thread thread-id-of(opts)
+  cond {
+    gt(size, MAX_MESSAGE_BYTES) => { err(`google-gmail: the message is ${size} bytes; Gmail accepts at most ${MAX_MESSAGE_BYTES}`) }
+    use-upload(size, opts) => {
+      boundary ::mime/new-boundary()
+      ::api/json(::gmail/SEND_SCOPE, "POST", ::gmail/upload-url("/messages/send", {uploadType: "multipart"}),
+        {Content-Type: `multipart/related; boundary="${boundary}"`},
+        ::mime/build-related({threadId: thread}, bytes, boundary), ::gmail/creds(opts))
+    }
+    => { ::gmail/json(::gmail/SEND_SCOPE, "POST", ::gmail/url("/messages/send"), send-body(bytes, thread), opts) }
+  }
+}
+
+send
+meta {
+    doc: """
+    Build and send an email from a message Map: `to`, `cc`, `bcc`,
+    `from`, `reply-to`, `subject`, `text`, `html`, `attachments`,
+    `headers`, `in-reply-to`, `references` (see
+    `::google::gmail::mime`). Returns the sent message `{id, threadId,
+    labelIds}`, or an Err for an invalid address, header or attachment.
+    Options: `thread-id`, `upload`, plus credentials. Scope: `gmail.send`.
+
+    ```hot
+    ::google::gmail::messages/send({
+      to: ["Ada <ada@example.com>"],
+      cc: "ops@example.com",
+      subject: "Deploy finished",
+      text: "v2.3 is live.",
+      html: "<p><b>v2.3</b> is live.</p>",
+      attachments: [{filename: "changelog.md", content: "- faster builds\n", mime-type: "text/markdown"}]
+    })
+    ```
+    """
+}
+fn
+(message: Map): Map {
+  send(message, {})
+},
+(message: Map, opts: Map): Map {
+  boundary or(get(opts, "boundary"), ::mime/new-boundary())
+  raw ::mime/build-message(message, boundary)
+  if(is-err(raw), raw, send-raw(raw, opts))
+}
+
+send-message
+meta {
+    doc: """Send a plain-text email: `send-message("ada@example.com", "Hi", "Hello from Hot!")`. `to` may be a list (`"a@x.io, b@x.io"` or a Vec). Scope: `gmail.send`."""
+}
+fn
+(to: Any, subject: Str, text: Str): Map {
+  send({to: to, subject: subject, text: text}, {})
+},
+(to: Any, subject: Str, text: Str, opts: Map): Map {
+  send({to: to, subject: subject, text: text}, opts)
+}
+
+// ---------------------------------------------------------------------------
+// Replies and forwards
+// ---------------------------------------------------------------------------
+
+reply-subject
+meta {
+    doc: """`"Re: <subject>"`, unless the subject already starts with `Re:` (any case)."""
+}
+fn (subject: Str?): Str {
+  s trim(or(subject, ""))
+  if(::hot::regex/is-match(s, "(?i)^re:"), s, trim(`Re: ${s}`))
+}
+
+forward-subject
+meta {doc: """`"Fwd: <subject>"`, unless it already starts with `Fwd:` or `Fw:`."""}
+fn (subject: Str?): Str {
+  s trim(or(subject, ""))
+  if(::hot::regex/is-match(s, "(?i)^fwd?:"), s, trim(`Fwd: ${s}`))
+}
+
+reply-fields
+meta {
+    doc: """
+    The addressing and threading fields for replying to `original` (a
+    message resource with headers), as a message Map (pure): `to`, `cc`,
+    `subject`, `in-reply-to`, `references` and `thread-id`.
+
+    - Replies go to `Reply-To`, else `From`; replying to a message you
+      sent goes to its original recipients.
+    - With `all`, the original `To` and `Cc` are copied to `cc`, without
+      duplicates and without `self-email` (your own address).
+    - `In-Reply-To` is the original `Message-ID`; `References` is the
+      original `References` plus its `Message-ID`, so Gmail and other
+      clients thread the reply.
+    """
+}
+fn (original: Map, self-email: Str?, all: Bool): Map {
+  h ::parse/headers(original)
+  me lowercase(trim(or(self-email, "")))
+  from-emails ::mime/emails(get(h, "from"))
+  reply-to-emails ::mime/emails(get(h, "reply-to"))
+  sent-by-me and(not(eq(me, "")), in(me, from-emails))
+  primary cond {
+    sent-by-me => { ::mime/emails(get(h, "to")) }
+    not(is-empty(reply-to-emails)) => { reply-to-emails }
+    => { from-emails }
+  }
+
+  to distinct(primary)
+  others if(all, concat(::mime/emails(get(h, "to")), ::mime/emails(get(h, "cc"))), [])
+  cc distinct(filter(others, (e) { and(not(in(e, to)), not(eq(e, me))) }))
+  message-id get(h, "message-id")
+  references distinct(concat(::mime/message-ids(get(h, "references")), ::mime/message-ids(message-id)))
+  ::gmail/compact({
+    to: to,
+    cc: if(is-empty(cc), null, cc),
+    subject: reply-subject(get(h, "subject")),
+    in-reply-to: message-id,
+    references: if(is-empty(references), null, references),
+    thread-id: get(original, "threadId")
+  })
+}
+
+self-email fn (opts: Map): Str? {
+  given get(opts, "self-email")
+  cond {
+    is-some(given) => { given }
+    => {
+      profile ::gmail/json(::gmail/READ_SCOPE, "GET", ::gmail/url("/profile"), "", opts)
+      if(is-err(profile), null, profile.emailAddress)
+    }
+  }
+}
+
+prepare-reply
+meta {
+    doc: """Fetch `message-id`'s headers and return the reply message Map (`reply-fields` merged under your `reply` fields) with its `thread-id`. Used by `reply`, `reply-all` and `::google::gmail::drafts/create-reply-draft`. Scope: `gmail.readonly`."""
+}
+fn (message-id: Str, reply: Map, all: Bool, opts: Map): Map {
+  original get-message(message-id, {...::gmail/creds(opts), format: "metadata", metadataHeaders: REPLY_HEADERS})
+  cond {
+    is-err(original) => { original }
+    => { {...reply-fields(original, self-email(opts), all), ...reply} }
+  }
+}
+
+reply
+meta {
+    doc: """
+    Reply to a message, in its thread: fetches the original's headers,
+    addresses the reply to its sender (`Reply-To` first), sets `Re:`,
+    `In-Reply-To` and `References`, and sends `reply` (a message Map with
+    at least `text` or `html`; any field you set wins). Options:
+    `self-email` (skips a profile lookup), credentials. Scopes:
+    `gmail.readonly` and `gmail.send`.
+
+    ```hot
+    ::google::gmail::messages/reply(email.id, {text: "Thanks, merged."})
+    ```
+    """
+}
+fn
+(message-id: Str, reply: Map): Map {
+  reply(message-id, reply, {})
+},
+(message-id: Str, reply: Map, opts: Map): Map {
+  message prepare-reply(message-id, reply, false, opts)
+  if(is-err(message), message, send(message, {...opts, thread-id: message.thread-id}))
+}
+
+reply-all
+meta {
+    doc: """Like `reply`, but also copies the original `To` and `Cc` (minus you) onto `cc`. Scopes: `gmail.readonly` and `gmail.send`."""
+}
+fn
+(message-id: Str, reply: Map): Map {
+  reply-all(message-id, reply, {})
+},
+(message-id: Str, reply: Map, opts: Map): Map {
+  message prepare-reply(message-id, reply, true, opts)
+  if(is-err(message), message, send(message, {...opts, thread-id: message.thread-id}))
+}
+
+forward
+meta {
+    doc: """
+    Forward a message: the original is attached whole (as
+    `message/rfc822`, with its attachments) to a new message built from
+    `message` (at least `to`; `text`/`html` for a note). The subject
+    defaults to `Fwd: <original subject>`. Scopes: `gmail.readonly` and
+    `gmail.send`.
+
+    ```hot
+    ::google::gmail::messages/forward(email.id, {to: "legal@example.com", text: "FYI, see below."})
+    ```
+    """
+}
+fn
+(message-id: Str, message: Map): Map {
+  forward(message-id, message, {})
+},
+(message-id: Str, message: Map, opts: Map): Map {
+  creds ::gmail/creds(opts)
+  raw get-message(message-id, {...creds, format: "raw"})
+  meta-message if(is-err(raw), raw, get-message(message-id, {...creds, format: "metadata", metadataHeaders: ["Subject"]}))
+  cond {
+    is-err(raw) => { raw }
+    is-err(meta-message) => { meta-message }
+    => {
+      original {filename: "forwarded-message.eml", content: ::parse/decode-data(raw.raw), mime-type: "message/rfc822"}
+      send({
+        ...message,
+        subject: or(get(message, "subject"), forward-subject(::parse/header(meta-message, "subject"))),
+        text: if(and(is-null(get(message, "text")), is-null(get(message, "html"))), "", get(message, "text")),
+        attachments: concat(or(get(message, "attachments"), []), [original])
+      }, opts)
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Listing and reading
+// ---------------------------------------------------------------------------
+
+list-params
+meta {
+    doc: """
+    The query parameters `list-messages` sends (pure): your Gmail
+    parameters (`q`, `maxResults` up to 500, `pageToken`, `labelIds` -
+    a Vec, sent repeated - and `includeSpamTrash`) with nulls and
+    credential keys dropped.
+    """
+}
+fn (opts: Map): Map {
+  ::gmail/query-params({}, opts)
+}
+
+list-messages
+meta {
+    doc: """
+    GET /users/me/messages - one page of message ids: `{messages: [{id,
+    threadId}], nextPageToken?, resultSizeEstimate}`. A Str argument is
+    a Gmail search (`"from:boss is:unread newer_than:2d"`). Follow
+    `nextPageToken` with `{pageToken}` or use `list-all-messages`. Scope:
+    `gmail.readonly`.
+    """
+}
+fn
+(): Map {
+  list-messages({})
+},
+(query: Str): Map {
+  list-messages({q: query})
+},
+(opts: Map): Map {
+  ::gmail/json(::gmail/READ_SCOPE, "GET", ::gmail/url("/messages", list-params(opts)), "", opts)
+}
+
+page-size fn (limit: Int?): Int {
+  if(is-some(limit), min(MAX_PAGE_SIZE, max(or(limit, 1), 1)), MAX_PAGE_SIZE)
+}
+
+list-all-messages
+meta {
+    doc: """
+    Follow `nextPageToken` and return every matching `{id, threadId}`,
+    or at most `limit`. Takes the same `opts` as `list-messages` (a Str
+    is a search). Uses `maxResults: 500` (or `limit` when smaller).
+    Scope: `gmail.readonly`.
+    """
+}
+fn
+(opts: Any): Vec {
+  list-all-messages(opts, null)
+},
+(opts: Any, limit: Int?): Vec {
+  base if(is-str(opts), {q: opts}, opts)
+  sized if(is-some(get(base, "maxResults")), base, {...base, maxResults: page-size(limit)})
+  ::api/collect-pages((token) { list-messages({...sized, pageToken: token}) }, "messages", limit)
+}
+
+get-message
+meta {
+    doc: """
+    GET /users/me/messages/{id} - a message. Options: `format` (`full`,
+    the default: headers and decoded-able parts; `metadata` with
+    `metadataHeaders` as a Vec; `minimal`; `raw`: the whole RFC 5322
+    message base64url encoded). Read it with `::google::gmail::parse`.
+    Scope: `gmail.readonly` (`gmail.metadata` allows `metadata` and
+    `minimal` only).
+    """
+}
+fn
+(id: Str): Map {
+  get-message(id, {})
+},
+(id: Str, opts: Map): Map {
+  params ::gmail/query-params({format: "full"}, opts)
+  ::gmail/json(::gmail/READ_SCOPE, "GET", ::gmail/url(`/messages/${::gmail/encode-id(id)}`, params), "", opts)
+}
+
+get-email
+meta {
+    doc: """`get-message` (full format) flattened with `::google::gmail::parse/to-email`. Scope: `gmail.readonly`."""
+}
+fn
+(id: Str): Email {
+  get-email(id, {})
+},
+(id: Str, opts: Map): Email {
+  message get-message(id, {...opts, format: "full"})
+  if(is-err(message), message, ::parse/to-email(message))
+}
+
+search-emails
+meta {
+    doc: """
+    Search with Gmail syntax and return up to `limit` (default 25)
+    matching messages as `Email` records, newest first. Makes one call
+    per message after the search. Scope: `gmail.readonly`.
+
+    ```hot
+    invoices ::google::gmail::messages/search-emails("from:billing@vendor.com has:attachment newer_than:30d", 10)
+    map(invoices, (e) { {subject: e.subject, files: map(e.attachments, (a) { a.filename })} })
+    ```
+    """
+}
+fn
+(query: Str): Vec {
+  search-emails(query, 25, {})
+},
+(query: Str, limit: Int): Vec {
+  search-emails(query, limit, {})
+},
+(query: Str, limit: Int, opts: Map): Vec {
+  ids list-all-messages({...opts, q: query}, limit)
+  if(is-err(ids), ids, map(ids, (m) { get-email(m.id, ::gmail/creds(opts)) }))
+}
+
+// ---------------------------------------------------------------------------
+// Labels, trash
+// ---------------------------------------------------------------------------
+
+label-changes
+meta {
+    doc: """The `{addLabelIds, removeLabelIds}` body (pure), omitting an empty or null side."""
+}
+fn (add-label-ids: Vec?, remove-label-ids: Vec?): Map {
+  add or(add-label-ids, [])
+  remove or(remove-label-ids, [])
+  ::gmail/compact({
+    addLabelIds: if(is-empty(add), null, add),
+    removeLabelIds: if(is-empty(remove), null, remove)
+  })
+}
+
+modify-message
+meta {
+    doc: """POST /users/me/messages/{id}/modify - add and remove label ids: `modify-message(id, ["STARRED"], ["UNREAD"])` stars and marks read. Returns the message. Scope: `gmail.modify`."""
+}
+fn
+(id: Str, add-label-ids: Vec, remove-label-ids: Vec): Map {
+  modify-message(id, add-label-ids, remove-label-ids, {})
+},
+(id: Str, add-label-ids: Vec, remove-label-ids: Vec, opts: Map): Map {
+  ::gmail/json(::gmail/MODIFY_SCOPE, "POST", ::gmail/url(`/messages/${::gmail/encode-id(id)}/modify`), label-changes(add-label-ids, remove-label-ids), opts)
+}
+
+batch-modify
+meta {
+    doc: """POST /users/me/messages/batchModify - change labels on many messages, 1000 ids per call (larger Vecs are split). Returns true. Scope: `gmail.modify`."""
+}
+fn
+(ids: Vec, add-label-ids: Vec, remove-label-ids: Vec): Bool {
+  batch-modify(ids, add-label-ids, remove-label-ids, {})
+},
+(ids: Vec, add-label-ids: Vec, remove-label-ids: Vec, opts: Map): Bool {
+  changes label-changes(add-label-ids, remove-label-ids)
+  results map(partition(ids, BATCH_LIMIT), (chunk) {
+    ::gmail/json(::gmail/MODIFY_SCOPE, "POST", ::gmail/url("/messages/batchModify"), {ids: chunk, ...changes}, opts)
+  }, OnErr.Preserve)
+  failed find-first(results, (r: Result) { is-err(r) })
+  if(is-some(failed), failed, true)
+}
+
+mark-read
+meta {doc: """Remove the `UNREAD` label. Scope: `gmail.modify`."""}
+fn
+(id: Str): Map {
+  mark-read(id, {})
+},
+(id: Str, opts: Map): Map {
+  modify-message(id, [], ["UNREAD"], opts)
+}
+
+mark-unread
+meta {doc: """Add the `UNREAD` label. Scope: `gmail.modify`."""}
+fn
+(id: Str): Map {
+  mark-unread(id, {})
+},
+(id: Str, opts: Map): Map {
+  modify-message(id, ["UNREAD"], [], opts)
+}
+
+archive-message
+meta {doc: """Remove the `INBOX` label (Gmail's Archive). Scope: `gmail.modify`."""}
+fn
+(id: Str): Map {
+  archive-message(id, {})
+},
+(id: Str, opts: Map): Map {
+  modify-message(id, [], ["INBOX"], opts)
+}
+
+trash-message
+meta {
+    doc: """POST /users/me/messages/{id}/trash - move a message to the trash (Gmail deletes it after 30 days; `untrash-message` restores it). Permanent deletion needs the full `https://mail.google.com/` scope and is not wrapped. Scope: `gmail.modify`."""
+}
+fn
+(id: Str): Map {
+  trash-message(id, {})
+},
+(id: Str, opts: Map): Map {
+  ::gmail/json(::gmail/MODIFY_SCOPE, "POST", ::gmail/url(`/messages/${::gmail/encode-id(id)}/trash`), "", opts)
+}
+
+untrash-message
+meta {
+    doc: """POST /users/me/messages/{id}/untrash - restore a message from the trash. Scope: `gmail.modify`."""
+}
+fn
+(id: Str): Map {
+  untrash-message(id, {})
+},
+(id: Str, opts: Map): Map {
+  ::gmail/json(::gmail/MODIFY_SCOPE, "POST", ::gmail/url(`/messages/${::gmail/encode-id(id)}/untrash`), "", opts)
+}
+
+// ---------------------------------------------------------------------------
+// Attachments
+// ---------------------------------------------------------------------------
+
+get-attachment
+meta {
+    doc: """GET /users/me/messages/{messageId}/attachments/{id} - an attachment's bytes (decoded from Gmail's base64url). Get ids from `::google::gmail::parse/attachments`. Scope: `gmail.readonly`."""
+}
+fn
+(message-id: Str, attachment-id: Str): Bytes {
+  get-attachment(message-id, attachment-id, {})
+},
+(message-id: Str, attachment-id: Str, opts: Map): Bytes {
+  body ::gmail/json(::gmail/READ_SCOPE, "GET",
+    ::gmail/url(`/messages/${::gmail/encode-id(message-id)}/attachments/${::gmail/encode-id(attachment-id)}`), "", opts)
+  if(is-err(body), body, ::parse/decode-data(body.data))
+}
+
+attachment-bytes
+meta {
+    doc: """
+    The bytes of an `Attachment` (from `::google::gmail::parse/attachments`
+    or `Email.attachments`): its inline `data`, or a `get-attachment`
+    call. Scope: `gmail.readonly`.
+
+    ```hot
+    email ::google::gmail::messages/get-email(id)
+    pdf first(filter(email.attachments, (a) { eq(a.mime-type, "application/pdf") }))
+    bytes ::google::gmail::messages/attachment-bytes(pdf)
+    ```
+    """
+}
+fn
+(attachment: Map): Bytes {
+  attachment-bytes(attachment, {})
+},
+(attachment: Map, opts: Map): Bytes {
+  cond {
+    is-some(get(attachment, "data")) => { attachment.data }
+    is-null(get(attachment, "attachment-id")) => { Bytes([]) }
+    => { get-attachment(attachment.message-id, attachment.attachment-id, opts) }
+  }
+}

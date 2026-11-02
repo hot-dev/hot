@@ -1,0 +1,162 @@
+::elevenlabs::test::opts ns
+meta ["test"]
+
+// Hermetic: no network and no elevenlabs.* context.
+
+::api ::elevenlabs::api
+::history ::elevenlabs::history
+::models ::elevenlabs::models
+::sound ::elevenlabs::sound
+::stt ::elevenlabs::stt
+::tts ::elevenlabs::tts
+::user ::elevenlabs::user
+::voices ::elevenlabs::voices
+::wh ::elevenlabs::webhooks
+
+OFFLINE {api-key: "tenant-key", base-url: "http://127.0.0.1:1"}
+
+// Nothing listens on port 1, so a call fails at the socket, with the URL
+// in the error. That error proves the call got past the credential check
+// and used this `opts`, without any network traffic.
+reaches fn (result: Result): Bool {
+    and(is-err(result), contains(err-message(result), "127.0.0.1:1"))
+}
+
+test-resolve-opts-override-ctx
+meta ["test"] fn () {
+    r ::api/resolve-from({api-key: "opt-key", base-url: "https://proxy.example/xi/"}, {"elevenlabs.api.key": "ctx-key"})
+    assert-eq("opt-key", r.api-key)
+    assert-eq("https://proxy.example/xi", r.base-url, "the trailing slash goes")
+}
+
+test-resolve-ctx-used-when-opts-empty
+meta ["test"] fn () {
+    r ::api/resolve-from({}, {"elevenlabs.api.key": "ctx-key"})
+    assert-eq("ctx-key", r.api-key)
+    assert-eq("https://api.elevenlabs.io", r.base-url)
+}
+
+test-resolve-missing-credential-is-a-clear-error
+meta ["test"] fn () {
+    out ::api/resolve-from({}, {})
+    assert(is-err(out))
+    assert(contains(err-message(out), "elevenlabs.api.key"))
+}
+
+test-resolve-returns-marked-value-unchanged
+meta ["test"] fn () {
+    assert-eq("call-key-value", ::api/resolve({api-key: "call-key-value"}).api-key)
+}
+
+test-resolve-never-writes-ctx
+meta ["test"] fn () {
+    before ::hot::ctx/get("elevenlabs.api.key")
+    assert-eq("call-key", ::api/resolve({api-key: "call-key"}).api-key)
+    assert(reaches(::user/get-user(OFFLINE)))
+    assert-eq(before, ::hot::ctx/get("elevenlabs.api.key"))
+}
+
+test-blank-credential-in-opts-is-an-error
+meta ["test"] fn () {
+    ctx {"elevenlabs.api.key": "ctx-key"}
+    results map([{api-key: ""}, {api-key: "   "}, {api-key: null}], (o) {
+        out ::api/resolve-from(o, ctx)
+        assert(is-err(out), "never falls back to elevenlabs.api.key")
+        assert(contains(err-message(out), "api-key"))
+        true
+    })
+    assert-eq(3, length(results))
+    assert(is-err(::voices/get-voice("v", {api-key: ""})), "the error reaches the caller")
+}
+
+test-base-url-without-credential-is-an-error
+meta ["test"] fn () {
+    out ::api/resolve-from({base-url: "https://collector.example"}, {"elevenlabs.api.key": "ctx_secret_key"})
+    assert(is-err(out), "the context key must not go to a per-call URL")
+    assert(contains(err-message(out), "base-url"))
+    assert(contains(err-message(out), "api-key"))
+    assert(not(contains(err-message(out), "ctx_secret_key")), "the key stays out of messages")
+    assert-eq("https://collector.example", ::api/resolve-from({base-url: "https://collector.example", api-key: "tenant"}, {"elevenlabs.api.key": "ctx_secret_key"}).base-url)
+    assert-eq("ctx_secret_key", ::api/resolve-from({base-url: ""}, {"elevenlabs.api.key": "ctx_secret_key"}).api-key, "a blank base-url is the default root")
+}
+
+test-base-url-without-credential-sends-nothing
+meta ["test"] fn () {
+    before ::hot::ctx/get("elevenlabs.api.key")
+    ::hot::ctx/set-secret("elevenlabs.api.key", "ctx_secret_key")
+    assert-eq("ctx_secret_key", ::api/resolve({}).api-key, "control: the live context key is set")
+    out ::voices/get-voice("v", {base-url: "http://127.0.0.1:1"})
+    assert(is-err(out))
+    assert(contains(err-message(out), "base-url"))
+    assert(not(reaches(out)), "no request was attempted: the failure isn't the socket")
+    assert(reaches(::voices/get-voice("v", OFFLINE)), "control: with a credential it reaches the socket")
+    ::hot::ctx/set-secret("elevenlabs.api.key", before)
+}
+
+test-build-request
+meta ["test"] fn () {
+    bare ::api/build-request("GET", "/v1/user", {}, "", ::api/resolve-from({api-key: "a"}, {}))
+    assert-eq("https://api.elevenlabs.io/v1/user", bare.url)
+    assert-eq("a", bare.headers.xi-api-key)
+    assert(is-null(get(bare.headers, "Content-Type")))
+    posted ::api/build-request("POST", "/v1/x", {X-Extra: "1"}, {a: 1}, {api-key: "b", base-url: "https://proxy.example"})
+    assert-eq("https://proxy.example/v1/x", posted.url)
+    assert-eq("application/json", get(posted.headers, "Content-Type"))
+    assert-eq("1", get(posted.headers, "X-Extra"))
+    assert-eq({a: 1}, from-json(posted.body))
+}
+
+test-opts-reach-every-function
+meta ["test"] fn () {
+    audio Bytes("x")
+    request ::tts/TextToSpeechRequest({text: "hi"})
+    stt ::stt/SpeechToTextRequest({})
+    assert(reaches(::api/request("GET", "/v1/user", {}, "", OFFLINE)))
+    assert(reaches(::api/json("GET", "/v1/user", {}, "", OFFLINE)))
+    assert(reaches(::api/bytes("GET", "/v1/user", "", OFFLINE)))
+    assert(reaches(::voices/list-voices({}, OFFLINE)))
+    assert(reaches(::voices/search-voices("q", OFFLINE)))
+    assert(reaches(::voices/get-voice("v", OFFLINE)))
+    assert(reaches(::voices/get-voice-settings("v", OFFLINE)))
+    assert(reaches(::voices/get-default-voice-settings(OFFLINE)))
+    assert(reaches(::history/list-history({}, OFFLINE)))
+    assert(reaches(::history/get-history-item("h", OFFLINE)))
+    assert(reaches(::history/get-history-audio("h", OFFLINE)))
+    assert(reaches(::history/delete-history-item("h", OFFLINE)))
+    assert(reaches(::user/get-user(OFFLINE)))
+    assert(reaches(::user/get-subscription(OFFLINE)))
+    assert(reaches(::models/list-models(OFFLINE)))
+    assert(reaches(::sound/sound-effect("door", {}, OFFLINE)))
+    assert(reaches(::tts/text-to-speech("v", request, null, OFFLINE)))
+    assert(reaches(::tts/text-to-speech-with-timestamps("v", request, null, OFFLINE)))
+    assert(reaches(::tts/text-to-speech-stream("v", request, null, OFFLINE)))
+    assert(reaches(::stt/speech-to-text(audio, stt, OFFLINE)))
+    assert(reaches(::stt/speech-to-text(audio, stt, "a.mp3", OFFLINE)))
+    assert(reaches(::stt/speech-to-text-url("https://example.com/a.mp3", stt, OFFLINE)))
+    assert(reaches(::stt/get-transcript("t", OFFLINE)))
+    assert(reaches(::stt/delete-transcript("t", OFFLINE)))
+}
+
+test-explicit-key-arity-still-works
+meta ["test"] fn () {
+    out ::api/request("GET", "/v1/user", {}, "", "")
+    assert(is-err(out), "a blank explicit key is an error")
+    assert(contains(err-message(out), "api-key"))
+}
+
+test-existing-arity-reads-ctx
+meta ["test"] fn () {
+    before ::hot::ctx/get("elevenlabs.api.key")
+    ::hot::ctx/set("elevenlabs.api.key", "")
+    out ::user/get-user()
+    assert(is-err(out))
+    assert(contains(err-message(out), "elevenlabs.api.key"))
+    ::hot::ctx/set("elevenlabs.api.key", before)
+}
+
+test-webhook-null-or-blank-secret-never-verifies
+meta ["test"] fn () {
+    request {headers: {elevenlabs-signature: "t=1,v0=abc"}, body-raw: "{}"}
+    assert(not(::wh/verify-request(request, null)))
+    assert(not(::wh/verify-request(request, "   ")))
+}

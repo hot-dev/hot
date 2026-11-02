@@ -1,0 +1,105 @@
+::elevenlabs::webhooks ns
+meta {
+    doc: """
+    ElevenLabs webhook verification. Each delivery carries an
+    `ElevenLabs-Signature` header of the form `t=<unix seconds>,v0=<hex>`,
+    where the hex value is HMAC-SHA256 of `<t>.<raw body>` keyed with the
+    webhook's secret. Deliveries older than 30 minutes are rejected, as
+    in ElevenLabs' docs and SDKs. See
+    https://elevenlabs.io/docs/product-guides/administration/webhooks.
+    """
+}
+
+::ctx ::hot::ctx
+::hmac ::hot::hmac
+::time ::hot::time
+
+// ElevenLabs' documented tolerance: 30 minutes.
+DEFAULT_TOLERANCE_SECONDS 1800
+
+parse-signature-header
+meta {
+    doc: """Split an `ElevenLabs-Signature` header into `{timestamp, signatures}` (`timestamp` is the `t=` value as a Str, or null; `signatures` every `v0=` value). Exposed for testing."""
+}
+fn (header: Str): Map {
+  reduce(split(header, ","), (acc, part) {
+    item trim(part)
+    cond {
+      starts-with(item, "t=") => { {...acc, timestamp: slice(item, 2)} }
+      starts-with(item, "v0=") => { {...acc, signatures: concat(acc.signatures, [slice(item, 3)])} }
+      => { acc }
+    }
+  }, {timestamp: null, signatures: []})
+}
+
+verify-request
+meta {
+    ctx: {"elevenlabs.webhook.secret": {required: false}},
+    doc: """
+    Verify an ElevenLabs webhook request: checks the
+    `ElevenLabs-Signature` HMAC over `<t>.<raw body>`, then rejects
+    deliveries whose signed timestamp is more than `tolerance-seconds`
+    from now (default 1800, ElevenLabs' 30 minutes). Pass a tolerance of
+    0 or less to skip the age check. Uses the
+    `elevenlabs.webhook.secret` context variable by default (failing
+    when it is unset), or an explicit secret, which is masked in call
+    records; an empty explicit secret never verifies.
+
+    **Example**
+
+    ```hot
+    elevenlabs-webhook
+    meta {webhook: {service: "elevenlabs", path: "/elevenlabs/webhook"}}
+    fn (request) {
+      if(not(::elevenlabs::webhooks/verify-request(request)),
+        ::hot::http/HttpResponse({status: 401, body: "invalid signature"}),
+        ::hot::http/HttpResponse({status: 200, body: {received: request.body.type}}))
+    }
+    ```
+    """
+}
+fn
+(request: Map): Bool {
+  secret or(::ctx/get("elevenlabs.webhook.secret"), "")
+  if(is-empty(secret),
+    fail("elevenlabs.webhook.secret is not set. Add it in Context Variables to verify ElevenLabs webhooks.")
+  )
+  verify-request(request, secret)
+},
+(request: Map, secret: Str?): Bool {
+  verify-request(request, secret, DEFAULT_TOLERANCE_SECONDS)
+},
+(request: Map, secret: Str?, tolerance-seconds: Int): Bool {
+  header or(get(or(get(request, "headers"), {}), "elevenlabs-signature"), "")
+  parsed parse-signature-header(header)
+  timestamp parsed.timestamp
+  cond {
+    // An empty key would make every signature forgeable: fail closed.
+    or(is-null(secret), is-blank(secret)) => { false }
+    or(is-null(timestamp), is-empty(Str(timestamp))) => { false }
+    is-empty(parsed.signatures) => { false }
+    => {
+      key ::ctx/mark-secret(secret)
+      raw-body ::hot::http/raw-body(request)
+      signed concat(Bytes(`${timestamp}.`), if(is-bytes(raw-body), raw-body, Bytes(raw-body)))
+      matched some(parsed.signatures, (sig) { ::hmac/hmac-verify-hex(key, signed, sig, "sha256") })
+      cond {
+        not(matched) => { false }
+        // The signature is what makes the timestamp trustworthy, so the
+        // age check runs only after verification succeeds.
+        lte(tolerance-seconds, 0) => { true }
+        => { timestamp-fresh(timestamp, tolerance-seconds) }
+      }
+    }
+  }
+}
+
+// True when the signed unix-seconds timestamp is within tolerance of now,
+// in either direction. Malformed timestamps fail closed.
+timestamp-fresh fn (timestamp: Str, tolerance-seconds: Int): Bool {
+  digits ::hot::regex/is-match(timestamp, "^[0-9]{1,12}$")
+  cond {
+    not(digits) => { false }
+    => { lte(abs(sub(::time/epoch-seconds(), Int(timestamp))), tolerance-seconds) }
+  }
+}

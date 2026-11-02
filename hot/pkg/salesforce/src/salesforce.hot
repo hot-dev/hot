@@ -1,21 +1,25 @@
 ::salesforce ns
 meta {
     doc: """
-    Salesforce bindings: SObject CRUD and SOQL over the REST API.
+    Salesforce bindings over the REST API: sObject CRUD and external-id
+    upserts, SOQL (with auto-paging), SOSL search, describe, sObject
+    collections and composite requests, Bulk API 2.0 ingest and query
+    jobs, and org limits.
 
-    **Setup** — set ONE auth mode in context, checked in order:
+    **Setup**: set ONE auth flow in context, or pass credentials per call
+    in a trailing `opts` Map on any API-calling function. See `::salesforce::auth`
+    for the full matrix; in short:
 
-    1. `salesforce.access.token` + `salesforce.instance.url` — a token
-       you manage
-    2. `salesforce.client-id` + `salesforce.client-secret` — connected
-       app client-credentials flow
-    3. `salesforce.client-id` + `salesforce.username` +
-       `salesforce.private.key` — connected app JWT-bearer flow (RS256
-       with the app's certificate key; built on hot.dev/jwt)
+    | Flow | Context variables |
+    |---|---|
+    | Access token | `salesforce.access.token` + `salesforce.instance.url` |
+    | Refresh token | `salesforce.client-id` + `salesforce.refresh-token` (+ `salesforce.client-secret` for confidential apps) |
+    | JWT bearer | `salesforce.client-id` + `salesforce.username` + `salesforce.private.key` |
+    | Client credentials | `salesforce.client-id` + `salesforce.client-secret` + `salesforce.my-domain.url` |
 
-    Optional `salesforce.login.url` overrides the default
-    `https://login.salesforce.com` (use your My Domain URL, or
-    `https://test.salesforce.com` for sandboxes).
+    `salesforce.sandbox` ("true") switches the login host and JWT
+    audience to `test.salesforce.com`. Sessions are cached for the rest
+    of the run and re-minted once on `401 INVALID_SESSION_ID`.
 
     **Quick start**
 
@@ -29,11 +33,17 @@ meta {
       Email: "ada@example.com"
     })
 
-    hot-leads ::query/soql("SELECT Id, Name, Email FROM Lead WHERE Rating = 'Hot' LIMIT 20")
-    map(hot-leads.records, (r) { r.Name })
+    hot-leads ::query/soql-records(`SELECT Id, Name, Email FROM Lead WHERE Company = ${::query/literal("Analytical Engines")}`)
+    map(hot-leads, (r) { r.Name })
     ```
     """
 }
 
-DEFAULT_LOGIN_URL "https://login.salesforce.com"
-API_VERSION "v62.0"
+DEFAULT_API_VERSION
+meta {
+    doc: """The REST API version used when `salesforce.api.version` is unset: v68.0 (Winter '27). Override per org with the context variable."""
+}
+"v68.0"
+
+LOGIN_URL "https://login.salesforce.com"
+TEST_URL "https://test.salesforce.com"

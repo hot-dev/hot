@@ -1,9 +1,11 @@
 ::stripe::customers ns
+meta {
+    doc: """Customers: create, retrieve, update, delete, list, and search. See https://docs.stripe.com/api/customers."""
+}
 
-api-request ::stripe::api/request
-query-string ::stripe::api/query-string
-HttpError ::stripe::api/HttpError
-is-ok-response ::hot::http/is-ok-response
+api-call ::stripe::api/call
+seg ::stripe::api/encode-id
+RequestOptions ::stripe::api/RequestOptions
 
 // ============================================================================
 // Customers
@@ -19,14 +21,18 @@ CreateCustomerRequest type {
   metadata: Map?,
   payment_method: Str?,
   invoice_settings: Map?,
+  tax: Map?,
   tax_exempt: Str?,
-  preferred_locales: Vec<Str>?
+  tax_id_data: Vec<Map>?,
+  preferred_locales: Vec<Str>?,
+  test_clock: Str?,
+  expand: Vec<Str>?
 }
 
 create-customer
 meta {
     doc: """
-POST /v1/customers - Create a customer.
+POST /v1/customers - Create a customer. Pass `RequestOptions({idempotency_key: ...})` to make a retried signup safe.
 
 **Example**
 
@@ -42,18 +48,27 @@ customer.id  // => "cus_..."
 ```
 """
 }
-fn (request: CreateCustomerRequest): Map {
-  response api-request("POST", `${::stripe/BASE_URL}/v1/customers`, {}, request)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: CreateCustomerRequest): Map {
+  create-customer(request, RequestOptions({}))
+},
+(request: CreateCustomerRequest, options: RequestOptions | Map): Map {
+  api-call("POST", "/v1/customers", request, options)
 }
 
 get-customer
 meta {
-    doc: """GET /v1/customers/{customer} - Retrieve a customer by ID."""
+    doc: """GET /v1/customers/{customer} - Retrieve a customer by ID. Optional `params` such as `{expand: ["invoice_settings.default_payment_method"]}`. A deleted customer comes back as `{id, object: "customer", deleted: true}`."""
 }
-fn (customer: Str): Map {
-  response api-request("GET", `${::stripe/BASE_URL}/v1/customers/${customer}`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(customer: Str): Map {
+  get-customer(customer, {})
+},
+(customer: Str, params: Map): Map {
+  get-customer(customer, params, {})
+},
+(customer: Str, params: Map, opts: Map): Map {
+  api-call("GET", `/v1/customers/${seg(customer)}`, params, opts)
 }
 
 UpdateCustomerRequest type {
@@ -66,25 +81,34 @@ UpdateCustomerRequest type {
   metadata: Map?,
   default_source: Str?,
   invoice_settings: Map?,
-  tax_exempt: Str?
+  tax: Map?,
+  tax_exempt: Str?,
+  preferred_locales: Vec<Str>?,
+  expand: Vec<Str>?
 }
 
 update-customer
 meta {
-    doc: """POST /v1/customers/{customer} - Update a customer. Only the fields you provide are changed."""
+    doc: """POST /v1/customers/{customer} - Update a customer. Only the fields you provide are changed. To set the default card for subscriptions and invoices, pass `invoice_settings: {default_payment_method: "pm_..."}`."""
 }
-fn (customer: Str, request: UpdateCustomerRequest): Map {
-  response api-request("POST", `${::stripe/BASE_URL}/v1/customers/${customer}`, {}, request)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(customer: Str, request: UpdateCustomerRequest): Map {
+  update-customer(customer, request, RequestOptions({}))
+},
+(customer: Str, request: UpdateCustomerRequest, options: RequestOptions | Map): Map {
+  api-call("POST", `/v1/customers/${seg(customer)}`, request, options)
 }
 
 delete-customer
 meta {
     doc: """DELETE /v1/customers/{customer} - Permanently delete a customer. Cancels any active subscriptions. Returns `{id, object: "customer", deleted: true}`."""
 }
-fn (customer: Str): Map {
-  response api-request("DELETE", `${::stripe/BASE_URL}/v1/customers/${customer}`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(customer: Str): Map {
+  delete-customer(customer, {})
+},
+(customer: Str, opts: Map): Map {
+  api-call("DELETE", `/v1/customers/${seg(customer)}`, "", opts)
 }
 
 ListCustomersRequest type {
@@ -93,13 +117,14 @@ ListCustomersRequest type {
   limit: Int?,
   starting_after: Str?,
   ending_before: Str?,
-  test_clock: Str?
+  test_clock: Str?,
+  expand: Vec<Str>?
 }
 
 list-customers
 meta {
     doc: """
-GET /v1/customers - List customers, most recent first. Filter by `email` (exact match) or `created`. Paginate with `limit` (1-100) and `starting_after`.
+GET /v1/customers - List customers, most recent first. Filter by `email` (exact, case-sensitive match) or `created`. Paginate with `limit` (1-100) and `starting_after`, or use `::stripe::api/list-all("/v1/customers", params)` to fetch every page.
 
 **Example**
 
@@ -117,17 +142,25 @@ fn
   list-customers(ListCustomersRequest({}))
 },
 (request: ListCustomersRequest): Map {
-  response api-request("GET", `${::stripe/BASE_URL}/v1/customers${query-string(request)}`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+  list-customers(request, {})
+},
+(request: ListCustomersRequest, opts: Map): Map {
+  api-call("GET", "/v1/customers", request, opts)
 }
 
 search-customers
 meta {
     doc: """
-GET /v1/customers/search - Search customers with Stripe's search query language, e.g. `email:"alice@example.com"` or `metadata["user_id"]:"42"`. See https://docs.stripe.com/search#query-fields-for-customers.
+GET /v1/customers/search - Search customers with Stripe's search query language, e.g. `email:"alice@example.com"` or `metadata["user_id"]:"42"`. Returns `{object: "search_result", data, has_more, next_page}`; pass `next_page` back as `page` in `params`. Search results can lag writes by about a minute. See https://docs.stripe.com/search#query-fields-for-customers.
 """
 }
-fn (query: Str): Map {
-  response api-request("GET", `${::stripe/BASE_URL}/v1/customers/search${query-string({query: query})}`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(query: Str): Map {
+  search-customers(query, {})
+},
+(query: Str, params: Map): Map {
+  search-customers(query, params, {})
+},
+(query: Str, params: Map, opts: Map): Map {
+  api-call("GET", "/v1/customers/search", {...params, query: query}, opts)
 }

@@ -1,0 +1,123 @@
+::web-search::api ns
+meta {
+    ctx: {
+        "tavily.api.key": {required: false},
+        "brave.api.key": {required: false},
+        "exa.api.key": {required: false},
+        "firecrawl.api.key": {required: false}
+    },
+    doc: """
+    Credentials for the providers.
+
+    **Per-call credentials.** `::web-search/search` and every native
+    provider function take them in their `opts` Map, resolved by `resolve`:
+    `opts` first, then context. Nothing from `opts` is written to ctx, so
+    one run can act for many tenants and parallel flows don't share
+    credentials. Credentials in `opts` are masked in call records.
+
+    - `tavily-api-key`, `brave-api-key`, `exa-api-key`, `firecrawl-api-key`:
+      the provider's key for this call
+
+    With any of these in `opts`, only those providers are candidates:
+    context keys are not consulted for that call, not even by `fallback`.
+    One of them present but blank or null is an error, never a fallback to
+    context.
+    """
+}
+
+::ctx ::hot::ctx
+
+// The `opts` key that carries each provider's API key.
+CREDENTIAL_KEYS {
+  tavily: "tavily-api-key",
+  brave: "brave-api-key",
+  exa: "exa-api-key",
+  firecrawl: "firecrawl-api-key"
+}
+
+non-blank fn (value: Any): Str? {
+  if(is-str(value), if(is-blank(value), null, trim(value)), null)
+}
+
+resolve-from
+meta {
+    doc: """
+    The one resolver, pure: `{per-call, keys}`, where `keys` maps each
+    usable provider to its API key. With a provider's key in `opts`,
+    `per-call` is true and `keys` holds only what `opts` has; otherwise
+    `keys` comes from `ctx-values` (a Map of context variables). An Err
+    when a credential key is in `opts` but blank or null. Exposed for
+    testing; `resolve` feeds it the context.
+    """
+}
+fn (opts: Map, ctx-values: Map): Map {
+  provided filter(::web-search/PROVIDERS, (p) { in(get(CREDENTIAL_KEYS, p), keys(opts)) })
+  blank find-first(provided, (p) { is-null(non-blank(get(opts, get(CREDENTIAL_KEYS, p)))) })
+  cond {
+    is-some(blank) => {
+      name get(CREDENTIAL_KEYS, blank)
+      err(`web-search: ${name} is in the call's options but is blank or null. Pass a value, or leave ${name} out to use ${get(::web-search/PROVIDER_KEYS, blank)}.`)
+    }
+
+    not(is-empty(provided)) => {
+      {per-call: true, keys: reduce(provided, (acc, p) { assoc(acc, p, non-blank(get(opts, get(CREDENTIAL_KEYS, p)))) }, {})}
+    }
+
+    => {
+      {
+        per-call: false,
+        keys: reduce(::web-search/PROVIDERS, (acc, p) {
+          assoc-some(acc, p, non-blank(get(ctx-values, get(::web-search/PROVIDER_KEYS, p))))
+        }, {})
+      }
+    }
+  }
+}
+
+resolve
+meta {
+    ctx: {
+        "tavily.api.key": {required: false},
+        "brave.api.key": {required: false},
+        "exa.api.key": {required: false},
+        "firecrawl.api.key": {required: false}
+    },
+    doc: """
+    The credentials for one call (see `resolve-from`). Keys from `opts` are
+    masked in this run's records and never written to ctx.
+
+    **Example**
+
+    ```hot
+    ::web-search::api/resolve({brave-api-key: "tenant-b-token"}).keys  // {brave: "tenant-b-token"}
+    ```
+    """
+}
+fn (opts: Map): Map {
+  ::ctx/mark-secret(filter(map(vals(CREDENTIAL_KEYS), (name) { non-blank(get(opts, name)) }), is-some))
+  resolve-from(opts, reduce(vals(::web-search/PROVIDER_KEYS), (acc, name) { assoc(acc, name, ::ctx/get(name)) }, {}))
+}
+
+api-key
+meta {
+    doc: """`provider`'s API key for a call (see `resolve`), or an Err naming what to set. With another provider's key in `opts`, this one is not read from context."""
+}
+fn (provider: Str, opts: Map): Str {
+  resolved resolve(opts)
+  cond {
+    is-err(resolved) => { resolved }
+    is-some(get(resolved.keys, provider)) => { get(resolved.keys, provider) }
+    resolved.per-call => { err(missing-per-call(provider)) }
+    => {
+      err(`web-search: provider "${provider}" is not configured. Set ${get(::web-search/PROVIDER_KEYS, provider)} in Context Variables, or pass ${get(CREDENTIAL_KEYS, provider)} in the call's options.`)
+    }
+  }
+}
+
+missing-per-call
+meta {
+    doc: """The message for a provider whose key is missing from a call that passed other providers' keys. Exposed for testing."""
+}
+fn (provider: Str): Str {
+  `web-search: provider "${provider}" has no ${get(CREDENTIAL_KEYS, provider)} in the call's options. With per-call credentials, only those providers are used; context keys are not.`
+}

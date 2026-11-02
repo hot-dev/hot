@@ -1,0 +1,76 @@
+::firecrawl::webhooks ns
+meta {
+    doc: """
+    Firecrawl webhook verification. Crawl, batch-scrape, and extract
+    jobs started with a `webhook` option POST events (`crawl.started`,
+    `crawl.page`, `crawl.completed`, `batch_scrape.*`, `extract.*`, ...)
+    signed with HMAC-SHA256 over the raw body, sent as
+    `X-Firecrawl-Signature: sha256=<hex>`. The secret is in the
+    Firecrawl dashboard's account settings (Advanced tab). See
+    https://docs.firecrawl.dev/webhooks/security.
+    """
+}
+
+::ctx ::hot::ctx
+::hmac ::hot::hmac
+
+SIGNATURE_HEADER "x-firecrawl-signature"
+SIGNATURE_PREFIX "sha256="
+
+signature-hex
+meta {
+    doc: """The hex digest from an `X-Firecrawl-Signature` value (`sha256=<hex>`), or `""` when the header is missing or lacks the `sha256=` prefix. Exposed for testing."""
+}
+fn (header: Any): Str {
+  cond {
+    not(is-str(header)) => { "" }
+    starts-with(header, SIGNATURE_PREFIX) => { trim(slice(header, length(SIGNATURE_PREFIX))) }
+    => { "" }
+  }
+}
+
+verify-request
+meta {
+    ctx: {"firecrawl.webhook.secret": {required: false}},
+    doc: """
+    Verify a Firecrawl webhook request: HMAC-SHA256 of the raw body with
+    your webhook secret must match `X-Firecrawl-Signature`, compared in
+    constant time. Uses the `firecrawl.webhook.secret` context variable
+    (failing when it is unset), or an explicit secret, which is masked in
+    call records; an empty explicit secret never verifies.
+
+    Firecrawl signs no timestamp, so there is no replay window to
+    check: deduplicate on the payload's `webhookId` if a replayed
+    delivery would matter.
+
+    **Example**
+
+    ```hot
+    firecrawl-webhook
+    meta {webhook: {service: "firecrawl", path: "/firecrawl/webhook"}}
+    fn (request) {
+      if(not(::firecrawl::webhooks/verify-request(request)),
+        ::hot::http/HttpResponse({status: 401, body: "invalid signature"}),
+        ::hot::http/HttpResponse({status: 200, body: {received: request.body.type}}))
+    }
+    ```
+    """
+}
+fn
+(request: Map): Bool {
+  secret or(::ctx/get("firecrawl.webhook.secret"), "")
+  if(is-empty(secret),
+    fail("firecrawl.webhook.secret is not set. Add it in Context Variables to verify webhook requests.")
+  )
+  verify-request(request, secret)
+},
+(request: Map, secret: Str?): Bool {
+  headers or(get(request, "headers"), {})
+  signature signature-hex(get(headers, SIGNATURE_HEADER))
+  cond {
+    // An empty key would make every signature forgeable: fail closed.
+    or(is-null(secret), is-blank(secret)) => { false }
+    is-empty(signature) => { false }
+    => { ::hmac/hmac-verify-hex(::ctx/mark-secret(secret), ::hot::http/raw-body(request), signature, "sha256") }
+  }
+}

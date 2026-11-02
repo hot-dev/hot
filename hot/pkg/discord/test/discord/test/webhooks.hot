@@ -71,3 +71,25 @@ fn () {
     request {headers: {}, body-raw: ""}
     assert(not(::webhooks/verify-request(request, TEST_PUBLIC_KEY)), "missing signature headers should fail")
 }
+
+test-verify-rejects-invalid-public-key
+meta ["test"]
+fn () {
+    // A malformed key is a configuration error; verification fails closed.
+    request make-request("r", TEST_SIGNATURE, "")
+    assert(not(::webhooks/verify-request(request, "not-a-hex-key", 0)), "invalid public key should fail, not error")
+}
+
+test-verify-uses-body-bytes-when-present
+meta ["test"]
+fn () {
+    // raw-body prefers body-bytes: the known vector signs "r" + empty body,
+    // so non-empty bytes must break the signature even when body-raw is "".
+    request {
+        headers: {x-signature-ed25519: TEST_SIGNATURE, x-signature-timestamp: "r"},
+        body-raw: "",
+        body-bytes: Bytes([255])
+    }
+
+    assert(not(::webhooks/verify-request(request, TEST_PUBLIC_KEY, 0)), "body-bytes are what gets verified")
+}

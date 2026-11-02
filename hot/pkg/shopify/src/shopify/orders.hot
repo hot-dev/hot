@@ -1,0 +1,263 @@
+::shopify::orders ns
+meta {
+    doc: """
+    Orders: list and search with cursor pagination, fetch one with line
+    items, and the lifecycle mutations (cancel, close, reopen, mark as
+    paid, tag). Requires the `read_orders` / `write_orders` scopes; orders
+    older than 60 days also need `read_all_orders`.
+    """
+}
+
+::api ::shopify::api
+
+ORDER_FIELDS """
+  id name createdAt updatedAt processedAt cancelledAt cancelReason closedAt closed
+  displayFinancialStatus displayFulfillmentStatus
+  email phone tags note test sourceName
+  totalPriceSet { shopMoney { amount currencyCode } }
+  currentTotalPriceSet { shopMoney { amount currencyCode } }
+  customer { id displayName defaultEmailAddress { emailAddress } }
+"""
+
+list-orders
+meta {
+    doc: """
+    One page of orders. Options: `first` (default 50, max 250), `after`
+    (cursor), `query` (Shopify search syntax, e.g.
+    `"financial_status:paid created_at:>=2026-10-01"`), `sortKey`
+    (`CREATED_AT`, `PROCESSED_AT`, `UPDATED_AT`, `TOTAL_PRICE`, ...) and
+    `reverse`. Returns `{nodes, pageInfo: {hasNextPage, endCursor}}`.
+    Defaults to newest first.
+
+    **Example**
+
+    ```hot
+    page ::shopify::orders/list-orders({first: 20, query: "fulfillment_status:unfulfilled"})
+    next ::shopify::orders/list-orders({first: 20, after: page.pageInfo.endCursor})
+    ```
+    """
+}
+fn
+(): Map {
+  list-orders({})
+},
+(options: Map): Map {
+  list-orders(options, {})
+},
+(options: Map, opts: Map): Map {
+  query ```
+  query Orders($first: Int!, $after: String, $query: String, $sortKey: OrderSortKeys, $reverse: Boolean) {
+    orders(first: $first, after: $after, query: $query, sortKey: $sortKey, reverse: $reverse) {
+      nodes { ${ORDER_FIELDS} }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+  ```
+  defaults {sortKey: "CREATED_AT", reverse: true}
+  data ::api/graphql(query, ::api/connection-variables({...defaults, ...options}), opts)
+  if-ok(data, %(%.orders))
+}
+
+collect-orders
+meta {
+    doc: """Follow cursors and return up to `max-items` orders (a Vec of nodes). Options as in `list-orders`."""
+}
+fn
+(options: Map, max-items: Int): Vec {
+  ::api/collect(list-orders, options, max-items)
+},
+(options: Map, max-items: Int, opts: Map): Vec {
+  ::api/collect((page-options) { list-orders(page-options, opts) }, options, max-items)
+}
+
+get-order
+meta {
+    doc: """One order by GraphQL id (`gid://shopify/Order/...`) with line items (first 100) and shipping address. Returns null when not found."""
+}
+fn
+(id: Str): Map? {
+  get-order(id, {})
+},
+(id: Str, opts: Map): Map? {
+  query ```
+  query Order($id: ID!) {
+    order(id: $id) {
+      ${ORDER_FIELDS}
+      shippingAddress { name address1 address2 city provinceCode zip countryCodeV2 phone }
+      lineItems(first: 100) {
+        nodes {
+          id name title sku quantity currentQuantity
+          variant { id }
+          originalUnitPriceSet { shopMoney { amount currencyCode } }
+        }
+      }
+    }
+  }
+  ```
+  data ::api/graphql(query, {id: id}, opts)
+  if-ok(data, %(%.order))
+}
+
+build-cancel-variables
+meta {
+    doc: """Variables for `orderCancel`. Options: `notifyCustomer`, `staffNote`, `refundMethod` (e.g. `{originalPaymentMethodsRefund: true}`). Unset options are omitted. Exposed for testing."""
+}
+fn (order-id: Str, reason: Str, restock: Bool, options: Map): Map {
+  filter-vals({
+    orderId: order-id,
+    reason: reason,
+    restock: restock,
+    notifyCustomer: get(options, "notifyCustomer"),
+    staffNote: get(options, "staffNote"),
+    refundMethod: get(options, "refundMethod")
+  }, is-some)
+}
+
+cancel-order
+meta {
+    doc: """
+    Cancel an order (`orderCancel`, asynchronous). `reason` is an
+    `OrderCancelReason` (`CUSTOMER`, `DECLINED`, `FRAUD`, `INVENTORY`,
+    `STAFF`, `OTHER`); `restock` returns committed inventory. Options:
+    `notifyCustomer`, `staffNote`, `refundMethod` (e.g.
+    `{originalPaymentMethodsRefund: true}`; authorized payments are voided
+    regardless). Returns `{job, jobResult}`; poll the job with `node` to
+    see it finish.
+
+    **Example**
+
+    ```hot
+    ::shopify::orders/cancel-order(order.id, "CUSTOMER", true, {
+      refundMethod: {originalPaymentMethodsRefund: true},
+      notifyCustomer: true
+    })
+    ```
+    """
+}
+fn
+(order-id: Str, reason: Str, restock: Bool): Map {
+  cancel-order(order-id, reason, restock, {})
+},
+(order-id: Str, reason: Str, restock: Bool, options: Map): Map {
+  cancel-order(order-id, reason, restock, options, {})
+},
+(order-id: Str, reason: Str, restock: Bool, options: Map, opts: Map): Map {
+  mutation """
+  mutation OrderCancel($orderId: ID!, $reason: OrderCancelReason!, $restock: Boolean!, $notifyCustomer: Boolean, $staffNote: String, $refundMethod: OrderCancelRefundMethodInput) {
+    orderCancel(orderId: $orderId, reason: $reason, restock: $restock, notifyCustomer: $notifyCustomer, staffNote: $staffNote, refundMethod: $refundMethod) {
+      job { id done }
+      jobResult { id done status }
+      orderCancelUserErrors { field message code }
+    }
+  }
+  """
+  ::api/mutate(mutation, build-cancel-variables(order-id, reason, restock, options), "orderCancel", "orderCancelUserErrors", opts)
+}
+
+close-order
+meta {
+    doc: """Close (archive) an order (`orderClose`). Returns the order's id, name and `closedAt`."""
+}
+fn
+(order-id: Str): Map {
+  close-order(order-id, {})
+},
+(order-id: Str, opts: Map): Map {
+  mutation """
+  mutation OrderClose($input: OrderCloseInput!) {
+    orderClose(input: $input) {
+      order { id name closed closedAt }
+      userErrors { field message }
+    }
+  }
+  """
+  payload ::api/mutate(mutation, {input: {id: order-id}}, "orderClose", opts)
+  if-ok(payload, %(%.order))
+}
+
+reopen-order
+meta {
+    doc: """Reopen a closed order (`orderOpen`)."""
+}
+fn
+(order-id: Str): Map {
+  reopen-order(order-id, {})
+},
+(order-id: Str, opts: Map): Map {
+  mutation """
+  mutation OrderOpen($input: OrderOpenInput!) {
+    orderOpen(input: $input) {
+      order { id name closed closedAt }
+      userErrors { field message }
+    }
+  }
+  """
+  payload ::api/mutate(mutation, {input: {id: order-id}}, "orderOpen", opts)
+  if-ok(payload, %(%.order))
+}
+
+mark-order-as-paid
+meta {
+    doc: """Record the outstanding balance as paid by a manual method (`orderMarkAsPaid`). Needs the staff `mark_orders_as_paid` permission; check the order's `canMarkAsPaid` first."""
+}
+fn
+(order-id: Str): Map {
+  mark-order-as-paid(order-id, {})
+},
+(order-id: Str, opts: Map): Map {
+  mutation """
+  mutation OrderMarkAsPaid($input: OrderMarkAsPaidInput!) {
+    orderMarkAsPaid(input: $input) {
+      order {
+        id name canMarkAsPaid displayFinancialStatus
+        totalOutstandingSet { shopMoney { amount currencyCode } }
+      }
+      userErrors { field message }
+    }
+  }
+  """
+  payload ::api/mutate(mutation, {input: {id: order-id}}, "orderMarkAsPaid", opts)
+  if-ok(payload, %(%.order))
+}
+
+add-tags
+meta {
+    doc: """Add tags to any taggable resource (order, product, customer, draft order) by GraphQL id (`tagsAdd`). Returns the resource id."""
+}
+fn
+(id: Str, tags: Vec<Str>): Str {
+  add-tags(id, tags, {})
+},
+(id: Str, tags: Vec<Str>, opts: Map): Str {
+  mutation """
+  mutation TagsAdd($id: ID!, $tags: [String!]!) {
+    tagsAdd(id: $id, tags: $tags) {
+      node { id }
+      userErrors { field message }
+    }
+  }
+  """
+  payload ::api/mutate(mutation, {id: id, tags: tags}, "tagsAdd", opts)
+  if-ok(payload, %(%.node.id))
+}
+
+remove-tags
+meta {
+    doc: """Remove tags from a taggable resource by GraphQL id (`tagsRemove`). Returns the resource id."""
+}
+fn
+(id: Str, tags: Vec<Str>): Str {
+  remove-tags(id, tags, {})
+},
+(id: Str, tags: Vec<Str>, opts: Map): Str {
+  mutation """
+  mutation TagsRemove($id: ID!, $tags: [String!]!) {
+    tagsRemove(id: $id, tags: $tags) {
+      node { id }
+      userErrors { field message }
+    }
+  }
+  """
+  payload ::api/mutate(mutation, {id: id, tags: tags}, "tagsRemove", opts)
+  if-ok(payload, %(%.node.id))
+}

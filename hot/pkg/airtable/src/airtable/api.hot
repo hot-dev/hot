@@ -1,0 +1,63 @@
+::airtable::api ns
+meta {
+    doc: """Per-call credentials for the Airtable package: `resolve(opts)` is the one place opts and context are merged."""
+}
+
+::ctx ::hot::ctx
+
+is-blank fn (value: Any): Bool {
+  cond {
+    is-str(value) => { is-empty(trim(value)) }
+    => { true }
+  }
+}
+
+resolve-from
+meta {
+    doc: """
+    The one resolver, pure: the credential for a call from `opts` first,
+    then `ctx-values` (a Map of context variables). Returns `{token: ...}`, or
+    an Err when there is none.
+
+    A `token` key in `opts` always decides the call. If its value is null or
+    blank that is an Err, never a fallback to context, so a tenant whose
+    stored credential is missing can't silently run on the project's
+    credential. Nothing is written to ctx. Exposed for testing; `resolve`
+    feeds it the context.
+    """
+}
+fn (opts: Map, ctx-values: Map): Map {
+  cond {
+    in("token", keys(opts)) => {
+      value get(opts, "token")
+      cond {
+        is-blank(value) => { err("airtable: the token in this call's opts is empty. Context is not used in its place.") }
+        => { {token: value} }
+      }
+    }
+
+    is-blank(get(ctx-values, "airtable.token")) => { err("airtable: airtable.token is not set. Add a personal access token in Context Variables, or pass {token: ...} in the call's opts.") }
+    => { {token: get(ctx-values, "airtable.token")} }
+  }
+}
+
+resolve
+meta {
+    ctx: {"airtable.token": {required: false}},
+    doc: """
+    The credential for one call: `opts` over the `airtable.token` context variable
+    (see `resolve-from`). Per-call credentials stay in the call; nothing is
+    written to ctx, so parallel flows and tenants never share them.
+    A credential from `opts` is masked in the run's call records.
+
+    **Example**
+
+    ```hot
+    ::airtable::api/resolve({token: "tenant-b-credential"}).token  // "tenant-b-credential"
+    ```
+    """
+}
+fn (opts: Map): Map {
+  ::ctx/mark-secret(opts.token)
+  resolve-from(opts, {"airtable.token": ::ctx/get("airtable.token")})
+}

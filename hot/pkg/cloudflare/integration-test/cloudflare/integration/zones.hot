@@ -1,9 +1,25 @@
 ::cloudflare::integration ns
 meta ["test"]
 
-// Requires ctx: cloudflare.token
+// Read-only. Requires ctx: cloudflare.token (CLOUDFLARE_TOKEN); skips
+// cleanly when it is unset.
+// Run with: hot test --project pkg-integration-cloudflare
+
+has-token fn (): Bool {
+    is-some(::cloudflare::api/ctx-str("cloudflare.token"))
+}
+
 test-list-zones
 meta ["test"] fn () {
-    out ::cloudflare/list-zones()
-    assert(is-some(out.result), "token should list zones")
+    cond {
+        not(has-token()) => {
+            println("CLOUDFLARE_TOKEN not set - skipping Cloudflare zones test")
+            assert(true, "Skipped - no token")
+        }
+        => {
+            page ::cloudflare::zones/list-zones({per_page: 5})
+            assert(is-vec(page.result), "token should list zones")
+            assert(lte(length(page.result), 5), "per_page is honoured")
+        }
+    }
 }

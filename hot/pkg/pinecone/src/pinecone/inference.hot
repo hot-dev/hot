@@ -1,0 +1,97 @@
+::pinecone::inference ns
+meta {
+    doc: """Pinecone hosted inference on api.pinecone.io: generate embeddings and rerank documents, without an index."""
+}
+
+::api ::pinecone::api
+
+build-embed-body
+meta {
+    doc: """The `POST /embed` body: `inputs` as `[{text}]`, plus `parameters` when given (e.g. `{input_type: "passage", truncate: "END"}`). Exposed for testing."""
+}
+fn (model: Str, texts: Vec, parameters: Any): Map {
+  ::api/compact({
+    model: model,
+    inputs: map(texts, (t) { {text: t} }),
+    parameters: parameters
+  })
+}
+
+embed
+meta {
+    ctx: {"pinecone.api.key": {required: false}},
+    doc: """
+    POST /embed - Embed texts with a hosted model, e.g.
+    "llama-text-embed-v2" (dense), "multilingual-e5-large" (dense), or
+    "pinecone-sparse-english-v0" (sparse). `parameters` is
+    model-specific; most dense models want `input_type` ("passage" for
+    documents, "query" for questions). Returns `{model, vector_type,
+    data: [{values}] or [{sparse_values, sparse_indices}], usage}`.
+
+    **Example**
+
+    ```hot
+    out ::pinecone::inference/embed("llama-text-embed-v2", ["Hot runs workflows."], {input_type: "passage"})
+    first(out.data).values
+    ```
+    """
+}
+fn
+(model: Str, texts: Vec): Map {
+  embed(model, texts, null, {})
+},
+(model: Str, texts: Vec, parameters: Map): Map {
+  embed(model, texts, parameters, {})
+},
+(model: Str, texts: Vec, parameters: Map?, opts: Map): Map {
+  ::api/json("POST", ::api/control-url("embed"), build-embed-body(model, texts, parameters), opts)
+}
+
+build-rerank-body
+meta {
+    doc: """The `POST /rerank` body: `documents` may be strings (sent as `{text}`) or Maps; set `options` among `top_n`, `return_documents`, `rank_fields`, `parameters` are included. Exposed for testing."""
+}
+fn (model: Str, query: Str, documents: Vec, options: Map): Map {
+  ::api/compact({
+    model: model,
+    query: query,
+    documents: map(documents, (d) { if(is-str(d), {text: d}, d) }),
+    top_n: get(options, "top_n"),
+    return_documents: get(options, "return_documents"),
+    rank_fields: get(options, "rank_fields"),
+    parameters: get(options, "parameters")
+  })
+}
+
+rerank
+meta {
+    ctx: {"pinecone.api.key": {required: false}},
+    doc: """
+    POST /rerank - Order `documents` by relevance to `query` with a
+    hosted reranker ("bge-reranker-v2-m3", "pinecone-rerank-v0",
+    "cohere-rerank-4-fast"). `options`: `top_n`, `return_documents`
+    (default true), `rank_fields` (default `["text"]`), `parameters`.
+    Returns `{model, data: [{index, score, document?}], usage}`, best
+    first; `index` points into `documents`.
+
+    **Example**
+
+    ```hot
+    out ::pinecone::inference/rerank("bge-reranker-v2-m3", "What is Hot?", [
+      "Hot is a workflow language.",
+      "Pinecone is a vector database."
+    ], {top_n: 1})
+    first(out.data).index
+    ```
+    """
+}
+fn
+(model: Str, query: Str, documents: Vec): Map {
+  rerank(model, query, documents, {})
+},
+(model: Str, query: Str, documents: Vec, options: Map): Map {
+  rerank(model, query, documents, options, {})
+},
+(model: Str, query: Str, documents: Vec, options: Map, opts: Map): Map {
+  ::api/json("POST", ::api/control-url("rerank"), build-rerank-body(model, query, documents, options), opts)
+}

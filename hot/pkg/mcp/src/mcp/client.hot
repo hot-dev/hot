@@ -263,7 +263,16 @@ connect-legacy fn (url: Str, client-info: ::types/ClientInfo, capabilities: ::ty
     clientInfo: untype(client-info)
   })
   raw ::rpc/send-raw(url, base-headers, req)
-  response ::rpc/parse-http-response(raw)
+  cond {
+    is-err(raw) => { raw }
+    => {
+      response ::rpc/parse-http-response(raw)
+      if(is-err(response), response, legacy-session(url, client-info, capabilities, base-headers, raw, response))
+    }
+  }
+}
+
+legacy-session fn (url: Str, client-info: ::types/ClientInfo, capabilities: ::types/ClientCapabilities?, base-headers: Map, raw: HttpResponse, response: ::rpc-types/Response): ::types/Session {
   result response.result
   selected-version or(result.protocolVersion, LEGACY-PROTOCOL-VERSION)
   session-id or(
@@ -352,6 +361,10 @@ modern-probe fn (url: Str, client-info: ::types/ClientInfo, capabilities: ::type
     "Mcp-Method": "server/discover"
   })
   raw ::rpc/send-raw(url, headers, req)
+  if(is-err(raw), raw, classify-probe(raw))
+}
+
+classify-probe fn (raw: HttpResponse): Map {
   body or(response-json-rpc-message(raw), {})
   error get(body, "error", null)
   error-code if(is-map(error), get(error, "code", null), null)
@@ -405,6 +418,7 @@ fn
     or(eq(mode, "auto"), eq(mode, "modern")) => {
       probe modern-probe(url, client-info, capabilities, base-headers, log-level)
       cond {
+        is-err(probe) => { probe }
         eq(probe.kind, "modern") => {
           modern-session(
             url,

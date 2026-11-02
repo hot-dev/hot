@@ -1,141 +1,394 @@
 ::google::drive ns
 meta {
     doc: """
-    Google Drive API bindings. Authentication is configured once via the
-    `google.*` context variables — see the `google-core` package.
+    Google Drive API v3 bindings: files and folders, search, Google Docs
+    export for text pipelines, binary-safe and resumable uploads, chunked
+    downloads, shared drives, permissions, revisions, and change sync with
+    push notifications. Credentials and scopes come from `google-core`.
+
+    **Namespaces**
+
+    - `::google::drive::files` - list/search, get, create folder, update,
+      rename, move, copy, trash, delete, shortcuts
+    - `::google::drive::query` - a `q` query builder with proper escaping
+    - `::google::drive::content` - `read-document`, download, export,
+      chunked download, export-format map
+    - `::google::drive::upload` - multipart and resumable uploads, content updates
+    - `::google::drive::permissions` - sharing
+    - `::google::drive::drives` - shared drives and `about`
+    - `::google::drive::revisions` - revision history
+    - `::google::drive::changes` - change feed, watch channels, webhook parsing
+
+    Every function has an options arity taking an `opts` Map. Its Drive
+    query parameters use Drive's own names (`q`, `pageSize`, `fields`,
+    `driveId`, ...); its credential keys (`token`, `refresh-token`,
+    `service-account`, `subject`, `scopes`, `retry`, ...) are handled by
+    `google-core`: they override context for that call and are masked in
+    call records.
 
     **Quick start**
 
     ```hot
-    ::drive ::google::drive
+    ::files ::google::drive::files
+    ::content ::google::drive::content
+    ::q ::google::drive::query
 
-    page ::drive/list-files("name contains 'report' and trashed = false")
-    file ::drive/upload-file("notes.txt", "hello", "text/plain")
-    content ::drive/download-file(file.id)
+    hits ::files/list-all-files({q: ::q/all-of(::q/name-contains("roadmap"), ::q/not-trashed())}, 50)
+    doc ::content/read-document(first(hits).id, "markdown")
+    doc.text
     ```
     """
 }
 
 ::api ::google::api
+::ctx ::hot::ctx
 ::uri ::hot::uri
 
+API_ROOT "https://www.googleapis.com"
 BASE_URL "https://www.googleapis.com/drive/v3"
 UPLOAD_URL "https://www.googleapis.com/upload/drive/v3"
 
+// Scopes. drive and drive.readonly are restricted scopes (public apps need
+// verification plus a security assessment); drive.file is non-sensitive
+// and covers files the app created or the user opened/shared with it.
 SCOPE "https://www.googleapis.com/auth/drive"
 READ_SCOPE "https://www.googleapis.com/auth/drive.readonly"
+FILE_SCOPE "https://www.googleapis.com/auth/drive.file"
+METADATA_READ_SCOPE "https://www.googleapis.com/auth/drive.metadata.readonly"
 
-MULTIPART_BOUNDARY "hot-drive-multipart-boundary"
+GOOGLE_APPS_PREFIX "application/vnd.google-apps."
+FOLDER_MIME "application/vnd.google-apps.folder"
+SHORTCUT_MIME "application/vnd.google-apps.shortcut"
+DOCUMENT_MIME "application/vnd.google-apps.document"
+SPREADSHEET_MIME "application/vnd.google-apps.spreadsheet"
+PRESENTATION_MIME "application/vnd.google-apps.presentation"
+DRAWING_MIME "application/vnd.google-apps.drawing"
+SCRIPT_MIME "application/vnd.google-apps.script"
+FORM_MIME "application/vnd.google-apps.form"
+VID_MIME "application/vnd.google-apps.vid"
 
-// ============================================================================
-// Listing / reading
-// ============================================================================
+// Default metadata fields for files (get, list, create, update, changes).
+FILE_FIELDS "id,name,mimeType,size,modifiedTime,createdTime,parents,md5Checksum,sha1Checksum,sha256Checksum,driveId,webViewLink,exportLinks,trashed,version,headRevisionId,shortcutDetails"
+LIST_FIELDS "nextPageToken,incompleteSearch,files(id,name,mimeType,size,modifiedTime,createdTime,parents,md5Checksum,sha1Checksum,sha256Checksum,driveId,webViewLink,exportLinks,trashed,version,headRevisionId,shortcutDetails)"
 
-list-files
+// ---------------------------------------------------------------------------
+// URL and parameter helpers (shared by the sub-namespaces)
+// ---------------------------------------------------------------------------
+
+api-root
+meta {
+    ctx: {"google.drive.api-root": {required: false, secret: false}},
+    doc: """The API root, `https://www.googleapis.com` unless the `google.drive.api-root` context variable points at a proxy or emulator."""
+}
+fn (): Str {
+  root ::ctx/get("google.drive.api-root")
+  if(or(is-null(root), eq(root, "")), API_ROOT, root)
+}
+
+url
+meta {
+    doc: """A Drive v3 URL: `path` (e.g. `"/files/abc"`) plus non-null `params` as a query string."""
+}
+fn
+(path: Str): Str {
+  url(path, {})
+},
+(path: Str, params: Map): Str {
+  ::api/with-query(`${api-root()}/drive/v3${path}`, params)
+}
+
+upload-url
+meta {doc: """A Drive v3 upload URL (`/upload/drive/v3...`) with `params`."""}
+fn (path: Str, params: Map): Str {
+  ::api/with-query(`${api-root()}/upload/drive/v3${path}`, params)
+}
+
+encode-id
+meta {doc: """URL-encode an id for a path segment."""}
+fn (id: Str): Str {
+  ::uri/encode(id)
+}
+
+query-params
 meta {
     doc: """
-    GET /files - List files, optionally filtered by a Drive query
-    (https://developers.google.com/drive/api/guides/search-files), e.g.
-    `"mimeType = 'application/pdf' and modifiedTime > '2026-01-01'"`.
-    Returns `{files: [...], nextPageToken?}`.
+    Build a call's query parameters: `defaults`, overridden by the Drive
+    parameters in `opts` (credential keys and the function's own
+    `local-keys` are removed), with nulls dropped. Pass a key as null in
+    `opts` to drop a default.
     """
 }
 fn
-(): Map {
-  ::api/json(READ_SCOPE, "GET", `${BASE_URL}/files`)
+(defaults: Map, opts: Map): Map {
+  query-params(defaults, opts, [])
 },
-(query: Str): Map {
-  ::api/json(READ_SCOPE, "GET", `${BASE_URL}/files?q=${::uri/encode(query)}`)
+(defaults: Map, opts: Map, local-keys: Vec): Map {
+  params filter-keys(::api/api-params(opts), (k) { not(in(k, local-keys)) })
+  filter-vals({...defaults, ...params}, is-some)
 }
 
-get-file
+creds
 meta {
-    doc: """GET /files/{id} - File metadata (name, mimeType, size, parents, ...)."""
+    doc: """The google-core part of `opts` (credentials, scopes, retry), passed through to `::google::api`."""
 }
-fn (id: Str): Map {
-  ::api/json(READ_SCOPE, "GET", `${BASE_URL}/files/${id}?fields=id,name,mimeType,size,parents,webViewLink,modifiedTime`)
+fn (opts: Map): Map {
+  ::api/credential-opts(opts)
 }
 
-download-file
+json
 meta {
-    doc: """GET /files/{id}?alt=media - Download a file's content (Bytes for binary files, Str for text)."""
+    doc: """`::google::api/json` with this package's conventions: `scope` default, credential opts, JSON or empty body."""
 }
-fn (id: Str): Any {
-  ::api/json(READ_SCOPE, "GET", `${BASE_URL}/files/${id}?alt=media`)
+fn (scope: Str, method: Str, full-url: Str, body: Any, opts: Map): Any {
+  ::api/json(scope, method, full-url, {}, body, creds(opts))
 }
 
-export-file
+compact
 meta {
-    doc: """GET /files/{id}/export - Export a Google Doc/Sheet/Slides file to another format, e.g. `export-file(id, "application/pdf")` or `"text/csv"`."""
+    doc: """Drop null values from a request body (Drive bodies never carry JSON null for unset fields)."""
 }
-fn (id: Str, mime-type: Str): Any {
-  ::api/json(READ_SCOPE, "GET", `${BASE_URL}/files/${id}/export?mimeType=${::uri/encode(mime-type)}`)
+fn (body: Map): Map {
+  filter-vals(untype(body), is-some)
 }
 
-// ============================================================================
-// Writing
-// ============================================================================
+as-vec fn (value: Any): Vec {
+  cond {
+    is-null(value) => { [] }
+    is-vec(value) => { value }
+    => { [value] }
+  }
+}
 
-build-multipart
+to-int
 meta {
-    doc: """Build a `multipart/related` upload body from JSON metadata and content. Exposed for testing; `upload-file` uses it."""
+    doc: """Drive returns int64 fields (size, version) as strings; parse to Int, or null when absent or malformed."""
 }
-fn (metadata: Map, content: Any, mime-type: Str): Str {
-  b MULTIPART_BOUNDARY
-  `--${b}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${to-json(untype(metadata))}\r\n--${b}\r\nContent-Type: ${mime-type}\r\n\r\n${content}\r\n--${b}--`
+fn (value: Any): Int? {
+  ::api/parse-int(value)
 }
 
-upload-file
+// ---------------------------------------------------------------------------
+// Neutral document metadata
+// ---------------------------------------------------------------------------
+
+is-google-native
+meta {
+    doc: """True for Google Workspace types (`application/vnd.google-apps.*`) other than folders and shortcuts: Docs, Sheets, Slides, Drawings, Forms, ... These have no bytes of their own and are exported."""
+}
+fn (mime-type: Str?): Bool {
+  m or(mime-type, "")
+  and(starts-with(m, GOOGLE_APPS_PREFIX), ne(m, FOLDER_MIME), ne(m, SHORTCUT_MIME))
+}
+
+is-folder
+meta {doc: """True for a folder MIME type."""}
+fn (mime-type: Str?): Bool {
+  eq(mime-type, FOLDER_MIME)
+}
+
+DocFile
 meta {
     doc: """
-    POST /upload/files?uploadType=multipart - Create a file with content in
-    one request. `parent` (4-arity) is the folder id.
+    Provider-neutral file metadata, shaped so a future documents package
+    can treat Drive, OneDrive, Dropbox and Box alike.
 
-    **Example**
-
-    ```hot
-    file ::google::drive/upload-file("report.csv", csv-text, "text/csv", folder.id)
-    file.id
-    ```
+    **Fields**
+    - `provider` - `"google-drive"`
+    - `id`, `name`, `mime-type`
+    - `path` - always null: Drive addresses files by id and has no path
+    - `size` - bytes (Int); null for Google-native files and folders
+    - `modified`, `created` - RFC 3339 timestamps
+    - `parents` - parent folder ids
+    - `drive-id` - the shared drive id, null in My Drive
+    - `web-url` - the browser link (`webViewLink`)
+    - `version` - Drive's monotonically increasing file version (use as an etag)
+    - `revision-id` - the head revision id (blob files only)
+    - `md5`, `sha256` - content checksums (blob files only)
+    - `hashes` - every checksum Drive gave, under `md5`, `sha1` and
+      `sha256` (blob files only; empty otherwise)
+    - `is-folder`, `is-google-native`, `is-shortcut`, `shortcut-target-id`
+    - `trashed`
+    - `export-formats` - MIME types available via `exportLinks`
+    - `raw` - the Drive file resource as returned
     """
 }
-fn
-(name: Str, content: Any, mime-type: Str): Map {
-  metadata {name: name}
-  ::api/json(SCOPE, "POST", `${UPLOAD_URL}/files?uploadType=multipart`,
-    {Content-Type: `multipart/related; boundary=${MULTIPART_BOUNDARY}`},
-    build-multipart(metadata, content, mime-type))
-},
-(name: Str, content: Any, mime-type: Str, parent: Str): Map {
-  metadata {name: name, parents: [parent]}
-  ::api/json(SCOPE, "POST", `${UPLOAD_URL}/files?uploadType=multipart`,
-    {Content-Type: `multipart/related; boundary=${MULTIPART_BOUNDARY}`},
-    build-multipart(metadata, content, mime-type))
+type {
+    provider: Str,
+    id: Str,
+    name: Str,
+    mime-type: Str,
+    path: Str?,
+    size: Int?,
+    modified: Str?,
+    created: Str?,
+    parents: Vec,
+    drive-id: Str?,
+    web-url: Str?,
+    version: Str?,
+    revision-id: Str?,
+    md5: Str?,
+    sha256: Str?,
+    hashes: Map,
+    is-folder: Bool,
+    is-google-native: Bool,
+    is-shortcut: Bool,
+    shortcut-target-id: Str?,
+    trashed: Bool,
+    export-formats: Vec,
+    raw: Map
 }
 
-create-folder
+to-doc-file
 meta {
-    doc: """POST /files - Create a folder; pass a `parent` folder id with the 2-arity form."""
+    doc: """Normalise a Drive file resource (as returned by `get-file`, `list-files`, `changes`) into a `DocFile`. Missing fields become null/false."""
 }
-fn
-(name: Str): Map {
-  ::api/json(SCOPE, "POST", `${BASE_URL}/files`, {}, {
-    name: name,
-    mimeType: "application/vnd.google-apps.folder"
-  })
-},
-(name: Str, parent: Str): Map {
-  ::api/json(SCOPE, "POST", `${BASE_URL}/files`, {}, {
-    name: name,
-    mimeType: "application/vnd.google-apps.folder",
-    parents: [parent]
+fn (file: Map): DocFile {
+  mime or(file.mimeType, "")
+  shortcut file.shortcutDetails
+  DocFile({
+    provider: "google-drive",
+    id: or(file.id, ""),
+    name: or(file.name, ""),
+    mime-type: mime,
+    path: null,
+    size: to-int(file.size),
+    modified: file.modifiedTime,
+    created: file.createdTime,
+    parents: or(file.parents, []),
+    drive-id: file.driveId,
+    web-url: file.webViewLink,
+    version: if(is-some(file.version), Str(file.version), null),
+    revision-id: file.headRevisionId,
+    md5: file.md5Checksum,
+    sha256: file.sha256Checksum,
+    hashes: filter-vals({md5: file.md5Checksum, sha1: file.sha1Checksum, sha256: file.sha256Checksum}, is-some),
+    is-folder: is-folder(mime),
+    is-google-native: is-google-native(mime),
+    is-shortcut: eq(mime, SHORTCUT_MIME),
+    shortcut-target-id: if(is-map(shortcut), shortcut.targetId, null),
+    trashed: eq(file.trashed, true),
+    export-formats: if(is-map(file.exportLinks), keys(file.exportLinks), []),
+    raw: file
   })
 }
 
-delete-file
+to-doc-files
+meta {doc: """`to-doc-file` over a Vec of Drive file resources."""}
+fn (files: Vec): Vec {
+  map(files, to-doc-file)
+}
+
+// ---------------------------------------------------------------------------
+// File content
+// ---------------------------------------------------------------------------
+
+FileContent
 meta {
-    doc: """DELETE /files/{id} - Permanently delete a file (skips the trash)."""
+    doc: """
+    Downloaded or exported file content. `bytes` is always the exact
+    response body (binary safe); `text` is the UTF-8 decoding when
+    `mime-type` is textual, else null.
+
+    **Fields**
+    - `file-id`, `name`
+    - `mime-type` - the MIME type of `bytes` (export target or stored type)
+    - `size` - `length(bytes)`
+    - `bytes`, `text`
+    - `source` - `"download"`, `"export"`, `"export-link"` (the >10 MB
+      export fallback), `"range"`, or `"chunked"`
+    - `format` - the export format asked for (`read-document`), else null
+    - `file` - the `DocFile` (set by `read-document`)
+    """
 }
-fn (id: Str): Any {
-  ::api/json(SCOPE, "DELETE", `${BASE_URL}/files/${id}`)
+type {
+    file-id: Str,
+    name: Str?,
+    mime-type: Str?,
+    size: Int,
+    bytes: Bytes,
+    text: Str?,
+    source: Str,
+    format: Str?,
+    file: DocFile?
 }
+
+base-mime
+meta {
+    doc: """A Content-Type without parameters, lowercased: `"text/plain; charset=utf-8"` becomes `"text/plain"`."""
+}
+fn (content-type: Str?): Str? {
+  cond {
+    is-null(content-type) => { null }
+    => { lowercase(trim(first(split(content-type, ";")))) }
+  }
+}
+
+is-textual-mime
+meta {
+    doc: """True when content of this MIME type is text: `text/*`, JSON, XML, SVG, JavaScript, CSV/TSV, Markdown, and the Apps Script JSON export."""
+}
+fn (mime-type: Str?): Bool {
+  m or(base-mime(mime-type), "")
+  or(
+    starts-with(m, "text/"),
+    in(m, ["application/json", "application/xml", "application/javascript", "application/x-javascript", "application/x-ndjson", "application/x-yaml", "application/yaml", "application/sql", "image/svg+xml"]),
+    ends-with(m, "+json"),
+    ends-with(m, "+xml")
+  )
+}
+
+content-from-bytes
+meta {doc: """Build a `FileContent` from raw bytes and their MIME type."""}
+fn (file-id: Str, bytes: Bytes, mime-type: Str?, source: Str): FileContent {
+  mime base-mime(mime-type)
+  FileContent({
+    file-id: file-id,
+    name: null,
+    mime-type: mime,
+    size: length(bytes),
+    bytes: bytes,
+    text: if(is-textual-mime(mime), Str(bytes), null),
+    source: source,
+    format: null,
+    file: null
+  })
+}
+
+content-from-response
+meta {
+    doc: """Build a `FileContent` from an HTTP response: `body-bytes` (never the auto-decoded `body`, so a JSON file stays bytes and `123` stays text) and the Content-Type header."""
+}
+fn (file-id: Str, response: Map, source: Str): FileContent {
+  raw get(response, "body-bytes")
+  bytes cond {
+    is-bytes(raw) => { raw }
+    is-str(response.body) => { Bytes(response.body) }
+    => { Bytes([]) }
+  }
+
+  content-from-bytes(file-id, bytes, get(or(response.headers, {}), "content-type"), source)
+}
+
+content-text
+meta {
+    doc: """The text of a `FileContent`: its `text`, or the UTF-8 decoding of `bytes` (invalid sequences become U+FFFD)."""
+}
+fn (content: Map): Str {
+  if(is-some(content.text), content.text, Str(content.bytes))
+}
+
+// ---------------------------------------------------------------------------
+// Shortcuts to the most used functions (the full surface lives in the
+// sub-namespaces listed in the namespace doc)
+// ---------------------------------------------------------------------------
+
+list-files ::google::drive::files/list-files
+list-all-files ::google::drive::files/list-all-files
+get-file ::google::drive::files/get-file
+create-folder ::google::drive::files/create-folder
+trash-file ::google::drive::files/trash-file
+delete-file ::google::drive::files/delete-file
+upload-file ::google::drive::upload/upload-file
+download-file ::google::drive::content/download-file
+export-file ::google::drive::content/export-file
+read-document ::google::drive::content/read-document

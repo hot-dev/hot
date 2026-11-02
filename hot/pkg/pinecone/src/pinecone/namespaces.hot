@@ -1,0 +1,68 @@
+::pinecone::namespaces ns
+meta {
+    doc: """Namespace management on an index host (serverless indexes): list, describe, create, and delete namespaces."""
+}
+
+::api ::pinecone::api
+
+list-namespaces
+meta {
+    ctx: {"pinecone.api.key": {required: false}},
+    doc: """GET {host}/namespaces - One page of namespaces. `options`: `prefix`, `limit` (default 100), `paginationToken`. Returns `{namespaces: [{name, record_count}], pagination?: {next}, total_count}`; `record_count` is a decimal string."""
+}
+fn
+(host: Str): Map {
+  list-namespaces(host, {})
+},
+(host: Str, options: Map): Map {
+  list-namespaces(host, options, {})
+},
+(host: Str, options: Map, opts: Map): Map {
+  ::api/json("GET", ::api/data-url(host, ["namespaces"], {
+    prefix: get(options, "prefix"),
+    limit: get(options, "limit"),
+    paginationToken: get(options, "paginationToken")
+  }), "", opts)
+}
+
+describe-namespace
+meta {
+    ctx: {"pinecone.api.key": {required: false}},
+    doc: """GET {host}/namespaces/{namespace} - One namespace: `{name, record_count, schema?, indexed_fields?}`."""
+}
+fn
+(host: Str, namespace: Str): Map {
+  describe-namespace(host, namespace, {})
+},
+(host: Str, namespace: Str, opts: Map): Map {
+  ::api/json("GET", ::api/data-url(host, ["namespaces", namespace], {}), "", opts)
+}
+
+create-namespace
+meta {
+    ctx: {"pinecone.api.key": {required: false}},
+    doc: """POST {host}/namespaces - Create an empty namespace, optionally with a metadata `schema` (`{fields: {genre: {filterable: true}}}`) restricting which metadata fields are indexed. Namespaces are also created implicitly by the first upsert."""
+}
+fn
+(host: Str, name: Str): Map {
+  create-namespace(host, name, null, {})
+},
+(host: Str, name: Str, schema: Map): Map {
+  create-namespace(host, name, schema, {})
+},
+(host: Str, name: Str, schema: Map?, opts: Map): Map {
+  ::api/json("POST", ::api/data-url(host, ["namespaces"], {}), ::api/compact({name: name, schema: schema}), opts)
+}
+
+delete-namespace
+meta {
+    ctx: {"pinecone.api.key": {required: false}},
+    doc: """DELETE {host}/namespaces/{namespace} - Delete a namespace and every record in it. Irreversible."""
+}
+fn
+(host: Str, namespace: Str): Any {
+  delete-namespace(host, namespace, {})
+},
+(host: Str, namespace: Str, opts: Map): Any {
+  ::api/json("DELETE", ::api/data-url(host, ["namespaces", namespace], {}), "", opts)
+}

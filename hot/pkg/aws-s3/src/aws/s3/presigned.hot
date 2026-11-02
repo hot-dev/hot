@@ -4,10 +4,20 @@
 
 ::ctx ::hot::ctx
 
-get-credentials ::aws::core/get-credentials
-get-region ::aws::core/get-region
-s3-endpoint ::aws::core/s3-endpoint
+::api ::aws::s3::api
+
 sign-url ::aws::core/sign-url
+
+// Presign one request with resolved settings
+presign
+meta {
+    doc: """A presigned URL for `method` on an object, with credentials, region and endpoint from `opts`. An Err when the bucket or region isn't valid."""
+}
+fn (method: Str, bucket: Str, key: Str, expires_in: Int, opts: Map): Str {
+    if-ok(::api/resolve(opts, bucket), (resolved) {
+        sign-url(method, ::api/object-url(bucket, key, resolved), resolved.region, "s3", resolved.credentials, expires_in)
+    })
+}
 
 // Generate a presigned URL for S3 GET operations
 generate-presigned-url
@@ -23,7 +33,7 @@ meta {
     ```hot
     // Generate a 1-hour download URL
     url ::aws::s3::presigned/generate-presigned-url("my-bucket", "path/to/file.pdf", 3600)
-    // => "https://my-bucket.s3.amazonaws.com/path/to/file.pdf?X-Amz-Algorithm=..."
+    // => "https://my-bucket.s3.us-east-1.amazonaws.com/path/to/file.pdf?X-Amz-Algorithm=..."
 
     // Download using the presigned URL (no AWS credentials needed)
     ::http ::hot::http
@@ -33,13 +43,14 @@ meta {
     """
 }
 fn
+(bucket: Str, key: Str, expires_in: Int, opts: Map): Str {
+    presign("GET", bucket, key, expires_in, opts)
+},
+(bucket: Str, key: Str, opts: Map): Str {
+    presign("GET", bucket, key, 3600, opts)
+},
 (bucket: Str, key: Str, expires_in: Int): Str {
-    region get-region()
-    credentials get-credentials()
-    endpoint s3-endpoint(bucket, region)
-    url `${endpoint}/${key}`
-
-    sign-url("GET", url, region, "s3", credentials, expires_in)
+    presign("GET", bucket, key, expires_in, {})
 },
 (bucket: Str, key: Str): Str {
     generate-presigned-url(bucket, key, 3600)
@@ -67,13 +78,14 @@ meta {
     """
 }
 fn
+(bucket: Str, key: Str, expires_in: Int, opts: Map): Str {
+    presign("PUT", bucket, key, expires_in, opts)
+},
+(bucket: Str, key: Str, opts: Map): Str {
+    presign("PUT", bucket, key, 3600, opts)
+},
 (bucket: Str, key: Str, expires_in: Int): Str {
-    region get-region()
-    credentials get-credentials()
-    endpoint s3-endpoint(bucket, region)
-    url `${endpoint}/${key}`
-
-    sign-url("PUT", url, region, "s3", credentials, expires_in)
+    presign("PUT", bucket, key, expires_in, {})
 },
 (bucket: Str, key: Str): Str {
     generate-presigned-upload-url(bucket, key, 3600)
@@ -96,13 +108,14 @@ meta {
     """
 }
 fn
+(bucket: Str, key: Str, expires_in: Int, opts: Map): Str {
+    presign("DELETE", bucket, key, expires_in, opts)
+},
+(bucket: Str, key: Str, opts: Map): Str {
+    presign("DELETE", bucket, key, 3600, opts)
+},
 (bucket: Str, key: Str, expires_in: Int): Str {
-    region get-region()
-    credentials get-credentials()
-    endpoint s3-endpoint(bucket, region)
-    url `${endpoint}/${key}`
-
-    sign-url("DELETE", url, region, "s3", credentials, expires_in)
+    presign("DELETE", bucket, key, expires_in, {})
 },
 (bucket: Str, key: Str): Str {
     generate-presigned-delete-url(bucket, key, 3600)

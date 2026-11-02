@@ -109,7 +109,15 @@ resume-finetuning
 meta {
     doc: """POST /fine_tuning/jobs/{fine_tuning_job_id}/resume - Resume a paused fine-tuning job."""
 }
-fn (request: ResumeFineTuningJobRequest): ResumeFineTuningJobResponse {
-  response api-request("POST", `${::openai/BASE_URL}/fine_tuning/jobs/${request.fine-tuning-job-id}/resume`)
-  if(is-ok-response(response), ResumeFineTuningJobResponse(response.body), err(HttpError(response)))
+fn
+(request: ResumeFineTuningJobRequest): ResumeFineTuningJobResponse {
+  resume-finetuning(request, {})
+},
+(request: ResumeFineTuningJobRequest, opts: Map): ResumeFineTuningJobResponse {
+  response api-request("POST", `/fine_tuning/jobs/${request.fine-tuning-job-id}/resume`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ResumeFineTuningJobResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

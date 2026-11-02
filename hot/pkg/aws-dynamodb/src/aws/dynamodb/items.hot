@@ -2,13 +2,12 @@
 
 // DynamoDB item operations
 
-http-request ::hot::http/request
 HttpResponse ::hot::http/HttpResponse
 is-ok-response ::hot::http/is-ok-response
 
-get-credentials ::aws::core/get-credentials
-get-region ::aws::core/get-region
-sign-request ::aws::core/sign-request
+resolve ::aws::core/resolve
+send-signed ::aws::core/send-signed
+service-url ::aws::core/service-url
 AwsError ::aws::core/AwsError
 
 // Put item response
@@ -56,43 +55,46 @@ meta {
     """
 }
 fn
+(table_name: Str, item: Map, condition_expression: Str?, expression_attribute_values: Map?, opts: Map): PutItemResponse | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        url `${service-url(resolved, "dynamodb")}/`
+
+        request-body {
+            TableName: table_name,
+            Item: item
+        }
+
+        with-condition cond {
+            is-null(condition_expression) => { request-body }
+            => { {...request-body,
+                ConditionExpression: condition_expression,
+                ExpressionAttributeValues: expression_attribute_values} }
+        }
+
+        body to-json(with-condition)
+
+        headers {
+            "Content-Type": "application/x-amz-json-1.0",
+            "X-Amz-Target": "DynamoDB_20120810.PutItem"
+        }
+
+        response send-signed("POST", url, "dynamodb", resolved, headers, body)
+
+        cond {
+            is-err(response) => { response }
+            is-ok-response(response) => { PutItemResponse({
+                attributes: response.body.Attributes,
+                consumed_capacity: response.body.ConsumedCapacity
+            }) }
+            => { err(AwsError(response)) }
+        }
+    })
+},
+(table_name: Str, item: Map, opts: Map): PutItemResponse | AwsError {
+    put-item(table_name, item, null, null, opts)
+},
 (table_name: Str, item: Map, condition_expression: Str?, expression_attribute_values: Map?): PutItemResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
-
-    url `https://dynamodb.${region}.amazonaws.com/`
-
-    request-body {
-        TableName: table_name,
-        Item: item
-    }
-
-    with-condition cond {
-        is-null(condition_expression) => { request-body }
-        => { {...request-body,
-            ConditionExpression: condition_expression,
-            ExpressionAttributeValues: expression_attribute_values} }
-    }
-
-    body to-json(with-condition)
-
-    headers {
-        "Content-Type": "application/x-amz-json-1.0",
-        "X-Amz-Target": "DynamoDB_20120810.PutItem",
-        "Host": `dynamodb.${region}.amazonaws.com`
-    }
-
-    signed-headers sign-request("POST", url, region, "dynamodb", credentials, headers, body)
-
-    response http-request("POST", url, signed-headers, body)
-
-    cond {
-        is-ok-response(response) => { PutItemResponse({
-            attributes: response.body.Attributes,
-            consumed_capacity: response.body.ConsumedCapacity
-        }) }
-        => { err(AwsError(response)) }
-    }
+    put-item(table_name, item, condition_expression, expression_attribute_values, {})
 },
 (table_name: Str, item: Map): PutItemResponse | AwsError {
     put-item(table_name, item, null, null)
@@ -115,41 +117,47 @@ meta {
     """
 }
 fn
+(table_name: Str, key: Map, consistent_read: Bool, projection_expression: Str?, opts: Map): GetItemResponse | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        url `${service-url(resolved, "dynamodb")}/`
+
+        request-body {
+            TableName: table_name,
+            Key: key,
+            ConsistentRead: consistent_read
+        }
+
+        with-projection merge(request-body, filter-vals({
+            ProjectionExpression: projection_expression
+        }, is-some))
+
+        body to-json(with-projection)
+
+        headers {
+            "Content-Type": "application/x-amz-json-1.0",
+            "X-Amz-Target": "DynamoDB_20120810.GetItem"
+        }
+
+        response send-signed("POST", url, "dynamodb", resolved, headers, body)
+
+        cond {
+            is-err(response) => { response }
+            is-ok-response(response) => { GetItemResponse({
+                item: response.body.Item,
+                consumed_capacity: response.body.ConsumedCapacity
+            }) }
+            => { err(AwsError(response)) }
+        }
+    })
+},
+(table_name: Str, key: Map, consistent_read: Bool, opts: Map): GetItemResponse | AwsError {
+    get-item(table_name, key, consistent_read, null, opts)
+},
+(table_name: Str, key: Map, opts: Map): GetItemResponse | AwsError {
+    get-item(table_name, key, false, null, opts)
+},
 (table_name: Str, key: Map, consistent_read: Bool, projection_expression: Str?): GetItemResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
-
-    url `https://dynamodb.${region}.amazonaws.com/`
-
-    request-body {
-        TableName: table_name,
-        Key: key,
-        ConsistentRead: consistent_read
-    }
-
-    with-projection merge(request-body, filter-vals({
-        ProjectionExpression: projection_expression
-    }, is-some))
-
-    body to-json(with-projection)
-
-    headers {
-        "Content-Type": "application/x-amz-json-1.0",
-        "X-Amz-Target": "DynamoDB_20120810.GetItem",
-        "Host": `dynamodb.${region}.amazonaws.com`
-    }
-
-    signed-headers sign-request("POST", url, region, "dynamodb", credentials, headers, body)
-
-    response http-request("POST", url, signed-headers, body)
-
-    cond {
-        is-ok-response(response) => { GetItemResponse({
-            item: response.body.Item,
-            consumed_capacity: response.body.ConsumedCapacity
-        }) }
-        => { err(AwsError(response)) }
-    }
+    get-item(table_name, key, consistent_read, projection_expression, {})
 },
 (table_name: Str, key: Map, consistent_read: Bool): GetItemResponse | AwsError {
     get-item(table_name, key, consistent_read, null)
@@ -173,43 +181,46 @@ meta {
     """
 }
 fn
+(table_name: Str, key: Map, condition_expression: Str?, expression_attribute_values: Map?, opts: Map): DeleteItemResponse | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        url `${service-url(resolved, "dynamodb")}/`
+
+        request-body {
+            TableName: table_name,
+            Key: key
+        }
+
+        with-condition cond {
+            is-null(condition_expression) => { request-body }
+            => { {...request-body,
+                ConditionExpression: condition_expression,
+                ExpressionAttributeValues: expression_attribute_values} }
+        }
+
+        body to-json(with-condition)
+
+        headers {
+            "Content-Type": "application/x-amz-json-1.0",
+            "X-Amz-Target": "DynamoDB_20120810.DeleteItem"
+        }
+
+        response send-signed("POST", url, "dynamodb", resolved, headers, body)
+
+        cond {
+            is-err(response) => { response }
+            is-ok-response(response) => { DeleteItemResponse({
+                attributes: response.body.Attributes,
+                consumed_capacity: response.body.ConsumedCapacity
+            }) }
+            => { err(AwsError(response)) }
+        }
+    })
+},
+(table_name: Str, key: Map, opts: Map): DeleteItemResponse | AwsError {
+    delete-item(table_name, key, null, null, opts)
+},
 (table_name: Str, key: Map, condition_expression: Str?, expression_attribute_values: Map?): DeleteItemResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
-
-    url `https://dynamodb.${region}.amazonaws.com/`
-
-    request-body {
-        TableName: table_name,
-        Key: key
-    }
-
-    with-condition cond {
-        is-null(condition_expression) => { request-body }
-        => { {...request-body,
-            ConditionExpression: condition_expression,
-            ExpressionAttributeValues: expression_attribute_values} }
-    }
-
-    body to-json(with-condition)
-
-    headers {
-        "Content-Type": "application/x-amz-json-1.0",
-        "X-Amz-Target": "DynamoDB_20120810.DeleteItem",
-        "Host": `dynamodb.${region}.amazonaws.com`
-    }
-
-    signed-headers sign-request("POST", url, region, "dynamodb", credentials, headers, body)
-
-    response http-request("POST", url, signed-headers, body)
-
-    cond {
-        is-ok-response(response) => { DeleteItemResponse({
-            attributes: response.body.Attributes,
-            consumed_capacity: response.body.ConsumedCapacity
-        }) }
-        => { err(AwsError(response)) }
-    }
+    delete-item(table_name, key, condition_expression, expression_attribute_values, {})
 },
 (table_name: Str, key: Map): DeleteItemResponse | AwsError {
     delete-item(table_name, key, null, null)
@@ -238,43 +249,43 @@ meta {
     """
 }
 fn
+(table_name: Str, key: Map, update_expression: Str, expression_attribute_values: Map, expression_attribute_names: Map?, opts: Map): UpdateItemResponse | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        url `${service-url(resolved, "dynamodb")}/`
+
+        request-body {
+            TableName: table_name,
+            Key: key,
+            UpdateExpression: update_expression,
+            ExpressionAttributeValues: expression_attribute_values,
+            ReturnValues: "ALL_NEW"
+        }
+
+        with-names merge(request-body, filter-vals({
+            ExpressionAttributeNames: expression_attribute_names
+        }, is-some))
+
+        body to-json(with-names)
+
+        headers {
+            "Content-Type": "application/x-amz-json-1.0",
+            "X-Amz-Target": "DynamoDB_20120810.UpdateItem"
+        }
+
+        response send-signed("POST", url, "dynamodb", resolved, headers, body)
+
+        cond {
+            is-err(response) => { response }
+            is-ok-response(response) => { UpdateItemResponse({
+                attributes: response.body.Attributes,
+                consumed_capacity: response.body.ConsumedCapacity
+            }) }
+            => { err(AwsError(response)) }
+        }
+    })
+},
 (table_name: Str, key: Map, update_expression: Str, expression_attribute_values: Map, expression_attribute_names: Map?): UpdateItemResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
-
-    url `https://dynamodb.${region}.amazonaws.com/`
-
-    request-body {
-        TableName: table_name,
-        Key: key,
-        UpdateExpression: update_expression,
-        ExpressionAttributeValues: expression_attribute_values,
-        ReturnValues: "ALL_NEW"
-    }
-
-    with-names merge(request-body, filter-vals({
-        ExpressionAttributeNames: expression_attribute_names
-    }, is-some))
-
-    body to-json(with-names)
-
-    headers {
-        "Content-Type": "application/x-amz-json-1.0",
-        "X-Amz-Target": "DynamoDB_20120810.UpdateItem",
-        "Host": `dynamodb.${region}.amazonaws.com`
-    }
-
-    signed-headers sign-request("POST", url, region, "dynamodb", credentials, headers, body)
-
-    response http-request("POST", url, signed-headers, body)
-
-    cond {
-        is-ok-response(response) => { UpdateItemResponse({
-            attributes: response.body.Attributes,
-            consumed_capacity: response.body.ConsumedCapacity
-        }) }
-        => { err(AwsError(response)) }
-    }
+    update-item(table_name, key, update_expression, expression_attribute_values, expression_attribute_names, {})
 },
 (table_name: Str, key: Map, update_expression: Str, expression_attribute_values: Map): UpdateItemResponse | AwsError {
     update-item(table_name, key, update_expression, expression_attribute_values, null)

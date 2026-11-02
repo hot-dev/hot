@@ -1,0 +1,144 @@
+::discord::automod ns
+meta {
+    doc: """
+    Auto-moderation rules: list, read, create, modify and delete. Needs
+    MANAGE_GUILD.
+
+    `trigger_type`: 1 keyword, 3 spam, 4 keyword preset, 5 mention spam,
+    6 member profile. `event_type`: 1 message send, 2 member update.
+    Actions: `{type: 1}` block message (optional
+    `metadata.custom_message`), `{type: 2, metadata: {channel_id}}` send an
+    alert, `{type: 3, metadata: {duration_seconds}}` time out,
+    `{type: 4}` block member interactions.
+    """
+}
+
+::api ::discord::api
+
+seg ::discord::api/seg
+
+ListAutoModerationRulesRequest type {
+  guild_id: Str
+}
+
+list-auto-moderation-rules
+meta {
+    doc: """GET /guilds/{guild_id}/auto-moderation/rules - Every auto-moderation rule in a guild."""
+}
+fn
+(request: ListAutoModerationRulesRequest): Vec<Map> {
+  list-auto-moderation-rules(request, {})
+},
+(request: ListAutoModerationRulesRequest, opts: Map): Vec<Map> {
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/auto-moderation/rules`, {}, opts)
+}
+
+GetAutoModerationRuleRequest type {
+  guild_id: Str,
+  rule_id: Str
+}
+
+get-auto-moderation-rule
+meta {
+    doc: """GET /guilds/{guild_id}/auto-moderation/rules/{rule_id} - One rule."""
+}
+fn
+(request: GetAutoModerationRuleRequest): Map {
+  get-auto-moderation-rule(request, {})
+},
+(request: GetAutoModerationRuleRequest, opts: Map): Map {
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/auto-moderation/rules/${seg(request.rule_id)}`, {}, opts)
+}
+
+CreateAutoModerationRuleRequest type {
+  guild_id: Str,
+  name: Str,
+  event_type: Int,
+  trigger_type: Int,
+  actions: Vec<Map>,
+  trigger_metadata: Map?,
+  enabled: Bool?,
+  exempt_roles: Vec<Str>?,
+  exempt_channels: Vec<Str>?,
+  reason: Str?
+}
+
+create-auto-moderation-rule
+meta {
+    doc: """
+    POST /guilds/{guild_id}/auto-moderation/rules - Create a rule.
+
+    **Example**
+
+    ```hot
+    ::automod ::discord::automod
+
+    ::automod/create-auto-moderation-rule(::automod/CreateAutoModerationRuleRequest({
+      guild_id: "1000000000000000000",
+      name: "Block invite spam",
+      event_type: 1,
+      trigger_type: 1,
+      trigger_metadata: {keyword_filter: ["discord.gg/*"]},
+      actions: [{type: 1, metadata: {custom_message: "Invites are not allowed here"}}],
+      enabled: true,
+      reason: "Invite spam wave"
+    }))
+    ```
+    """
+}
+fn
+(request: CreateAutoModerationRuleRequest): Map {
+  create-auto-moderation-rule(request, {})
+},
+(request: CreateAutoModerationRuleRequest, opts: Map): Map {
+  ::api/call("POST", `/guilds/${seg(request.guild_id)}/auto-moderation/rules`, {
+    body: ::api/body(request, ["guild_id"]),
+    reason: request.reason
+  }, opts)
+}
+
+ModifyAutoModerationRuleRequest type {
+  guild_id: Str,
+  rule_id: Str,
+  name: Str?,
+  event_type: Int?,
+  trigger_metadata: Map?,
+  actions: Vec<Map>?,
+  enabled: Bool?,
+  exempt_roles: Vec<Str>?,
+  exempt_channels: Vec<Str>?,
+  reason: Str?
+}
+
+modify-auto-moderation-rule
+meta {
+    doc: """PATCH /guilds/{guild_id}/auto-moderation/rules/{rule_id} - Change a rule (e.g. `enabled: false` to pause it). Only fields you set are sent; `trigger_type` cannot change."""
+}
+fn
+(request: ModifyAutoModerationRuleRequest): Map {
+  modify-auto-moderation-rule(request, {})
+},
+(request: ModifyAutoModerationRuleRequest, opts: Map): Map {
+  ::api/call("PATCH", `/guilds/${seg(request.guild_id)}/auto-moderation/rules/${seg(request.rule_id)}`, {
+    body: ::api/body(request, ["guild_id", "rule_id"]),
+    reason: request.reason
+  }, opts)
+}
+
+DeleteAutoModerationRuleRequest type {
+  guild_id: Str,
+  rule_id: Str,
+  reason: Str?
+}
+
+delete-auto-moderation-rule
+meta {
+    doc: """DELETE /guilds/{guild_id}/auto-moderation/rules/{rule_id} - Delete a rule."""
+}
+fn
+(request: DeleteAutoModerationRuleRequest): Bool {
+  delete-auto-moderation-rule(request, {})
+},
+(request: DeleteAutoModerationRuleRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `/guilds/${seg(request.guild_id)}/auto-moderation/rules/${seg(request.rule_id)}`, {reason: request.reason}, opts)
+}

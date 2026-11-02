@@ -1,0 +1,138 @@
+::notion::test::opts ns
+meta ["test"]
+
+// Hermetic: no network and no notion.* context.
+
+::api ::notion::api
+::blocks ::notion::blocks
+::comments ::notion::comments
+::databases ::notion::databases
+::pages ::notion::pages
+::users ::notion::users
+
+OFFLINE {token: "ntn_tenant", base-url: "http://127.0.0.1:1"}
+
+// Nothing listens on port 1, so a call fails at the socket, with the URL
+// in the error. That error proves the call got past the credential check
+// and used this `opts`, without any network traffic.
+reaches fn (result: Result): Bool {
+    and(is-err(result), contains(err-message(result), "127.0.0.1:1"))
+}
+
+test-resolve-opts-override-ctx
+meta ["test"] fn () {
+    r ::api/resolve-from({token: "opt-token", api-version: "2025-09-03", base-url: "https://proxy.example/v1/"}, {"notion.token": "ctx-token"})
+    assert-eq("opt-token", r.token)
+    assert-eq("2025-09-03", r.api-version)
+    assert-eq("https://proxy.example/v1", r.base-url, "the trailing slash goes")
+}
+
+test-resolve-ctx-used-when-opts-empty
+meta ["test"] fn () {
+    r ::api/resolve-from({}, {"notion.token": "ctx-token"})
+    assert-eq("ctx-token", r.token)
+    assert-eq(::notion/NOTION_VERSION, r.api-version)
+    assert-eq("https://api.notion.com/v1", r.base-url)
+}
+
+test-resolve-missing-credential-is-a-clear-error
+meta ["test"] fn () {
+    out ::api/resolve-from({}, {})
+    assert(is-err(out))
+    assert(contains(err-message(out), "notion.token"))
+}
+
+test-resolve-never-writes-ctx
+meta ["test"] fn () {
+    before ::hot::ctx/get("notion.token")
+    assert-eq("call-token", ::api/resolve({token: "call-token"}).token)
+    assert(reaches(::users/me(OFFLINE)))
+    assert-eq(before, ::hot::ctx/get("notion.token"))
+}
+
+test-existing-arity-reads-ctx
+meta ["test"] fn () {
+    cond {
+        is-some(::hot::ctx/get("notion.token")) => { assert(true) }
+        => {
+            out ::users/me()
+            assert(is-err(out))
+            assert(contains(err-message(out), "notion.token"))
+        }
+    }
+}
+
+test-build-request
+meta ["test"] fn () {
+    bare ::api/build-request("GET", "/users/me", {}, "", ::api/resolve-from({token: "a"}, {}))
+    assert-eq("https://api.notion.com/v1/users/me", bare.url)
+    assert-eq("Bearer a", bare.headers.Authorization)
+    assert-eq(::notion/NOTION_VERSION, get(bare.headers, "Notion-Version"))
+    assert(is-null(get(bare.headers, "Content-Type")))
+    posted ::api/build-request("POST", "/search", {X-Extra: "1"}, {query: "q"}, ::api/resolve-from({token: "b", api-version: "2025-09-03"}, {}))
+    assert-eq("Bearer b", posted.headers.Authorization)
+    assert-eq("2025-09-03", get(posted.headers, "Notion-Version"))
+    assert-eq("1", get(posted.headers, "X-Extra"))
+    assert-eq("application/json", get(posted.headers, "Content-Type"))
+    assert-eq({query: "q"}, from-json(posted.body))
+}
+
+test-opts-reach-every-module
+meta ["test"] fn () {
+    assert(reaches(::api/request("GET", "/users/me", {}, "", OFFLINE)))
+    assert(reaches(::api/json("GET", "/users/me", {}, "", OFFLINE)))
+    assert(reaches(::pages/get-page("p", OFFLINE)))
+    assert(reaches(::pages/create-page("p", "Title", [], OFFLINE)))
+    assert(reaches(::users/list-users({page_size: 1}, OFFLINE)))
+    assert(reaches(::databases/query-database("d", {}, OFFLINE)))
+    assert(reaches(::comments/create-comment({page_id: "p"}, "hi", OFFLINE)))
+    assert(reaches(::blocks/get-children("b", OFFLINE)))
+}
+
+test-search-arities-keep-their-meaning
+meta ["test"] fn () {
+    assert(reaches(::blocks/search("q", OFFLINE)), "a Map is opts")
+    assert(reaches(::blocks/search("q", "page", OFFLINE)), "a Str is the object type")
+}
+
+test-blank-credential-in-opts-is-an-error
+meta ["test"] fn () {
+    ctx {"notion.token": "ctx-token"}
+    results map([{token: ""}, {token: "   "}, {token: null}], (o) {
+        out ::api/resolve-from(o, ctx)
+        assert(is-err(out), "never falls back to notion.token")
+        assert(contains(err-message(out), "token"))
+        true
+    })
+    assert-eq(3, length(results))
+    assert(is-err(::users/me({token: ""})), "the error reaches the caller")
+}
+
+test-base-url-without-credential-is-an-error
+meta ["test"] fn () {
+    out ::api/resolve-from({base-url: "https://collector.example"}, {"notion.token": "ntn_ctx_secret"})
+    assert(is-err(out), "the context key must not go to a per-call URL")
+    assert(contains(err-message(out), "base-url"))
+    assert(contains(err-message(out), "token"))
+    assert(not(contains(err-message(out), "ntn_ctx_secret")), "the key stays out of messages")
+    assert-eq("https://collector.example", ::api/resolve-from({base-url: "https://collector.example", token: "tenant"}, {"notion.token": "ntn_ctx_secret"}).base-url, "with a credential it works")
+    assert-eq("ntn_ctx_secret", ::api/resolve-from({base-url: ""}, {"notion.token": "ntn_ctx_secret"}).token, "a blank base-url is the default root")
+}
+
+test-base-url-without-credential-sends-nothing
+meta ["test"] fn () {
+    before ::hot::ctx/get("notion.token")
+    ::hot::ctx/set-secret("notion.token", "ntn_ctx_secret")
+    assert-eq("ntn_ctx_secret", ::api/resolve({}).token, "control: the live context key is set")
+    out ::pages/get-page("p", {base-url: "http://127.0.0.1:1"})
+    assert(is-err(out))
+    assert(contains(err-message(out), "base-url"))
+    assert(not(reaches(out)), "no request was attempted: the failure isn't the socket")
+    assert(reaches(::pages/get-page("p", {token: "tenant", base-url: "http://127.0.0.1:1"})), "control: with a credential it reaches the socket")
+    ::hot::ctx/set-secret("notion.token", before)
+}
+
+test-resolve-marks-the-opts-credential-and-returns-it-unchanged
+meta ["test"] fn () {
+    assert-eq("tenant-credential-a", ::api/resolve({token: "tenant-credential-a"}).token)
+}
