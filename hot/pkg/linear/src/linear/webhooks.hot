@@ -6,6 +6,7 @@ meta {
 ::ctx ::hot::ctx
 ::hmac ::hot::hmac
 ::json ::hot::json
+::re ::hot::regex
 ::time ::hot::time
 
 // Linear's recommended replay tolerance: reject payloads whose signed
@@ -22,7 +23,10 @@ meta {
     `max-age-ms` of 0 or less to skip the replay check. Uses the
     `linear.webhook.secret` context variable by default (failing when it
     is unset), or accepts an explicit secret — an empty explicit secret
-    never verifies.
+    never verifies. The Map form takes `webhook-secret` and `max-age-ms`;
+    without `webhook-secret` it reads the context variable. A
+    `webhook-secret` present but blank or null is an Err, never a fallback
+    to context.
 
     **Example**
 
@@ -34,6 +38,9 @@ meta {
         ::hot::http/HttpResponse({status: 401, body: "invalid signature"}),
         handle-event(request.body))
     }
+
+    // One tenant's secret, for one call
+    ::linear::webhooks/verify-request(request, {webhook-secret: "lin_wh_tenant_b"})
     ```
     """
 }
@@ -48,7 +55,26 @@ fn
 (request: Map, secret: Str): Bool {
   verify-request(request, secret, DEFAULT_MAX_AGE_MS)
 },
+(request: Map, opts: Map): Bool {
+  secret ::ctx/mark-secret(opts.webhook-secret)
+  max-age-ms get(opts, "max-age-ms", DEFAULT_MAX_AGE_MS)
+  cond {
+    is-some(::linear::api/blank-credential(opts, ["webhook-secret"])) => {
+      err("linear: webhook-secret is in the call's opts but is blank or null. Pass a value, or leave webhook-secret out to use linear.webhook.secret.")
+    }
+
+    is-some(secret) => { verify-request(request, secret, max-age-ms) }
+    => {
+      from-ctx or(::ctx/get("linear.webhook.secret"), "")
+      if(is-empty(from-ctx),
+        fail("linear.webhook.secret is not set. Add it in Context Variables, or pass webhook-secret in opts, to verify webhook requests.")
+      )
+      verify-request(request, from-ctx, max-age-ms)
+    }
+  }
+},
 (request: Map, secret: Str, max-age-ms: Int): Bool {
+  ::ctx/mark-secret(secret)
   signature get(request.headers, "linear-signature", "")
   cond {
     // An empty key would make every signature forgeable: fail closed.
@@ -77,6 +103,8 @@ timestamp-fresh fn (raw-body: Str, max-age-ms: Int): Bool {
       timestamp get(payload, "webhookTimestamp")
       cond {
         not(is-some(timestamp)) => { false }
+        // Int("abc") is an Err that would halt the run instead of failing closed.
+        and(is-str(timestamp), not(::re/is-match(trim(timestamp), "^-?[0-9]+$"))) => { false }
         => {
           now-ms ::time/epoch-millis(::time/now())
           lte(abs(sub(now-ms, Int(timestamp))), max-age-ms)

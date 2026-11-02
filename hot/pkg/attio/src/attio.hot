@@ -13,6 +13,9 @@ meta {
     **Setup** — context variable `attio.api.key`: an API key from
     Workspace settings → Developers.
 
+    **Per-call credentials.** Every API-calling function takes an optional
+    trailing `opts` Map (`api-key`, `base-url`). See `::attio::api`.
+
     **Quick start**
 
     ```hot

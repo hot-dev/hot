@@ -118,6 +118,7 @@ meta {
     """
 }
 fn (options: Map): PgConnection {
+    ::hot::ctx/mark-secret(get(options, "password"))
     host get(options, "host", "127.0.0.1")
     port get(options, "port", 5432)
     user options.user

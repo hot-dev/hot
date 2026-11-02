@@ -30,9 +30,17 @@ calls-add
 meta {
     doc: """POST /calls.add - Register a new call. Requires an `external_unique_id` and `join_url`. Optionally include a title, participants, and start time."""
 }
-fn (request: CallsAddRequest): CallsAddResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/calls.add`, {}, request)
-  if(is-ok-response(response), CallsAddResponse(response.body), err(HttpError(response)))
+fn
+(request: CallsAddRequest): CallsAddResponse {
+  calls-add(request, {})
+},
+(request: CallsAddRequest, opts: Map): CallsAddResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/calls.add`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { CallsAddResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 CallsEndRequest type {
@@ -50,9 +58,17 @@ calls-end
 meta {
     doc: """POST /calls.end - End a call. Pass the call `id` and optionally a `duration` in seconds."""
 }
-fn (request: CallsEndRequest): CallsEndResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/calls.end`, {}, request)
-  if(is-ok-response(response), CallsEndResponse(response.body), err(HttpError(response)))
+fn
+(request: CallsEndRequest): CallsEndResponse {
+  calls-end(request, {})
+},
+(request: CallsEndRequest, opts: Map): CallsEndResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/calls.end`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { CallsEndResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 CallsInfoRequest type {
@@ -70,9 +86,17 @@ calls-info
 meta {
     doc: """GET /calls.info - Get information about a call. Returns the call object with title, participants, and status."""
 }
-fn (request: CallsInfoRequest): CallsInfoResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/calls.info?id=${request.id}`)
-  if(is-ok-response(response), CallsInfoResponse(response.body), err(HttpError(response)))
+fn
+(request: CallsInfoRequest): CallsInfoResponse {
+  calls-info(request, {})
+},
+(request: CallsInfoRequest, opts: Map): CallsInfoResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/calls.info?id=${request.id}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { CallsInfoResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 CallsUpdateRequest type {
@@ -93,9 +117,17 @@ calls-update
 meta {
     doc: """POST /calls.update - Update information about a call. Can change the title and join URLs."""
 }
-fn (request: CallsUpdateRequest): CallsUpdateResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/calls.update`, {}, request)
-  if(is-ok-response(response), CallsUpdateResponse(response.body), err(HttpError(response)))
+fn
+(request: CallsUpdateRequest): CallsUpdateResponse {
+  calls-update(request, {})
+},
+(request: CallsUpdateRequest, opts: Map): CallsUpdateResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/calls.update`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { CallsUpdateResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 // ============================================================================
@@ -117,9 +149,17 @@ calls-participants-add
 meta {
     doc: """POST /calls.participants.add - Add new participants to a call. Each user in the `users` Vec should be a Map with a `slack_id` or `external_id` and `display_name`."""
 }
-fn (request: CallsParticipantsAddRequest): CallsParticipantsAddResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/calls.participants.add`, {}, request)
-  if(is-ok-response(response), CallsParticipantsAddResponse(response.body), err(HttpError(response)))
+fn
+(request: CallsParticipantsAddRequest): CallsParticipantsAddResponse {
+  calls-participants-add(request, {})
+},
+(request: CallsParticipantsAddRequest, opts: Map): CallsParticipantsAddResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/calls.participants.add`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { CallsParticipantsAddResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 CallsParticipantsRemoveRequest type {
@@ -137,9 +177,17 @@ calls-participants-remove
 meta {
     doc: """POST /calls.participants.remove - Remove participants from a call. Each user in the `users` Vec should be a Map with a `slack_id` or `external_id`."""
 }
-fn (request: CallsParticipantsRemoveRequest): CallsParticipantsRemoveResponse {
-  response api-request("POST", `${::slack::core/BASE_URL}/calls.participants.remove`, {}, request)
-  if(is-ok-response(response), CallsParticipantsRemoveResponse(response.body), err(HttpError(response)))
+fn
+(request: CallsParticipantsRemoveRequest): CallsParticipantsRemoveResponse {
+  calls-participants-remove(request, {})
+},
+(request: CallsParticipantsRemoveRequest, opts: Map): CallsParticipantsRemoveResponse {
+  response api-request("POST", `${::slack::core/BASE_URL}/calls.participants.remove`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { CallsParticipantsRemoveResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 // ============================================================================
@@ -175,7 +223,15 @@ response.self  // => {id: "U1234", name: "my-bot"}
 ```
 """
 }
-fn (request: RtmConnectRequest): RtmConnectResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/rtm.connect?batch_presence_aware=${or(request.batch_presence_aware, "")}&presence_sub=${or(request.presence_sub, "")}`)
-  if(is-ok-response(response), RtmConnectResponse(response.body), err(HttpError(response)))
+fn
+(request: RtmConnectRequest): RtmConnectResponse {
+  rtm-connect(request, {})
+},
+(request: RtmConnectRequest, opts: Map): RtmConnectResponse {
+  response api-request("GET", `${::slack::core/BASE_URL}/rtm.connect?batch_presence_aware=${or(request.batch_presence_aware, "")}&presence_sub=${or(request.presence_sub, "")}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { RtmConnectResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

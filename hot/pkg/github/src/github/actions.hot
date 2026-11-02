@@ -44,15 +44,22 @@ fn
   ::api/json("GET", actions-path(owner, repo, "/workflows"))
 },
 (owner: Str, repo: Str, params: Map): Map {
-  ::api/json("GET", actions-path(owner, repo, "/workflows") |> with-query(params))
+  list-workflows(owner, repo, params, {})
+},
+(owner: Str, repo: Str, params: Map, opts: Map): Map {
+  ::api/json("GET", actions-path(owner, repo, "/workflows") |> with-query(params), {}, "", opts)
 }
 
 get-workflow
 meta {
     doc: """GET /repos/{owner}/{repo}/actions/workflows/{workflow} - Get a workflow by numeric id or file name."""
 }
-fn (owner: Str, repo: Str, workflow: Any): Map {
-  ::api/json("GET", workflow-path(owner, repo, workflow))
+fn
+(owner: Str, repo: Str, workflow: Any): Map {
+  get-workflow(owner, repo, workflow, {})
+},
+(owner: Str, repo: Str, workflow: Any, opts: Map): Map {
+  ::api/json("GET", workflow-path(owner, repo, workflow), {}, "", opts)
 }
 
 list-runs-for-workflow
@@ -69,23 +76,38 @@ fn
   ::api/json("GET", `${workflow-path(owner, repo, workflow)}/runs`)
 },
 (owner: Str, repo: Str, workflow: Any, params: Map): Map {
-  ::api/json("GET", `${workflow-path(owner, repo, workflow)}/runs` |> with-query(params))
+  list-runs-for-workflow(owner, repo, workflow, params, {})
+},
+(owner: Str, repo: Str, workflow: Any, params: Map, opts: Map): Map {
+  ::api/json("GET", `${workflow-path(owner, repo, workflow)}/runs` |> with-query(params), {}, "", opts)
 }
 
 enable-workflow
 meta {
     doc: """PUT /repos/{owner}/{repo}/actions/workflows/{workflow}/enable - Enable a workflow."""
 }
-fn (owner: Str, repo: Str, workflow: Any): Any {
-  ::api/json("PUT", `${workflow-path(owner, repo, workflow)}/enable`)
+fn
+(owner: Str, repo: Str, workflow: Any): Any {
+  enable-workflow(owner, repo, workflow, {})
+},
+(owner: Str, repo: Str, workflow: Any, opts: Map): Any {
+  ::api/json("PUT", `${workflow-path(owner, repo, workflow)}/enable`, {}, "", opts)
 }
 
 disable-workflow
 meta {
     doc: """PUT /repos/{owner}/{repo}/actions/workflows/{workflow}/disable - Disable a workflow."""
 }
-fn (owner: Str, repo: Str, workflow: Any): Any {
-  ::api/json("PUT", `${workflow-path(owner, repo, workflow)}/disable`)
+fn
+(owner: Str, repo: Str, workflow: Any): Any {
+  disable-workflow(owner, repo, workflow, {})
+},
+(owner: Str, repo: Str, workflow: Any, opts: Map): Any {
+  ::api/json("PUT", `${workflow-path(owner, repo, workflow)}/disable`, {}, "", opts)
+}
+
+dispatch-body fn (ref: Str, inputs: Map): Map {
+  if(is-empty(inputs), {ref: ref}, {ref: ref, inputs: inputs})
 }
 
 dispatch-workflow
@@ -102,7 +124,10 @@ fn
   ::api/json("POST", `${workflow-path(owner, repo, workflow)}/dispatches`, {}, {ref: ref})
 },
 (owner: Str, repo: Str, workflow: Any, ref: Str, inputs: Map): Any {
-  ::api/json("POST", `${workflow-path(owner, repo, workflow)}/dispatches`, {}, {ref: ref, inputs: inputs})
+  dispatch-workflow(owner, repo, workflow, ref, inputs, {})
+},
+(owner: Str, repo: Str, workflow: Any, ref: Str, inputs: Map, opts: Map): Any {
+  ::api/json("POST", `${workflow-path(owner, repo, workflow)}/dispatches`, {}, dispatch-body(ref, inputs), opts)
 }
 
 // ============================================================================
@@ -118,23 +143,34 @@ fn
   ::api/json("GET", actions-path(owner, repo, "/runs"))
 },
 (owner: Str, repo: Str, params: Map): Map {
-  ::api/json("GET", actions-path(owner, repo, "/runs") |> with-query(params))
+  list-workflow-runs(owner, repo, params, {})
+},
+(owner: Str, repo: Str, params: Map, opts: Map): Map {
+  ::api/json("GET", actions-path(owner, repo, "/runs") |> with-query(params), {}, "", opts)
 }
 
 get-workflow-run
 meta {
     doc: """GET /repos/{owner}/{repo}/actions/runs/{run_id} - One run's status and conclusion — poll this to watch CI."""
 }
-fn (owner: Str, repo: Str, run-id: Any): Map {
-  ::api/json("GET", run-path(owner, repo, run-id))
+fn
+(owner: Str, repo: Str, run-id: Any): Map {
+  get-workflow-run(owner, repo, run-id, {})
+},
+(owner: Str, repo: Str, run-id: Any, opts: Map): Map {
+  ::api/json("GET", run-path(owner, repo, run-id), {}, "", opts)
 }
 
 get-workflow-run-attempt
 meta {
     doc: """GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt} - One attempt of a re-run workflow."""
 }
-fn (owner: Str, repo: Str, run-id: Any, attempt: Any): Map {
-  ::api/json("GET", attempt-path(owner, repo, run-id, attempt))
+fn
+(owner: Str, repo: Str, run-id: Any, attempt: Any): Map {
+  get-workflow-run-attempt(owner, repo, run-id, attempt, {})
+},
+(owner: Str, repo: Str, run-id: Any, attempt: Any, opts: Map): Map {
+  ::api/json("GET", attempt-path(owner, repo, run-id, attempt), {}, "", opts)
 }
 
 list-workflow-jobs
@@ -151,7 +187,10 @@ fn
   ::api/json("GET", `${run-path(owner, repo, run-id)}/jobs`)
 },
 (owner: Str, repo: Str, run-id: Any, params: Map): Map {
-  ::api/json("GET", `${run-path(owner, repo, run-id)}/jobs` |> with-query(params))
+  list-workflow-jobs(owner, repo, run-id, params, {})
+},
+(owner: Str, repo: Str, run-id: Any, params: Map, opts: Map): Map {
+  ::api/json("GET", `${run-path(owner, repo, run-id)}/jobs` |> with-query(params), {}, "", opts)
 }
 
 list-workflow-attempt-jobs
@@ -167,7 +206,10 @@ fn
   ::api/json("GET", `${attempt-path(owner, repo, run-id, attempt)}/jobs`)
 },
 (owner: Str, repo: Str, run-id: Any, attempt: Any, params: Map): Map {
-  ::api/json("GET", `${attempt-path(owner, repo, run-id, attempt)}/jobs` |> with-query(params))
+  list-workflow-attempt-jobs(owner, repo, run-id, attempt, params, {})
+},
+(owner: Str, repo: Str, run-id: Any, attempt: Any, params: Map, opts: Map): Map {
+  ::api/json("GET", `${attempt-path(owner, repo, run-id, attempt)}/jobs` |> with-query(params), {}, "", opts)
 }
 
 get-workflow-job
@@ -177,8 +219,12 @@ meta {
     including its ordered steps and each step's status and conclusion.
     """
 }
-fn (owner: Str, repo: Str, job-id: Any): Map {
-  ::api/json("GET", job-path(owner, repo, job-id))
+fn
+(owner: Str, repo: Str, job-id: Any): Map {
+  get-workflow-job(owner, repo, job-id, {})
+},
+(owner: Str, repo: Str, job-id: Any, opts: Map): Map {
+  ::api/json("GET", job-path(owner, repo, job-id), {}, "", opts)
 }
 
 download-workflow-job-logs
@@ -189,32 +235,48 @@ meta {
     `list-workflow-jobs` identifies a failed checkout or test step.
     """
 }
-fn (owner: Str, repo: Str, job-id: Any): Any {
-  ::api/download(`${job-path(owner, repo, job-id)}/logs`)
+fn
+(owner: Str, repo: Str, job-id: Any): Any {
+  download-workflow-job-logs(owner, repo, job-id, {})
+},
+(owner: Str, repo: Str, job-id: Any, opts: Map): Any {
+  ::api/download(`${job-path(owner, repo, job-id)}/logs`, opts)
 }
 
 download-workflow-run-logs
 meta {
     doc: """GET /repos/{owner}/{repo}/actions/runs/{run_id}/logs - Download a workflow run's log archive as Bytes."""
 }
-fn (owner: Str, repo: Str, run-id: Any): Any {
-  ::api/download(`${run-path(owner, repo, run-id)}/logs`)
+fn
+(owner: Str, repo: Str, run-id: Any): Any {
+  download-workflow-run-logs(owner, repo, run-id, {})
+},
+(owner: Str, repo: Str, run-id: Any, opts: Map): Any {
+  ::api/download(`${run-path(owner, repo, run-id)}/logs`, opts)
 }
 
 download-workflow-attempt-logs
 meta {
     doc: """GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt}/logs - Download one attempt's log archive as Bytes."""
 }
-fn (owner: Str, repo: Str, run-id: Any, attempt: Any): Any {
-  ::api/download(`${attempt-path(owner, repo, run-id, attempt)}/logs`)
+fn
+(owner: Str, repo: Str, run-id: Any, attempt: Any): Any {
+  download-workflow-attempt-logs(owner, repo, run-id, attempt, {})
+},
+(owner: Str, repo: Str, run-id: Any, attempt: Any, opts: Map): Any {
+  ::api/download(`${attempt-path(owner, repo, run-id, attempt)}/logs`, opts)
 }
 
 cancel-workflow-run
 meta {
     doc: """POST /repos/{owner}/{repo}/actions/runs/{run_id}/cancel - Cancel a workflow run."""
 }
-fn (owner: Str, repo: Str, run-id: Any): Any {
-  ::api/json("POST", `${run-path(owner, repo, run-id)}/cancel`)
+fn
+(owner: Str, repo: Str, run-id: Any): Any {
+  cancel-workflow-run(owner, repo, run-id, {})
+},
+(owner: Str, repo: Str, run-id: Any, opts: Map): Any {
+  ::api/json("POST", `${run-path(owner, repo, run-id)}/cancel`, {}, "", opts)
 }
 
 rerun-workflow
@@ -230,7 +292,10 @@ fn
   rerun-workflow(owner, repo, run-id, {})
 },
 (owner: Str, repo: Str, run-id: Any, options: Map): Any {
-  ::api/json("POST", `${run-path(owner, repo, run-id)}/rerun`, {}, options)
+  rerun-workflow(owner, repo, run-id, options, {})
+},
+(owner: Str, repo: Str, run-id: Any, options: Map, opts: Map): Any {
+  ::api/json("POST", `${run-path(owner, repo, run-id)}/rerun`, {}, options, opts)
 }
 
 rerun-failed-workflow-jobs
@@ -246,7 +311,10 @@ fn
   rerun-failed-workflow-jobs(owner, repo, run-id, {})
 },
 (owner: Str, repo: Str, run-id: Any, options: Map): Any {
-  ::api/json("POST", `${run-path(owner, repo, run-id)}/rerun-failed-jobs`, {}, options)
+  rerun-failed-workflow-jobs(owner, repo, run-id, options, {})
+},
+(owner: Str, repo: Str, run-id: Any, options: Map, opts: Map): Any {
+  ::api/json("POST", `${run-path(owner, repo, run-id)}/rerun-failed-jobs`, {}, options, opts)
 }
 
 rerun-workflow-job
@@ -262,5 +330,8 @@ fn
   rerun-workflow-job(owner, repo, job-id, {})
 },
 (owner: Str, repo: Str, job-id: Any, options: Map): Any {
-  ::api/json("POST", `${job-path(owner, repo, job-id)}/rerun`, {}, options)
+  rerun-workflow-job(owner, repo, job-id, options, {})
+},
+(owner: Str, repo: Str, job-id: Any, options: Map, opts: Map): Any {
+  ::api/json("POST", `${job-path(owner, repo, job-id)}/rerun`, {}, options, opts)
 }

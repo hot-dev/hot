@@ -1,0 +1,188 @@
+::aws::test::bedrock ns
+meta ["test"]
+
+// Hermetic: no network, no aws.* context. A `transport` in opts stands in for the network.
+
+::invoke ::aws::bedrock::invoke
+::converse ::aws::bedrock::converse
+::chat ::aws::bedrock::chat
+::models ::aws::bedrock::models
+
+HttpResponse ::hot::http/HttpResponse
+
+// Every call is answered 418 with the signed request as the body.
+echo fn (): Map {
+    {
+        "access-key-id": "AKIDOPTS",
+        "secret-access-key": "opts-secret",
+        region: "eu-west-1",
+        transport: (req) { HttpResponse({status: 418, headers: {}, body: req}) }
+    }
+}
+
+// The request a call would have sent.
+sent fn (result: Result): Any {
+    if(is-err(result), err-value(result).body, result.body)
+}
+
+// Every call is answered 200 with these headers and body.
+answer fn (headers: Map, body: Any): Map {
+    {
+        "access-key-id": "AKIDOPTS",
+        "secret-access-key": "opts-secret",
+        region: "eu-west-1",
+        transport: (req) { HttpResponse({status: 200, headers: headers, body: body, body-bytes: if(is-bytes(body), body, Bytes(""))}) }
+    }
+}
+
+// Answered 200 with an AWS JSON body, which the runtime hands over as Bytes.
+amz fn (body: Map): Map {
+    answer({"content-type": "application/x-amz-json-1.0"}, Bytes(to-json(body)))
+}
+
+assert-missing-credentials fn (result: Result) {
+    assert(is-err(result))
+    assert(contains(err-value(result), "aws.access-key-id"))
+}
+
+RUNTIME "https://bedrock-runtime.eu-west-1.amazonaws.com"
+CONTROL "https://bedrock.eu-west-1.amazonaws.com"
+MODEL "anthropic.claude-3-5-sonnet-20241022-v2:0"
+MODEL_PATH "anthropic.claude-3-5-sonnet-20241022-v2%3A0"
+
+assert-request fn (result: Result, url: Str) {
+    request sent(result)
+    assert-eq(url, request.url)
+    auth get(request.headers, "Authorization")
+    assert(contains(auth, "Credential=AKIDOPTS/"), auth)
+    assert(contains(auth, "/eu-west-1/bedrock/aws4_request"), auth)
+    assert(is-null(::hot::ctx/get("aws.access-key-id")), "no ctx writes")
+}
+
+test-invoke-opts-reach-the-request
+meta ["test"] fn () {
+    u `${RUNTIME}/model/${MODEL_PATH}/invoke`
+    msgs [{role: "user", content: "hi"}]
+    assert-request(::invoke/invoke-model(MODEL, {a: 1}, "application/json", "application/json", echo()), u)
+    assert-request(::invoke/invoke-claude(MODEL, msgs, echo()), u)
+    assert-request(::invoke/invoke-claude(MODEL, msgs, 10, echo()), u)
+    assert-request(::invoke/invoke-claude(MODEL, msgs, 10, "sys", null, null, null, echo()), u)
+    assert-request(::invoke/invoke-titan(MODEL, "hi", echo()), u)
+    assert-request(::invoke/invoke-llama(MODEL, "hi", echo()), u)
+    assert-request(::invoke/invoke-mistral(MODEL, "hi", echo()), u)
+
+    assert(contains(sent(::invoke/invoke-claude("hi", echo())).url, "/model/anthropic.claude-3-haiku-20240307-v1%3A0/invoke"), "the prompt arity")
+}
+
+test-converse-opts-reach-the-request
+meta ["test"] fn () {
+    u `${RUNTIME}/model/${MODEL_PATH}/converse`
+    msgs [{role: "user", content: [{text: "hi"}]}]
+    assert-request(::converse/converse(MODEL, "hi", echo()), u)
+    assert-request(::converse/converse(MODEL, msgs, echo()), u)
+    assert-request(::converse/converse(MODEL, msgs, [{text: "s"}], {maxTokens: 5}, echo()), u)
+    assert-request(::converse/converse(MODEL, msgs, null, null, null, null, echo()), u)
+}
+
+test-streaming-opts-reach-the-request
+meta ["test"] fn () {
+    u `${RUNTIME}/model/${MODEL_PATH}/converse-stream`
+    msgs [{role: "user", content: [{text: "hi"}]}]
+    assert-request(::converse/converse-stream(MODEL, msgs, echo()), u)
+    assert-request(::converse/converse-stream(MODEL, msgs, [{text: "s"}], echo()), u)
+    assert-request(::converse/converse-stream(MODEL, msgs, null, null, null, echo()), u)
+    assert-eq("application/vnd.amazon.eventstream", get(sent(::converse/converse-stream(MODEL, msgs, echo())).headers, "Accept"))
+
+    frames Bytes([0, 1, 2, 3])
+    raw ::converse/converse-stream(MODEL, msgs, answer({"content-type": "application/vnd.amazon.eventstream"}, frames))
+    assert-eq(frames, raw.body, "the event stream stays Bytes")
+}
+
+test-model-ids-with-slashes-are-encoded
+meta ["test"] fn () {
+    arn "arn:aws:bedrock:us-east-1:123:inference-profile/us.anthropic.claude"
+    request sent(::converse/converse(arn, "hi", echo()))
+    assert-eq(`${RUNTIME}/model/arn%3Aaws%3Abedrock%3Aus-east-1%3A123%3Ainference-profile%2Fus.anthropic.claude/converse`, request.url)
+}
+
+test-models-opts-reach-the-request
+meta ["test"] fn () {
+    assert-request(::models/list-foundation-models(echo()), `${CONTROL}/foundation-models`)
+    assert-request(::models/list-foundation-models("Anthropic", echo()), `${CONTROL}/foundation-models?byProvider=Anthropic`)
+    assert-request(::models/list-foundation-models("A B", null, null, "ON/DEMAND", echo()), `${CONTROL}/foundation-models?byProvider=A%20B&byInferenceType=ON%2FDEMAND`)
+    assert-request(::models/get-foundation-model(MODEL, echo()), `${CONTROL}/foundation-models/${MODEL_PATH}`)
+}
+
+test-endpoint-opt
+meta ["test"] fn () {
+    assert-eq(`http://localhost:4566/model/${MODEL_PATH}/converse`, sent(::converse/converse(MODEL, "hi", {...echo(), endpoint: "http://localhost:4566"})).url)
+}
+
+test-existing-arities-read-ctx
+meta ["test"] fn () {
+    assert-missing-credentials(::converse/converse(MODEL, "hi"))
+    assert-missing-credentials(::converse/converse(MODEL, [{role: "user", content: [{text: "hi"}]}], [{text: "s"}], {maxTokens: 5}))
+    assert-missing-credentials(::invoke/invoke-claude("hi"))
+    assert-missing-credentials(::models/list-foundation-models())
+}
+
+CONVERSE_BODY {
+    output: {message: {role: "assistant", content: [{text: "Paris"}]}},
+    stopReason: "end_turn",
+    usage: {inputTokens: 1, outputTokens: 1}
+}
+
+test-chat-with-opts
+meta ["test"] fn () {
+    json answer({"content-type": "application/json"}, CONVERSE_BODY)
+    assert-eq("Paris", ::chat/chat(MODEL, "Capital?", json))
+    assert-eq("Paris", ::chat/chat(MODEL, "Capital?", "Be brief", json))
+    assert-eq("Paris", ::chat/chat(MODEL, "Capital?", "Be brief", 10, json))
+    assert-eq("Paris", ::chat/chat-with-image(MODEL, "What?", "png", "aGk=", json))
+
+    multi ::chat/converse-multi(MODEL, [], "Hi", "Sys", json)
+    assert-eq("Paris", multi.response)
+    assert-eq(2, length(multi.history))
+}
+
+test-chat-carries-opts-to-the-request
+meta ["test"] fn () {
+    assert-request(::chat/chat(MODEL, "Capital?", echo()), `${RUNTIME}/model/${MODEL_PATH}/converse`)
+    assert-request(::chat/chat-with-image(MODEL, "What?", "png", "aGk=", echo()), `${RUNTIME}/model/${MODEL_PATH}/converse`)
+    multi ::chat/converse-multi(MODEL, [], "Hi", "Sys", echo())
+    assert-eq(`${RUNTIME}/model/${MODEL_PATH}/converse`, multi.error.body.url, "an API error lands in error, with the history kept")
+    assert-eq([], multi.history)
+}
+
+test-chat-missing-credentials
+meta ["test"] fn () {
+    assert-missing-credentials(::chat/chat(MODEL, "Capital?"))
+}
+
+test-responses
+meta ["test"] fn () {
+    result ::converse/converse(MODEL, "hi", answer({"content-type": "application/json"}, CONVERSE_BODY))
+    assert-eq("end_turn", result.stop_reason)
+    assert-eq("Paris", first(result.output.message.content).text)
+
+    invoked ::invoke/invoke-model(MODEL, {a: 1}, "application/json", "application/json", answer({"content-type": "application/json"}, {ok: true}))
+    assert-eq("application/json", invoked.content_type, "read from the lowercase header")
+    assert-eq(200, invoked.status_code)
+
+    models ::models/list-foundation-models(answer({}, {modelSummaries: [{modelId: "m"}]}))
+    assert-eq("m", first(models.models).model_id)
+}
+
+test-unsafe-region-never-reaches-the-request
+meta ["test"] fn () {
+    out ::models/list-foundation-models({...echo(), region: "evil.example/"})
+    assert(is-err(out), "it would be interpolated into the hostname")
+    assert(not(contains(err-value(out), "evil.example")), "the value isn't echoed")
+}
+
+test-unsafe-region-in-the-streaming-and-chat-paths
+meta ["test"] fn () {
+    bad {...echo(), region: "a.b/c"}
+    assert(is-err(::converse/converse-stream(MODEL, [{role: "user", content: [{text: "hi"}]}], bad)))
+    assert(is-err(::chat/chat(MODEL, "hi", bad)))
+}

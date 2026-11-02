@@ -29,7 +29,10 @@ fn
   ::api/json("GET", "/tasks")
 },
 (options: Map): Map {
-  ::api/json("GET", `/tasks${::hot::uri/query-string(options)}`)
+  list-tasks(options, {})
+},
+(options: Map, opts: Map): Map {
+  ::api/json("GET", `/tasks${::hot::uri/query-string(options)}`, "", opts)
 }
 
 create-task
@@ -55,7 +58,10 @@ fn
   create-task(content, {})
 },
 (content: Str, options: Map): Map {
-  out ::api/json("POST", "/tasks", build-task-payload(content, options))
+  create-task(content, options, {})
+},
+(content: Str, options: Map, opts: Map): Map {
+  out ::api/json("POST", "/tasks", build-task-payload(content, options), opts)
   match out {
     Result.Err => { err(out) }
 
@@ -67,8 +73,12 @@ update-task
 meta {
     doc: """PATCH /tasks/{id} - Update a task (`is_completed`, `deadline_at`, `assignees`, `linked_records`)."""
 }
-fn (task-id: Str, changes: Map): Map {
-  out ::api/json("PATCH", `/tasks/${task-id}`, {data: changes})
+fn
+(task-id: Str, changes: Map): Map {
+  update-task(task-id, changes, {})
+},
+(task-id: Str, changes: Map, opts: Map): Map {
+  out ::api/json("PATCH", `/tasks/${task-id}`, {data: changes}, opts)
   match out {
     Result.Err => { err(out) }
 
@@ -80,6 +90,10 @@ delete-task
 meta {
     doc: """DELETE /tasks/{id} - Delete a task."""
 }
-fn (task-id: Str): Any {
-  ::api/json("DELETE", `/tasks/${task-id}`)
+fn
+(task-id: Str): Any {
+  delete-task(task-id, {})
+},
+(task-id: Str, opts: Map): Any {
+  ::api/json("DELETE", `/tasks/${task-id}`, "", opts)
 }

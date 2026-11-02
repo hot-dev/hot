@@ -6,7 +6,9 @@ meta {
     comments, plus the metadata API for base schemas and token identity.
 
     **Setup** — context variable `airtable.token`: a personal access
-    token (`pat...`) with the scopes and bases it needs.
+    token (`pat...`) with the scopes and bases it needs. Every API function
+    also takes a trailing `opts` Map, so one run can use several tokens:
+    `{token: "pat..."}` replaces the context token for that call.
 
     **Quick start**
 
@@ -30,12 +32,26 @@ meta {
 
 BASE_URL "https://api.airtable.com/v0"
 
-request fn
+request
+meta {
+    ctx: {"airtable.token": {required: false}},
+    doc: """The authenticated request behind every function: `opts` (`{token}`), then the `airtable.token` context variable. With no token from either place, it returns an Err (see `::airtable::api/resolve`)."""
+}
+fn
 (method: Str, path: Str, body: Any): Any {
-  request(method, path, body, ::ctx/get("airtable.token"))
+  request(method, path, body, {})
+},
+// 4-arity: per-call opts ({token}), then ctx
+(method: Str, path: Str, body: Any, opts: Map): Any {
+  resolved ::airtable::api/resolve(opts)
+  cond {
+    is-err(resolved) => { resolved }
+    => { request(method, path, body, resolved.token) }
+  }
 },
 // 4-arity: explicit token override
 (method: Str, path: Str, body: Any, token: Str): Any {
+  ::ctx/mark-secret(token)
   headers cond {
     eq(body, "") => { {Authorization: `Bearer ${token}`} }
     => { {Authorization: `Bearer ${token}`, Content-Type: "application/json"} }
@@ -84,12 +100,13 @@ fn (value: Str): Str {
 
 list-records
 meta {
-    ctx: {"airtable.token": {required: true}},
+    ctx: {"airtable.token": {required: false}},
     doc: """
     GET /{base}/{table} - List records. `params`: `filterByFormula`
     (Airtable formula), `maxRecords`, `view`, `sort` handled by formula,
     `offset` (paging cursor from the previous page). Returns
-    `{records, offset?}`.
+    `{records, offset?}`. To pass `opts` without filters, use `{}` for
+    `params`.
     """
 }
 fn
@@ -98,38 +115,57 @@ fn
 },
 (base-id: Str, table: Str, params: Map): Map {
   request("GET", `${table-path(base-id, table)}${::uri/query-string(params)}`, "")
+},
+(base-id: Str, table: Str, params: Map, opts: Map): Map {
+  request("GET", `${table-path(base-id, table)}${::uri/query-string(params)}`, "", opts)
 }
 
 get-record
 meta {
     doc: """GET /{base}/{table}/{id} - One record (`{id, createdTime, fields}`)."""
 }
-fn (base-id: Str, table: Str, record-id: Str): Map {
-  request("GET", `${table-path(base-id, table)}/${record-id}`, "")
+fn
+(base-id: Str, table: Str, record-id: Str): Map {
+  get-record(base-id, table, record-id, {})
+},
+(base-id: Str, table: Str, record-id: Str, opts: Map): Map {
+  request("GET", `${table-path(base-id, table)}/${record-id}`, "", opts)
 }
 
 create-records
 meta {
     doc: """POST /{base}/{table} - Create up to 10 records: `[{fields: {...}}]`. `typecast` is enabled so string inputs coerce to the field types."""
 }
-fn (base-id: Str, table: Str, records: Vec): Map {
-  request("POST", table-path(base-id, table), {records: records, typecast: true})
+fn
+(base-id: Str, table: Str, records: Vec): Map {
+  create-records(base-id, table, records, {})
+},
+(base-id: Str, table: Str, records: Vec, opts: Map): Map {
+  request("POST", table-path(base-id, table), {records: records, typecast: true}, opts)
 }
 
 update-records
 meta {
     doc: """PATCH /{base}/{table} - Update up to 10 records: `[{id, fields}]` (only the given fields change)."""
 }
-fn (base-id: Str, table: Str, records: Vec): Map {
-  request("PATCH", table-path(base-id, table), {records: records, typecast: true})
+fn
+(base-id: Str, table: Str, records: Vec): Map {
+  update-records(base-id, table, records, {})
+},
+(base-id: Str, table: Str, records: Vec, opts: Map): Map {
+  request("PATCH", table-path(base-id, table), {records: records, typecast: true}, opts)
 }
 
 delete-record
 meta {
     doc: """DELETE /{base}/{table}/{id} - Delete one record."""
 }
-fn (base-id: Str, table: Str, record-id: Str): Map {
-  request("DELETE", `${table-path(base-id, table)}/${record-id}`, "")
+fn
+(base-id: Str, table: Str, record-id: Str): Map {
+  delete-record(base-id, table, record-id, {})
+},
+(base-id: Str, table: Str, record-id: Str, opts: Map): Map {
+  request("DELETE", `${table-path(base-id, table)}/${record-id}`, "", opts)
 }
 
 upsert-records
@@ -149,12 +185,16 @@ meta {
     ```
     """
 }
-fn (base-id: Str, table: Str, merge-fields: Vec, records: Vec): Map {
+fn
+(base-id: Str, table: Str, merge-fields: Vec, records: Vec): Map {
+  upsert-records(base-id, table, merge-fields, records, {})
+},
+(base-id: Str, table: Str, merge-fields: Vec, records: Vec, opts: Map): Map {
   request("PATCH", table-path(base-id, table), {
     performUpsert: {fieldsToMergeOn: merge-fields},
     records: records,
     typecast: true
-  })
+  }, opts)
 }
 
 records-query
@@ -170,8 +210,12 @@ delete-records
 meta {
     doc: """DELETE /{base}/{table}?records[]= - Delete up to 10 records in one call. Returns `{records: [{id, deleted}]}`."""
 }
-fn (base-id: Str, table: Str, record-ids: Vec): Map {
-  request("DELETE", `${table-path(base-id, table)}${records-query(record-ids)}`, "")
+fn
+(base-id: Str, table: Str, record-ids: Vec): Map {
+  delete-records(base-id, table, record-ids, {})
+},
+(base-id: Str, table: Str, record-ids: Vec, opts: Map): Map {
+  request("DELETE", `${table-path(base-id, table)}${records-query(record-ids)}`, "", opts)
 }
 
 // ---------------------------------------------------------------------------
@@ -192,30 +236,45 @@ fn
 },
 (base-id: Str, table: Str, record-id: Str, params: Map): Map {
   request("GET", `${comments-path(base-id, table, record-id)}${::uri/query-string(params)}`, "")
+},
+(base-id: Str, table: Str, record-id: Str, params: Map, opts: Map): Map {
+  request("GET", `${comments-path(base-id, table, record-id)}${::uri/query-string(params)}`, "", opts)
 }
 
 create-comment
 meta {
     doc: """POST /{base}/{table}/{record}/comments - Comment on a record. `@[userId]` mentions work inside `text`."""
 }
-fn (base-id: Str, table: Str, record-id: Str, text: Str): Map {
-  request("POST", comments-path(base-id, table, record-id), {text: text})
+fn
+(base-id: Str, table: Str, record-id: Str, text: Str): Map {
+  create-comment(base-id, table, record-id, text, {})
+},
+(base-id: Str, table: Str, record-id: Str, text: Str, opts: Map): Map {
+  request("POST", comments-path(base-id, table, record-id), {text: text}, opts)
 }
 
 update-comment
 meta {
     doc: """PATCH /{base}/{table}/{record}/comments/{comment} - Edit a comment's text (author-owned comments only)."""
 }
-fn (base-id: Str, table: Str, record-id: Str, comment-id: Str, text: Str): Map {
-  request("PATCH", `${comments-path(base-id, table, record-id)}/${comment-id}`, {text: text})
+fn
+(base-id: Str, table: Str, record-id: Str, comment-id: Str, text: Str): Map {
+  update-comment(base-id, table, record-id, comment-id, text, {})
+},
+(base-id: Str, table: Str, record-id: Str, comment-id: Str, text: Str, opts: Map): Map {
+  request("PATCH", `${comments-path(base-id, table, record-id)}/${comment-id}`, {text: text}, opts)
 }
 
 delete-comment
 meta {
     doc: """DELETE /{base}/{table}/{record}/comments/{comment} - Delete a comment (author-owned comments only)."""
 }
-fn (base-id: Str, table: Str, record-id: Str, comment-id: Str): Map {
-  request("DELETE", `${comments-path(base-id, table, record-id)}/${comment-id}`, "")
+fn
+(base-id: Str, table: Str, record-id: Str, comment-id: Str): Map {
+  delete-comment(base-id, table, record-id, comment-id, {})
+},
+(base-id: Str, table: Str, record-id: Str, comment-id: Str, opts: Map): Map {
+  request("DELETE", `${comments-path(base-id, table, record-id)}/${comment-id}`, "", opts)
 }
 
 // ---------------------------------------------------------------------------
@@ -226,22 +285,34 @@ whoami
 meta {
     doc: """GET /meta/whoami - The token's own user id and granted scopes. The cheapest way to smoke-test a token."""
 }
-fn (): Map {
-  request("GET", "/meta/whoami", "")
+fn
+(): Map {
+  whoami({})
+},
+(opts: Map): Map {
+  request("GET", "/meta/whoami", "", opts)
 }
 
 list-bases
 meta {
     doc: """GET /meta/bases - The bases the token can access."""
 }
-fn (): Map {
-  request("GET", "/meta/bases", "")
+fn
+(): Map {
+  list-bases({})
+},
+(opts: Map): Map {
+  request("GET", "/meta/bases", "", opts)
 }
 
 get-base-schema
 meta {
     doc: """GET /meta/bases/{base}/tables - The base's tables, fields, and views — what an agent reads before writing records."""
 }
-fn (base-id: Str): Map {
-  request("GET", `/meta/bases/${base-id}/tables`, "")
+fn
+(base-id: Str): Map {
+  get-base-schema(base-id, {})
+},
+(base-id: Str, opts: Map): Map {
+  request("GET", `/meta/bases/${base-id}/tables`, "", opts)
 }

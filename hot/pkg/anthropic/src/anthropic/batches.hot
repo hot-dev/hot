@@ -3,7 +3,7 @@ meta {
     doc: """Anthropic Message Batches API - Process large volumes of messages asynchronously with 50% cost reduction."""
 }
 
-api-request ::anthropic::api/request
+api-call ::anthropic::api/call
 HttpError ::anthropic::api/HttpError
 is-ok-response ::hot::http/is-ok-response
 
@@ -79,8 +79,15 @@ meta {
     """
 }
 fn (request: CreateBatchRequest): MessageBatch {
-    response api-request("POST", `${::anthropic/BASE_URL}/v1/messages/batches`, {}, request)
-    if(is-ok-response(response), MessageBatch(response.body), err(HttpError(response)))
+    create(request, {})
+},
+(request: CreateBatchRequest, opts: Map): MessageBatch {
+    response api-call("POST", `/v1/messages/batches`, {}, request, opts)
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { MessageBatch(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 list
@@ -107,12 +114,26 @@ meta {
 }
 fn
 (): BatchesListResponse {
-    response api-request("GET", `${::anthropic/BASE_URL}/v1/messages/batches`)
-    if(is-ok-response(response), BatchesListResponse(response.body), err(HttpError(response)))
+    list({})
+},
+(opts: Map): BatchesListResponse {
+    response api-call("GET", `/v1/messages/batches`, {}, "", opts)
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { BatchesListResponse(response.body) }
+      => { err(HttpError(response)) }
+    }
 },
 (limit: Int): BatchesListResponse {
-    response api-request("GET", `${::anthropic/BASE_URL}/v1/messages/batches?limit=${limit}`)
-    if(is-ok-response(response), BatchesListResponse(response.body), err(HttpError(response)))
+    list(limit, {})
+},
+(limit: Int, opts: Map): BatchesListResponse {
+    response api-call("GET", `/v1/messages/batches?limit=${limit}`, {}, "", opts)
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { BatchesListResponse(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 get
@@ -131,8 +152,15 @@ meta {
     """
 }
 fn (batch_id: Str): MessageBatch {
-    response api-request("GET", `${::anthropic/BASE_URL}/v1/messages/batches/${batch_id}`)
-    if(is-ok-response(response), MessageBatch(response.body), err(HttpError(response)))
+    get(batch_id, {})
+},
+(batch_id: Str, opts: Map): MessageBatch {
+    response api-call("GET", `/v1/messages/batches/${batch_id}`, {}, "", opts)
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { MessageBatch(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 cancel
@@ -150,8 +178,15 @@ meta {
     """
 }
 fn (batch_id: Str): MessageBatch {
-    response api-request("POST", `${::anthropic/BASE_URL}/v1/messages/batches/${batch_id}/cancel`)
-    if(is-ok-response(response), MessageBatch(response.body), err(HttpError(response)))
+    cancel(batch_id, {})
+},
+(batch_id: Str, opts: Map): MessageBatch {
+    response api-call("POST", `/v1/messages/batches/${batch_id}/cancel`, {}, "", opts)
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { MessageBatch(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 results
@@ -169,6 +204,13 @@ meta {
     """
 }
 fn (batch_id: Str): Any {
-    response api-request("GET", `${::anthropic/BASE_URL}/v1/messages/batches/${batch_id}/results`)
-    if(is-ok-response(response), response.body, err(HttpError(response)))
+    results(batch_id, {})
+},
+(batch_id: Str, opts: Map): Any {
+    response api-call("GET", `/v1/messages/batches/${batch_id}/results`, {}, "", opts)
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { response.body }
+      => { err(HttpError(response)) }
+    }
 }

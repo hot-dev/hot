@@ -14,11 +14,13 @@
 
 ::ctx ::hot::ctx
 is-ok-response ::hot::http/is-ok-response
+management-call ::xai::api/management-call
+api-call ::xai::api/call
 HttpRequest ::hot::http/HttpRequest
 HttpResponse ::hot::http/HttpResponse
 
 // Management API has a different base URL
-MANAGEMENT_BASE_URL "https://management-api.x.ai"
+MANAGEMENT_BASE_URL ::xai/MANAGEMENT_BASE_URL
 
 // ============================================================================
 // Types
@@ -121,40 +123,16 @@ SearchResponse type {
 
 management-request
 meta {
-    doc: """Make an HTTP request with Management API Key. Required for Collections API.""",
-    ctx: {"xai.management.api.key": {}}
+    doc: """Make an HTTP request with Management API Key. Required for Collections API. A trailing `opts` Map can carry a `management-api-key` (see `::xai::api/resolve-management`); `url` is used as given.""",
+    ctx: {"xai.management.api.key": {required: false}}
 }
 fn
 (method: Str, url: Str, additional-headers: Map, body: Any): HttpResponse {
-    // Collections API requires Management API Key
-    management-key ::ctx/get("xai.management.api.key")
-
-    default-headers {
-        Authorization: `Bearer ${management-key}`
-    }
-
-    // For GET/DELETE requests with no body, don't send Content-Type
-    match body {
-        "" | Null => {
-            final-headers {...default-headers, ...additional-headers}
-            ::hot::http/request(HttpRequest({
-                method: method,
-                url: url,
-                headers: final-headers
-            }))
-        }
-
-        _ => {
-            headers {...default-headers, Content-Type: "application/json"}
-            final-headers {...headers, ...additional-headers}
-            ::hot::http/request(HttpRequest({
-                method: method,
-                url: url,
-                headers: final-headers,
-                body: to-json(untype(body))
-            }))
-        }
-    }
+    management-request(method, url, additional-headers, body, {})
+},
+(method: Str, url: Str, additional-headers: Map, body: Any, opts: Map): HttpResponse {
+    resolved ::xai::api/resolve-management(opts)
+    ::hot::http/request(::xai::api/build-request(method, url, additional-headers, body, resolved))
 },
 (method: Str, url: Str): HttpResponse {
     management-request(method, url, {}, "")
@@ -185,8 +163,15 @@ meta {
     """
 }
 fn (request: CreateCollectionRequest): Collection | HttpError {
-    response management-request("POST", `${MANAGEMENT_BASE_URL}/v1/collections`, {}, request)
-    if(is-ok-response(response), Collection(response.body), err(HttpError(response)))
+    create(request, {})
+},
+(request: CreateCollectionRequest, opts: Map): Collection | HttpError {
+    response management-call("POST", `/v1/collections`, {}, request, opts)
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { Collection(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 list
@@ -207,8 +192,15 @@ meta {
     """
 }
 fn (): CollectionListResponse | HttpError {
-    response management-request("GET", `${MANAGEMENT_BASE_URL}/v1/collections`)
-    if(is-ok-response(response), CollectionListResponse(response.body), err(HttpError(response)))
+    list({})
+},
+(opts: Map): CollectionListResponse | HttpError {
+    response management-call("GET", `/v1/collections`, {}, "", opts)
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { CollectionListResponse(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 get
@@ -226,8 +218,15 @@ meta {
     """
 }
 fn (collection-id: Str): Collection | HttpError {
-    response management-request("GET", `${MANAGEMENT_BASE_URL}/v1/collections/${collection-id}`)
-    if(is-ok-response(response), Collection(response.body), err(HttpError(response)))
+    get(collection-id, {})
+},
+(collection-id: Str, opts: Map): Collection | HttpError {
+    response management-call("GET", `/v1/collections/${collection-id}`, {}, "", opts)
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { Collection(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 update
@@ -247,8 +246,15 @@ meta {
     """
 }
 fn (collection-id: Str, request: UpdateCollectionRequest): Collection | HttpError {
-    response management-request("PATCH", `${MANAGEMENT_BASE_URL}/v1/collections/${collection-id}`, {}, request)
-    if(is-ok-response(response), Collection(response.body), err(HttpError(response)))
+    update(collection-id, request, {})
+},
+(collection-id: Str, request: UpdateCollectionRequest, opts: Map): Collection | HttpError {
+    response management-call("PATCH", `/v1/collections/${collection-id}`, {}, request, opts)
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { Collection(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 delete
@@ -264,8 +270,15 @@ meta {
     """
 }
 fn (collection-id: Str): Map | HttpError {
-    response management-request("DELETE", `${MANAGEMENT_BASE_URL}/v1/collections/${collection-id}`)
-    if(is-ok-response(response), ok(response.body), err(HttpError(response)))
+    delete(collection-id, {})
+},
+(collection-id: Str, opts: Map): Map | HttpError {
+    response management-call("DELETE", `/v1/collections/${collection-id}`, {}, "", opts)
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { ok(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 // ============================================================================
@@ -288,6 +301,9 @@ meta {
 
     // With metadata fields
     doc add-document("col_abc123", "file_xyz789", {category: "report", year: "2024"})
+
+    // With a per-call Management API key
+    doc add-document("col_abc123", "file_xyz789", {}, {management-api-key: "tenant-key"})
     ```
     """
 }
@@ -295,13 +311,20 @@ fn (collection-id: Str, file-id: Str): Document | HttpError {
     add-document(collection-id, file-id, {})
 },
 (collection-id: Str, file-id: Str, fields: Map): Document | HttpError {
+    add-document(collection-id, file-id, fields, {})
+},
+(collection-id: Str, file-id: Str, fields: Map, opts: Map): Document | HttpError {
     body {
         file_id: file-id,
         fields: fields
     }
 
-    response management-request("POST", `${MANAGEMENT_BASE_URL}/v1/collections/${collection-id}/documents`, {}, body)
-    if(is-ok-response(response), Document(response.body), err(HttpError(response)))
+    response management-call("POST", `/v1/collections/${collection-id}/documents`, {}, body, opts)
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { Document(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 remove-document
@@ -317,8 +340,15 @@ meta {
     """
 }
 fn (collection-id: Str, file-id: Str): Map | HttpError {
-    response management-request("DELETE", `${MANAGEMENT_BASE_URL}/v1/collections/${collection-id}/documents/${file-id}`)
-    if(is-ok-response(response), ok(response.body), err(HttpError(response)))
+    remove-document(collection-id, file-id, {})
+},
+(collection-id: Str, file-id: Str, opts: Map): Map | HttpError {
+    response management-call("DELETE", `/v1/collections/${collection-id}/documents/${file-id}`, {}, "", opts)
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { ok(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 // ============================================================================
@@ -353,9 +383,13 @@ meta {
     first-result.content // => "The key revenue drivers were..."
     ```
     """,
-    ctx: {"xai.api.key": {}}
+    ctx: {"xai.api.key": {required: false}}
 }
-fn (request: SearchRequest): SearchResponse | HttpError {
+fn
+(request: SearchRequest): SearchResponse | HttpError {
+    search(request, {})
+},
+(request: SearchRequest, opts: Map): SearchResponse | HttpError {
     // Build the request body
     body {
         query: request.query,
@@ -376,19 +410,12 @@ fn (request: SearchRequest): SearchResponse | HttpError {
     }
 
     // Search uses regular API key, not management key
-    api-key ::ctx/get("xai.api.key")
-    headers {
-        Authorization: `Bearer ${api-key}`,
-        Content-Type: "application/json"
+    response api-call("POST", "/documents/search", {}, final-body, opts)
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { SearchResponse(response.body) }
+      => { err(HttpError(response)) }
     }
-
-    response ::hot::http/request(HttpRequest({
-        method: "POST",
-        url: `${::xai/BASE_URL}/documents/search`,
-        headers: headers,
-        body: to-json(final-body)
-    }))
-    if(is-ok-response(response), SearchResponse(response.body), err(HttpError(response)))
 }
 
 // ============================================================================
@@ -410,11 +437,15 @@ meta {
     ```
     """
 }
-fn (query: Str, collection-ids: Vec<Str>): SearchResponse | HttpError {
+fn
+(query: Str, collection-ids: Vec<Str>): SearchResponse | HttpError {
+    search-simple(query, collection-ids, {})
+},
+(query: Str, collection-ids: Vec<Str>, opts: Map): SearchResponse | HttpError {
     search(SearchRequest({
         query: query,
         collection_ids: collection-ids
-    }))
+    }), opts)
 }
 
 keyword-search
@@ -432,12 +463,16 @@ meta {
     ```
     """
 }
-fn (query: Str, collection-ids: Vec<Str>): SearchResponse | HttpError {
+fn
+(query: Str, collection-ids: Vec<Str>): SearchResponse | HttpError {
+    keyword-search(query, collection-ids, {})
+},
+(query: Str, collection-ids: Vec<Str>, opts: Map): SearchResponse | HttpError {
     search(SearchRequest({
         query: query,
         collection_ids: collection-ids,
         retrieval_mode: RetrievalMode({type: "keyword"})
-    }))
+    }), opts)
 }
 
 semantic-search
@@ -456,12 +491,16 @@ meta {
     ```
     """
 }
-fn (query: Str, collection-ids: Vec<Str>): SearchResponse | HttpError {
+fn
+(query: Str, collection-ids: Vec<Str>): SearchResponse | HttpError {
+    semantic-search(query, collection-ids, {})
+},
+(query: Str, collection-ids: Vec<Str>, opts: Map): SearchResponse | HttpError {
     search(SearchRequest({
         query: query,
         collection_ids: collection-ids,
         retrieval_mode: RetrievalMode({type: "semantic"})
-    }))
+    }), opts)
 }
 
 // ============================================================================

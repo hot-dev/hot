@@ -1,5 +1,23 @@
 ::linear::api ns
-meta {ctx: {"linear.api.key": {required: true}}}
+meta {
+    ctx: {"linear.api.key": {required: false}},
+    doc: """
+    Transport for Linear's GraphQL API.
+
+    **Per-call credentials.** Every API-calling function in this package
+    takes an optional trailing `opts` Map, resolved by `resolve`: `opts`
+    first, then the `linear.api.key` context variable, then the defaults.
+    Nothing from `opts` is written to ctx, so one run can act for many
+    workspaces and parallel flows don't share credentials. An `api-key`
+    present but blank or null is an error, never a fallback to context.
+
+    - `api-key`: the personal API key (`lin_api_...`) or OAuth token
+      (`lin_oauth_...`) for this call
+    - `base-url`: another GraphQL endpoint, such as a proxy. It needs an
+      `api-key` in the same `opts`: `linear.api.key` is never sent to a
+      per-call URL.
+    """
+}
 
 ::ctx ::hot::ctx
 
@@ -31,6 +49,84 @@ fn (body: Map): Any {
   }
 }
 
+non-blank fn (value: Any): Str? {
+  if(is-str(value), if(is-empty(trim(value)), null, trim(value)), null)
+}
+
+blank-credential
+meta {
+    doc: """The first of `names` that `opts` has but with a blank or null value, else null. Such a key is an error, never a fallback to context: a tenant whose key is missing must not run on the project's credentials."""
+}
+fn (opts: Map, names: Vec): Str? {
+  find-first(names, (name) { and(in(name, keys(opts)), is-null(non-blank(get(opts, name)))) })
+}
+
+resolve-from
+meta {
+    doc: """The one resolver, pure: `{api-key, base-url}` for a call from `opts` first, then `ctx-values` (a Map of context variables), then defaults. An Err when no API key is set, when `api-key` is in `opts` but blank or null (that never falls back to context), or when `opts` has `base-url` without `api-key`. Exposed for testing; `resolve` feeds it the context."""
+}
+fn (opts: Map, ctx-values: Map): Map {
+  api-key or(non-blank(get(opts, "api-key")), non-blank(get(ctx-values, "linear.api.key")))
+  blank blank-credential(opts, ["api-key"])
+  cond {
+    is-some(blank) => {
+      err(`linear: ${blank} is in the call's opts but is blank or null. Pass a value, or leave ${blank} out to use linear.api.key.`)
+    }
+
+    and(is-some(non-blank(get(opts, "base-url"))), is-null(non-blank(get(opts, "api-key")))) => {
+      err("linear: base-url is in the call's opts without api-key. Pass api-key with it. Context credentials are never sent to a per-call URL.")
+    }
+
+    is-null(api-key) => { err("linear: linear.api.key is not set. Add it in Context Variables, or pass {api-key: ...} in the call's opts.") }
+    => { {api-key: api-key, base-url: or(non-blank(get(opts, "base-url")), ::linear/GRAPHQL_URL)} }
+  }
+}
+
+resolve
+meta {
+    ctx: {"linear.api.key": {required: false}},
+    doc: """
+    Credentials and settings for one call (see `resolve-from`). `opts`
+    values are never written to ctx.
+    A credential from `opts` is masked in the run's call records.
+
+    **Example**
+
+    ```hot
+    ::linear::api/resolve({api-key: "lin_api_tenant_b"}).base-url  // "https://api.linear.app/graphql"
+    ```
+    """
+}
+fn (opts: Map): Map {
+  ::ctx/mark-secret(opts.api-key)
+  resolve-from(opts, {"linear.api.key": ::ctx/get("linear.api.key")})
+}
+
+build-request
+meta {
+    doc: """The outgoing `HttpRequest` from resolved settings (see `resolve`). Pure; exposed for testing."""
+}
+fn (query: Str, variables: Map, resolved: Map): HttpRequest {
+  HttpRequest({
+    method: "POST",
+    url: resolved.base-url,
+    headers: {
+      Authorization: auth-header(resolved.api-key),
+      Content-Type: "application/json"
+    },
+    body: to-json({query: query, variables: untype(variables)})
+  })
+}
+
+send-graphql fn (req: HttpRequest): Any {
+  response ::hot::http/request(req)
+  cond {
+    is-err(response) => { response }
+    not(is-ok-response(response)) => { err({status: response.status, body: response.body}) }
+    => { parse-graphql-response(response.body) }
+  }
+}
+
 graphql
 meta {
     doc: """
@@ -43,6 +139,9 @@ meta {
     ```hot
     me ::linear::api/graphql("query { viewer { id name email } }", {})
     me.viewer.name
+
+    // Per-call credentials
+    other ::linear::api/graphql("query { viewer { id } }", {}, {api-key: "lin_api_tenant_b"})
     ```
     """
 }
@@ -51,21 +150,17 @@ fn
   graphql(query, {})
 },
 (query: Str, variables: Map): Any {
-  graphql(query, variables, ::ctx/get("linear.api.key"))
+  graphql(query, variables, {})
 },
 (query: Str, variables: Map, api-key: Str): Any {
-  response ::hot::http/request(HttpRequest({
-    method: "POST",
-    url: ::linear/GRAPHQL_URL,
-    headers: {
-      Authorization: auth-header(api-key),
-      Content-Type: "application/json"
-    },
-    body: to-json({query: query, variables: untype(variables)})
-  }))
+  ::ctx/mark-secret(api-key)
+  send-graphql(build-request(query, variables, {api-key: api-key, base-url: ::linear/GRAPHQL_URL}))
+},
+// 3-arity: per-call credentials and settings (see `resolve`)
+(query: Str, variables: Map, opts: Map): Any {
+  resolved resolve(opts)
   cond {
-    is-err(response) => { response }
-    not(is-ok-response(response)) => { err({status: response.status, body: response.body}) }
-    => { parse-graphql-response(response.body) }
+    is-err(resolved) => { resolved }
+    => { send-graphql(build-request(query, variables, resolved)) }
   }
 }
