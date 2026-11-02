@@ -7,7 +7,7 @@ use crate::lang::bytecode::{
 use crate::lang::compiler::core_registry::CoreVariableRegistry;
 use crate::lang::runtime::error::RuntimeError;
 use crate::lang::runtime::jit::{
-    CallNames, CodeMemoryStatus, JitConfig, JitFunctionProfile, JitRuntimeState,
+    CallNames, CodeMemoryStatus, JitConfig, JitFunctionProfile, JitRuntimeState, ParamArrows,
 };
 use crate::lang::runtime::native_core::NativeCoreShadows;
 use crate::val::Val;
@@ -7807,22 +7807,83 @@ impl VirtualMachine {
                 *arg = converted;
                 continue;
             }
-            let Some((source, target)) = self.implicit_arrow(arg, param_type) else {
-                continue;
-            };
-            let Some(impl_name) = self.resolve_type_implementation(&source, &target) else {
-                return Err(VmError::runtime_with_ip(
-                    format!(
-                        "Implicit coercion referenced missing arrow {} -> {}",
-                        source, target
-                    ),
-                    self.instruction_pointer,
-                ));
-            };
-            *arg = self
-                .execute_function_call_by_qualified_name(&impl_name, std::slice::from_ref(arg))?;
+            if let Some(coerced) = self.run_implicit_arrow(arg, param_type)? {
+                *arg = coerced;
+            }
         }
         Ok(args)
+    }
+
+    /// The implicit arrows that can reach each of `function_id`'s parameters,
+    /// by the rule in `implicit_arrow`: an untagged value of a builtin type
+    /// doesn't convert to a builtin type. Read once, when it's compiled.
+    fn param_arrows(&mut self, function_id: FunctionId) -> Vec<ParamArrows> {
+        let Some(expected) = self.lookup_typed_param_signature(function_id) else {
+            return Vec::new();
+        };
+        expected
+            .iter()
+            .map(|param_type| {
+                let builtin = is_primitive_param_type(param_type);
+                let variant = format!("{param_type}.");
+                let reachable = self.type_implementations.keys().any(|(source, target)| {
+                    (target == param_type || target.starts_with(&variant))
+                        && !(builtin && is_primitive_param_type(source))
+                });
+                match (reachable, builtin) {
+                    (false, _) => ParamArrows::None,
+                    (true, true) => ParamArrows::FromTagged,
+                    (true, false) => ParamArrows::FromAny,
+                }
+            })
+            .collect()
+    }
+
+    /// `coerce_call_args` for one argument of a self tail call in compiled
+    /// code, which goes on looping with what this returns. `None` when the
+    /// argument passes unchanged.
+    pub(crate) fn coerce_self_tail_arg(
+        &mut self,
+        function_id: FunctionId,
+        index: usize,
+        arg: &Val,
+    ) -> VmResult<Option<Val>> {
+        let Some(expected) = self.lookup_typed_param_signature(function_id) else {
+            return Ok(None);
+        };
+        let Some(param_type) = expected.get(index) else {
+            return Ok(None);
+        };
+        // Usually a tagged argument is already the parameter's type, on every
+        // iteration of the loop. A compiled loop holds an Ok as it came, where
+        // a call would have unwrapped it.
+        let arg = match arg {
+            Val::Map(map) => match crate::val::tagged_type_name(map) {
+                Some(tag) if tag == param_type.as_str() => return Ok(None),
+                Some("::hot::type/Result.Ok") => map.get(&Val::from("$val")).unwrap_or(&Val::Null),
+                _ => arg,
+            },
+            _ => arg,
+        };
+        self.run_implicit_arrow(arg, param_type)
+    }
+
+    /// `arg` converted by the implicit arrow to `param_type`, if there is one.
+    fn run_implicit_arrow(&mut self, arg: &Val, param_type: &str) -> VmResult<Option<Val>> {
+        let Some((source, target)) = self.implicit_arrow(arg, param_type) else {
+            return Ok(None);
+        };
+        let Some(impl_name) = self.resolve_type_implementation(&source, &target) else {
+            return Err(VmError::runtime_with_ip(
+                format!(
+                    "Implicit coercion referenced missing arrow {} -> {}",
+                    source, target
+                ),
+                self.instruction_pointer,
+            ));
+        };
+        self.execute_function_call_by_qualified_name(&impl_name, std::slice::from_ref(arg))
+            .map(Some)
     }
 
     /// The arrow that implicitly coerces `arg` to `param_type` (qualified, from
@@ -9545,13 +9606,15 @@ impl VirtualMachine {
                 && !self.jit_blocked_by_overload_dispatch(function_id)
             {
                 let shadows = self.native_core_shadows();
+                let param_arrows = self.param_arrows(function_id);
                 let compile_result = self.jit.compile_function(
                     &program,
                     function_id,
                     function_info,
                     args,
                     CallNames::new(&self.namespace_variables, &self.core_functions, &shadows)
-                        .traced(self.traces_calls()),
+                        .traced(self.traces_calls())
+                        .param_arrows(&param_arrows),
                 );
 
                 match compile_result {
@@ -9834,6 +9897,7 @@ impl VirtualMachine {
                                         && !self.jit_blocked_by_overload_dispatch(function_id)
                                     {
                                         let shadows = self.native_core_shadows();
+                                        let param_arrows = self.param_arrows(function_id);
                                         match self.jit.compile_function(
                                             &program,
                                             function_id,
@@ -9844,7 +9908,8 @@ impl VirtualMachine {
                                                 &self.core_functions,
                                                 &shadows,
                                             )
-                                            .traced(self.traces_calls()),
+                                            .traced(self.traces_calls())
+                                            .param_arrows(&param_arrows),
                                         ) {
                                             Ok(()) => {}
                                             Err(err) => {
@@ -11843,14 +11908,13 @@ impl VirtualMachine {
                 // same-arity sibling (e.g. an `(x: Vec)` overload passing a
                 // Str element back to its own name). The TCO loop runs that
                 // as a regular call. The args are prepared for the function
-                // called, and a sibling gets its implicit arrows.
-                let dispatched = self.overload_for_args(*function_id, &new_args);
-                let function_id = dispatched.unwrap_or(*function_id);
-                let mut new_args =
+                // called and get its implicit arrows, as on any call.
+                let function_id = self
+                    .overload_for_args(*function_id, &new_args)
+                    .unwrap_or(*function_id);
+                let new_args =
                     self.prepare_call_args(CallTarget::Function(function_id), new_args)?;
-                if dispatched.is_some() {
-                    new_args = self.coerce_call_args(function_id, new_args)?;
-                }
+                let new_args = self.coerce_call_args(function_id, new_args)?;
 
                 // Restore instruction pointer before returning tail call request
                 self.instruction_pointer = saved_instruction_pointer;
