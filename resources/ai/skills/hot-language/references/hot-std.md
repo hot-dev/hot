@@ -517,8 +517,13 @@ sha512 fn (data: Str | Bytes): Str                       // SHA-512 (128-char he
 ```hot
 ::hmac ::hot::hmac
 
+hmac-sha256 fn (key: Str | Bytes, data: Str | Bytes): Str  // HMAC-SHA256 (64-char hex)
+hmac-sha256-bytes fn (key: Str | Bytes, data: Str | Bytes): Bytes  // HMAC-SHA256, as raw bytes
 hmac-sha512 fn (key: Str | Bytes, data: Str | Bytes): Str  // HMAC-SHA512 (128-char hex)
 hmac-sha1 fn (key: Str | Bytes, data: Str | Bytes): Str    // HMAC-SHA1 (legacy)
+hmac-verify fn (key: Str | Bytes, data: Str | Bytes, expected: Str, algorithm: Str): Bool       // Check an HMAC in constant time
+hmac-verify-hex fn (key: Str | Bytes, data: Str | Bytes, expected-hex: Str, algorithm: Str): Bool
+hmac-verify-base64 fn (key: Str | Bytes, data: Str | Bytes, expected-b64: Str, algorithm: Str): Bool
 ```
 
 ### ::hot::time
