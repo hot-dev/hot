@@ -1710,6 +1710,22 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
             expected
         );
     }
+    // Early usage checks read the counters under the restricted login, moving
+    // them onto a new period without any row lock outliving a statement.
+    sqlx::query(
+        "UPDATE hot.usage_task SET period_start=now()+interval '10 days' WHERE org_id=ANY($1)",
+    )
+    .bind(vec![child_a, child_b])
+    .execute(&admin)
+    .await?;
+    let rollover_period = chrono::Utc::now() - chrono::Duration::days(1);
+    let moved = db::usage::account_task_usage(&db_a, &root, rollover_period)
+        .await
+        .map_err(|e| format!("account task usage at rollover: {e:?}"))?
+        .ok_or("counters should reach the period")?;
+    let period_totals: (i64, i64) = sqlx::query_as("SELECT COALESCE(SUM(f.compute_units),0)::bigint,COALESCE(SUM(f.duration_ms),0)::bigint FROM hot.task t CROSS JOIN LATERAL hot.task_usage(t) f JOIN hot.env e ON e.env_id=t.env_id WHERE e.org_id=ANY($1) AND f.usage_at >= $2")
+        .bind(vec![child_a, child_b]).bind(rollover_period).fetch_one(&admin).await?;
+    assert_eq!((moved.compute_units, moved.duration_ms), period_totals);
     // A rejected claim at period rollover must not discard counter
     // initialization; otherwise every redelivery rescans history under the
     // account lock.
@@ -2185,6 +2201,26 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
         .await?,
         expected
     );
+    // Trace usage reads that counter under each scope that shows it.
+    let usage_period = chrono::Utc::now();
+    let by_env = db::subscription::OrgUsageStats::calculate_environment(
+        &db_a,
+        &child_a,
+        &env_a,
+        usage_period,
+        -1,
+    )
+    .await
+    .map_err(|e| format!("environment trace usage: {e:?}"))?;
+    assert_eq!(by_env.call_storage_bytes, expected);
+    let read_set = db_a.with_scope(DatabaseScope::ReadSet {
+        org_ids: vec![child_a],
+        env_ids: vec![env_a],
+    });
+    let by_org = db::subscription::OrgUsageStats::calculate(&read_set, &child_a, usage_period, -1)
+        .await
+        .map_err(|e| format!("org trace usage: {e:?}"))?;
+    assert_eq!(by_org.call_storage_bytes, expected);
 
     sqlx::query("DELETE FROM call WHERE call_id=$1")
         .bind(counter_call)
