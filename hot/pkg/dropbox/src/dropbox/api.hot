@@ -1,0 +1,892 @@
+::dropbox::api ns
+meta {
+    ctx: {
+        "dropbox.select.user": {required: false, secret: false},
+        "dropbox.select.admin": {required: false, secret: false},
+        "dropbox.path.root": {required: false, secret: false},
+        "dropbox.api.root": {required: false, secret: false}
+    },
+    doc: """
+    The Dropbox transport: RPC requests (JSON bodies on
+    `api.dropboxapi.com`), content requests (arguments in the
+    `Dropbox-API-Arg` header on `content.dropboxapi.com`, Bytes bodies,
+    results in the `Dropbox-API-Result` header), team headers, typed
+    errors and cursor pagination.
+
+    **Header-safe JSON.** HTTP headers must be ASCII, so
+    `Dropbox-API-Arg` (and `Dropbox-API-Path-Root`) JSON escapes every
+    character from U+007F up as `\\uXXXX` (UTF-16 surrogate pairs above
+    U+FFFF), the way the official SDKs do. Without it, non-ASCII paths
+    such as `/Café/日本.txt` are corrupted. See `ascii-escape`.
+
+    **Team headers.** `opts.select-user` (or the `dropbox.select.user`
+    context variable) sends `Dropbox-API-Select-User: <team_member_id>`
+    so a team token acts as that member; `opts.select-admin` /
+    `dropbox.select.admin` sends `Dropbox-API-Select-Admin` (admin access
+    to team-owned content). `opts.path-root` / `dropbox.path.root` sends
+    `Dropbox-API-Path-Root` (see `path-root-value`): `"home"`, a root
+    namespace id for the team space, or `ns:<id>` for one namespace.
+
+    **Retry.** Nothing waits between attempts. A connection failure on a
+    read-only route is retried once, immediately (`opts.retry: false`
+    turns that off). 429s, 5xx and the other transient errors come back
+    as `err(HttpError)` with `retry-after` from the `Retry-After` header
+    (or the 429 body's `retry_after`): check `is-retryable` and let a Hot
+    `retry` policy back off (see https://hot.dev/docs/retries).
+
+    **401 handling.** When a cached token minted from a refresh token is
+    rejected with 401, it is evicted and the call is retried once with a
+    freshly minted token.
+    """
+}
+
+::auth ::dropbox::auth
+::ctx ::hot::ctx
+::bit ::hot::bit
+::hex ::hot::hex
+::bytes ::hot::bytes
+::re ::hot::regex
+
+http-request ::hot::http/request
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+MAX_IMMEDIATE_RETRIES 1
+RETRY_STATUSES [408, 429, 500, 502, 503, 504]
+
+// Endpoint error tags that mean "try again later" rather than "this
+// request is wrong" (write contention, export not ready yet, ...).
+RETRY_TAGS ["too_many_write_operations", "too_many_requests", "retry_error", "internal_error", "rate_limit", "transient_error"]
+
+// Read-only routes: safe to send again after a dropped connection.
+IDEMPOTENT_ROUTES [
+    "files/list_folder",
+    "files/list_folder/continue",
+    "files/list_folder/get_latest_cursor",
+    "files/list_folder/longpoll",
+    "files/get_metadata",
+    "files/search_v2",
+    "files/search/continue_v2",
+    "files/download",
+    "files/export",
+    "files/get_temporary_link",
+    "files/list_revisions",
+    "files/delete_batch/check",
+    "files/copy_batch/check_v2",
+    "files/move_batch/check_v2",
+    "files/create_folder_batch/check",
+    "sharing/list_shared_links",
+    "sharing/get_shared_link_metadata",
+    "users/get_current_account",
+    "users/get_space_usage",
+    "files/upload_session/append_v2"
+]
+
+// Safety stop for cursor pagination when no limit is given.
+MAX_PAGES 10000
+
+// ---------------------------------------------------------------------------
+// Header-safe JSON (pure)
+// ---------------------------------------------------------------------------
+
+hex4
+meta {
+    doc: """A code unit (0..65535) as four lowercase hex digits: `hex4(233)` is `"00e9"`."""
+}
+fn (n: Int): Str {
+  ::hex/encode(Bytes([::bit/shift-right(n, 8), ::bit/and(n, 255)]))
+}
+
+unicode-escape
+meta {
+    doc: """The JSON `\\uXXXX` escape for a Unicode code point, as a surrogate pair above U+FFFF: `unicode-escape(233)` is `\\u00e9`, `unicode-escape(128512)` is `\\ud83d\\ude00`."""
+}
+fn (cp: Int): Str {
+  cond {
+    lt(cp, 65536) => { `\\u${hex4(cp)}` }
+    => {
+      v sub(cp, 65536)
+      `\\u${hex4(add(55296, ::bit/shift-right(v, 10)))}\\u${hex4(add(56320, ::bit/and(v, 1023)))}`
+    }
+  }
+}
+
+escape-step fn (state: Map, b: Int): Map {
+  cond {
+    gt(state.need, 0) => {
+      cp add(mul(state.cp, 64), ::bit/and(b, 63))
+      need sub(state.need, 1)
+      cond {
+        eq(need, 0) => { {parts: concat(state.parts, [unicode-escape(cp)]), cp: 0, need: 0} }
+        => { {parts: state.parts, cp: cp, need: need} }
+      }
+    }
+
+    lt(b, 127) => { {parts: concat(state.parts, [Str(Bytes([b]))]), cp: 0, need: 0} }
+    eq(b, 127) => { {parts: concat(state.parts, ["\\u007f"]), cp: 0, need: 0} }
+    gte(b, 240) => { {parts: state.parts, cp: ::bit/and(b, 7), need: 3} }
+    gte(b, 224) => { {parts: state.parts, cp: ::bit/and(b, 15), need: 2} }
+    gte(b, 192) => { {parts: state.parts, cp: ::bit/and(b, 31), need: 1} }
+    => { {parts: concat(state.parts, ["\\ufffd"]), cp: 0, need: 0} }
+  }
+}
+
+ascii-escape
+meta {
+    doc: """
+    Make a JSON text safe for an HTTP header (pure): every character from
+    U+007F up becomes `\\uXXXX` (lowercase hex; a UTF-16 surrogate pair
+    above U+FFFF), which any JSON parser reads back as the same string.
+    Pure-ASCII text is returned unchanged.
+
+    ```hot
+    ::dropbox::api/ascii-escape("{\\"path\\":\\"/Café\\"}")
+    // {"path":"/Caf\\u00e9"}
+    ```
+    """
+}
+fn (text: Str): Str {
+  cond {
+    ::re/is-match(text, "^[\\x00-\\x7E]*$") => { text }
+    => {
+      state reduce(::bytes/to-vec(Bytes(text)), escape-step, {parts: [], cp: 0, need: 0})
+      join(state.parts, "")
+    }
+  }
+}
+
+header-json
+meta {
+    doc: """Encode an argument as header-safe JSON (pure): nulls are dropped from Maps, then `ascii-escape` is applied. This is the `Dropbox-API-Arg` value."""
+}
+fn (arg: Any): Str {
+  value if(is-map(arg), ::dropbox/compact(arg), untype(arg))
+  ascii-escape(to-json(if(is-null(value), {}, value)))
+}
+
+// ---------------------------------------------------------------------------
+// Team headers (pure)
+// ---------------------------------------------------------------------------
+
+path-root-home
+meta {
+    doc: """`Dropbox-API-Path-Root` value for paths relative to the user's home namespace (the default)."""
+}
+fn (): Map {
+  {".tag": "home"}
+}
+
+path-root-team
+meta {
+    doc: """`Dropbox-API-Path-Root` value for the team space: paths are relative to the user's root namespace (`root_info.root_namespace_id` from `::dropbox::users/get-current-account`)."""
+}
+fn (root-namespace-id: Str): Map {
+  {".tag": "root", root: root-namespace-id}
+}
+
+path-root-namespace
+meta {
+    doc: """`Dropbox-API-Path-Root` value for paths relative to one namespace id (a shared or team folder you can access)."""
+}
+fn (namespace-id: Str): Map {
+  {".tag": "namespace_id", namespace_id: namespace-id}
+}
+
+path-root-value
+meta {
+    doc: """
+    The `Dropbox-API-Path-Root` header value for a path-root option
+    (pure), or null for none. Accepts a Map (sent as is, e.g. from
+    `path-root-team`), a JSON Str starting with `{`, `"home"`,
+    `"ns:<id>"` (one namespace), or a bare namespace id (the team-space
+    root, the common case for team members).
+
+    ```hot
+    ::dropbox::api/path-root-value("3235641")    // {".tag":"root","root":"3235641"}
+    ::dropbox::api/path-root-value("ns:1234")    // {".tag":"namespace_id","namespace_id":"1234"}
+    ```
+    """
+}
+fn (value: Any): Str? {
+  cond {
+    ::dropbox/is-blank(value) => { null }
+    is-map(value) => { header-json(value) }
+    => {
+      s trim(Str(value))
+      cond {
+        starts-with(s, "{") => { ascii-escape(s) }
+        eq(s, "home") => { header-json(path-root-home()) }
+        starts-with(s, "ns:") => { header-json(path-root-namespace(slice(s, 3, length(s)))) }
+        => { header-json(path-root-team(s)) }
+      }
+    }
+  }
+}
+
+opt-or-ctx fn (opts: Map, ctx: Map, k: Str): Any {
+  if(in(k, keys(opts)), get(opts, k), get(ctx, k))
+}
+
+team-headers
+meta {
+    doc: """The `Dropbox-API-Select-User`, `Dropbox-API-Select-Admin` and `Dropbox-API-Path-Root` headers for a call (pure): from `opts` (`select-user`, `select-admin`, `path-root`), else from `ctx` (the same keys). Unset values send no header."""
+}
+fn (opts: Map, ctx: Map): Map {
+  user opt-or-ctx(opts, ctx, "select-user")
+  admin opt-or-ctx(opts, ctx, "select-admin")
+  root path-root-value(opt-or-ctx(opts, ctx, "path-root"))
+  filter-vals({
+    Dropbox-API-Select-User: if(::dropbox/is-blank(user), null, Str(user)),
+    Dropbox-API-Select-Admin: if(::dropbox/is-blank(admin), null, Str(admin)),
+    Dropbox-API-Path-Root: root
+  }, is-some)
+}
+
+ctx-team
+meta {
+    doc: """The team options read from context (`dropbox.select.user`, `dropbox.select.admin`, `dropbox.path.root`)."""
+}
+fn (): Map {
+  {
+    select-user: ::ctx/get("dropbox.select.user"),
+    select-admin: ::ctx/get("dropbox.select.admin"),
+    path-root: ::ctx/get("dropbox.path.root")
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Options
+// ---------------------------------------------------------------------------
+
+// The package's one credential resolver: opts first, then context.
+resolve ::dropbox::auth/resolve-credentials
+
+api-params
+meta {
+    doc: """Strip the package's own keys (`::dropbox::auth/CREDENTIAL_KEYS`) from `opts`, leaving Dropbox arguments."""
+}
+fn (opts: Map): Map {
+  filter-keys(opts, (k) { not(in(k, ::auth/CREDENTIAL_KEYS)) })
+}
+
+credential-opts
+meta {
+    doc: """Keep only the package's own keys (credentials, team headers, `retry`) from `opts`, to pass them on to a follow-up call."""
+}
+fn (opts: Map): Map {
+  filter-keys(opts, (k) { in(k, ::auth/CREDENTIAL_KEYS) })
+}
+
+build-arg
+meta {
+    doc: """
+    Build a route argument (pure): `base` (the function's required
+    fields), overridden by the Dropbox arguments in `opts` (package keys
+    and the function's own `local-keys` removed), with nulls dropped.
+    """
+}
+fn
+(base: Map, opts: Map): Map {
+  build-arg(base, opts, [])
+},
+(base: Map, opts: Map, local-keys: Vec): Map {
+  params filter-keys(api-params(opts), (k) { not(in(k, local-keys)) })
+  filter-vals({...base, ...params}, is-some)
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+HttpError
+meta {
+    doc: """
+    A non-2xx response from Dropbox.
+
+    **Fields**
+    - `status` - HTTP status code (400 bad input, 401 auth, 403 access,
+      409 endpoint error, 429 rate limit, 5xx)
+    - `headers`, `body` - the raw response (`body` is decoded JSON when JSON)
+    - `message` - readable summary, e.g.
+      `"dropbox: HTTP 409 path/not_found (files/get_metadata)"`
+    - `route` - the route called, e.g. `"files/get_metadata"`
+    - `error-summary` - Dropbox's `error_summary`
+    - `error` - Dropbox's typed `error` union (`{".tag": "path", path: {".tag": "not_found"}}`)
+    - `error-tag` - the tag path joined with `/`, e.g. `"path/not_found"`
+    - `error-tags` - the tag path as a Vec, e.g. `["path", "not_found"]`
+    - `user-message` - Dropbox's `user_message.text`, safe to show users, when sent
+    - `retry-after` - seconds from `Retry-After` (or the 429 body's `retry_after`), else null
+    """
+}
+type {
+    status: Int,
+    headers: Map?,
+    body: Any,
+    message: Str?,
+    route: Str?,
+    error-summary: Str?,
+    error: Any?,
+    error-tag: Str?,
+    error-tags: Vec?,
+    user-message: Str?,
+    retry-after: Int?
+}
+
+decode-error-body fn (body: Any): Any {
+  cond {
+    is-bytes(body) => {
+      text Str(body)
+      parsed from-json(text)
+      if(is-err(parsed), text, parsed)
+    }
+
+    is-str(body) => {
+      parsed if(starts-with(trim(body), "{"), from-json(body), body)
+      if(is-err(parsed), body, parsed)
+    }
+    => { body }
+  }
+}
+
+union-tags
+meta {
+    doc: """The tag path of a Dropbox error union (pure): `{".tag": "path", path: {".tag": "not_found"}}` gives `["path", "not_found"]`. A 429 body's `{reason: {".tag": "too_many_requests"}}` gives `["too_many_requests"]`."""
+}
+fn (e: Any): Vec {
+  cond {
+    not(is-map(e)) => { [] }
+    is-str(get(e, ".tag")) => {
+      tag get(e, ".tag")
+      concat([tag], union-tags(get(e, tag)))
+    }
+
+    is-map(get(e, "reason")) => { union-tags(get(e, "reason")) }
+    => { [] }
+  }
+}
+
+summary-tags
+meta {
+    doc: """The tag path from an `error_summary` (pure): `"path/not_found/.."` gives `["path", "not_found"]`; the trailing punctuation Dropbox appends is dropped."""
+}
+fn (summary: Str?): Vec {
+  filter(split(or(summary, ""), "/"), (s) { ::re/is-match(s, "^[A-Za-z0-9_]+$") })
+}
+
+error-node
+meta {
+    doc: """The member of a Dropbox error union whose `.tag` is `tag` (pure), searching nested unions: for `{".tag": "lookup_failed", lookup_failed: {".tag": "incorrect_offset", correct_offset: 8}}`, `error-node(e, "incorrect_offset")` is `{".tag": "incorrect_offset", correct_offset: 8}`. Null when absent."""
+}
+fn (e: Any, tag: Str): Map? {
+  cond {
+    not(is-map(e)) => { null }
+    eq(get(e, ".tag"), tag) => { e }
+    is-str(get(e, ".tag")) => { error-node(get(e, get(e, ".tag")), tag) }
+    => { null }
+  }
+}
+
+body-excerpt
+meta {
+    doc: """A short (at most 300 characters) printable form of a response body, for error messages."""
+}
+fn (body: Any): Str {
+  text cond {
+    is-null(body) => { "" }
+    is-str(body) => { body }
+    is-bytes(body) => { Str(body) }
+    => { to-json(untype(body)) }
+  }
+
+  if(gt(length(text), 300), `${slice(text, 0, 300)}...`, text)
+}
+
+parse-int
+meta {
+    doc: """Parse an Int from an Int or a decimal-digit Str (surrounding whitespace allowed); null for anything else. Never halts on bad input."""
+}
+fn (value: Any): Int? {
+  cond {
+    is-int(value) => { value }
+    not(is-str(value)) => { null }
+    => {
+      s trim(value)
+      // Retry-After may be an HTTP date, and a consumed Err from Int() halts: parse digits only.
+      if(::re/is-match(s, "^-?[0-9]{1,15}$"), Int(s), null)
+    }
+  }
+}
+
+retry-after-seconds
+meta {
+    doc: """Seconds to wait from a response's `Retry-After` header, else the 429 body's `error.retry_after`, else null."""
+}
+fn (headers: Map?, body: Any): Int? {
+  from-header parse-int(get(or(headers, {}), "retry-after"))
+  e if(is-map(body), get(body, "error"), null)
+  from-body if(is-map(e), parse-int(get(e, "retry_after")), null)
+  seconds or(from-header, from-body)
+  if(is-some(seconds), max(or(seconds, 0), 0), null)
+}
+
+// `HttpError(response)`: the error for a non-2xx response when the route is not known.
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
+  http-error(response, null)
+}
+
+http-error
+meta {
+    doc: """Build an `HttpError` (with a readable `message`) from a non-2xx response and the route that was called, which `HttpError(response)` cannot know. Pure; exposed for testing and for code that reads responses itself."""
+}
+fn (response: Map, route: Str?): HttpError {
+  headers or(response.headers, {})
+  body decode-error-body(response.body)
+  summary if(is-map(body), get(body, "error_summary"), null)
+  e if(is-map(body), get(body, "error"), null)
+  structured union-tags(e)
+  tags if(is-empty(structured), summary-tags(summary), structured)
+  tag if(is-empty(tags), null, join(tags, "/"))
+  um if(is-map(body), get(body, "user_message"), null)
+  user-message cond {
+    is-map(um) => { get(um, "text") }
+    is-str(um) => { um }
+    => { null }
+  }
+
+  route-part if(is-some(route), ` (${route})`, "")
+  detail cond {
+    is-some(user-message) => { `: ${user-message}` }
+    is-some(tag) => { "" }
+    => { `: ${body-excerpt(body)}` }
+  }
+
+  tag-part if(is-some(tag), ` ${tag}`, "")
+  fields {
+    status: response.status,
+    headers: headers,
+    body: body,
+    message: `dropbox: HTTP ${response.status}${tag-part}${route-part}${detail}`,
+    route: route,
+    error-summary: summary,
+    error: e,
+    error-tag: tag,
+    error-tags: tags,
+    user-message: user-message,
+    retry-after: retry-after-seconds(headers, body)
+  }
+
+  HttpError(fields)
+}
+
+plain-payload
+meta {
+    doc: """The payload of a `Result.Err` (or the value itself), with type tags removed so an `HttpError` / `TokenError` reads like a Map."""
+}
+fn (value: Result): Any {
+  payload if(is-err(value), err-value(value), value)
+  if(or(is-null(payload), is-str(payload)), payload, untype(payload))
+}
+
+error-tags-of
+meta {
+    doc: """The Dropbox error tag path of a failed call (an `HttpError`, a `Result.Err` holding one, or a raw error body), or `[]`."""
+}
+fn (error: Result): Vec {
+  payload plain-payload(error)
+  cond {
+    not(is-map(payload)) => { [] }
+    is-vec(get(payload, "error-tags")) => { get(payload, "error-tags") }
+    => { union-tags(get(payload, "error")) }
+  }
+}
+
+has-error-tag
+meta {
+    doc: """
+    True when a failed call's Dropbox error carries `tag` anywhere in its
+    tag path: `has-error-tag(result, "not_found")` matches
+    `path/not_found`, `from_lookup/not_found`, ...
+
+    ```hot
+    meta-data ::dropbox::files/get-metadata("/maybe.txt")
+    if(::dropbox::api/has-error-tag(meta-data, "not_found"), "missing", "present")
+    ```
+    """
+}
+fn (error: Result, tag: Str): Bool {
+  and(is-err(error), in(tag, error-tags-of(error)))
+}
+
+is-not-found
+meta {
+    doc: """True when a call failed because nothing exists at the path (`.../not_found`)."""
+}
+fn (error: Result): Bool {
+  has-error-tag(error, "not_found")
+}
+
+is-reset
+meta {
+    doc: """True when a cursor was invalidated (`reset`) and the listing must restart from `list_folder`."""
+}
+fn (error: Result): Bool {
+  has-error-tag(error, "reset")
+}
+
+is-transport-limit
+meta {
+    doc: """True for the Business-plan data transport limit: a 403 `invalid_account_type/feature` on an upload once a team has used its monthly data transport calls. Retrying will not help until the next month or a plan change."""
+}
+fn (error: Result): Bool {
+  payload plain-payload(error)
+  tags error-tags-of(error)
+  and(is-map(payload), eq(get(payload, "status"), 403), in("invalid_account_type", tags))
+}
+
+is-connection-failure
+meta {
+    doc: """True when a transport error message is a connection or read failure (worth trying again), not a size-limit or URL error."""
+}
+fn (message: Str): Bool {
+  and(
+    or(contains(message, "request failed"), contains(message, "failed to read body")),
+    not(contains(message, "exceeds"))
+  )
+}
+
+is-retryable
+meta {
+    doc: """
+    True when a failed call is worth retrying later: an `HttpError` (or a
+    `Result.Err` holding one) with status 408, 429 or 5xx, or a 409 whose
+    tag is transient (`too_many_write_operations`, `retry_error`, ...);
+    a `TokenError` with one of those statuses; or a connection failure.
+    False for successes and permanent errors (400, 401, 403, 409
+    `not_found`, ...).
+
+    Nothing waits and retries for you: Hot has no in-run sleep. Give the
+    handler, schedule or task a `retry` policy and fail the run when this
+    returns true; `retry-after` on the `HttpError` says how long Dropbox
+    asked you to wait.
+
+    ```hot
+    sync-dropbox
+    meta {
+      schedule: "every 15 minutes",
+      retry: {attempts: 5, delay: 5000, backoff: "exponential", max_delay: 300000, jitter: true}
+    }
+    fn (event) {
+      page ::dropbox::files/list-folder("/Inbox")
+      cond {
+        ::dropbox::api/is-retryable(page) => { fail(`dropbox: retrying later: ${err-message(page)}`) }
+        is-err(page) => { println(`dropbox: giving up: ${err-message(page)}`) }
+        => { length(page.entries) }
+      }
+    }
+    ```
+    """
+}
+fn (error: Result): Bool {
+  payload plain-payload(error)
+  tags error-tags-of(error)
+  cond {
+    is-str(payload) => { is-connection-failure(payload) }
+    not(is-map(payload)) => { false }
+    is-int(get(payload, "status")) => {
+      or(in(payload.status, RETRY_STATUSES), gt(length(filter(tags, (t) { in(t, RETRY_TAGS) })), 0))
+    }
+
+    is-str(get(payload, "message")) => { is-connection-failure(payload.message) }
+    => { false }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Request building (pure)
+// ---------------------------------------------------------------------------
+
+retry-policy
+meta {
+    doc: """The immediate-retry policy (pure): `{max-retries: 1}`, or `0` when `opts.retry` is `false` or `0`. Never more than one: nothing here waits between attempts."""
+}
+fn (opts: Map): Map {
+  r opts.retry
+  n cond {
+    eq(r, false) => { 0 }
+    is-int(r) => { r }
+    => { MAX_IMMEDIATE_RETRIES }
+  }
+  {max-retries: min(max(n, 0), MAX_IMMEDIATE_RETRIES)}
+}
+
+route-url
+meta {
+    doc: """
+    The URL of a route on its host: `route-url("rpc", "files/list_folder")`
+    is `https://api.dropboxapi.com/2/files/list_folder`; `"upload"` and
+    `"download"` use `content.dropboxapi.com`, `"notify"` uses
+    `notify.dropboxapi.com`. When the `dropbox.api.root` context variable
+    (or the 3-arity `root`) is set, every route goes to `{root}/2/{route}`
+    instead, for a proxy or a local mock server.
+    """
+}
+fn
+(style: Str, route: Str): Str {
+  route-url(style, route, ::ctx/get("dropbox.api.root"))
+},
+(style: Str, route: Str, root: Str?): Str {
+  base cond {
+    not(::dropbox/is-blank(root)) => { `${::re/replace-all(trim(root), "/+$", "")}/2` }
+    in(style, ["upload", "download"]) => { ::dropbox/CONTENT_URL }
+    eq(style, "notify") => { ::dropbox/NOTIFY_URL }
+    => { ::dropbox/API_URL }
+  }
+  `${base}/${route}`
+}
+
+build-request
+meta {
+    doc: """
+    Build the outgoing `HttpRequest` for a route (pure). `style` is:
+
+    - `"rpc"` / `"notify"` - `arg` is the JSON body (`Content-Type:
+      application/json`); a null `arg` sends no body (Void routes)
+    - `"upload"` - `arg` goes in `Dropbox-API-Arg` (header-safe JSON),
+      `body` (Bytes) is the content, `Content-Type: application/octet-stream`
+    - `"download"` - `arg` goes in `Dropbox-API-Arg`, no body and no Content-Type
+
+    `token` (nullable) becomes the Bearer header; `headers` (team
+    headers, `Range`, ...) are added last.
+    """
+}
+fn (style: Str, route: Str, arg: Any, body: Any, token: Str?, headers: Map): HttpRequest {
+  auth if(is-null(token), {}, {Authorization: `Bearer ${token}`})
+  cond {
+    eq(style, "upload") => {
+      payload cond {
+        is-bytes(body) => { body }
+        is-null(body) => { Bytes([]) }
+        is-str(body) => { Bytes(body) }
+        => { Bytes(to-json(untype(body))) }
+      }
+
+      HttpRequest({
+        method: "POST",
+        url: route-url(style, route),
+        headers: {...auth, Content-Type: "application/octet-stream", Dropbox-API-Arg: header-json(arg), ...headers},
+        body: payload
+      })
+    }
+
+    eq(style, "download") => {
+      HttpRequest({
+        method: "POST",
+        url: route-url(style, route),
+        headers: {...auth, Dropbox-API-Arg: header-json(arg), ...headers},
+        body: ""
+      })
+    }
+
+    is-null(arg) => {
+      HttpRequest({method: "POST", url: route-url(style, route), headers: {...auth, ...headers}, body: ""})
+    }
+    => {
+      value if(is-map(arg), ::dropbox/compact(arg), untype(arg))
+      HttpRequest({
+        method: "POST",
+        url: route-url(style, route),
+        headers: {...auth, Content-Type: "application/json", ...headers},
+        body: to-json(value)
+      })
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Sending
+// ---------------------------------------------------------------------------
+
+send-with-retry
+meta {
+    doc: """Send a request; on a connection failure of an idempotent route, send it once more straight away (per `policy`). Never waits."""
+}
+fn
+(req: HttpRequest, route: Str, policy: Map): HttpResponse {
+  send-with-retry(req, route, policy, 0)
+},
+(req: HttpRequest, route: Str, policy: Map, attempt: Int): HttpResponse {
+  response http-request(req)
+  cond {
+    and(is-err(response), lt(attempt, policy.max-retries), in(route, IDEMPOTENT_ROUTES), is-connection-failure(err-message(response))) => {
+      send-with-retry(req, route, policy, add(attempt, 1))
+    }
+    => { response }
+  }
+}
+
+request
+meta {
+    doc: """
+    Make an authenticated Dropbox request and return the raw
+    `HttpResponse` (non-2xx included), or an Err for credential and
+    transport failures. `style` is `"rpc"`, `"upload"` or `"download"`
+    (see `build-request`); `headers` are extra request headers (e.g.
+    `Range`); `opts` carries credentials, team options and `retry`.
+
+    ```hot
+    response ::dropbox::api/request("rpc", "users/get_current_account", null, "", {}, {})
+    response.status
+    ```
+    """
+}
+fn (style: Str, route: Str, arg: Any, body: Any, headers: Map, opts: Map): HttpResponse {
+  creds resolve(opts)
+  policy retry-policy(opts)
+  extra {...team-headers(opts, ctx-team()), ...headers}
+  cond {
+    is-err(creds) => { creds }
+    => {
+      auth ::auth/bearer(creds)
+      cond {
+        is-err(auth) => { auth }
+        => {
+          response send-with-retry(build-request(style, route, arg, body, auth.token, extra), route, policy)
+          cond {
+            and(auth.cached, not(is-err(response)), eq(response.status, 401)) => {
+              ::auth/evict-token(auth.cache-key)
+              fresh ::auth/bearer(creds)
+              if(is-err(fresh), fresh, send-with-retry(build-request(style, route, arg, body, fresh.token, extra), route, policy))
+            }
+            => { response }
+          }
+        }
+      }
+    }
+  }
+}
+
+unwrap
+meta {
+    doc: """The decoded body of a 2xx response (null for Void routes), the Err of a failed request, or `err(HttpError)` for a non-2xx response."""
+}
+fn (response: Result, route: Str): Any {
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => {
+      body response.body
+      cond {
+        is-bytes(body) => {
+          text Str(body)
+          if(eq(trim(text), ""), null, from-json(text))
+        }
+
+        and(is-str(body), eq(trim(body), "")) => { null }
+        and(is-str(body), eq(trim(body), "null")) => { null }
+        => { body }
+      }
+    }
+    => { err(http-error(response, route)) }
+  }
+}
+
+rpc
+meta {
+    doc: """
+    Call an RPC route and unwrap: the decoded JSON result on 2xx (null
+    for Void routes), or an Err carrying `HttpError` (credential failures
+    carry `::dropbox::auth/TokenError`). `arg` is the route argument Map
+    (nulls dropped) or null for Void routes.
+
+    ```hot
+    account ::dropbox::api/rpc("users/get_current_account", null)
+    account.email
+    ```
+    """
+}
+fn
+(route: Str, arg: Any): Any {
+  rpc(route, arg, {})
+},
+(route: Str, arg: Any, opts: Map): Any {
+  unwrap(request("rpc", route, arg, "", {}, opts), route)
+}
+
+api-result
+meta {
+    doc: """The decoded `Dropbox-API-Result` header of a content response (the route's result: file metadata for download, `{export_metadata, file_metadata}` for export), or null."""
+}
+fn (response: Map): Any {
+  raw get(or(response.headers, {}), "dropbox-api-result")
+  cond {
+    ::dropbox/is-blank(raw) => { null }
+    => {
+      parsed from-json(Str(raw))
+      if(is-err(parsed), null, parsed)
+    }
+  }
+}
+
+upload-call
+meta {
+    doc: """Call an upload-style content route: `arg` in `Dropbox-API-Arg`, `content` (Bytes, or a Str as UTF-8) as the body. Returns the decoded JSON result or an Err carrying `HttpError`."""
+}
+fn (route: Str, arg: Any, content: Any, opts: Map): Any {
+  unwrap(request("upload", route, arg, content, {}, opts), route)
+}
+
+notify
+meta {
+    doc: """Call a `notify.dropboxapi.com` route (`files/list_folder/longpoll`). These routes take no authentication, so no Authorization or team header is sent. Returns the decoded JSON result or an Err carrying `HttpError`."""
+}
+fn (route: Str, arg: Any, opts: Map): Any {
+  req build-request("notify", route, arg, "", null, {})
+  unwrap(send-with-retry(req, route, retry-policy(opts)), route)
+}
+
+// ---------------------------------------------------------------------------
+// Cursor pagination
+// ---------------------------------------------------------------------------
+
+collect-loop fn (page: Result, fetch-next: Fn, items-key: Str, limit: Int?, acc: Vec, pages: Int): Vec {
+  cond {
+    is-err(page) => { page }
+    => {
+      all concat(acc, or(get(page, items-key), []))
+      cursor get(page, "cursor")
+      cond {
+        and(is-some(limit), gte(length(all), or(limit, 0))) => { slice(all, 0, limit) }
+        not(eq(get(page, "has_more"), true)) => { all }
+        ::dropbox/is-blank(cursor) => { all }
+        gte(pages, MAX_PAGES) => { all }
+        => { collect-loop(fetch-next(cursor), fetch-next, items-key, limit, all, add(pages, 1)) }
+      }
+    }
+  }
+}
+
+collect-cursor
+meta {
+    doc: """
+    Follow a Dropbox cursor (`has_more` + `cursor`) and collect every
+    item, or at most `limit` (null for no limit). `first-page` is the
+    already-fetched first page (or an Err), `fetch-next` is `(cursor: Str) ->
+    page` (the `.../continue` call), and `items-key` names the list
+    (`"entries"`, `"matches"`, `"links"`). The first failing page's Err
+    is returned.
+
+    ```hot
+    entries ::dropbox::api/collect-cursor(
+      ::dropbox::files/list-folder("/Reports"),
+      (c) { ::dropbox::files/list-folder-continue(c) },
+      "entries", 1000)
+    ```
+    """
+}
+fn
+(first-page: Result, fetch-next: Fn, items-key: Str): Vec {
+  collect-loop(first-page, fetch-next, items-key, null, [], 1)
+},
+(first-page: Result, fetch-next: Fn, items-key: Str, limit: Int?): Vec {
+  collect-loop(first-page, fetch-next, items-key, limit, [], 1)
+}

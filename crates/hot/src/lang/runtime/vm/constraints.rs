@@ -7,6 +7,7 @@
 //! value itself never appears in the error.
 
 use super::{VirtualMachine, VmError, VmResult};
+use crate::lang::bytecode::{ConstantId, param_mask};
 use crate::val::Val;
 use ahash::{AHashMap, AHashSet};
 use fastnum::D256;
@@ -30,6 +31,13 @@ enum GuardStop {
     Fuel,
     Depth,
     Native(String),
+}
+
+/// How the checked path of a `CheckParam` ended.
+pub(crate) enum ParamCheck {
+    Passed,
+    Converted(Val),
+    Failed(Val),
 }
 
 /// How a predicate evaluation ended.
@@ -341,6 +349,62 @@ impl VirtualMachine {
         })
     }
 
+    /// Execute `CheckParam` on a parameter in the current frame. Returns the
+    /// `Err` of a failed check, for the caller to return from the function.
+    pub(crate) fn execute_check_param(
+        &mut self,
+        var_name: ConstantId,
+        spec: ConstantId,
+        mask: u32,
+        each: bool,
+    ) -> VmResult<Option<Val>> {
+        let name = self.get_constant_string(var_name)?;
+        let passes = self
+            .scope_stack
+            .last()
+            .and_then(|scope| scope.variables.get(name.as_ref()))
+            .is_some_and(|value| param_mask::passes(value, mask, each));
+        if passes {
+            return Ok(None);
+        }
+        let value = self.lookup_variable(&name)?;
+        let spec = self.get_constant(spec)?;
+        match self.check_param_value(value, &spec, mask)? {
+            ParamCheck::Passed => Ok(None),
+            ParamCheck::Converted(value) => {
+                self.store_variable(&name, value)?;
+                Ok(None)
+            }
+            ParamCheck::Failed(error) => Ok(Some(error)),
+        }
+    }
+
+    /// The checked path of `CheckParam`, for a value outside its mask. A value
+    /// tagged with a type over an accepted kind (`Port(80)` at `x: Int`, which
+    /// `hot check` accepts) keeps its tag.
+    pub(crate) fn check_param_value(
+        &mut self,
+        value: Val,
+        spec: &Val,
+        mask: u32,
+    ) -> VmResult<ParamCheck> {
+        if !value.is_err()
+            && let Val::Map(map) = &value
+            && crate::val::tagged_type_name(map).is_some()
+            && map
+                .get(&Val::from("$val"))
+                .is_some_and(|inner| param_mask::accepts(inner, mask))
+        {
+            return Ok(ParamCheck::Passed);
+        }
+        let checked = self.execute_check_constraint(value, spec, false)?;
+        Ok(if checked.is_err() {
+            ParamCheck::Failed(checked)
+        } else {
+            ParamCheck::Converted(checked)
+        })
+    }
+
     /// The spec cache, rebuilt when the program's table has changed.
     fn constraint_specs(&mut self) -> &ConstraintSpecCache {
         let table = &self.program.constraint_types;
@@ -585,6 +649,18 @@ impl VirtualMachine {
                         Ok(checked) => return Ok(Ok(checked)),
                         Err(failure) => failures.push(failure),
                     }
+                }
+                // No member's base type matched: say what all of them accept.
+                let expected: Vec<&str> = failures
+                    .iter()
+                    .filter_map(|f| match &f.kind {
+                        FailureKind::BaseMismatch { expected } => Some(expected.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                if expected.len() > 1 && expected.len() == failures.len() {
+                    let expected = expected.join(" | ");
+                    return Ok(Err(self.base_mismatch(&expected, &value, path)));
                 }
                 // Prefer the member whose base type matched: its predicate
                 // says more than "expected another type".

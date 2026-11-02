@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use uuid::Uuid;
 
 mod constraints;
+pub(crate) use constraints::ParamCheck;
 
 /// Default maximum Hot-level recursion depth. Each user-visible function call
 /// adds one to the depth counter (dispatch wrappers like `call`/`call-lib` are
@@ -543,6 +544,9 @@ struct OverloadCandidate {
 struct OverloadSet {
     prefix: String,
     arity: usize,
+    /// Its overloads take a rest parameter, so a call can pass one argument
+    /// fewer than `arity`, or any number more.
+    variadic: bool,
     candidates: Vec<OverloadCandidate>,
 }
 
@@ -556,13 +560,22 @@ impl OverloadCandidate {
     /// Summed rank over the parameters, or `None` when a parameter does not
     /// accept its argument. `names` are the arguments' dispatch type names,
     /// and `maps` whether each is structurally a Map.
-    fn rank(&self, names: &[std::borrow::Cow<'_, str>], maps: &[bool]) -> Option<u32> {
-        if self.param_types.len() != names.len() {
+    fn rank(
+        &self,
+        names: &[std::borrow::Cow<'_, str>],
+        maps: &[bool],
+        variadic: bool,
+    ) -> Option<u32> {
+        if !variadic && self.param_types.len() != names.len() {
             return None;
         }
+        // A rest parameter's type is each of its values' type.
+        let rest = self.param_types.len().saturating_sub(1);
         let mut total = 0;
-        for (i, (declared, name)) in self.param_types.iter().zip(names).enumerate() {
-            total += if self.lazy_params.get(i).copied().unwrap_or(false) {
+        for (i, name) in names.iter().enumerate() {
+            let param = if variadic { i.min(rest) } else { i };
+            let declared = self.param_types.get(param)?;
+            total += if self.lazy_params.get(param).copied().unwrap_or(false) {
                 // Lazy arguments arrive as thunks, so their type is unknown.
                 OVERLOAD_RANK_ANY
             } else {
@@ -882,6 +895,17 @@ fn split_param_types(types: &str) -> Vec<String> {
     }
     parts.push(types[start..].to_string());
     parts
+}
+
+/// The exact conversion `CheckParam` would make for `arg` at a parameter of
+/// `param_type`: an `Int` to a `Dec`, or a whole `Dec` to an `Int`.
+fn exact_number_for_param(arg: &Val, param_type: &str) -> Option<Val> {
+    let base = param_type.strip_suffix('?').unwrap_or(param_type);
+    match (base, arg) {
+        ("Dec", Val::Int(n)) => Some(Val::Dec(fastnum::D256::from(*n))),
+        ("Int", Val::Dec(d)) if d.floor() == *d => d.to_i64().ok().map(Val::Int),
+        _ => None,
+    }
 }
 
 /// Whether a parameter's type is a built-in one, as `is_primitive_type_expr`
@@ -3729,6 +3753,19 @@ impl VirtualMachine {
                 let spec = self.get_constant(spec)?;
                 let result = self.execute_check_constraint(value, &spec, test)?;
                 self.set_register(dest, result)?;
+                self.instruction_pointer += 1;
+            }
+            Instruction::CheckParam {
+                var_name,
+                spec,
+                mask,
+                each,
+            } => {
+                if let Some(error) = self.execute_check_param(*var_name, *spec, *mask, *each)? {
+                    self.set_register(0, error)?;
+                    self.instruction_pointer = usize::MAX;
+                    return Ok(());
+                }
                 self.instruction_pointer += 1;
             }
             Instruction::ProvenArgs { function_id, mask } => {
@@ -6923,6 +6960,9 @@ impl VirtualMachine {
                 function_name,
                 function_id
             );
+            let function_id = self
+                .overload_for_args(function_id, args)
+                .unwrap_or(function_id);
             return self.execute_user_function(function_id, args);
         }
 
@@ -6997,6 +7037,11 @@ impl VirtualMachine {
                             function_name,
                             function_id
                         );
+                        // An arity match ignores the argument types; prefer the
+                        // overload that fits them, as a direct call does.
+                        let function_id = self
+                            .overload_for_args(function_id, args)
+                            .unwrap_or(function_id);
                         return self.execute_user_function(function_id, args);
                     }
 
@@ -7384,9 +7429,7 @@ impl VirtualMachine {
 
     fn build_overload_set(&self, function_id: FunctionId) -> Option<OverloadSet> {
         let info = self.program.functions.get(function_id as usize)?;
-        if info.is_variadic {
-            return None;
-        }
+        let variadic = info.is_variadic;
         let arity = info.arity as usize;
         let prefix = format!("{}/{}", info.name, arity);
         // Declared types per overload, from its longest typed key: the
@@ -7429,13 +7472,15 @@ impl VirtualMachine {
             .chain(untyped.map(|id| (id, vec!["Any".to_string(); arity])))
             .filter_map(|(id, param_types): (FunctionId, Vec<String>)| {
                 let overload = self.program.functions.get(id as usize)?;
-                (!overload.is_variadic && param_types.len() == arity).then(|| OverloadCandidate {
-                    function_id: id,
-                    param_types: param_types
-                        .iter()
-                        .map(|declared| self.dispatch_param_type(&overload.namespace, declared))
-                        .collect(),
-                    lazy_params: overload.lazy_params.clone(),
+                (overload.is_variadic == variadic && param_types.len() == arity).then(|| {
+                    OverloadCandidate {
+                        function_id: id,
+                        param_types: param_types
+                            .iter()
+                            .map(|declared| self.dispatch_param_type(&overload.namespace, declared))
+                            .collect(),
+                        lazy_params: overload.lazy_params.clone(),
+                    }
                 })
             })
             .collect();
@@ -7445,6 +7490,7 @@ impl VirtualMachine {
         (candidates.len() > 1 && belongs).then_some(OverloadSet {
             prefix,
             arity,
+            variadic,
             candidates,
         })
     }
@@ -7546,7 +7592,12 @@ impl VirtualMachine {
         args: &[Val],
     ) -> Option<FunctionId> {
         let set = self.overload_set(function_id)?;
-        if args.len() != set.arity {
+        let fits = if set.variadic {
+            args.len() + 1 >= set.arity
+        } else {
+            args.len() == set.arity
+        };
+        if !fits {
             return None;
         }
         let (names, maps): (Vec<std::borrow::Cow<'_, str>>, Vec<bool>) =
@@ -7586,12 +7637,14 @@ impl VirtualMachine {
             return function_id;
         };
         let eligible = |c: &&OverloadCandidate| c.lazy_params == resolved.lazy_params;
-        let mut best = resolved.rank(names, maps).map(|rank| (rank, function_id));
+        let mut best = resolved
+            .rank(names, maps, set.variadic)
+            .map(|rank| (rank, function_id));
         for candidate in set.candidates.iter().filter(eligible) {
             if candidate.function_id == function_id {
                 continue;
             }
-            if let Some(rank) = candidate.rank(names, maps)
+            if let Some(rank) = candidate.rank(names, maps, set.variadic)
                 && best.is_none_or(|(best_rank, _)| rank < best_rank)
             {
                 best = Some((rank, candidate.function_id));
@@ -7607,7 +7660,7 @@ impl VirtualMachine {
                 .iter()
                 .filter(eligible)
                 .find(|c| c.function_id == id)
-                .and_then(|c| c.rank(names, maps))
+                .and_then(|c| c.rank(names, maps, set.variadic))
             && best.is_none_or(|(best_rank, _)| rank <= best_rank)
         {
             return id;
@@ -7748,6 +7801,12 @@ impl VirtualMachine {
             return Ok(args);
         }
         for (arg, param_type) in args.iter_mut().zip(expected.iter()) {
+            // An exact number conversion ahead of the callee, so that compiled
+            // code for the parameter's own type can take the call.
+            if let Some(converted) = exact_number_for_param(arg, param_type) {
+                *arg = converted;
+                continue;
+            }
             if let Some(coerced) = self.run_implicit_arrow(arg, param_type)? {
                 *arg = coerced;
             }
@@ -8882,6 +8941,19 @@ impl VirtualMachine {
                     }
                     // An Err (such as a failed `where` check on a parameter)
                     // returns from the lambda at once.
+                    Instruction::CheckParam {
+                        var_name,
+                        spec,
+                        mask,
+                        each,
+                    } => {
+                        if let Some(error) =
+                            self.execute_check_param(*var_name, *spec, *mask, *each)?
+                        {
+                            last_result = error;
+                            break;
+                        }
+                    }
                     Instruction::ReturnIfErr { src } => {
                         let value = self.get_register(*src)?;
                         if value.is_err() {
@@ -11785,6 +11857,22 @@ impl VirtualMachine {
                 // Restore instruction pointer before returning
                 self.instruction_pointer = saved_instruction_pointer;
                 return Ok(FunctionExecutionResult::Value(last_result));
+            }
+
+            // A failed parameter check returns its error, as ReturnIfErr does.
+            if let Instruction::CheckParam {
+                var_name,
+                spec,
+                mask,
+                each,
+            } = instruction
+            {
+                if let Some(error) = self.execute_check_param(*var_name, *spec, *mask, *each)? {
+                    self.instruction_pointer = saved_instruction_pointer;
+                    return Ok(FunctionExecutionResult::Value(error));
+                }
+                func_ip += 1;
+                continue;
             }
 
             // Handle conditional error return: if the value is an error, return it immediately

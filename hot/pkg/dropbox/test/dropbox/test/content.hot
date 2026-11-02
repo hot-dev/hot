@@ -1,0 +1,110 @@
+::dropbox::test::content ns
+meta ["test"]
+
+::content ::dropbox::content
+
+// Vectors generated independently with Python's hashlib (the algorithm
+// at https://www.dropbox.com/developers/reference/content-hash).
+EMPTY_HASH "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+HELLO_HASH "9595c9df90075148eb06860365df33584b75bff782a510c6cd4883a419833d50"
+
+// "0123456789abcdef" doubled up to exactly 4 MiB.
+four-mib fn (): Bytes {
+  reduce(range(0, 18), (acc, i) { concat(acc, acc) }, Bytes("0123456789abcdef"))
+}
+
+test-content-hash-small
+meta ["test"] fn () {
+    assert-eq(EMPTY_HASH, ::content/content-hash(Bytes([])), "an empty file hashes the empty string")
+    assert-eq(HELLO_HASH, ::content/content-hash(Bytes("hello")))
+    assert-eq(HELLO_HASH, ::content/content-hash("hello"), "a Str hashes its UTF-8 bytes")
+    assert-eq("c5dfde5d03d9f1a754ab008d75a480fb53387eee8a8328d431344cbb59416fb9", ::content/content-hash("hello world!", 4))
+    assert-eq("0f7a99aa13023b48fe87e452ed1411f1415d5f899379dd627b196d1c448d5300", ::content/content-hash("hello world!", 5), "a short last block")
+    assert-eq("831834b6a741e0ce2ef8e9602d2b55ac70aadcc7f39a79a4d16b8640f73ef15c", ::content/content-hash(Bytes([0, 1, 255, 254, 195, 40, 0, 10, 13]), 3), "binary content")
+}
+
+test-content-hash-4mib-blocks
+meta ["test"] fn () {
+    block four-mib()
+    assert-eq(4194304, length(block))
+    assert-eq("fa61965210c4e003dc22f916c83942de13e8aad8384507d4699f438c8cf4fcb1", ::content/content-hash(block), "exactly one block")
+    assert-eq("4b3d8225c4d56c15be73729ce424f44d6e67009155f44bdd34c10f5129025565", ::content/content-hash(concat(block, Bytes("x"))), "one block plus one byte")
+    assert-eq("d763f9a6ce16d7f6c8411dc92867a753b24193caf4a8eccf4b6c638763e7d742", ::content/content-hash(concat(block, block, Bytes("xyz"))), "three blocks")
+}
+
+test-matches-content-hash
+meta ["test"] fn () {
+    assert(::content/matches-content-hash("hello", HELLO_HASH))
+    assert(::content/matches-content-hash("hello", uppercase(HELLO_HASH)))
+    assert(not(::content/matches-content-hash("hellO", HELLO_HASH)))
+    assert(not(::content/matches-content-hash("hello", null)))
+    assert(not(::content/matches-content-hash("", "")))
+}
+
+test-range-math
+meta ["test"] fn () {
+    assert-eq("bytes=0-1023", ::content/range-header(0, 1023))
+    assert-eq("bytes=500-", ::content/range-header(500, null))
+    assert-eq([[0, 3], [4, 7], [8, 9]], ::content/download-ranges(10, 4))
+    assert-eq([[0, 9]], ::content/download-ranges(10, 16))
+    assert-eq([], ::content/download-ranges(0, 16))
+    assert(::content/is-size-limit-error(err("::hot::http/request: response exceeds http.max-response-bytes (16777216)")))
+    assert(not(::content/is-size-limit-error(err("request failed"))))
+}
+
+test-download-arg
+meta ["test"] fn () {
+    assert-eq({path: "/a.pdf"}, ::content/download-arg("a.pdf", {range: {start: 0, end: 9}, chunk-size: 4, token: "t"}))
+    assert-eq({path: "rev:a1c10ce0dd78"}, ::content/download-arg("/a.pdf", {rev: "a1c10ce0dd78"}), "a revision is addressed as a rev: path")
+}
+
+test-export-format
+meta ["test"] fn () {
+    paper {name: "Roadmap.paper", export_info: {export_as: "html", export_options: ["html", "markdown"]}}
+    assert-eq("markdown", ::content/export-format(paper, "auto"), "auto prefers Markdown")
+    assert-eq("markdown", ::content/export-format(paper, null))
+    assert-eq("markdown", ::content/export-format(paper, "MD"))
+    assert-eq("html", ::content/export-format(paper, "html"))
+    bad ::content/export-format(paper, "pdf")
+    assert(is-err(bad))
+    assert(contains(err-message(bad), "supported: html, markdown"))
+    gdoc {name: "Plan.gdoc", export_info: {export_as: "docx", export_options: ["docx", "pdf"]}}
+    assert-eq("docx", ::content/export-format(gdoc, "auto"), "no Markdown on offer: the default export")
+    assert-eq("pdf", ::content/export-format(null, "pdf"), "unknown options: passed through")
+    assert(is-null(::content/export-format(null, "auto")), "auto with no metadata lets Dropbox choose")
+}
+
+test-build-content
+meta ["test"] fn () {
+    entry {".tag": "file", id: "id:1", name: "notes.md", path_display: "/notes.md", rev: "r1", size: 5}
+    md ::content/build-content("/notes.md", Bytes("# Hi\n"), entry, null, null, "download")
+    assert-eq("text/markdown", md.mime-type)
+    assert-eq("# Hi\n", md.text)
+    assert-eq(5, md.size)
+    assert-eq("id:1", md.file.id)
+
+    binary Bytes([0, 255, 195, 40])
+    pdf ::content/build-content("/a.pdf", binary, {".tag": "file", name: "a.pdf"}, null, null, "download")
+    assert-eq("application/pdf", pdf.mime-type)
+    assert(is-null(pdf.text), "binary types get no text")
+    assert-eq(binary, pdf.bytes, "exact bytes")
+
+    json ::content/build-content("/n.json", Bytes("123"), {".tag": "file", name: "n.json"}, null, null, "download")
+    assert-eq("123", json.text, "a JSON file stays text, not a decoded number")
+
+    exported ::content/build-content("/Roadmap.paper", Bytes("# Roadmap"), {".tag": "file", name: "Roadmap.paper"}, "Roadmap.md", "markdown", "export")
+    assert-eq("Roadmap.md", exported.name)
+    assert-eq("text/markdown", exported.mime-type)
+    assert-eq("markdown", exported.format)
+
+    by-format ::content/build-content("/R.paper", Bytes("<p>x</p>"), null, "R", "html", "export")
+    assert-eq("text/html", by-format.mime-type, "the format gives the type when the name has no extension")
+    assert(is-null(by-format.file))
+}
+
+test-response-bytes
+meta ["test"] fn () {
+    assert-eq(Bytes([1, 2]), ::content/response-bytes({status: 200, body: 12, body-bytes: Bytes([1, 2])}), "body-bytes wins over the decoded body")
+    assert-eq(Bytes("x"), ::content/response-bytes({status: 200, body: "x"}))
+    assert-eq(Bytes([]), ::content/response-bytes({status: 200, body: null}))
+}

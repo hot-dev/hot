@@ -2088,6 +2088,11 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
         sqlx::query("INSERT INTO hot.usage_storage(env_id,org_id,slot,store_bytes) VALUES($1,$2,0,7) ON CONFLICT(env_id,slot) DO UPDATE SET store_bytes=hot.usage_storage.store_bytes+7")
             .bind(env).bind(org).execute(&admin).await?;
     }
+    // Real entries too, written through the scope the check reads under. If its
+    // organization didn't match the row policy, it would count none and "repair"
+    // the counter down to nothing.
+    sqlx::query("INSERT INTO store_map_entry(org_id,env_id,store_name,key,value,size) VALUES($1,$2,'reconciled','\"key\"','\"value\"',11)")
+        .bind(child_a).bind(env_a).execute(&a).await?;
     let mut holder = admin.begin().await?;
     sqlx::query("SELECT 1 FROM hot.usage_storage WHERE env_id=$1 AND slot=0 FOR UPDATE")
         .bind(last)
@@ -2143,6 +2148,51 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
     holder.rollback().await?;
     assert_eq!(reconciling.await??.storage_rows, 2);
     assert!(store_matches(last).await?);
+    assert!(store_matches(env_a).await?);
+    // A check that fails doesn't stop the rest of the pass. Here the first
+    // environment's repair gives up on a row a writer holds, the last is still
+    // repaired, the pass reports the failure, and the next tick repairs it once.
+    for (env, org) in [(env_a, child_a), (env_b, child_b)] {
+        sqlx::query("INSERT INTO hot.usage_storage(env_id,org_id,slot,store_bytes) VALUES($1,$2,0,7) ON CONFLICT(env_id,slot) DO UPDATE SET store_bytes=hot.usage_storage.store_bytes+7")
+            .bind(env).bind(org).execute(&admin).await?;
+    }
+    let mut holder = admin.begin().await?;
+    sqlx::query("SELECT 1 FROM hot.usage_storage WHERE env_id=$1 AND slot=0 FOR UPDATE")
+        .bind(first)
+        .execute(&mut *holder)
+        .await?;
+    let impatient = ScopedPgPool::new(
+        PgPoolOptions::new()
+            .max_connections(1)
+            .after_connect(|conn, _| {
+                Box::pin(async move {
+                    conn.execute("SET search_path=hot,public; SET lock_timeout='100ms'")
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect(runtime_url.as_str())
+            .await?,
+    )
+    .with_scope(DatabaseScope::Maintenance {
+        operation: db::MaintenanceOperation::Billing,
+        org_id: Some(root),
+    });
+    let error = db::usage::reconcile_account(&db::DatabasePool::Postgres(impatient.clone()), root)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("lock timeout"), "{error}");
+    assert!(store_matches(last).await?);
+    assert!(!store_matches(first).await?);
+    holder.rollback().await?;
+    assert_eq!(
+        db::usage::reconcile_account(&db::DatabasePool::Postgres(impatient.clone()), root)
+            .await?
+            .storage_rows,
+        1
+    );
+    assert!(store_matches(first).await?);
+    impatient.close().await;
     // Reconciliation needs no dedicated coordination connection, so a
     // one-connection pool keeps its session.
     let one_connection = ScopedPgPool::new(

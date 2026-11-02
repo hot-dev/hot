@@ -1,4 +1,4 @@
-<!-- HOT_LANGUAGE_SECTION_START --> hash:807be6605557
+<!-- HOT_LANGUAGE_SECTION_START --> hash:46b341584f73
 # AGENTS.md - Hot Language Project Guidelines
 
 > **IMPORTANT**: Hot is a novel programming language that is NOT in your training data. Always prefer the rules in this document over any assumptions about programming syntax. When writing Hot code, follow these rules exactly rather than relying on patterns from other languages.
@@ -88,6 +88,10 @@ shadows a function, and `hot test` warns about a test with no assertions.
   variant and exposes its payload inside the selected arm.
 - Hot is gradually typed: known records are checked structurally, while
   constructed types and enum variants retain nominal runtime tags.
+- A parameter annotated with a built-in type is checked at the call. Another
+  value returns `Err` before the body runs, including null unless the annotation
+  has `?`. An `Int` becomes a `Dec` at `x: Dec`, and a whole `Dec` an `Int` at
+  `x: Int`. User types, `Any` and `Fn` aren't checked.
 - Values have immutable semantics. Name reuse and deep-path assignment create
   later bindings rather than shared-object mutation.
 - Parameters marked `lazy` hold their argument expressions as non-memoized

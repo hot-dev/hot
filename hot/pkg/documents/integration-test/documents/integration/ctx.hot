@@ -1,0 +1,105 @@
+::documents::integration::ctx ns
+
+::env ::hot::env
+
+// Credentials for the documents smoke tests, using each provider
+// package's own environment variables and context keys. Unset variables
+// are skipped entirely, so a provider without credentials behaves as if
+// it were never configured and its test records a skip.
+//
+// Google Drive:  GOOGLE_ACCESS_TOKEN, or GOOGLE_SERVICE_ACCOUNT (key JSON)
+//                (+ GOOGLE_IMPERSONATE for domain-wide delegation)
+// OneDrive:      MS_ACCESS_TOKEN, or MS_CLIENT_ID + MS_REFRESH_TOKEN, or
+//                MS_CLIENT_ID + MS_CLIENT_SECRET + MS_TENANT_ID; MS_TEST_DRIVE_ID
+//                (required for app-only tokens)
+// Dropbox:       DROPBOX_ACCESS_TOKEN, or DROPBOX_REFRESH_TOKEN + DROPBOX_APP_KEY
+//                (+ DROPBOX_APP_SECRET); DROPBOX_TEST_PATH (default the root)
+// Box:           BOX_ACCESS_TOKEN, or BOX_CLIENT_ID + BOX_CLIENT_SECRET with
+//                BOX_ENTERPRISE_ID or BOX_USER_ID; BOX_TEST_FOLDER_ID (default "0")
+// Amazon S3:     AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY (+ AWS_SESSION_TOKEN),
+//                AWS_REGION, and AWS_S3_TEST_BUCKET (+ AWS_S3_TEST_PREFIX)
+
+present fn (m: Map): Map {
+  filter-vals(m, (v) { not(is-empty(v)) })
+}
+
+::hot::ctx/set-secret(present({
+    "google.service.account": ::env/get("GOOGLE_SERVICE_ACCOUNT", ""),
+    "google.access.token": ::env/get("GOOGLE_ACCESS_TOKEN", ""),
+    "microsoft.client.secret": ::env/get("MS_CLIENT_SECRET", ""),
+    "microsoft.oauth.refresh-token": ::env/get("MS_REFRESH_TOKEN", ""),
+    "microsoft.access.token": ::env/get("MS_ACCESS_TOKEN", ""),
+    "dropbox.access.token": ::env/get("DROPBOX_ACCESS_TOKEN", ""),
+    "dropbox.refresh.token": ::env/get("DROPBOX_REFRESH_TOKEN", ""),
+    "dropbox.app.secret": ::env/get("DROPBOX_APP_SECRET", ""),
+    "box.access.token": ::env/get("BOX_ACCESS_TOKEN", ""),
+    "box.client.secret": ::env/get("BOX_CLIENT_SECRET", ""),
+    "aws.access-key-id": ::env/get("AWS_ACCESS_KEY_ID", ""),
+    "aws.secret-access-key": ::env/get("AWS_SECRET_ACCESS_KEY", ""),
+    "aws.session-token": ::env/get("AWS_SESSION_TOKEN", "")
+}))
+
+::hot::ctx/set(present({
+    "google.impersonate": ::env/get("GOOGLE_IMPERSONATE", ""),
+    "microsoft.tenant.id": ::env/get("MS_TENANT_ID", ""),
+    "microsoft.client.id": ::env/get("MS_CLIENT_ID", ""),
+    "microsoft.onedrive.drive-id": ::env/get("MS_TEST_DRIVE_ID", ""),
+    "dropbox.app.key": ::env/get("DROPBOX_APP_KEY", ""),
+    "box.client.id": ::env/get("BOX_CLIENT_ID", ""),
+    "box.enterprise.id": ::env/get("BOX_ENTERPRISE_ID", ""),
+    "box.user.id": ::env/get("BOX_USER_ID", ""),
+    "aws.region": ::env/get("AWS_REGION", "")
+}))
+
+has fn (key: Str): Bool {
+  v ::hot::ctx/get(key)
+  and(is-some(v), not(is-empty(trim(Str(v)))))
+}
+
+google fn (): Bool {
+  or(has("google.access.token"), has("google.service.account"))
+}
+
+onedrive fn (): Bool {
+  delegated or(has("microsoft.access.token"), and(has("microsoft.client.id"), has("microsoft.oauth.refresh-token")))
+  app-only and(has("microsoft.client.id"), has("microsoft.client.secret"), has("microsoft.tenant.id"), has("microsoft.onedrive.drive-id"))
+  or(delegated, app-only)
+}
+
+dropbox fn (): Bool {
+  or(has("dropbox.access.token"), and(has("dropbox.refresh.token"), has("dropbox.app.key")))
+}
+
+box fn (): Bool {
+  or(has("box.access.token"), and(has("box.client.id"), has("box.client.secret"), or(has("box.enterprise.id"), has("box.user.id"))))
+}
+
+s3 fn (): Bool {
+  and(has("aws.access-key-id"), has("aws.secret-access-key"), not(is-empty(::env/get("AWS_S3_TEST_BUCKET", ""))))
+}
+
+skip fn (provider: Str): Bool {
+  println(`${provider} credentials not set - skipping`)
+  assert(true, `skipped: no ${provider} credentials`)
+}
+
+// Source descriptors for each provider (context credentials, so no opts).
+google-source fn (): Map {
+  {provider: "google-drive"}
+}
+
+onedrive-source fn (): Map {
+  {provider: "onedrive"}
+}
+
+dropbox-source fn (): Map {
+  {provider: "dropbox", root: ::env/get("DROPBOX_TEST_PATH", "")}
+}
+
+box-source fn (): Map {
+  {provider: "box", folder-id: ::env/get("BOX_TEST_FOLDER_ID", "0")}
+}
+
+s3-source fn (): Map {
+  {provider: "s3", bucket: ::env/get("AWS_S3_TEST_BUCKET", ""), prefix: ::env/get("AWS_S3_TEST_PREFIX", "")}
+}

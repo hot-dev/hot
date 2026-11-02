@@ -1,0 +1,27 @@
+::microsoft::integration::sharepoint ns
+meta ["test"]
+
+// Live SharePoint reads (no writes). Requires MS_TEST_SITE_ID (a site id
+// such as "contoso.sharepoint.com,{guid},{guid}") plus credentials.
+
+::ctx ::microsoft::integration::ctx
+::sites ::microsoft::sharepoint::sites
+::lists ::microsoft::sharepoint::lists
+
+SITE_ID ::hot::env/get("MS_TEST_SITE_ID", "")
+
+test-site-libraries-and-lists
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip() }
+        is-empty(SITE_ID) => { assert(true, "MS_TEST_SITE_ID not set: skipping") }
+        => {
+            site ::sites/get-site(SITE_ID, {select: "id,displayName,webUrl"})
+            assert(not(is-err(site)), `get-site: ${if-err(site, (e) { err-message(e) })}`)
+            drives ::sites/list-drives(SITE_ID)
+            assert(is-vec(drives), "a site lists its document libraries")
+            lists ::lists/list-lists(SITE_ID, {select: "id,displayName,list"})
+            assert(is-vec(lists))
+        }
+    }
+}

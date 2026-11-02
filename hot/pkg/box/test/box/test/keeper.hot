@@ -1,0 +1,189 @@
+::box::test::keeper ns
+meta ["test"]
+
+// The store-backed keeper for Box's single-use refresh tokens. Each test
+// uses its own store; none of them reaches the token endpoint.
+
+::auth ::box::auth
+::api ::box::api
+::store ::hot::store
+
+HOUR_MS 3600000
+
+fresh-store fn (): Str {
+    `box-keeper-test-${Uuid()}`
+}
+
+keeper-creds fn (store: Str, account: Str): Map {
+    {kind: "keeper", account: account, store: store, seed-refresh-token: null, client-id: "c", client-secret: "s", on-refresh: null}
+}
+
+now fn (): Int {
+    ::hot::time/epoch-millis(::hot::time/now())
+}
+
+test-keeper-record
+meta ["test"] fn () {
+    rec ::auth/keeper-record({access_token: "at", refresh_token: "rt", expires_in: 3600, token_type: "bearer"}, 1000)
+    assert-eq("at", rec.access-token)
+    assert-eq("rt", rec.refresh-token)
+    assert-eq(add(1000, mul(3540, 1000)), rec.expires-at)
+    assert-eq(add(1000, mul(5184000, 1000)), rec.refresh-expires-at, "60-day refresh lifetime")
+    assert-eq(1000, rec.updated-at)
+    assert(not(in("token_type", keys(rec))), "only the keeper's own fields are stored")
+}
+
+test-keeper-plan
+meta ["test"] fn () {
+    t 1000000
+    fresh {access-token: "a", expires-at: add(t, 1000), refresh-token: "r"}
+    stale {access-token: "a", expires-at: sub(t, 1), refresh-token: "r"}
+    assert-eq("missing", ::auth/keeper-plan(null, t, false))
+    assert-eq("use", ::auth/keeper-plan(fresh, t, false))
+    assert-eq("refresh", ::auth/keeper-plan(fresh, t, true), "force skips a fresh token after a 401")
+    assert-eq("refresh", ::auth/keeper-plan(stale, t, false))
+    assert-eq("busy", ::auth/keeper-plan({...stale, lease-until: add(t, 5000)}, t, false), "a live lease blocks")
+    assert-eq("refresh", ::auth/keeper-plan({...stale, lease-until: sub(t, 1)}, t, false), "an expired lease does not")
+    assert-eq("use", ::auth/keeper-plan({...fresh, lease-until: add(t, 5000)}, t, false), "a fresh token is usable during a lease")
+    assert-eq("missing", ::auth/keeper-plan({access-token: null, expires-at: 0, refresh-token: ""}, t, false))
+    assert-eq("expired", ::auth/keeper-plan({...stale, refresh-expires-at: sub(t, 1)}, t, false))
+}
+
+test-claim-is-compare-and-set
+meta ["test"] fn () {
+    s ::store/Map({name: fresh-store()})
+    rec ::auth/keeper-record({access_token: "old", refresh_token: "rt-1", expires_in: 1}, 0)
+    ::store/put(s, "acct", rec)
+    // Two runs read the same record and both try to claim the refresh.
+    seen-a ::store/get(s, "acct")
+    seen-b ::store/get(s, "acct")
+    t now()
+    won-a ::store/put-if(s, "acct", seen-a, ::auth/claim-record(seen-a, t, "lease-a"))
+    won-b ::store/put-if(s, "acct", seen-b, ::auth/claim-record(seen-b, t, "lease-b"))
+    assert(won-a, "the first claim wins")
+    assert(not(won-b), "the second run cannot spend the same refresh token")
+    assert-eq("lease-a", ::store/get(s, "acct").lease-id)
+    assert-eq("busy", ::auth/keeper-plan(::store/get(s, "acct"), t, false), "the loser sees a live lease")
+}
+
+test-keeper-busy-is-retryable
+meta ["test"] fn () {
+    name fresh-store()
+    s ::store/Map({name: name})
+    t now()
+    ::store/put(s, "acct", {access-token: "old", expires-at: 0, refresh-token: "rt", lease-until: add(t, 30000), lease-id: "other-run"})
+    result ::auth/keeper-access-token(keeper-creds(name, "acct"), false)
+    assert(is-err(result))
+    assert-eq("refresh_in_progress", err-value(result).error-code)
+    assert(::api/is-retryable(result), "another run's refresh is worth retrying shortly")
+}
+
+test-keeper-uses-fresh-stored-token
+meta ["test"] fn () {
+    name fresh-store()
+    s ::store/Map({name: name})
+    ::store/put(s, "acct", {access-token: "stored-at", expires-at: add(now(), HOUR_MS), refresh-token: "rt"})
+    result ::auth/keeper-access-token(keeper-creds(name, "acct"), false)
+    assert-eq("stored-at", result.access-token)
+    assert(not(result.refreshed))
+}
+
+test-keeper-missing-and-expired
+meta ["test"] fn () {
+    name fresh-store()
+    missing ::auth/keeper-access-token(keeper-creds(name, "nobody"), false)
+    assert(is-err(missing))
+    assert-eq("no_tokens", err-value(missing).error-code)
+    assert(not(::api/is-retryable(missing)), "missing tokens need a new consent, not a retry")
+    s ::store/Map({name: name})
+    ::store/put(s, "old", {access-token: "a", expires-at: 0, refresh-token: "rt", refresh-expires-at: 1})
+    expired ::auth/keeper-access-token(keeper-creds(name, "old"), false)
+    assert-eq("refresh_token_expired", err-value(expired).error-code)
+}
+
+test-seed-only-fills-an-empty-entry
+meta ["test"] fn () {
+    name fresh-store()
+    s ::store/Map({name: name})
+    ::store/put(s, "acct", {access-token: "live", expires-at: add(now(), HOUR_MS), refresh-token: "rt-current"})
+    creds {...keeper-creds(name, "acct"), seed-refresh-token: "rt-stale-from-context"}
+    result ::auth/keeper-access-token(creds, false)
+    assert-eq("live", result.access-token)
+    assert-eq("rt-current", ::store/get(s, "acct").refresh-token, "the context seed never overwrites a stored pair")
+    seed ::auth/seed-record("rt-seed", 5)
+    assert-eq("rt-seed", seed.refresh-token)
+    assert-eq(0, seed.expires-at, "a seed has no usable access token")
+}
+
+test-save-load-forget
+meta ["test"] fn () {
+    name fresh-store()
+    opts {token-store: name}
+    assert(::auth/save-tokens("u1", {access_token: "at", refresh_token: "rt", expires_in: 3600}, opts))
+    loaded ::auth/load-tokens("u1", opts)
+    assert-eq("rt", loaded.refresh-token)
+    assert(is-err(::auth/save-tokens("u1", {access_token: "at"}, opts)), "a response without a refresh token is not kept")
+    assert(::auth/forget-tokens("u1", opts))
+    assert(is-null(::auth/load-tokens("u1", opts)))
+}
+
+test-bearer-keeper-caches-for-the-run
+meta ["test"] fn () {
+    name fresh-store()
+    s ::store/Map({name: name})
+    ::store/put(s, "acct", {access-token: "stored-at", expires-at: add(now(), HOUR_MS), refresh-token: "rt"})
+    creds keeper-creds(name, "acct")
+    first-call ::auth/bearer(creds, {})
+    assert-eq("stored-at", first-call.token)
+    assert(first-call.cached, "a stored token may be stale server-side, so a 401 should force a refresh")
+    // The run cache now answers without the store.
+    ::store/delete(s, "acct")
+    second ::auth/bearer(creds, {})
+    assert-eq("stored-at", second.token)
+}
+
+test-store-name
+meta ["test"] fn () {
+    assert-eq("box-oauth-tokens", ::auth/store-name(null))
+    assert-eq("custom", ::auth/store-name(" custom "))
+    assert-eq("named", ::auth/store-name(::store/Map({name: "named"})))
+}
+
+test-failed-refresh-releases-the-lease
+meta ["test"] fn () {
+    // Point the token endpoint at a closed local port so the refresh fails
+    // without leaving the machine, then restore the default.
+    name fresh-store()
+    s ::store/Map({name: name})
+    stale {access-token: "old", expires-at: 0, refresh-token: "rt-1"}
+    ::store/put(s, "acct", stale)
+    ::hot::ctx/set("box.api-root", "http://127.0.0.1:9")
+    result ::auth/keeper-access-token(keeper-creds(name, "acct"), false)
+    ::hot::ctx/set("box.api-root", "")
+    assert(is-err(result), "the refresh fails")
+    assert-eq(stale, ::store/get(s, "acct"), "the lease is released and the stored pair is untouched")
+    assert-eq("refresh", ::auth/keeper-plan(::store/get(s, "acct"), now(), false), "the next run may try again")
+}
+
+test-seed-fills-an-empty-account-once
+meta ["test"] fn () {
+    name fresh-store()
+    s ::store/Map({name: name})
+    ::hot::ctx/set("box.api-root", "http://127.0.0.1:9")
+    result ::auth/keeper-access-token({...keeper-creds(name, "new"), seed-refresh-token: "rt-seed"}, false)
+    ::hot::ctx/set("box.api-root", "")
+    assert(is-err(result), "the seed's refresh fails here (no token endpoint)")
+    assert-eq("rt-seed", ::store/get(s, "new").refresh-token, "the context seed was stored with put-if-missing")
+}
+
+test-refresh-with-callback-reports-failures
+meta ["test"] fn () {
+    ::hot::ctx/set("box.api-root", "http://127.0.0.1:9")
+    saved (tokens) { fail("on-refresh must not run when the refresh failed") }
+    creds {kind: "refresh", refresh-token: "rt-SECRET-123", client-id: "c", client-secret: "s", on-refresh: saved}
+    result ::auth/bearer(creds, {})
+    ::hot::ctx/set("box.api-root", "")
+    assert(is-err(result))
+    assert(contains(err-message(result), "box: token request failed"))
+    assert(not(contains(err-message(result), "rt-SECRET-123")), "the refresh token never appears in the error")
+}

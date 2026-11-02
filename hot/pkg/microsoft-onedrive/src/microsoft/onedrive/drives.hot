@@ -1,0 +1,99 @@
+::microsoft::onedrive::drives ns
+meta {
+    doc: """
+    Resolve drives: the signed-in user's OneDrive, another user's, a
+    SharePoint site's libraries, a group's library, or any drive by id.
+    Each returns Graph's drive resource (`id`, `driveType`: `personal`,
+    `business` or `documentLibrary`, `owner`, `quota`, `webUrl`); pass
+    its `id` as `opts.drive` to the other namespaces.
+
+    **Permissions.** `Files.Read` (own drive), `Files.Read.All` or
+    `Sites.Read.All` (others); app-only: `Files.Read.All`,
+    `Sites.Read.All`, or `Sites.Selected` with a grant on the site.
+    """
+}
+
+::od ::microsoft::onedrive
+::api ::microsoft::graph::api
+
+get-drive
+meta {
+    doc: """
+    GET a drive by reference: `"me"`, a drive id, or a base path from
+    `::microsoft::onedrive/user-drive`, `site-drive`, `group-drive`.
+    `opts` takes `select` and credentials.
+
+    ```hot
+    mine ::microsoft::onedrive::drives/get-drive("me")
+    mine.driveType   // "business" or "personal"
+    lib ::microsoft::onedrive::drives/get-drive(::microsoft::onedrive/site-drive(site-id))
+    ```
+    """
+}
+fn
+(ref: Any): Map {
+  get-drive(ref, {})
+},
+(ref: Any, opts: Map): Map {
+  ::api/json("GET", ::api/with-query(::od/drive-base-from(ref, null), ::od/query-opts({}, opts)), ::od/creds(opts))
+}
+
+my-drive
+meta {
+    doc: """GET /me/drive - the signed-in user's OneDrive (delegated tokens only)."""
+}
+fn
+(): Map {
+  my-drive({})
+},
+(opts: Map): Map {
+  get-drive("me", opts)
+}
+
+user-drive
+meta {
+    doc: """GET /users/{id}/drive - a user's OneDrive (app-only needs `Files.Read.All`). The user must have signed in to OneDrive once for it to exist."""
+}
+fn
+(user: Str): Map {
+  user-drive(user, {})
+},
+(user: Str, opts: Map): Map {
+  get-drive(::od/user-drive(user), opts)
+}
+
+list-drives-at
+meta {
+    doc: """GET {owner}/drives - the drives of `"/me"`, `"/users/{id}"`, `"/sites/{id}"` or `"/groups/{id}"`, all pages."""
+}
+fn
+(owner-path: Str): Vec {
+  list-drives-at(owner-path, {})
+},
+(owner-path: Str, opts: Map): Vec {
+  ::api/collect-pages(`${owner-path}/drives`, {...::od/query-opts({}, opts), ...::od/creds(opts)}, null)
+}
+
+site-drives
+meta {
+    doc: """GET /sites/{id}/drives - a SharePoint site's document libraries (each a drive). See also `::microsoft::sharepoint::sites/list-drives`."""
+}
+fn
+(site-id: Str): Vec {
+  site-drives(site-id, {})
+},
+(site-id: Str, opts: Map): Vec {
+  list-drives-at(`/sites/${::api/encode-segment(site-id)}`, opts)
+}
+
+group-drive
+meta {
+    doc: """GET /groups/{id}/drive - a Microsoft 365 group's or team's document library."""
+}
+fn
+(group-id: Str): Map {
+  group-drive(group-id, {})
+},
+(group-id: Str, opts: Map): Map {
+  get-drive(::od/group-drive(group-id), opts)
+}

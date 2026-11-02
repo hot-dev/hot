@@ -1,0 +1,54 @@
+::documents::integration::smoke ns
+meta ["test"]
+
+// =============================================================================
+// Read-only smoke tests, one per provider (see ctx.hot for the variables).
+// Each lists one page of the source's root and gets the first item back.
+// Without a provider's credentials its test records a skip and passes.
+// Run with: hot test -p pkg-integration-documents
+// =============================================================================
+
+::ctx ::documents::integration::ctx
+::docs ::documents
+
+smoke fn (source: Map): Bool {
+  page ::docs/list(source, null, {page-size: 5})
+  assert(not(is-err(page)), `list: ${if-err(page, (e) { err-message(e) })}`)
+  assert(is-vec(page.documents), "a page has documents")
+  assert(all(page.documents, (d) { eq(d.provider, ::documents::source/provider-name(source)) }), "every Document names its provider")
+  cond {
+    is-empty(page.documents) => { assert(true, "the source root is empty: nothing to get") }
+    => {
+      d first(page.documents)
+      got ::docs/get(source, d.id)
+      assert(not(is-err(got)), `get: ${if-err(got, (e) { err-message(e) })}`)
+      assert-eq(d.id, got.id, "get returns the listed item")
+      assert-eq(d.kind, got.kind)
+    }
+  }
+}
+
+test-google-drive
+meta ["test"] fn () {
+  if(::ctx/google(), smoke(::ctx/google-source()), ::ctx/skip("Google Drive"))
+}
+
+test-onedrive
+meta ["test"] fn () {
+  if(::ctx/onedrive(), smoke(::ctx/onedrive-source()), ::ctx/skip("OneDrive"))
+}
+
+test-dropbox
+meta ["test"] fn () {
+  if(::ctx/dropbox(), smoke(::ctx/dropbox-source()), ::ctx/skip("Dropbox"))
+}
+
+test-box
+meta ["test"] fn () {
+  if(::ctx/box(), smoke(::ctx/box-source()), ::ctx/skip("Box"))
+}
+
+test-s3
+meta ["test"] fn () {
+  if(::ctx/s3(), smoke(::ctx/s3-source()), ::ctx/skip("S3"))
+}

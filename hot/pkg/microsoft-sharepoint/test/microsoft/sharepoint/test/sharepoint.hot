@@ -1,0 +1,84 @@
+::microsoft::sharepoint::test::sharepoint ns
+meta ["test"]
+
+::sp ::microsoft::sharepoint
+::sites ::microsoft::sharepoint::sites
+::lists ::microsoft::sharepoint::lists
+::perms ::microsoft::sharepoint::permissions
+
+SITE "contoso.sharepoint.com,2C712604-1370-44E7-A1F5-426573FDA80A,2D2244C3-251A-49EA-93A8-39E1C3A060FE"
+
+test-site-and-list-paths
+meta ["test"] fn () {
+    assert-eq("/sites/contoso.sharepoint.com%2C2C712604-1370-44E7-A1F5-426573FDA80A%2C2D2244C3-251A-49EA-93A8-39E1C3A060FE", ::sp/site-path(SITE))
+    assert-eq(`${::sp/site-path(SITE)}/lists/Team%20Tasks`, ::sp/list-path(SITE, "Team Tasks"), "lists by display name are encoded")
+}
+
+test-site-by-path-path
+meta ["test"] fn () {
+    assert-eq("/sites/contoso.sharepoint.com:/sites/engineering", ::sites/site-by-path-path("Contoso.SharePoint.com", "/sites/engineering"))
+    assert-eq("/sites/contoso.sharepoint.com:/sites/R%26D%20Team", ::sites/site-by-path-path("contoso.sharepoint.com", "sites/R&D Team/"))
+    assert-eq("/sites/contoso.sharepoint.com", ::sites/site-by-path-path("contoso.sharepoint.com", "/"), "the host's root site")
+    assert-eq("/sites/contoso.sharepoint.com", ::sites/site-by-path-path("contoso.sharepoint.com", null))
+}
+
+test-parse-site-url
+meta ["test"] fn () {
+    assert-eq({hostname: "contoso.sharepoint.com", path: "/sites/eng"}, ::sites/parse-site-url("https://contoso.sharepoint.com/sites/eng"))
+    assert-eq({hostname: "contoso.sharepoint.com", path: "/sites/eng"}, ::sites/parse-site-url("https://Contoso.sharepoint.com/sites/eng/Shared%20Documents/Forms/AllItems.aspx?id=1#x"))
+    assert-eq({hostname: "contoso.sharepoint.com", path: "/teams/R&D Team/Sub"}, ::sites/parse-site-url("https://contoso.sharepoint.com/teams/R%26D%20Team/Sub/Lists/Tasks/AllItems.aspx"))
+    assert-eq({hostname: "contoso.sharepoint.com", path: "/"}, ::sites/parse-site-url("https://contoso.sharepoint.com/SitePages/Home.aspx"))
+    assert(is-err(::sites/parse-site-url("http://contoso.sharepoint.com/sites/eng")))
+}
+
+test-search-path
+meta ["test"] fn () {
+    assert-eq("/sites?search=engineering%20docs", ::sites/search-path("engineering docs"))
+    assert-eq("/sites?search=%2A", ::sites/search-path("*"))
+}
+
+test-drive-opts
+meta ["test"] fn () {
+    assert-eq({drive: "b!lib", top: 5}, ::sites/drive-opts({id: "b!lib", name: "Documents"}, {top: 5}))
+    assert-eq({drive: "b!lib"}, ::sites/drive-opts("b!lib"))
+    assert-eq("/drives/b%21lib/root/children", `${::microsoft::onedrive/item-path("root", ::sites/drive-opts("b!lib"))}/children`, "libraries go through microsoft-onedrive")
+}
+
+test-items-query
+meta ["test"] fn () {
+    assert-eq({expand: "fields($select=Title,Status)", top: 100}, ::lists/items-query({fields: ["Title", "Status"], top: 100}))
+    assert-eq({expand: "fields($select=Title,Status)"}, ::lists/items-query({fields: "Title, Status"}))
+    assert-eq({expand: "fields"}, ::lists/items-query({}), "all columns by default")
+    assert-eq({expand: "fields,driveItem", filter: "fields/Status eq 'Open'"}, ::lists/items-query({expand: "driveItem", filter: "fields/Status eq 'Open'", allow-non-indexed: true, token: "t"}))
+    qs ::microsoft::graph::api/query-string(::lists/items-query({fields: ["Title"], filter: "fields/Status eq 'Open'"}))
+    assert-eq("$expand=fields%28%24select%3DTitle%29&$filter=fields%2FStatus%20eq%20%27Open%27", qs)
+}
+
+test-items-headers
+meta ["test"] fn () {
+    assert-eq({Prefer: "HonorNonIndexedQueriesWarningMayFailRandomly"}, ::lists/items-headers({allow-non-indexed: true}))
+    assert-eq({}, ::lists/items-headers({}))
+}
+
+test-list-resource
+meta ["test"] fn () {
+    assert-eq("sites/contoso.sharepoint.com%2C1%2C2/lists/L1", ::lists/list-resource("contoso.sharepoint.com,1,2", "L1"))
+    assert-eq(42300, ::microsoft::graph::subscriptions/max-expiration-minutes(::lists/list-resource("s", "l")))
+}
+
+test-site-grant-body
+meta ["test"] fn () {
+    assert-eq({roles: ["write"], grantedToIdentities: [{application: {id: "89ea5c94-7736-4e25-95ad-3fa95f62b66e", displayName: "Contoso Time Manager App"}}]},
+        ::perms/build-site-grant("89ea5c94-7736-4e25-95ad-3fa95f62b66e", "Contoso Time Manager App", ["write"]), "the documented request body")
+    assert-eq({roles: ["read"], grantedToIdentities: [{application: {id: "a1"}}]}, ::perms/build-site-grant("a1", null, ["read"]), "displayName omitted when unset")
+    assert(not(is-err(::perms/build-site-grant("a1", "x", ["owner", "fullcontrol"]))))
+    assert(is-err(::perms/build-site-grant("a1", "x", [])))
+    assert(is-err(::perms/build-site-grant("a1", "x", ["admin"])))
+}
+
+test-list-grant-body
+meta ["test"] fn () {
+    assert-eq({roles: ["write"], grantedToV2: {application: {id: "89ea5c94-7736-4e25-95ad-3fa95f62b66e", displayName: "Contoso Time Manager App"}}},
+        ::perms/build-list-grant("89ea5c94-7736-4e25-95ad-3fa95f62b66e", "Contoso Time Manager App", ["write"]))
+    assert(is-err(::perms/build-list-grant("a1", "x", ["Read"])), "roles are lower case")
+}

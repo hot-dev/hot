@@ -1,0 +1,187 @@
+::microsoft::graph::test::opts ns
+meta ["test"]
+
+// The per-call rules. Hermetic: no network, and a fake context source.
+
+::auth ::microsoft::graph::auth
+::api ::microsoft::graph::api
+::subs ::microsoft::graph::subscriptions
+
+CTX {
+    refresh-token: "ctx-refresh",
+    client-id: "ctx-app",
+    client-secret: "ctx-secret",
+    tenant-id: "contoso.onmicrosoft.com"
+}
+
+test-blank-credential-is-an-err-naming-the-key
+meta ["test"] fn () {
+    for-each(["token", "refresh-token", "client-id", "client-secret", "private-key"], (k) {
+        for-each([null, "", "   "], (blank) {
+            r ::auth/resolve-from(assoc({}, k, blank), CTX)
+            assert(is-err(r), `${k} blank is an Err`)
+            assert(contains(err-message(r), k), `the Err names ${k}`)
+        })
+    })
+    // Through the transport too, before any network call
+    r ::api/json("GET", "/me", {token: ""})
+    assert(is-err(r))
+    assert(contains(err-message(r), "token"))
+    assert(is-err(::api/resolve({client-secret: null})))
+}
+
+test-absent-keys-still-use-context
+meta ["test"] fn () {
+    picked ::auth/resolve-from({select: "id", tenant-id: "fabrikam.com"}, CTX)
+    assert-eq("refresh", picked.kind)
+    assert-eq("ctx-refresh", picked.refresh-token)
+    assert-eq("fabrikam.com", picked.tenant)
+}
+
+test-per-call-url-needs-a-credential-in-opts
+meta ["test"] fn () {
+    for-each(["graph-url", "login-url"], (k) {
+        r ::auth/resolve-from(assoc({}, k, "https://proxy.example.com"), CTX)
+        assert(is-err(r), `${k} alone is an Err`)
+        assert(contains(err-message(r), k), `the Err names ${k}`)
+        assert(contains(err-message(r), "token"), "the Err names the credential keys")
+    })
+    r ::api/json("GET", "/me", {graph-url: "https://proxy.example.com"})
+    assert(is-err(r))
+    assert(contains(err-message(r), "graph-url"))
+
+    ok ::auth/resolve-from({token: "t-1", graph-url: "https://proxy.example.com/"}, CTX)
+    assert-eq("https://proxy.example.com", ok.cloud.graph)
+    assert-eq("t-1", ok.token)
+    app ::auth/resolve-from({client-id: "a", client-secret: "s", tenant-id: "t.com", login-url: "https://login.example.com"}, CTX)
+    assert-eq("https://login.example.com", app.cloud.login)
+    assert-eq("s", app.client-auth.client-secret)
+}
+
+test-context-credentials-never-go-to-a-per-call-url
+meta ["test"] fn () {
+    // A per-call refresh token normally borrows the context's client secret...
+    borrowed ::auth/resolve-from({refresh-token: "r-1"}, CTX)
+    assert-eq("ctx-secret", borrowed.client-auth.client-secret)
+    // ...but not to send it to a login root named in the call.
+    kept ::auth/resolve-from({refresh-token: "r-1", login-url: "https://login.example.com"}, CTX)
+    assert-eq("refresh", kept.kind)
+    assert(is-null(kept.client-auth), "the context secret stays behind")
+}
+
+test-resolve-returns-marked-values-unchanged
+meta ["test"] fn () {
+    tok ::api/resolve({token: "a-per-call-access-token"})
+    assert-eq("a-per-call-access-token", tok.token)
+    app ::api/resolve({client-id: "a", client-secret: "a-per-call-secret", tenant-id: "t.com"})
+    assert-eq("a-per-call-secret", app.client-auth.client-secret)
+    refresh ::api/resolve({refresh-token: "a-per-call-refresh", client-id: "a"})
+    assert-eq("a-per-call-refresh", refresh.refresh-token)
+    assert-eq("a-per-call-access-token", ::auth/access-token({token: "a-per-call-access-token"}))
+    assert-eq("a-per-call-refresh", ::auth/latest-refresh-token({refresh-token: "a-per-call-refresh", client-id: "a"}))
+    assert(is-null(::hot::ctx/get("token")), "nothing is written to context")
+}
+
+test-mark-tokens-returns-the-response-unchanged
+meta ["test"] fn () {
+    tokens {access_token: "at-value-123", refresh_token: "rt-value-123", id_token: null, expires_in: 3600, scope: "Files.Read"}
+    assert-eq(tokens, ::auth/mark-tokens(tokens))
+    assert-eq({}, ::auth/mark-tokens({}))
+}
+
+test-http-error-arrow
+meta ["test"] fn () {
+    response ::hot::http/HttpResponse({status: 403, headers: {"Retry-After": "5"}, body: {error: {code: "accessDenied", message: "No"}}})
+    e ::api/HttpError(response)
+    assert-eq("microsoft-graph: HTTP 403 accessDenied: No", e.message)
+    assert-eq(5, e.retry-after)
+    assert(is-type(e, ::api/HttpError))
+    u ::api/unwrap(response)
+    assert(is-err(u))
+    assert(::api/has-code(u, "accessDenied"))
+}
+
+GRAPH "https://graph.microsoft.com"
+
+test-full-url-hosts-that-may-receive-credentials
+meta ["test"] fn () {
+    for-each(["https://graph.microsoft.com/v1.0/me?$skiptoken=1", "https://graph.microsoft.us/v1.0/me", "https://dod-graph.microsoft.us/v1.0/me", "https://microsoftgraph.chinacloudapi.cn/v1.0/me", "https://GRAPH.Microsoft.COM/v1.0/me", "https://graph.microsoft.com", "https://graph.microsoft.com?x=1"], (url) {
+        assert(::api/may-receive-credentials(url, GRAPH), url)
+    })
+    // Through a proxy: its own links, and the real cloud's
+    assert(::api/may-receive-credentials("https://proxy.example.com/v1.0/me", "https://proxy.example.com"))
+    assert(::api/may-receive-credentials("https://proxy.example.com:8443/v1.0/me", "https://proxy.example.com:8443"))
+    assert(::api/may-receive-credentials("https://graph.microsoft.com/v1.0/me", "https://proxy.example.com"))
+    assert(not(::api/may-receive-credentials("https://proxy.example.com/v1.0/me", GRAPH)), "a proxy that is not this call's root")
+}
+
+test-full-url-needs-https-unless-the-root-is-http
+meta ["test"] fn () {
+    assert(not(::api/may-receive-credentials("http://graph.microsoft.com/v1.0/me", GRAPH)))
+    assert(not(::api/may-receive-credentials("http://proxy.example.com/v1.0/me", "https://proxy.example.com")), "an https root never downgrades")
+    assert(::api/may-receive-credentials("http://localhost:9000/v1.0/me", "http://localhost:9000"))
+    assert(::api/may-receive-credentials("https://localhost:9000/v1.0/me", "http://localhost:9000"))
+    assert(not(::api/may-receive-credentials("http://graph.microsoft.com/v1.0/me", "http://localhost:9000")), "http only on the root's own host")
+    assert(not(::api/may-receive-credentials("http://evil.example/v1.0/me", "http://localhost:9000")))
+    assert(not(::api/may-receive-credentials("ftp://graph.microsoft.com/x", GRAPH)))
+}
+
+test-full-url-host-tricks-are-refused
+meta ["test"] fn () {
+    for-each([
+        "https://evil.example/graph.microsoft.com",
+        "https://graph.microsoft.com.evil.example/v1.0/me",
+        "https://evilgraph.microsoft.com/v1.0/me",
+        "https://graph.microsoft.com./v1.0/me",
+        "https://graph.microsoft.com@evil.example/v1.0/me",
+        "https://evil.example@graph.microsoft.com/v1.0/me",
+        "https://user:pw@graph.microsoft.com/v1.0/me",
+        "https://a@b@graph.microsoft.com/v1.0/me",
+        "https://evil.example\\@graph.microsoft.com/v1.0/me",
+        "https://evil.example\\.graph.microsoft.com/v1.0/me",
+        "https://evil.example%2f@graph.microsoft.com/v1.0/me",
+        "https://evil.example\t@graph.microsoft.com/v1.0/me",
+        "https://graph.microsoft.com\t.evil.example/v1.0/me",
+        "https://graph.microsoft.com\n.evil.example/v1.0/me",
+        "https:///evil.example/graph.microsoft.com",
+        "https://",
+        "https://:443/v1.0/me"
+    ], (url) {
+        assert(not(::api/may-receive-credentials(url, GRAPH)), url)
+    })
+    // Bracketed hosts compare whole, not just up to the first colon
+    assert(::api/may-receive-credentials("http://[::1]:9000/x", "http://[::1]:9000"))
+    assert(not(::api/may-receive-credentials("http://[fe80::2]:9000/x", "http://[::1]:9000")))
+    assert(not(::api/may-receive-credentials("http://[::1]@evil.example/x", "http://[::1]:9000")))
+}
+
+test-refused-url-is-an-err-before-any-credential-is-used
+meta ["test"] fn () {
+    // These would hit the network or the token endpoint if they got past the check.
+    with-token ::api/request("GET", "https://evil.example/v1.0/me", {token: "a-per-call-access-token"})
+    assert(is-err(with-token))
+    assert(contains(err-message(with-token), "https://evil.example"), "the Err names the host")
+    assert(not(contains(err-message(with-token), "a-per-call-access-token")))
+    minted ::api/json("GET", "https://evil.example/v1.0/me?$skiptoken=secret-page", {client-id: "a", client-secret: "s", tenant-id: "t.com"})
+    assert(is-err(minted))
+    assert(contains(err-message(minted), "refusing to send credentials"), "refused before a token is minted")
+    assert(not(contains(err-message(minted), "secret-page")), "the query stays out of the Err")
+    downgraded ::api/json("GET", "http://graph.microsoft.com/v1.0/me", {token: "t"})
+    assert(contains(err-message(downgraded), "http://graph.microsoft.com"))
+    tricked ::api/json("GET", "https://user:pw@graph.microsoft.com/v1.0/me", {token: "t"})
+    assert(contains(err-message(tricked), "cannot be read safely"))
+    assert(not(contains(err-message(tricked), "user:pw")), "userinfo stays out of the Err")
+    page ::api/fetch-page("/users", {token: "t"}, "https://evil.example/v1.0/users?$skiptoken=1")
+    assert(is-err(page), "a bad next-link stops paging")
+    assert(contains(err-message(page), "https://evil.example"))
+    // No credentials: the credential error comes first and names no host
+    assert(is-err(::api/request("GET", "https://evil.example/x", {token: ""})))
+}
+
+test-explicit-client-state-still-verifies
+meta ["test"] fn () {
+    request {body: {value: [{subscriptionId: "s", clientState: "a-shared-client-state", changeType: "updated", resource: "r"}]}}
+    assert-eq(1, length(::subs/verify-notifications(request, "a-shared-client-state")))
+    assert(is-err(::subs/verify-notifications(request, "another-client-state")))
+    assert(is-err(::subs/verify-notifications(request, "")))
+}

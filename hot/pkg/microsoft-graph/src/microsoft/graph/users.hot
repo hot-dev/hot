@@ -1,0 +1,79 @@
+::microsoft::graph::users ns
+meta {
+    doc: """
+    `/me` and `/users/{id}` basics: who the token belongs to, and the
+    user ids the drive functions take. App-only tokens have no `/me`;
+    address users by id or user principal name instead.
+
+    **Permissions.** `User.Read` (delegated, `/me`); `User.Read.All`
+    (application, any user; `User.ReadBasic.All` for basic fields).
+    """
+}
+
+::api ::microsoft::graph::api
+
+USER_SELECT "id,displayName,userPrincipalName,mail,givenName,surname,jobTitle,preferredLanguage"
+
+me
+meta {
+    doc: """
+    GET /me - the signed-in user (delegated tokens only). `opts` takes
+    OData options (`select`, default the common profile fields) and
+    credentials.
+
+    ```hot
+    who ::microsoft::graph::users/me()
+    who.userPrincipalName
+    ```
+    """
+}
+fn
+(): Map {
+  me({})
+},
+(opts: Map): Map {
+  ::api/get-json("/me", {select: USER_SELECT, ...opts})
+}
+
+user-path
+meta {
+    doc: """The Graph path for a user id or user principal name: `/users/{encoded}` (pure)."""
+}
+fn (id-or-upn: Str): Str {
+  `/users/${::api/encode-segment(id-or-upn)}`
+}
+
+get-user
+meta {
+    doc: """GET /users/{id | userPrincipalName}. `opts` takes OData options (`select`, `expand`) and credentials."""
+}
+fn
+(id-or-upn: Str): Map {
+  get-user(id-or-upn, {})
+},
+(id-or-upn: Str, opts: Map): Map {
+  ::api/get-json(user-path(id-or-upn), {select: USER_SELECT, ...opts})
+}
+
+list-users
+meta {
+    doc: """
+    GET /users - every user (following `@odata.nextLink`), or at most
+    `limit`. `opts` takes OData options; `search` and `count` add
+    `ConsistencyLevel: eventual` for you.
+
+    ```hot
+    staff ::microsoft::graph::users/list-users({filter: "accountEnabled eq true", select: ["id", "mail"]}, 500)
+    ```
+    """
+}
+fn
+(): Vec {
+  list-users({}, null)
+},
+(opts: Map): Vec {
+  list-users(opts, null)
+},
+(opts: Map, limit: Int?): Vec {
+  ::api/collect-pages("/users", {select: USER_SELECT, top: 999, ...opts}, limit)
+}

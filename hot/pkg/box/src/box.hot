@@ -1,0 +1,463 @@
+::box ns
+meta {
+    ctx: {
+        "box.api-root": {required: false, secret: false},
+        "box.upload-root": {required: false, secret: false}
+    },
+    doc: """
+    Box Platform API v2.0 bindings: folders and files, search, binary-safe
+    downloads (with Range chunking past the response cap), multipart and
+    chunked uploads, extracted-text representations, shared links,
+    collaborations, versions, the Events API, admin logs, and webhooks v2
+    with signature verification.
+
+    **Credentials** come from context by default, or per call from an
+    `opts` Map (see `::box::auth` for the full table):
+
+    1. `box.access.token` - a ready access token (developer token, or one
+       you manage)
+    2. OAuth 2.0 refresh tokens through the store-backed keeper
+       (`box.oauth.account`, or a seed `box.oauth.refresh-token`).
+       Box refresh tokens are **single-use**: every refresh returns a new
+       pair, which the keeper persists with compare-and-set.
+    3. `box.jwt.config` - the Box app config JSON (JWT server auth), with
+       `box.jwt.private-key` holding the unencrypted PKCS#8 key
+    4. `box.client.id` + `box.client.secret` + `box.enterprise.id` or
+       `box.user.id` - Client Credentials Grant
+
+    `box.as-user` (or `opts.as-user`) sends the `As-User` header so an
+    admin or service account acts as a managed user.
+
+    **Namespaces**
+
+    - `::box::auth` - credential resolution, CCG, JWT, token cache, refresh-token keeper
+    - `::box::oauth` - `authorize-url`, `exchange-code`, `refresh-tokens`, `revoke-token`
+    - `::box::api` - `request` / `json`, `HttpError`, `is-retryable`, marker and offset paging
+    - `::box::folders` - folder items, get, create, update, rename, move, copy, trash, restore
+    - `::box::files` - file info, update, rename, move, copy, trash, restore, versions
+    - `::box::search` - search with typed filters
+    - `::box::content` - downloads, Range chunks, extracted text, `read-document`
+    - `::box::upload` - multipart upload, new versions, chunked upload sessions, preflight
+    - `::box::sharing` - shared links and collaborations
+    - `::box::events` - user event stream, admin logs, long-poll
+    - `::box::webhooks` - webhook CRUD and signature verification
+
+    **Quick start**
+
+    ```hot
+    ::folders ::box::folders
+    ::content ::box::content
+
+    items ::folders/list-all-items("0", {fields: "id,type,name,size,modified_at,sha1"}, 200)
+    doc ::content/read-document(first(items).id, "text")
+    doc.text
+    ```
+    """
+}
+
+::uri ::hot::uri
+::ctx ::hot::ctx
+
+API_ROOT "https://api.box.com"
+UPLOAD_ROOT "https://upload.box.com"
+TOKEN_URL "https://api.box.com/oauth2/token"
+REVOKE_URL "https://api.box.com/oauth2/revoke"
+AUTHORIZE_URL "https://account.box.com/api/oauth2/authorize"
+WEB_ROOT "https://app.box.com"
+
+// The root folder of every Box account.
+ROOT_FOLDER_ID "0"
+
+// Box has no MIME type field. Files get one from their extension; folders
+// and web links get these labels so DocFile.mime-type is never empty.
+FOLDER_MIME "inode/directory"
+WEB_LINK_MIME "application/vnd.box.web-link"
+DEFAULT_MIME "application/octet-stream"
+
+// Default `fields` for file and folder reads. Box returns a mini
+// representation unless fields are named.
+FILE_FIELDS "id,type,name,size,sha1,etag,sequence_id,file_version,parent,path_collection,created_at,modified_at,content_created_at,content_modified_at,trashed_at,purged_at,item_status,extension,description,shared_link,owned_by,modified_by"
+FOLDER_FIELDS "id,type,name,size,etag,sequence_id,parent,path_collection,created_at,modified_at,content_created_at,content_modified_at,trashed_at,purged_at,item_status,description,shared_link,owned_by,modified_by,has_collaborations"
+ITEM_FIELDS "id,type,name,size,sha1,etag,sequence_id,file_version,parent,created_at,modified_at,content_modified_at,trashed_at,item_status,extension"
+
+// ---------------------------------------------------------------------------
+// URL and parameter helpers (shared by the sub-namespaces)
+// ---------------------------------------------------------------------------
+
+is-blank fn (value: Any): Bool {
+  or(is-null(value), and(is-str(value), is-empty(trim(value))))
+}
+
+api-root
+meta {
+    doc: """The API root, `https://api.box.com` unless the `box.api-root` context variable points at a proxy or test server."""
+}
+fn (): Str {
+  root ::ctx/get("box.api-root")
+  if(is-blank(root), API_ROOT, root)
+}
+
+upload-root
+meta {
+    doc: """The upload root, `https://upload.box.com` unless the `box.upload-root` context variable overrides it."""
+}
+fn (): Str {
+  root ::ctx/get("box.upload-root")
+  if(is-blank(root), UPLOAD_ROOT, root)
+}
+
+url
+meta {
+    doc: """A Box API v2.0 URL: `path` (e.g. `"/files/123"`) plus non-null `params` as a query string (see `::box::api/with-query`)."""
+}
+fn
+(path: Str): Str {
+  url(path, {})
+},
+(path: Str, params: Map): Str {
+  ::box::api/with-query(`${api-root()}/2.0${path}`, params)
+}
+
+upload-url
+meta {doc: """A Box upload URL (`https://upload.box.com/api/2.0...`) with `params`."""}
+fn
+(path: Str): Str {
+  upload-url(path, {})
+},
+(path: Str, params: Map): Str {
+  ::box::api/with-query(`${upload-root()}/api/2.0${path}`, params)
+}
+
+encode-id
+meta {doc: """URL-encode an id for a path segment."""}
+fn (id: Any): Str {
+  ::uri/encode(Str(id))
+}
+
+query-params
+meta {
+    doc: """
+    Build a call's query parameters: `defaults`, overridden by the Box
+    parameters in `opts` (credential keys and the function's own
+    `local-keys` are removed), with nulls dropped. Pass a key as null in
+    `opts` to drop a default.
+    """
+}
+fn
+(defaults: Map, opts: Map): Map {
+  query-params(defaults, opts, [])
+},
+(defaults: Map, opts: Map, local-keys: Vec): Map {
+  params filter-keys(::box::api/api-params(opts), (k) { not(in(k, local-keys)) })
+  filter-vals({...defaults, ...params}, is-some)
+}
+
+creds
+meta {
+    doc: """The credential part of `opts` (credentials, `as-user`, `retry`), passed through to `::box::api`."""
+}
+fn (opts: Map): Map {
+  ::box::api/credential-opts(opts)
+}
+
+json
+meta {
+    doc: """`::box::api/json` with this package's conventions: credential opts and a JSON or empty body."""
+}
+fn (method: Str, full-url: Str, body: Any, opts: Map): Any {
+  ::box::api/json(method, full-url, {}, body, creds(opts))
+}
+
+compact
+meta {
+    doc: """Drop null values from a request body (unset optionals are never sent as JSON null)."""
+}
+fn (body: Map): Map {
+  filter-vals(untype(body), is-some)
+}
+
+// opts keys that become headers rather than query parameters.
+HEADER_KEYS ["if-match", "if-none-match", "boxapi"]
+
+condition-headers
+meta {
+    doc: """The conditional / shared-link headers in `opts` (pure): `if-match` (an etag: the write fails with 412 if the item changed), `if-none-match`, and `boxapi` (`shared_link=<url>&shared_link_password=<pw>` for items reached through a shared link)."""
+}
+fn (opts: Map): Map {
+  reduce(HEADER_KEYS, (acc, k) {
+    v get(opts, k)
+    if(is-blank(v), acc, assoc(acc, k, Str(v)))
+  }, {})
+}
+
+json-with
+meta {doc: """`json` with extra headers (for `if-match` and friends)."""}
+fn (method: Str, full-url: Str, headers: Map, body: Any, opts: Map): Any {
+  ::box::api/json(method, full-url, headers, body, creds(opts))
+}
+
+parent-ref
+meta {
+    doc: """The `{id}` reference Box uses for a parent folder, or null for a null id."""
+}
+fn (folder-id: Any): Map? {
+  if(is-blank(folder-id), null, {id: Str(folder-id)})
+}
+
+to-int
+meta {
+    doc: """Parse an Int from an Int or a decimal Str, or null (never halts on bad input)."""
+}
+fn (value: Any): Int? {
+  ::box::api/parse-int(value)
+}
+
+// ---------------------------------------------------------------------------
+// Neutral document metadata
+// ---------------------------------------------------------------------------
+
+DocFile
+meta {
+    doc: """
+    Provider-neutral file metadata with the same fields as
+    `hot.dev/google-drive`'s `DocFile`, plus `sha1` (Box's content hash),
+    so a documents package can treat Drive, OneDrive, Dropbox and Box alike.
+
+    **Fields**
+    - `provider` - `"box"`
+    - `id`, `name`
+    - `mime-type` - from the file extension (`application/octet-stream`
+      when unknown); `FOLDER_MIME` for folders, `WEB_LINK_MIME` for web links
+    - `size` - bytes (Int); for folders Box reports the total size of the contents
+    - `modified`, `created` - RFC 3339 timestamps (`modified_at`, `created_at`)
+    - `parents` - the parent folder id, as a one-element Vec (empty for the root)
+    - `drive-id` - always null (Box has no shared drives)
+    - `web-url` - `https://app.box.com/file/{id}` or `/folder/{id}`
+    - `version` - the item `etag` (send it as `if-match` for safe updates)
+    - `revision-id` - the current `file_version.id`
+    - `md5`, `sha256` - always null (Box hashes with SHA-1)
+    - `sha1` - the content SHA-1 (hex), files only
+    - `is-folder`, `is-google-native` (always false), `is-shortcut`
+      (always false; Box web links are bookmarks, not shortcuts),
+      `shortcut-target-id` (null)
+    - `trashed` - true when `trashed_at` is set or `item_status` is not `active`
+    - `export-formats` - always empty (see `::box::content/extracted-text`)
+    - `raw` - the Box item as returned
+    """
+}
+type {
+    provider: Str,
+    id: Str,
+    name: Str,
+    mime-type: Str,
+    size: Int?,
+    modified: Str?,
+    created: Str?,
+    parents: Vec,
+    drive-id: Str?,
+    web-url: Str?,
+    version: Str?,
+    revision-id: Str?,
+    md5: Str?,
+    sha256: Str?,
+    sha1: Str?,
+    is-folder: Bool,
+    is-google-native: Bool,
+    is-shortcut: Bool,
+    shortcut-target-id: Str?,
+    trashed: Bool,
+    export-formats: Vec,
+    raw: Map
+}
+
+mime-for
+meta {
+    doc: """The MIME type for a Box item (pure): folders and web links get `FOLDER_MIME` / `WEB_LINK_MIME`; files get one from their name's extension, else `application/octet-stream`."""
+}
+fn (item: Map): Str {
+  cond {
+    eq(item.type, "folder") => { FOLDER_MIME }
+    eq(item.type, "web_link") => { WEB_LINK_MIME }
+    => {
+      name or(item.name, "")
+      found if(contains(name, "."), ::hot::mime/from-path(name), null)
+      if(is-str(found), found, DEFAULT_MIME)
+    }
+  }
+}
+
+web-url
+meta {
+    doc: """The Box web app link for an item: `https://app.box.com/file/{id}`, `/folder/{id}` or `/web_link/{id}`."""
+}
+fn (item: Map): Str? {
+  cond {
+    is-blank(item.id) => { null }
+    eq(item.type, "folder") => { `${WEB_ROOT}/folder/${item.id}` }
+    eq(item.type, "web_link") => { `${WEB_ROOT}/web_link/${item.id}` }
+    => { `${WEB_ROOT}/file/${item.id}` }
+  }
+}
+
+is-trashed
+meta {
+    doc: """True when a Box item is in the trash or deleted: `trashed_at` is set or `item_status` is `trashed` / `deleted`."""
+}
+fn (item: Map): Bool {
+  or(is-some(item.trashed_at), in(item.item_status, ["trashed", "deleted"]))
+}
+
+to-doc-file
+meta {
+    doc: """Normalise a Box file, folder or web-link item (from `get-file`, folder items, search, events) into a `DocFile`. Missing fields become null/false."""
+}
+fn (item: Map): DocFile {
+  parent item.parent
+  parent-id if(is-map(parent), parent.id, null)
+  version item.file_version
+  DocFile({
+    provider: "box",
+    id: Str(or(item.id, "")),
+    name: or(item.name, ""),
+    mime-type: mime-for(item),
+    size: to-int(item.size),
+    modified: item.modified_at,
+    created: item.created_at,
+    parents: if(is-some(parent-id), [Str(parent-id)], []),
+    drive-id: null,
+    web-url: web-url(item),
+    version: if(is-some(item.etag), Str(item.etag), null),
+    revision-id: if(is-map(version), version.id, null),
+    md5: null,
+    sha256: null,
+    sha1: item.sha1,
+    is-folder: eq(item.type, "folder"),
+    is-google-native: false,
+    is-shortcut: false,
+    shortcut-target-id: null,
+    trashed: is-trashed(item),
+    export-formats: [],
+    raw: item
+  })
+}
+
+to-doc-files
+meta {doc: """`to-doc-file` over a Vec of Box items."""}
+fn (items: Vec): Vec {
+  map(items, to-doc-file)
+}
+
+// ---------------------------------------------------------------------------
+// File content
+// ---------------------------------------------------------------------------
+
+FileContent
+meta {
+    doc: """
+    Downloaded file content or extracted text, with the same fields as
+    `hot.dev/google-drive`'s `FileContent` plus `text-state`.
+
+    **Fields**
+    - `file-id`, `name`
+    - `mime-type` - the MIME type of `bytes`
+    - `size` - `length(bytes)`
+    - `bytes` - the exact response body (binary safe)
+    - `text` - the UTF-8 decoding when the content is textual, else null
+    - `source` - `"download"`, `"range"`, `"chunked"` or `"extracted-text"`
+    - `format` - the format `read-document` was asked for, else null
+    - `file` - the `DocFile` (set by `read-document`)
+    - `text-state` - the extracted-text representation state seen by
+      `read-document` (`"success"`, `"pending"`, `"none"`,
+      `"unavailable"`, ...), else null
+    """
+}
+type {
+    file-id: Str,
+    name: Str?,
+    mime-type: Str?,
+    size: Int,
+    bytes: Bytes,
+    text: Str?,
+    source: Str,
+    format: Str?,
+    file: DocFile?,
+    text-state: Str?
+}
+
+base-mime
+meta {
+    doc: """A Content-Type without parameters, lowercased: `"text/plain; charset=utf-8"` becomes `"text/plain"`."""
+}
+fn (content-type: Str?): Str? {
+  cond {
+    is-null(content-type) => { null }
+    => { lowercase(trim(first(split(content-type, ";")))) }
+  }
+}
+
+is-textual-mime
+meta {
+    doc: """True when content of this MIME type is text: `text/*`, JSON, XML, SVG, JavaScript, YAML, NDJSON and `+json` / `+xml` types."""
+}
+fn (mime-type: Str?): Bool {
+  m or(base-mime(mime-type), "")
+  or(
+    starts-with(m, "text/"),
+    in(m, ["application/json", "application/xml", "application/javascript", "application/x-javascript", "application/x-ndjson", "application/x-yaml", "application/yaml", "application/sql", "image/svg+xml"]),
+    ends-with(m, "+json"),
+    ends-with(m, "+xml")
+  )
+}
+
+content-from-bytes
+meta {doc: """Build a `FileContent` from raw bytes and their MIME type."""}
+fn (file-id: Str, bytes: Bytes, mime-type: Str?, source: Str): FileContent {
+  mime base-mime(mime-type)
+  FileContent({
+    file-id: file-id,
+    name: null,
+    mime-type: mime,
+    size: length(bytes),
+    bytes: bytes,
+    text: if(is-textual-mime(mime), Str(bytes), null),
+    source: source,
+    format: null,
+    file: null,
+    text-state: null
+  })
+}
+
+response-bytes
+meta {
+    doc: """The exact body of an HTTP response: `body-bytes`, or the UTF-8 bytes of a Str body, or empty."""
+}
+fn (response: Map): Bytes {
+  raw get(response, "body-bytes")
+  cond {
+    is-bytes(raw) => { raw }
+    is-str(response.body) => { Bytes(response.body) }
+    => { Bytes([]) }
+  }
+}
+
+content-text
+meta {
+    doc: """The text of a `FileContent`: its `text`, or the UTF-8 decoding of `bytes` (invalid sequences become U+FFFD)."""
+}
+fn (content: Map): Str {
+  if(is-some(content.text), content.text, Str(content.bytes))
+}
+
+// ---------------------------------------------------------------------------
+// Shortcuts to the most used functions
+// ---------------------------------------------------------------------------
+
+list-items ::box::folders/list-items
+list-all-items ::box::folders/list-all-items
+get-folder ::box::folders/get-folder
+create-folder ::box::folders/create-folder
+get-file ::box::files/get-file
+search ::box::search/search
+download-file ::box::content/download-file
+read-document ::box::content/read-document
+upload-file ::box::upload/upload-file

@@ -1,0 +1,145 @@
+::microsoft::graph::test::subscriptions ns
+meta ["test"]
+
+::subs ::microsoft::graph::subscriptions
+
+// 2026-11-01T00:00:00Z
+NOW 1793491200000
+
+test-resource-kind-and-max-expiration
+meta ["test"] fn () {
+    assert-eq("drive-item", ::subs/resource-kind("/me/drive/root"))
+    assert-eq("drive-item", ::subs/resource-kind("drives/b!abc/root"))
+    assert-eq("list", ::subs/resource-kind("sites/contoso.sharepoint.com,1,2/lists/3"))
+    assert-eq("outlook", ::subs/resource-kind("me/mailFolders('Inbox')/messages"))
+    assert-eq("directory", ::subs/resource-kind("/users"))
+    assert-eq("teams", ::subs/resource-kind("chats/getAllMessages"))
+    assert-eq(42300, ::subs/max-expiration-minutes("/me/drive/root"))
+    assert-eq(42300, ::subs/max-expiration-minutes("sites/s/lists/l"))
+    assert-eq(10080, ::subs/max-expiration-minutes("me/messages"))
+    assert-eq(1440, ::subs/max-expiration-minutes("me/messages", true), "rich Outlook notifications")
+    assert-eq(41760, ::subs/max-expiration-minutes("groups"))
+    assert-eq(60, ::subs/max-expiration-minutes("communications/presences/abc/presence"))
+    assert-eq(4230, ::subs/max-expiration-minutes("print/printers/p/jobs"))
+}
+
+test-expiration-for
+meta ["test"] fn () {
+    assert-eq("2026-11-01T01:00:00Z", ::subs/expiration-at(NOW, 60))
+    // default: the maximum minus one hour
+    assert-eq(::subs/expiration-at(NOW, sub(42300, 60)), ::subs/expiration-for("/me/drive/root", {}, NOW))
+    assert-eq(::subs/expiration-at(NOW, 120), ::subs/expiration-for("/me/drive/root", {expires-in-minutes: 120}, NOW))
+    assert-eq(::subs/expiration-at(NOW, 45), ::subs/expiration-for("/me/drive/root", {expires-in-minutes: 5}, NOW), "at least 45 minutes")
+    assert-eq(::subs/expiration-at(NOW, 42300), ::subs/expiration-for("/me/drive/root", {expires-in-minutes: 999999}, NOW), "at most the resource cap")
+    assert-eq("2026-12-01T00:00:00Z", ::subs/expiration-for("/me/drive/root", {expiration: "2026-12-01T00:00:00Z"}, NOW))
+}
+
+test-build-subscription
+meta ["test"] fn () {
+    body ::subs/build-subscription("/me/drive/root", "updated", "https://api.example.com/hook", {
+        client-state: "s3cret",
+        lifecycle-url: "https://api.example.com/lifecycle",
+        expires-in-minutes: 60,
+        latestSupportedTlsVersion: "v1_2",
+        token: "never-in-the-body"
+    }, NOW)
+    assert-eq({
+        changeType: "updated",
+        notificationUrl: "https://api.example.com/hook",
+        lifecycleNotificationUrl: "https://api.example.com/lifecycle",
+        resource: "me/drive/root",
+        expirationDateTime: "2026-11-01T01:00:00Z",
+        clientState: "s3cret",
+        latestSupportedTlsVersion: "v1_2"
+    }, body)
+    minimal ::subs/build-subscription("users", ["updated", "deleted"], "https://h.example.com/x", {}, NOW)
+    assert-eq("updated,deleted", minimal.changeType)
+    assert(not(in("clientState", keys(minimal))), "unset optionals are omitted")
+    assert(not(in("lifecycleNotificationUrl", keys(minimal))))
+}
+
+test-build-subscription-validation
+meta ["test"] fn () {
+    assert(is-err(::subs/build-subscription("users", "updated", "http://insecure.example.com", {}, NOW)))
+    assert(is-err(::subs/build-subscription("users", "updated", "https://ok.example.com", {lifecycle-url: "http://x"}, NOW)))
+    long join(map(range(0, 129), (i) { "a" }), "")
+    assert(is-err(::subs/build-subscription("users", "updated", "https://ok.example.com", {client-state: long}, NOW)), "clientState max 128")
+}
+
+test-validation-handshake
+meta ["test"] fn () {
+    r ::subs/validation-response({method: "POST", url: "/graph/hook?validationToken=Validation%3A%20Testing", query: {validationToken: "Validation: Testing client application"}, headers: {}})
+    assert-eq(200, r.status)
+    assert-eq("Validation: Testing client application", r.body)
+    assert(starts-with(get(r.headers, "Content-Type"), "text/plain"))
+    from-url ::subs/validation-response({method: "POST", url: "/graph/hook?validationToken=abc%20def", headers: {}})
+    assert-eq("abc def", from-url.body, "decoded from the URL when query is absent")
+    assert(is-null(::subs/validation-response({method: "POST", url: "/graph/hook", query: {}, headers: {}, body: {value: []}})))
+    assert-eq(202, ::subs/accepted().status)
+}
+
+payload fn (state: Str?): Map {
+  n {
+      subscriptionId: "sub-1",
+      subscriptionExpirationDateTime: "2026-11-30T00:00:00Z",
+      changeType: "updated",
+      resource: "drives/b!abc/root",
+      tenantId: "tenant-1",
+      resourceData: {id: "root"}
+  }
+  {method: "POST", url: "/graph/hook", headers: {"content-type": "application/json"}, body: {value: [if(is-null(state), n, {...n, clientState: state})]}}
+}
+
+test-parse-notifications
+meta ["test"] fn () {
+    notes ::subs/parse-notifications(payload("s3cret"))
+    assert-eq(1, length(notes))
+    n first(notes)
+    assert-eq("sub-1", n.subscription-id)
+    assert-eq("updated", n.change-type)
+    assert-eq("drives/b!abc/root", n.resource)
+    assert-eq("s3cret", n.client-state)
+    assert-eq({id: "root"}, n.resource-data)
+    assert(not(n.is-lifecycle))
+    raw ::subs/parse-notifications({method: "POST", url: "/h", headers: {}, body-raw: "{\"value\":[{\"subscriptionId\":\"s\",\"lifecycleEvent\":\"missed\",\"clientState\":\"c\"}]}"})
+    assert-eq("missed", first(raw).lifecycle-event, "parsed from the raw body")
+    assert(first(raw).is-lifecycle)
+    assert(is-err(::subs/parse-notifications({method: "POST", url: "/h", headers: {}, body-raw: "not json"})))
+    assert(is-err(::subs/parse-notifications({method: "POST", url: "/h", headers: {}, body: {other: 1}})))
+}
+
+test-verify-notifications
+meta ["test"] fn () {
+    ok ::subs/verify-notifications(payload("s3cret"), "s3cret")
+    assert-eq(1, length(ok), "valid clientState")
+    tampered ::subs/verify-notifications(payload("s3cret-x"), "s3cret")
+    assert(is-err(tampered), "tampered clientState")
+    assert(contains(err-message(tampered), "clientState"))
+    assert(is-err(::subs/verify-notifications(payload(null), "s3cret")), "missing clientState")
+    assert(is-err(::subs/verify-notifications(payload(""), "")), "empty expected secret fails closed")
+    assert(is-err(::subs/verify-notifications(payload("s3cret"), "  ")), "blank expected secret fails closed")
+    mixed {method: "POST", url: "/h", headers: {}, body: {value: [{clientState: "s3cret"}, {clientState: "evil"}]}}
+    assert(is-err(::subs/verify-notifications(mixed, "s3cret")), "one bad notification rejects the batch")
+    assert(is-err(::subs/verify-notifications({method: "POST", url: "/h", headers: {}, body: {value: []}}, "s3cret")), "empty payload")
+}
+
+test-lifecycle-helpers
+meta ["test"] fn () {
+    notes ::subs/parse-notifications({method: "POST", url: "/h", headers: {}, body: {value: [
+        {subscriptionId: "a", lifecycleEvent: "reauthorizationRequired", clientState: "c"},
+        {subscriptionId: "a", lifecycleEvent: "reauthorizationRequired", clientState: "c"},
+        {subscriptionId: "b", changeType: "updated", clientState: "c"},
+        {subscriptionId: "c", lifecycleEvent: "subscriptionRemoved", clientState: "c"}
+    ]}})
+    assert-eq(3, length(::subs/lifecycle-notifications(notes)))
+    assert-eq(1, length(::subs/change-notifications(notes)))
+    assert-eq(["a"], ::subs/needs-reauthorization(notes))
+    assert(::subs/needs-resync(notes))
+    assert(not(::subs/needs-resync(::subs/change-notifications(notes))))
+}
+
+test-strip-slashes
+meta ["test"] fn () {
+    assert-eq("me/drive/root", ::subs/strip-slashes("/me/drive/root/"))
+    assert-eq("users", ::subs/strip-slashes("users"))
+}

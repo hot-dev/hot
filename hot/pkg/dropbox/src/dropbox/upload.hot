@@ -1,0 +1,360 @@
+::dropbox::upload ns
+meta {
+    doc: """
+    Uploads: `upload` for files up to the session threshold, and upload
+    sessions (`upload_session/start`, `append_v2`, `finish`) in chunks for
+    large files. `upload` switches to a session automatically above
+    `opts.session-threshold` (default 32 MiB; Dropbox's single-request
+    cap is 150 MiB).
+
+    Content may be Bytes (sent verbatim), a Str (its UTF-8 bytes), or a
+    Map/Vec (sent as JSON). Bodies are sent as Bytes, so binary data
+    (0x00, 0xFF, invalid UTF-8) arrives intact. Every request carries the
+    `content_hash` of the bytes it sends, so Dropbox rejects data
+    corrupted in transit (`opts.verify: false` turns that off).
+
+    **Sessions.** Chunks default to 16 MiB (`opts.chunk-size`, rounded
+    down to a multiple of 4 MiB, at most 148 MiB). A session lives for 7
+    days. When a chunk fails, the Err is an `UploadError` carrying
+    `session-id` and `offset`: call `resume-upload` with the same content
+    to continue from there, from a later run or a task retry. An append
+    whose response was lost but whose data arrived (Dropbox answers
+    `incorrect_offset` with the expected next offset) counts as done.
+
+    **Data transport limit.** Every upload, start, append and finish call
+    counts as a data transport call for Dropbox Business teams with a
+    monthly limit; over it they fail with 403 (`::dropbox::api/is-transport-limit`).
+    Bigger chunks mean fewer calls.
+
+    **Scopes.** `files.content.write`.
+    """
+}
+
+::api ::dropbox::api
+::content ::dropbox::content
+
+BLOCK 4194304
+DEFAULT_SESSION_THRESHOLD 33554432
+DEFAULT_CHUNK_SIZE 16777216
+MAX_CHUNK_SIZE 155189248
+UPLOAD_LOCAL_KEYS ["mode", "rev", "session", "session-threshold", "chunk-size", "verify", "session_type"]
+COMMIT_KEYS ["autorename", "client_modified", "mute", "strict_conflict", "property_groups"]
+
+UploadError
+meta {
+    doc: """
+    A failed upload-session step. `message` is readable; `session-id` and
+    `offset` say where to continue with `resume-upload` (null when the
+    session never started); `cause` is the underlying `HttpError` or
+    transport error.
+    """
+}
+type {
+    message: Str,
+    session-id: Str?,
+    offset: Int?,
+    cause: Any
+}
+
+// ---------------------------------------------------------------------------
+// Argument building (pure)
+// ---------------------------------------------------------------------------
+
+to-bytes
+meta {
+    doc: """Upload content as Bytes: Bytes pass through, a Str becomes its UTF-8 bytes, null is empty, and anything else is JSON-encoded."""
+}
+fn (content: Any): Bytes {
+  cond {
+    is-bytes(content) => { content }
+    is-str(content) => { Bytes(content) }
+    is-null(content) => { Bytes([]) }
+    => { Bytes(to-json(untype(content))) }
+  }
+}
+
+write-mode
+meta {
+    doc: """
+    The `WriteMode` for a commit (pure): `"add"` (default; never
+    overwrite, fail or autorename on a conflict), `"overwrite"`, or
+    `"update"` with `rev` (overwrite only if the file is still at `rev`,
+    the safe way to save edits). A Map is passed through. A `rev` with no
+    mode means update.
+
+    ```hot
+    ::dropbox::upload/write-mode("update", "a1c10ce0dd78")
+    // {".tag": "update", update: "a1c10ce0dd78"}
+    ```
+    """
+}
+fn (mode: Any, rev: Str?): Any {
+  cond {
+    is-map(mode) => { mode }
+    or(eq(mode, "update"), and(is-null(mode), is-some(rev))) => {
+      if(is-null(rev), err("dropbox: write mode \"update\" needs a rev"), {".tag": "update", update: rev})
+    }
+
+    is-null(mode) => { "add" }
+    in(mode, ["add", "overwrite"]) => { mode }
+    => { err(`dropbox: unknown write mode "${mode}"; use add, overwrite or update`) }
+  }
+}
+
+commit-info
+meta {
+    doc: """The `CommitInfo` for a path (pure): `path`, `mode` (see `write-mode`, from `opts.mode` / `opts.rev`) and `autorename`, `client_modified` (`"2026-11-01T12:00:00Z"`), `mute`, `strict_conflict`, `property_groups` from `opts`."""
+}
+fn (path: Str, opts: Map): Map {
+  mode write-mode(get(opts, "mode"), get(opts, "rev"))
+  extra filter-keys(::api/api-params(opts), (k) { in(k, COMMIT_KEYS) })
+  cond {
+    is-err(mode) => { mode }
+    => { filter-vals({...extra, path: ::dropbox/normalize-path(path), mode: mode}, is-some) }
+  }
+}
+
+hash-for fn (data: Bytes, opts: Map): Str? {
+  if(eq(get(opts, "verify"), false), null, ::content/content-hash(data))
+}
+
+upload-arg
+meta {
+    doc: """The `files/upload` argument (pure): `commit-info` plus `content_hash` of `data` (unless `opts.verify` is false)."""
+}
+fn (path: Str, data: Bytes, opts: Map): Map {
+  commit commit-info(path, opts)
+  cond {
+    is-err(commit) => { commit }
+    => { filter-vals({...commit, content_hash: hash-for(data, opts)}, is-some) }
+  }
+}
+
+align-chunk-size
+meta {
+    doc: """Round a chunk size down to a multiple of 4 MiB (at least 4 MiB, at most 148 MiB so a request stays under Dropbox's 150 MiB cap)."""
+}
+fn (size: Int): Int {
+  aligned mul(floor(div(size, BLOCK)), BLOCK)
+  min(max(BLOCK, aligned), MAX_CHUNK_SIZE)
+}
+
+chunk-bounds
+meta {
+    doc: """The `[start, end)` byte range of the chunk starting at `offset` (pure): `chunk-bounds(0, 4, 10)` is `[0, 4]`, the last chunk is short."""
+}
+fn (offset: Int, chunk-size: Int, total: Int): Vec {
+  [offset, min(total, add(offset, chunk-size))]
+}
+
+session-cursor
+meta {doc: """An `UploadSessionCursor` (pure): `{session_id, offset}`."""}
+fn (session-id: Str, offset: Int): Map {
+  {session_id: session-id, offset: offset}
+}
+
+append-outcome
+meta {
+    doc: """
+    Classify an append response (pure): the new offset on success; also
+    the new offset when Dropbox answers `incorrect_offset` with exactly
+    `offset + sent` (the data had arrived but the response was lost); an
+    Err otherwise.
+    """
+}
+fn (result: Result, offset: Int, sent: Int): Int {
+  expected add(offset, sent)
+  payload if(is-err(result), ::api/plain-payload(result), null)
+  node if(is-map(payload), ::api/error-node(get(payload, "error"), "incorrect_offset"), null)
+  cond {
+    not(is-err(result)) => { expected }
+    and(is-map(node), eq(get(or(node, {}), "correct_offset"), expected)) => { expected }
+    => { result }
+  }
+}
+
+upload-error fn (message: Str, session-id: Str?, offset: Int?, cause: Result): UploadError {
+  UploadError({
+    message: `${message}: ${err-message(cause)}`,
+    session-id: session-id,
+    offset: offset,
+    cause: ::api/plain-payload(cause)
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Single-request upload
+// ---------------------------------------------------------------------------
+
+upload-single
+meta {
+    doc: """POST files/upload (content host) - upload `content` (at most 150 MiB) in one request. Returns the file's metadata. Options as for `upload`."""
+}
+fn (path: Str, content: Any, opts: Map): Map {
+  data to-bytes(content)
+  arg upload-arg(path, data, opts)
+  cond {
+    is-err(arg) => { arg }
+    gt(length(data), 157286400) => { err("dropbox: files/upload takes at most 150 MiB; use upload-session") }
+    => { ::api/upload-call("files/upload", arg, data, ::api/credential-opts(opts)) }
+  }
+}
+
+upload
+meta {
+    doc: """
+    Upload a file to `path` and return its metadata. Content up to
+    `opts.session-threshold` (default 32 MiB) goes in one request; larger
+    content (or `session: true`) uses an upload session.
+
+    Options: `mode` (`"add"` default, `"overwrite"`, `"update"` with
+    `rev`), `rev`, `autorename`, `client_modified`, `mute`,
+    `strict_conflict`, `session`, `session-threshold`, `chunk-size`,
+    `verify` (default true: send `content_hash`), plus credentials.
+
+    ```hot
+    meta-data ::dropbox::upload/upload("/Reports/q3.csv", "region,total\nwest,42\n", {mode: "overwrite"})
+    meta-data.content_hash
+    ```
+    """
+}
+fn
+(path: Str, content: Any): Map {
+  upload(path, content, {})
+},
+(path: Str, content: Any, opts: Map): Map {
+  data to-bytes(content)
+  threshold or(get(opts, "session-threshold"), DEFAULT_SESSION_THRESHOLD)
+  cond {
+    or(eq(get(opts, "session"), true), gt(length(data), threshold)) => { upload-session(path, data, opts) }
+    => { upload-single(path, data, opts) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Upload sessions
+// ---------------------------------------------------------------------------
+
+start-upload-session
+meta {
+    doc: """POST files/upload_session/start - open a session with the first chunk of content (may be empty). Returns the `session_id` (a Str). Options: `session_type` (`"sequential"` default, or `"concurrent"`), `verify`."""
+}
+fn
+(content: Any): Str {
+  start-upload-session(content, {})
+},
+(content: Any, opts: Map): Str {
+  data to-bytes(content)
+  arg filter-vals({session_type: get(opts, "session_type"), content_hash: hash-for(data, opts)}, is-some)
+  result ::api/upload-call("files/upload_session/start", arg, data, ::api/credential-opts(opts))
+  if(is-err(result), result, result.session_id)
+}
+
+append-upload-session
+meta {
+    doc: """POST files/upload_session/append_v2 - send the next chunk at `offset` (the bytes already sent). Returns the next offset (Int). A lost response whose data arrived is recognised (see `append-outcome`). Options: `close`, `verify`."""
+}
+fn
+(session-id: Str, offset: Int, content: Any): Int {
+  append-upload-session(session-id, offset, content, {})
+},
+(session-id: Str, offset: Int, content: Any, opts: Map): Int {
+  data to-bytes(content)
+  arg filter-vals({cursor: session-cursor(session-id, offset), close: get(opts, "close"), content_hash: hash-for(data, opts)}, is-some)
+  result ::api/upload-call("files/upload_session/append_v2", arg, data, ::api/credential-opts(opts))
+  append-outcome(result, offset, length(data))
+}
+
+finish-upload-session
+meta {
+    doc: """POST files/upload_session/finish - send the last chunk at `offset` (may be empty) and commit the file to `path`. Returns the file's metadata. Commit options as for `upload`."""
+}
+fn
+(session-id: Str, offset: Int, content: Any, path: Str): Map {
+  finish-upload-session(session-id, offset, content, path, {})
+},
+(session-id: Str, offset: Int, content: Any, path: Str, opts: Map): Map {
+  data to-bytes(content)
+  commit commit-info(path, opts)
+  cond {
+    is-err(commit) => { commit }
+    => {
+      arg filter-vals({cursor: session-cursor(session-id, offset), commit: commit, content_hash: hash-for(data, opts)}, is-some)
+      ::api/upload-call("files/upload_session/finish", arg, data, ::api/credential-opts(opts))
+    }
+  }
+}
+
+send-chunks fn (session-id: Str, data: Bytes, offset: Int, chunk: Int, path: Str, opts: Map): Map {
+  total length(data)
+  bounds chunk-bounds(offset, chunk, total)
+  end last(bounds)
+  cond {
+    gte(end, total) => {
+      done finish-upload-session(session-id, offset, slice(data, offset, total), path, opts)
+      if(is-err(done), err(upload-error("dropbox: upload_session/finish failed", session-id, offset, done)), done)
+    }
+    => {
+      next-offset append-upload-session(session-id, offset, slice(data, offset, end), opts)
+      cond {
+        is-err(next-offset) => { err(upload-error("dropbox: upload_session/append_v2 failed", session-id, offset, next-offset)) }
+        => { send-chunks(session-id, data, next-offset, chunk, path, opts) }
+      }
+    }
+  }
+}
+
+upload-session
+meta {
+    doc: """
+    Upload `content` to `path` through an upload session: `start` with
+    the first chunk, `append_v2` for the middle chunks, `finish` with the
+    last chunk and the commit. Returns the file's metadata, or an Err
+    carrying an `UploadError` with the `session-id` and `offset` to
+    `resume-upload` from.
+
+    ```hot
+    big ::hot::file/read-file-bytes("/tmp/video.mp4")
+    meta-data ::dropbox::upload/upload-session("/Videos/talk.mp4", big, {chunk-size: 33554432})
+    ```
+    """
+}
+fn
+(path: Str, content: Any): Map {
+  upload-session(path, content, {})
+},
+(path: Str, content: Any, opts: Map): Map {
+  data to-bytes(content)
+  chunk align-chunk-size(or(get(opts, "chunk-size"), DEFAULT_CHUNK_SIZE))
+  first-end min(length(data), chunk)
+  commit commit-info(path, opts)
+  cond {
+    is-err(commit) => { commit }
+    => {
+      session-id start-upload-session(slice(data, 0, first-end), opts)
+      cond {
+        is-err(session-id) => { err(upload-error("dropbox: upload_session/start failed", null, null, session-id)) }
+        => { send-chunks(session-id, data, first-end, chunk, path, opts) }
+      }
+    }
+  }
+}
+
+resume-upload
+meta {
+    doc: """
+    Continue an interrupted upload session: send `content` (the whole
+    file again) from `offset` (from the `UploadError`) and commit to
+    `path`. Sessions expire 7 days after `start`; an expired one fails
+    with `lookup_failed/not_found`, so start over with `upload`.
+    """
+}
+fn
+(session-id: Str, offset: Int, content: Any, path: Str): Map {
+  resume-upload(session-id, offset, content, path, {})
+},
+(session-id: Str, offset: Int, content: Any, path: Str, opts: Map): Map {
+  data to-bytes(content)
+  chunk align-chunk-size(or(get(opts, "chunk-size"), DEFAULT_CHUNK_SIZE))
+  send-chunks(session-id, data, offset, chunk, path, opts)
+}

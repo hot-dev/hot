@@ -1,0 +1,67 @@
+::documents::test::source ns
+meta ["test"]
+
+::source ::documents::source
+
+test-provider-names-and-aliases
+meta ["test"] fn () {
+    assert-eq("google-drive", ::source/provider-name("google"))
+    assert-eq("google-drive", ::source/provider-name({provider: "Google-Drive"}))
+    assert-eq("onedrive", ::source/provider-name("SharePoint"))
+    assert-eq("onedrive", ::source/provider-name("microsoft-onedrive"))
+    assert-eq("s3", ::source/provider-name("aws-s3"))
+    assert-eq("box", ::source/provider-name({provider: " box "}))
+    unknown ::source/provider-name("ftp")
+    assert(is-err(unknown))
+    assert(contains(err-message(unknown), "unknown provider"))
+    assert(is-err(::source/provider-name({})), "a descriptor needs a provider")
+    assert(is-err(::source/provider-name(null)))
+}
+
+test-resolve-normalises-scope
+meta ["test"] fn () {
+    s ::source/resolve({provider: "sharepoint", drive: "b!abc", junk: 1})
+    assert-eq({provider: "onedrive", drive: "b!abc", opts: {}}, s, "only the provider's scope keys are kept")
+    g ::source/resolve({provider: "google-drive", drive-id: "", opts: {token: "t"}})
+    assert-eq({provider: "google-drive", opts: {token: "t"}}, g, "blank scope values are dropped")
+    assert-eq({provider: "box", opts: {}}, ::source/resolve("box"), "a bare name is a default-scope source")
+    b ::source/resolve({provider: "s3", bucket: "acme", prefix: "inbox/"})
+    assert-eq("acme", b.bucket)
+    assert-eq("inbox/", b.prefix)
+    assert(is-err(::source/resolve({provider: "s3"})), "s3 needs a bucket")
+    assert(is-err(::source/resolve({provider: "box", opts: "token"})), "opts must be a Map")
+}
+
+test-source-id-never-carries-credentials
+meta ["test"] fn () {
+    s ::source/resolve({provider: "dropbox", root: "/Contracts", opts: {token: "secret-token"}})
+    id ::source/source-id(s)
+    assert-eq({provider: "dropbox", root: "/Contracts"}, id)
+    assert(not(contains(to-json(id), "secret-token")))
+}
+
+test-provider-opts-call-overrides-source
+meta ["test"] fn () {
+    s ::source/resolve({provider: "box", opts: {token: "tenant-a", as-user: "111"}})
+    merged ::source/provider-opts(s, {token: "tenant-b", fields: "id,name", cursor: "doc1.x", page-size: 5, limit: 9, mime-type: "text/plain", max-pages: 2})
+    assert-eq({token: "tenant-b", as-user: "111", fields: "id,name"}, merged, "call opts win; documents' own keys never reach the provider")
+    assert-eq({token: "tenant-a", as-user: "111"}, ::source/provider-opts(s, {}), "source opts are used when the call has none")
+    assert-eq({}, ::source/provider-opts(::source/resolve("box"), {}), "no opts: the provider falls back to context")
+}
+
+test-resolver-never-writes-context
+meta ["test"] fn () {
+    before ::hot::ctx/get("box.access.token")
+    s ::source/resolve({provider: "box", opts: {token: "per-call"}})
+    ::source/provider-opts(s, {token: "other"})
+    assert-eq(before, ::hot::ctx/get("box.access.token"), "per-call credentials stay out of ctx")
+    assert(is-null(::hot::ctx/get("google.access.token")))
+}
+
+test-page-size
+meta ["test"] fn () {
+    assert-eq(100, ::source/page-size({}, 100, 1000))
+    assert-eq(1000, ::source/page-size({page-size: 5000}, 100, 1000))
+    assert-eq(1, ::source/page-size({page-size: 0}, 100, 1000))
+    assert-eq(100, ::source/page-size({page-size: "50"}, 100, 1000), "non-Int sizes are ignored")
+}
