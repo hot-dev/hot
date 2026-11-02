@@ -1284,6 +1284,31 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn streaming_responses_are_tagged_with_their_declared_type() {
+        let app = Router::new().route("/", axum::routing::get(|| async { "ok" }));
+        let url = start_mock_server(app).await;
+        let response = tokio::task::spawn_blocking(move || {
+            request_stream(&[
+                Val::from("GET"),
+                Val::from(url),
+                Val::map_empty(),
+                Val::from(""),
+                Val::from("raw"),
+            ])
+        })
+        .await
+        .unwrap();
+        let HotResult::Ok(response) = response else {
+            panic!("expected a response: {response:?}");
+        };
+        assert!(response.is_type("::hot::http/StreamingHttpResponse"));
+        assert!(matches!(
+            crate::val::as_fields(&response).get("status"),
+            Some(Val::Int(200))
+        ));
+    }
+
     #[tokio::test]
     async fn public_only_policy_rejects_local_http_destination() {
         let app = Router::new().route("/", axum::routing::get(|| async { "nope" }));

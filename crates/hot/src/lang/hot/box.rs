@@ -1775,14 +1775,15 @@ mod tests {
 
     #[test]
     fn test_allowed_images_returns_policy_map() {
-        let result = allowed_images(&[]);
-        match result {
-            HotResult::Ok(Val::Map(m)) => {
-                assert!(m.contains_key(&Val::from("policy")));
-                assert!(m.contains_key(&Val::from("denied")));
-            }
-            _ => panic!("Expected Ok(Map)"),
-        }
+        let HotResult::Ok(result) = allowed_images(&[]) else {
+            panic!("Expected Ok");
+        };
+        assert!(result.is_type("::hot::box/BoxImagePolicy"));
+        let Val::Map(m) = crate::val::as_fields(&result) else {
+            panic!("Expected a BoxImagePolicy");
+        };
+        assert!(m.contains_key(&Val::from("policy")));
+        assert!(m.contains_key(&Val::from("denied")));
     }
 
     #[tokio::test]

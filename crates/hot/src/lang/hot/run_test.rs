@@ -449,8 +449,8 @@ probe("abc")"#;
     /// `HttpResponse -> Target` arrow instead of copying fields, here dropping
     /// a body the arrow redacts. It used to be an untagged Map, so the arrow
     /// only ran for values built with `HttpResponse(...)`.
-    #[test]
-    fn real_http_response_runs_a_declared_arrow() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn real_http_response_runs_a_declared_arrow() {
         let src = |url: &str| {
             format!(
                 r#"::t ns
@@ -483,7 +483,7 @@ probe fn (): Vec {{
         r.status, r.body.secret, get(r.headers, "x-trace"),
         get(r, "status"), is-type(r, HttpResponse), describe(r),
         ::http/is-ok-response(r), is-map(untype(r)),
-        get(tagged, "$type"), plain.status,
+        is-type(tagged, HttpResponse), is-type(plain, HttpResponse), plain.status,
         spread.status, get(assoc(r, "status", 201), "status"),
     ]
 }}
@@ -506,7 +506,8 @@ probe()"#
             Val::from("a response"),
             Val::Bool(false),
             Val::Bool(true),
-            Val::from("::hot::http/HttpResponse"),
+            Val::Bool(true),
+            Val::Bool(false),
             Val::Int(404),
             Val::Int(404),
             Val::Int(201),
@@ -515,8 +516,15 @@ probe()"#
             crate::val!({"jit": {"mode": "disabled"}}),
             crate::val!({"jit": {"threshold": 1}}),
         ] {
-            let out = compile_and_run_with_std_conf(&src(&serve_json(9)), Some(conf.clone()))
-                .unwrap_or_else(|e| panic!("{conf:?}: {e}"));
+            // HTTP natives block on the runtime, so they run off its threads.
+            let program = src(&serve_json(9));
+            let run_conf = conf.clone();
+            let out = tokio::task::spawn_blocking(move || {
+                compile_and_run_with_std_conf(&program, Some(run_conf))
+            })
+            .await
+            .expect("the run finishes")
+            .unwrap_or_else(|e| panic!("{conf:?}: {e}"));
             assert_eq!(out, expected, "{conf:?}");
         }
     }
