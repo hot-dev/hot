@@ -54,7 +54,7 @@ meta {
     """
 }
 fn
-(name: Str, attributes: Map, tags: Vec<Map>): CreateTopicResponse | AwsError {
+(name: Str, attributes: Map, tags: Vec<Map>?): CreateTopicResponse | AwsError {
     region get-region()
     credentials get-credentials()
 
@@ -154,7 +154,7 @@ meta {
     """
 }
 fn
-(next_token: Str): ListTopicsResponse | AwsError {
+(next_token: Str?): ListTopicsResponse | AwsError {
     region get-region()
     credentials get-credentials()
 

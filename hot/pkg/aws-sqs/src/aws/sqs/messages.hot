@@ -107,7 +107,7 @@ meta {
     """
 }
 fn
-(queue_url: Str, message_body: Str, delay_seconds: Int, message_attributes: Map): SendMessageResponse | AwsError {
+(queue_url: Str, message_body: Str, delay_seconds: Int, message_attributes: Map?): SendMessageResponse | AwsError {
     region get-region()
     credentials get-credentials()
 

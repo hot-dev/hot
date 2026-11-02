@@ -3077,13 +3077,20 @@ unsafe fn hot_jit_call_vm_body(function_id: i64, args_ptr: *const i64, args_coun
     }
 
     let error_capture = vm.error_capture_active;
-    // Same runtime overload dispatch as the interpreter's CallUserFunction,
-    // with the arguments prepared for the overload called.
-    let function_id = vm
-        .overload_for_args(function_id as u32, &args)
-        .unwrap_or(function_id as u32);
+    // Same runtime overload dispatch and implicit coercion as the
+    // interpreter's CallUserFunction, with the arguments prepared for the
+    // overload called.
+    let dispatched = vm.overload_for_args(function_id as u32, &args);
+    let function_id = dispatched.unwrap_or(function_id as u32);
     let target = crate::lang::runtime::vm::CallTarget::Function(function_id);
-    let args = match vm.prepare_call_args(target, args) {
+    let prepared = vm.prepare_call_args(target, args).and_then(|args| {
+        if dispatched.is_none() {
+            vm.coerce_call_args(function_id, args)
+        } else {
+            Ok(args)
+        }
+    });
+    let args = match prepared {
         Ok(args) => args,
         Err(err) => {
             // The callee never ran, so the proof set for it is spent.

@@ -269,7 +269,7 @@ meta {
     or the storage backend was reset between runs.
     """
 }
-fn (ref: BlobRef): Bytes? {
+fn (ref: BlobRef?): Bytes? {
     cond {
         is-null(ref) => { null }
         not(::file/file-exists(ref.path)) => { null }
@@ -290,7 +290,7 @@ delete
 meta {
     doc: "Remove a blob from its backing store. Idempotent; returns `false` when the blob was already gone."
 }
-fn (ref: BlobRef): Bool {
+fn (ref: BlobRef?): Bool {
     cond {
         is-null(ref) => { false }
         => { ::file/delete-file(ref.path) }

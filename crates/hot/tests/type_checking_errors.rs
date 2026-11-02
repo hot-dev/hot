@@ -2755,6 +2755,85 @@ mod integration_tests {
         );
     }
 
+    fn warnings_with_code(source: &str, code: &str) -> Vec<String> {
+        compile_and_get_warnings(source)
+            .iter()
+            .filter(|w| constraint_code(w) == Some(code))
+            .map(|w| w.to_string())
+            .collect()
+    }
+
+    /// `is-null` or `is-some` on a parameter declared without `?` warns. A
+    /// nullable, `Any`, `Result` or untyped parameter doesn't, nor does a name
+    /// rebound in the body or a field of the parameter.
+    #[test]
+    fn test_null_check_on_a_non_nullable_parameter_warns() {
+        let source = r#"
+            ::test ns
+            User type { name: Str? }
+            Mode type "a" | "b"
+            MaybeMode type "a" | null
+
+            str-param fn (x: Str): Bool { is-null(x) }
+            some-check fn (x: Int): Bool { is-some(x) }
+            nested fn (x: Map): Bool { not(is-null(x)) }
+            struct-param fn (x: User): Bool { is-null(x) }
+            literal-union fn (x: Mode): Bool { is-null(x) }
+            union-param fn (x: Str | Bytes): Bool { is-null(x) }
+            in-lambda fn (x: Vec): Bool { (y: Str) { is-null(y) }("a") }
+            outer-param fn (x: Str): Fn { () { is-null(x) } }
+            flow-fn fn cond (x: Str): Bool {
+                is-null(x) => { true }
+                => { false }
+            }
+
+            nullable fn (x: Str?): Bool { is-null(x) }
+            union-null fn (x: Str | Null): Bool { is-null(x) }
+            nullable-literal fn (x: MaybeMode): Bool { is-null(x) }
+            any-param fn (x: Any): Bool { is-null(x) }
+            untyped fn (x): Bool { is-null(x) }
+            result-param fn (x: Result): Bool { is-null(x) }
+            lazy-param fn (lazy x: Str): Bool { is-null(x) }
+            rebound fn (x: Str): Bool {
+                x get({}, "k")
+                is-null(x)
+            }
+            field fn (x: User): Bool { is-null(x.name) }
+        "#;
+        let warnings = warnings_with_code(source, "null-check-on-non-nullable");
+        assert_eq!(warnings.len(), 9, "{warnings:#?}");
+    }
+
+    /// A literal `null` for a parameter declared without `?` warns, unless a
+    /// same-arity overload takes it, and `Any`, `Result` and nullable
+    /// parameters take it.
+    #[test]
+    fn test_null_argument_for_a_non_nullable_parameter_warns() {
+        let source = r#"
+            ::test ns
+            one fn (x: Str): Any { x }
+            two fn (x: Str, y: Int): Any { x }
+            nullable fn (x: Str?): Any { x }
+            anything fn (x: Any): Any { x }
+            result-param fn (x: Result): Any { x }
+            overloaded
+            fn (x: Str): Any { x },
+               (x: Null): Any { x }
+            many fn (...xs: Str): Any { xs }
+
+            warns-one fn (): Any { one(null) }
+            warns-two fn (): Any { two("a", null) }
+            warns-pipe fn (): Any { "a" |> two(null) }
+            warns-many fn (): Any { many("a", null) }
+
+            quiet fn (): Vec {
+                [nullable(null), anything(null), result-param(null), overloaded(null), one("a")]
+            }
+        "#;
+        let warnings = warnings_with_code(source, "null-for-non-nullable");
+        assert_eq!(warnings.len(), 4, "{warnings:#?}");
+    }
+
     fn impossible_comparisons(source: &str) -> Vec<String> {
         compile_and_get_warnings(source)
             .iter()
