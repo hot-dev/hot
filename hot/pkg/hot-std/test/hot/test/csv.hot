@@ -1,0 +1,442 @@
+::hot::test::csv ns
+meta ["test"]
+
+// =============================================================================
+// CSV and TSV Module Tests
+// =============================================================================
+
+::csv ::hot::csv
+::file ::hot::file
+
+// Whether `result` is an Err whose message holds `text`.
+fails-with fn (result: Result, text: Str): Bool {
+    and(is-err(result), contains(Str(err-value(result)), text))
+}
+
+// -----------------------------------------------------------------------------
+// Reading
+// -----------------------------------------------------------------------------
+
+test-from-csv-keys-rows-by-header
+meta ["test"]
+fn () {
+    assert-eq([{a: "1", b: "2"}, {a: "3", b: "4"}], from-csv("a,b\n1,2\n3,4\n"))
+}
+
+test-from-csv-values-stay-str
+meta ["test"]
+fn () {
+    rows from-csv("zip,account\n02134,123456789012345678901234567890\n")
+    assert-eq("02134", rows[0].zip)
+    assert-eq("123456789012345678901234567890", rows[0].account)
+}
+
+test-from-csv-rfc-4180-quoting
+meta ["test"]
+fn () {
+    rows from-csv("a,b\n\"x,y\",\"say \"\"hi\"\"\"\n\"one\ntwo\",\"\"\n")
+    assert-eq("x,y", rows[0].a)
+    assert-eq("say \"hi\"", rows[0].b)
+    assert-eq("one\ntwo", rows[1].a)
+    assert-eq("", rows[1].b)
+}
+
+test-from-csv-line-endings
+meta ["test"]
+fn () {
+    want [{a: "1"}, {a: "2"}]
+    assert-eq(want, from-csv("a\r\n1\r\n2\r\n"))
+    assert-eq(want, from-csv("a\n1\n2"))
+    assert-eq(want, from-csv("a\r1\r2\r"))
+    assert-eq("x\r\ny", from-csv("a\r\n\"x\r\ny\"\r\n")[0].a)
+}
+
+test-from-csv-strips-bom
+meta ["test"]
+fn () {
+    with-bom concat(Bytes([239, 187, 191]), Bytes("id,name\n1,Ada\n"))
+    assert-eq([{id: "1", name: "Ada"}], from-csv(with-bom))
+    assert-eq([{id: "1", name: "Ada"}], from-csv(Str(with-bom)))
+    assert-eq([], from-csv(Bytes([239, 187, 191])))
+}
+
+test-from-csv-empty-input
+meta ["test"]
+fn () {
+    assert-eq([], from-csv(""))
+    assert-eq([], from-csv("a,b\n"))
+    assert-eq([], from-csv("", {header: false}))
+    assert-eq([], from-csv("\n\n"))
+}
+
+test-from-csv-code-points-beyond-ascii
+meta ["test"]
+fn () {
+    rows from-csv("名前,メモ\n日本語,\"🎉, 🎉\"\n")
+    assert-eq("日本語", rows[0]["名前"])
+    assert-eq("🎉, 🎉", rows[0]["メモ"])
+    assert-eq(rows, from-csv(Bytes("名前,メモ\n日本語,\"🎉, 🎉\"\n")))
+}
+
+test-from-csv-bytes-input
+meta ["test"]
+fn () {
+    assert-eq([{a: "1"}], from-csv(Bytes("a\n1\n")))
+}
+
+test-from-csv-header-false
+meta ["test"]
+fn () {
+    assert-eq([["a", "b"], ["1", "2"]], from-csv("a,b\n1,2\n", {header: false}))
+}
+
+test-from-csv-columns-treat-first-row-as-data
+meta ["test"]
+fn () {
+    assert-eq([{x: "1", y: "2"}], from-csv("1,2\n", {columns: ["x", "y"]}))
+    assert-eq(
+        [{x: "1", y: "2"}],
+        from-csv("a,a\n1,2\n", {columns: ["x", "y"], header: true})
+    )
+}
+
+test-from-csv-comment-trim-and-skip-empty
+meta ["test"]
+fn () {
+    assert-eq([{a: "1"}], from-csv("# note\na\n# more\n1\n", {comment: "#"}))
+    assert-eq([{a: "1", b: "2"}], from-csv("a,b\n1,2\n# last, with no newline", {comment: "#"}))
+    assert-eq([], from-csv("# only a comment", {comment: "#"}))
+    assert-eq([{a: "1", b: "2"}], from-csv(" a , b \n 1 ,2\n", {trim: true}))
+    assert-eq([{a: "1", b: "2"}], from-csv("a,b\n,\n1,2\n,\n", {skip-empty: true}))
+    assert-eq(2, length(from-csv("a,b\n,\n1,2\n")))
+    assert-eq([{a: "1"}], from-csv("a\n\n1\n\n"))
+}
+
+test-from-csv-custom-delimiter-and-quote
+meta ["test"]
+fn () {
+    assert-eq([{a: "1;2", b: "3"}], from-csv("a;b\n'1;2';3\n", {delimiter: ";", quote: "'"}))
+    assert-eq([{a: "5\" disk"}], from-csv("a\n5\" disk\n", {quote: false}))
+}
+
+test-from-tsv
+meta ["test"]
+fn () {
+    assert-eq([{a: "1", b: "x,y"}], from-tsv("a\tb\n1\tx,y\n"))
+    assert-eq([{a: "1\t2"}], from-tsv("a\n\"1\t2\"\n"))
+    assert-eq([{a: "1", b: "2"}], from-tsv("a,b\n1,2\n", {delimiter: ","}))
+}
+
+// -----------------------------------------------------------------------------
+// Malformed input
+// -----------------------------------------------------------------------------
+
+test-from-csv-wrong-field-count-names-the-line
+meta ["test"]
+fn () {
+    assert(fails-with(from-csv("a,b\n1,2\n3\n"), "line 3: expected 2 fields, found 1"))
+    assert(fails-with(from-csv("a,b\n1,2,3\n"), "line 2: expected 2 fields, found 3"))
+    assert(fails-with(from-csv("1,2\n3\n", {header: false}), "line 2"))
+    // A quoted newline moves the lines along, and the error names where the row starts.
+    assert(fails-with(from-csv("a,b\n\"x\ny\",2\n3\n"), "line 4"))
+    // So do CRLF, a lone CR, a comment and a blank line.
+    assert(fails-with(from-csv("a,b\r\n1,2\r\n3\r\n"), "line 3"))
+    assert(fails-with(from-csv("a,b\r1,2\r3\r"), "line 3"))
+    assert(fails-with(from-csv("# c\na,b\n\n3\n", {comment: "#"}), "line 4"))
+}
+
+test-from-csv-strict-false-pads-and-drops
+meta ["test"]
+fn () {
+    assert-eq(
+        [{a: "1", b: null}, {a: "2", b: "3"}],
+        from-csv("a,b\n1\n2,3,4\n", {strict: false})
+    )
+    assert-eq(
+        [["1", "2"], ["3", null], ["4", "5", "6"]],
+        from-csv("1,2\n3\n4,5,6\n", {header: false, strict: false})
+    )
+}
+
+test-from-csv-malformed-quoting-names-the-line
+meta ["test"]
+fn () {
+    assert(fails-with(from-csv("a\n1\n\"open\nmore\n"), "line 3: quoted field is never closed"))
+    assert(fails-with(from-csv("a\n\"x\"y\n"), "line 2: text after a closing quote"))
+    assert(fails-with(from-csv("a\n5\" disk\n"), "line 2: quote inside an unquoted field"))
+    // strict: false is about field counts, not quoting.
+    assert(is-err(from-csv("a\n\"open\n", {strict: false})))
+}
+
+test-from-csv-invalid-utf8-names-the-line
+meta ["test"]
+fn () {
+    bad concat(Bytes("a\n1\n"), Bytes([255, 254]), Bytes("\n"))
+    assert(fails-with(from-csv(bad), "line 3: invalid UTF-8"))
+}
+
+test-from-csv-bad-headers
+meta ["test"]
+fn () {
+    assert(fails-with(from-csv("a,a\n1,2\n"), "appears twice"))
+    assert(fails-with(from-csv("a,\n1,2\n"), "column 2 has a blank name"))
+    assert(fails-with(from-csv("a,$type\n1,2\n"), "$type"))
+    assert-eq([{x: "1", y: "2"}], from-csv("a,\n1,2\n", {columns: ["x", "y"], header: true}))
+    assert(is-err(from-csv("1,2\n", {columns: ["x", "x"]})))
+}
+
+test-from-csv-bad-options
+meta ["test"]
+fn () {
+    assert(fails-with(from-csv("a\n", {delimeter: ";"}), "unknown option"))
+    assert(is-err(from-csv("a\n", {delimiter: "||"})))
+    assert(is-err(from-csv("a\n", {delimiter: "é"})))
+    assert(is-err(from-csv("a\n", {delimiter: "\""})))
+    assert(is-err(from-csv("a\n", {types: {a: "Float"}})))
+    assert(is-err(from-csv("a\n", {types: {b: "Int"}})))
+    assert(is-err(from-csv("1\n", {header: false, types: {a: "Int"}})))
+}
+
+// -----------------------------------------------------------------------------
+// types
+// -----------------------------------------------------------------------------
+
+test-from-csv-types-convert-named-columns
+meta ["test"]
+fn () {
+    rows from-csv(
+        "id,price,on,zip\n7,1.50,TRUE,02134\n",
+        {types: {id: "Int", price: "Dec", on: "Bool"}}
+    )
+    assert-eq(7, rows[0].id)
+    assert-eq(1.50, rows[0].price)
+    assert-eq(true, rows[0].on)
+    assert-eq("02134", rows[0].zip)
+}
+
+test-from-csv-types-empty-cell-is-null
+meta ["test"]
+fn () {
+    assert-eq([{a: null}], from-csv("a\n\"\"\n", {types: {a: "Int"}}))
+}
+
+test-from-csv-types-bad-cell-names-row-and-column
+meta ["test"]
+fn () {
+    result from-csv("a,b\n1,2\n3,oops-secret-cell\n", {types: {b: "Int"}})
+    assert(fails-with(result, "line 3, row 2, column \"b\": not a valid Int"))
+    assert(not(contains(Str(err-value(result)), "oops-secret-cell")))
+    assert(is-err(from-csv("a\n9223372036854775808\n", {types: {a: "Int"}})))
+    assert(is-err(from-csv("a\nNaN\n", {types: {a: "Dec"}})))
+    assert(is-err(from-csv("a\nyes\n", {types: {a: "Bool"}})))
+}
+
+// -----------------------------------------------------------------------------
+// Writing
+// -----------------------------------------------------------------------------
+
+test-to-csv-map-rows
+meta ["test"]
+fn () {
+    assert-eq("a,b\n1,2\n", to-csv([{a: 1, b: 2}]))
+    // Columns are in first-seen order across rows, with gaps left empty.
+    assert-eq("a,b,c\n1,2,\n,,3\n", to-csv([{a: 1, b: 2}, {c: 3}]))
+}
+
+test-to-csv-vec-rows
+meta ["test"]
+fn () {
+    assert-eq("1,2\n3,4\n", to-csv([[1, 2], [3, 4]]))
+    assert-eq("x,y\n1,2\n", to-csv([[1, 2]], {columns: ["x", "y"]}))
+    assert(fails-with(to-csv([[1, 2], [3]]), "row 2: expected 2 cells, found 1"))
+    assert(is-err(to-csv([[1], {a: 1}])))
+    assert(is-err(to-csv([1, 2])))
+}
+
+test-to-csv-renders-scalars
+meta ["test"]
+fn () {
+    assert-eq("a,b,c,d,e\n1,1.50,true,,x\n", to-csv([{a: 1, b: 1.50, c: true, d: null, e: "x"}]))
+}
+
+test-to-csv-quotes-what-needs-it
+meta ["test"]
+fn () {
+    assert-eq("a\n\"x,y\"\n\"q\"\"r\"\n\"l\nm\"\n\"cr\rx\"\n", to-csv([{a: "x,y"}, {a: "q\"r"}, {a: "l\nm"}, {a: "cr\rx"}]))
+}
+
+test-to-csv-nested-cell-names-the-column
+meta ["test"]
+fn () {
+    assert(fails-with(to-csv([{a: 1, b: {c: 2}}]), "row 1, column \"b\": can't write a Map"))
+    assert(fails-with(to-csv([{a: [1]}]), "column \"a\": can't write a Vec"))
+    assert(fails-with(to-csv([[1, {b: 2}]]), "row 1, column 2"))
+}
+
+test-to-csv-options
+meta ["test"]
+fn () {
+    assert-eq("b\n2\n", to-csv([{a: 1, b: 2}], {columns: ["b"]}))
+    assert-eq("1\n", to-csv([{a: 1}], {header: false}))
+    assert-eq("a\r\n1\r\n", to-csv([{a: 1}], {line-ending: "\r\n"}))
+    assert-eq("a;b\n1;2\n", to-csv([{a: 1, b: 2}], {delimiter: ";"}))
+    assert-eq("a\n'x,y'\n", to-csv([{a: "x,y"}], {quote: "'"}))
+    assert(is-err(to-csv([{a: 1}], {line-ending: "\r"})))
+    assert(is-err(to-csv([{a: 1}], {typo: 1})))
+}
+
+test-to-csv-empty
+meta ["test"]
+fn () {
+    assert-eq("", to-csv([]))
+    assert-eq("a,b\n", to-csv([], {columns: ["a", "b"]}))
+    assert-eq("", to-csv([], {columns: ["a"], header: false}))
+}
+
+test-to-csv-escape-formulas
+meta ["test"]
+fn () {
+    escaped to-csv(
+        [{a: "=1+1"}, {a: "+1"}, {a: "-1"}, {a: "@x"}, {a: "\tx"}, {a: "\rx"}, {a: "safe"}],
+        {escape-formulas: true}
+    )
+    assert-eq("a\n'=1+1\n'+1\n'-1\n'@x\n'\tx\n\"'\rx\"\nsafe\n", escaped)
+    // Off by default, and numbers can't hold a formula.
+    assert-eq("a\n=1+1\n", to-csv([{a: "=1+1"}]))
+    assert-eq("a\n-5\n", to-csv([{a: -5}], {escape-formulas: true}))
+    assert-eq("'=b\n1\n", to-csv([{"=b": 1}], {escape-formulas: true}))
+}
+
+test-to-tsv
+meta ["test"]
+fn () {
+    assert-eq("a\tb\n1\tx,y\n", to-tsv([{a: 1, b: "x,y"}]))
+    assert-eq("a\n\"x\ty\"\n", to-tsv([{a: "x\ty"}]))
+}
+
+// -----------------------------------------------------------------------------
+// Round trips
+// -----------------------------------------------------------------------------
+
+test-csv-round-trip
+meta ["test"]
+fn () {
+    rows [
+        {id: "007", note: "a,b", quote: "say \"hi\"", lines: "one\r\ntwo", empty: ""},
+        {id: "008", note: "日本語 🎉", quote: "'", lines: "\n", empty: " spaces "},
+    ]
+    assert-eq(rows, from-csv(to-csv(rows)))
+    assert-eq(rows, from-tsv(to-tsv(rows)))
+    assert-eq(rows, from-csv(to-csv(rows, {line-ending: "\r\n"})))
+}
+
+test-csv-round-trip-single-empty-column
+meta ["test"]
+fn () {
+    assert-eq([{a: ""}, {a: "x"}, {a: ""}], from-csv(to-csv([{a: ""}, {a: "x"}, {a: null}])))
+}
+
+test-csv-round-trip-null-through-types
+meta ["test"]
+fn () {
+    rows [{a: 1, b: 1.5, c: true}, {a: null, b: null, c: null}]
+    types {a: "Int", b: "Dec", c: "Bool"}
+    assert-eq(rows, from-csv(to-csv(rows), {types: types}))
+}
+
+// -----------------------------------------------------------------------------
+// Rows one at a time
+// -----------------------------------------------------------------------------
+
+test-iter-csv-matches-from-csv
+meta ["test"]
+fn () {
+    text "a,b\n1,\"x\ny\"\n3,4\n"
+    assert-eq(from-csv(text), collect(iter-csv(text)))
+    assert-eq(from-csv(text), collect(iter-csv(Bytes(text))))
+    assert-eq(from-csv(text), collect(iter-csv(Iter([text]))))
+    assert-eq(from-tsv("a\tb\n1\t2\n"), collect(iter-tsv("a\tb\n1\t2\n")))
+}
+
+test-iter-csv-chunks-can-split-anywhere
+meta ["test"]
+fn () {
+    text Str(concat(Bytes([239, 187, 191]), Bytes("名前,b\r\n\"日本\r\n語\",🎉\r\n")))
+    want [{"名前": "日本\r\n語", b: "🎉"}]
+    assert-eq(want, from-csv(text))
+    // `Iter` of a Str yields one code point at a time.
+    assert-eq(want, collect(iter-csv(Iter(text))))
+    // One byte at a time, through characters and the BOM.
+    bytes-one-by-one Iter(map(::hot::bytes/to-vec(Bytes(text)), (byte) { Bytes([byte]) }))
+    assert-eq(want, collect(iter-csv(bytes-one-by-one)))
+}
+
+test-iter-csv-next-reports-done
+meta ["test"]
+fn () {
+    rows iter-csv("a\n1\n")
+    assert-eq({a: "1"}, next(rows).value)
+    assert(next(rows).done)
+    assert(next(rows).done)
+}
+
+test-iter-csv-reads-only-what-is-asked-for
+meta ["test"]
+fn () {
+    // The second chunk is malformed, and nothing has asked for it yet.
+    rows iter-csv(Iter(["a\n1\n", "\"open"]))
+    assert-eq({a: "1"}, next(rows).value)
+}
+
+test-iter-csv-error-names-the-line-and-stays
+meta ["test"]
+fn () {
+    rows iter-csv(Iter(["a,b\n1,2\n", "3\n"]))
+    assert-eq({a: "1", b: "2"}, next(rows).value)
+    first next(rows)
+    assert(fails-with(first, "line 3: expected 2 fields, found 1"))
+    // Asking again doesn't read as the end of the file.
+    assert(fails-with(next(rows), "line 3"))
+}
+
+test-iter-csv-bad-input
+meta ["test"]
+fn () {
+    assert(fails-with(collect(iter-csv(Iter(["a\n", 5]))), "Str or Bytes"))
+    assert(is-err(iter-csv("a\n", {nope: 1})))
+}
+
+// A failure partway through has to stop every way of consuming rows.
+test-iter-csv-errors-propagate-through-consumers
+meta ["test"]
+fn () {
+    bad fn (): Iter { iter-csv("a,b\n1,2\n3\n") }
+    assert(fails-with(map(bad(), (row) { row }), "line 3"))
+    assert(fails-with(filter(bad(), (row) { true }), "line 3"))
+    assert(fails-with(reduce(bad(), (sum, row) { sum }, 0), "line 3"))
+    assert(fails-with(for-each(bad(), (row) { row }), "line 3"))
+    assert(fails-with(collect(bad()), "line 3"))
+}
+
+test-iter-csv-through-file-stream
+meta ["test"]
+fn () {
+    path `csv-stream-test-${Uuid()}.csv`
+    ::file/write-file(path, "id,name\n1,日本語\n2,Ada\n")
+    rows collect(iter-csv(::file/read-file-stream(path, {chunk-size: 1})))
+    assert-eq([{id: "1", name: "日本語"}, {id: "2", name: "Ada"}], rows)
+    ::file/delete-file(path)
+}
+
+test-read-file-stream-chunks
+meta ["test"]
+fn () {
+    path `file-stream-test-${Uuid()}.bin`
+    ::file/write-file(path, "abcdefg")
+    chunks collect(::file/read-file-stream(path, {chunk-size: 3}))
+    assert-eq([Bytes("abc"), Bytes("def"), Bytes("g")], chunks)
+    ::file/delete-file(path)
+    assert(is-err(::file/read-file-stream(path)))
+    assert(is-err(::file/read-file-stream("x", {chunk-size: 0})))
+    assert(is-err(::file/read-file-stream("x", {nope: 1})))
+}

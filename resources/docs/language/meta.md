@@ -384,7 +384,7 @@ Two independent filters do this.
 - Values passed to `::hot::ctx/mark-secret`. Use it for a credential that arrives as an ordinary argument, like a per-call `opts` Map.
 - For webhooks and MCP tools, the request's `auth` subtree, its `original-url`, and its sensitive headers, including those named in `secret-headers`.
 
-A registered value is masked wherever it appears inside a string, as itself or URL-encoded, form-encoded, JSON-escaped or base64-encoded, including base64 of a longer string like `Basic base64(user:secret)`. Inside a Map or Vec, each value is registered separately. So is a JSON object held in a string, like a service account key, and the credential after the scheme in `Bearer <credential>`.
+A registered value is masked wherever it appears inside a string, as itself or URL-encoded, form-encoded, JSON-escaped, base64-encoded or as a quoted CSV cell holds it, including base64 of a longer string like `Basic base64(user:secret)`. Inside a Map or Vec, each value is registered separately. So is a JSON object held in a string, like a service account key, and the credential after the scheme in `Bearer <credential>`.
 
 The same goes for bytes: a `Bytes` value holding a registered value or a credential field is masked whole, wherever it is recorded. So are bytes rendered as numbers, as in `Bytes([83, 69, ...])`, which is how a failure's message shows them when an `Err` holds a response's `body-bytes`, and a Vec holding nothing but bytes. An `Err` that `hot run` prints as a program's result is masked too. Any other result is the program's output, and is printed as it is.
 
@@ -418,6 +418,7 @@ Masking is a safety net for records, not a guarantee. Treat any secret that may 
 - **A run's result as delivered.** The waiting webhook or MCP caller receives the run's real result, since it may be what they asked for, and `hot run` prints it. The stored `run.result` is masked, so **a caller that reads a result back through the API sees `<secret>`** for a credential field or registered secret in it.
 - **Stream data.** `::hot::stream/data` and HTTP stream chunks go to their consumers with registered secrets masked, but not credential fields, which may be what a consumer asked for.
 - **Large values spilled to blob storage.** Masking happens before a value is spilled, but a running call's large argument spilled before a secret was registered stays in its blob, though its record is masked and written again without it.
+- **Columns in raw CSV text.** A `password` column is a credential field once `from-csv` makes it a Map key, but not in the text passed to it. Mark such values with `::hot::ctx/mark-secret`, or use `iter-csv` so the text never enters a record.
 - **Trace-level logs.** `HOT_LOG_LEVEL=trace` logs values as the VM handles them. Don't use it where logs are shared.
 
 ### Runtime Functions

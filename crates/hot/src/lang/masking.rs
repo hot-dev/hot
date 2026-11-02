@@ -379,17 +379,19 @@ fn is_base64_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'-' | b'_' | b'=')
 }
 
-/// `value` as URL or form encoding or a JSON string would carry it, where that
-/// differs from `value`.
+/// `value` as URL or form encoding, a JSON string or a quoted CSV cell would
+/// carry it, where that differs from `value`.
 fn text_encodings(value: &[u8]) -> Vec<String> {
     let mut variants = vec![
         percent_encoding::percent_encode(value, COMPONENT).to_string(),
         form_urlencoded::byte_serialize(value).collect(),
     ];
-    if let Ok(text) = std::str::from_utf8(value)
-        && let Ok(quoted) = serde_json::to_string(text)
-    {
-        variants.push(quoted[1..quoted.len() - 1].to_string());
+    if let Ok(text) = std::str::from_utf8(value) {
+        if let Ok(quoted) = serde_json::to_string(text) {
+            variants.push(quoted[1..quoted.len() - 1].to_string());
+        }
+        variants.push(text.replace('"', "\"\""));
+        variants.push(text.replace('\'', "''"));
     }
     variants
 }
@@ -1009,6 +1011,19 @@ mod tests {
         let spaced = "two words and more";
         let form: String = form_urlencoded::byte_serialize(spaced.as_bytes()).collect();
         assert_eq!(masked_text(&[spaced], &format!("k={form}")), "k=<secret>");
+    }
+
+    #[test]
+    fn masks_a_value_as_a_quoted_csv_cell_holds_it() {
+        let quoted = "pa\"ss'word,1";
+        assert_eq!(
+            masked_text(&[quoted], "id,key\n1,\"pa\"\"ss'word,1\"\n"),
+            "id,key\n1,\"<secret>\"\n"
+        );
+        assert_eq!(
+            masked_text(&[quoted], "id;key\n1;'pa\"ss''word,1'\n"),
+            "id;key\n1;'<secret>'\n"
+        );
     }
 
     #[test]
