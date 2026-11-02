@@ -1,0 +1,227 @@
+::box::test::params ns
+meta ["test"]
+
+// Request, body and query building for the endpoint namespaces (pure).
+
+::folders ::box::folders
+::files ::box::files
+::search ::box::search
+::events ::box::events
+::sharing ::box::sharing
+::hooks ::box::webhooks
+::oauth ::box::oauth
+
+http-err fn (response: Map): Any {
+  ::box::api/HttpError(::hot::http/HttpResponse(response))
+}
+
+test-url-building
+meta ["test"] fn () {
+    assert-eq("https://api.box.com/2.0/files/123", ::box/url("/files/123"))
+    assert-eq("https://upload.box.com/api/2.0/files/content?fields=id", ::box/upload-url("/files/content", {fields: "id"}))
+    assert-eq("a%2Fb%3Fc", ::box/encode-id("a/b?c"), "ids are encoded for path segments")
+    assert-eq("123", ::box/encode-id(123))
+}
+
+test-query-params
+meta ["test"] fn () {
+    params ::box/query-params({fields: "id", limit: 100}, {limit: 5, token: "t", as-user: "9", fields: null, extra: "x"})
+    assert-eq({limit: 5, extra: "x"}, params, "opts override defaults, a null drops one, credentials are stripped")
+    local ::box/query-params({}, {name: "n", sort: "name"}, ["name"])
+    assert-eq({sort: "name"}, local, "a function's own keys never reach the query")
+}
+
+test-condition-headers
+meta ["test"] fn () {
+    assert-eq({}, ::box/condition-headers({fields: "id"}))
+    assert-eq({if-match: "3"}, ::box/condition-headers({if-match: 3}))
+    assert-eq({boxapi: "shared_link=x"}, ::box/condition-headers({boxapi: "shared_link=x", if-none-match: ""}))
+}
+
+test-folder-items-params
+meta ["test"] fn () {
+    defaults ::folders/items-params({})
+    assert-eq(true, defaults.usemarker, "marker paging by default")
+    assert-eq(1000, defaults.limit)
+    assert-eq(::box/ITEM_FIELDS, defaults.fields)
+    offset ::folders/items-params({offset: 200, limit: 50})
+    assert(not(in("usemarker", keys(offset))), "offset paging drops usemarker")
+    assert-eq(200, offset.offset)
+    custom ::folders/items-params({fields: "id,name", sort: "date", direction: "DESC", marker: "m1", paging: "marker", if-match: "1"})
+    assert-eq("m1", custom.marker)
+    assert-eq("date", custom.sort)
+    assert(not(in("paging", keys(custom))), "local keys are not sent")
+    assert(not(in("if-match", keys(custom))), "headers are not sent as params")
+}
+
+test-folder-bodies
+meta ["test"] fn () {
+    assert-eq({name: "Reports", parent: {id: "0"}}, ::folders/create-body("Reports", "0", {}))
+    assert-eq({name: "R", parent: {id: "5"}, sync_state: "synced"}, ::folders/create-body("R", "5", {metadata: {sync_state: "synced", x: null}}))
+    assert-eq({parent: {id: "9"}}, ::folders/copy-body("9", null), "no null name")
+    assert-eq({parent: {id: "9"}, name: "Copy"}, ::folders/copy-body("9", "Copy"))
+    assert-eq({}, ::folders/restore-body({}))
+    assert-eq({name: "Back", parent: {id: "3"}}, ::folders/restore-body({name: "Back", parent-id: "3"}))
+}
+
+test-conflict-item
+meta ["test"] fn () {
+    conflict err(http-err({status: 409, headers: {}, body: {
+        type: "error", status: 409, code: "item_name_in_use", message: "Item with the same name already exists",
+        context_info: {conflicts: [{type: "folder", id: "777", name: "Reports"}]}
+    }}))
+    assert-eq("777", ::folders/conflict-item(conflict).id)
+    single err(http-err({status: 409, headers: {}, body: {code: "item_name_in_use", context_info: {conflicts: {type: "file", id: "8"}}}}))
+    assert-eq("8", ::folders/conflict-item(single).id, "a single conflict Map works too")
+    assert(is-null(::folders/conflict-item(err("other"))))
+}
+
+test-file-headers
+meta ["test"] fn () {
+    assert-eq({x-rep-hints: "[extracted_text]"}, ::files/file-headers({rep-hints: "[extracted_text]"}))
+    assert-eq({}, ::files/file-headers({}))
+    assert-eq({if-none-match: "7"}, ::files/file-headers({if-none-match: "7"}))
+}
+
+test-file-bodies
+meta ["test"] fn () {
+    assert-eq({parent: {id: "1"}}, ::files/copy-body("1", {}))
+    assert-eq({parent: {id: "1"}, name: "n", version: "v9"}, ::files/copy-body("1", {name: "n", version: "v9"}))
+    assert-eq({type: "file_version", id: "456"}, ::files/promote-body("456"))
+    assert-eq({name: "x"}, ::files/restore-body({name: "x"}))
+}
+
+test-search-params
+meta ["test"] fn () {
+    p ::search/search-params("quarterly report", {
+        file_extensions: ["pdf", "docx"],
+        ancestor_folder_ids: ["12", "34"],
+        content_types: ["name", "file_content"],
+        type: "file",
+        limit: 50
+    })
+    assert-eq("quarterly report", p.query)
+    assert-eq(["pdf", "docx"], p.file_extensions)
+    assert-eq(50, p.limit)
+    assert-eq(::box/ITEM_FIELDS, p.fields)
+    assert(not(in("mdfilters", keys(p))), "no mdfilters unless given")
+    url ::box/url("/search", p)
+    assert(contains(url, "file_extensions=pdf%2Cdocx"), "array filters are comma-separated")
+    assert(contains(url, "ancestor_folder_ids=12%2C34"))
+    assert(contains(url, "query=quarterly+report"))
+    blank ::search/search-params(" ", {})
+    assert(not(in("query", keys(blank))), "a blank query is omitted")
+}
+
+test-search-mdfilters
+meta ["test"] fn () {
+    f ::search/md-filter("enterprise", "contract", {status: "signed", amount: {gt: 10000}})
+    assert-eq({scope: "enterprise", templateKey: "contract", filters: {status: "signed", amount: {gt: 10000}}}, f)
+    p ::search/search-params(null, {mdfilters: f})
+    assert-eq([f], from-json(p.mdfilters), "mdfilters is a JSON array")
+    assert(not(in("query", keys(p))))
+    assert(is-err(::search/search(null, {})), "a search needs a query or mdfilters")
+}
+
+test-event-params
+meta ["test"] fn () {
+    p ::events/event-params({stream_position: "now", seen: ["a"], max-pages: 3})
+    assert-eq({stream_type: "all", limit: 500, stream_position: "now"}, p, "local keys stay local")
+    admin ::events/event-params({stream_type: "admin_logs", event_type: ["LOGIN", "DOWNLOAD"], created_after: "2026-10-01T00:00:00Z"})
+    assert(contains(::box/url("/events", admin), "event_type=LOGIN%2CDOWNLOAD"))
+    assert(is-err(::events/get-events({stream_type: "bogus"})), "unknown stream types are refused before any call")
+}
+
+test-dedupe-events
+meta ["test"] fn () {
+    events [{event_id: "a", n: 1}, {event_id: "b", n: 2}, {event_id: "a", n: 3}, {n: 4}, {event_id: "c", n: 5}]
+    deduped ::events/dedupe-events(events)
+    assert-eq([1, 2, 4, 5], map(deduped, (e) { e.n }), "the first copy of each event_id wins")
+    seen ::events/dedupe-events(events, ["b", "c"])
+    assert-eq([1, 4], map(seen, (e) { e.n }), "ids from earlier runs are dropped")
+    assert-eq(["a", "b", "a", "c"], ::events/event-ids(events))
+}
+
+test-event-positions
+meta ["test"] fn () {
+    assert-eq("1152922976252290886", ::events/as-position(1152922976252290886))
+    assert-eq("now", ::events/as-position("now"))
+    assert(is-null(::events/as-position("")))
+    assert(::events/is-caught-up({entries: [], next_stream_position: 5}, "5"))
+    assert(::events/is-caught-up({entries: [{}], next_stream_position: "5"}, "5"), "an unmoved position is the end")
+    assert(not(::events/is-caught-up({entries: [{}], next_stream_position: "6"}, "5")))
+}
+
+test-realtime-server
+meta ["test"] fn () {
+    response {chunk_size: 1, entries: [{type: "realtime_server", url: "https://2.realtime.services.box.net/subscribe?channel=abc&stream_type=all", ttl: "10", max_retries: "10", retry_timeout: 610}]}
+    server ::events/realtime-server(response)
+    assert-eq("10", server.max_retries)
+    assert-eq("https://2.realtime.services.box.net/subscribe?channel=abc&stream_type=all&stream_position=123", ::events/long-poll-request-url(server.url, "123"))
+    assert(is-null(::events/realtime-server({entries: []})))
+}
+
+test-shared-link-settings
+meta ["test"] fn () {
+    assert-eq({}, ::sharing/shared-link-settings({}), "no settings: the enterprise default access")
+    s ::sharing/shared-link-settings({access: "open", password: "Secr3t-pass", unshared-at: "2026-12-31T00:00:00Z", can-download: true, can-edit: false})
+    assert-eq("open", s.access)
+    assert-eq("Secr3t-pass", s.password)
+    assert-eq("2026-12-31T00:00:00Z", s.unshared_at)
+    assert-eq({can_download: true, can_edit: false}, s.permissions)
+    assert(not(in("vanity_name", keys(s))))
+}
+
+test-item-path
+meta ["test"] fn () {
+    assert-eq("/files/1", ::sharing/item-path("file", "1"))
+    assert-eq("/folders/2", ::sharing/item-path("folder", "2"))
+    assert(is-err(::sharing/item-path("web_link", "3")))
+}
+
+test-boxapi-header
+meta ["test"] fn () {
+    assert-eq("shared_link=https://app.box.com/s/abc", ::sharing/boxapi-header("https://app.box.com/s/abc", null))
+    assert-eq("shared_link=https://app.box.com/s/abc&shared_link_password=pw", ::sharing/boxapi-header("https://app.box.com/s/abc", "pw"))
+}
+
+test-collaboration-body
+meta ["test"] fn () {
+    b ::sharing/collaboration-body("folder", "12", ::sharing/user-by-email("ana@example.com"), "viewer", {can-view-path: true})
+    assert-eq({type: "folder", id: "12"}, b.item)
+    assert-eq({type: "user", login: "ana@example.com"}, b.accessible_by)
+    assert-eq("viewer", b.role)
+    assert-eq(true, b.can_view_path)
+    assert(not(in("expires_at", keys(b))), "no null expiry")
+    assert-eq({type: "group", id: "9"}, ::sharing/group-by-id("9"))
+    assert-eq({type: "user", id: "8"}, ::sharing/user-by-id("8"))
+    assert(is-err(::sharing/add-collaboration("hub", "1", ::sharing/user-by-id("8"), "viewer")), "bad item types are refused before any call")
+}
+
+test-webhook-body
+meta ["test"] fn () {
+    b ::hooks/webhook-body("folder", "12", "https://example.com/hook", ["FILE.UPLOADED"])
+    assert-eq({target: {type: "folder", id: "12"}, address: "https://example.com/hook", triggers: ["FILE.UPLOADED"]}, b)
+    assert-eq({triggers: ["FILE.TRASHED"]}, ::hooks/webhook-body(null, null, null, ["FILE.TRASHED"]), "updates omit unset parts")
+    assert(is-err(::hooks/create-webhook("folder", "12", "http://insecure", ["FILE.UPLOADED"])))
+    assert(is-err(::hooks/create-webhook("folder", "12", "https://ok", [])))
+    assert(is-err(::hooks/create-webhook("user", "12", "https://ok", ["FILE.UPLOADED"])))
+}
+
+test-authorize-url
+meta ["test"] fn () {
+    url ::oauth/authorize-url("cid", "https://app.example.com/cb", "csrf-1")
+    assert(starts-with(url, "https://account.box.com/api/oauth2/authorize?"))
+    assert(contains(url, "response_type=code"))
+    assert(contains(url, "client_id=cid"))
+    assert(contains(url, "state=csrf-1"))
+    assert(contains(url, "redirect_uri=https%3A%2F%2Fapp.example.com%2Fcb"))
+    assert(not(contains(url, "scope=")), "no scope unless asked")
+    scoped ::oauth/authorize-url("cid", "https://x/cb", "s", {scope: ["root_readonly", "manage_webhook"]})
+    assert(contains(scoped, "scope=root_readonly+manage_webhook"))
+}
+
+test-revoke-body
+meta ["test"] fn () {
+    assert-eq({client_id: "c", client_secret: "s", token: "t"}, ::oauth/revoke-body("c", "s", "t"))
+}

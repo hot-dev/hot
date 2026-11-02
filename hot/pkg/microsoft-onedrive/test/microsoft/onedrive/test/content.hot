@@ -1,0 +1,41 @@
+::microsoft::onedrive::test::content ns
+meta ["test"]
+
+::content ::microsoft::onedrive::content
+
+test-range-math
+meta ["test"] fn () {
+    assert-eq("bytes=0-1023", ::content/range-header(0, 1023))
+    assert-eq("bytes=500-", ::content/range-header(500, null))
+    assert-eq([[0, 3], [4, 7], [8, 9]], ::content/download-ranges(10, 4))
+    assert-eq([[0, 9]], ::content/download-ranges(10, 100))
+    assert-eq([], ::content/download-ranges(0, 4))
+    assert(::content/is-size-limit-error(err("::hot::http/request: response body exceeds http.max-response-bytes (16777216)")))
+    assert(not(::content/is-size-limit-error(err("request failed"))))
+}
+
+item fn (name: Str, size: Int): Map {
+  {id: "i1", name: name, size: size, file: {mimeType: "application/octet-stream"}}
+}
+
+test-read-plan
+meta ["test"] fn () {
+    assert-eq({action: "download", format: "original"}, ::content/read-plan(item("a.docx", 100), "auto"))
+    assert-eq({action: "download", format: "original"}, ::content/read-plan(item("a.docx", 100), null))
+    assert-eq({action: "convert", format: "pdf"}, ::content/read-plan(item("a.docx", 2097152), "pdf"), "2 MB converts")
+    assert-eq({action: "download", format: "original"}, ::content/read-plan(item("a.docx", 2097153), "pdf"), "over 2 MB falls back to the original")
+    assert-eq({action: "download", format: "pdf"}, ::content/read-plan(item("a.PDF", 50000000), "pdf"), "a PDF is already a PDF")
+    assert-eq({action: "download", format: "original"}, ::content/read-plan(item("movie.mp4", 10), "pdf"), "unsupported source")
+    assert-eq({action: "convert", format: "html"}, ::content/read-plan(item("plan.loop", 10), "html"))
+    assert-eq({action: "download", format: "text"}, ::content/read-plan(item("notes.md", 10), "TEXT"))
+    assert-eq("error", ::content/read-plan(item("a.docx", 10), "text").action)
+    assert-eq("error", ::content/read-plan(item("a.docx", 10), "epub").action)
+    assert-eq("error", ::content/read-plan({id: "f", name: "Reports", folder: {}}, "auto").action)
+}
+
+test-convert-params
+meta ["test"] fn () {
+    assert-eq({format: "pdf"}, ::content/convert-params("PDF", {}))
+    assert-eq({format: "jpg", width: 300, height: 200}, ::content/convert-params("jpg", {width: 300, height: 200}))
+    assert(is-err(::content/convert-params("jpg", {width: 300})), "jpg needs both dimensions")
+}

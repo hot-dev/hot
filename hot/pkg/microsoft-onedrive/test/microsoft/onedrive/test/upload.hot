@@ -1,0 +1,65 @@
+::microsoft::onedrive::test::upload ns
+meta ["test"]
+
+::up ::microsoft::onedrive::upload
+
+test-to-bytes
+meta ["test"] fn () {
+    bin Bytes([0, 1, 255, 254, 195, 40])
+    assert-eq(bin, ::up/to-bytes(bin), "Bytes pass through untouched")
+    assert-eq(Bytes("héllo"), ::up/to-bytes("héllo"))
+    assert-eq(Bytes("{\"a\":1}"), ::up/to-bytes({a: 1}))
+    assert-eq(Bytes([]), ::up/to-bytes(null))
+}
+
+test-chunk-math
+meta ["test"] fn () {
+    assert-eq(327680, ::up/align-chunk-size(1), "at least 320 KiB")
+    assert-eq(655360, ::up/align-chunk-size(700000), "rounded down to a 320 KiB multiple")
+    assert-eq(10485760, ::up/align-chunk-size(10485760), "10 MiB is 32 x 320 KiB")
+    assert-eq(62586880, ::up/align-chunk-size(100000000), "capped under 60 MiB")
+    assert(lt(::up/align-chunk-size(100000000), 62914560))
+    assert-eq(0, mod(::up/DEFAULT_CHUNK_SIZE, 327680))
+    assert-eq("bytes 0-25/128", ::up/content-range(0, 26, 128), "the documented example")
+    assert-eq("bytes 101-127/128", ::up/content-range(101, 128, 128))
+    assert-eq([0, 327680], ::up/chunk-bounds(0, 327680, 1000000))
+    assert-eq([983040, 1000000], ::up/chunk-bounds(983040, 327680, 1000000), "the last chunk is short")
+}
+
+test-next-offset-from-ranges
+meta ["test"] fn () {
+    assert-eq(26, ::up/next-offset-from-ranges(["26-"]))
+    assert-eq(12345, ::up/next-offset-from-ranges(["12345-55232", "77829-99375"]))
+    assert(is-null(::up/next-offset-from-ranges([])))
+    assert(is-null(::up/next-offset-from-ranges(null)))
+    assert(is-null(::up/next-offset-from-ranges(["junk"])), "malformed ranges never halt")
+}
+
+test-build-session-body
+meta ["test"] fn () {
+    assert-eq({item: {"@microsoft.graph.conflictBehavior": "rename"}}, ::up/build-session-body("rename", {}), "unset optionals omitted")
+    full ::up/build-session-body("fail", {description: "d", file-size: 1234, defer-commit: true})
+    assert-eq({item: {"@microsoft.graph.conflictBehavior": "fail", description: "d", fileSize: 1234}, deferCommit: true}, full)
+}
+
+test-classify-chunk-response
+meta ["test"] fn () {
+    done ::up/classify-chunk-response(::hot::http/HttpResponse({status: 201, headers: {}, body: {id: "f1", name: "big.bin"}}), 10)
+    assert-eq("complete", done.state)
+    assert-eq("f1", done.item.id)
+    assert-eq("complete", ::up/classify-chunk-response(::hot::http/HttpResponse({status: 200, headers: {}, body: {id: "f1"}}), 10).state)
+    more ::up/classify-chunk-response(::hot::http/HttpResponse({status: 202, headers: {}, body: {expirationDateTime: "2026-11-02T00:00:00Z", nextExpectedRanges: ["655360-"]}}), 327680)
+    assert-eq("incomplete", more.state)
+    assert-eq(655360, more.next-offset, "nextExpectedRanges wins")
+    assumed ::up/classify-chunk-response(::hot::http/HttpResponse({status: 202, headers: {}, body: {}}), 327680)
+    assert-eq(327680, assumed.next-offset, "no ranges: assume the chunk landed")
+    assert-eq("retry", ::up/classify-chunk-response(err("::hot::http/request: request failed: connection reset"), 0).state)
+    expired ::up/classify-chunk-response(::hot::http/HttpResponse({status: 404, headers: {}, body: ""}), 0)
+    assert(is-err(expired))
+    assert(contains(err-message(expired), "expired"))
+    assert(contains(err-message(::up/classify-chunk-response(::hot::http/HttpResponse({status: 416, headers: {}, body: ""}), 0)), "resume-upload"))
+    conflict ::up/classify-chunk-response(::hot::http/HttpResponse({status: 409, headers: {}, body: {error: {code: "nameAlreadyExists", message: "exists"}}}), 0)
+    assert(::microsoft::graph::api/has-code(conflict, "nameAlreadyExists"))
+    throttled ::up/classify-chunk-response(::hot::http/HttpResponse({status: 503, headers: {"Retry-After": "30"}, body: ""}), 0)
+    assert(::microsoft::graph::api/is-retryable(throttled), "5xx is an Err the run retry policy can act on")
+}

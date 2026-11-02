@@ -1,0 +1,180 @@
+::microsoft::sharepoint::permissions ns
+meta {
+    doc: """
+    Least-privilege app-only access: grant an app (by client id) a role
+    on one site (`Sites.Selected`) or one list
+    (`Lists.SelectedOperations.Selected`), list the grants, change and
+    revoke them. For single files and folders
+    (`Files.SelectedOperations.Selected`) use
+    `::microsoft::onedrive::sharing/grant-app`.
+
+    **This is an admin step.** The *granting* call needs
+    `Sites.FullControl.All` (application, or delegated for a SharePoint
+    Administrator who is a member of the site); the app being granted
+    only needs `Sites.Selected` (or the list/file scope) consented in
+    Entra ID. Usually a separate admin tool or a one-off run with an
+    admin app does the granting; your production app never holds
+    `Sites.FullControl.All`.
+
+    All three steps are required for access: (1) the Selected scope is
+    admin-consented for the app, (2) a grant exists on the resource,
+    (3) the app's token carries the scope.
+
+    **Roles:** `read`, `write`, `owner`, `fullcontrol`.
+    """
+}
+
+::sp ::microsoft::sharepoint
+::api ::microsoft::graph::api
+::auth ::microsoft::graph::auth
+
+ROLES ["read", "write", "owner", "fullcontrol"]
+
+check-roles fn (roles: Vec): Vec {
+  bad filter(roles, (r) { not(in(r, ROLES)) })
+  cond {
+    is-empty(roles) => { err("microsoft-sharepoint: a grant needs at least one role (read, write, owner, fullcontrol)") }
+    not(is-empty(bad)) => { err(`microsoft-sharepoint: roles are read, write, owner or fullcontrol (got ${join(bad, ", ")})`) }
+    => { roles }
+  }
+}
+
+build-site-grant
+meta {
+    doc: """The body of a site grant (pure): `{roles, grantedToIdentities: [{application: {id, displayName}}]}`, the documented shape for `POST /sites/{id}/permissions`."""
+}
+fn (app-id: Str, display-name: Str?, roles: Vec): Map {
+  checked check-roles(roles)
+  cond {
+    is-err(checked) => { checked }
+    => { {roles: roles, grantedToIdentities: [{application: ::auth/compact({id: app-id, displayName: display-name})}]} }
+  }
+}
+
+build-list-grant
+meta {
+    doc: """The body of a list grant (pure): `{roles, grantedToV2: {application: {id, displayName}}}`, the documented shape for `POST /sites/{id}/lists/{id}/permissions`."""
+}
+fn (app-id: Str, display-name: Str?, roles: Vec): Map {
+  checked check-roles(roles)
+  cond {
+    is-err(checked) => { checked }
+    => { {roles: roles, grantedToV2: {application: ::auth/compact({id: app-id, displayName: display-name})}} }
+  }
+}
+
+perm-json fn (method: Str, path: Str, body: Any, opts: Map): Any {
+  ::api/json(method, path, {}, body, ::api/credential-opts(opts))
+}
+
+grant-site
+meta {
+    doc: """
+    POST /sites/{site-id}/permissions - grant app `app-id` (its client id)
+    `roles` on a site, for an app consented `Sites.Selected`. Needs
+    `Sites.FullControl.All`. Returns the permission (keep its `id` to
+    revoke).
+
+    ```hot
+    // Run once with an admin app's credentials
+    grant ::microsoft::sharepoint::permissions/grant-site(site-id, "11111111-2222-3333-4444-555555555555", "Contoso Indexer", ["read"], {
+      client-id: admin-app-id, client-secret: admin-secret, tenant-id: "contoso.onmicrosoft.com"
+    })
+    grant.id
+    ```
+    """
+}
+fn
+(site-id: Str, app-id: Str, display-name: Str?, roles: Vec): Map {
+  grant-site(site-id, app-id, display-name, roles, {})
+},
+(site-id: Str, app-id: Str, display-name: Str?, roles: Vec, opts: Map): Map {
+  body build-site-grant(app-id, display-name, roles)
+  if(is-err(body), body, perm-json("POST", `${::sp/site-path(site-id)}/permissions`, body, opts))
+}
+
+list-site-grants
+meta {
+    doc: """GET /sites/{site-id}/permissions - the app grants on a site (`id`, `roles`, `grantedToIdentitiesV2`). Needs `Sites.FullControl.All`."""
+}
+fn
+(site-id: Str): Vec {
+  list-site-grants(site-id, {})
+},
+(site-id: Str, opts: Map): Vec {
+  ::api/collect-pages(`${::sp/site-path(site-id)}/permissions`, ::api/credential-opts(opts), null)
+}
+
+get-site-grant
+meta {doc: """GET /sites/{site-id}/permissions/{id}."""}
+fn
+(site-id: Str, permission-id: Str): Map {
+  get-site-grant(site-id, permission-id, {})
+},
+(site-id: Str, permission-id: Str, opts: Map): Map {
+  perm-json("GET", `${::sp/site-path(site-id)}/permissions/${::api/encode-segment(permission-id)}`, "", opts)
+}
+
+update-site-grant
+meta {
+    doc: """PATCH /sites/{site-id}/permissions/{id} - change a grant's roles (e.g. raise `read` to `write`). Returns the permission."""
+}
+fn
+(site-id: Str, permission-id: Str, roles: Vec): Map {
+  update-site-grant(site-id, permission-id, roles, {})
+},
+(site-id: Str, permission-id: Str, roles: Vec, opts: Map): Map {
+  checked check-roles(roles)
+  if(is-err(checked), checked, perm-json("PATCH", `${::sp/site-path(site-id)}/permissions/${::api/encode-segment(permission-id)}`, {roles: roles}, opts))
+}
+
+delete-site-grant
+meta {
+    doc: """DELETE /sites/{site-id}/permissions/{id} - revoke an app's access to the site. Returns true."""
+}
+fn
+(site-id: Str, permission-id: Str): Bool {
+  delete-site-grant(site-id, permission-id, {})
+},
+(site-id: Str, permission-id: Str, opts: Map): Bool {
+  result perm-json("DELETE", `${::sp/site-path(site-id)}/permissions/${::api/encode-segment(permission-id)}`, "", opts)
+  if(is-err(result), result, true)
+}
+
+grant-list
+meta {
+    doc: """POST /sites/{site-id}/lists/{list}/permissions - grant an app `roles` on one list, for an app consented `Lists.SelectedOperations.Selected`. Breaks permission inheritance on the list. Returns the permission."""
+}
+fn
+(site-id: Str, list: Str, app-id: Str, display-name: Str?, roles: Vec): Map {
+  grant-list(site-id, list, app-id, display-name, roles, {})
+},
+(site-id: Str, list: Str, app-id: Str, display-name: Str?, roles: Vec, opts: Map): Map {
+  body build-list-grant(app-id, display-name, roles)
+  if(is-err(body), body, perm-json("POST", `${::sp/list-path(site-id, list)}/permissions`, body, opts))
+}
+
+list-list-grants
+meta {
+    doc: """GET /sites/{site-id}/lists/{list}/permissions - the permissions on a list."""
+}
+fn
+(site-id: Str, list: Str): Vec {
+  list-list-grants(site-id, list, {})
+},
+(site-id: Str, list: Str, opts: Map): Vec {
+  ::api/collect-pages(`${::sp/list-path(site-id, list)}/permissions`, ::api/credential-opts(opts), null)
+}
+
+delete-list-grant
+meta {
+    doc: """DELETE /sites/{site-id}/lists/{list}/permissions/{id} - revoke a list grant. Returns true."""
+}
+fn
+(site-id: Str, list: Str, permission-id: Str): Bool {
+  delete-list-grant(site-id, list, permission-id, {})
+},
+(site-id: Str, list: Str, permission-id: Str, opts: Map): Bool {
+  result perm-json("DELETE", `${::sp/list-path(site-id, list)}/permissions/${::api/encode-segment(permission-id)}`, "", opts)
+  if(is-err(result), result, true)
+}

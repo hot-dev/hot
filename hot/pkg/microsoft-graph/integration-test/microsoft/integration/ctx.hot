@@ -1,0 +1,53 @@
+::microsoft::integration::ctx ns
+
+::env ::hot::env
+
+// Placeholder credentials for the microsoft-graph, microsoft-onedrive and
+// microsoft-sharepoint integration suites (one project). Unset environment
+// variables are skipped entirely, so absent credentials behave exactly as
+// if never configured. Every test is read-only.
+//
+//   MS_TENANT_ID      tenant GUID or domain (app-only needs one; delegated defaults to common)
+//   MS_CLIENT_ID      the Entra app (client) id
+//   MS_CLIENT_SECRET  app secret: app-only, or a confidential app's refresh
+//   MS_REFRESH_TOKEN  a delegated refresh token (offline_access) for a test user
+//   MS_ACCESS_TOKEN   or a ready access token
+//   MS_TEST_DRIVE_ID  a drive to read (required for app-only; default /me/drive)
+//   MS_TEST_SITE_ID   a SharePoint site id for the sharepoint suite
+::hot::ctx/set(filter-vals({
+    "microsoft.tenant.id": ::env/get("MS_TENANT_ID", ""),
+    "microsoft.client.id": ::env/get("MS_CLIENT_ID", ""),
+    "microsoft.client.secret": ::env/get("MS_CLIENT_SECRET", ""),
+    "microsoft.oauth.refresh-token": ::env/get("MS_REFRESH_TOKEN", ""),
+    "microsoft.access.token": ::env/get("MS_ACCESS_TOKEN", ""),
+    "microsoft.onedrive.drive-id": ::env/get("MS_TEST_DRIVE_ID", ""),
+}, (v) { not(is-empty(v)) }))
+
+has fn (key: Str): Bool {
+  not(::microsoft::graph::auth/is-blank-value(::hot::ctx/get(key)))
+}
+
+configured
+meta {
+    doc: """True when some Microsoft credential is configured: an access token, a refresh token + client id, or an app secret + client id + tenant."""
+}
+fn (): Bool {
+  or(
+    has("microsoft.access.token"),
+    and(has("microsoft.client.id"), has("microsoft.oauth.refresh-token")),
+    and(has("microsoft.client.id"), has("microsoft.client.secret"), has("microsoft.tenant.id"))
+  )
+}
+
+is-delegated
+meta {
+    doc: """True when the configured credential acts as a user (access or refresh token), so /me works."""
+}
+fn (): Bool {
+  or(has("microsoft.access.token"), has("microsoft.oauth.refresh-token"))
+}
+
+skip fn (): Bool {
+  println("Microsoft credentials not set (MS_CLIENT_ID + MS_REFRESH_TOKEN, or MS_CLIENT_ID + MS_CLIENT_SECRET + MS_TENANT_ID, or MS_ACCESS_TOKEN) - skipping")
+  assert(true, "skipped: no Microsoft credentials")
+}

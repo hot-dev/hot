@@ -120,6 +120,14 @@ sox
 tesseract
 whisper
 
+# Documents & File Storage
+microsoft-graph
+microsoft-onedrive
+microsoft-sharepoint
+dropbox
+box
+documents
+
 # KYC, KYB & Compliance
 persona
 middesk

@@ -1,0 +1,67 @@
+::dropbox::users ns
+meta {
+    doc: """
+    The connected account: who it is, its space usage, and the path root
+    for a team space.
+
+    **Team space.** Members of teams using the team space see team
+    folders beside their own folder only when calls carry
+    `Dropbox-API-Path-Root` with their root namespace. Read it once with
+    `team-path-root(get-current-account())` and pass it as
+    `opts.path-root` (or store it in the `dropbox.path.root` context
+    variable).
+
+    **Scopes.** `account_info.read`.
+    """
+}
+
+::api ::dropbox::api
+
+get-current-account
+meta {
+    doc: """POST users/get_current_account - the connected account: `account_id`, `name`, `email`, `account_type`, `root_info` (`root_namespace_id`, `home_namespace_id`), `team` for team members."""
+}
+fn
+(): Map {
+  get-current-account({})
+},
+(opts: Map): Map {
+  ::api/rpc("users/get_current_account", null, opts)
+}
+
+get-space-usage
+meta {
+    doc: """POST users/get_space_usage - `{used, allocation}` in bytes (`allocation` is individual or team)."""
+}
+fn
+(): Map {
+  get-space-usage({})
+},
+(opts: Map): Map {
+  ::api/rpc("users/get_space_usage", null, opts)
+}
+
+team-path-root
+meta {
+    doc: """
+    The `path-root` option for an account's team space (pure): a
+    `Dropbox-API-Path-Root` value relative to `root_info.root_namespace_id`
+    when it differs from the home namespace (a team-space member), else
+    null (no header needed).
+
+    ```hot
+    account ::dropbox::users/get-current-account()
+    root ::dropbox::users/team-path-root(account)
+    ::dropbox::files/list-folder("", {path-root: root})
+    ```
+    """
+}
+fn (account: Map): Map? {
+  info get(account, "root_info")
+  root if(is-map(info), get(info, "root_namespace_id"), null)
+  home if(is-map(info), get(info, "home_namespace_id"), null)
+  cond {
+    or(is-null(root), eq(root, home)) => { null }
+    => { ::api/path-root-team(Str(root)) }
+  }
+}

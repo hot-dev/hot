@@ -1,0 +1,46 @@
+::microsoft::integration::onedrive ns
+meta ["test"]
+
+// Live OneDrive / SharePoint library reads (no writes). Uses
+// MS_TEST_DRIVE_ID when set (required for app-only), else /me/drive.
+
+::ctx ::microsoft::integration::ctx
+::drives ::microsoft::onedrive::drives
+::items ::microsoft::onedrive::items
+::delta ::microsoft::onedrive::delta
+
+test-drive-and-children
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip() }
+        and(not(::ctx/is-delegated()), not(::ctx/has("microsoft.onedrive.drive-id"))) => {
+            assert(true, "app-only without MS_TEST_DRIVE_ID: skipping")
+        }
+        => {
+            d ::drives/get-drive(or(::hot::ctx/get("microsoft.onedrive.drive-id"), "me"))
+            assert(not(is-err(d)), `get-drive: ${if-err(d, (e) { err-message(e) })}`)
+            assert(in(d.driveType, ["personal", "business", "documentLibrary"]))
+            page ::items/list-children("root", {top: 5, select: "id,name,size,file,folder,parentReference,eTag,cTag"})
+            assert(is-vec(page.value), "children page has a value array")
+            files ::microsoft::onedrive/to-doc-files(page.value)
+            assert-eq(length(page.value), length(files))
+        }
+    }
+}
+
+test-latest-delta-link
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip() }
+        and(not(::ctx/is-delegated()), not(::ctx/has("microsoft.onedrive.drive-id"))) => {
+            assert(true, "app-only without MS_TEST_DRIVE_ID: skipping")
+        }
+        => {
+            link ::delta/latest-delta-link()
+            assert(not(is-err(link)), `latest-delta-link: ${if-err(link, (e) { err-message(e) })}`)
+            set ::delta/sync-changes(link)
+            assert(not(is-err(set)), "an immediate sync from the latest link succeeds")
+            assert(starts-with(set.delta-link, "https://"))
+        }
+    }
+}

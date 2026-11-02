@@ -131,6 +131,12 @@ the release, and name the table or migration.
 Without it, run `hot db migrate` from your deployment's migration job before
 starting the new version.
 
+Some migrations build an index concurrently, so running traffic isn't blocked.
+They read the whole table, then wait for every transaction older than the build
+to finish, so a large database can spend minutes on them, and give your
+migration job room for that. If one is interrupted, run `hot db migrate` again.
+It clears the unfinished index and starts that build over.
+
 ## Upgrading from Hot 2.x {#upgrading-from-hot-2x}
 
 Hot 3.0 adds migrations 012 to 016. They add organization hierarchy, install

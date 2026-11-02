@@ -1,0 +1,101 @@
+::box::test::opts ns
+meta ["test"]
+
+// The per-call rules. Hermetic: no network, and a fake context source.
+
+::auth ::box::auth
+::api ::box::api
+::oauth ::box::oauth
+::fx ::box::test::fixtures
+::hooks ::box::webhooks
+
+CTX {
+    token: "ctx-token",
+    account: null,
+    refresh-token: null,
+    token-store: null,
+    client-id: "ctx-app",
+    client-secret: "ctx-secret",
+    jwt-config: null,
+    private-key: null,
+    enterprise-id: "ctx-enterprise",
+    user-id: null
+}
+
+test-blank-credential-is-an-err-naming-the-key
+meta ["test"] fn () {
+    for-each(["token", "account", "refresh-token", "client-id", "client-secret", "jwt-config", "private-key"], (k) {
+        for-each([null, "", "   "], (blank) {
+            r ::auth/resolve-from(assoc({}, k, blank), CTX)
+            assert(is-err(r), `${k} blank is an Err`)
+            assert(contains(err-message(r), k), `the Err names ${k}`)
+        })
+    })
+    r ::api/json("GET", "https://api.box.com/2.0/users/me", {}, "", {token: ""})
+    assert(is-err(r), "before any network call")
+    assert(contains(err-message(r), "token"))
+    blank-app ::auth/app-keys({client-secret: ""})
+    assert(is-err(blank-app))
+    assert(contains(err-message(blank-app), "client-secret"))
+}
+
+test-unreadable-hosts-are-refused-without-echoing-the-url
+meta ["test"] fn () {
+    for-each(["https://evil.example\\@api.box.com/secret-path", "https://user:pw@api.box.com/secret-path"], (url) {
+        r ::api/request("GET", url, {}, "", {token: "a-per-call-access-token"})
+        assert(is-err(r), url)
+        assert(contains(err-message(r), "cannot be read safely"))
+        assert(not(contains(err-message(r), "secret-path")), "the URL stays out of the Err")
+        assert(not(contains(err-message(r), "user:pw")), "userinfo stays out of the Err")
+        assert(not(contains(err-message(r), "evil.example")), "the URL stays out of the Err")
+    })
+    named ::api/request("GET", "https://evil.example/x", {}, "", {token: "a-per-call-access-token"})
+    assert(contains(err-message(named), "evil.example"), "a readable host is named")
+}
+
+test-absent-keys-still-use-context
+meta ["test"] fn () {
+    assert-eq("ctx-token", ::auth/resolve-from({user-id: "42", marker: null}, CTX).token)
+}
+
+test-resolve-returns-marked-values-unchanged
+meta ["test"] fn () {
+    assert-eq("a-per-call-access-token", ::api/resolve({token: "a-per-call-access-token"}).token)
+    assert-eq("a-per-call-access-token", ::auth/access-token({token: "a-per-call-access-token"}))
+    ccg ::api/resolve({client-id: "a", client-secret: "a-per-call-secret", enterprise-id: "1"})
+    assert-eq("a-per-call-secret", ccg.client-secret)
+    keys-only ::auth/app-keys({client-id: "a", client-secret: "a-per-call-secret"})
+    assert-eq({client-id: "a", client-secret: "a-per-call-secret"}, keys-only)
+    assert(is-null(::hot::ctx/get("token")), "nothing is written to context")
+}
+
+test-jwt-config-secrets
+meta ["test"] fn () {
+    config {
+        enterpriseID: "9",
+        boxAppSettings: {clientID: "cid", clientSecret: "a-config-secret", appAuth: {publicKeyID: "kid", privateKey: "a-config-key", passphrase: "a-passphrase"}}
+    }
+
+    assert-eq(["a-config-secret", "a-config-key", "a-passphrase"], ::auth/jwt-config-secrets(config))
+    text to-json(config)
+    assert-eq([text, "a-config-secret", "a-config-key", "a-passphrase"], ::auth/jwt-config-secrets(text))
+    assert-eq(["not json"], ::auth/jwt-config-secrets("not json"))
+    assert-eq([], ::auth/jwt-config-secrets(null))
+    resolved ::api/resolve({jwt-config: {...config, boxAppSettings: {clientID: "cid", clientSecret: "s3", appAuth: {privateKey: ::fx/TEST_RSA_PEM}}}})
+    assert-eq("jwt", resolved.kind)
+    assert-eq("s3", resolved.client-secret)
+}
+
+test-explicit-webhook-keys-still-verify
+meta ["test"] fn () {
+    assert-eq("missing-timestamp", ::hooks/verification-failure({headers: {}, body-raw: "{}"}, "a-webhook-key", null, 600))
+    assert-eq("no-key", ::hooks/verification-failure({headers: {}, body-raw: "{}"}, "", null, 600))
+}
+
+test-marked-responses-come-back-unchanged
+meta ["test"] fn () {
+    tokens {access_token: "at-value-123", refresh_token: "rt-value-123", expires_in: 3600}
+    assert-eq(tokens, ::auth/mark-fields(tokens, ::auth/TOKEN_RESPONSE_SECRETS))
+    record {access-token: "at-value-123", refresh-token: "rt-value-123", expires-at: 5}
+    assert-eq(record, ::auth/mark-fields(record, ::auth/RECORD_SECRETS))
+}

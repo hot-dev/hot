@@ -1,0 +1,129 @@
+::box::test::upload ns
+meta ["test"]
+
+// Upload body building, digests and part math (pure). SHA-1 vectors come
+// from Python's hashlib.
+
+::up ::box::upload
+::bytes ::hot::bytes
+
+ALL_BYTES Bytes(range(0, 256))
+
+test-sha1-vectors
+meta ["test"] fn () {
+    assert-eq("2aae6c35c94fcfb415dbe95f408b9ce91ee846ed", ::up/sha1-hex("hello world"))
+    assert-eq("Kq5sNclPz7QV2+lfQIuc6R7oRu0=", ::up/sha1-base64("hello world"))
+    assert-eq("4916d6bdb7f78e6803698cab32d1586ea457dfc8", ::up/sha1-hex(ALL_BYTES))
+    assert-eq("sha=SRbWvbf3jmgDaYyrMtFYbqRX38g=", ::up/digest-header(ALL_BYTES), "binary content hashes byte for byte")
+}
+
+test-to-bytes
+meta ["test"] fn () {
+    assert-eq(Bytes([0, 255]), ::up/to-bytes(Bytes([0, 255])))
+    assert-eq(Bytes("hé"), ::up/to-bytes("hé"))
+    assert-eq(Bytes([]), ::up/to-bytes(null))
+    assert-eq({a: 1}, from-json(Str(::up/to-bytes({a: 1}))))
+}
+
+test-upload-attributes
+meta ["test"] fn () {
+    assert-eq({name: "a.txt", parent: {id: "0"}}, ::up/upload-attributes("a.txt", "0", {}))
+    full ::up/upload-attributes("a.txt", "5", {content-modified-at: "2026-10-01T00:00:00Z", description: "d", attributes: {content_created_at: "2026-09-01T00:00:00Z"}})
+    assert-eq("2026-10-01T00:00:00Z", full.content_modified_at)
+    assert-eq("2026-09-01T00:00:00Z", full.content_created_at)
+    assert-eq("d", full.description)
+    version ::up/upload-attributes(null, null, {})
+    assert-eq({}, version, "a new version sends no name or parent unless asked")
+}
+
+test-build-multipart-is-binary-safe
+meta ["test"] fn () {
+    content Bytes([0, 255, 13, 10, 45, 45, 0])
+    body ::up/build-multipart({name: "bin.dat", parent: {id: "0"}}, content, "bin.dat", "BOUNDARY")
+    head Bytes("--BOUNDARY\r\nContent-Disposition: form-data; name=\"attributes\"\r\n\r\n")
+    assert-eq(head, slice(body, 0, length(head)), "the attributes part comes first")
+    file-head Bytes("Content-Disposition: form-data; name=\"file\"; filename=\"bin.dat\"\r\nContent-Type: application/octet-stream\r\n\r\n")
+    at ::bytes/index-of(body, file-head)
+    assert(is-some(at), "the file part follows")
+    start add(at, length(file-head))
+    assert-eq(content, slice(body, start, add(start, length(content))), "content bytes are copied verbatim")
+    tail Bytes("\r\n--BOUNDARY--\r\n")
+    assert-eq(tail, slice(body, sub(length(body), length(tail)), length(body)))
+    attrs-start length(head)
+    attrs-end ::bytes/index-of(body, Bytes("\r\n--BOUNDARY\r\n"))
+    assert-eq({name: "bin.dat", parent: {id: "0"}}, from-json(Str(slice(body, attrs-start, attrs-end))))
+}
+
+test-safe-filename
+meta ["test"] fn () {
+    assert-eq("a_b_c_", ::up/safe-filename("a\"b\\c\n"))
+    assert-eq("file", ::up/safe-filename(""))
+    assert-eq("Q3 report.pdf", ::up/safe-filename("Q3 report.pdf"))
+}
+
+test-first-entry
+meta ["test"] fn () {
+    assert-eq({id: "1"}, ::up/first-entry({total_count: 1, entries: [{id: "1"}]}))
+    assert-eq({id: "2"}, ::up/first-entry({id: "2"}))
+}
+
+test-part-math
+meta ["test"] fn () {
+    assert-eq("bytes 0-8388607/20000000", ::up/part-range(0, 8388608, 20000000))
+    assert-eq("bytes 16777216-19999999/20000000", ::up/part-range(16777216, 3222784, 20000000))
+    offsets ::up/part-offsets(20000000, 8388608)
+    assert-eq([[0, 8388608], [8388608, 8388608], [16777216, 3222784]], offsets)
+    assert-eq(20000000, reduce(offsets, (acc, o) { add(acc, last(o)) }, 0), "parts cover the file exactly")
+    assert-eq([[0, 10]], ::up/part-offsets(10, 100))
+}
+
+test-part-headers
+meta ["test"] fn () {
+    h ::up/part-headers(Bytes("hello world"), 100, 1000)
+    assert-eq("sha=Kq5sNclPz7QV2+lfQIuc6R7oRu0=", h.Digest)
+    assert-eq("bytes 100-110/1000", get(h, "Content-Range"))
+    assert-eq("application/octet-stream", get(h, "Content-Type"))
+}
+
+test-create-session-body
+meta ["test"] fn () {
+    assert-eq({folder_id: "0", file_size: 25000000, file_name: "big.zip"}, ::up/create-session-body("0", "big.zip", 25000000))
+}
+
+test-commit-body
+meta ["test"] fn () {
+    parts [
+        {part_id: "BFDF5379", offset: 8388608, size: 100, sha1: "b", extra: "x"},
+        {part_id: "6F2A3B91", offset: 0, size: 8388608, sha1: "a"}
+    ]
+    body ::up/commit-body(parts, null)
+    assert-eq(["6F2A3B91", "BFDF5379"], map(body.parts, (p) { p.part_id }), "parts are sorted by offset")
+    assert(not(in("extra", keys(first(body.parts)))), "only the commit fields are sent")
+    assert(not(in("attributes", keys(body))), "no null attributes")
+    with-attrs ::up/commit-body(parts, {content_modified_at: "2026-10-01T00:00:00Z"})
+    assert-eq("2026-10-01T00:00:00Z", with-attrs.attributes.content_modified_at)
+    assert(not(in("attributes", keys(::up/commit-body(parts, {})))), "empty attributes are omitted")
+}
+
+test-preflight-body
+meta ["test"] fn () {
+    assert-eq({name: "a.pdf", parent: {id: "0"}, size: 1024}, ::up/preflight-body("a.pdf", "0", 1024))
+    assert-eq({size: 5}, ::up/preflight-body(null, null, 5))
+}
+
+test-preflight-result
+meta ["test"] fn () {
+    transport ::up/preflight-result(err("::hot::http/request: request failed: dns"))
+    assert(is-err(transport))
+    assert(contains(err-message(transport), "request failed"))
+    ok ::up/preflight-result(::hot::http/HttpResponse({status: 200, headers: {}, body: {upload_url: "https://upload.box.com/api/2.0/files/content", upload_token: "t"}}))
+    assert-eq("https://upload.box.com/api/2.0/files/content", ok.upload_url)
+    conflict ::up/preflight-result(::hot::http/HttpResponse({status: 409, headers: {}, body: {type: "error", status: 409, code: "item_name_in_use", message: "Item with the same name already exists"}}))
+    assert(::box::api/has-code(conflict, "item_name_in_use"))
+    assert(contains(err-message(conflict), "HTTP 409 item_name_in_use"))
+}
+
+test-options-is-idempotent
+meta ["test"] fn () {
+    assert(::box::api/is-retryable-transport("OPTIONS", "::hot::http/request: request failed: reset"))
+}

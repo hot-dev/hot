@@ -1,0 +1,519 @@
+::microsoft::graph::subscriptions ns
+meta {
+    doc: """
+    Change notifications (webhooks): create, renew, reauthorize, list
+    and delete subscriptions; answer Graph's validation handshake; parse
+    and verify notification and lifecycle-notification payloads.
+
+    **Flow**
+
+    1. Expose an HTTPS webhook. When you create a subscription, Graph
+       POSTs `?validationToken=...` to it; answer within 10 seconds with
+       `validation-response(request)` (200, `text/plain`, the token).
+    2. `create-subscription(resource, change-type, notification-url,
+       {client-state})`. Keep the returned `id`.
+    3. Each notification POST: `verify-notifications(request,
+       client-state)` checks every `clientState` in constant time; reply
+       `202 Accepted` within 3 seconds (`accepted()`) and do the work in a
+       follow-up event, or Graph retries and eventually throttles the
+       endpoint.
+    4. Subscriptions expire and are never renewed by Graph: renew from a
+       Hot schedule with `renew-subscription` before
+       `max-expiration-minutes(resource)` runs out.
+
+    **Lifecycle notifications** (`lifecycleNotificationUrl`) arrive with
+    a `lifecycleEvent`: `reauthorizationRequired` (call
+    `reauthorize-subscription` or `renew-subscription`),
+    `subscriptionRemoved` (create it again, then catch up with a delta
+    query), or `missed` (resync with a delta query). Outlook and Teams
+    send all three; other resources send `reauthorizationRequired`.
+
+    Notifications carry no file data for drives and lists: treat one as
+    "run the delta sync now".
+
+    **Permissions.** Creating a subscription needs the same permission
+    as reading the resource (e.g. `Files.Read.All` for a drive).
+    """
+}
+
+::api ::microsoft::graph::api
+::auth ::microsoft::graph::auth
+::time ::hot::time
+::ctx ::hot::ctx
+::http ::hot::http
+
+MAX_CLIENT_STATE_LENGTH 128
+MIN_EXPIRATION_MINUTES 45
+RENEWAL_MARGIN_MINUTES 60
+
+// Maximum subscription lifetimes in minutes, from
+// https://learn.microsoft.com/graph/api/resources/subscription#subscription-lifetime
+MAX_EXPIRATION_MINUTES {
+    drive-item: 42300,
+    list: 42300,
+    outlook: 10080,
+    outlook-rich: 1440,
+    directory: 41760,
+    teams: 4320,
+    presence: 60,
+    other: 4230
+}
+
+// ---------------------------------------------------------------------------
+// Lifetimes (pure)
+// ---------------------------------------------------------------------------
+
+strip-slashes
+meta {
+    doc: """Remove leading and trailing `/` from a resource path (pure): `"/me/drive/root"` becomes `"me/drive/root"`."""
+}
+fn (path: Str): Str {
+  p trim(path)
+  cond {
+    starts-with(p, "/") => { strip-slashes(slice(p, 1, length(p))) }
+    ends-with(p, "/") => { strip-slashes(slice(p, 0, sub(length(p), 1))) }
+    => { p }
+  }
+}
+
+resource-kind
+meta {
+    doc: """Classify a subscription `resource` path for its lifetime (pure): `drive-item`, `list`, `outlook`, `directory`, `teams`, `presence` or `other`."""
+}
+fn (resource: Str): Str {
+  r lowercase(resource)
+  cond {
+    or(contains(r, "/drive/root"), and(contains(r, "drives/"), contains(r, "/root"))) => { "drive-item" }
+    contains(r, "/lists/") => { "list" }
+    or(contains(r, "chats"), contains(r, "teams"), contains(r, "channels"), contains(r, "onlinemeetings"), contains(r, "callrecords")) => { "teams" }
+    or(contains(r, "messages"), contains(r, "events"), contains(r, "contacts"), contains(r, "mailfolders")) => { "outlook" }
+    contains(r, "presence") => { "presence" }
+    or(starts-with(strip-slashes(r), "users"), starts-with(strip-slashes(r), "groups"), starts-with(strip-slashes(r), "directory")) => { "directory" }
+    => { "other" }
+  }
+}
+
+max-expiration-minutes
+meta {
+    doc: """
+    The longest lifetime Graph allows for a subscription on `resource`,
+    in minutes (pure): driveItem and SharePoint lists 42,300 (under 30
+    days), users/groups 41,760, Outlook 10,080 (1,440 with resource
+    data), Teams 4,320, presence 60, otherwise 4,230. Pass
+    `include-resource-data: true` for the Outlook rich-notification cap.
+    """
+}
+fn
+(resource: Str): Int {
+  max-expiration-minutes(resource, false)
+},
+(resource: Str, include-resource-data: Bool): Int {
+  kind resource-kind(resource)
+  key if(and(eq(kind, "outlook"), include-resource-data), "outlook-rich", kind)
+  get(MAX_EXPIRATION_MINUTES, key)
+}
+
+expiration-at
+meta {
+    doc: """An RFC 3339 UTC timestamp `minutes` from `now-ms` (pure), e.g. `"2026-11-30T09:00:00Z"`; the subscription `expirationDateTime` form."""
+}
+fn (now-ms: Int, minutes: Int): Str {
+  Str(::time/Instant(::time/Millisecond(add(now-ms, mul(minutes, 60000)))))
+}
+
+expiration-for
+meta {
+    doc: """
+    The `expirationDateTime` for a create or renew (pure): `opts.expiration`
+    (an RFC 3339 Str) when set, else `opts.expires-in-minutes`, else the
+    resource's maximum minus a one-hour margin; clamped to 45 minutes ..
+    the maximum.
+    """
+}
+fn (resource: Str, opts: Map, now-ms: Int): Str {
+  explicit get(opts, "expiration")
+  cap max-expiration-minutes(resource, eq(get(opts, "includeResourceData"), true))
+  wanted or(get(opts, "expires-in-minutes"), max(sub(cap, RENEWAL_MARGIN_MINUTES), MIN_EXPIRATION_MINUTES))
+  minutes min(max(wanted, MIN_EXPIRATION_MINUTES), cap)
+  if(::auth/is-blank-value(explicit), expiration-at(now-ms, minutes), Str(explicit))
+}
+
+now-ms fn (): Int {
+  ::time/epoch-millis(::time/now())
+}
+
+// ---------------------------------------------------------------------------
+// Subscriptions
+// ---------------------------------------------------------------------------
+
+SUBSCRIPTION_LOCAL_KEYS ["client-state", "lifecycle-url", "expiration", "expires-in-minutes"]
+
+build-subscription
+meta {
+    doc: """
+    Build a subscription body (pure). Options: `client-state` (a secret
+    of at most 128 characters echoed in every notification; strongly
+    recommended), `lifecycle-url` (HTTPS endpoint for lifecycle
+    notifications), `expiration` / `expires-in-minutes` (see
+    `expiration-for`), and Graph's own fields (`includeResourceData`,
+    `encryptionCertificate`, `encryptionCertificateId`,
+    `latestSupportedTlsVersion`, `notificationQueryOptions`). Both URLs
+    must be `https://`.
+    """
+}
+fn (resource: Str, change-type: Str | Vec, notification-url: Str, opts: Map, now-ms: Int): Map {
+  state get(opts, "client-state")
+  lifecycle get(opts, "lifecycle-url")
+  change if(is-vec(change-type), join(change-type, ","), change-type)
+  extra filter-keys(::api/api-params(opts), (k) { not(in(k, SUBSCRIPTION_LOCAL_KEYS)) })
+  cond {
+    not(starts-with(notification-url, "https://")) => { err("microsoft-graph: notificationUrl must be an https:// URL") }
+    and(is-some(lifecycle), not(starts-with(or(lifecycle, ""), "https://"))) => { err("microsoft-graph: lifecycleNotificationUrl must be an https:// URL") }
+    and(is-some(state), gt(length(or(state, "")), MAX_CLIENT_STATE_LENGTH)) => { err("microsoft-graph: clientState is limited to 128 characters") }
+    => {
+      ::auth/compact({
+        changeType: change,
+        notificationUrl: notification-url,
+        lifecycleNotificationUrl: lifecycle,
+        resource: strip-slashes(resource),
+        expirationDateTime: expiration-for(resource, opts, now-ms),
+        clientState: state,
+        ...extra
+      })
+    }
+  }
+}
+
+create-subscription
+meta {
+    doc: """
+    POST /subscriptions - subscribe `notification-url` to changes on
+    `resource` (a Graph path without the version, e.g.
+    `"/me/drive/root"`, `"drives/{id}/root"`,
+    `"sites/{site-id}/lists/{list-id}"`, `"users"`,
+    `"me/mailFolders('Inbox')/messages"`). `change-type` is `"updated"`,
+    `"created,updated,deleted"` or a Vec. Graph validates the URL first
+    (see `validation-response`); a duplicate resource + change type
+    returns 409. See `build-subscription` for the options.
+
+    ```hot
+    sub ::microsoft::graph::subscriptions/create-subscription("/me/drive/root", "updated",
+      "https://api.example.com/graph/hook", {
+        client-state: ::hot::ctx/get("microsoft.graph.client-state"),
+        lifecycle-url: "https://api.example.com/graph/lifecycle"
+      })
+    sub.id
+    sub.expirationDateTime
+    ```
+    """
+}
+fn
+(resource: Str, change-type: Str | Vec, notification-url: Str): Map {
+  create-subscription(resource, change-type, notification-url, {})
+},
+(resource: Str, change-type: Str | Vec, notification-url: Str, opts: Map): Map {
+  ::auth/mark-values([get(opts, "client-state")])
+  body build-subscription(resource, change-type, notification-url, opts, now-ms())
+  if(is-err(body), body, ::api/json("POST", "/subscriptions", {}, body, ::api/credential-opts(opts)))
+}
+
+get-subscription
+meta {doc: """GET /subscriptions/{id}."""}
+fn
+(id: Str): Map {
+  get-subscription(id, {})
+},
+(id: Str, opts: Map): Map {
+  ::api/json("GET", `/subscriptions/${::api/encode-segment(id)}`, ::api/credential-opts(opts))
+}
+
+list-subscriptions
+meta {
+    doc: """GET /subscriptions - every subscription the app (app-only) or the signed-in user created, following `@odata.nextLink`."""
+}
+fn
+(): Vec {
+  list-subscriptions({})
+},
+(opts: Map): Vec {
+  ::api/collect-pages("/subscriptions", opts, null)
+}
+
+renew-subscription
+meta {
+    doc: """
+    PATCH /subscriptions/{id} - extend a subscription. `resource` sets
+    the default lifetime (its maximum minus one hour); pass `expiration`
+    or `expires-in-minutes` in `opts` to choose. A renewal also
+    reauthorizes the subscription. Returns the updated subscription.
+
+    ```hot
+    renew-graph-subscription
+    meta {schedule: "0 4 */7 * *"}
+    fn (event) {
+      sub-id ::hot::store/get(::hot::store/Map({name: "graph-sync"}), "subscription-id")
+      ::microsoft::graph::subscriptions/renew-subscription(sub-id, "/me/drive/root")
+    }
+    ```
+    """
+}
+fn
+(id: Str, resource: Str): Map {
+  renew-subscription(id, resource, {})
+},
+(id: Str, resource: Str, opts: Map): Map {
+  body {expirationDateTime: expiration-for(resource, opts, now-ms())}
+  ::api/json("PATCH", `/subscriptions/${::api/encode-segment(id)}`, {}, body, ::api/credential-opts(opts))
+}
+
+reauthorize-subscription
+meta {
+    doc: """POST /subscriptions/{id}/reauthorize - answer a `reauthorizationRequired` lifecycle notification without changing the expiration. Do not reauthorize and renew the same subscription within 10 minutes; `renew-subscription` does both. Returns true."""
+}
+fn
+(id: Str): Bool {
+  reauthorize-subscription(id, {})
+},
+(id: Str, opts: Map): Bool {
+  result ::api/json("POST", `/subscriptions/${::api/encode-segment(id)}/reauthorize`, {}, "", ::api/credential-opts(opts))
+  if(is-err(result), result, true)
+}
+
+delete-subscription
+meta {doc: """DELETE /subscriptions/{id} - stop notifications. Returns true."""}
+fn
+(id: Str): Bool {
+  delete-subscription(id, {})
+},
+(id: Str, opts: Map): Bool {
+  result ::api/json("DELETE", `/subscriptions/${::api/encode-segment(id)}`, ::api/credential-opts(opts))
+  if(is-err(result), result, true)
+}
+
+// ---------------------------------------------------------------------------
+// Webhook handshake and parsing
+// ---------------------------------------------------------------------------
+
+validation-token
+meta {
+    doc: """The `validationToken` query parameter of a webhook request (URL-decoded), or null when this is not a validation request. Reads `request.query`, falling back to the URL's query string."""
+}
+fn (request: Map): Str? {
+  q or(request.query, {})
+  from-query get(q, "validationToken")
+  from-url cond {
+    is-some(from-query) => { null }
+    not(contains(or(request.url, ""), "?")) => { null }
+    => { get(::hot::uri/decode-query(last(split(request.url, "?"))), "validationToken") }
+  }
+
+  v or(from-query, from-url)
+  if(::auth/is-blank-value(v), null, Str(v))
+}
+
+validation-response
+meta {
+    doc: """
+    Answer Graph's subscription validation: when `request` carries
+    `?validationToken=`, return an `HttpResponse` with status 200,
+    `Content-Type: text/plain` and the decoded token as the body (Graph
+    requires it within 10 seconds); otherwise null, so you can fall
+    through to notification handling.
+
+    ```hot
+    graph-hook
+    meta {webhook: {service: "graph", path: "/graph/hook"}}
+    fn (request) {
+      handshake ::microsoft::graph::subscriptions/validation-response(request)
+      cond {
+        is-some(handshake) => { handshake }
+        => {
+          notes ::microsoft::graph::subscriptions/verify-notifications(request)
+          cond {
+            is-err(notes) => { ::hot::http/HttpResponse({status: 401, body: "bad clientState"}) }
+            => {
+              send("graph:changed", {count: length(notes)})
+              ::microsoft::graph::subscriptions/accepted()
+            }
+          }
+        }
+      }
+    }
+    ```
+    """
+}
+fn (request: Map): Any {
+  token validation-token(request)
+  cond {
+    is-null(token) => { null }
+    => { ::http/HttpResponse({status: 200, headers: {Content-Type: "text/plain; charset=utf-8"}, body: token}) }
+  }
+}
+
+accepted
+meta {
+    doc: """A `202 Accepted` `HttpResponse` with an empty body: the reply Graph wants within 3 seconds of a notification."""
+}
+fn (): Any {
+  ::http/HttpResponse({status: 202, body: ""})
+}
+
+Notification
+meta {
+    doc: """
+    One change or lifecycle notification from a webhook payload.
+
+    - `subscription-id`, `subscription-expiration`, `tenant-id`
+    - `client-state` - echoed from the subscription (check it)
+    - `change-type` - `created`, `updated`, `deleted` (change notifications)
+    - `resource` - the changed resource path (e.g. `drives/{id}/root`)
+    - `resource-data` - `{id, @odata.type, ...}` when Graph includes it
+    - `lifecycle-event` - `reauthorizationRequired`,
+      `subscriptionRemoved` or `missed` for lifecycle notifications
+    - `is-lifecycle`
+    - `raw` - the notification as sent
+    """
+}
+type {
+    subscription-id: Str?,
+    subscription-expiration: Str?,
+    tenant-id: Str?,
+    client-state: Str?,
+    change-type: Str?,
+    resource: Str?,
+    resource-data: Map?,
+    lifecycle-event: Str?,
+    is-lifecycle: Bool,
+    raw: Map
+}
+
+payload-of fn (request: Map): Any {
+  b request.body
+  cond {
+    is-map(b) => { b }
+    => {
+      raw ::http/raw-body(request)
+      text if(is-bytes(raw), Str(raw), raw)
+      parsed if(or(is-null(text), eq(text, "")), null, from-json(text))
+      if(is-err(parsed), null, parsed)
+    }
+  }
+}
+
+to-notification
+meta {
+    doc: """Read one entry of a notification payload's `value` into a `Notification` (pure)."""
+}
+fn (n: Map): Notification {
+  lifecycle n.lifecycleEvent
+  Notification({
+    subscription-id: n.subscriptionId,
+    subscription-expiration: n.subscriptionExpirationDateTime,
+    tenant-id: n.tenantId,
+    client-state: n.clientState,
+    change-type: n.changeType,
+    resource: n.resource,
+    resource-data: if(is-map(n.resourceData), n.resourceData, null),
+    lifecycle-event: lifecycle,
+    is-lifecycle: is-some(lifecycle),
+    raw: n
+  })
+}
+
+parse-notifications
+meta {
+    doc: """
+    Parse a webhook request into a Vec of `Notification` (pure). Reads
+    the decoded JSON body, or the raw body. Returns an Err when the body
+    is not a `{value: [...]}` payload. Does not check `clientState`: use
+    `verify-notifications`.
+    """
+}
+fn (request: Map): Vec {
+  payload payload-of(request)
+  cond {
+    or(not(is-map(payload)), not(is-vec(get(or(payload, {}), "value")))) => { err("microsoft-graph: the notification body is not a {value: [...]} payload") }
+    => { map(filter(payload.value, is-map), to-notification) }
+  }
+}
+
+client-state-matches
+meta {
+    doc: """True when a notification's `clientState` equals `expected` (constant-time compare). Fails closed: a blank `expected` or a missing value is false."""
+}
+fn (notification: Map, expected: Str?): Bool {
+  got get(notification, "client-state")
+  cond {
+    ::auth/is-blank-value(expected) => { false }
+    ::auth/is-blank-value(got) => { false }
+    => { ::hot::random/secure-compare(Str(got), Str(expected)) }
+  }
+}
+
+verify-notifications
+meta {
+    ctx: {"microsoft.graph.client-state": {required: false}},
+    doc: """
+    Parse a webhook request and check that every notification carries
+    the expected `clientState` (constant-time). Returns the Vec of
+    `Notification`, or an Err when the body is malformed, empty, or any
+    `clientState` is missing or wrong. The 1-arity form checks against
+    the `microsoft.graph.client-state` context variable and halts when
+    it is unset, so an unconfigured endpoint never accepts traffic. An
+    explicit `expected` is marked as a secret.
+
+    Rich notifications (`includeResourceData`) also carry
+    `validationTokens` JWTs; they are not checked here.
+    """
+}
+fn
+(request: Map): Vec {
+  expected or(::ctx/get("microsoft.graph.client-state"), "")
+  if(eq(trim(Str(expected)), ""),
+    fail("microsoft.graph.client-state is not set. Add it in Context Variables (and pass it as client-state when subscribing) to verify Graph notifications.")
+  )
+  verify-notifications(request, Str(expected))
+},
+(request: Map, expected: Str): Vec {
+  ::auth/mark-values([expected])
+  notes parse-notifications(request)
+  cond {
+    ::auth/is-blank-value(expected) => { err("microsoft-graph: no expected clientState configured; refusing the notification") }
+    is-err(notes) => { notes }
+    is-empty(notes) => { err("microsoft-graph: the notification payload has no notifications") }
+    gt(length(filter(notes, (n) { not(client-state-matches(n, expected)) })), 0) => {
+      err("microsoft-graph: invalid or missing clientState in a notification")
+    }
+    => { notes }
+  }
+}
+
+lifecycle-notifications
+meta {doc: """The lifecycle notifications in a Vec of `Notification` (pure)."""}
+fn (notes: Vec): Vec {
+  filter(notes, (n) { n.is-lifecycle })
+}
+
+change-notifications
+meta {
+    doc: """The change (non-lifecycle) notifications in a Vec of `Notification` (pure)."""
+}
+fn (notes: Vec): Vec {
+  filter(notes, (n) { not(n.is-lifecycle) })
+}
+
+needs-reauthorization
+meta {
+    doc: """The subscription ids that sent `reauthorizationRequired` (pure, de-duplicated)."""
+}
+fn (notes: Vec): Vec {
+  distinct(map(filter(notes, (n) { eq(n.lifecycle-event, "reauthorizationRequired") }), (n) { n.subscription-id }))
+}
+
+needs-resync
+meta {
+    doc: """True when any lifecycle notification is `missed` or `subscriptionRemoved`: run a full delta sync (and recreate removed subscriptions) (pure)."""
+}
+fn (notes: Vec): Bool {
+  gt(length(filter(notes, (n) { in(n.lifecycle-event, ["missed", "subscriptionRemoved"]) })), 0)
+}
