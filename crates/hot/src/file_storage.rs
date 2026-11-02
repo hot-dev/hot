@@ -46,7 +46,7 @@ pub struct FileReadStream {
 }
 
 impl FileMetadata {
-    /// Convert FileMetadata to Hot Val (Map)
+    /// Convert FileMetadata to a Hot `FileMeta`
     pub fn to_val(&self) -> Val {
         let mut map = IndexMap::new();
         map.insert(Val::from("file-id"), Val::from(self.file_id.to_string()));
@@ -70,7 +70,7 @@ impl FileMetadata {
             Val::from("updated-at"),
             Val::Int(self.updated_at.timestamp()),
         );
-        Val::map(map)
+        Val::constructed("::hot::file/FileMeta", map)
     }
 
     /// Create from database FileRecord
