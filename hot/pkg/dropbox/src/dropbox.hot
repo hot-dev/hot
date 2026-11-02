@@ -1,0 +1,391 @@
+::dropbox ns
+meta {
+    doc: """
+    Dropbox API v2 bindings for document workflows and agents: list and
+    search files, read any file as text (Paper docs export to Markdown),
+    binary-safe downloads with Range chunking, uploads with chunked upload
+    sessions and content-hash checks, folders, moves, copies, deletes,
+    revisions, batch jobs, shared links, cursor-based change sync with
+    longpoll, and signed webhooks.
+
+    **Credentials** come from context by default, or per call from `opts`:
+
+    1. `dropbox.access.token` - a short-lived (about 4 hours) access token
+    2. `dropbox.refresh.token` + `dropbox.app.key` (+ `dropbox.app.secret`)
+       - an offline refresh token; access tokens are minted and cached for
+       the run
+
+    Team apps add `dropbox.select.user` / `dropbox.select.admin` (a team
+    member id) and `dropbox.path.root` (team space or a namespace).
+
+    **Namespaces**
+
+    - `::dropbox::auth` - credential resolution and the per-run token cache
+    - `::dropbox::oauth` - `authorize-url` (PKCE, offline), `exchange-code`, refresh, revoke
+    - `::dropbox::api` - RPC and content requests, `Dropbox-API-Arg`, `HttpError`, `is-retryable`
+    - `::dropbox::files` - list, search, metadata, folders, move, copy, delete, restore, revisions, batches
+    - `::dropbox::content` - `read-document`, download (Range, chunked), export, temporary links, `content-hash`
+    - `::dropbox::upload` - single uploads and upload sessions
+    - `::dropbox::sharing` - shared links
+    - `::dropbox::sync` - cursors, `sync-changes`, longpoll
+    - `::dropbox::webhooks` - challenge echo, signature verification, payload parsing
+    - `::dropbox::users` - current account, space usage, team-space path root
+
+    Every function has an options arity taking an `opts` Map. API
+    arguments use Dropbox's own snake_case names (`recursive`, `limit`,
+    `include_deleted`, `autorename`, ...); the package's own keys
+    (`token`, `refresh-token`, `app-key`, `app-secret`, `select-user`,
+    `select-admin`, `path-root`, `retry`) are handled by `::dropbox::api`.
+
+    **Quick start**
+
+    ```hot
+    ::files ::dropbox::files
+    ::content ::dropbox::content
+
+    entries ::files/list-all("/Reports", {recursive: true}, 500)
+    doc ::content/read-document("/Reports/Q3 plan.paper", "markdown")
+    doc.text
+    ```
+    """
+}
+
+::mime ::hot::mime
+
+API_URL "https://api.dropboxapi.com/2"
+CONTENT_URL "https://content.dropboxapi.com/2"
+NOTIFY_URL "https://notify.dropboxapi.com/2"
+AUTHORIZE_URL "https://www.dropbox.com/oauth2/authorize"
+TOKEN_URL "https://api.dropboxapi.com/oauth2/token"
+
+// Neutral MIME types for Dropbox items that have no file extension type.
+FOLDER_MIME "inode/directory"
+PAPER_MIME "application/vnd.dropbox.paper"
+
+// ---------------------------------------------------------------------------
+// Small helpers shared by the sub-namespaces
+// ---------------------------------------------------------------------------
+
+is-blank
+meta {
+    doc: """True for null, `""`, and whitespace-only strings (context placeholders wire `""` for unset env vars)."""
+}
+fn (value: Any): Bool {
+  or(is-null(value), and(is-str(value), is-empty(trim(value))))
+}
+
+compact
+meta {
+    doc: """Drop null values from an argument Map (Dropbox arguments never carry JSON null for unset fields)."""
+}
+fn (arg: Map): Map {
+  filter-vals(untype(arg), is-some)
+}
+
+normalize-path
+meta {
+    doc: """
+    Normalise a Dropbox path for an argument (pure). The root is `""`
+    (null, `""` and `"/"` all mean root); ids (`id:...`), revisions
+    (`rev:...`) and namespace paths (`ns:...`) pass through; other paths
+    get a leading `/` and lose a trailing one. Dropbox paths are
+    case-insensitive and always use `/`.
+
+    ```hot
+    ::dropbox/normalize-path("Reports/Q3/")   // "/Reports/Q3"
+    ::dropbox/normalize-path("/")             // ""
+    ::dropbox/normalize-path("id:a4ayc_80_OEAAAAAAAAAYa")
+    ```
+    """
+}
+fn (path: Str?): Str {
+  p trim(or(path, ""))
+  cond {
+    or(eq(p, ""), eq(p, "/")) => { "" }
+    or(starts-with(p, "id:"), starts-with(p, "rev:"), starts-with(p, "ns:")) => { p }
+    => {
+      lead if(starts-with(p, "/"), p, `/${p}`)
+      if(and(ends-with(lead, "/"), gt(length(lead), 1)), slice(lead, 0, sub(length(lead), 1)), lead)
+    }
+  }
+}
+
+parent-path
+meta {
+    doc: """The parent folder of a display path (pure): `"/a/b/c.txt"` gives `"/a/b"`, `"/c.txt"` gives `""` (root). Null for ids and the root."""
+}
+fn (path: Str?): Str? {
+  p or(path, "")
+  cond {
+    or(eq(p, ""), not(starts-with(p, "/"))) => { null }
+    => {
+      parts split(p, "/")
+      join(slice(parts, 0, sub(length(parts), 1)), "/")
+    }
+  }
+}
+
+file-extension
+meta {
+    doc: """The lowercased extension of a file name without the dot (`"Q3.Plan.PDF"` gives `"pdf"`), or null."""
+}
+fn (name: Str?): Str? {
+  n or(name, "")
+  parts split(n, ".")
+  cond {
+    lt(length(parts), 2) => { null }
+    eq(first(parts), "") => { if(gt(length(parts), 2), lowercase(last(parts)), null) }
+    => { lowercase(last(parts)) }
+  }
+}
+
+entry-tag
+meta {
+    doc: """The `.tag` of a metadata entry: `"file"`, `"folder"` or `"deleted"` (null when absent)."""
+}
+fn (entry: Map): Str? {
+  get(entry, ".tag")
+}
+
+is-folder
+meta {doc: """True for a folder metadata entry."""}
+fn (entry: Map): Bool {
+  eq(entry-tag(entry), "folder")
+}
+
+is-file
+meta {doc: """True for a file metadata entry."""}
+fn (entry: Map): Bool {
+  eq(entry-tag(entry), "file")
+}
+
+is-deleted
+meta {
+    doc: """True for a deleted metadata entry (from `list_folder` with `include_deleted`, or a sync delta)."""
+}
+fn (entry: Map): Bool {
+  eq(entry-tag(entry), "deleted")
+}
+
+is-exportable
+meta {
+    doc: """True for a file Dropbox cannot download directly but can export (`is_downloadable: false` with `export_info.export_as` set): Paper docs and cloud docs such as Google Docs stored in Dropbox."""
+}
+fn (entry: Map): Bool {
+  info get(entry, "export_info")
+  and(eq(get(entry, "is_downloadable"), false), is-map(info), is-some(get(or(info, {}), "export_as")))
+}
+
+mime-type-of
+meta {
+    doc: """The MIME type for a metadata entry (pure): `FOLDER_MIME` for folders, `PAPER_MIME` for `.paper` docs, else from the file extension (`application/octet-stream` when unknown). Dropbox does not store MIME types."""
+}
+fn (entry: Map): Str {
+  ext file-extension(get(entry, "name"))
+  cond {
+    is-folder(entry) => { FOLDER_MIME }
+    eq(ext, "paper") => { PAPER_MIME }
+    is-null(ext) => { "application/octet-stream" }
+    => { or(::mime/from-ext(ext), "application/octet-stream") }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Neutral document metadata
+// ---------------------------------------------------------------------------
+
+DocFile
+meta {
+    doc: """
+    Provider-neutral file metadata, the same field names as
+    `::google::drive/DocFile` plus `path` and `content-hash`, so a
+    documents pipeline can treat Drive and Dropbox alike.
+
+    **Fields**
+    - `provider` - `"dropbox"`
+    - `id` - Dropbox's stable id (`id:...`); for deleted entries (which
+      have no id) the lowercased path
+    - `name`, `mime-type` (from the extension; `inode/directory` for folders)
+    - `path` - `path_display`, the display path (`/Reports/Q3.pdf`)
+    - `size` - bytes (Int); null for folders
+    - `modified` - `server_modified` (when the content last changed on Dropbox)
+    - `created` - always null (Dropbox does not record it)
+    - `parents` - the parent folder's display path, as a one-element Vec
+    - `drive-id` - the shared folder (namespace) id the item lives in, if any
+    - `web-url` - `preview_url` when Dropbox returned one, else null
+    - `version`, `revision-id` - the file's `rev` (use as an etag)
+    - `md5`, `sha256` - always null (Dropbox has neither)
+    - `content-hash` - Dropbox's `content_hash` (see `::dropbox::content/content-hash`)
+    - `is-folder`, `is-google-native` (true for export-only files such as
+      Paper docs), `is-shortcut` (a symlink), `shortcut-target-id` (its target)
+    - `trashed` - true for deleted entries
+    - `export-formats` - `export_info.export_options`
+    - `raw` - the Dropbox metadata as returned
+    """
+}
+type {
+    provider: Str,
+    id: Str,
+    name: Str,
+    mime-type: Str,
+    path: Str?,
+    size: Int?,
+    modified: Str?,
+    created: Str?,
+    parents: Vec,
+    drive-id: Str?,
+    web-url: Str?,
+    version: Str?,
+    revision-id: Str?,
+    md5: Str?,
+    sha256: Str?,
+    content-hash: Str?,
+    is-folder: Bool,
+    is-google-native: Bool,
+    is-shortcut: Bool,
+    shortcut-target-id: Str?,
+    trashed: Bool,
+    export-formats: Vec,
+    raw: Map
+}
+
+shared-folder-id fn (entry: Map): Str? {
+  sharing get(entry, "sharing_info")
+  cond {
+    not(is-map(sharing)) => { or(get(entry, "parent_shared_folder_id"), get(entry, "shared_folder_id")) }
+    => { or(get(sharing, "parent_shared_folder_id"), get(sharing, "shared_folder_id"), get(entry, "parent_shared_folder_id")) }
+  }
+}
+
+to-doc-file
+meta {
+    doc: """
+    Normalise a Dropbox metadata entry (from `get_metadata`,
+    `list_folder`, search, sync deltas, or the `metadata` of a write
+    result) into a `DocFile`. A `{metadata: {...}}` wrapper is unwrapped.
+    Missing fields become null/false.
+    """
+}
+fn (entry: Map): DocFile {
+  e if(and(is-map(get(entry, "metadata")), is-null(get(entry, "name"))), entry.metadata, entry)
+  path get(e, "path_display")
+  parent parent-path(path)
+  symlink get(e, "symlink_info")
+  info get(e, "export_info")
+  rev get(e, "rev")
+  size get(e, "size")
+  DocFile({
+    provider: "dropbox",
+    id: or(get(e, "id"), get(e, "path_lower"), ""),
+    name: or(get(e, "name"), ""),
+    mime-type: mime-type-of(e),
+    path: path,
+    size: if(is-int(size), size, null),
+    modified: get(e, "server_modified"),
+    created: null,
+    parents: if(is-null(parent), [], [parent]),
+    drive-id: shared-folder-id(e),
+    web-url: get(e, "preview_url"),
+    version: rev,
+    revision-id: rev,
+    md5: null,
+    sha256: null,
+    content-hash: get(e, "content_hash"),
+    is-folder: is-folder(e),
+    is-google-native: is-exportable(e),
+    is-shortcut: is-map(symlink),
+    shortcut-target-id: if(is-map(symlink), get(symlink, "target"), null),
+    trashed: is-deleted(e),
+    export-formats: if(is-map(info), or(get(info, "export_options"), []), []),
+    raw: e
+  })
+}
+
+to-doc-files
+meta {doc: """`to-doc-file` over a Vec of metadata entries."""}
+fn (entries: Vec): Vec {
+  map(entries, to-doc-file)
+}
+
+// ---------------------------------------------------------------------------
+// File content
+// ---------------------------------------------------------------------------
+
+FileContent
+meta {
+    doc: """
+    Downloaded or exported file content, the same shape as
+    `::google::drive/FileContent`. `bytes` is always the exact response
+    body (binary safe); `text` is the UTF-8 decoding when `mime-type` is
+    textual, else null.
+
+    **Fields**
+    - `file-id` - the path or id asked for
+    - `name`
+    - `mime-type` - the MIME type of `bytes` (from the name or export name)
+    - `size` - `length(bytes)`
+    - `bytes`, `text`
+    - `source` - `"download"`, `"export"`, `"range"` or `"chunked"`
+    - `format` - the export format used, else null
+    - `file` - the `DocFile` (from the `Dropbox-API-Result` header)
+    """
+}
+type {
+    file-id: Str,
+    name: Str?,
+    mime-type: Str?,
+    size: Int,
+    bytes: Bytes,
+    text: Str?,
+    source: Str,
+    format: Str?,
+    file: DocFile?
+}
+
+base-mime
+meta {
+    doc: """A Content-Type without parameters, lowercased: `"text/plain; charset=utf-8"` becomes `"text/plain"`."""
+}
+fn (content-type: Str?): Str? {
+  cond {
+    is-null(content-type) => { null }
+    => { lowercase(trim(first(split(content-type, ";")))) }
+  }
+}
+
+is-textual-mime
+meta {
+    doc: """True when content of this MIME type is text: `text/*`, JSON, XML, SVG, JavaScript, YAML, SQL, and `+json`/`+xml` types."""
+}
+fn (mime-type: Str?): Bool {
+  m or(base-mime(mime-type), "")
+  or(
+    starts-with(m, "text/"),
+    in(m, ["application/json", "application/xml", "application/javascript", "application/x-javascript", "application/x-ndjson", "application/x-yaml", "application/yaml", "application/sql", "image/svg+xml"]),
+    ends-with(m, "+json"),
+    ends-with(m, "+xml")
+  )
+}
+
+content-text
+meta {
+    doc: """The text of a `FileContent`: its `text`, or the UTF-8 decoding of `bytes` (invalid sequences become U+FFFD)."""
+}
+fn (content: Map): Str {
+  if(is-some(content.text), content.text, Str(content.bytes))
+}
+
+// ---------------------------------------------------------------------------
+// Shortcuts to the most used functions
+// ---------------------------------------------------------------------------
+
+list-folder ::dropbox::files/list-folder
+list-all ::dropbox::files/list-all
+get-metadata ::dropbox::files/get-metadata
+search ::dropbox::files/search
+create-folder ::dropbox::files/create-folder
+delete-path ::dropbox::files/delete-path
+download ::dropbox::content/download
+read-document ::dropbox::content/read-document
+upload ::dropbox::upload/upload
+sync-changes ::dropbox::sync/sync-changes

@@ -1,0 +1,159 @@
+::documents::test::text ns
+meta ["test"]
+
+::fx ::documents::test::fixtures
+::a ::documents::adapters
+::t ::documents::text
+::source ::documents::source
+
+google fn (file: Map): Any {
+  ::a/from-google(::source/resolve("google-drive"), ::google::drive/to-doc-file(file))
+}
+
+onedrive fn (item: Map): Any {
+  ::a/from-onedrive(::source/resolve("onedrive"), ::microsoft::onedrive/to-doc-file(item))
+}
+
+dropbox fn (entry: Map): Any {
+  ::a/from-dropbox(::source/resolve("dropbox"), ::dropbox/to-doc-file(entry))
+}
+
+box fn (item: Map): Any {
+  ::a/from-box(::source/resolve("box"), ::box/to-doc-file(item))
+}
+
+s3 fn (key: Str, mime: Str?): Any {
+  ::a/from-s3(::source/resolve({provider: "s3", bucket: "b"}), ::documents::s3/to-doc-file(filter-vals({key: key, content-type: mime}, is-some)))
+}
+
+test-normalize-format
+meta ["test"] fn () {
+    assert-eq("auto", ::t/normalize-format(null))
+    assert-eq("auto", ::t/normalize-format(" "))
+    assert-eq("markdown", ::t/normalize-format("MD"))
+    assert-eq("text", ::t/normalize-format("txt"))
+    assert-eq("pdf", ::t/normalize-format("PDF"))
+    bad ::t/normalize-format("docx")
+    assert(is-err(bad))
+    assert(contains(err-message(bad), "auto, text, markdown, pdf"))
+}
+
+test-text-detection
+meta ["test"] fn () {
+    assert(::t/is-textual("text/plain; charset=utf-8", "a.bin"))
+    assert(::t/is-textual("application/octet-stream", "notes.MD"), "by extension")
+    assert(::t/is-textual("application/ld+json", "x"))
+    assert(::t/is-textual(null, "data.csv"))
+    assert(not(::t/is-textual("application/pdf", "a.pdf")))
+    assert(not(::t/is-textual("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "a.docx")))
+    assert-eq("markdown", ::t/text-format("application/octet-stream", "README.md"))
+    assert-eq("csv", ::t/text-format("text/csv", "x"))
+    assert-eq("json", ::t/text-format("application/json", "x"))
+    assert-eq("text", ::t/text-format("text/plain", "a.txt"))
+    assert-eq("", ::t/extension(".bashrc"), "a dotfile has no extension")
+    assert-eq("gz", ::t/extension("dir.v2/archive.tar.gz"))
+    assert-eq("application/octet-stream", ::t/mime-from-name("noext"))
+    assert-eq("application/pdf", ::t/mime-from-name("Q3.PDF"))
+}
+
+test-google-native-exports
+meta ["test"] fn () {
+    doc google(::fx/DRIVE_DOC)
+    auto ::t/plan(doc, "auto")
+    assert-eq("export", auto.action)
+    assert-eq("markdown", auto.format, "Docs read as Markdown")
+    assert-eq("text/markdown", auto.export)
+    assert-eq("text/plain", ::t/plan(doc, "text").export)
+    assert-eq("application/pdf", ::t/plan(doc, "pdf").export)
+    sheet google(::fx/DRIVE_SHEET)
+    assert-eq("csv", ::t/plan(sheet, "auto").format, "Sheets read as CSV")
+    assert-eq("text/csv", ::t/plan(sheet, "markdown").export, "no Markdown for Sheets: CSV instead")
+    form ::t/plan(google(::fx/DRIVE_FORM), "auto")
+    assert-eq("unsupported", form.action, "Forms cannot be exported")
+}
+
+test-google-blobs
+meta ["test"] fn () {
+    pdf google(::fx/DRIVE_FILE)
+    assert-eq("download", ::t/plan(pdf, "pdf").action, "a stored PDF downloads")
+    assert-eq("unsupported", ::t/plan(pdf, "auto").action, "a PDF has no native text")
+    assert(contains(::t/plan(pdf, "auto").reason, "hot.dev/pandoc"), "the reason names extraction tools")
+    txt google({id: "t", name: "notes.txt", mimeType: "text/plain", size: "3"})
+    p ::t/plan(txt, "markdown")
+    assert-eq("download", p.action)
+    assert-eq("text", p.format, "the produced format, not the one asked for")
+    folder ::t/plan(google(::fx/DRIVE_FOLDER), "auto")
+    assert-eq("error", folder.action)
+}
+
+test-onedrive-conversion
+meta ["test"] fn () {
+    docx onedrive(::fx/ONEDRIVE_FILE)
+    assert-eq("convert", ::t/plan(docx, "pdf").action, "Office files up to 2 MB convert to PDF")
+    assert-eq("pdf", ::t/plan(docx, "pdf").export)
+    assert-eq("unsupported", ::t/plan(docx, "auto").action, "no native text for Office files")
+    big ::t/plan(onedrive(::fx/ONEDRIVE_BIG_DOCX), "pdf")
+    assert-eq("unsupported", big.action)
+    assert(contains(big.reason, "2 MB"))
+    loop ::t/plan(onedrive(::fx/ONEDRIVE_LOOP), "auto")
+    assert-eq("convert", loop.action, "Loop converts to HTML")
+    assert-eq("html", loop.format)
+    md ::t/plan(onedrive(::fx/ONEDRIVE_NOTES), "auto")
+    assert-eq("download", md.action, "octet-stream .md is text by extension")
+    assert-eq("markdown", md.format)
+}
+
+test-dropbox-paper
+meta ["test"] fn () {
+    paper dropbox(::fx/DROPBOX_PAPER)
+    auto ::t/plan(paper, "auto")
+    assert-eq("export", auto.action)
+    assert-eq("markdown", auto.export)
+    assert-eq("markdown", auto.format)
+    text ::t/plan(paper, "text")
+    assert-eq("markdown", text.export, "no plain_text offered: Markdown is still text")
+    plain ::t/plan(dropbox({...::fx/DROPBOX_PAPER, export_info: {export_as: "html", export_options: ["html", "markdown", "plain_text"]}}), "text")
+    assert-eq("plain_text", plain.export)
+    assert-eq("text", plain.format)
+    assert-eq("unsupported", ::t/plan(paper, "pdf").action, "Paper offers no PDF")
+    assert-eq("download", ::t/plan(dropbox(::fx/DROPBOX_FILE), "pdf").action)
+    assert-eq("unsupported", ::t/plan(dropbox(::fx/DROPBOX_FILE), "text").action)
+}
+
+test-box-extracted-text
+meta ["test"] fn () {
+    docx box(::fx/BOX_DOCX)
+    assert-eq("extracted-text", ::t/plan(docx, "auto").action, "Box extracts text from binaries")
+    assert-eq("extracted-text", ::t/plan(box(::fx/BOX_FILE), "text").action)
+    assert-eq("download", ::t/plan(box(::fx/BOX_FILE), "pdf").action)
+    assert-eq("download", ::t/plan(box({type: "file", id: "9", name: "a.csv"}), "auto").action)
+    assert-eq("error", ::t/plan(box(::fx/BOX_FOLDER), "text").action)
+}
+
+test-s3
+meta ["test"] fn () {
+    assert-eq("download", ::t/plan(s3("a/b.json", "application/json"), "auto").action)
+    assert-eq("json", ::t/plan(s3("a/b.json", null), "auto").format)
+    assert-eq("unsupported", ::t/plan(s3("a/b.docx", null), "auto").action)
+    assert-eq("download", ::t/plan(s3("scan.pdf", "application/pdf"), "pdf").action)
+    assert-eq("error", ::t/plan(s3("dir/", null), "auto").action)
+}
+
+test-results
+meta ["test"] fn () {
+    doc google(::fx/DRIVE_FILE)
+    ok ::t/ok-result(doc, Bytes("# Hi"), "markdown", "text/markdown; charset=utf-8", "export")
+    assert-eq("ok", ok.status)
+    assert-eq("# Hi", ok.text)
+    assert(is-null(ok.bytes))
+    assert-eq("text/markdown", ok.mime-type)
+    pdf ::t/ok-result(doc, Bytes([37, 80, 68, 70]), "pdf", null, "convert")
+    assert(is-null(pdf.text), "PDF bytes are not decoded")
+    assert-eq(Bytes([37, 80, 68, 70]), pdf.bytes)
+    assert-eq("application/pdf", pdf.mime-type)
+    no ::t/not-ok-result(doc, "unsupported", "binary")
+    assert-eq("unsupported", no.status)
+    assert-eq("application/pdf", no.mime-type, "the file's MIME type, for routing to an extractor")
+    pending ::t/not-ok-result(doc, "pending", "later")
+    assert-eq("extracted-text", pending.method)
+}

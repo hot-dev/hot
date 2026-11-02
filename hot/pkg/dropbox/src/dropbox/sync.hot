@@ -1,0 +1,202 @@
+::dropbox::sync ns
+meta {
+    doc: """
+    Keep a mirror in sync with Dropbox's folder cursors: take a cursor,
+    read every change since it (`list_folder/continue`), store the new
+    cursor. Deltas are metadata entries: files and folders that were
+    added or changed, and `deleted` entries for removals.
+
+    **Sync loop**
+
+    1. Once: `cursor ::sync/get-latest-cursor("/Docs", {recursive: true})`
+       ("changes from now on"), or `start-sync` for a full snapshot plus
+       its cursor. Store the cursor.
+    2. Each run (schedule, webhook, or after `longpoll` says so):
+       `set ::sync/sync-changes(cursor, {path: "/Docs", recursive: true})`,
+       apply `changed-files(set)` and `deleted-paths(set)`, store
+       `set.cursor`.
+
+    **Reset.** A cursor can be invalidated (409 `reset`, e.g. after a
+    large server-side change). When `opts.path` is given, `sync-changes`
+    then relists the folder from scratch and returns `reset: true` with
+    the full listing in `entries`: replace your mirror with it rather
+    than merging. Without `opts.path` the `reset` Err is returned.
+
+    **Longpoll.** `longpoll` holds one HTTP request open until something
+    changes or the timeout passes; see its doc. Webhooks (see
+    `::dropbox::webhooks`) are the push alternative.
+
+    **Scopes.** `files.metadata.read`.
+    """
+}
+
+::api ::dropbox::api
+::files ::dropbox::files
+
+SYNC_LOCAL_KEYS ["path", "cursor"]
+MIN_LONGPOLL_TIMEOUT 30
+MAX_LONGPOLL_TIMEOUT 480
+
+get-latest-cursor
+meta {
+    doc: """POST files/list_folder/get_latest_cursor - a cursor for "changes to `path` from now on" (a Str), without listing. Options as for `::dropbox::files/list-folder` (`recursive`, `include_deleted`, ...); use the same ones for every sync of this cursor."""
+}
+fn
+(path: Str?): Str {
+  get-latest-cursor(path, {})
+},
+(path: Str?, opts: Map): Str {
+  result ::api/rpc("files/list_folder/get_latest_cursor", ::files/list-folder-arg(path, opts), opts)
+  if(is-err(result), result, result.cursor)
+}
+
+ChangeSet
+meta {
+    doc: """
+    Everything that changed since a cursor.
+
+    - `entries` - every metadata entry in order (files, folders, deleted)
+    - `cursor` - store it and pass it to the next sync
+    - `pages` - how many pages were read
+    - `reset` - true when the old cursor was invalidated and `entries` is a
+      fresh full listing (replace the mirror; do not merge)
+    """
+}
+type {
+    entries: Vec,
+    cursor: Str,
+    pages: Int,
+    reset: Bool
+}
+
+sync-loop fn (page: Result, opts: Map, acc: Vec, pages: Int, reset: Bool): ChangeSet {
+  cond {
+    is-err(page) => { page }
+    => {
+      all concat(acc, or(page.entries, []))
+      cond {
+        eq(page.has_more, true) => { sync-loop(::files/list-folder-continue(page.cursor, opts), opts, all, add(pages, 1), reset) }
+        => { ChangeSet({entries: all, cursor: page.cursor, pages: pages, reset: reset}) }
+      }
+    }
+  }
+}
+
+start-sync
+meta {
+    doc: """A full listing of `path` and the cursor to sync from afterwards, as a `ChangeSet` (`reset: true`, since it is a snapshot). Options as for `::dropbox::files/list-folder` (`recursive: true` for the tree)."""
+}
+fn
+(path: Str?): ChangeSet {
+  start-sync(path, {})
+},
+(path: Str?, opts: Map): ChangeSet {
+  creds ::api/credential-opts(opts)
+  sync-loop(::files/list-folder(path, filter-keys(opts, (k) { not(in(k, SYNC_LOCAL_KEYS)) })), creds, [], 1, true)
+}
+
+sync-changes
+meta {
+    doc: """
+    Read every page of changes since `cursor` and return a `ChangeSet`
+    with the cursor to use next time. On a 409 `reset`, relists
+    `opts.path` (with the other `list-folder` options in `opts`) and
+    returns `reset: true`; without `opts.path` the Err is returned.
+
+    ```hot
+    ::sync ::dropbox::sync
+
+    set ::sync/sync-changes(saved-cursor, {path: "/Docs", recursive: true})
+    upserts ::sync/changed-files(set)     // DocFiles to (re)index
+    deletes ::sync/deleted-paths(set)     // lowercased paths to drop
+    saved-cursor set.cursor
+    ```
+    """
+}
+fn
+(cursor: Str): ChangeSet {
+  sync-changes(cursor, {})
+},
+(cursor: Str, opts: Map): ChangeSet {
+  creds ::api/credential-opts(opts)
+  result sync-loop(::files/list-folder-continue(cursor, creds), creds, [], 1, false)
+  cond {
+    and(::api/is-reset(result), is-some(get(opts, "path"))) => { start-sync(get(opts, "path"), opts) }
+    => { result }
+  }
+}
+
+changed-files
+meta {
+    doc: """The entries in a `ChangeSet` (or a Vec of entries) that exist (files and folders, not deletions), as `DocFile`s, the latest entry per path. A path deleted later in the same set is left out."""
+}
+fn (changes: Any): Vec {
+  items if(is-vec(changes), changes, changes.entries)
+  latest reduce(items, (acc, e) { assoc(acc, or(get(e, "path_lower"), get(e, "id"), ""), e) }, {})
+  map(filter(vals(latest), (e) { not(::dropbox/is-deleted(e)) }), ::dropbox/to-doc-file)
+}
+
+deleted-paths
+meta {
+    doc: """The lowercased paths a `ChangeSet` (or Vec of entries) deleted, de-duplicated. Deleting a folder deletes everything under it (Dropbox reports only the folder). A path re-created later in the same set is not included."""
+}
+fn (changes: Any): Vec {
+  items if(is-vec(changes), changes, changes.entries)
+  final reduce(items, (acc, e) { assoc(acc, or(get(e, "path_lower"), ""), ::dropbox/is-deleted(e)) }, {})
+  keys(filter-vals(final, (v) { eq(v, true) }))
+}
+
+is-under
+meta {
+    doc: """True when lowercased `path` is `folder` or inside it (pure): use it to drop a deleted folder's descendants from a mirror."""
+}
+fn (path: Str, folder: Str): Bool {
+  p lowercase(path)
+  f lowercase(folder)
+  or(eq(p, f), starts-with(p, `${f}/`))
+}
+
+// ---------------------------------------------------------------------------
+// Longpoll
+// ---------------------------------------------------------------------------
+
+longpoll-timeout
+meta {
+    doc: """Clamp a longpoll timeout to Dropbox's 30..480 seconds (pure; null gives 30)."""
+}
+fn (timeout: Int?): Int {
+  min(max(or(timeout, MIN_LONGPOLL_TIMEOUT), MIN_LONGPOLL_TIMEOUT), MAX_LONGPOLL_TIMEOUT)
+}
+
+longpoll
+meta {
+    doc: """
+    POST files/list_folder/longpoll (notify host, no authentication) -
+    wait until something under `cursor` changes or `timeout` seconds pass
+    (30..480, default 30; Dropbox adds up to 90 s of jitter). Returns
+    `{changes, backoff?}`: when `changes` is true, call `sync-changes`;
+    when `backoff` is set, wait that many seconds before the next
+    longpoll (schedule it, do not spin).
+
+    This is a single blocking HTTP call, not a sleep, but it holds the
+    run open for up to `timeout` + 90 seconds. The runtime's HTTP timeout
+    (120 s by default) cuts longer waits off with a transport Err, so
+    keep `timeout` at 30 unless your HTTP timeout is raised, and treat a
+    timeout as "no news". For many accounts, webhooks scale better.
+
+    ```hot
+    poll ::dropbox::sync/longpoll(saved-cursor)
+    if(poll.changes, ::dropbox::sync/sync-changes(saved-cursor), null)
+    ```
+    """
+}
+fn
+(cursor: Str): Map {
+  longpoll(cursor, MIN_LONGPOLL_TIMEOUT, {})
+},
+(cursor: Str, timeout: Int?): Map {
+  longpoll(cursor, timeout, {})
+},
+(cursor: Str, timeout: Int?, opts: Map): Map {
+  ::api/notify("files/list_folder/longpoll", {cursor: cursor, timeout: longpoll-timeout(timeout)}, opts)
+}

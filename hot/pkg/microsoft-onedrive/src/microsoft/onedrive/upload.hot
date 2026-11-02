@@ -1,0 +1,440 @@
+::microsoft::onedrive::upload ns
+meta {
+    doc: """
+    Uploads: binary-safe simple uploads (one PUT) for small files, and
+    resumable upload sessions (`createUploadSession`) for large ones.
+    `upload-file` and `replace-content` pick for you: simple up to 4 MiB,
+    a session above.
+
+    Content may be Bytes (sent verbatim), a Str (its UTF-8 bytes), or a
+    Map/Vec (sent as JSON).
+
+    **Upload sessions.** `create-upload-session` returns an
+    `UploadSession` with a pre-authenticated `upload-url` (keep it to
+    resume). Bytes are PUT to it in order, in chunks that are multiples
+    of 320 KiB (327,680 bytes) and under 60 MiB; the default is 10 MiB
+    (`opts.chunk-size`, rounded down to a 320 KiB multiple; Microsoft
+    recommends 5-10 MiB). Chunk PUTs carry **no Authorization header**
+    (Graph may answer 401 if they do). A chunk whose connection drops is
+    resent once, at once; any other failure (429, 5xx, 416) stops with
+    an Err: call `resume-upload` later (for example from a run `retry`
+    policy), which asks the session for `nextExpectedRanges` and sends
+    the rest. A session expires when no chunk arrives before its
+    `expiration`; 404 means start again. `cancel-upload-session`
+    discards one.
+
+    **Conflicts.** `opts.conflict` is `"replace"` (default for
+    `upload-file`; OneDrive keeps the old content as a version),
+    `"rename"` or `"fail"`.
+
+    **Permissions.** `Files.ReadWrite` (own drive), `Files.ReadWrite.All`,
+    `Sites.ReadWrite.All`, or `Sites.Selected` / `Files.SelectedOperations.Selected`
+    with a write grant. App-only cannot replace the content of a file
+    protected by a sensitivity label.
+    """
+}
+
+::od ::microsoft::onedrive
+::api ::microsoft::graph::api
+::auth ::microsoft::graph::auth
+::http ::hot::http
+
+SIMPLE_UPLOAD_LIMIT 4194304
+CHUNK_ALIGN 327680
+DEFAULT_CHUNK_SIZE 10485760
+MAX_CHUNK_SIZE 62586880
+DEFAULT_CONFLICT "replace"
+
+// ---------------------------------------------------------------------------
+// Body and chunk math (pure)
+// ---------------------------------------------------------------------------
+
+to-bytes
+meta {
+    doc: """Upload content as Bytes: Bytes pass through, a Str becomes its UTF-8 bytes, null is empty, anything else is JSON-encoded (pure)."""
+}
+fn (content: Any): Bytes {
+  cond {
+    is-bytes(content) => { content }
+    is-str(content) => { Bytes(content) }
+    is-null(content) => { Bytes([]) }
+    => { Bytes(to-json(untype(content))) }
+  }
+}
+
+align-chunk-size
+meta {
+    doc: """Round a chunk size down to a multiple of 320 KiB (327,680 bytes), at least 320 KiB and under 60 MiB (pure)."""
+}
+fn (size: Int): Int {
+  aligned mul(floor(div(size, CHUNK_ALIGN)), CHUNK_ALIGN)
+  min(MAX_CHUNK_SIZE, max(CHUNK_ALIGN, aligned))
+}
+
+content-range
+meta {
+    doc: """The `Content-Range` for bytes `start` up to (not including) `end` of a `total`-byte upload: `content-range(0, 26, 128)` is `"bytes 0-25/128"` (pure)."""
+}
+fn (start: Int, end: Int, total: Int): Str {
+  `bytes ${start}-${sub(end, 1)}/${total}`
+}
+
+chunk-bounds
+meta {
+    doc: """The `[start, end)` of the chunk beginning at `offset` (pure): `end` is `offset + chunk-size`, capped at `total`."""
+}
+fn (offset: Int, chunk-size: Int, total: Int): Vec {
+  [offset, min(total, add(offset, chunk-size))]
+}
+
+next-offset-from-ranges
+meta {
+    doc: """
+    The next byte to send from an upload session's `nextExpectedRanges`
+    (pure): the start of the first range (`["26-"]` is 26,
+    `["12345-55232", "77829-99375"]` is 12345); null when the list is
+    empty or missing.
+    """
+}
+fn (ranges: Any): Int? {
+  cond {
+    or(not(is-vec(ranges)), is-empty(or(ranges, []))) => { null }
+    => { ::auth/parse-int(first(split(Str(first(ranges)), "-"))) }
+  }
+}
+
+UploadSession
+meta {
+    doc: """
+    An open upload session.
+
+    - `upload-url` - the pre-authenticated URL for chunk PUTs; treat it as
+      a secret, and keep it to resume
+    - `expiration` - when the session lapses without activity
+    - `next-expected-ranges` - Graph's `nextExpectedRanges`
+    """
+}
+type {
+    upload-url: Str,
+    expiration: Str?,
+    next-expected-ranges: Vec
+}
+
+to-session fn (body: Map): UploadSession {
+  UploadSession({
+    upload-url: body.uploadUrl,
+    expiration: body.expirationDateTime,
+    next-expected-ranges: or(body.nextExpectedRanges, [])
+  })
+}
+
+build-session-body
+meta {
+    doc: """The `createUploadSession` body (pure): `{item: {@microsoft.graph.conflictBehavior, description?, fileSize?}, deferCommit?}`. Unset options are omitted."""
+}
+fn (conflict: Str, opts: Map): Map {
+  ::auth/compact({
+    item: ::auth/compact({
+      "@microsoft.graph.conflictBehavior": conflict,
+      description: get(opts, "description"),
+      fileSize: get(opts, "file-size")
+    }),
+    deferCommit: get(opts, "defer-commit")
+  })
+}
+
+classify-chunk-response
+meta {
+    doc: """
+    Interpret the response to a chunk PUT (pure): `{state: "complete",
+    item}` (200/201), `{state: "incomplete", next-offset}` (202, from
+    `nextExpectedRanges`; `assumed-offset` when Graph lists none), or
+    `{state: "retry", error}` for a dropped connection; an Err for an
+    expired session (404), a range mismatch (416: call `resume-upload`),
+    a name conflict (409) or any other failure (429/5xx carry
+    `retry-after`).
+    """
+}
+fn (response: Result, assumed-offset: Int?): Map {
+  cond {
+    is-err(response) => {
+      message err-message(response)
+      if(::api/is-retryable-transport("PUT", message), {state: "retry", error: message}, response)
+    }
+
+    in(response.status, [200, 201]) => { {state: "complete", item: response.body} }
+    eq(response.status, 202) => {
+      b if(is-map(response.body), response.body, {})
+      next next-offset-from-ranges(get(b, "nextExpectedRanges"))
+      {state: "incomplete", next-offset: or(next, assumed-offset)}
+    }
+
+    eq(response.status, 404) => { err("microsoft-onedrive: the upload session has expired or was cancelled; start a new upload") }
+    eq(response.status, 416) => { err("microsoft-onedrive: the upload session already has this range; call resume-upload to continue from nextExpectedRanges") }
+    => { err(::api/HttpError(response)) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Upload sessions
+// ---------------------------------------------------------------------------
+
+create-upload-session
+meta {
+    doc: """
+    POST {parent}:/{name}:/createUploadSession - open a session for a new
+    file `name` under `parent` (an id, `"root"`, a `/path`, or a Map).
+    `opts.conflict` (`replace` default, `rename`, `fail`),
+    `description`, `file-size` (personal OneDrive: checks quota up front),
+    `defer-commit`, `drive`. Returns an `UploadSession`.
+    """
+}
+fn
+(parent: Any, name: Str): UploadSession {
+  create-upload-session(parent, name, {})
+},
+(parent: Any, name: Str, opts: Map): UploadSession {
+  start-session(`${::od/child-path(parent, name, opts)}/createUploadSession`, opts)
+}
+
+create-replace-session
+meta {
+    doc: """POST {item}/createUploadSession - open a session that replaces an existing file's content. `opts` as for `create-upload-session`, plus `if-match` (eTag)."""
+}
+fn
+(item: Any): UploadSession {
+  create-replace-session(item, {})
+},
+(item: Any, opts: Map): UploadSession {
+  start-session(`${::od/item-path(item, opts)}/createUploadSession`, opts)
+}
+
+start-session fn (path: Str, opts: Map): UploadSession {
+  conflict ::od/conflict-behavior(get(opts, "conflict"), DEFAULT_CONFLICT)
+  cond {
+    is-err(conflict) => { conflict }
+    => {
+      body ::api/json("POST", path, ::od/if-match-headers(opts), build-session-body(conflict, opts), ::od/creds(opts))
+      if(is-err(body), body, to-session(body))
+    }
+  }
+}
+
+put-chunk
+meta {
+    doc: """PUT one chunk to an upload URL, without an Authorization header, with its `Content-Range`. Returns the raw response or a transport Err."""
+}
+fn (upload-url: Str, chunk: Bytes, start: Int, total: Int): Any {
+  ::http/request(::http/HttpRequest({
+    method: "PUT",
+    url: upload-url,
+    headers: {Content-Range: content-range(start, add(start, length(chunk)), total)},
+    body: chunk
+  }))
+}
+
+upload-loop fn (upload-url: Str, bytes: Bytes, offset: Int, chunk-size: Int, attempt: Int, policy: Map): Map {
+  total length(bytes)
+  bounds chunk-bounds(offset, chunk-size, total)
+  chunk slice(bytes, first(bounds), last(bounds))
+  result classify-chunk-response(put-chunk(upload-url, chunk, offset, total), last(bounds))
+  cond {
+    is-err(result) => { result }
+    eq(result.state, "complete") => { result.item }
+    eq(result.state, "incomplete") => {
+      next result.next-offset
+      cond {
+        gte(next, total) => { err("microsoft-onedrive: the session received every byte but did not finish; check upload-session-status") }
+        gt(next, offset) => { upload-loop(upload-url, bytes, next, chunk-size, 0, policy) }
+        => { err("microsoft-onedrive: the upload session made no progress; call resume-upload") }
+      }
+    }
+    => {
+      cond {
+        gte(attempt, policy.max-retries) => { err(`microsoft-onedrive: chunk upload failed: ${result.error}`) }
+        => { upload-loop(upload-url, bytes, offset, chunk-size, add(attempt, 1), policy) }
+      }
+    }
+  }
+}
+
+upload-to-session
+meta {
+    doc: """
+    Send `content` to an open session's `upload-url`, starting at byte 0
+    (or `opts.offset`), in `opts.chunk-size` chunks (default 10 MiB,
+    rounded down to a 320 KiB multiple). Returns the created driveItem.
+    """
+}
+fn
+(upload-url: Str, content: Any): Map {
+  upload-to-session(upload-url, content, {})
+},
+(upload-url: Str, content: Any, opts: Map): Map {
+  bytes to-bytes(content)
+  chunk align-chunk-size(or(get(opts, "chunk-size"), DEFAULT_CHUNK_SIZE))
+  cond {
+    eq(length(bytes), 0) => { err("microsoft-onedrive: upload sessions need at least one byte; use upload-small for empty files") }
+    => { upload-loop(upload-url, bytes, or(get(opts, "offset"), 0), chunk, 0, ::api/retry-policy(opts)) }
+  }
+}
+
+upload-session-status
+meta {
+    doc: """GET an upload URL (no Authorization) - how far the session got: `{next-offset, next-expected-ranges, expiration}`. An Err when the session is gone (404)."""
+}
+fn
+(upload-url: Str): Map {
+  upload-session-status(upload-url, {})
+},
+(upload-url: Str, opts: Map): Map {
+  // Pre-authenticated URL: no Authorization header, whatever opts carries.
+  response ::http/request(::http/HttpRequest({method: "GET", url: upload-url, headers: or(get(opts, "headers"), {}), body: ""}))
+  cond {
+    is-err(response) => { response }
+    eq(response.status, 404) => { err("microsoft-onedrive: the upload session has expired or was cancelled; start a new upload") }
+    not(::http/is-ok-response(response)) => { err(::api/HttpError(response)) }
+    => {
+      b if(is-map(response.body), response.body, {})
+      ranges or(get(b, "nextExpectedRanges"), [])
+      {next-offset: next-offset-from-ranges(ranges), next-expected-ranges: ranges, expiration: get(b, "expirationDateTime")}
+    }
+  }
+}
+
+resume-upload
+meta {
+    doc: """
+    Continue an interrupted upload of `content` to `upload-url`: ask the
+    session where it stands, then send the rest. Returns the driveItem.
+
+    ```hot
+    item ::microsoft::onedrive::upload/resume-upload(saved-upload-url, bytes)
+    ```
+    """
+}
+fn
+(upload-url: Str, content: Any): Map {
+  resume-upload(upload-url, content, {})
+},
+(upload-url: Str, content: Any, opts: Map): Map {
+  status upload-session-status(upload-url, opts)
+  cond {
+    is-err(status) => { status }
+    is-null(status.next-offset) => { err("microsoft-onedrive: the session expects no more bytes; it may be complete or waiting for a deferred commit") }
+    => { upload-to-session(upload-url, content, {...opts, offset: status.next-offset}) }
+  }
+}
+
+cancel-upload-session
+meta {
+    doc: """DELETE an upload URL (no Authorization) - discard the session and its uploaded bytes. Returns true."""
+}
+fn
+(upload-url: Str): Bool {
+  cancel-upload-session(upload-url, {})
+},
+(upload-url: Str, opts: Map): Bool {
+  response ::http/request(::http/HttpRequest({method: "DELETE", url: upload-url, headers: or(get(opts, "headers"), {}), body: ""}))
+  cond {
+    is-err(response) => { response }
+    or(::http/is-ok-response(response), eq(response.status, 404)) => { true }
+    => { err(::api/HttpError(response)) }
+  }
+}
+
+upload-large
+meta {
+    doc: """Upload `content` as `name` under `parent` through an upload session (any size). Returns the driveItem. See `create-upload-session` and `upload-to-session` for `opts`."""
+}
+fn
+(parent: Any, name: Str, content: Any): Map {
+  upload-large(parent, name, content, {})
+},
+(parent: Any, name: Str, content: Any, opts: Map): Map {
+  session create-upload-session(parent, name, opts)
+  if(is-err(session), session, upload-to-session(session.upload-url, content, opts))
+}
+
+// ---------------------------------------------------------------------------
+// Simple uploads and one-call helpers
+// ---------------------------------------------------------------------------
+
+conflict-query fn (conflict: Str?): Str {
+  if(is-null(conflict), "", `?@microsoft.graph.conflictBehavior=${conflict}`)
+}
+
+put-content fn (path: Str, bytes: Bytes, mime-type: Str?, conflict: Str?, opts: Map): Map {
+  headers {
+      Content-Type: if(::auth/is-blank-value(mime-type), "application/octet-stream", mime-type),
+      ...::od/if-match-headers(opts)
+  }
+
+  ::api/json("PUT", `${path}/content${conflict-query(conflict)}`, headers, bytes, ::od/creds(opts))
+}
+
+upload-small
+meta {
+    doc: """
+    PUT {parent}:/{name}:/content - create or replace a file in one
+    request (best up to 4 MiB; Graph accepts up to 250 MB, but a session
+    survives dropped connections). `opts.conflict` (`replace` default,
+    `rename`, `fail`), `drive`. Returns the driveItem.
+    """
+}
+fn
+(parent: Any, name: Str, content: Any, mime-type: Str?): Map {
+  upload-small(parent, name, content, mime-type, {})
+},
+(parent: Any, name: Str, content: Any, mime-type: Str?, opts: Map): Map {
+  conflict ::od/conflict-behavior(get(opts, "conflict"), DEFAULT_CONFLICT)
+  cond {
+    is-err(conflict) => { conflict }
+    => { put-content(::od/child-path(parent, name, opts), to-bytes(content), mime-type, conflict, opts) }
+  }
+}
+
+upload-file
+meta {
+    doc: """
+    Upload `content` as `name` under `parent` (an id, `"root"`, a `/path`
+    or a Map): a simple PUT up to 4 MiB, an upload session above (or with
+    `opts.resumable: true`). `opts.conflict` (`replace` default,
+    `rename`, `fail`), `chunk-size`, `drive`. Returns the driveItem.
+
+    ```hot
+    item ::microsoft::onedrive::upload/upload-file("/Reports", "q3.csv", "region,total\nwest,42\n", "text/csv")
+    big ::microsoft::onedrive::upload/upload-file("root", "video.mp4", video-bytes, "video/mp4", {conflict: "rename"})
+    ```
+    """
+}
+fn
+(parent: Any, name: Str, content: Any, mime-type: Str?): Map {
+  upload-file(parent, name, content, mime-type, {})
+},
+(parent: Any, name: Str, content: Any, mime-type: Str?, opts: Map): Map {
+  bytes to-bytes(content)
+  cond {
+    or(eq(get(opts, "resumable"), true), gt(length(bytes), SIMPLE_UPLOAD_LIMIT)) => { upload-large(parent, name, bytes, opts) }
+    => { upload-small(parent, name, bytes, mime-type, opts) }
+  }
+}
+
+replace-content
+meta {
+    doc: """Replace an existing file's content (a new version): a simple PUT to `{item}/content` up to 4 MiB, an upload session above. `opts.if-match` (eTag) guards against overwriting someone else's change. Returns the driveItem."""
+}
+fn
+(item: Any, content: Any, mime-type: Str?): Map {
+  replace-content(item, content, mime-type, {})
+},
+(item: Any, content: Any, mime-type: Str?, opts: Map): Map {
+  bytes to-bytes(content)
+  cond {
+    or(eq(get(opts, "resumable"), true), gt(length(bytes), SIMPLE_UPLOAD_LIMIT)) => {
+      session create-replace-session(item, opts)
+      if(is-err(session), session, upload-to-session(session.upload-url, bytes, opts))
+    }
+    => { put-content(::od/item-path(item, opts), bytes, mime-type, null, opts) }
+  }
+}

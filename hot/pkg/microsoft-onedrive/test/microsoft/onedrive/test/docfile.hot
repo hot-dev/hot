@@ -1,0 +1,129 @@
+::microsoft::onedrive::test::docfile ns
+meta ["test"]
+
+::od ::microsoft::onedrive
+
+BUSINESS_FILE {
+    id: "01BYE5RZ6QN3ZWBTUFOFD3GSPGOHDJD36K",
+    name: "Q3 Plan.DOCX",
+    size: 35212,
+    eTag: "\"{86EB4C8E-D20D-46B9-AD41-23B8868DDA8A},3\"",
+    cTag: "\"c:{86EB4C8E-D20D-46B9-AD41-23B8868DDA8A},2\"",
+    createdDateTime: "2026-10-01T10:00:00Z",
+    lastModifiedDateTime: "2026-10-30T15:12:00Z",
+    webUrl: "https://contoso.sharepoint.com/sites/eng/Shared%20Documents/Q3%20Plan.docx",
+    parentReference: {driveId: "b!xyz", driveType: "documentLibrary", id: "01BYE5RZ56Y2GOVW7725BZO354PWSELRRZ"},
+    file: {mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", hashes: {quickXorHash: "Fp/t3ZEO4cSlBz5r0Wbt3zbJ4LQ="}}
+}
+
+test-business-file
+meta ["test"] fn () {
+    f ::od/to-doc-file(BUSINESS_FILE)
+    assert-eq("microsoft-onedrive", f.provider)
+    assert-eq("01BYE5RZ6QN3ZWBTUFOFD3GSPGOHDJD36K", f.id)
+    assert-eq("Q3 Plan.DOCX", f.name)
+    assert-eq("application/vnd.openxmlformats-officedocument.wordprocessingml.document", f.mime-type)
+    assert-eq(35212, f.size)
+    assert-eq("2026-10-30T15:12:00Z", f.modified)
+    assert-eq("2026-10-01T10:00:00Z", f.created)
+    assert-eq(["01BYE5RZ56Y2GOVW7725BZO354PWSELRRZ"], f.parents)
+    assert-eq("b!xyz", f.drive-id)
+    assert-eq(BUSINESS_FILE.eTag, f.version)
+    assert-eq(BUSINESS_FILE.cTag, f.revision-id)
+    assert(is-null(f.md5), "Graph has no MD5")
+    assert(is-null(f.sha256))
+    assert-eq({quickXorHash: "Fp/t3ZEO4cSlBz5r0Wbt3zbJ4LQ="}, f.hashes)
+    assert(not(f.is-folder))
+    assert(not(f.is-google-native))
+    assert(not(f.is-shortcut))
+    assert(not(f.trashed))
+    assert-eq(["application/pdf"], f.export-formats, "docx converts to PDF")
+    assert-eq(BUSINESS_FILE, f.raw)
+}
+
+test-same-fields-as-google-docfile
+meta ["test"] fn () {
+    google-fields ["provider", "id", "name", "mime-type", "size", "modified", "created", "parents", "drive-id", "web-url", "version", "revision-id", "md5", "sha256", "is-folder", "is-google-native", "is-shortcut", "shortcut-target-id", "trashed", "export-formats", "raw"]
+    f untype(::od/to-doc-file(BUSINESS_FILE))
+    assert-eq([], filter(google-fields, (k) { not(in(k, keys(f))) }), "every google-drive DocFile field is present")
+    assert-eq(["hashes"], filter(keys(f), (k) { not(in(k, google-fields)) }), "plus only hashes")
+}
+
+test-personal-file-hashes
+meta ["test"] fn () {
+    f ::od/to-doc-file({id: "A1!12", name: "photo.jpg", size: "2048", file: {mimeType: "image/jpeg", hashes: {sha1Hash: "ABCDEF", crc32Hash: "0A0B", sha256Hash: "DEADBEEF"}}})
+    assert-eq(2048, f.size, "string sizes are parsed")
+    assert-eq("deadbeef", f.sha256, "sha256Hash lower-cased when present")
+    assert-eq("ABCDEF", get(f.hashes, "sha1Hash"))
+    assert-eq([], f.export-formats)
+    assert-eq([], f.parents)
+}
+
+test-folder-package-and-deleted
+meta ["test"] fn () {
+    folder ::od/to-doc-file({id: "F1", name: "Reports", size: 999, folder: {childCount: 3}})
+    assert(folder.is-folder)
+    assert-eq("", folder.mime-type)
+    assert(is-null(folder.size), "no size for folders")
+    assert-eq([], folder.export-formats)
+    notebook ::od/to-doc-file({id: "N1", name: "Notes", package: {type: "oneNote"}})
+    assert(notebook.is-folder, "packages have no content either")
+    gone ::od/to-doc-file({id: "D1", deleted: {state: "deleted"}})
+    assert(gone.trashed)
+    assert-eq("", gone.name)
+}
+
+test-remote-item
+meta ["test"] fn () {
+    f ::od/to-doc-file({id: "local-1", name: "Budget.xlsx", remoteItem: {id: "remote-9", size: 100, file: {mimeType: "application/vnd.ms-excel"}, parentReference: {driveId: "owner"}}})
+    assert(f.is-shortcut)
+    assert-eq("remote-9", f.shortcut-target-id)
+    assert-eq("application/vnd.ms-excel", f.mime-type, "the target's file facet fills in")
+    assert-eq(100, f.size)
+    shared-folder ::od/to-doc-file({id: "l2", name: "Team", remoteItem: {id: "r2", folder: {}}})
+    assert(shared-folder.is-folder)
+}
+
+test-extension-and-conversion
+meta ["test"] fn () {
+    assert-eq("docx", ::od/extension("A.B.DOCX"))
+    assert-eq("", ::od/extension("README"))
+    assert-eq("", ::od/extension(null))
+    assert-eq(["application/pdf"], ::od/conversion-formats("deck.pptx"))
+    assert-eq(["application/pdf", "text/html"], ::od/conversion-formats("plan.loop"))
+    assert-eq(["text/html"], ::od/conversion-formats("x.fluid"))
+    assert-eq([], ::od/conversion-formats("movie.mp4"))
+}
+
+test-textual-detection
+meta ["test"] fn () {
+    assert(::od/is-textual("text/plain; charset=utf-8", "a.bin"))
+    assert(::od/is-textual("application/octet-stream", "notes.md"), "by extension")
+    assert(::od/is-textual(null, "data.CSV"))
+    assert(::od/is-textual("application/ld+json", "x"))
+    assert(not(::od/is-textual("application/pdf", "a.pdf")))
+    assert(not(::od/is-textual("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "a.docx")))
+}
+
+test-content-is-binary-safe
+meta ["test"] fn () {
+    bin Bytes([0, 255, 195, 40, 10])
+    c ::od/content-from-bytes("f1", bin, "application/octet-stream", "blob.bin", "download")
+    assert-eq(bin, c.bytes)
+    assert-eq(5, c.size)
+    assert(is-null(c.text))
+    json-file ::od/content-from-response("f2", {status: 200, headers: {"Content-Type": "application/json"}, body: {a: 1}, body-bytes: Bytes("{\"a\": 1}")}, "a.json", "download")
+    assert-eq(Bytes("{\"a\": 1}"), json-file.bytes, "the exact bytes, not the decoded body")
+    assert-eq("{\"a\": 1}", json-file.text)
+    assert-eq("application/json", json-file.mime-type)
+    assert-eq("123", ::od/content-text(::od/content-from-bytes("f3", Bytes("123"), "text/plain", "n.txt", "download")))
+}
+
+test-follow-redirect-passthrough
+meta ["test"] fn () {
+    ok {status: 200, headers: {}, body: "x"}
+    assert-eq(ok, ::od/follow-redirect(ok))
+    assert(is-err(::od/follow-redirect(err("request failed"))))
+    no-location {status: 302, headers: {}, body: ""}
+    assert-eq(no-location, ::od/follow-redirect(no-location), "a 3xx without Location is returned as is")
+}

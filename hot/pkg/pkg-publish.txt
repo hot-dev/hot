@@ -120,5 +120,13 @@ sox
 tesseract
 whisper
 
+# Documents & File Storage
+microsoft-graph
+microsoft-onedrive
+microsoft-sharepoint
+dropbox
+box
+documents
+
 # Standard Library (bundled with CLI, but docs are published)
 hot-std

@@ -1,0 +1,90 @@
+::dropbox::test::docfile ns
+meta ["test"]
+
+FILE {
+    ".tag": "file",
+    name: "Q3 Plan.pdf",
+    id: "id:a4ayc_80_OEAAAAAAAAAXw",
+    client_modified: "2026-10-01T12:00:00Z",
+    server_modified: "2026-10-02T09:30:00Z",
+    rev: "a1c10ce0dd78",
+    size: 7212,
+    path_lower: "/reports/q3 plan.pdf",
+    path_display: "/Reports/Q3 Plan.pdf",
+    sharing_info: {read_only: false, parent_shared_folder_id: "84528192421", modified_by: "dbid:AAH4f99"},
+    is_downloadable: true,
+    content_hash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}
+
+test-to-doc-file-file
+meta ["test"] fn () {
+    d ::dropbox/to-doc-file(FILE)
+    assert-eq("dropbox", d.provider)
+    assert-eq("id:a4ayc_80_OEAAAAAAAAAXw", d.id)
+    assert-eq("Q3 Plan.pdf", d.name)
+    assert-eq("application/pdf", d.mime-type)
+    assert-eq("/Reports/Q3 Plan.pdf", d.path)
+    assert-eq(7212, d.size)
+    assert-eq("2026-10-02T09:30:00Z", d.modified)
+    assert(is-null(d.created))
+    assert-eq(["/Reports"], d.parents)
+    assert-eq("84528192421", d.drive-id)
+    assert-eq("a1c10ce0dd78", d.version)
+    assert-eq("a1c10ce0dd78", d.revision-id)
+    assert-eq(FILE.content_hash, d.content-hash)
+    assert(is-null(d.md5))
+    assert(is-null(d.sha256))
+    assert(not(d.is-folder))
+    assert(not(d.is-google-native))
+    assert(not(d.is-shortcut))
+    assert(not(d.trashed))
+    assert-eq([], d.export-formats)
+    assert-eq(FILE, d.raw)
+}
+
+test-to-doc-file-folder-deleted-paper
+meta ["test"] fn () {
+    folder ::dropbox/to-doc-file({".tag": "folder", name: "Reports", id: "id:f1", path_lower: "/reports", path_display: "/Reports", shared_folder_id: "999"})
+    assert(folder.is-folder)
+    assert-eq("inode/directory", folder.mime-type)
+    assert(is-null(folder.size))
+    assert-eq([""], folder.parents, "a top-level folder's parent is the root")
+    assert-eq("999", folder.drive-id)
+
+    gone ::dropbox/to-doc-file({".tag": "deleted", name: "old.txt", path_lower: "/old.txt", path_display: "/old.txt"})
+    assert(gone.trashed)
+    assert-eq("/old.txt", gone.id, "deleted entries have no id: the lowercased path stands in")
+
+    paper ::dropbox/to-doc-file({".tag": "file", name: "Roadmap.paper", id: "id:p1", path_display: "/Roadmap.paper", rev: "r", size: 0, is_downloadable: false, export_info: {export_as: "html", export_options: ["html", "markdown"]}})
+    assert(paper.is-google-native, "export-only files are flagged like Google-native files")
+    assert-eq("application/vnd.dropbox.paper", paper.mime-type)
+    assert-eq(["html", "markdown"], paper.export-formats)
+
+    link ::dropbox/to-doc-file({".tag": "file", name: "l", id: "id:s", symlink_info: {target: "/real.txt"}})
+    assert(link.is-shortcut)
+    assert-eq("/real.txt", link.shortcut-target-id)
+
+    wrapped ::dropbox/to-doc-file({metadata: FILE})
+    assert-eq("Q3 Plan.pdf", wrapped.name, "a {metadata} write result is unwrapped")
+}
+
+test-doc-file-field-parity
+meta ["test"] fn () {
+    // The google-drive DocFile fields, all present with the same names.
+    drive-fields ["provider", "id", "name", "mime-type", "size", "modified", "created", "parents", "drive-id", "web-url", "version", "revision-id", "md5", "sha256", "is-folder", "is-google-native", "is-shortcut", "shortcut-target-id", "trashed", "export-formats", "raw"]
+    d untype(::dropbox/to-doc-file(FILE))
+    missing filter(drive-fields, (f) { not(in(f, keys(d))) })
+    assert-eq([], missing)
+    assert-eq(["content-hash", "path"], sort(filter(keys(d), (k) { not(in(k, drive-fields)) })), "plus path and content-hash")
+}
+
+test-mime-and-text
+meta ["test"] fn () {
+    assert-eq("text/plain", ::dropbox/mime-type-of({".tag": "file", name: "a.txt"}))
+    assert-eq("application/octet-stream", ::dropbox/mime-type-of({".tag": "file", name: "noext"}))
+    assert(::dropbox/is-textual-mime("text/csv; charset=utf-8"))
+    assert(::dropbox/is-textual-mime("application/ld+json"))
+    assert(not(::dropbox/is-textual-mime("application/pdf")))
+    assert(::dropbox/is-exportable({is_downloadable: false, export_info: {export_as: "html"}}))
+    assert(not(::dropbox/is-exportable({is_downloadable: true})))
+}

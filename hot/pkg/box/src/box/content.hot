@@ -1,0 +1,509 @@
+::box::content ns
+meta {
+    doc: """
+    Read file content: byte-exact downloads (Box answers with a redirect
+    to `dl.boxcloud.com`, which Hot follows without forwarding the
+    token), Range and chunked downloads past the response cap, Box's
+    `extracted_text` representation, and `read-document` for one-call
+    text reads.
+
+    **Extracted text.** Box makes a plain-text rendition of documents
+    (PDF, Office, Google, iWork, ...) on request. `extracted-text` never
+    waits: it returns an `ExtractedText` whose `state` is `"success"`
+    (with `text`), `"pending"` (generation is running), `"none"` (just
+    asked Box to generate it), `"unavailable"` (Box offers no text for
+    this file type) or `"error"`. Poll again from a later step or a Hot
+    schedule (for example every few minutes) until `is-done`; small
+    documents are usually ready within seconds, large ones can take
+    minutes.
+
+    **Limits.** Every single response is capped by the runtime's
+    `http.max-response-bytes` (16 MiB by default, 120 s timeout):
+    `download-file` switches to Range-chunked downloads when a file is
+    larger. The whole file is still held in memory. Box answers 202 with
+    `Retry-After` while a just-uploaded file is not yet downloadable; that
+    comes back as a retryable `HttpError`.
+    """
+}
+
+::api ::box::api
+::files ::box::files
+FileContent ::box/FileContent
+is-ok-response ::hot::http/is-ok-response
+
+DEFAULT_DOWNLOAD_CHUNK 8388608
+TEXT_REP "extracted_text"
+TEXT_REP_HINT "[extracted_text]"
+ASSET_PATH_PLACEHOLDER "{+asset_path}"
+DONE_STATES ["success", "unavailable", "error"]
+READ_FIELDS "id,type,name,size,sha1,etag,sequence_id,file_version,parent,path_collection,created_at,modified_at,content_created_at,content_modified_at,trashed_at,item_status,extension,description,representations"
+
+// ---------------------------------------------------------------------------
+// Range math (pure)
+// ---------------------------------------------------------------------------
+
+range-header
+meta {
+    doc: """An HTTP `Range` value for bytes `start`..`end` inclusive (`end` null for "to the end"): `range-header(0, 1023)` is `"bytes=0-1023"`."""
+}
+fn (start: Int, end: Int?): Str {
+  if(is-null(end), `bytes=${start}-`, `bytes=${start}-${end}`)
+}
+
+download-ranges
+meta {
+    doc: """Split `size` bytes into inclusive `[start, end]` ranges of at most `chunk-size` bytes (pure). `download-ranges(10, 4)` is `[[0, 3], [4, 7], [8, 9]]`."""
+}
+fn (size: Int, chunk-size: Int): Vec {
+  c max(chunk-size, 1)
+  count floor(div(add(size, sub(c, 1)), c))
+  map(range(0, count), (i) {
+    start mul(i, c)
+    [start, sub(min(size, add(start, c)), 1)]
+  })
+}
+
+is-size-limit-error
+meta {
+    doc: """True when a request failed because the response exceeded `http.max-response-bytes`."""
+}
+fn (result: Result): Bool {
+  and(is-err(result), contains(err-message(result), "exceeds"))
+}
+
+// ---------------------------------------------------------------------------
+// Downloads
+// ---------------------------------------------------------------------------
+
+DOWNLOAD_LOCAL_KEYS ["range", "chunk-size", "name", "mime-type", "boxapi"]
+
+download-params
+meta {
+    doc: """Query parameters for a download (pure): Box parameters from `opts`, such as `version` (a file version id for an older version)."""
+}
+fn (opts: Map): Map {
+  ::box/query-params({}, opts, DOWNLOAD_LOCAL_KEYS)
+}
+
+download-headers
+meta {
+    doc: """The download request headers (pure): `Range` from `opts.range` (`{start, end}`, inclusive) and `boxapi` for shared-link access."""
+}
+fn (opts: Map): Map {
+  rng get(opts, "range")
+  base ::box/condition-headers(filter-keys(opts, (k) { eq(k, "boxapi") }))
+  if(is-map(rng), {...base, Range: range-header(rng.start, rng.end)}, base)
+}
+
+content-url fn (file-id: Str, opts: Map): Str {
+  ::box/url(`/files/${::box/encode-id(file-id)}/content`, download-params(opts))
+}
+
+to-content fn (file-id: Str, response: Map, source: Str, opts: Map): FileContent {
+  // dl.boxcloud.com often labels everything application/octet-stream; a
+  // known name gives a better type.
+  header-mime ::box/base-mime(get(or(response.headers, {}), "content-type"))
+  mime cond {
+    is-some(get(opts, "mime-type")) => { get(opts, "mime-type") }
+    and(is-some(get(opts, "name")), or(is-null(header-mime), eq(header-mime, ::box/DEFAULT_MIME))) => {
+      ::box/mime-for({type: "file", name: get(opts, "name")})
+    }
+    => { header-mime }
+  }
+
+  content ::box/content-from-bytes(file-id, ::box/response-bytes(response), mime, source)
+  FileContent({...untype(content), name: get(opts, "name")})
+}
+
+download-file
+meta {
+    doc: """
+    GET /files/{id}/content - download a file's bytes as a `FileContent`.
+    When the file is larger than `http.max-response-bytes`, it is fetched
+    again in Range chunks (`download-file-chunked`).
+
+    Options: `range: {start, end}` (inclusive; `end` null for the rest)
+    for a partial download, `version` (an older file version id),
+    `chunk-size` for the chunked fallback, `boxapi` for shared-link
+    access, plus credentials.
+
+    ```hot
+    pdf ::box::content/download-file("12345")
+    pdf.bytes       // exact bytes
+    ```
+    """
+}
+fn
+(file-id: Str): FileContent {
+  download-file(file-id, {})
+},
+(file-id: Str, opts: Map): FileContent {
+  rng get(opts, "range")
+  response ::api/request("GET", content-url(file-id, opts), download-headers(opts), "", ::box/creds(opts))
+  cond {
+    and(is-size-limit-error(response), not(is-map(rng))) => { download-file-chunked(file-id, opts) }
+    is-err(response) => { response }
+    eq(response.status, 202) => { err(::api/HttpError(response)) }
+    not(is-ok-response(response)) => { err(::api/HttpError(response)) }
+    => { to-content(file-id, response, if(is-map(rng), "range", "download"), opts) }
+  }
+}
+
+download-range
+meta {doc: """Download bytes `start`..`end` (inclusive) of a file."""}
+fn
+(file-id: Str, start: Int, end: Int): FileContent {
+  download-range(file-id, start, end, {})
+},
+(file-id: Str, start: Int, end: Int, opts: Map): FileContent {
+  download-file(file-id, {...opts, range: {start: start, end: end}})
+}
+
+fetch-ranges fn (full-url: Str, ranges: Vec, index: Int, acc: Bytes, opts: Map): Bytes {
+  cond {
+    gte(index, length(ranges)) => { acc }
+    => {
+      r get(ranges, index)
+      response ::api/request("GET", full-url, {Range: range-header(first(r), last(r))}, "", ::box/creds(opts))
+      cond {
+        is-err(response) => { response }
+        // A server that ignores Range answers 200 with the whole body.
+        eq(response.status, 200) => { ::box/response-bytes(response) }
+        eq(response.status, 206) => {
+          fetch-ranges(full-url, ranges, add(index, 1), concat(acc, ::box/response-bytes(response)), opts)
+        }
+        => { err(::api/HttpError(response)) }
+      }
+    }
+  }
+}
+
+download-file-chunked
+meta {
+    doc: """
+    Download a file in Range requests of `opts.chunk-size` bytes (default
+    8 MiB; keep it under `http.max-response-bytes`) and join them, so
+    files larger than one response can be read. The whole file is still
+    held in memory.
+    """
+}
+fn
+(file-id: Str): FileContent {
+  download-file-chunked(file-id, {})
+},
+(file-id: Str, opts: Map): FileContent {
+  chunk or(get(opts, "chunk-size"), DEFAULT_DOWNLOAD_CHUNK)
+  meta-data ::files/get-file(file-id, {...::box/creds(opts), fields: "id,name,size"})
+  cond {
+    is-err(meta-data) => { meta-data }
+    => {
+      size or(::box/to-int(meta-data.size), 0)
+      bytes fetch-ranges(content-url(file-id, opts), download-ranges(size, chunk), 0, Bytes([]), opts)
+      cond {
+        is-err(bytes) => { bytes }
+        => {
+          content ::box/content-from-bytes(file-id, bytes, ::box/mime-for({type: "file", name: meta-data.name}), "chunked")
+          FileContent({...untype(content), name: meta-data.name})
+        }
+      }
+    }
+  }
+}
+
+download-text
+meta {doc: """Download a file and decode it as UTF-8 text."""}
+fn
+(file-id: Str): Str {
+  download-text(file-id, {})
+},
+(file-id: Str, opts: Map): Str {
+  content download-file(file-id, opts)
+  if(is-err(content), content, ::box/content-text(content))
+}
+
+// ---------------------------------------------------------------------------
+// Representations and extracted text
+// ---------------------------------------------------------------------------
+
+ExtractedText
+meta {
+    doc: """
+    The state of a file's `extracted_text` representation.
+
+    **Fields**
+    - `file-id`
+    - `state` - `"success"`, `"pending"`, `"none"` (generation was just
+      requested), `"unavailable"` (Box offers no text rendition for this
+      file) or `"error"`
+    - `text` - the text when `state` is `"success"`, else null
+    - `ready` - true when `text` is set
+    - `info-url` - the representation info URL (GET it to check or trigger generation)
+    - `content-url` - the URL the text is fetched from
+    - `file` - the file information returned with the representation
+    """
+}
+type {
+    file-id: Str,
+    state: Str,
+    text: Str?,
+    ready: Bool,
+    info-url: Str?,
+    content-url: Str?,
+    file: Map?
+}
+
+find-representation
+meta {
+    doc: """The entry of `file.representations.entries` whose `representation` is `rep` (e.g. `"extracted_text"`), or null (pure)."""
+}
+fn (file: Map, rep: Str): Map? {
+  reps file.representations
+  entries if(is-map(reps), or(reps.entries, []), [])
+  found filter(entries, (e) { and(is-map(e), eq(e.representation, rep)) })
+  if(is-empty(found), null, first(found))
+}
+
+representation-url
+meta {
+    doc: """Fill a representation `url_template` (pure): `{+asset_path}` becomes `asset-path` (`""` for unpaged representations such as `extracted_text`, `"1.png"` for page 1 of a paged one)."""
+}
+fn (template: Str, asset-path: Str): Str {
+  replace(template, ASSET_PATH_PLACEHOLDER, asset-path)
+}
+
+representation-state
+meta {
+    doc: """The `status.state` of a representation entry (pure), or `"unavailable"` for a null entry."""
+}
+fn (entry: Map?): Str {
+  cond {
+    not(is-map(entry)) => { "unavailable" }
+    and(is-map(entry.status), is-str(entry.status.state)) => { entry.status.state }
+    => { "error" }
+  }
+}
+
+extracted-text-from
+meta {
+    doc: """Build an `ExtractedText` from file information that carries `representations` (pure; no text fetched)."""
+}
+fn (file-id: Str, file: Map, text: Str?): ExtractedText {
+  entry find-representation(file, TEXT_REP)
+  template if(and(is-map(entry), is-map(get(or(entry, {}), "content"))), entry.content.url_template, null)
+  ExtractedText({
+    file-id: file-id,
+    state: representation-state(entry),
+    text: text,
+    ready: is-some(text),
+    info-url: if(and(is-map(entry), is-map(get(or(entry, {}), "info"))), entry.info.url, null),
+    content-url: if(is-str(template), representation-url(template, ""), null),
+    file: file
+  })
+}
+
+is-done
+meta {
+    doc: """True when polling an `ExtractedText` again would not change it: `state` is `"success"`, `"unavailable"` or `"error"`."""
+}
+fn (status: Map): Bool {
+  in(status.state, DONE_STATES)
+}
+
+is-ready
+meta {doc: """True when an `ExtractedText` carries the text."""}
+fn (status: Map): Bool {
+  eq(status.ready, true)
+}
+
+get-representations
+meta {
+    doc: """GET /files/{id}?fields=representations with an `x-rep-hints` header (e.g. `"[extracted_text]"`, `"[pdf][jpg?dimensions=320x320]"`). Returns the file information with `representations.entries`."""
+}
+fn
+(file-id: Str, hints: Str): Map {
+  get-representations(file-id, hints, {})
+},
+(file-id: Str, hints: Str, opts: Map): Map {
+  ::files/get-file(file-id, {...opts, fields: or(get(opts, "fields"), READ_FIELDS), rep-hints: hints})
+}
+
+fetch-representation-text fn (url: Str, opts: Map): Any {
+  response ::api/request("GET", url, {}, "", ::box/creds(opts))
+  cond {
+    is-err(response) => { response }
+    eq(response.status, 202) => { null }
+    not(is-ok-response(response)) => { err(::api/HttpError(response)) }
+    => { Str(::box/response-bytes(response)) }
+  }
+}
+
+trigger-generation fn (info-url: Str?, opts: Map): Any {
+  cond {
+    is-null(info-url) => { null }
+    => { ::api/json("GET", info-url, {}, "", ::box/creds(opts)) }
+  }
+}
+
+resolve-text fn (status: ExtractedText, opts: Map): ExtractedText {
+  cond {
+    and(eq(status.state, "success"), is-some(status.content-url)) => {
+      text fetch-representation-text(status.content-url, opts)
+      cond {
+        is-err(text) => { text }
+        is-null(text) => { ExtractedText({...untype(status), state: "pending"}) }
+        => { ExtractedText({...untype(status), text: text, ready: true}) }
+      }
+    }
+
+    eq(status.state, "none") => {
+      // Asking for the info URL is what starts generation.
+      info trigger-generation(status.info-url, opts)
+      next-state if(and(is-map(info), is-map(info.status), is-str(info.status.state)), info.status.state, "pending")
+      ExtractedText({...untype(status), state: if(eq(next-state, "none"), "pending", next-state)})
+    }
+    => { status }
+  }
+}
+
+extracted-text
+meta {
+    doc: """
+    Check (and when needed request) a file's `extracted_text`
+    representation, and fetch the text when it is ready. Never waits:
+    returns an `ExtractedText` in whatever state Box reports. Call it
+    again later (a later step, or a Hot schedule) until `is-done`.
+
+    ```hot
+    status ::box::content/extracted-text("12345")
+    cond {
+      ::box::content/is-ready(status) => { index-text(status.text) }
+      ::box::content/is-done(status) => { println(`box: no text for this file (${status.state})`) }
+      => { println("box: text is still being generated; try again later") }
+    }
+    ```
+    """
+}
+fn
+(file-id: Str): ExtractedText {
+  extracted-text(file-id, {})
+},
+(file-id: Str, opts: Map): ExtractedText {
+  file get-representations(file-id, TEXT_REP_HINT, opts)
+  cond {
+    is-err(file) => { file }
+    => { resolve-text(extracted-text-from(file-id, file, null), opts) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// read-document: one call for any file
+// ---------------------------------------------------------------------------
+
+READ_LOCAL_KEYS ["fields", "download-fallback", "rep-hints"]
+
+wants-original
+meta {
+    doc: """True when a `read-document` format asks for the stored bytes (`"original"`, `"download"`, `"raw"`, `"bytes"`), not text (pure)."""
+}
+fn (format: Str?): Bool {
+  in(lowercase(trim(or(format, "auto"))), ["original", "download", "raw", "bytes"])
+}
+
+with-file fn (content: Result, file: Map, format: Str?, text-state: Str?): FileContent {
+  cond {
+    is-err(content) => { content }
+    => {
+      FileContent({...untype(content), name: file.name, format: format, file: ::box/to-doc-file(file), text-state: text-state})
+    }
+  }
+}
+
+empty-content fn (file: Map, format: Str?, text-state: Str?): FileContent {
+  base ::box/content-from-bytes(Str(file.id), Bytes([]), null, "none")
+  with-file(base, file, format, text-state)
+}
+
+read-document
+meta {
+    doc: """
+    Read any file as a `FileContent` with its `DocFile` attached, in one
+    metadata call plus one content call.
+
+    - `format` `"auto"` (default) or `"text"`: textual files (txt, md,
+      csv, json, ...) are downloaded as is; other documents use Box's
+      `extracted_text` when it is ready (`source: "extracted-text"`).
+      When it is not ready, generation is requested and the original is
+      downloaded instead (`text` is then null for binary files);
+      `text-state` says what Box reported, so read again later for the
+      text. `{download-fallback: false}` skips that download (empty
+      `bytes`).
+    - `"original"` (or `"download"`, `"raw"`): download the stored bytes.
+
+    ```hot
+    doc ::box::content/read-document("12345", "text")
+    doc.text            // ready for chunking and embedding, or null
+    doc.text-state      // "success", "pending", "unavailable", ...
+    doc.file.sha1       // for incremental re-indexing
+    ```
+    """
+}
+fn
+(file-id: Str): FileContent {
+  read-document(file-id, "auto", {})
+},
+(file-id: Str, format: Str?): FileContent {
+  read-document(file-id, format, {})
+},
+(file-id: Str, format: Str?, opts: Map): FileContent {
+  fmt if(::box/is-blank(format), "auto", format)
+  original wants-original(fmt)
+  hints if(original, null, TEXT_REP_HINT)
+  file ::files/get-file(file-id, filter-vals({...::box/creds(opts), fields: or(get(opts, "fields"), READ_FIELDS), rep-hints: hints}, is-some))
+  cond {
+    is-err(file) => { file }
+    => { read-with-file(file-id, file, fmt, original, opts) }
+  }
+}
+
+read-with-file fn (file-id: Str, file: Map, fmt: Str, original: Bool, opts: Map): FileContent {
+  download-opts {...filter-keys(opts, (k) { not(in(k, READ_LOCAL_KEYS)) }), name: file.name}
+  cond {
+    original => { with-file(download-file(file-id, download-opts), file, fmt, null) }
+    ::box/is-textual-mime(::box/mime-for(file)) => { with-file(download-file(file-id, download-opts), file, fmt, null) }
+    => {
+      status resolve-text(extracted-text-from(file-id, file, null), opts)
+      cond {
+        is-err(status) => { status }
+        is-ready(status) => {
+          text-bytes Bytes(status.text)
+          content ::box/content-from-bytes(file-id, text-bytes, "text/plain", "extracted-text")
+          with-file(content, file, fmt, status.state)
+        }
+
+        eq(get(opts, "download-fallback"), false) => { empty-content(file, fmt, status.state) }
+        => { with-file(download-file(file-id, download-opts), file, fmt, status.state) }
+      }
+    }
+  }
+}
+
+read-document-text
+meta {
+    doc: """`read-document`, returning just the text; an Err when there is no text yet (the message says whether Box is still generating it, so a schedule can try again)."""
+}
+fn
+(file-id: Str): Str {
+  read-document-text(file-id, "auto", {})
+},
+(file-id: Str, format: Str?): Str {
+  read-document-text(file-id, format, {})
+},
+(file-id: Str, format: Str?, opts: Map): Str {
+  content read-document(file-id, format, {...opts, download-fallback: false})
+  cond {
+    is-err(content) => { content }
+    is-some(content.text) => { content.text }
+    in(content.text-state, ["pending", "none"]) => { err(`box: the extracted text of ${content.name} is still being generated; read it again later`) }
+    => { err(`box: ${content.name} has no text rendition (${or(content.text-state, "unknown")})`) }
+  }
+}

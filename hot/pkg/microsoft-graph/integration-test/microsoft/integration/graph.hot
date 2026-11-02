@@ -1,0 +1,41 @@
+::microsoft::integration::graph ns
+meta ["test"]
+
+// =============================================================================
+// Integration tests (live Microsoft Graph, read-only)
+// =============================================================================
+// See ::microsoft::integration::ctx for the environment variables. Without
+// credentials each test records a skip and passes.
+// Run with: hot test --project pkg-integration-microsoft
+
+::ctx ::microsoft::integration::ctx
+
+test-access-token
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip() }
+        => {
+            token ::microsoft::graph::auth/access-token()
+            assert(not(is-err(token)), `token request should succeed: ${if-err(token, (e) { err-message(e) })}`)
+            assert(gt(length(token), 20), "bearer token should be non-trivial")
+        }
+    }
+}
+
+test-me-or-batch
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip() }
+        not(::ctx/is-delegated()) => { assert(true, "app-only: /me does not apply") }
+        => {
+            me ::microsoft::graph::users/me()
+            assert(is-some(me.id), "the delegated token should resolve to a user")
+            out ::microsoft::graph::api/batch([
+                {id: "me", method: "GET", url: "/me?$select=id"},
+                {id: "drive", method: "GET", url: "/me/drive?$select=id,driveType"}
+            ])
+            assert(get(out.by-id, "me").ok, "batched /me should succeed")
+            assert-eq(me.id, get(out.by-id, "me").body.id)
+        }
+    }
+}

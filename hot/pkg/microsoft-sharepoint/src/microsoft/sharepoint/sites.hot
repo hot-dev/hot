@@ -1,0 +1,265 @@
+::microsoft::sharepoint::sites ns
+meta {
+    doc: """
+    SharePoint sites: the tenant root site, a site by URL or by
+    hostname + server-relative path, search, subsites, every site
+    (app-only), and a site's document libraries (drives).
+
+    **Permissions.** `Sites.Read.All` (delegated or application), or
+    `Sites.Selected` with a grant on the site (app-only reads of a
+    granted site by id work; search and `get-all-sites` do not see sites
+    the app has no grant on).
+    """
+}
+
+::sp ::microsoft::sharepoint
+::api ::microsoft::graph::api
+::auth ::microsoft::graph::auth
+::od ::microsoft::onedrive
+
+opts-query fn (opts: Map): Map {
+  ::od/query-opts({}, opts)
+}
+
+get-json fn (path: Str, opts: Map): Any {
+  ::api/json("GET", ::api/with-query(path, opts-query(opts)), ::api/credential-opts(opts))
+}
+
+collect fn (path: Str, opts: Map, limit: Int?): Vec {
+  ::api/collect-pages(path, {...opts-query(opts), ...::api/credential-opts(opts)}, limit)
+}
+
+get-root-site
+meta {
+    doc: """GET /sites/root - the tenant's root site (`https://{tenant}.sharepoint.com`)."""
+}
+fn
+(): Map {
+  get-root-site({})
+},
+(opts: Map): Map {
+  get-json("/sites/root", opts)
+}
+
+get-site
+meta {
+    doc: """GET /sites/{site-id}. `opts` takes `select`, `expand` (e.g. `"drive"`, `"lists"`)."""
+}
+fn
+(site-id: Str): Map {
+  get-site(site-id, {})
+},
+(site-id: Str, opts: Map): Map {
+  get-json(::sp/site-path(site-id), opts)
+}
+
+site-by-path-path
+meta {
+    doc: """The Graph path for a site by host and server-relative path (pure): `/sites/{hostname}:/{path}` (each segment encoded), or `/sites/{hostname}` for the host's root site."""
+}
+fn (hostname: Str, path: Str?): Str {
+  segments filter(split(or(path, ""), "/"), (s) { not(is-empty(s)) })
+  host ::api/encode-segment(lowercase(trim(hostname)))
+  if(is-empty(segments), `/sites/${host}`, `/sites/${host}:${::od/encode-path(or(path, ""))}`)
+}
+
+get-site-by-path
+meta {
+    doc: """
+    GET /sites/{hostname}:/{server-relative-path} - a site by host and
+    path.
+
+    ```hot
+    site ::microsoft::sharepoint::sites/get-site-by-path("contoso.sharepoint.com", "/sites/engineering")
+    site.id   // "contoso.sharepoint.com,2C712604-...,2D2244C3-..."
+    ```
+    """
+}
+fn
+(hostname: Str, path: Str): Map {
+  get-site-by-path(hostname, path, {})
+},
+(hostname: Str, path: Str, opts: Map): Map {
+  get-json(site-by-path-path(hostname, path), opts)
+}
+
+parse-site-url
+meta {
+    doc: """
+    Split a site URL into `{hostname, path}` (pure), dropping any query
+    or fragment, and a library/page suffix after the site
+    (`/Shared Documents/...`, `/Lists/...`, `/SitePages/...`,
+    `/_layouts/...`). Returns an Err for a non-https URL.
+
+    ```hot
+    ::microsoft::sharepoint::sites/parse-site-url("https://contoso.sharepoint.com/sites/eng/Shared%20Documents/Forms/AllItems.aspx")
+    // {hostname: "contoso.sharepoint.com", path: "/sites/eng"}
+    ```
+    """
+}
+fn (url: Str): Map {
+  u trim(url)
+  cond {
+    not(starts-with(lowercase(u), "https://")) => { err("microsoft-sharepoint: a site URL must start with https://") }
+    => {
+      no-scheme slice(u, 8, length(u))
+      no-query first(split(first(split(no-scheme, "#")), "?"))
+      parts split(no-query, "/")
+      host lowercase(first(parts))
+      segments map(filter(rest(parts), (s) { not(is-empty(s)) }), ::hot::uri/decode)
+      stops ["shared documents", "lists", "sitepages", "_layouts", "forms", "pages", "siteassets", "documents"]
+      walked reduce(segments, (acc, seg) {
+        cond {
+          acc.stopped => { acc }
+          in(lowercase(seg), stops) => { {...acc, stopped: true} }
+          ends-with(lowercase(seg), ".aspx") => { {...acc, stopped: true} }
+          => { {...acc, kept: concat(acc.kept, [seg])} }
+        }
+      }, {kept: [], stopped: false})
+      site-segments walked.kept
+      {hostname: host, path: if(is-empty(site-segments), "/", `/${join(site-segments, "/")}`)}
+    }
+  }
+}
+
+get-site-by-url
+meta {
+    doc: """
+    GET a site from its browser URL (`https://contoso.sharepoint.com/sites/eng`,
+    or a library or page URL inside it). See `parse-site-url`.
+
+    ```hot
+    site ::microsoft::sharepoint::sites/get-site-by-url("https://contoso.sharepoint.com/sites/engineering")
+    ```
+    """
+}
+fn
+(url: Str): Map {
+  get-site-by-url(url, {})
+},
+(url: Str, opts: Map): Map {
+  parts parse-site-url(url)
+  if(is-err(parts), parts, get-json(site-by-path-path(parts.hostname, parts.path), opts))
+}
+
+search-path
+meta {
+    doc: """The site search path (pure): `/sites?search={encoded query}` (Graph's `search` parameter, not OData `$search`)."""
+}
+fn (query: Str): Str {
+  `/sites?search=${::api/encode-segment(query)}`
+}
+
+search-sites
+meta {
+    doc: """
+    GET /sites?search={query} - sites whose name or description matches,
+    all pages or at most `limit`. `"*"` lists every site the caller can
+    see.
+
+    ```hot
+    hits ::microsoft::sharepoint::sites/search-sites("engineering", {}, 20)
+    map(hits, (s) { s.webUrl })
+    ```
+    """
+}
+fn
+(query: Str): Vec {
+  search-sites(query, {}, null)
+},
+(query: Str, opts: Map): Vec {
+  search-sites(query, opts, null)
+},
+(query: Str, opts: Map, limit: Int?): Vec {
+  collect(search-path(query), opts, limit)
+}
+
+get-all-sites
+meta {
+    doc: """GET /sites/getAllSites - every site in the tenant (app-only with `Sites.Read.All`), all pages or at most `limit`. Includes OneDrive personal sites unless filtered."""
+}
+fn
+(): Vec {
+  get-all-sites({}, null)
+},
+(opts: Map): Vec {
+  get-all-sites(opts, null)
+},
+(opts: Map, limit: Int?): Vec {
+  collect("/sites/getAllSites", opts, limit)
+}
+
+list-subsites
+meta {doc: """GET /sites/{site-id}/sites - a site's direct subsites, all pages."""}
+fn
+(site-id: Str): Vec {
+  list-subsites(site-id, {})
+},
+(site-id: Str, opts: Map): Vec {
+  collect(`${::sp/site-path(site-id)}/sites`, opts, null)
+}
+
+list-drives
+meta {
+    doc: """
+    GET /sites/{site-id}/drives - the site's document libraries, each a
+    drive (`id`, `name`, `webUrl`, `driveType: "documentLibrary"`). Pass
+    a library's `id` as `opts.drive` to `microsoft-onedrive`.
+    """
+}
+fn
+(site-id: Str): Vec {
+  list-drives(site-id, {})
+},
+(site-id: Str, opts: Map): Vec {
+  collect(`${::sp/site-path(site-id)}/drives`, opts, null)
+}
+
+get-default-drive
+meta {
+    doc: """GET /sites/{site-id}/drive - the site's default document library ("Documents" / "Shared Documents")."""
+}
+fn
+(site-id: Str): Map {
+  get-default-drive(site-id, {})
+},
+(site-id: Str, opts: Map): Map {
+  get-json(`${::sp/site-path(site-id)}/drive`, opts)
+}
+
+find-drive
+meta {
+    doc: """The site library whose `name` matches (case-insensitive), or an Err listing the names there are. Library names are display names, e.g. `"Documents"`, `"Contracts"`."""
+}
+fn
+(site-id: Str, name: Str): Map {
+  find-drive(site-id, name, {})
+},
+(site-id: Str, name: Str, opts: Map): Map {
+  drives list-drives(site-id, opts)
+  cond {
+    is-err(drives) => { drives }
+    => {
+      hit find-first(drives, (d) { eq(lowercase(or(d.name, "")), lowercase(trim(name))) })
+      if(is-null(hit), err(`microsoft-sharepoint: no library named "${name}"; the site has: ${join(map(drives, (d) { or(d.name, "") }), ", ")}`), hit)
+    }
+  }
+}
+
+drive-opts
+meta {
+    doc: """Opts that point `microsoft-onedrive` at a library: `{drive: id}` from a drive Map or id, merged into `opts` (pure).
+
+    ```hot
+    lib ::microsoft::sharepoint::sites/find-drive(site-id, "Contracts")
+    ::microsoft::onedrive::items/list-all-children("root", ::microsoft::sharepoint::sites/drive-opts(lib))
+    ```
+    """
+}
+fn
+(drive: Any): Map {
+  drive-opts(drive, {})
+},
+(drive: Any, opts: Map): Map {
+  {...opts, drive: if(is-map(drive), Str(get(drive, "id")), Str(drive))}
+}

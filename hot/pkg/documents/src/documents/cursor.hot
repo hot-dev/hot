@@ -1,0 +1,100 @@
+::documents::cursor ns
+meta {
+    doc: """
+    Opaque cursors for `list` pages and `changes`. A cursor is a Str
+    `doc1.<base64url JSON>` carrying the provider, the kind (`list` or
+    `changes`), the provider's own token (a Drive page token, Graph
+    nextLink or deltaLink, Dropbox cursor, Box marker or stream position,
+    S3 continuation token or watermark) and, for list pages, the folder.
+    Store it as is; passing it to another provider or verb is an Err.
+
+    Cursors hold no credentials. Provider tokens are not secrets, but a
+    Graph link names the drive and a Dropbox cursor the folder, so treat
+    stored cursors like other metadata.
+    """
+}
+
+::b64 ::hot::base64
+
+PREFIX "doc1."
+
+encode
+meta {
+    doc: """
+    Encode a cursor (pure). `value` is the provider token (a Str or a
+    Map); `folder` is the listed folder for list cursors (null for
+    change cursors). Nulls are left out of the payload.
+
+    ```hot
+    c ::documents::cursor/encode("box", "list", "JV9IRGZmieiBasejOG9yDCRNgd2ymoZIbjsxbJMjIs3kioVii", "12345")
+    ::documents::cursor/decode(c).v
+    ```
+    """
+}
+fn
+(provider: Str, kind: Str, value: Any): Str {
+  encode(provider, kind, value, null)
+},
+(provider: Str, kind: Str, value: Any, folder: Any): Str {
+  payload filter-vals({p: provider, k: kind, v: value, f: folder}, is-some)
+  `${PREFIX}${::b64/encode-url(to-json(payload))}`
+}
+
+decode
+meta {
+    doc: """Decode a cursor into `{p, k, v, f?}` (pure). Anything that is not a cursor from `encode` is an Err; it never halts on bad input."""
+}
+fn (cursor: Any): Map {
+  cond {
+    not(is-str(cursor)) => { err("documents: a cursor must be a Str") }
+    not(starts-with(cursor, PREFIX)) => { err("documents: not a documents cursor (expected doc1.)") }
+    => {
+      bytes ::b64/decode-url(slice(cursor, length(PREFIX), length(cursor)))
+      parsed if(is-err(bytes), bytes, from-json(Str(bytes)))
+      cond {
+        is-err(parsed) => { err("documents: the cursor is corrupt") }
+        not(is-map(parsed)) => { err("documents: the cursor is corrupt") }
+        or(not(is-str(get(parsed, "p"))), not(is-str(get(parsed, "k"))), is-null(get(parsed, "v"))) => {
+          err("documents: the cursor is incomplete")
+        }
+        => { parsed }
+      }
+    }
+  }
+}
+
+decode-for
+meta {
+    doc: """Decode a cursor and check it belongs to `provider` and `kind` (`"list"` or `"changes"`) (pure). Returns the payload Map, or an Err saying what the cursor is for."""
+}
+fn (cursor: Any, provider: Str, kind: Str): Map {
+  c decode(cursor)
+  cond {
+    is-err(c) => { c }
+    ne(c.p, provider) => { err(`documents: this cursor belongs to ${c.p}, not ${provider}`) }
+    ne(c.k, kind) => { err(`documents: this is a ${c.k} cursor; ${kind} needs a cursor from ${if(eq(kind, "changes"), "start-cursor or changes", "list")}`) }
+    => { c }
+  }
+}
+
+list-cursor
+meta {
+    doc: """A list-page cursor for `token`, or null when `token` is blank (the last page) (pure)."""
+}
+fn (provider: Str, token: Any, folder: Any): Str? {
+  cond {
+    or(is-null(token), and(is-str(token), is-empty(trim(token)))) => { null }
+    => { encode(provider, "list", token, folder) }
+  }
+}
+
+change-cursor
+meta {
+    doc: """A change cursor for `token` (pure); an Err when the provider returned none."""
+}
+fn (provider: Str, token: Any): Str {
+  cond {
+    or(is-null(token), and(is-str(token), is-empty(trim(token)))) => { err(`documents: ${provider} returned no change cursor`) }
+    => { encode(provider, "changes", token) }
+  }
+}

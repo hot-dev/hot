@@ -1,0 +1,35 @@
+::dropbox::integration::ctx ns
+
+::env ::hot::env
+
+// Placeholder credentials for the dropbox integration suite. Unset
+// environment variables are skipped entirely, so absent credentials
+// behave exactly as if never configured. Use either DROPBOX_ACCESS_TOKEN
+// (short-lived, about 4 hours) or DROPBOX_REFRESH_TOKEN + DROPBOX_APP_KEY
+// (+ DROPBOX_APP_SECRET unless the token came from a PKCE flow).
+// DROPBOX_TEST_PATH is the folder the suite reads (default: the root).
+// DROPBOX_API_ROOT points every route at a proxy or local mock.
+::hot::ctx/set-secret(filter-vals({
+    "dropbox.access.token": ::env/get("DROPBOX_ACCESS_TOKEN", ""),
+    "dropbox.refresh.token": ::env/get("DROPBOX_REFRESH_TOKEN", ""),
+    "dropbox.app.secret": ::env/get("DROPBOX_APP_SECRET", ""),
+}, (v) { not(is-empty(v)) }))
+
+::hot::ctx/set(filter-vals({
+    "dropbox.app.key": ::env/get("DROPBOX_APP_KEY", ""),
+    "dropbox.api.root": ::env/get("DROPBOX_API_ROOT", ""),
+}, (v) { not(is-empty(v)) }))
+
+configured fn (): Bool {
+  has (key) { is-some(::hot::ctx/get(key)) }
+  or(has("dropbox.access.token"), and(has("dropbox.refresh.token"), has("dropbox.app.key")))
+}
+
+skip fn (): Bool {
+  println("Dropbox credentials not set - skipping")
+  assert(true, "skipped: no Dropbox credentials")
+}
+
+test-path fn (): Str {
+  ::env/get("DROPBOX_TEST_PATH", "")
+}

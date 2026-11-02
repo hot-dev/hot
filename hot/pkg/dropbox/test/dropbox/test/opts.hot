@@ -1,0 +1,62 @@
+::dropbox::test::opts ns
+meta ["test"]
+
+// The per-call rules. Hermetic: no network, and a fake context source.
+
+::auth ::dropbox::auth
+::api ::dropbox::api
+::hooks ::dropbox::webhooks
+
+CTX {token: "ctx-token", refresh-token: null, app-key: "ctx-key", app-secret: "ctx-secret"}
+
+test-blank-credential-is-an-err-naming-the-key
+meta ["test"] fn () {
+    for-each(["token", "refresh-token", "app-key", "app-secret"], (k) {
+        for-each([null, "", "   "], (blank) {
+            r ::auth/resolve-from(assoc({}, k, blank), CTX)
+            assert(is-err(r), `${k} blank is an Err`)
+            assert(contains(err-message(r), k), `the Err names ${k}`)
+        })
+    })
+    r ::api/rpc("users/get_current_account", null, {token: ""})
+    assert(is-err(r), "before any network call")
+    assert(contains(err-message(r), "token"))
+}
+
+test-absent-keys-still-use-context
+meta ["test"] fn () {
+    assert-eq("ctx-token", ::auth/resolve-from({select-user: "dbmid:1", limit: 5}, CTX).token)
+}
+
+test-resolve-returns-marked-values-unchanged
+meta ["test"] fn () {
+    assert-eq({kind: "token", token: "a-per-call-access-token"}, ::api/resolve({token: "a-per-call-access-token"}))
+    assert-eq("a-per-call-access-token", ::auth/access-token({token: "a-per-call-access-token"}))
+    refresh ::api/resolve({refresh-token: "a-per-call-refresh", app-key: "k", app-secret: "a-per-call-app-secret"})
+    assert-eq("a-per-call-refresh", get(refresh, "refresh-token"))
+    assert-eq("a-per-call-app-secret", get(refresh, "app-secret"))
+    assert(is-null(::hot::ctx/get("token")), "nothing is written to context")
+}
+
+test-mark-tokens-returns-the-response-unchanged
+meta ["test"] fn () {
+    tokens {access_token: "at-value-123", refresh_token: "rt-value-123", expires_in: 14400, scope: "files.content.read"}
+    assert-eq(tokens, ::auth/mark-tokens(tokens))
+    assert-eq({}, ::auth/mark-tokens({}))
+}
+
+test-http-error-arrow-has-no-route
+meta ["test"] fn () {
+    e ::api/HttpError(::hot::http/HttpResponse({status: 409, headers: {}, body: {error_summary: "path/not_found/..", error: {".tag": "path", path: {".tag": "not_found"}}}}))
+    assert-eq("dropbox: HTTP 409 path/not_found", e.message)
+    assert-eq("path/not_found", e.error-tag)
+    assert(is-null(e.route))
+    routed ::api/http-error({status: 409, headers: {}, body: {error_summary: "path/not_found/.."}}, "files/get_metadata")
+    assert-eq("dropbox: HTTP 409 path/not_found (files/get_metadata)", routed.message)
+}
+
+test-explicit-app-secret-fails-closed
+meta ["test"] fn () {
+    assert-eq(false, ::hooks/verify-signature({headers: {}, body-raw: "{}"}, "an-explicit-secret"))
+    assert-eq(false, ::hooks/verify-signature({headers: {"x-dropbox-signature": "ab"}, body-raw: "{}"}, ""))
+}

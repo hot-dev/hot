@@ -1,0 +1,118 @@
+::dropbox::test::auth ns
+meta ["test"]
+
+// Hermetic: these tests never set dropbox.* context.
+
+::auth ::dropbox::auth
+::oauth ::dropbox::oauth
+
+test-credentials-from
+meta ["test"] fn () {
+    tok ::auth/credentials-from({token: "sl.abc"})
+    assert-eq({kind: "token", token: "sl.abc"}, tok)
+
+    refresh ::auth/credentials-from({refresh-token: "r-1", app-key: "key-1", app-secret: "sec-1"})
+    assert-eq("refresh", refresh.kind)
+    assert-eq("key-1", get(refresh, "app-key"))
+    assert-eq("sec-1", get(refresh, "app-secret"))
+
+    pkce ::auth/credentials-from({refresh-token: "r-1", app-key: "key-1", app-secret: "  "})
+    assert(is-null(get(pkce, "app-secret")), "PKCE refresh tokens need no secret")
+
+    both ::auth/credentials-from({token: "sl.abc", refresh-token: "r-1", app-key: "k"})
+    assert-eq("token", both.kind, "an access token wins")
+
+    no-key ::auth/credentials-from({refresh-token: "r-1"})
+    assert(is-err(no-key))
+    assert(contains(err-message(no-key), "app key"))
+    assert(not(contains(err-message(no-key), "r-1")), "tokens never appear in messages")
+
+    none ::auth/credentials-from({token: "", refresh-token: null})
+    assert(is-err(none))
+    assert(contains(err-message(none), "dropbox.access.token"))
+}
+
+test-merge-sources
+meta ["test"] fn () {
+    ctx {token: "ctx-token", refresh-token: null, app-key: "ctx-key", app-secret: "ctx-secret"}
+    assert-eq("ctx-token", ::auth/merge-sources({}, ctx).token, "context when opts has no credential")
+    assert-eq("opt-token", ::auth/merge-sources({token: "opt-token"}, ctx).token)
+    borrowed ::auth/merge-sources({refresh-token: "tenant-r"}, ctx)
+    assert-eq("ctx-key", get(borrowed, "app-key"), "a per-call refresh token borrows the context app key")
+    assert-eq("ctx-secret", get(borrowed, "app-secret"))
+    assert(is-null(borrowed.token), "but never the context access token")
+    own ::auth/merge-sources({refresh-token: "tenant-r", app-key: "tenant-key"}, ctx)
+    assert-eq("tenant-key", get(own, "app-key"))
+    assert(is-null(get(own, "app-secret")), "an explicit app key keeps its own (absent) secret")
+}
+
+test-token-cache
+meta ["test"] fn () {
+    creds {kind: "refresh", refresh-token: "r-secret-value", app-key: "k1", app-secret: null}
+    key ::auth/token-cache-key(creds)
+    assert(starts-with(key, "dropbox.token-cache."))
+    assert(not(contains(key, "r-secret-value")), "the refresh token is hashed")
+    assert(ne(key, ::auth/token-cache-key({...creds, app-key: "k2"})))
+    assert(is-null(::auth/token-cache-key({kind: "token", token: "t"})), "explicit tokens are never cached")
+
+    entry ::auth/cache-entry({access_token: "sl.x", expires_in: 14400}, 1000)
+    assert-eq("sl.x", entry.access-token)
+    assert-eq(add(1000, mul(sub(14400, 300), 1000)), entry.expires-at, "expires 300 s early")
+    assert(::auth/is-fresh(entry, 2000))
+    assert(not(::auth/is-fresh(entry, entry.expires-at)))
+    assert(not(::auth/is-fresh(null, 0)))
+    odd ::auth/cache-entry({access_token: "sl.y", expires_in: "soon"}, 0)
+    assert-eq(mul(sub(14400, 300), 1000), odd.expires-at, "a malformed expires_in falls back to 4 hours")
+}
+
+test-token-error
+meta ["test"] fn () {
+    e ::auth/token-error("dropbox: token refresh failed", {status: 400, body: {error: "invalid_grant", error_description: "refresh token is invalid or revoked"}})
+    assert-eq("dropbox: token refresh failed: invalid_grant (refresh token is invalid or revoked)", e.message)
+    assert-eq("invalid_grant", e.error-code)
+    assert-eq(400, e.status)
+    plain ::auth/token-error("dropbox: token refresh failed", {status: 503, body: "busy"})
+    assert-eq("dropbox: token refresh failed: busy", plain.message)
+}
+
+test-authorize-url
+meta ["test"] fn () {
+    url ::oauth/authorize-url("appkey123", "https://app.example.com/cb", "csrf-1", {
+        code-verifier: "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+        scope: ["files.metadata.read", "files.content.read"]
+    })
+    assert(starts-with(url, "https://www.dropbox.com/oauth2/authorize?"))
+    assert(contains(url, "client_id=appkey123"))
+    assert(contains(url, "response_type=code"))
+    assert(contains(url, "token_access_type=offline"), "offline (refresh token) by default")
+    assert(contains(url, "state=csrf-1"))
+    assert(contains(url, "redirect_uri=https%3A%2F%2Fapp.example.com%2Fcb"))
+    assert(contains(url, "code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"), "RFC 7636 appendix B challenge")
+    assert(contains(url, "code_challenge_method=S256"))
+    assert(contains(url, "scope=files.metadata.read+files.content.read"), "space-separated scopes (form-encoded)")
+    assert(not(contains(url, "force_reapprove")), "unset options are omitted")
+    assert(not(contains(url, "include_granted_scopes")))
+
+    bare ::oauth/authorize-url("appkey123", null, null, {token-access-type: null})
+    assert(not(contains(bare, "redirect_uri")), "the no-redirect flow sends no redirect_uri")
+    assert(not(contains(bare, "token_access_type")))
+    assert(not(contains(bare, "code_challenge")))
+}
+
+test-authorize-params
+meta ["test"] fn () {
+    built ::oauth/build-authorize-params({force-reapprove: true, disable-signup: false, include-granted-scopes: "user", scope: "a, b"})
+    assert-eq("true", built.params.force_reapprove)
+    assert-eq("false", built.params.disable_signup)
+    assert-eq("user", built.params.include_granted_scopes)
+    assert-eq("a b", built.params.scope)
+    assert(is-null(built.code-challenge))
+}
+
+test-missing-scopes
+meta ["test"] fn () {
+    tokens {scope: "account_info.read files.metadata.read"}
+    assert-eq(["account_info.read", "files.metadata.read"], ::oauth/granted-scopes(tokens))
+    assert-eq(["files.content.read"], ::oauth/missing-scopes(tokens, "files.metadata.read files.content.read"))
+    assert-eq([], ::oauth/missing-scopes(tokens, ["account_info.read"]))
+}

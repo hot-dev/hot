@@ -1,0 +1,81 @@
+::microsoft::onedrive::versions ns
+meta {
+    doc: """
+    File version history: list versions, read one, download its content,
+    and restore it as the current version. Versions are kept for files
+    in OneDrive for work or school and SharePoint libraries (subject to
+    the library's version limit) and in personal OneDrive.
+
+    **Permissions.** `Files.Read` / `Files.Read.All` to read;
+    `Files.ReadWrite` / `Files.ReadWrite.All` to restore.
+    """
+}
+
+::od ::microsoft::onedrive
+::api ::microsoft::graph::api
+::http ::hot::http
+FileContent ::microsoft::onedrive/FileContent
+
+version-path fn (item: Any, version-id: Str, opts: Map): Str {
+  `${::od/item-path(item, opts)}/versions/${::api/encode-segment(version-id)}`
+}
+
+list-versions
+meta {
+    doc: """
+    GET {item}/versions - every version (`id` such as `"3.0"`,
+    `lastModifiedDateTime`, `lastModifiedBy`, `size`), newest first.
+
+    ```hot
+    versions ::microsoft::onedrive::versions/list-versions("/Contracts/MSA.docx")
+    ```
+    """
+}
+fn
+(item: Any): Vec {
+  list-versions(item, {})
+},
+(item: Any, opts: Map): Vec {
+  ::api/collect-pages(`${::od/item-path(item, opts)}/versions`, {...::od/query-opts({}, opts), ...::od/creds(opts)}, null)
+}
+
+get-version
+meta {doc: """GET {item}/versions/{version-id}."""}
+fn
+(item: Any, version-id: Str): Map {
+  get-version(item, version-id, {})
+},
+(item: Any, version-id: Str, opts: Map): Map {
+  ::api/json("GET", version-path(item, version-id, opts), ::od/creds(opts))
+}
+
+download-version
+meta {
+    doc: """GET {item}/versions/{version-id}/content - the bytes of one version as a `FileContent` (`source: "version"`)."""
+}
+fn
+(item: Any, version-id: Str): FileContent {
+  download-version(item, version-id, {})
+},
+(item: Any, version-id: Str, opts: Map): FileContent {
+  response ::od/follow-redirect(::api/request("GET", `${version-path(item, version-id, opts)}/content`, {}, "", ::od/creds(opts)))
+  id if(is-map(item), Str(item.id), Str(item))
+  cond {
+    is-err(response) => { response }
+    not(::http/is-ok-response(response)) => { err(::api/HttpError(response)) }
+    => { ::od/content-from-response(id, response, if(is-map(item), get(item, "name"), null), "version") }
+  }
+}
+
+restore-version
+meta {
+    doc: """POST {item}/versions/{version-id}/restoreVersion - make an earlier version current (creates a new version). Returns true."""
+}
+fn
+(item: Any, version-id: Str): Bool {
+  restore-version(item, version-id, {})
+},
+(item: Any, version-id: Str, opts: Map): Bool {
+  result ::api/json("POST", `${version-path(item, version-id, opts)}/restoreVersion`, {}, "", ::od/creds(opts))
+  if(is-err(result), result, true)
+}

@@ -1,0 +1,287 @@
+::microsoft::graph::test::auth ns
+meta ["test"]
+
+// Hermetic: these tests never set microsoft.* context, and never call the
+// network (only pure builders and local signing).
+
+::auth ::microsoft::graph::auth
+::fx ::microsoft::graph::test::fixtures
+::b64 ::hot::base64
+::hex ::hot::hex
+
+GLOBAL "https://graph.microsoft.com"
+
+test-cloud-config
+meta ["test"] fn () {
+    g ::auth/cloud-config({})
+    assert-eq("global", g.name)
+    assert-eq("https://graph.microsoft.com", g.graph)
+    assert-eq("https://login.microsoftonline.com", g.login)
+    gov ::auth/cloud-config({cloud: "US-Gov"})
+    assert-eq("https://graph.microsoft.us", gov.graph)
+    assert-eq("https://login.microsoftonline.us", gov.login)
+    assert-eq("https://dod-graph.microsoft.us", ::auth/cloud-config({cloud: "us-dod"}).graph)
+    assert-eq("https://login.chinacloudapi.cn", ::auth/cloud-config({cloud: "china"}).login)
+    proxy ::auth/cloud-config({graph-url: "https://graph-proxy.example.com/", login-url: ""})
+    assert-eq("https://graph-proxy.example.com", proxy.graph, "trailing slash trimmed")
+    assert-eq("https://login.microsoftonline.com", proxy.login, "blank override ignored")
+    assert(is-err(::auth/cloud-config({cloud: "mars"})))
+}
+
+test-endpoints
+meta ["test"] fn () {
+    assert-eq("https://login.microsoftonline.com/common/oauth2/v2.0/token", ::auth/token-url("https://login.microsoftonline.com", "common"))
+    assert-eq("https://login.microsoftonline.com/contoso.onmicrosoft.com/oauth2/v2.0/authorize", ::auth/authorize-endpoint("https://login.microsoftonline.com", "contoso.onmicrosoft.com"))
+    assert(::auth/is-multi-tenant-segment("Organizations"))
+    assert(not(::auth/is-multi-tenant-segment("72f988bf-86f1-41af-91ab-2d7cd011db47")))
+}
+
+test-normalize-scopes
+meta ["test"] fn () {
+    assert-eq(["Files.Read", "Sites.Read.All", "offline_access"], ::auth/normalize-scopes("Files.Read, Sites.Read.All  offline_access Files.Read", GLOBAL))
+    assert-eq(["https://graph.microsoft.com/.default"], ::auth/normalize-scopes(".default", GLOBAL))
+    assert-eq([], ::auth/normalize-scopes(null))
+    assert-eq([], ::auth/normalize-scopes(""))
+    gov ::auth/normalize-scopes(["Files.Read.All", "openid", "https://graph.microsoft.us/User.Read"], "https://graph.microsoft.us")
+    assert-eq(["https://graph.microsoft.us/Files.Read.All", "openid", "https://graph.microsoft.us/User.Read"], gov, "national clouds need the resource prefix")
+}
+
+test-delegated-scopes-default-and-offline
+meta ["test"] fn () {
+    assert-eq(["https://graph.microsoft.com/.default", "offline_access"], ::auth/delegated-scopes({}, GLOBAL))
+    assert-eq(["Files.Read.All", "offline_access"], ::auth/delegated-scopes({scopes: "Files.Read.All"}, GLOBAL))
+    assert-eq(["offline_access", "User.Read"], ::auth/delegated-scopes({scopes: ["offline_access", "User.Read"]}, GLOBAL), "offline_access not duplicated")
+    assert-eq(["https://graph.microsoft.us/.default"], ::auth/app-scopes("https://graph.microsoft.us"))
+}
+
+test-merge-sources-precedence
+meta ["test"] fn () {
+    ctx {
+        refresh-token: "ctx-refresh",
+        client-id: "app-1",
+        client-secret: "ctx-secret",
+        tenant-id: "contoso.onmicrosoft.com",
+        cloud: "global"
+    }
+    // A per-call token replaces context credentials but keeps app identity
+    picked ::auth/merge-sources({token: "opt-token"}, ctx)
+    assert-eq("opt-token", picked.token)
+    assert-eq("app-1", get(picked, "client-id"))
+    assert(is-null(get(picked, "refresh-token")), "context refresh token does not leak into a per-call credential")
+    assert(is-null(get(picked, "client-secret")), "context secret does not leak into a per-call token")
+
+    // A per-call refresh token borrows the context's client secret for the same app
+    user ::auth/merge-sources({refresh-token: "user-42"}, ctx)
+    assert-eq("user-42", get(user, "refresh-token"))
+    assert-eq("ctx-secret", get(user, "client-secret"))
+
+    // ... but not for a different app
+    other ::auth/merge-sources({refresh-token: "user-42", client-id: "app-2"}, ctx)
+    assert(is-null(get(other, "client-secret")))
+
+    // No primary credential in opts: context, retargeted
+    tenant ::auth/merge-sources({tenant-id: "fabrikam.com", select: "id"}, ctx)
+    assert-eq("ctx-refresh", get(tenant, "refresh-token"))
+    assert-eq("fabrikam.com", get(tenant, "tenant-id"))
+    assert(is-null(get(tenant, "select")), "API parameters are not credential keys")
+
+    // Blank opts values never override context
+    assert-eq("app-1", get(::auth/merge-sources({client-id: ""}, ctx), "client-id"))
+}
+
+test-credentials-from-kinds
+meta ["test"] fn () {
+    tok ::auth/credentials-from({token: "eyJ.a.b", refresh-token: "ignored"})
+    assert-eq("token", tok.kind)
+    assert-eq("https://graph.microsoft.com", tok.cloud.graph)
+
+    refresh ::auth/credentials-from({refresh-token: "r1", client-id: "app-1"})
+    assert-eq("refresh", refresh.kind)
+    assert-eq("common", refresh.tenant, "delegated defaults to the common endpoint")
+    assert(is-null(refresh.client-auth), "no secret: a public client")
+
+    confidential ::auth/credentials-from({refresh-token: "r1", client-id: "app-1", client-secret: "s"})
+    assert-eq("secret", confidential.client-auth.method)
+
+    secret ::auth/credentials-from({client-id: "app-1", client-secret: "s", tenant-id: "contoso.com"})
+    assert-eq("client-secret", secret.kind)
+    assert-eq("contoso.com", secret.tenant)
+
+    cert ::auth/credentials-from({client-id: "app-1", client-secret: "s", private-key: ::fx/KEY_PEM, certificate: ::fx/CERT_PEM, tenant-id: "contoso.com"})
+    assert-eq("certificate", cert.kind, "a certificate wins over a secret")
+    assert-eq(::fx/CERT_SHA1, cert.client-auth.thumbprints.sha1)
+}
+
+test-credentials-from-errors
+meta ["test"] fn () {
+    none ::auth/credentials-from({})
+    assert(is-err(none))
+    assert(contains(err-message(none), "no credentials configured"))
+    no-client ::auth/credentials-from({refresh-token: "r1"})
+    assert(contains(err-message(no-client), "client id"))
+    common ::auth/credentials-from({client-id: "app-1", client-secret: "s"})
+    assert(is-err(common), "app-only on the common endpoint is rejected before any network call")
+    assert(contains(err-message(common), "tenant"))
+    assert(is-err(::auth/credentials-from({client-id: "app-1", client-secret: "s", tenant-id: "consumers"})))
+    assert(is-err(::auth/credentials-from({token: "t", cloud: "nowhere"})))
+    bad-cert ::auth/credentials-from({client-id: "a", tenant-id: "t.com", private-key: ::fx/KEY_PEM, certificate: "not a pem"})
+    assert(is-err(bad-cert))
+    no-print ::auth/credentials-from({client-id: "a", tenant-id: "t.com", private-key: ::fx/KEY_PEM})
+    assert(not(is-err(no-print)), "resolution is lazy about thumbprints")
+}
+
+test-certificate-thumbprints
+meta ["test"] fn () {
+    prints ::auth/certificate-thumbprints(::fx/CERT_PEM)
+    assert-eq(::fx/CERT_SHA1, prints.sha1)
+    assert-eq(::fx/CERT_SHA256, prints.sha256)
+    assert(is-err(::auth/certificate-thumbprints("-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----")))
+    assert-eq(::fx/CERT_SHA1, ::auth/normalize-thumbprint("D4:A3:1D:F4:CC:45:2F:93:D7:02:53:C1:D1:A8:8D:64:59:A6:85:F9"))
+    assert(is-null(::auth/normalize-thumbprint("  ")))
+}
+
+test-assertion-header
+meta ["test"] fn () {
+    both ::auth/assertion-header({sha1: ::fx/CERT_SHA1, sha256: ::fx/CERT_SHA256})
+    assert-eq("RS256", both.alg)
+    assert-eq("JWT", both.typ)
+    assert-eq(::fx/X5T, both.x5t)
+    assert-eq(::fx/X5T_S256, get(both, "x5t#S256"))
+    sha1-only ::auth/assertion-header({sha1: uppercase(::fx/CERT_SHA1)})
+    assert-eq(::fx/X5T, sha1-only.x5t)
+    assert(not(in("x5t#S256", keys(sha1-only))), "no x5t#S256 without a SHA-256 thumbprint")
+    assert(is-err(::auth/assertion-header({})))
+    assert(is-err(::auth/assertion-header({sha1: "abc"})), "wrong-length thumbprint")
+    assert(is-err(::auth/assertion-header({sha1: "zz231df4cc452f93d70253c1d1a88d6459a685f9"})), "non-hex thumbprint")
+}
+
+test-assertion-claims
+meta ["test"] fn () {
+    c ::auth/assertion-claims("app-1", "https://login.microsoftonline.com/t/oauth2/v2.0/token", 1700000000)
+    assert-eq("app-1", c.iss)
+    assert-eq("app-1", c.sub)
+    assert-eq("https://login.microsoftonline.com/t/oauth2/v2.0/token", c.aud)
+    assert-eq(1700000000, c.nbf)
+    assert-eq(1700000600, c.exp, "ten-minute lifetime")
+    assert-eq(36, length(c.jti))
+    assert(ne(c.jti, ::auth/assertion-claims("app-1", "a", 1).jti), "jti is unique")
+}
+
+test-client-assertion-signature-verifies
+meta ["test"] fn () {
+    jwt ::auth/client-assertion({
+        client-id: "app-1",
+        private-key: ::fx/KEY_PEM,
+        thumbprints: ::auth/certificate-thumbprints(::fx/CERT_PEM)
+    }, "https://login.microsoftonline.com/contoso.com/oauth2/v2.0/token")
+    parts split(jwt, ".")
+    assert-eq(3, length(parts))
+    header from-json(Str(::b64/decode-url(first(parts))))
+    claims from-json(Str(::b64/decode-url(get(parts, 1))))
+    assert-eq(::fx/X5T, header.x5t)
+    assert-eq(::fx/X5T_S256, get(header, "x5t#S256"))
+    assert-eq("app-1", claims.iss)
+    ok ::hot::crypto/rsa-sha256-verify(::hex/decode(::fx/MODULUS_HEX), Bytes([1, 0, 1]),
+        `${first(parts)}.${get(parts, 1)}`, ::b64/decode-url(last(parts)))
+    assert(ok, "the RS256 signature verifies against the certificate's public key")
+    bad ::auth/client-assertion({client-id: "a", private-key: "not a key", thumbprints: {sha1: ::fx/CERT_SHA1}}, "aud")
+    assert(is-err(bad))
+}
+
+test-token-bodies
+meta ["test"] fn () {
+    secret-creds ::auth/credentials-from({client-id: "app-1", client-secret: "s3cret", tenant-id: "contoso.com"})
+    cc ::auth/build-client-credentials-body(secret-creds, ["https://graph.microsoft.com/.default"], "aud")
+    assert-eq({grant_type: "client_credentials", client_id: "app-1", scope: "https://graph.microsoft.com/.default", client_secret: "s3cret"}, cc)
+
+    public ::auth/credentials-from({refresh-token: "r1", client-id: "app-1"})
+    rb ::auth/build-refresh-body(public, "r1", ["Files.Read", "offline_access"], "aud")
+    assert-eq({grant_type: "refresh_token", client_id: "app-1", refresh_token: "r1", scope: "Files.Read offline_access"}, rb, "public clients send no secret")
+
+    cert ::auth/credentials-from({client-id: "app-1", private-key: ::fx/KEY_PEM, thumbprint: ::fx/CERT_SHA1, tenant-id: "contoso.com"})
+    cb ::auth/build-client-credentials-body(cert, ["https://graph.microsoft.com/.default"], "aud")
+    assert-eq("urn:ietf:params:oauth:client-assertion-type:jwt-bearer", cb.client_assertion_type)
+    assert(not(in("client_secret", keys(cb))))
+    assert-eq(3, length(split(cb.client_assertion, ".")))
+}
+
+test-token-cache-key
+meta ["test"] fn () {
+    a ::auth/credentials-from({client-id: "app-1", client-secret: "s", tenant-id: "contoso.com"})
+    b ::auth/credentials-from({client-id: "app-1", client-secret: "s", tenant-id: "fabrikam.com"})
+    scopes ["https://graph.microsoft.com/.default"]
+    ka ::auth/token-cache-key(a, scopes)
+    assert(starts-with(ka, "microsoft.token-cache."))
+    assert(not(contains(ka, "contoso")), "the key is a hash, never the identity or secret")
+    assert-eq(ka, ::auth/token-cache-key(a, scopes), "stable")
+    assert(ne(ka, ::auth/token-cache-key(b, scopes)), "per tenant")
+    r1 ::auth/credentials-from({refresh-token: "user-1", client-id: "app-1"})
+    r2 ::auth/credentials-from({refresh-token: "user-2", client-id: "app-1"})
+    assert(ne(::auth/token-cache-key(r1, ["Files.Read"]), ::auth/token-cache-key(r2, ["Files.Read"])), "per user")
+    assert-eq(::auth/token-cache-key(r1, ["A", "B"]), ::auth/token-cache-key(r1, ["B", "A"]), "scope order does not matter")
+    assert(is-null(::auth/token-cache-key({kind: "token", token: "t"}, [])))
+}
+
+test-cache-entry-and-freshness
+meta ["test"] fn () {
+    entry ::auth/cache-entry({access_token: "at", expires_in: 3600}, 1000)
+    assert-eq(add(1000, mul(3300, 1000)), entry.expires-at, "expires five minutes early")
+    assert(::auth/is-fresh(entry, 2000))
+    assert(not(::auth/is-fresh(entry, add(1000, mul(3300, 1000)))))
+    assert-eq(add(1000, mul(3300, 1000)), ::auth/cache-entry({access_token: "at", expires_in: "3600"}, 1000).expires-at, "string expires_in")
+    assert(not(::auth/is-fresh(null, 0)))
+}
+
+test-token-error-parsing
+meta ["test"] fn () {
+    e ::auth/token-error("microsoft-graph: token request failed", {status: 400, body: {
+        error: "invalid_grant",
+        error_description: "AADSTS70008: The refresh token has expired due to inactivity.\r\nTrace ID: abc\r\nCorrelation ID: def",
+        error_codes: [70008],
+        trace_id: "abc",
+        correlation_id: "def"
+    }})
+    assert-eq("microsoft-graph: token request failed: invalid_grant (AADSTS70008: The refresh token has expired due to inactivity.)", e.message, "only the first line of the description")
+    assert-eq("invalid_grant", e.error-code)
+    assert-eq([70008], e.error-codes)
+    assert-eq("abc", e.trace-id)
+    assert-eq(400, e.status)
+    plain ::auth/token-error("microsoft-graph: token request failed", {status: 503, body: "Service Unavailable"})
+    assert-eq("microsoft-graph: token request failed: Service Unavailable", plain.message)
+}
+
+test-pem-body
+meta ["test"] fn () {
+    assert(is-null(::auth/pem-body("nothing here", "CERTIFICATE")))
+    assert-eq("QUJD", ::auth/pem-body("-----BEGIN CERTIFICATE-----\r\nQU\nJD\n-----END CERTIFICATE-----\n", "CERTIFICATE"))
+}
+
+test-parse-int-guards
+meta ["test"] fn () {
+    assert-eq(42, ::auth/parse-int(" 42 "))
+    assert-eq(7, ::auth/parse-int(7))
+    assert(is-null(::auth/parse-int("abc")), "never calls Int on non-digits")
+    assert(is-null(::auth/parse-int("Wed, 21 Oct 2015 07:28:00 GMT")))
+    assert(is-null(::auth/parse-int(null)))
+}
+
+test-resolver-uses-opts-and-never-writes-ctx
+meta ["test"] fn () {
+    // opts override (context is empty in this hermetic suite)
+    creds ::microsoft::graph::api/resolve({token: "per-call-token", cloud: "us-gov"})
+    assert-eq("token", creds.kind)
+    assert-eq("per-call-token", creds.token)
+    assert-eq("https://graph.microsoft.us", creds.cloud.graph, "settings override per call too")
+    app ::microsoft::graph::api/resolve({client-id: "app-1", client-secret: "s", tenant-id: "tenant-a.com"})
+    assert-eq("tenant-a.com", app.tenant)
+    // a missing credential gives a clear error
+    missing ::microsoft::graph::api/resolve({})
+    assert(is-err(missing))
+    assert(contains(err-message(missing), "no credentials configured"))
+    // resolving never writes per-call credentials into the run-wide context
+    assert(is-null(::hot::ctx/get("microsoft.access.token")))
+    assert(is-null(::hot::ctx/get("microsoft.client.secret")))
+    assert(is-null(::hot::ctx/get("microsoft.tenant.id")))
+    // ctx is used when opts carries nothing (shown with an explicit ctx Map)
+    assert-eq({token: "ctx-token"}, ::auth/merge-sources({}, {token: "ctx-token"}))
+}

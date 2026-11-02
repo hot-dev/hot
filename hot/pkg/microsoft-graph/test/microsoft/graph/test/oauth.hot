@@ -1,0 +1,62 @@
+::microsoft::graph::test::oauth ns
+meta ["test"]
+
+::oauth ::microsoft::graph::oauth
+::uri ::hot::uri
+
+query-of fn (url: Str): Map {
+  ::uri/decode-query(last(split(url, "?")))
+}
+
+test-authorize-url
+meta ["test"] fn () {
+    verifier "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+    url ::oauth/authorize-url("app-1", "https://app.example.com/cb", "Files.Read.All User.Read", "csrf-1", {code-verifier: verifier, prompt: "select_account", tenant-id: "organizations"})
+    assert(starts-with(url, "https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize?"))
+    q query-of(url)
+    assert-eq("code", q.response_type)
+    assert-eq("app-1", q.client_id)
+    assert-eq("https://app.example.com/cb", q.redirect_uri)
+    assert-eq("Files.Read.All User.Read offline_access", q.scope, "offline_access is added for a refresh token")
+    assert-eq("csrf-1", q.state)
+    assert-eq("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", q.code_challenge, "RFC 7636 appendix B vector")
+    assert-eq("S256", q.code_challenge_method)
+    assert-eq("select_account", q.prompt)
+    assert(not(in("login_hint", keys(q))), "unset options are omitted")
+}
+
+test-authorize-url-defaults-and-clouds
+meta ["test"] fn () {
+    plain ::oauth/authorize-url("app-1", "https://a/cb", ["User.Read"], "", {offline: false})
+    assert(starts-with(plain, "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?"), "common by default")
+    q query-of(plain)
+    assert-eq("User.Read", q.scope)
+    assert(not(in("state", keys(q))), "blank state omitted")
+    assert(not(in("code_challenge", keys(q))))
+    gov ::oauth/authorize-url("app-1", "https://a/cb", "Files.Read", "s", {cloud: "us-gov", tenant-id: "contoso.us"})
+    assert(starts-with(gov, "https://login.microsoftonline.us/contoso.us/oauth2/v2.0/authorize?"))
+    assert-eq("https://graph.microsoft.us/Files.Read offline_access", query-of(gov).scope)
+}
+
+test-admin-consent-url
+meta ["test"] fn () {
+    url ::oauth/admin-consent-url("app-1", "https://a/consented", "st", {tenant-id: "contoso.com"})
+    assert(starts-with(url, "https://login.microsoftonline.com/contoso.com/v2.0/adminconsent?"))
+    q query-of(url)
+    assert-eq("https://graph.microsoft.com/.default", q.scope)
+    assert-eq("app-1", q.client_id)
+}
+
+test-build-authorize-params
+meta ["test"] fn () {
+    b ::oauth/build-authorize-params({login-hint: "alex@contoso.com", domain-hint: "organizations", extra: {claims: "{}"}})
+    assert-eq({login_hint: "alex@contoso.com", domain_hint: "organizations", claims: "{}"}, b.params)
+    assert(is-null(b.code-challenge))
+}
+
+test-granted-and-missing-scopes
+meta ["test"] fn () {
+    tokens {scope: "https://graph.microsoft.com/Files.Read.All https://graph.microsoft.com/User.Read openid"}
+    assert-eq([], ::oauth/missing-scopes(tokens, "Files.Read.All User.Read"))
+    assert-eq(["Sites.Read.All"], ::oauth/missing-scopes(tokens, ["Sites.Read.All", "files.read.all"]), "case-insensitive")
+}

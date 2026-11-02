@@ -1,0 +1,177 @@
+::box::test::content ns
+meta ["test"]
+
+// DocFile normalising, content helpers, ranges and representations (pure).
+
+::content ::box::content
+
+FILE {
+    type: "file",
+    id: "12345",
+    name: "Q3 Report.pdf",
+    size: 629644,
+    sha1: "85136c79cbf9fe36bb9d05d0639c70c265c18d37",
+    etag: "3",
+    sequence_id: "3",
+    file_version: {type: "file_version", id: "987", sha1: "85136c79cbf9fe36bb9d05d0639c70c265c18d37"},
+    parent: {type: "folder", id: "111", name: "Reports"},
+    created_at: "2026-10-01T09:00:00-07:00",
+    modified_at: "2026-10-02T10:30:00-07:00",
+    trashed_at: null,
+    item_status: "active",
+    extension: "pdf"
+}
+
+test-to-doc-file-file
+meta ["test"] fn () {
+    d ::box/to-doc-file(FILE)
+    assert-eq("box", d.provider)
+    assert-eq("12345", d.id)
+    assert-eq("Q3 Report.pdf", d.name)
+    assert-eq("application/pdf", d.mime-type)
+    assert-eq(629644, d.size)
+    assert-eq("2026-10-02T10:30:00-07:00", d.modified)
+    assert-eq("2026-10-01T09:00:00-07:00", d.created)
+    assert-eq(["111"], d.parents)
+    assert(is-null(d.drive-id))
+    assert-eq("https://app.box.com/file/12345", d.web-url)
+    assert-eq("3", d.version, "the etag, for if-match")
+    assert-eq("987", d.revision-id)
+    assert-eq("85136c79cbf9fe36bb9d05d0639c70c265c18d37", d.sha1)
+    assert(is-null(d.md5))
+    assert(is-null(d.sha256))
+    assert(not(d.is-folder))
+    assert(not(d.is-google-native))
+    assert(not(d.is-shortcut))
+    assert(not(d.trashed))
+    assert-eq([], d.export-formats)
+    assert-eq("12345", d.raw.id)
+}
+
+test-doc-file-field-names-match-google-drive
+meta ["test"] fn () {
+    // google-drive's DocFile fields, plus sha1.
+    drive ["provider", "id", "name", "mime-type", "size", "modified", "created", "parents", "drive-id", "web-url", "version", "revision-id", "md5", "sha256", "is-folder", "is-google-native", "is-shortcut", "shortcut-target-id", "trashed", "export-formats", "raw"]
+    fields keys(untype(::box/to-doc-file(FILE)))
+    assert-eq([], filter(drive, (k) { not(in(k, fields)) }), "every google-drive DocFile field is present")
+    assert-eq(["sha1"], filter(fields, (k) { not(in(k, drive)) }), "sha1 is the only addition")
+}
+
+test-to-doc-file-folder-and-trash
+meta ["test"] fn () {
+    folder ::box/to-doc-file({type: "folder", id: "0", name: "All Files", size: 10, parent: null})
+    assert(folder.is-folder)
+    assert-eq(::box/FOLDER_MIME, folder.mime-type)
+    assert-eq([], folder.parents, "the root has no parent")
+    assert-eq("https://app.box.com/folder/0", folder.web-url)
+    trashed ::box/to-doc-file({type: "file", id: "9", name: "old.txt", trashed_at: "2026-10-03T00:00:00Z", item_status: "trashed"})
+    assert(trashed.trashed)
+    assert-eq("text/plain", trashed.mime-type)
+    link ::box/to-doc-file({type: "web_link", id: "5", name: "Docs"})
+    assert-eq(::box/WEB_LINK_MIME, link.mime-type)
+    unknown ::box/to-doc-file({type: "file", id: "6", name: "README"})
+    assert-eq("application/octet-stream", unknown.mime-type, "no extension: octet-stream")
+    sparse ::box/to-doc-file({type: "file", id: "7"})
+    assert-eq("", sparse.name)
+    assert(is-null(sparse.size))
+    assert(is-null(sparse.version))
+    assert-eq(2, length(::box/to-doc-files([FILE, FILE])))
+}
+
+test-mime-helpers
+meta ["test"] fn () {
+    assert-eq("text/plain", ::box/base-mime("Text/Plain; charset=utf-8"))
+    assert(::box/is-textual-mime("application/json"))
+    assert(::box/is-textual-mime("application/vnd.api+json"))
+    assert(::box/is-textual-mime("text/csv"))
+    assert(not(::box/is-textual-mime("application/pdf")))
+    assert(not(::box/is-textual-mime(null)))
+}
+
+test-content-from-bytes-is-binary-safe
+meta ["test"] fn () {
+    raw Bytes([0, 255, 128, 10])
+    c ::box/content-from-bytes("1", raw, "application/octet-stream", "download")
+    assert-eq(raw, c.bytes)
+    assert-eq(4, c.size)
+    assert(is-null(c.text), "binary content has no text")
+    t ::box/content-from-bytes("2", Bytes("123"), "text/plain; charset=utf-8", "download")
+    assert-eq("123", t.text, "a file containing 123 stays text")
+    assert-eq("text/plain", t.mime-type)
+}
+
+test-response-bytes
+meta ["test"] fn () {
+    assert-eq(Bytes([1, 2]), ::box/response-bytes({status: 200, body: "ignored", body-bytes: Bytes([1, 2])}))
+    assert-eq(Bytes("hi"), ::box/response-bytes({status: 200, body: "hi"}))
+    assert-eq(Bytes([]), ::box/response-bytes({status: 200, body: {a: 1}}))
+}
+
+test-range-math
+meta ["test"] fn () {
+    assert-eq("bytes=0-1023", ::content/range-header(0, 1023))
+    assert-eq("bytes=500-", ::content/range-header(500, null))
+    assert-eq([[0, 3], [4, 7], [8, 9]], ::content/download-ranges(10, 4))
+    assert-eq([[0, 9]], ::content/download-ranges(10, 100))
+    assert-eq([], ::content/download-ranges(0, 4))
+}
+
+test-download-headers
+meta ["test"] fn () {
+    assert-eq({Range: "bytes=10-19"}, ::content/download-headers({range: {start: 10, end: 19}}))
+    assert-eq({}, ::content/download-headers({if-match: "1"}), "only boxapi and Range become download headers")
+    assert-eq({version: "55"}, ::content/download-params({version: "55", range: {start: 0, end: 1}, chunk-size: 9}))
+}
+
+REPS {
+    representations: {entries: [
+        {representation: "pdf", status: {state: "success"}},
+        {
+            representation: "extracted_text",
+            properties: {},
+            info: {url: "https://api.box.com/2.0/internal_files/12345/versions/987/representations/extracted_text"},
+            content: {url_template: "https://dl.boxcloud.com/api/2.0/internal_files/12345/versions/987/representations/extracted_text/content/{+asset_path}"},
+            status: {state: "pending"}
+        }
+    ]}
+}
+
+test-find-representation
+meta ["test"] fn () {
+    rep ::content/find-representation(REPS, "extracted_text")
+    assert-eq("pending", ::content/representation-state(rep))
+    assert(is-null(::content/find-representation(REPS, "jpg")))
+    assert(is-null(::content/find-representation({}, "extracted_text")))
+    assert-eq("unavailable", ::content/representation-state(null))
+    assert-eq("error", ::content/representation-state({representation: "x"}))
+}
+
+test-representation-url
+meta ["test"] fn () {
+    t "https://dl.boxcloud.com/x/content/{+asset_path}?watermark=1"
+    assert-eq("https://dl.boxcloud.com/x/content/?watermark=1", ::content/representation-url(t, ""))
+    assert-eq("https://dl.boxcloud.com/x/content/1.png?watermark=1", ::content/representation-url(t, "1.png"))
+}
+
+test-extracted-text-from
+meta ["test"] fn () {
+    s ::content/extracted-text-from("12345", REPS, null)
+    assert-eq("pending", s.state)
+    assert(not(s.ready))
+    assert(not(::content/is-done(s)), "pending: poll again later")
+    assert-eq("https://dl.boxcloud.com/api/2.0/internal_files/12345/versions/987/representations/extracted_text/content/", s.content-url)
+    assert(contains(s.info-url, "/representations/extracted_text"))
+    none ::content/extracted-text-from("1", {representations: {entries: []}}, null)
+    assert-eq("unavailable", none.state)
+    assert(::content/is-done(none), "no rendition: nothing to wait for")
+    ready ::content/extracted-text-from("1", REPS, "hello")
+    assert(::content/is-ready(ready))
+}
+
+test-wants-original
+meta ["test"] fn () {
+    assert(::content/wants-original("original"))
+    assert(::content/wants-original(" RAW "))
+    assert(not(::content/wants-original("text")))
+    assert(not(::content/wants-original(null)))
+}
