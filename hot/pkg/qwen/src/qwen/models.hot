@@ -2,11 +2,10 @@
 
 // ============================================================================
 // Qwen Models API
-// https://docs.qwencloud.com/api-reference/toolkitframework/openai-compatible/overview
+// https://www.alibabacloud.com/help/en/model-studio/models
 // ============================================================================
 
-api-request ::qwen::api/request
-HttpError ::qwen::api/HttpError
+HttpError ::openai::api/HttpError
 is-ok-response ::hot::http/is-ok-response
 
 // ============================================================================
@@ -40,16 +39,24 @@ meta {
 
     ```hot
     models list()
-    models.data // => [{id: "qwen3.6-plus", object: "model", ...}, ...]
+    models.data // => [{id: "qwen3.7-plus", object: "model", ...}, ...]
 
     first-model first(models.data)
-    first-model.id // => "qwen3.6-plus"
+    first-model.id // => "qwen3.7-plus"
     ```
     """
 }
-fn (): ModelsListResponse | HttpError {
-    response api-request("GET", `${::qwen/BASE_URL}/models`)
-    if(is-ok-response(response), ModelsListResponse(response.body), err(HttpError(response)))
+fn
+(): ModelsListResponse | HttpError {
+    list({})
+},
+(opts: Map): ModelsListResponse | HttpError {
+    response ::qwen::api/request("GET", "/models", {}, "", opts)
+    cond {
+        is-err(response) => { response }
+        is-ok-response(response) => { ModelsListResponse(response.body) }
+        => { err(HttpError(response)) }
+    }
 }
 
 get
@@ -62,36 +69,62 @@ meta {
     **Example**
 
     ```hot
-    model get("qwen3.6-plus")
-    model.id // => "qwen3.6-plus"
+    model get("qwen3.7-plus")
+    model.id // => "qwen3.7-plus"
     model.object // => "model"
     ```
     """
 }
-fn (model-id: Str): Model | HttpError {
-    response api-request("GET", `${::qwen/BASE_URL}/models/${model-id}`)
-    if(is-ok-response(response), Model(response.body), err(HttpError(response)))
+fn
+(model-id: Str): Model | HttpError {
+    get(model-id, {})
+},
+(model-id: Str, opts: Map): Model | HttpError {
+    response ::qwen::api/request("GET", model-path(model-id), {}, "", opts)
+    cond {
+        is-err(response) => { response }
+        is-ok-response(response) => { Model(response.body) }
+        => { err(HttpError(response)) }
+    }
+}
+
+model-path
+meta {
+    doc: """
+    The `/models/{id}` path with the id URL-encoded.
+
+    **Example**
+
+    ```hot
+    model-path("qwen3.8-max")  // => "/models/qwen3.8-max"
+    ```
+    """
+}
+fn (model-id: Str): Str {
+    `/models/${::hot::uri/encode(model-id)}`
 }
 
 // ============================================================================
-// Available Models (as of 2026)
+// Model ids (Model Studio, November 2026). Availability varies by region;
+// check the Model Studio model list for yours.
 // ============================================================================
 
-// Qwen3.6 — latest flagship
+// Current generation (proprietary, hosted only)
+QWEN3_8_MAX "qwen3.8-max"       // flagship: complex reasoning and coding
+QWEN3_7_PLUS "qwen3.7-plus"     // balanced performance, speed and cost; multimodal input
+QWEN3_8_FLASH "qwen3.8-flash"   // fast and cost-effective
+
+// Previous generations, still served
 QWEN3_6_PLUS "qwen3.6-plus"
-
-// Qwen3.5 — fast / cost-effective family
-QWEN3_5_FLASH "qwen3.5-flash"
 QWEN3_5_PLUS "qwen3.5-plus"
+QWEN3_5_FLASH "qwen3.5-flash"
+QWEN3_MAX "qwen3-max"           // proprietary (not open-weight)
 
-// Qwen3 open-weight series
-QWEN3_MAX "qwen3-max"
-
-// Legacy (but still supported) models
+// Rolling aliases for the commercial tiers
+QWEN_MAX "qwen-max"
 QWEN_PLUS "qwen-plus"
 QWEN_FLASH "qwen-flash"
-QWEN_TURBO "qwen-turbo"
-QWEN_MAX "qwen-max"
+QWEN_TURBO "qwen-turbo"         // superseded by qwen-flash
 
 // Long-context / document model
 QWEN_LONG "qwen-long"
@@ -102,4 +135,5 @@ QWEN_VL_MAX "qwen-vl-max"
 
 // Embeddings
 TEXT_EMBEDDING_V4 "text-embedding-v4"
+QWEN3_7_TEXT_EMBEDDING "qwen3.7-text-embedding"
 TEXT_EMBEDDING_V3 "text-embedding-v3"

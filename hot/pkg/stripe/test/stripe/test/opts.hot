@@ -1,0 +1,218 @@
+::stripe::test::opts ns
+meta ["test"]
+
+// Hermetic: no network and no stripe.* context. A blank api-key stops every
+// call in the resolver with an Err naming the key, which proves that function
+// passes its options through.
+
+::api ::stripe::api
+::balance ::stripe::balance
+::customers ::stripe::customers
+::pi ::stripe::payment-intents
+::subs ::stripe::subscriptions
+::invoices ::stripe::invoices
+::setup ::stripe::setup-intents
+::webhooks ::stripe::webhooks
+
+BLANK {api-key: ""}
+
+refused fn (result: Result, key: Str): Bool {
+    and(is-err(result), contains(err-message(result), key), contains(err-message(result), "blank or null"))
+}
+
+// ============================================================================
+// Resolver
+// ============================================================================
+
+test-resolve-opts-override-ctx
+meta ["test"]
+fn () {
+    resolved ::api/resolve-from({api-key: "sk_test_opts"}, {"stripe.api.key": "sk_test_ctx"})
+    assert-eq("sk_test_opts", resolved.api-key)
+    assert-eq(::stripe/API_VERSION, resolved.api-version)
+}
+
+test-resolve-ctx-used-when-opts-empty
+meta ["test"]
+fn () {
+    resolved ::api/resolve-from({}, {"stripe.api.key": "sk_test_ctx", "stripe.api.version": "2025-03-31.basil"})
+    assert-eq("sk_test_ctx", resolved.api-key)
+    assert-eq("2025-03-31.basil", resolved.api-version)
+}
+
+test-resolve-all-opts-keys
+meta ["test"]
+fn () {
+    resolved ::api/resolve-from({
+        api-key: "sk_test_opts",
+        api-version: "2025-03-31.basil",
+        stripe-account: "acct_1",
+        idempotency-key: "k1"
+    }, {})
+    assert-eq("2025-03-31.basil", resolved.api-version)
+    assert-eq("acct_1", resolved.stripe-account)
+    assert-eq("k1", resolved.idempotency-key)
+}
+
+test-resolve-typed-and-map-agree
+meta ["test"]
+fn () {
+    typed ::api/resolve-from(::api/RequestOptions({
+        api_key: "sk_test_opts",
+        stripe_version: "2025-03-31.basil",
+        stripe_account: "acct_1",
+        idempotency_key: "k1"
+    }), {})
+    plain ::api/resolve-from({
+        api-key: "sk_test_opts",
+        api-version: "2025-03-31.basil",
+        stripe-account: "acct_1",
+        idempotency-key: "k1"
+    }, {})
+    assert-eq(plain, typed)
+}
+
+test-resolve-snake-case-map-keys-still-work
+meta ["test"]
+fn () {
+    // A Map used to coerce to RequestOptions, so an idempotency key in this
+    // spelling must never be dropped silently.
+    resolved ::api/resolve-from({idempotency_key: "k1"}, {"stripe.api.key": "sk_test_ctx"})
+    assert-eq("k1", resolved.idempotency-key)
+}
+
+test-resolve-missing-key-is-a-clear-error
+meta ["test"]
+fn () {
+    result ::api/resolve-from({}, {})
+    assert(is-err(result))
+    assert(contains(err-message(result), "stripe.api.key"))
+    assert(contains(err-message(result), "api-key"))
+}
+
+test-resolve-blank-values-are-errors-not-fallbacks
+meta ["test"]
+fn () {
+    context {"stripe.api.key": "sk_test_ctx"}
+    assert(refused(::api/resolve-from({api-key: ""}, context), "api-key"))
+    assert(refused(::api/resolve-from({api-key: "   "}, context), "api-key"))
+    assert(refused(::api/resolve-from({api-key: null}, context), "api-key"))
+    assert(refused(::api/resolve-from({stripe-account: null}, context), "stripe-account"))
+    assert(refused(::api/resolve-from({idempotency-key: ""}, context), "idempotency-key"))
+    assert(refused(::api/resolve-from(::api/RequestOptions({api_key: ""}), context), "api-key"))
+}
+
+test-resolve-unset-record-fields-are-not-blank
+meta ["test"]
+fn () {
+    resolved ::api/resolve-from(::api/RequestOptions({}), {"stripe.api.key": "sk_test_ctx"})
+    assert-eq("sk_test_ctx", resolved.api-key)
+    assert-eq(null, get(resolved, "stripe-account"))
+}
+
+test-resolve-marks-the-key-and-returns-it-unchanged
+meta ["test"]
+fn () {
+    assert-eq("sk_test_tenant_key", ::api/resolve({api-key: "sk_test_tenant_key"}).api-key)
+}
+
+test-resolve-never-writes-ctx
+meta ["test"]
+fn () {
+    ::api/resolve({api-key: "sk_test_tenant_key", api-version: "2025-03-31.basil"})
+    assert(ne("sk_test_tenant_key", ::hot::ctx/get("stripe.api.key")))
+    assert(ne("2025-03-31.basil", ::hot::ctx/get("stripe.api.version")))
+}
+
+test-build-request-from-resolved
+meta ["test"]
+fn () {
+    resolved ::api/resolve-from({api-key: "sk_test_opts", api-version: "2025-03-31.basil"}, {})
+    req ::api/build-request("GET", `${::stripe/BASE_URL}/v1/balance`, {}, "", resolved)
+    assert-eq("Bearer sk_test_opts", req.headers.Authorization)
+    assert-eq("2025-03-31.basil", req.headers.Stripe-Version)
+}
+
+test-option-headers-from-resolved-omit-the-key
+meta ["test"]
+fn () {
+    resolved ::api/resolve-from({api-key: "sk_test_opts", stripe-account: "acct_1", idempotency-key: "k1"}, {})
+    headers ::api/option-headers(resolved)
+    assert-eq("acct_1", headers.Stripe-Account)
+    assert-eq("k1", headers.Idempotency-Key)
+    assert-eq(null, get(headers, "Authorization"))
+}
+
+// ============================================================================
+// Per-call URL
+// ============================================================================
+
+test-ctx-key-is-not-sent-outside-stripe
+meta ["test"]
+fn () {
+    ::hot::ctx/set("stripe.api.key", "sk_test_ctx_key")
+    result ::api/request("GET", "http://127.0.0.1:1/v1/balance")
+    ::hot::ctx/set("stripe.api.key", "")
+    assert(is-err(result))
+    assert(contains(err-message(result), "api-key"))
+    assert(contains(err-message(result), "not under"))
+}
+
+test-explicit-key-may-go-to-another-url
+meta ["test"]
+fn () {
+    // Nothing listens on port 1, so the socket error proves the request was sent.
+    result ::api/request("GET", "http://127.0.0.1:1/v1/balance", {}, "", {api-key: "sk_test_opts"})
+    assert(is-err(result))
+    assert(contains(err-message(result), "127.0.0.1:1"))
+}
+
+// ============================================================================
+// Every module passes options through
+// ============================================================================
+
+test-opts-reach-the-transport
+meta ["test"]
+fn () {
+    assert(refused(::api/call("GET", "/v1/balance", "", BLANK), "api-key"))
+    assert(refused(::api/request("GET", `${::stripe/BASE_URL}/v1/balance`, {}, "", BLANK), "api-key"))
+    assert(refused(::api/request("GET", `${::stripe/BASE_URL}/v1/balance`, {}, "", ""), "api-key"))
+    assert(refused(::api/list-all("/v1/customers", {}, 10, BLANK), "api-key"))
+}
+
+test-opts-reach-endpoint-modules
+meta ["test"]
+fn () {
+    assert(refused(::balance/get-balance(BLANK), "api-key"))
+    assert(refused(::customers/get-customer("cus_1", {}, BLANK), "api-key"))
+    assert(refused(::customers/delete-customer("cus_1", BLANK), "api-key"))
+    assert(refused(::customers/list-customers(::customers/ListCustomersRequest({}), BLANK), "api-key"))
+    assert(refused(::customers/search-customers("email:'a'", {}, BLANK), "api-key"))
+    assert(refused(::customers/create-customer(::customers/CreateCustomerRequest({name: "A"}), BLANK), "api-key"))
+    assert(refused(::pi/cancel-payment-intent("pi_1", BLANK), "api-key"))
+    assert(refused(::pi/cancel-payment-intent("pi_1", "duplicate", BLANK), "api-key"))
+    assert(refused(::setup/cancel-setup-intent("seti_1", BLANK), "api-key"))
+    assert(refused(::setup/cancel-setup-intent("seti_1", "abandoned", BLANK), "api-key"))
+    assert(refused(::subs/cancel-subscription("sub_1", ::subs/CancelSubscriptionRequest({}), BLANK), "api-key"))
+    assert(refused(::invoices/create-invoice-item("cus_1", 100, "usd", "x", BLANK), "api-key"))
+    assert(refused(::invoices/create-invoice-item("cus_1", 100, "usd", "x", "in_1", BLANK), "api-key"))
+    assert(refused(::invoices/create-invoice-preview({customer: "cus_1"}, BLANK), "api-key"))
+    assert(refused(::webhooks/get-webhook-endpoint("we_1", BLANK), "api-key"))
+    assert(refused(::webhooks/create-webhook-endpoint(::webhooks/CreateWebhookEndpointRequest({url: "https://x", enabled_events: []}), BLANK), "api-key"))
+    assert(refused(::webhooks/list-webhook-endpoints({}, BLANK), "api-key"))
+}
+
+test-typed-options-reach-endpoint-modules
+meta ["test"]
+fn () {
+    options ::api/RequestOptions({stripe_account: ""})
+    assert(refused(::customers/create-customer(::customers/CreateCustomerRequest({name: "A"}), options), "stripe-account"))
+}
+
+test-lone-map-after-an-id-is-params-not-options
+meta ["test"]
+fn () {
+    // A lone Map after an ID is still params or a request, never options.
+    result ::customers/get-customer("cus_1", {api-key: ""})
+    assert(not(and(is-err(result), contains(err-message(result), "blank or null"))))
+}

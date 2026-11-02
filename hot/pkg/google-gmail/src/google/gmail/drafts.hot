@@ -1,0 +1,154 @@
+::google::gmail::drafts ns
+meta {
+    doc: """
+    Drafts: create (including a threaded reply draft for a human to
+    review), update, send, list, get, delete. Messages are built with
+    `::google::gmail::mime` and switch to the media-upload endpoint above
+    5 MiB, as for sending.
+
+    **Scopes.** `gmail.compose` for everything except reads, which use
+    `gmail.readonly`. `create-reply-draft` also reads the original
+    (`gmail.readonly`).
+    """
+}
+
+::gmail ::google::gmail
+::api ::google::api
+::mime ::google::gmail::mime
+::messages ::google::gmail::messages
+
+draft-body
+meta {
+    doc: """The JSON body for `drafts.create` / `drafts.update` (pure): `{id?, message: {raw, threadId?}}`."""
+}
+fn (raw: Bytes, thread-id: Str?, draft-id: Str?): Map {
+  ::gmail/compact({id: draft-id, message: ::messages/send-body(raw, thread-id)})
+}
+
+save-draft fn (method: Str, path: Str, message: Map, draft-id: Str?, opts: Map): Map {
+  raw ::mime/build-message(message, or(get(opts, "boundary"), ::mime/new-boundary()))
+  thread ::messages/thread-id-of(opts)
+  cond {
+    is-err(raw) => { raw }
+    gt(length(raw), ::messages/MAX_MESSAGE_BYTES) => { err(`google-gmail: the draft is ${length(raw)} bytes; Gmail accepts at most ${::messages/MAX_MESSAGE_BYTES}`) }
+    ::messages/use-upload(length(raw), opts) => {
+      boundary ::mime/new-boundary()
+      metadata ::gmail/compact({id: draft-id, message: if(is-null(thread), null, {threadId: thread})})
+      ::api/json(::gmail/COMPOSE_SCOPE, method, ::gmail/upload-url(path, {uploadType: "multipart"}),
+        {Content-Type: `multipart/related; boundary="${boundary}"`},
+        ::mime/build-related(metadata, raw, boundary), ::gmail/creds(opts))
+    }
+    => { ::gmail/json(::gmail/COMPOSE_SCOPE, method, ::gmail/url(path), draft-body(raw, thread, draft-id), opts) }
+  }
+}
+
+create-draft
+meta {
+    doc: """
+    POST /users/me/drafts - save a draft from a message Map (same fields
+    as `::google::gmail::messages/send`). Options: `thread-id`, `upload`.
+    Returns `{id, message: {id, threadId, labelIds}}`. Scope:
+    `gmail.compose`.
+    """
+}
+fn
+(message: Map): Map {
+  create-draft(message, {})
+},
+(message: Map, opts: Map): Map {
+  save-draft("POST", "/drafts", message, null, opts)
+}
+
+create-reply-draft
+meta {
+    doc: """
+    Draft a reply to a message, threaded and addressed like
+    `::google::gmail::messages/reply`, for a person to review and send.
+    `all: true` in `opts` drafts a reply-all. Scopes: `gmail.readonly` and
+    `gmail.compose`.
+
+    ```hot
+    draft ::google::gmail::drafts/create-reply-draft(email.id, {text: "Proposed answer..."})
+    ```
+    """
+}
+fn
+(message-id: Str, reply: Map): Map {
+  create-reply-draft(message-id, reply, {})
+},
+(message-id: Str, reply: Map, opts: Map): Map {
+  message ::messages/prepare-reply(message-id, reply, eq(get(opts, "all"), true), opts)
+  if(is-err(message), message, create-draft(message, {...opts, thread-id: message.thread-id}))
+}
+
+update-draft
+meta {
+    doc: """PUT /users/me/drafts/{id} - replace a draft's message (all fields; Gmail keeps nothing from the old one). Options: `thread-id`, `upload`. Scope: `gmail.compose`."""
+}
+fn
+(draft-id: Str, message: Map): Map {
+  update-draft(draft-id, message, {})
+},
+(draft-id: Str, message: Map, opts: Map): Map {
+  save-draft("PUT", `/drafts/${::gmail/encode-id(draft-id)}`, message, draft-id, opts)
+}
+
+send-draft
+meta {
+    doc: """POST /users/me/drafts/send - send an existing draft as is. Returns the sent message; the draft is removed. Scope: `gmail.compose`."""
+}
+fn
+(draft-id: Str): Map {
+  send-draft(draft-id, {})
+},
+(draft-id: Str, opts: Map): Map {
+  ::gmail/json(::gmail/COMPOSE_SCOPE, "POST", ::gmail/url("/drafts/send"), {id: draft-id}, opts)
+}
+
+list-drafts
+meta {
+    doc: """GET /users/me/drafts - one page of drafts: `{drafts: [{id, message: {id, threadId}}], nextPageToken?}`. Options: `q`, `maxResults` (max 500), `pageToken`, `includeSpamTrash`. Scope: `gmail.readonly`."""
+}
+fn
+(): Map {
+  list-drafts({})
+},
+(opts: Map): Map {
+  ::gmail/json(::gmail/READ_SCOPE, "GET", ::gmail/url("/drafts", ::gmail/query-params({}, opts)), "", opts)
+}
+
+list-all-drafts
+meta {doc: """Every draft (all pages), or at most `limit`. Scope: `gmail.readonly`."""}
+fn
+(opts: Map): Vec {
+  list-all-drafts(opts, null)
+},
+(opts: Map, limit: Int?): Vec {
+  sized if(is-some(get(opts, "maxResults")), opts, {...opts, maxResults: ::messages/page-size(limit)})
+  ::api/collect-pages((token) { list-drafts({...sized, pageToken: token}) }, "drafts", limit)
+}
+
+get-draft
+meta {
+    doc: """GET /users/me/drafts/{id} - a draft with its message. Options: `format` (`full` default, `metadata`, `minimal`, `raw`). Scope: `gmail.readonly`."""
+}
+fn
+(draft-id: Str): Map {
+  get-draft(draft-id, {})
+},
+(draft-id: Str, opts: Map): Map {
+  params ::gmail/query-params({format: "full"}, opts)
+  ::gmail/json(::gmail/READ_SCOPE, "GET", ::gmail/url(`/drafts/${::gmail/encode-id(draft-id)}`, params), "", opts)
+}
+
+delete-draft
+meta {
+    doc: """DELETE /users/me/drafts/{id} - discard a draft (immediately and permanently; it does not go to the trash). Returns true. Scope: `gmail.compose`."""
+}
+fn
+(draft-id: Str): Bool {
+  delete-draft(draft-id, {})
+},
+(draft-id: Str, opts: Map): Bool {
+  ::gmail/done(::gmail/json(::gmail/COMPOSE_SCOPE, "DELETE", ::gmail/url(`/drafts/${::gmail/encode-id(draft-id)}`), "", opts))
+}

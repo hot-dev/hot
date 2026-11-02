@@ -1,0 +1,107 @@
+::slack::admin::usergroups ns
+meta {
+    doc: """
+    `admin.usergroups.*`: link IDP groups to default channels and
+    workspaces. Scope: `admin.usergroups:write` (`:read` for listing).
+
+    **Example**
+
+    ```hot
+    ::usergroups ::slack::admin::usergroups
+
+    ::usergroups/add-channels(::usergroups/AddChannelsRequest({
+      usergroup_id: "S0123ABCDEF",
+      channel_ids: ["C0123ABCDEF", "C0456GHIJKL"]
+    }))
+    ```
+    """
+}
+
+::api ::slack::admin::api
+
+AddChannelsRequest type {
+  usergroup_id: Str,
+  channel_ids: Vec<Str>,
+  team_id: Str?
+}
+
+add-channels
+meta {
+    doc: """
+    admin.usergroups.addChannels - Add up to 100 default channels to an IDP group.
+
+    Scope: `admin.usergroups:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: AddChannelsRequest): Map {
+  add-channels(request, {})
+},
+(request: AddChannelsRequest, opts: Map): Map {
+  ::api/call("admin.usergroups.addChannels", request, opts)
+}
+
+AddTeamsRequest type {
+  usergroup_id: Str,
+  team_ids: Vec<Str>,
+  auto_provision: Bool?
+}
+
+add-teams
+meta {
+    doc: """
+    admin.usergroups.addTeams - Associate workspaces with an IDP group; `auto_provision: true` creates accounts for its members.
+
+    Scope: `admin.teams:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: AddTeamsRequest): Map {
+  add-teams(request, {})
+},
+(request: AddTeamsRequest, opts: Map): Map {
+  ::api/call("admin.usergroups.addTeams", request, opts)
+}
+
+ListChannelsRequest type {
+  usergroup_id: Str,
+  team_id: Str?,
+  include_num_members: Bool?
+}
+
+list-channels
+meta {
+    doc: """
+    admin.usergroups.listChannels - List the channels linked to an IDP group (`channels`).
+
+    Scope: `admin.usergroups:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: ListChannelsRequest): Map {
+  list-channels(request, {})
+},
+(request: ListChannelsRequest, opts: Map): Map {
+  ::api/call("admin.usergroups.listChannels", request, opts)
+}
+
+RemoveChannelsRequest type {
+  usergroup_id: Str,
+  channel_ids: Vec<Str>
+}
+
+remove-channels
+meta {
+    doc: """
+    admin.usergroups.removeChannels - Remove default channels from an IDP group.
+
+    Scope: `admin.usergroups:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: RemoveChannelsRequest): Map {
+  remove-channels(request, {})
+},
+(request: RemoveChannelsRequest, opts: Map): Map {
+  ::api/call("admin.usergroups.removeChannels", request, opts)
+}

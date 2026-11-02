@@ -1,0 +1,493 @@
+::salesforce::bulk ns
+meta {
+    doc: """
+    Bulk API 2.0: ingest jobs (insert, update, upsert, delete, hardDelete
+    from CSV) and query jobs (SOQL results as CSV) for data volumes past
+    what `::salesforce::composite` handles comfortably.
+
+    **Ingest**: `create-ingest-job` → `upload-job-data` (one CSV upload
+    per job, up to 150 MB) → `close-job` → poll `get-ingest-job` until
+    `is-job-finished` → `successful-results` / `failed-results` /
+    `unprocessed-records`. `ingest` does the first three steps in one
+    call.
+
+    **Query**: `create-query-job` → poll `get-query-job` →
+    `query-results`, following `locator` while it is non-null.
+
+    Jobs run asynchronously on Salesforce's side and hot-std has no
+    sleep, so poll from a scheduled function, a later event, or a task
+    whose retry policy supplies the delay: `poll-ingest-job` and
+    `poll-query-job` return an Err until the job is finished, which is
+    exactly what a retrying task needs.
+    """
+}
+
+::api ::salesforce::api
+
+INGEST_OPERATIONS ["insert", "update", "upsert", "delete", "hardDelete"]
+FINISHED_STATES ["JobComplete", "Failed", "Aborted"]
+
+// ---------------------------------------------------------------------------
+// Pure helpers (exposed for testing)
+// ---------------------------------------------------------------------------
+
+build-ingest-job-body
+meta {
+    doc: """
+    The create-ingest-job body. `operation` is one of insert, update,
+    upsert, delete, hardDelete; `options`: `external-id-field`
+    (required for upsert), `line-ending` (`LF` default or `CRLF`),
+    `column-delimiter` (`COMMA` default, `TAB`, `PIPE`, `SEMICOLON`,
+    `CARET`, `BACKQUOTE`), `assignment-rule-id`. Unset options are
+    omitted. Returns an Err for an unknown operation or an upsert
+    without an external id field.
+    """
+}
+fn (object: Str, operation: Str, options: Map): Map {
+  external-id get(options, "external-id-field")
+  cond {
+    not(in(operation, INGEST_OPERATIONS)) => {
+      err(`salesforce: unknown bulk operation '${operation}' (use ${join(INGEST_OPERATIONS, ", ")})`)
+    }
+
+    and(eq(operation, "upsert"), is-null(external-id)) => {
+      err("salesforce: a bulk upsert needs options.external-id-field")
+    }
+    => {
+      filter-vals({
+        object: object,
+        operation: operation,
+        externalIdFieldName: external-id,
+        contentType: "CSV",
+        lineEnding: get(options, "line-ending"),
+        columnDelimiter: get(options, "column-delimiter"),
+        assignmentRuleId: get(options, "assignment-rule-id")
+      }, is-some)
+    }
+  }
+}
+
+build-query-job-body
+meta {
+    doc: """The create-query-job body. `options`: `include-deleted` (operation `queryAll`), `line-ending`, `column-delimiter`. Unset options are omitted."""
+}
+fn (soql: Str, options: Map): Map {
+  filter-vals({
+    operation: if(Bool(get(options, "include-deleted", false)), "queryAll", "query"),
+    query: soql,
+    lineEnding: get(options, "line-ending"),
+    columnDelimiter: get(options, "column-delimiter")
+  }, is-some)
+}
+
+is-job-finished
+meta {
+    doc: """True when a job's `state` is terminal: `JobComplete`, `Failed`, or `Aborted`."""
+}
+fn (job: Map): Bool {
+  in(get(job, "state"), FINISHED_STATES)
+}
+
+csv-cell
+meta {
+    doc: """Render one CSV cell: null → empty, Bool/number → text, and quote (doubling inner quotes) when the value holds a comma, quote, or line break. Exposed for testing."""
+}
+fn (value: Any): Str {
+  text cond {
+    is-null(value) => { "" }
+    is-bool(value) => { if(value, "true", "false") }
+    => { Str(value) }
+  }
+
+  needs-quotes or(contains(text, ","), contains(text, "\""), contains(text, "\n"), contains(text, "\r"))
+  doubled replace(text, "\"", "\"\"")
+  if(needs-quotes, concat("\"", doubled, "\""), text)
+}
+
+to-csv
+meta {
+    doc: """
+    Render records as Bulk-ready CSV (comma-delimited, LF line endings):
+    a header row of `columns`, then one row per record in that column
+    order. Missing or null values become empty cells, which Bulk treats
+    as "leave unchanged" on update; write `#N/A` to clear a field.
+
+    **Example**
+
+    ```hot
+    csv ::salesforce::bulk/to-csv([
+      {LastName: "Lovelace", Email: "ada@example.com"},
+      {LastName: "Hopper", Email: "grace@example.com"}
+    ], ["LastName", "Email"])
+    ```
+    """
+}
+fn (records: Vec, columns: Vec): Str {
+  header join(map(columns, csv-cell), ",")
+  rows map(records, (r) { join(map(columns, (c) { csv-cell(get(r, c)) }), ",") })
+  `${join(concat([header], rows), "\n")}\n`
+}
+
+results-path
+meta {
+    doc: """The query-results path with optional `locator` and `max-records` parameters. Exposed for testing."""
+}
+fn (job-id: Str, options: Map): Str {
+  `/jobs/query/${::api/segment(job-id)}/results${::api/query-string({locator: get(options, "locator"), maxRecords: get(options, "max-records")})}`
+}
+
+parse-locator
+meta {
+    doc: """The `Sforce-Locator` header as a cursor: null when absent or the literal "null" Salesforce sends on the last page. Exposed for testing."""
+}
+fn (headers: Any): Any {
+  raw cond {
+    not(is-map(headers)) => { null }
+    => { get(headers, "sforce-locator", get(headers, "Sforce-Locator")) }
+  }
+
+  cond {
+    or(is-null(raw), eq(raw, "null"), eq(raw, "")) => { null }
+    => { raw }
+  }
+}
+
+body-text fn (response: Any): Str {
+  bytes get(response, "body-bytes")
+  cond {
+    is-bytes(bytes) => { Str(bytes) }
+    is-str(get(response, "body")) => { response.body }
+    is-null(get(response, "body")) => { "" }
+    => { Str(response.body) }
+  }
+}
+
+send-csv fn (method: Str, path: Str, opts: Map): Any {
+  response ::api/send(method, path, null, {accept: "text/csv"}, opts)
+  cond {
+    is-err(response) => { response }
+    not(::hot::http/is-ok-response(response)) => { ::api/unwrap(response) }
+    => { response }
+  }
+}
+
+csv-result fn (method: Str, path: Str, opts: Map): Str {
+  response send-csv(method, path, opts)
+  cond {
+    is-err(response) => { response }
+    => { body-text(response) }
+  }
+}
+
+job-path fn (kind: Str, job-id: Str): Str {
+  `/jobs/${kind}/${::api/segment(job-id)}`
+}
+
+poll fn (job: Result): Map {
+  cond {
+    is-err(job) => { job }
+    is-job-finished(job) => { job }
+    => { err(`salesforce: bulk job ${job.id} is still ${job.state}`) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Ingest jobs
+// ---------------------------------------------------------------------------
+
+create-ingest-job
+meta {
+    doc: """POST /jobs/ingest - Open an ingest job. See `build-ingest-job-body` for the options. Returns the job (`id`, `state: "Open"`, ...)."""
+}
+fn
+(object: Str, operation: Str): Map {
+  create-ingest-job(object, operation, {})
+},
+(object: Str, operation: Str, options: Map): Map {
+  create-ingest-job(object, operation, options, {})
+},
+(object: Str, operation: Str, options: Map, opts: Map): Map {
+  body build-ingest-job-body(object, operation, options)
+  cond {
+    is-err(body) => { body }
+    => { ::api/json("POST", "/jobs/ingest", body, opts) }
+  }
+}
+
+upload-job-data
+meta {
+    doc: """PUT /jobs/ingest/{id}/batches - Upload the job's CSV (header row of field API names first; see `to-csv`). One upload per job. Returns null on success."""
+}
+fn
+(job-id: Str, csv: Str): Any {
+  upload-job-data(job-id, csv, {})
+},
+(job-id: Str, csv: Str, opts: Map): Any {
+  ::api/unwrap(::api/send("PUT", `${job-path("ingest", job-id)}/batches`, csv, {content-type: "text/csv"}, opts))
+}
+
+close-job
+meta {
+    doc: """PATCH /jobs/ingest/{id} with `state: UploadComplete` - Tell Salesforce the data is in so processing starts. Returns the job."""
+}
+fn
+(job-id: Str): Map {
+  close-job(job-id, {})
+},
+(job-id: Str, opts: Map): Map {
+  ::api/json("PATCH", job-path("ingest", job-id), {state: "UploadComplete"}, opts)
+}
+
+abort-ingest-job
+meta {
+    doc: """PATCH /jobs/ingest/{id} with `state: Aborted` - Abort an open or in-progress ingest job."""
+}
+fn
+(job-id: Str): Map {
+  abort-ingest-job(job-id, {})
+},
+(job-id: Str, opts: Map): Map {
+  ::api/json("PATCH", job-path("ingest", job-id), {state: "Aborted"}, opts)
+}
+
+get-ingest-job
+meta {
+    doc: """GET /jobs/ingest/{id} - Job status: `state` (`Open`, `UploadComplete`, `InProgress`, `JobComplete`, `Failed`, `Aborted`), `numberRecordsProcessed`, `numberRecordsFailed`, `errorMessage`."""
+}
+fn
+(job-id: Str): Map {
+  get-ingest-job(job-id, {})
+},
+(job-id: Str, opts: Map): Map {
+  ::api/json("GET", job-path("ingest", job-id), null, opts)
+}
+
+poll-ingest-job
+meta {
+    doc: """
+    Fetch an ingest job and return it once finished, or an Err while it
+    is still running. Run it in a task with a retry policy to wait.
+
+    **Example**
+
+    ```hot
+    check-job fn (job-id: Str): Map { ::salesforce::bulk/poll-ingest-job(job-id) }
+
+    job ::salesforce::bulk/ingest("Contact", "insert", csv)
+    ::hot::task/start(check-job, job.id, ::hot::task/TaskOptions({retry: {attempts: 20, delay: 5000, backoff: "exponential"}}))
+    ```
+    """
+}
+fn
+(job-id: Str): Map {
+  poll-ingest-job(job-id, {})
+},
+(job-id: Str, opts: Map): Map {
+  poll(get-ingest-job(job-id, opts))
+}
+
+delete-ingest-job
+meta {
+    doc: """DELETE /jobs/ingest/{id} - Delete a finished job and its data. Returns null."""
+}
+fn
+(job-id: Str): Any {
+  delete-ingest-job(job-id, {})
+},
+(job-id: Str, opts: Map): Any {
+  ::api/json("DELETE", job-path("ingest", job-id), null, opts)
+}
+
+successful-results
+meta {
+    doc: """GET /jobs/ingest/{id}/successfulResults - CSV of the processed records, with `sf__Id` and `sf__Created` columns first."""
+}
+fn
+(job-id: Str): Str {
+  successful-results(job-id, {})
+},
+(job-id: Str, opts: Map): Str {
+  csv-result("GET", `${job-path("ingest", job-id)}/successfulResults`, opts)
+}
+
+failed-results
+meta {
+    doc: """GET /jobs/ingest/{id}/failedResults - CSV of the failed records, with `sf__Id` and `sf__Error` columns first."""
+}
+fn
+(job-id: Str): Str {
+  failed-results(job-id, {})
+},
+(job-id: Str, opts: Map): Str {
+  csv-result("GET", `${job-path("ingest", job-id)}/failedResults`, opts)
+}
+
+unprocessed-records
+meta {
+    doc: """GET /jobs/ingest/{id}/unprocessedrecords - CSV of the records never processed (e.g. after an abort)."""
+}
+fn
+(job-id: Str): Str {
+  unprocessed-records(job-id, {})
+},
+(job-id: Str, opts: Map): Str {
+  csv-result("GET", `${job-path("ingest", job-id)}/unprocessedrecords`, opts)
+}
+
+ingest
+meta {
+    doc: """
+    Create an ingest job, upload `csv`, and close it, returning the
+    closed job (`state: "UploadComplete"`). Poll it with
+    `get-ingest-job` / `poll-ingest-job`. When the upload fails the job
+    is aborted before the Err is returned. See `build-ingest-job-body`
+    for the options.
+
+    **Example**
+
+    ```hot
+    csv ::salesforce::bulk/to-csv(rows, ["External_Id__c", "LastName", "Email"])
+    job ::salesforce::bulk/ingest("Contact", "upsert", csv, {external-id-field: "External_Id__c"})
+    job.id
+    ```
+    """
+}
+fn
+(object: Str, operation: Str, csv: Str): Map {
+  ingest(object, operation, csv, {})
+},
+(object: Str, operation: Str, csv: Str, options: Map): Map {
+  ingest(object, operation, csv, options, {})
+},
+(object: Str, operation: Str, csv: Str, options: Map, opts: Map): Map {
+  job create-ingest-job(object, operation, options, opts)
+  cond {
+    is-err(job) => { job }
+    => {
+      uploaded upload-job-data(job.id, csv, opts)
+      cond {
+        is-err(uploaded) => {
+          abort-ingest-job(job.id, opts)
+          uploaded
+        }
+        => { close-job(job.id, opts) }
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Query jobs
+// ---------------------------------------------------------------------------
+
+create-query-job
+meta {
+    doc: """
+    POST /jobs/query - Start an asynchronous SOQL export. `options`:
+    `include-deleted`, `line-ending`, `column-delimiter`.
+
+    **Example**
+
+    ```hot
+    job ::salesforce::bulk/create-query-job("SELECT Id, Email FROM Contact")
+    job.id
+    ```
+    """
+}
+fn
+(soql: Str): Map {
+  create-query-job(soql, {})
+},
+(soql: Str, options: Map): Map {
+  create-query-job(soql, options, {})
+},
+(soql: Str, options: Map, opts: Map): Map {
+  ::api/json("POST", "/jobs/query", build-query-job-body(soql, options), opts)
+}
+
+get-query-job
+meta {
+    doc: """GET /jobs/query/{id} - Query job status (`state`, `numberRecordsProcessed`, ...)."""
+}
+fn
+(job-id: Str): Map {
+  get-query-job(job-id, {})
+},
+(job-id: Str, opts: Map): Map {
+  ::api/json("GET", job-path("query", job-id), null, opts)
+}
+
+poll-query-job
+meta {
+    doc: """Fetch a query job and return it once finished, or an Err while it is still running (see `poll-ingest-job`)."""
+}
+fn
+(job-id: Str): Map {
+  poll-query-job(job-id, {})
+},
+(job-id: Str, opts: Map): Map {
+  poll(get-query-job(job-id, opts))
+}
+
+abort-query-job
+meta {
+    doc: """PATCH /jobs/query/{id} with `state: Aborted` - Abort a running query job."""
+}
+fn
+(job-id: Str): Map {
+  abort-query-job(job-id, {})
+},
+(job-id: Str, opts: Map): Map {
+  ::api/json("PATCH", job-path("query", job-id), {state: "Aborted"}, opts)
+}
+
+delete-query-job
+meta {
+    doc: """DELETE /jobs/query/{id} - Delete a finished query job and its results. Returns null."""
+}
+fn
+(job-id: Str): Any {
+  delete-query-job(job-id, {})
+},
+(job-id: Str, opts: Map): Any {
+  ::api/json("DELETE", job-path("query", job-id), null, opts)
+}
+
+query-results
+meta {
+    doc: """
+    GET /jobs/query/{id}/results - One chunk of a finished query job's
+    results: `{csv, locator, number-of-records}`. Pass `locator` back in
+    `options` for the next chunk until it is null; `max-records` caps the
+    chunk size.
+
+    **Example**
+
+    ```hot
+    page ::salesforce::bulk/query-results(job.id, {max-records: 50000})
+    more if(is-null(page.locator), null, ::salesforce::bulk/query-results(job.id, {locator: page.locator}))
+    ```
+    """
+}
+fn
+(job-id: Str): Map {
+  query-results(job-id, {})
+},
+(job-id: Str, options: Map): Map {
+  query-results(job-id, options, {})
+},
+(job-id: Str, options: Map, opts: Map): Map {
+  response send-csv("GET", results-path(job-id, options), opts)
+  cond {
+    is-err(response) => { response }
+    => {
+      headers or(response.headers, {})
+      count get(headers, "sforce-numberofrecords", get(headers, "Sforce-NumberOfRecords"))
+      {
+        csv: body-text(response),
+        locator: parse-locator(headers),
+        number-of-records: if(is-null(count), null, Int(count))
+      }
+    }
+  }
+}

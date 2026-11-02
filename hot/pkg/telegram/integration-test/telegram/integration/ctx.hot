@@ -2,10 +2,37 @@
 
 ::env ::hot::env
 
-// Placeholder credentials for the telegram integration suite. Unset
-// environment variables are skipped entirely, so absent credentials
-// behave exactly as if never configured.
+// Credentials for the telegram integration suite. Unset environment
+// variables are skipped entirely, so absent credentials behave exactly as
+// if never configured, and every test then skips (passes with a "skipped"
+// note) instead of calling Telegram.
 ::hot::ctx/set(filter-vals({
     "telegram.bot.token": ::env/get("TELEGRAM_BOT_TOKEN", ""),
     "telegram.webhook.secret": ::env/get("TELEGRAM_WEBHOOK_SECRET", ""),
 }, (v) { not(is-empty(v)) }))
+
+TEST_CHAT_ID ::env/get("TELEGRAM_TEST_CHAT_ID", "")
+
+configured
+meta {doc: """True when TELEGRAM_BOT_TOKEN is set."""}
+fn (): Bool {
+    not(is-empty(or(::hot::ctx/get("telegram.bot.token"), "")))
+}
+
+has-chat
+meta {doc: """True when a bot token and TELEGRAM_TEST_CHAT_ID are both set."""}
+fn (): Bool {
+    and(configured(), not(is-empty(TEST_CHAT_ID)))
+}
+
+skip
+meta {
+    doc: """Record a skipped test: prints why and passes one assertion so the runner reports it cleanly."""
+}
+fn (reason: Str): Bool {
+    println(`skipped: ${reason}`)
+    assert(true, reason)
+}
+
+UNCONFIGURED "set TELEGRAM_BOT_TOKEN (a test bot from @BotFather)"
+NO_CHAT "set TELEGRAM_BOT_TOKEN and TELEGRAM_TEST_CHAT_ID"

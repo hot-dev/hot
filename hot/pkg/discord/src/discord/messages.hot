@@ -1,11 +1,17 @@
 ::discord::messages ns
+meta {
+    doc: """
+    Messages, reactions and pins: send (with embeds, components, polls
+    and file uploads), read, edit, delete, crosspost, react, and pin.
+    """
+}
 
-api-request ::discord::api/request
-HttpError ::discord::api/HttpError
-is-ok-response ::hot::http/is-ok-response
+::api ::discord::api
+
+seg ::discord::api/seg
 
 // ============================================================================
-// Messages
+// Reading messages
 // ============================================================================
 
 GetChannelMessagesRequest type {
@@ -19,24 +25,68 @@ GetChannelMessagesRequest type {
 get-channel-messages
 meta {
     doc: """
-GET /channels/{channel_id}/messages - Retrieve messages from a channel. Returns up to 100 messages. Use `before`, `after`, or `around` a message ID for pagination.
+    GET /channels/{channel_id}/messages - Up to `limit` (1-100, default 50)
+    messages, newest first. Page with one of `before`, `after` or `around`
+    (a message id). Needs VIEW_CHANNEL and READ_MESSAGE_HISTORY; message
+    `content` is empty unless the app has the Message Content intent.
 
-**Example**
+    **Example**
 
-```hot
-::messages ::discord::messages
+    ```hot
+    ::messages ::discord::messages
 
-response ::messages/get-channel-messages(::messages/GetChannelMessagesRequest({
-  channel_id: "123456789",
-  limit: 10
-}))
-// => [{id: "...", content: "Hello", author: {...}}, ...]
-```
-"""
+    recent ::messages/get-channel-messages(::messages/GetChannelMessagesRequest({
+      channel_id: "1100000000000000000",
+      limit: 10
+    }))
+    // => [{id: "...", content: "Hello", author: {...}}, ...]
+    ```
+    """
 }
-fn (request: GetChannelMessagesRequest): Vec<Map> {
-  response api-request("GET", `${::discord::core/BASE_URL}/channels/${request.channel_id}/messages?limit=${or(request.limit, "")}&around=${or(request.around, "")}&before=${or(request.before, "")}&after=${or(request.after, "")}`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: GetChannelMessagesRequest): Vec<Map> {
+  get-channel-messages(request, {})
+},
+(request: GetChannelMessagesRequest, opts: Map): Vec<Map> {
+  ::api/call("GET", `/channels/${seg(request.channel_id)}/messages`, {
+    query: {around: request.around, before: request.before, after: request.after, limit: request.limit}
+  }, opts)
+}
+
+get-message-history
+meta {
+    doc: """
+    Page backwards through a channel's history with `before`, newest
+    first, collecting up to `max-items` messages (100 per request). The
+    3-arity form starts before a given message id.
+
+    **Example**
+
+    ```hot
+    last-500 ::discord::messages/get-message-history("1100000000000000000", 500)
+    ```
+    """
+}
+fn
+(channel-id: Str, max-items: Int): Vec<Map> {
+  get-message-history(channel-id, max-items, null)
+},
+(channel-id: Str, max-items: Int, before: Str?): Vec<Map> {
+  get-message-history(channel-id, max-items, before, {})
+},
+(channel-id: Str, max-items: Int, before: Str?, opts: Map): Vec<Map> {
+  ::api/paginate(
+    (cursor) {
+      get-channel-messages(GetChannelMessagesRequest({
+        channel_id: channel-id,
+        before: or(cursor, before),
+        limit: min(100, max-items)
+      }), opts)
+    },
+    (page) { last(page).id },
+    min(100, max-items),
+    max-items
+  )
 }
 
 GetMessageRequest type {
@@ -46,58 +96,81 @@ GetMessageRequest type {
 
 get-message
 meta {
-    doc: """GET /channels/{channel_id}/messages/{message_id} - Retrieve a specific message by ID."""
+    doc: """GET /channels/{channel_id}/messages/{message_id} - One message by id."""
 }
-fn (request: GetMessageRequest): Map {
-  response api-request("GET", `${::discord::core/BASE_URL}/channels/${request.channel_id}/messages/${request.message_id}`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: GetMessageRequest): Map {
+  get-message(request, {})
+},
+(request: GetMessageRequest, opts: Map): Map {
+  ::api/call("GET", `/channels/${seg(request.channel_id)}/messages/${seg(request.message_id)}`, {}, opts)
 }
+
+// ============================================================================
+// Sending and editing
+// ============================================================================
 
 CreateMessageRequest type {
   channel_id: Str,
   content: Str?,
+  nonce: Any?,
+  enforce_nonce: Bool?,
   tts: Bool?,
   embeds: Vec<Map>?,
   allowed_mentions: Map?,
   message_reference: Map?,
   components: Vec<Map>?,
   sticker_ids: Vec<Str>?,
-  flags: Int?
+  attachments: Vec<Map>?,
+  flags: Int?,
+  poll: Map?,
+  files: Vec<::discord::api/FileUpload>?
 }
 
 create-message
 meta {
     doc: """
-POST /channels/{channel_id}/messages - Send a message to a channel. Provide `content` for text or `embeds` for rich content. Use `message_reference` to reply to a message.
+    POST /channels/{channel_id}/messages - Send a message. Provide at
+    least one of `content`, `embeds`, `components`, `sticker_ids`, `poll`
+    or `files`. Unset fields are omitted from the request.
 
-**Example**
+    - `message_reference: {message_id}` replies to a message
+      (`{type: 1, message_id, channel_id}` forwards one).
+    - `allowed_mentions: {parse: []}` suppresses pings from user text.
+    - `files` uploads attachments as multipart/form-data; reference one in
+      an embed as `attachment://<filename>`. `attachments` is generated from
+      `files` when you don't pass it.
+    - `nonce` with `enforce_nonce: true` deduplicates retries.
+    - `flags`: 4 = SUPPRESS_EMBEDS, 4096 = SUPPRESS_NOTIFICATIONS,
+      32768 = IS_COMPONENTS_V2.
 
-```hot
-::messages ::discord::messages
+    **Example**
 
-response ::messages/create-message(::messages/CreateMessageRequest({
-  channel_id: "123456789",
-  content: "Hello from Hot!"
-}))
-response.id       // => "987654321"
-response.content  // => "Hello from Hot!"
-```
-"""
+    ```hot
+    ::messages ::discord::messages
+
+    sent ::messages/create-message(::messages/CreateMessageRequest({
+      channel_id: "1100000000000000000",
+      content: "Nightly report attached",
+      files: [{filename: "report.csv", content: "date,count\n2026-11-01,42\n"}]
+    }))
+    sent.id
+    ```
+    """
 }
-fn (request: CreateMessageRequest): Map {
-  body {
-    content: request.content,
-    tts: request.tts,
-    embeds: request.embeds,
-    allowed_mentions: request.allowed_mentions,
-    message_reference: request.message_reference,
-    components: request.components,
-    sticker_ids: request.sticker_ids,
-    flags: request.flags
+fn
+(request: CreateMessageRequest): Map {
+  create-message(request, {})
+},
+(request: CreateMessageRequest, opts: Map): Map {
+  files or(request.files, [])
+  payload ::api/body(request, ["channel_id"])
+  final cond {
+    and(not(is-empty(files)), is-null(request.attachments)) => { assoc(payload, "attachments", ::api/attachments-for(files)) }
+    => { payload }
   }
 
-  response api-request("POST", `${::discord::core/BASE_URL}/channels/${request.channel_id}/messages`, {}, body)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+  ::api/call("POST", `/channels/${seg(request.channel_id)}/messages`, {body: final, files: files}, opts)
 }
 
 EditMessageRequest type {
@@ -105,40 +178,48 @@ EditMessageRequest type {
   message_id: Str,
   content: Str?,
   embeds: Vec<Map>?,
+  flags: Int?,
   allowed_mentions: Map?,
   components: Vec<Map>?,
-  flags: Int?
+  attachments: Vec<Map>?,
+  files: Vec<::discord::api/FileUpload>?,
+  clear: Vec<Str>?
 }
 
 edit-message
 meta {
     doc: """
-PATCH /channels/{channel_id}/messages/{message_id} - Edit a previously sent message. Only the message author or bot can edit.
+    PATCH /channels/{channel_id}/messages/{message_id} - Edit a message.
+    Only the fields you set change; unset fields are left alone. Set an
+    empty value to remove content (`embeds: []`, `components: []`), or
+    list fields in `clear` to send them as null.
 
-**Example**
+    `attachments` is the full list to keep: existing attachments not in it
+    are removed. New `files` are appended as `files[n]`; include
+    `{id: n}` entries for them in `attachments` when you also pass it.
 
-```hot
-::messages ::discord::messages
+    **Example**
 
-response ::messages/edit-message(::messages/EditMessageRequest({
-  channel_id: "123456789",
-  message_id: "987654321",
-  content: "Updated message text"
-}))
-```
-"""
+    ```hot
+    ::messages ::discord::messages
+
+    ::messages/edit-message(::messages/EditMessageRequest({
+      channel_id: "1100000000000000000",
+      message_id: "1200000000000000000",
+      content: "Deploy finished (edited)"
+    }))
+    ```
+    """
 }
-fn (request: EditMessageRequest): Map {
-  body {
-    content: request.content,
-    embeds: request.embeds,
-    allowed_mentions: request.allowed_mentions,
-    components: request.components,
-    flags: request.flags
-  }
-
-  response api-request("PATCH", `${::discord::core/BASE_URL}/channels/${request.channel_id}/messages/${request.message_id}`, {}, body)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: EditMessageRequest): Map {
+  edit-message(request, {})
+},
+(request: EditMessageRequest, opts: Map): Map {
+  ::api/call("PATCH", `/channels/${seg(request.channel_id)}/messages/${seg(request.message_id)}`, {
+    body: ::api/body(request, ["channel_id", "message_id"]),
+    files: or(request.files, [])
+  }, opts)
 }
 
 DeleteMessageRequest type {
@@ -148,25 +229,35 @@ DeleteMessageRequest type {
 
 delete-message
 meta {
-    doc: """DELETE /channels/{channel_id}/messages/{message_id} - Delete a message. Bots can delete any message; users can only delete their own."""
+    doc: """DELETE /channels/{channel_id}/messages/{message_id} - Delete a message. Deleting another user's message needs MANAGE_MESSAGES."""
 }
-fn (request: DeleteMessageRequest): Bool {
-  response api-request("DELETE", `${::discord::core/BASE_URL}/channels/${request.channel_id}/messages/${request.message_id}`)
-  if(is-ok-response(response), true, err(HttpError(response)))
+fn
+(request: DeleteMessageRequest): Bool {
+  delete-message(request, {})
+},
+(request: DeleteMessageRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `/channels/${seg(request.channel_id)}/messages/${seg(request.message_id)}`, {}, opts)
 }
 
 BulkDeleteMessagesRequest type {
   channel_id: Str,
-  messages: Vec<Str>
+  messages: Vec<Str>,
+  reason: Str?
 }
 
 bulk-delete-messages
 meta {
-    doc: """POST /channels/{channel_id}/messages/bulk-delete - Delete multiple messages at once (2-100). Messages older than 14 days cannot be bulk-deleted."""
+    doc: """POST /channels/{channel_id}/messages/bulk-delete - Delete 2-100 messages at once. Messages older than 14 days are rejected. Needs MANAGE_MESSAGES. `reason` goes to the audit log."""
 }
-fn (request: BulkDeleteMessagesRequest): Bool {
-  response api-request("POST", `${::discord::core/BASE_URL}/channels/${request.channel_id}/messages/bulk-delete`, {}, {messages: request.messages})
-  if(is-ok-response(response), true, err(HttpError(response)))
+fn
+(request: BulkDeleteMessagesRequest): Bool {
+  bulk-delete-messages(request, {})
+},
+(request: BulkDeleteMessagesRequest, opts: Map): Bool {
+  ::api/call-ok("POST", `/channels/${seg(request.channel_id)}/messages/bulk-delete`, {
+    body: {messages: request.messages},
+    reason: request.reason
+  }, opts)
 }
 
 CrosspostMessageRequest type {
@@ -176,16 +267,25 @@ CrosspostMessageRequest type {
 
 crosspost-message
 meta {
-    doc: """POST /channels/{channel_id}/messages/{message_id}/crosspost - Crosspost (publish) a message in an Announcement channel to all following channels."""
+    doc: """POST /channels/{channel_id}/messages/{message_id}/crosspost - Publish a message in an Announcement channel to every following channel."""
 }
-fn (request: CrosspostMessageRequest): Map {
-  response api-request("POST", `${::discord::core/BASE_URL}/channels/${request.channel_id}/messages/${request.message_id}/crosspost`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: CrosspostMessageRequest): Map {
+  crosspost-message(request, {})
+},
+(request: CrosspostMessageRequest, opts: Map): Map {
+  ::api/call("POST", `/channels/${seg(request.channel_id)}/messages/${seg(request.message_id)}/crosspost`, {}, opts)
 }
 
 // ============================================================================
 // Reactions
 // ============================================================================
+// `emoji` is a Unicode emoji ("👍") or a custom emoji as `name:id`. It is
+// URL-encoded for you; already-encoded input is passed through.
+
+reaction-path fn (channel-id: Str, message-id: Str, emoji: Str): Str {
+  `/channels/${seg(channel-id)}/messages/${seg(message-id)}/reactions/${::api/emoji-segment(emoji)}`
+}
 
 CreateReactionRequest type {
   channel_id: Str,
@@ -196,32 +296,27 @@ CreateReactionRequest type {
 create-reaction
 meta {
     doc: """
-PUT /channels/{channel_id}/messages/{message_id}/reactions/{emoji}/@me - Add a reaction to a message. For custom emoji use `name:id` format; for Unicode emoji use the URL-encoded character.
+    PUT /channels/{channel_id}/messages/{message_id}/reactions/{emoji}/@me - React to a message.
 
-**Example**
+    **Example**
 
-```hot
-::messages ::discord::messages
+    ```hot
+    ::messages ::discord::messages
 
-// Unicode emoji
-::messages/create-reaction(::messages/CreateReactionRequest({
-  channel_id: "123456789",
-  message_id: "987654321",
-  emoji: "%F0%9F%91%8D"
-}))
-
-// Custom emoji
-::messages/create-reaction(::messages/CreateReactionRequest({
-  channel_id: "123456789",
-  message_id: "987654321",
-  emoji: "hotbot:123456789"
-}))
-```
-"""
+    ::messages/create-reaction(::messages/CreateReactionRequest({
+      channel_id: "1100000000000000000",
+      message_id: "1200000000000000000",
+      emoji: "👍"
+    }))
+    ```
+    """
 }
-fn (request: CreateReactionRequest): Bool {
-  response api-request("PUT", `${::discord::core/BASE_URL}/channels/${request.channel_id}/messages/${request.message_id}/reactions/${request.emoji}/@me`)
-  if(is-ok-response(response), true, err(HttpError(response)))
+fn
+(request: CreateReactionRequest): Bool {
+  create-reaction(request, {})
+},
+(request: CreateReactionRequest, opts: Map): Bool {
+  ::api/call-ok("PUT", `${reaction-path(request.channel_id, request.message_id, request.emoji)}/@me`, {}, opts)
 }
 
 DeleteOwnReactionRequest type {
@@ -232,11 +327,14 @@ DeleteOwnReactionRequest type {
 
 delete-own-reaction
 meta {
-    doc: """DELETE /channels/{channel_id}/messages/{message_id}/reactions/{emoji}/@me - Remove your own reaction from a message."""
+    doc: """DELETE /channels/{channel_id}/messages/{message_id}/reactions/{emoji}/@me - Remove the bot's own reaction."""
 }
-fn (request: DeleteOwnReactionRequest): Bool {
-  response api-request("DELETE", `${::discord::core/BASE_URL}/channels/${request.channel_id}/messages/${request.message_id}/reactions/${request.emoji}/@me`)
-  if(is-ok-response(response), true, err(HttpError(response)))
+fn
+(request: DeleteOwnReactionRequest): Bool {
+  delete-own-reaction(request, {})
+},
+(request: DeleteOwnReactionRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `${reaction-path(request.channel_id, request.message_id, request.emoji)}/@me`, {}, opts)
 }
 
 DeleteUserReactionRequest type {
@@ -248,28 +346,37 @@ DeleteUserReactionRequest type {
 
 delete-user-reaction
 meta {
-    doc: """DELETE /channels/{channel_id}/messages/{message_id}/reactions/{emoji}/{user_id} - Remove a specific user's reaction. Requires MANAGE_MESSAGES permission."""
+    doc: """DELETE /channels/{channel_id}/messages/{message_id}/reactions/{emoji}/{user_id} - Remove another user's reaction. Needs MANAGE_MESSAGES."""
 }
-fn (request: DeleteUserReactionRequest): Bool {
-  response api-request("DELETE", `${::discord::core/BASE_URL}/channels/${request.channel_id}/messages/${request.message_id}/reactions/${request.emoji}/${request.user_id}`)
-  if(is-ok-response(response), true, err(HttpError(response)))
+fn
+(request: DeleteUserReactionRequest): Bool {
+  delete-user-reaction(request, {})
+},
+(request: DeleteUserReactionRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `${reaction-path(request.channel_id, request.message_id, request.emoji)}/${seg(request.user_id)}`, {}, opts)
 }
 
 GetReactionsRequest type {
   channel_id: Str,
   message_id: Str,
   emoji: Str,
+  type: Int?,
   after: Str?,
   limit: Int?
 }
 
 get-reactions
 meta {
-    doc: """GET /channels/{channel_id}/messages/{message_id}/reactions/{emoji} - Get users who reacted with a specific emoji. Returns up to 100 users."""
+    doc: """GET /channels/{channel_id}/messages/{message_id}/reactions/{emoji} - Users who reacted with `emoji` (up to `limit`, 1-100). `type` 0 = normal, 1 = super reactions. Page with `after` (a user id)."""
 }
-fn (request: GetReactionsRequest): Vec<Map> {
-  response api-request("GET", `${::discord::core/BASE_URL}/channels/${request.channel_id}/messages/${request.message_id}/reactions/${request.emoji}?after=${or(request.after, "")}&limit=${or(request.limit, "")}`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: GetReactionsRequest): Vec<Map> {
+  get-reactions(request, {})
+},
+(request: GetReactionsRequest, opts: Map): Vec<Map> {
+  ::api/call("GET", reaction-path(request.channel_id, request.message_id, request.emoji), {
+    query: {type: request.type, after: request.after, limit: request.limit}
+  }, opts)
 }
 
 DeleteAllReactionsRequest type {
@@ -279,11 +386,14 @@ DeleteAllReactionsRequest type {
 
 delete-all-reactions
 meta {
-    doc: """DELETE /channels/{channel_id}/messages/{message_id}/reactions - Remove all reactions from a message. Requires MANAGE_MESSAGES permission."""
+    doc: """DELETE /channels/{channel_id}/messages/{message_id}/reactions - Remove every reaction from a message. Needs MANAGE_MESSAGES."""
 }
-fn (request: DeleteAllReactionsRequest): Bool {
-  response api-request("DELETE", `${::discord::core/BASE_URL}/channels/${request.channel_id}/messages/${request.message_id}/reactions`)
-  if(is-ok-response(response), true, err(HttpError(response)))
+fn
+(request: DeleteAllReactionsRequest): Bool {
+  delete-all-reactions(request, {})
+},
+(request: DeleteAllReactionsRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `/channels/${seg(request.channel_id)}/messages/${seg(request.message_id)}/reactions`, {}, opts)
 }
 
 DeleteAllReactionsForEmojiRequest type {
@@ -294,67 +404,121 @@ DeleteAllReactionsForEmojiRequest type {
 
 delete-all-reactions-for-emoji
 meta {
-    doc: """DELETE /channels/{channel_id}/messages/{message_id}/reactions/{emoji} - Remove all reactions of a specific emoji from a message. Requires MANAGE_MESSAGES permission."""
+    doc: """DELETE /channels/{channel_id}/messages/{message_id}/reactions/{emoji} - Remove every reaction of one emoji. Needs MANAGE_MESSAGES."""
 }
-fn (request: DeleteAllReactionsForEmojiRequest): Bool {
-  response api-request("DELETE", `${::discord::core/BASE_URL}/channels/${request.channel_id}/messages/${request.message_id}/reactions/${request.emoji}`)
-  if(is-ok-response(response), true, err(HttpError(response)))
+fn
+(request: DeleteAllReactionsForEmojiRequest): Bool {
+  delete-all-reactions-for-emoji(request, {})
+},
+(request: DeleteAllReactionsForEmojiRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", reaction-path(request.channel_id, request.message_id, request.emoji), {}, opts)
 }
 
 // ============================================================================
-// Pins
+// Pins (current /channels/{id}/messages/pins endpoints; the older
+// /channels/{id}/pins routes are deprecated)
 // ============================================================================
 
-GetPinnedMessagesRequest type {
-  channel_id: Str
+GetChannelPinsRequest type {
+  channel_id: Str,
+  before: Str?,
+  limit: Int?
 }
 
-get-pinned-messages
+get-channel-pins
 meta {
     doc: """
-GET /channels/{channel_id}/pins - Get all pinned messages in a channel. Returns up to 50 message objects.
+    GET /channels/{channel_id}/messages/pins - Pinned messages, newest pin
+    first. Returns `{items: [{pinned_at, message}], has_more}`. `limit`
+    is 1-50 (default 50); page with `before` set to the last item's
+    `pinned_at` timestamp, or use `get-all-pins`.
 
-**Example**
+    **Example**
 
-```hot
-::messages ::discord::messages
+    ```hot
+    ::messages ::discord::messages
 
-response ::messages/get-pinned-messages(::messages/GetPinnedMessagesRequest({
-  channel_id: "123456789"
-}))
-// => [{id: "...", content: "Important!", pinned: true, ...}, ...]
-```
-"""
+    pins ::messages/get-channel-pins(::messages/GetChannelPinsRequest({
+      channel_id: "1100000000000000000"
+    }))
+    map(pins.items, (p) { p.message.content })
+    ```
+    """
 }
-fn (request: GetPinnedMessagesRequest): Vec<Map> {
-  response api-request("GET", `${::discord::core/BASE_URL}/channels/${request.channel_id}/pins`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: GetChannelPinsRequest): Map {
+  get-channel-pins(request, {})
+},
+(request: GetChannelPinsRequest, opts: Map): Map {
+  ::api/call("GET", `/channels/${seg(request.channel_id)}/messages/pins`, {
+    query: {before: request.before, limit: request.limit}
+  }, opts)
+}
+
+get-all-pins-loop fn
+(channel-id: Str, max-items: Int, before: Str?, acc: Vec): Vec<Map> {
+  get-all-pins-loop(channel-id, max-items, before, acc, {})
+},
+(channel-id: Str, max-items: Int, before: Str?, acc: Vec, opts: Map): Vec<Map> {
+  page get-channel-pins(GetChannelPinsRequest({channel_id: channel-id, before: before, limit: 50}), opts)
+  all concat(acc, page.items)
+  cond {
+    or(not(page.has_more), is-empty(page.items)) => { slice(all, 0, min(length(all), max-items)) }
+    gte(length(all), max-items) => { slice(all, 0, max-items) }
+    => { get-all-pins-loop(channel-id, max-items, last(page.items).pinned_at, all, opts) }
+  }
+}
+
+get-all-pins
+meta {
+    doc: """Every pin in a channel (up to `max-items`, default 1000) as `[{pinned_at, message}]`, following `has_more`."""
+}
+fn
+(channel-id: Str): Vec<Map> {
+  get-all-pins(channel-id, {})
+},
+(channel-id: Str, opts: Map): Vec<Map> {
+  get-all-pins-loop(channel-id, 1000, null, [], opts)
+},
+(channel-id: Str, max-items: Int): Vec<Map> {
+  get-all-pins(channel-id, max-items, {})
+},
+(channel-id: Str, max-items: Int, opts: Map): Vec<Map> {
+  get-all-pins-loop(channel-id, max-items, null, [], opts)
 }
 
 PinMessageRequest type {
   channel_id: Str,
-  message_id: Str
+  message_id: Str,
+  reason: Str?
 }
 
 pin-message
 meta {
-    doc: """PUT /channels/{channel_id}/pins/{message_id} - Pin a message in a channel. Maximum of 50 pinned messages per channel."""
+    doc: """PUT /channels/{channel_id}/messages/pins/{message_id} - Pin a message. Needs PIN_MESSAGES. `reason` goes to the audit log."""
 }
-fn (request: PinMessageRequest): Bool {
-  response api-request("PUT", `${::discord::core/BASE_URL}/channels/${request.channel_id}/pins/${request.message_id}`)
-  if(is-ok-response(response), true, err(HttpError(response)))
+fn
+(request: PinMessageRequest): Bool {
+  pin-message(request, {})
+},
+(request: PinMessageRequest, opts: Map): Bool {
+  ::api/call-ok("PUT", `/channels/${seg(request.channel_id)}/messages/pins/${seg(request.message_id)}`, {reason: request.reason}, opts)
 }
 
 UnpinMessageRequest type {
   channel_id: Str,
-  message_id: Str
+  message_id: Str,
+  reason: Str?
 }
 
 unpin-message
 meta {
-    doc: """DELETE /channels/{channel_id}/pins/{message_id} - Unpin a message from a channel."""
+    doc: """DELETE /channels/{channel_id}/messages/pins/{message_id} - Unpin a message. Needs PIN_MESSAGES. `reason` goes to the audit log."""
 }
-fn (request: UnpinMessageRequest): Bool {
-  response api-request("DELETE", `${::discord::core/BASE_URL}/channels/${request.channel_id}/pins/${request.message_id}`)
-  if(is-ok-response(response), true, err(HttpError(response)))
+fn
+(request: UnpinMessageRequest): Bool {
+  unpin-message(request, {})
+},
+(request: UnpinMessageRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `/channels/${seg(request.channel_id)}/messages/pins/${seg(request.message_id)}`, {reason: request.reason}, opts)
 }

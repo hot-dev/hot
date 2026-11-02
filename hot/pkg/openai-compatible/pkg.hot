@@ -3,13 +3,16 @@
 hot.pkg.openai-compatible {
   name: "hot.dev/openai-compatible",
   version: "0.1.0",
-  hot-min-version: "2.6.0",
-  description: "Generic client for OpenAI-compatible APIs: OpenRouter, Together, Fireworks, DeepSeek, Ollama, and private gateways. Chat completions (with streaming), models, and embeddings against a configurable base URL.",
+  hot-min-version: "3.0.2",
+  description: "Presets for OpenAI-compatible APIs built on hot.dev/openai: Ollama, vLLM, LM Studio, Groq, OpenRouter, DeepSeek, Together, Fireworks, Mistral, Cerebras, Perplexity, or any custom gateway. Returns hot-ai providers for the run loop, plus chat (with streaming), models and embeddings helpers.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
-  tags: ["ai", "llm"],
-  deps: {},
+  tags: ["ai", "llm", "openai", "ollama", "openrouter"],
+  deps: {
+    "hot.dev/openai": "1.3.0",
+    "hot.dev/hot-ai": "1.9.0"
+  },
   src-paths: ["src/"],
   test-paths: ["test/"]
 }

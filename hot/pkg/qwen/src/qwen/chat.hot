@@ -2,12 +2,10 @@
 
 // ============================================================================
 // Qwen Chat Completions (OpenAI-compatible)
-// https://docs.qwencloud.com/api-reference/chat/openai-chat
+// https://www.alibabacloud.com/help/en/model-studio/qwen-api-via-openai-chat-completions
 // ============================================================================
 
-api-request ::qwen::api/request
-api-request-stream ::qwen::api/request-stream
-HttpError ::qwen::api/HttpError
+HttpError ::openai::api/HttpError
 is-ok-response ::hot::http/is-ok-response
 
 // ============================================================================
@@ -15,7 +13,7 @@ is-ok-response ::hot::http/is-ok-response
 // ============================================================================
 
 // Literal union for chat message roles
-Role type open "user" | "system" | "assistant" | "tool"
+Role type open "user" | "system" | "developer" | "assistant" | "tool"
 
 // Literal union for finish reasons (Qwen: stop | length | tool_calls)
 FinishReason type open "stop" | "length" | "tool_calls"
@@ -28,7 +26,10 @@ Message type {
     content: Any,
     name: Str?,
     tool_calls: Vec<Map>?,
-    tool_call_id: Str?
+    tool_call_id: Str?,
+    // Thinking-mode reasoning on assistant messages (responses, and
+    // multi-turn input for models with preserve_thinking).
+    reasoning_content: Str?
 }
 
 // Tool definition (function calling)
@@ -49,21 +50,28 @@ ResponseFormat type {
     json_schema: Any?
 }
 
-// Chat completion request. Mirrors the OpenAI shape with the Qwen-specific
-// `enable_thinking`, `thinking_budget`, `enable_search`, `search_options`,
-// `enable_code_interpreter`, `top_k`, and `vl_high_resolution_images` fields
-// that DashScope forwards from `extra_body` in the OpenAI SDK.
+// Chat completion request. Mirrors the OpenAI shape plus the Qwen-specific
+// fields DashScope reads at the top level of the body (the OpenAI SDK sends
+// them via `extra_body`): enable_thinking, thinking_budget,
+// preserve_thinking, enable_search, search_options
+// ({forced_search, search_strategy: "turbo" | "max" | "agent",
+// enable_search_extension}), enable_code_interpreter, top_k,
+// repetition_penalty, vl_high_resolution_images and tool_stream.
+// Unset fields are omitted from the request body.
 ChatCompletionRequest type {
     model: Str,
     messages: Vec<Message>,
     max_tokens: Int?,
+    max_completion_tokens: Int?,
     temperature: Dec?,
     top_p: Dec?,
     top_k: Int?,
     n: Int?,
     stream: Bool?,
+    stream_options: Map?,
     stop: Any?,
     presence_penalty: Dec?,
+    repetition_penalty: Dec?,
     seed: Int?,
     logprobs: Bool?,
     top_logprobs: Int?,
@@ -71,9 +79,12 @@ ChatCompletionRequest type {
     tools: Vec<Tool>?,
     tool_choice: Any?,
     parallel_tool_calls: Bool?,
+    tool_stream: Bool?,
     response_format: ResponseFormat?,
     enable_thinking: Bool?,
     thinking_budget: Int?,
+    preserve_thinking: Bool?,
+    reasoning_effort: Str?,
     enable_search: Bool?,
     search_options: Map?,
     enable_code_interpreter: Bool?,
@@ -151,7 +162,7 @@ meta {
 
     ```hot
     response complete(ChatCompletionRequest({
-        model: "qwen3.6-plus",
+        model: "qwen3.7-plus",
         messages: [{role: "user", content: "Say 'Hello, Hot!' and nothing else."}],
         max_tokens: 50
     }))
@@ -165,7 +176,7 @@ meta {
 
     ```hot
     response complete(ChatCompletionRequest({
-        model: "qwen3.6-plus",
+        model: "qwen3.7-plus",
         messages: [
             {role: "system", content: "You are a helpful assistant that responds in JSON."},
             {role: "user", content: "What is 2+2? Reply with {\"answer\": <number>}"}
@@ -175,22 +186,45 @@ meta {
     }))
     ```
 
-    **Example — with thinking mode (Qwen3/Qwen3.5/Qwen3.6 hybrid models)**
+    **Example — thinking mode, without streaming**
+
+    Hybrid models return their reasoning in
+    `choices[0].message.reasoning_content`. Some open-weight models only
+    allow thinking when streaming; use `complete-stream` for those.
 
     ```hot
     response complete(ChatCompletionRequest({
-        model: "qwen3.6-plus",
+        model: "qwen3.7-plus",
         messages: [{role: "user", content: "Is 89 prime? Show your reasoning."}],
         enable_thinking: true,
-        thinking_budget: 2048,
-        stream: true
+        thinking_budget: 2048
     }))
+    reasoning response.choices[0].message.reasoning_content
     ```
     """
 }
-fn (request: ChatCompletionRequest): ChatCompletionResponse | HttpError {
-    response api-request("POST", `${::qwen/BASE_URL}/chat/completions`, {}, request)
-    if(is-ok-response(response), ChatCompletionResponse(response.body), err(HttpError(response)))
+fn
+(request: ChatCompletionRequest): ChatCompletionResponse | HttpError {
+    complete(request, {})
+},
+(request: ChatCompletionRequest, opts: Map): ChatCompletionResponse | HttpError {
+    response ::qwen::api/request("POST", "/chat/completions", {}, request-body(request), opts)
+    cond {
+        is-err(response) => { response }
+        is-ok-response(response) => { ChatCompletionResponse(response.body) }
+        => { err(HttpError(response)) }
+    }
+}
+
+request-body
+meta {
+    doc: """
+    The JSON body for a `ChatCompletionRequest`: unset optional fields
+    are omitted rather than sent as null. Pure; exposed for testing.
+    """
+}
+fn (request: ChatCompletionRequest): Map {
+    filter-vals(untype(request), is-some)
 }
 
 // ============================================================================
@@ -211,7 +245,7 @@ meta {
 
     ```hot
     response complete-stream(ChatCompletionRequest({
-        model: "qwen3.6-plus",
+        model: "qwen3.7-plus",
         messages: [{role: "user", content: "Count from 1 to 3."}],
         max_tokens: 50
     }))
@@ -227,11 +261,16 @@ meta {
     ```
     """
 }
-fn (request: ChatCompletionRequest): StreamingChatResponse | HttpError {
+fn
+(request: ChatCompletionRequest): StreamingChatResponse | HttpError {
+    complete-stream(request, {})
+},
+(request: ChatCompletionRequest, opts: Map): StreamingChatResponse | HttpError {
     // Force stream: true
-    streaming-request {...untype(request), stream: true}
-    response api-request-stream("POST", `${::qwen/BASE_URL}/chat/completions`, {}, streaming-request, "sse")
+    streaming-request {...request-body(request), stream: true}
+    response ::qwen::api/request-stream("POST", "/chat/completions", {}, streaming-request, opts)
     cond {
+        is-err(response) => { response }
         gte(response.status, 400) => { err(HttpError(response)) }
         => { StreamingChatResponse(response) }
     }
@@ -252,23 +291,32 @@ meta {
     **Example**
 
     ```hot
-    answer chat("qwen3.6-plus", "What is the capital of France?")
+    answer chat("qwen3.7-plus", "What is the capital of France?")
     // => "The capital of France is Paris."
 
     // With system instructions
-    answer chat("qwen3-max", "What is 2+2?", "Respond with just the number.")
+    answer chat("qwen3.8-flash", "What is 2+2?", "Respond with just the number.")
     // => "4"
     ```
     """
 }
 fn
 (model: Str, message: Str): Str {
-    chat(model, message, null, null)
+    chat(model, message, null, null, {})
+},
+(model: Str, message: Str, opts: Map): Str {
+    chat(model, message, null, null, opts)
 },
 (model: Str, message: Str, system: Str): Str {
-    chat(model, message, system, null)
+    chat(model, message, system, null, {})
+},
+(model: Str, message: Str, system: Str, opts: Map): Str {
+    chat(model, message, system, null, opts)
 },
 (model: Str, message: Str, system: Str?, max-tokens: Int?): Str {
+    chat(model, message, system, max-tokens, {})
+},
+(model: Str, message: Str, system: Str?, max-tokens: Int?, opts: Map): Str {
     messages cond {
         is-null(system) => {
             [Message({role: "user", content: message})]
@@ -287,11 +335,11 @@ fn
         max_tokens: or(max-tokens, 4096)
     }
 
-    response complete(ChatCompletionRequest(request))
+    response complete(ChatCompletionRequest(request), opts)
 
-    match response {
-        Result.Err => { err(response) }
-        Result.Ok => { extract-response-text(response) }
+    cond {
+        is-err(response) => { response }
+        => { extract-response-text(response) }
     }
 }
 
@@ -360,7 +408,7 @@ meta {
 
     ```hot
     response complete(ChatCompletionRequest({
-        model: "qwen3.6-plus",
+        model: "qwen3.7-plus",
         messages: [{role: "user", content: "Say 'test'"}],
         max_tokens: 50
     }))
@@ -433,7 +481,7 @@ meta {
 
     ```hot
     response complete-stream(ChatCompletionRequest({
-        model: "qwen3.6-plus",
+        model: "qwen3.7-plus",
         messages: [{role: "user", content: "Is 89 prime?"}],
         enable_thinking: true
     }))

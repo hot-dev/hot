@@ -1,0 +1,178 @@
+::google::sheets::records ns
+meta {
+    doc: """
+    Convert between Sheets value grids (`[[...], ...]`, rows of cells)
+    and records (one Map per row, keyed by the header row), plus A1
+    notation helpers. All functions are pure.
+
+    Sheets drops trailing empty cells and empty trailing rows from
+    responses, so rows may be shorter than the header: missing cells
+    become null in records.
+    """
+}
+
+LETTERS "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+// ---------------------------------------------------------------------------
+// Grids and records
+// ---------------------------------------------------------------------------
+
+is-blank-cell fn (cell: Any): Bool {
+  or(is-null(cell), and(is-str(cell), eq(trim(cell), "")))
+}
+
+header-names
+meta {
+    doc: """The header row as column names: each cell as a trimmed Str; blank headers become null (their column is skipped)."""
+}
+fn (header: Vec): Vec {
+  map(header, (h) { if(is-blank-cell(h), null, trim(Str(h))) })
+}
+
+row-to-record
+meta {
+    doc: """One row as a Map keyed by `columns` (from `header-names`); missing cells are null and null-named columns are skipped."""
+}
+fn (columns: Vec, row: Vec): Map {
+  n length(row)
+  reduce(range(0, length(columns)), (acc, i) {
+    name get(columns, i)
+    cond {
+      is-null(name) => { acc }
+      => { assoc(acc, name, if(lt(i, n), get(row, i), null)) }
+    }
+  }, {})
+}
+
+rows-to-records
+meta {
+    doc: """
+    A value grid whose first row is a header, as a Vec of Maps. Fully
+    blank rows are skipped. A missing or empty grid gives `[]`.
+
+    ```hot
+    ::google::sheets::records/rows-to-records([["name", "score"], ["Ada", 9], ["Bob"]])
+    // [{name: "Ada", score: 9}, {name: "Bob", score: null}]
+    ```
+    """
+}
+fn (values: Vec?): Vec {
+  grid or(values, [])
+  cond {
+    is-empty(grid) => { [] }
+    => {
+      columns header-names(first(grid))
+      rows filter(rest(grid), (row) { not(all(row, is-blank-cell)) })
+      map(rows, (row) { row-to-record(columns, row) })
+    }
+  }
+}
+
+record-columns
+meta {
+    doc: """The column names for `records`: every key, in order of first appearance."""
+}
+fn (records: Vec): Vec {
+  distinct(mapcat(records, (r) { map(keys(r), Str) }))
+}
+
+cell-value
+meta {
+    doc: """A record value as a cell: Str, Int, Dec and Bool pass through; null becomes `""` (an empty cell); Maps and Vecs become JSON text."""
+}
+fn (value: Any): Any {
+  cond {
+    is-null(value) => { "" }
+    or(is-str(value), is-int(value), is-dec(value), is-bool(value)) => { value }
+    => { to-json(untype(value)) }
+  }
+}
+
+records-to-rows
+meta {
+    doc: """
+    Records as value rows ordered by `columns` (default: every key in
+    order of first appearance), without a header. Missing values become
+    `""`.
+
+    ```hot
+    ::google::sheets::records/records-to-rows([{name: "Ada", score: 9}], ["name", "score"])
+    // [["Ada", 9]]
+    ```
+    """
+}
+fn
+(records: Vec): Vec {
+  records-to-rows(records, record-columns(records))
+},
+(records: Vec, columns: Vec): Vec {
+  map(records, (r) { map(columns, (c) { cell-value(get(r, c)) }) })
+}
+
+records-to-grid
+meta {
+    doc: """Records as a full grid: the header row (`columns`, default every key) followed by `records-to-rows`."""
+}
+fn
+(records: Vec): Vec {
+  records-to-grid(records, record-columns(records))
+},
+(records: Vec, columns: Vec): Vec {
+  concat([columns], records-to-rows(records, columns))
+}
+
+// ---------------------------------------------------------------------------
+// A1 notation
+// ---------------------------------------------------------------------------
+
+column-letter
+meta {
+    doc: """The A1 letters for a 0-based column index: 0 is `A`, 25 is `Z`, 26 is `AA`, 701 is `ZZ`."""
+}
+fn (index: Int): Str {
+  position mod(index, 26)
+  letter slice(LETTERS, position, add(position, 1))
+  cond {
+    lt(index, 26) => { letter }
+    => {
+      prefix column-letter(sub(Int(floor(div(sub(index, position), 26))), 1))
+      `${prefix}${letter}`
+    }
+  }
+}
+
+quote-sheet
+meta {
+    doc: """A sheet title quoted for A1 notation: `Sheet1` stays as is; `"Q3 Plan"` becomes `'Q3 Plan'` and a `'` inside is doubled."""
+}
+fn (title: Str): Str {
+  cond {
+    ::hot::regex/is-match(title, "^[A-Za-z_][A-Za-z0-9_]*$") => { title }
+    => {
+      doubled ::hot::str/replace(title, "'", "''")
+      `'${doubled}'`
+    }
+  }
+}
+
+a1
+meta {
+    doc: """An A1 range on a sheet: `a1("Q3 Plan", "A1:C10")` is `'Q3 Plan'!A1:C10`; `a1("Data")` is the whole sheet (`Data`)."""
+}
+fn
+(sheet-title: Str): Str {
+  quote-sheet(sheet-title)
+},
+(sheet-title: Str, range: Str): Str {
+  `${quote-sheet(sheet-title)}!${range}`
+}
+
+grid-a1
+meta {
+    doc: """The A1 range covering `rows` x `columns` cells from the top-left cell (0-based `start-row`, `start-column`): `grid-a1(0, 0, 3, 2)` is `A1:B3`."""
+}
+fn (start-row: Int, start-column: Int, rows: Int, columns: Int): Str {
+  first-cell `${column-letter(start-column)}${add(start-row, 1)}`
+  last-cell `${column-letter(add(start-column, sub(max(columns, 1), 1)))}${add(start-row, max(rows, 1))}`
+  `${first-cell}:${last-cell}`
+}

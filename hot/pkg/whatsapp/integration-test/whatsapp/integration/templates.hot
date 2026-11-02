@@ -6,11 +6,11 @@ WHATSAPP_TEST_WABA_ID ::hot::env/get("WHATSAPP_TEST_WABA_ID", "")
 test-list-templates
 meta ["test"]
 fn () {
-  assert(WHATSAPP_TEST_WABA_ID, "Set WHATSAPP_TEST_WABA_ID in .env")
+  if(::whatsapp::integration::ctx/configured(["WHATSAPP_TEST_WABA_ID"]), {
+    response ::whatsapp::templates/list-templates(::whatsapp::templates/ListTemplatesRequest({
+      waba_id: WHATSAPP_TEST_WABA_ID
+    }))
 
-  response ::whatsapp::templates/list-templates(::whatsapp::templates/ListTemplatesRequest({
-    waba_id: WHATSAPP_TEST_WABA_ID
-  }))
-
-  assert(is-some(response.data), "should return data array")
+    assert(is-some(response.data), "should return data array")
+  }, null)
 }

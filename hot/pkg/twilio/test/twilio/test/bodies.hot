@@ -1,0 +1,189 @@
+::twilio::test::bodies ns
+meta ["test"]
+
+::api ::twilio::api
+::messages ::twilio::messages
+::calls ::twilio::calls
+::accounts ::twilio::accounts
+::recordings ::twilio::recordings
+::verify ::twilio::verify
+::lookups ::twilio::lookups
+
+// ============================================================================
+// Messages: every request field reaches the body (MediaUrl was once dropped)
+// ============================================================================
+
+test-create-message-body-keeps-media-url
+meta ["test"]
+fn () {
+    body ::messages/create-message-body(::messages/CreateMessageRequest({
+        To: "+15558675310",
+        From: "+15017122661",
+        Body: "pic",
+        MediaUrl: ["https://a.com/1.jpg", "https://a.com/2.jpg"]
+    }))
+    assert-eq(["https://a.com/1.jpg", "https://a.com/2.jpg"], body.MediaUrl)
+    assert-eq(
+        "To=%2B15558675310&From=%2B15017122661&Body=pic&MediaUrl=https%3A%2F%2Fa.com%2F1.jpg&MediaUrl=https%3A%2F%2Fa.com%2F2.jpg",
+        ::api/form-encode(body))
+}
+
+test-create-message-body-omits-unset-optionals
+meta ["test"]
+fn () {
+    body ::messages/create-message-body(::messages/CreateMessageRequest({To: "+15558675310", MessagingServiceSid: "MG123", Body: "hi"}))
+    assert-eq(["To", "MessagingServiceSid", "Body"], keys(body))
+}
+
+test-create-message-body-passes-every-field
+meta ["test"]
+fn () {
+    body ::messages/create-message-body(::messages/CreateMessageRequest({
+        To: "+1", From: "+2", ContentSid: "HX1", ContentVariables: "{\"1\":\"a\"}",
+        StatusCallback: "https://cb", SendAt: "2026-12-01T00:00:00Z", ScheduleType: "fixed",
+        ShortenUrls: true, SendAsMms: false, ValidityPeriod: 600, PersistentAction: ["geo:1,2"]
+    }))
+    assert-eq(11, length(keys(body)))
+    encoded ::api/form-encode(body)
+    assert(contains(encoded, "ShortenUrls=true"), encoded)
+    assert(contains(encoded, "SendAsMms=false"), encoded)
+    assert(contains(encoded, "ScheduleType=fixed"), encoded)
+}
+
+test-list-messages-query-range-filters
+meta ["test"]
+fn () {
+    q ::messages/list-messages-query(::messages/ListMessagesRequest({
+        To: "+15558675310", DateSentAfter: "2026-01-01", DateSentBefore: "2026-01-31", PageSize: 50
+    }))
+    assert-eq("?To=%2B15558675310&DateSent%3C=2026-01-31&DateSent%3E=2026-01-01&PageSize=50", q)
+}
+
+test-list-messages-query-empty
+meta ["test"]
+fn () {
+    assert-eq("", ::messages/list-messages-query(::messages/ListMessagesRequest({})))
+}
+
+// ============================================================================
+// Calls: StatusCallbackEvent was once dropped from the body
+// ============================================================================
+
+test-create-call-body-keeps-status-callback-event
+meta ["test"]
+fn () {
+    body ::calls/create-call-body(::calls/CreateCallRequest({
+        To: "+15558675310",
+        From: "+15017122661",
+        Url: "https://example.com/twiml",
+        StatusCallback: "https://example.com/status",
+        StatusCallbackEvent: ["initiated", "answered", "completed"],
+        RecordingStatusCallbackEvent: ["completed"],
+        Record: true,
+        TimeLimit: 60
+    }))
+    encoded ::api/form-encode(body)
+    assert(contains(encoded, "StatusCallbackEvent=initiated&StatusCallbackEvent=answered&StatusCallbackEvent=completed"), encoded)
+    assert(contains(encoded, "RecordingStatusCallbackEvent=completed"), encoded)
+    assert(contains(encoded, "Record=true"), encoded)
+    assert(contains(encoded, "TimeLimit=60"), encoded)
+}
+
+test-create-call-body-omits-unset-optionals
+meta ["test"]
+fn () {
+    body ::calls/create-call-body(::calls/CreateCallRequest({To: "+1", From: "+2", Twiml: "<Response/>"}))
+    assert-eq(["To", "From", "Twiml"], keys(body))
+}
+
+test-update-call-body-excludes-path-sid
+meta ["test"]
+fn () {
+    body ::calls/update-call-body(::calls/UpdateCallRequest({sid: "CA123", Status: "completed"}))
+    assert-eq({Status: "completed"}, body)
+}
+
+test-list-calls-query-range-filters
+meta ["test"]
+fn () {
+    q ::calls/list-calls-query(::calls/ListCallsRequest({Status: "completed", StartTimeAfter: "2026-01-01", EndTimeBefore: "2026-02-01"}))
+    assert-eq("?Status=completed&StartTime%3E=2026-01-01&EndTime%3C=2026-02-01", q)
+}
+
+test-update-phone-number-body-excludes-path-sid
+meta ["test"]
+fn () {
+    body ::accounts/update-incoming-phone-number-body(::accounts/UpdateIncomingPhoneNumberRequest({
+        sid: "PN123", SmsUrl: "https://a/sms", VoiceCallerIdLookup: true
+    }))
+    assert-eq({SmsUrl: "https://a/sms", VoiceCallerIdLookup: true}, body)
+}
+
+test-recording-media-url
+meta ["test"]
+fn () {
+    c ::api/auth-token-client("AC123", "tok")
+    assert-eq("https://api.twilio.com/2010-04-01/Accounts/AC123/Recordings/RE9.mp3",
+        ::recordings/recording-media-url(c, ::recordings/DownloadRecordingRequest({sid: "RE9", format: "mp3"})))
+    assert-eq("https://api.twilio.com/2010-04-01/Accounts/AC123/Recordings/RE9.wav",
+        ::recordings/recording-media-url(c, ::recordings/DownloadRecordingRequest({sid: "RE9"})))
+}
+
+test-list-recordings-query
+meta ["test"]
+fn () {
+    assert-eq("?CallSid=CA1&DateCreated%3E=2026-03-01",
+        ::recordings/list-recordings-query(::recordings/ListRecordingsRequest({CallSid: "CA1", DateCreatedAfter: "2026-03-01"})))
+}
+
+// ============================================================================
+// Verify
+// ============================================================================
+
+test-start-verification-body
+meta ["test"]
+fn () {
+    body ::verify/start-verification-body(::verify/StartVerificationRequest({
+        service_sid: "VA1",
+        To: "+15558675310",
+        Channel: "sms",
+        Locale: "es",
+        TemplateCustomSubstitutions: {name: "Ada"}
+    }))
+    assert-eq(["To", "Channel", "Locale", "TemplateCustomSubstitutions"], keys(body))
+    assert-eq("{\"name\":\"Ada\"}", body.TemplateCustomSubstitutions)
+}
+
+test-check-verification-body
+meta ["test"]
+fn () {
+    body ::verify/check-verification-body(::verify/CheckVerificationRequest({service_sid: "VA1", To: "+1", Code: "123456"}))
+    assert-eq({Code: "123456", To: "+1"}, body)
+}
+
+test-verify-service-sid-explicit-wins
+meta ["test"]
+fn () {
+    assert-eq("VA_explicit", ::verify/service-sid("VA_explicit"))
+}
+
+// ============================================================================
+// Lookup
+// ============================================================================
+
+test-lookup-url-encodes-number-and-joins-fields
+meta ["test"]
+fn () {
+    url ::lookups/lookup-url(::lookups/LookupPhoneNumberRequest({
+        PhoneNumber: "+14159929960",
+        Fields: ["line_type_intelligence", "caller_name"]
+    }))
+    assert-eq("https://lookups.twilio.com/v2/PhoneNumbers/%2B14159929960?Fields=line_type_intelligence%2Ccaller_name", url)
+}
+
+test-lookup-url-plain
+meta ["test"]
+fn () {
+    url ::lookups/lookup-url(::lookups/LookupPhoneNumberRequest({PhoneNumber: "4159929960", CountryCode: "US"}))
+    assert-eq("https://lookups.twilio.com/v2/PhoneNumbers/4159929960?CountryCode=US", url)
+}

@@ -2,27 +2,66 @@
 meta ["test"]
 
 // =============================================================================
-// Integration Tests (live OpenRouter or any OpenAI-compatible endpoint)
+// Integration Tests (any live OpenAI-compatible endpoint)
 // =============================================================================
-// Requires ctx: openai-compatible.url + openai-compatible.api.key
+// Requires ctx: openai-compatible.url (+ openai-compatible.api.key unless the
+// server is keyless) and OPENAI_COMPATIBLE_MODEL, a model id the server
+// serves without the `custom/` prefix (e.g. "llama3.2" on Ollama,
+// "anthropic/claude-haiku-4.5" on OpenRouter). Read-only: lists models and
+// sends short chat completions. Every test skips when the URL is unset.
 // Run with: hot test --project pkg-integration-openai-compatible
 
+::env ::hot::env
+::oc ::openai-compatible
 ::chat ::openai-compatible::chat
 ::models ::openai-compatible::models
 
+test-model fn (): Str { ::env/get("OPENAI_COMPATIBLE_MODEL", "") }
+
+skip fn (test-name: Str): Bool {
+    cond {
+        and(is-some(::hot::ctx/get("openai-compatible.url")), not(is-empty(test-model()))) => { false }
+        => {
+            tap(`[openai-compatible] skipping ${test-name}: set OPENAI_COMPATIBLE_URL and OPENAI_COMPATIBLE_MODEL to run`)
+            true
+        }
+    }
+}
+
 test-list-models
 meta ["test"] fn () {
-    page ::models/list-models()
-    assert(gt(length(page.data), 0), "provider should expose at least one model")
+    cond {
+        skip("test-list-models") => { assert(true) }
+        => {
+            page ::models/list-models(::oc/custom())
+            assert(gt(length(page.data), 0), "provider should expose at least one model")
+        }
+    }
 }
 
 test-chat-completion
 meta ["test"] fn () {
-    response ::chat/chat-completion(::chat/ChatCompletionRequest({
-        model: "anthropic/claude-haiku-4.5",
-        messages: [{role: "user", content: "Reply with exactly the word: hot"}],
-        max_tokens: 10
-    }))
-    content response.choices[0].message.content
-    assert(contains(lowercase(content), "hot"), "model should echo the word")
+    cond {
+        skip("test-chat-completion") => { assert(true) }
+        => {
+            content ::chat/chat(::oc/custom(), test-model(), "Reply with exactly the word: hot")
+            assert(contains(lowercase(content), "hot"), "model should echo the word")
+        }
+    }
+}
+
+test-run-loop-via-registry
+meta ["test"] fn () {
+    cond {
+        skip("test-run-loop-via-registry") => { assert(true) }
+        => {
+            opts ::ai::chat/ChatOptions({
+                model: `custom/${test-model()}`,
+                providers: ::ai::chat/with-providers([::oc/provider(::oc/custom())]),
+                max-iterations: 1
+            })
+            answer ::ai::chat/run-loop(opts, "Reply with exactly the word: hot")
+            assert(contains(lowercase(answer), "hot"), "run-loop should return the reply text")
+        }
+    }
 }

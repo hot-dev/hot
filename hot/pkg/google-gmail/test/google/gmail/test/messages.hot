@@ -1,0 +1,110 @@
+::google::gmail::test::messages ns
+meta ["test"]
+
+::gmail ::google::gmail
+::messages ::google::gmail::messages
+::labels ::google::gmail::labels
+::drafts ::google::gmail::drafts
+
+ORIGINAL {
+    id: "m1",
+    threadId: "t1",
+    payload: {headers: [
+        {name: "From", value: "Ada <ada@example.com>"},
+        {name: "To", value: "me@example.com, Bob <bob@example.com>"},
+        {name: "Cc", value: "carol@example.com, me@example.com"},
+        {name: "Subject", value: "Q3 plan"},
+        {name: "Message-ID", value: "<m1@mail.example>"},
+        {name: "References", value: "<m0@mail.example>"}
+    ]}
+}
+
+test-urls
+meta ["test"] fn () {
+    assert-eq("https://gmail.googleapis.com/gmail/v1/users/me/messages", ::gmail/url("/messages"))
+    assert-eq("https://gmail.googleapis.com/gmail/v1/users/me/messages?q=is%3Aunread+from%3Aa&labelIds=INBOX&labelIds=UNREAD",
+      ::gmail/url("/messages", {q: "is:unread from:a", labelIds: ["INBOX", "UNREAD"]}))
+    assert-eq("https://gmail.googleapis.com/upload/gmail/v1/users/me/messages/send?uploadType=multipart", ::gmail/upload-url("/messages/send", {uploadType: "multipart"}))
+    assert-eq("https://gmail.googleapis.com/gmail/v1/users/me/messages/a%2Fb", ::gmail/url(`/messages/${::gmail/encode-id("a/b")}`))
+}
+
+test-list-params-omit-unset-and-credentials
+meta ["test"] fn () {
+    assert-eq({}, ::messages/list-params({}))
+    p ::messages/list-params({q: "x", maxResults: 50, pageToken: null, token: "ya29.secret", subject: "u@x"})
+    assert-eq({q: "x", maxResults: 50}, p, "nulls and credential keys never reach the query")
+}
+
+test-send-body-and-upload-switch
+meta ["test"] fn () {
+    assert-eq({raw: "SGk"}, ::messages/send-body(Bytes("Hi"), null), "no threadId unless given")
+    assert-eq({raw: "SGk", threadId: "t1"}, ::messages/send-body(Bytes("Hi"), "t1"))
+    assert(not(::messages/use-upload(1000, {})))
+    assert(::messages/use-upload(5242881, {}), "over 5 MiB uses the upload endpoint")
+    assert(::messages/use-upload(10, {upload: true}))
+}
+
+test-reply-fields
+meta ["test"] fn () {
+    r ::messages/reply-fields(ORIGINAL, "me@example.com", false)
+    assert-eq(["ada@example.com"], r.to)
+    assert(not(in("cc", keys(r))), "plain reply has no cc")
+    assert-eq("Re: Q3 plan", r.subject)
+    assert-eq("<m1@mail.example>", r.in-reply-to)
+    assert-eq(["<m0@mail.example>", "<m1@mail.example>"], r.references)
+    assert-eq("t1", r.thread-id)
+
+    all ::messages/reply-fields(ORIGINAL, "ME@example.com", true)
+    assert-eq(["ada@example.com"], all.to)
+    assert-eq(["bob@example.com", "carol@example.com"], all.cc, "reply-all copies To and Cc, minus me and duplicates")
+}
+
+test-reply-fields-reply-to-and-own-message
+meta ["test"] fn () {
+    with-reply-to {threadId: "t", payload: {headers: [{name: "From", value: "a@example.com"}, {name: "Reply-To", value: "list@example.com"}, {name: "Subject", value: "RE: hi"}]}}
+    r ::messages/reply-fields(with-reply-to, null, false)
+    assert-eq(["list@example.com"], r.to, "Reply-To wins over From")
+    assert-eq("RE: hi", r.subject, "an existing Re: is kept")
+    assert(not(in("in-reply-to", keys(r))), "no Message-ID, no In-Reply-To")
+    mine {threadId: "t", payload: {headers: [{name: "From", value: "me@example.com"}, {name: "To", value: "x@example.com"}]}}
+    assert-eq(["x@example.com"], ::messages/reply-fields(mine, "me@example.com", false).to, "replying to my own message goes to its recipients")
+}
+
+test-subjects
+meta ["test"] fn () {
+    assert-eq("Re: x", ::messages/reply-subject("x"))
+    assert-eq("re: x", ::messages/reply-subject("re: x"))
+    assert-eq("Fwd: x", ::messages/forward-subject("x"))
+    assert-eq("FW: x", ::messages/forward-subject("FW: x"))
+    assert-eq("Re:", ::messages/reply-subject(null))
+}
+
+test-label-changes
+meta ["test"] fn () {
+    assert-eq({addLabelIds: ["STARRED"], removeLabelIds: ["UNREAD"]}, ::messages/label-changes(["STARRED"], ["UNREAD"]))
+    assert-eq({removeLabelIds: ["INBOX"]}, ::messages/label-changes([], ["INBOX"]), "an empty side is omitted")
+    assert-eq({}, ::messages/label-changes(null, null))
+}
+
+test-label-and-draft-bodies
+meta ["test"] fn () {
+    assert-eq({name: "Clients/Acme"}, ::labels/build-label("Clients/Acme", {token: "t"}))
+    assert-eq({name: "x", labelListVisibility: "labelHide"}, ::labels/build-label("x", {labelListVisibility: "labelHide", color: null}))
+    assert-eq({message: {raw: "SGk"}}, ::drafts/draft-body(Bytes("Hi"), null, null))
+    assert-eq({id: "d1", message: {raw: "SGk", threadId: "t1"}}, ::drafts/draft-body(Bytes("Hi"), "t1", "d1"))
+}
+
+test-invalid-messages-fail-before-any-request
+meta ["test"] fn () {
+    sent ::messages/send({to: "bad\r\nBcc: x@evil.com", subject: "s", text: "x"})
+    assert(is-err(sent))
+    assert(contains(err-message(sent), "line breaks"))
+    assert-eq(36700160, ::messages/MAX_MESSAGE_BYTES, "Gmail's 35 MB send limit")
+}
+
+test-calls-surface-no-credentials-err
+meta ["test"] fn () {
+    r ::messages/list-messages("is:unread")
+    assert(is-err(r))
+    assert(contains(err-message(r), "no credentials"))
+}

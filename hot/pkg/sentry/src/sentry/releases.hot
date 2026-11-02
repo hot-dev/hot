@@ -1,0 +1,237 @@
+::sentry::releases ns
+meta {
+    doc: """
+    Sentry releases and deploys — the CI path: create a release for a
+    version, associate commits, finalize it when it ships, and record a
+    deploy per environment. Source map and debug-file uploads use
+    `sentry-cli` (`sentry-cli sourcemaps inject` then
+    `sentry-cli sourcemaps upload --release <version>`), which handles
+    artifact bundles and debug IDs.
+    """,
+    ctx: {"sentry.token": {required: false}, "sentry.org": {required: false, secret: false}}
+}
+
+::api ::sentry::api
+
+Page ::sentry::api/Page
+
+release-suffix fn (version: Str): Str {
+  `/releases/${::api/seg(version)}/`
+}
+
+as-vec fn (value: Any): Vec {
+  cond {
+    is-vec(value) => { value }
+    => { [value] }
+  }
+}
+
+create-release-body
+meta {
+    doc: """The create body: `{version, projects}` plus the optional `ref`, `url`, `dateReleased`, `commits`, `refs`, `status`, `owner` from `options`, unset ones omitted. Exposed for testing."""
+}
+fn
+(version: Str, projects: Any, options: Map): Map {
+  {...filter-vals(untype(options), is-some), version: version, projects: as-vec(projects)}
+}
+
+create-release
+meta {
+    doc: """
+    POST /organizations/{org}/releases/ - Create a release (or return the
+    existing one) for `version` in one or more projects (a slug or Vec of
+    slugs). `options`: `ref`, `url`, `dateReleased`, `refs`
+    (`[{repository, commit, previousCommit?}]`, needs a repository
+    integration), `commits` (`[{id, repository?, message?, author_name?, author_email?, timestamp?}]`).
+
+    **Example**
+
+    ```hot
+    ::sentry::releases/create-release("my-api@1.4.0", "my-api", {ref: "v1.4.0"})
+    ```
+    """
+}
+fn
+(version: Str, projects: Any): Map {
+  create-release(version, projects, {})
+},
+(version: Str, projects: Any, options: Map): Map {
+  create-release(version, projects, options, {})
+},
+(version: Str, projects: Any, options: Map, opts: Map): Map {
+  ::api/org-json("POST", "/releases/", create-release-body(version, projects, options), opts)
+}
+
+list-releases
+meta {
+    doc: """GET /organizations/{org}/releases/ - One page of releases, newest first. `params`: `query` (version prefix), `project` (id or Vec of ids), `environment`, `per_page`, `cursor`. Returns a `Page`."""
+}
+fn
+(): Page {
+  list-releases({})
+},
+(params: Map): Page {
+  list-releases(params, {})
+},
+(params: Map, opts: Map): Page {
+  ::api/org-page("/releases/", params, opts)
+}
+
+list-all-releases
+meta {
+    doc: """Every release matching `params`, following cursors up to `max` (default 1000)."""
+}
+fn
+(params: Map): Vec {
+  list-all-releases(params, ::api/DEFAULT_MAX_ITEMS)
+},
+(params: Map, max: Int): Vec {
+  list-all-releases(params, max, {})
+},
+(params: Map, opts: Map): Vec {
+  list-all-releases(params, ::api/DEFAULT_MAX_ITEMS, opts)
+},
+(params: Map, max: Int, opts: Map): Vec {
+  ::api/collect-pages((p) { list-releases(p, opts) }, params, max)
+}
+
+get-release
+meta {
+    doc: """GET /organizations/{org}/releases/{version}/ - One release: projects, commit count, authors, new issues, deploy summary, `dateReleased`."""
+}
+fn
+(version: Str): Map {
+  get-release(version, {})
+},
+(version: Str, opts: Map): Map {
+  ::api/org-json("GET", release-suffix(version), "", opts)
+}
+
+update-release
+meta {
+    doc: """PUT /organizations/{org}/releases/{version}/ - Change `ref`, `url`, `dateReleased`, `commits`, `refs`, or `status` (`open`, `archived`). Null fields are dropped."""
+}
+fn
+(version: Str, changes: Map): Map {
+  update-release(version, changes, {})
+},
+(version: Str, changes: Map, opts: Map): Map {
+  ::api/org-json("PUT", release-suffix(version), filter-vals(untype(changes), is-some), opts)
+}
+
+finalize-release
+meta {
+    doc: """Mark a release as released: sets `dateReleased` to now (or the given ISO-8601 time). What `sentry-cli releases finalize` does."""
+}
+fn
+(version: Str): Map {
+  finalize-release(version, Str(::hot::time/now()))
+},
+(version: Str, released-at: Str): Map {
+  finalize-release(version, released-at, {})
+},
+(version: Str, opts: Map): Map {
+  finalize-release(version, Str(::hot::time/now()), opts)
+},
+(version: Str, released-at: Str, opts: Map): Map {
+  update-release(version, {dateReleased: released-at}, opts)
+}
+
+set-commits
+meta {
+    doc: """
+    Associate commits with a release through Sentry's repository
+    integration: `refs` is `[{repository: "org/repo", commit: "<sha>", previousCommit?: "<sha>"}]`,
+    and Sentry fetches the commit range itself. Without a repository
+    integration, pass explicit commits with `update-release(version, {commits: [...]})`.
+    """
+}
+fn
+(version: Str, refs: Vec): Map {
+  set-commits(version, refs, {})
+},
+(version: Str, refs: Vec, opts: Map): Map {
+  update-release(version, {refs: refs}, opts)
+}
+
+delete-release
+meta {
+    doc: """DELETE /organizations/{org}/releases/{version}/ - Delete a release (refused when it has health data)."""
+}
+fn
+(version: Str): Any {
+  delete-release(version, {})
+},
+(version: Str, opts: Map): Any {
+  ::api/org-json("DELETE", release-suffix(version), "", opts)
+}
+
+list-release-commits
+meta {
+    doc: """GET /organizations/{org}/releases/{version}/commits/ - One page of the release's commits. Returns a `Page`."""
+}
+fn
+(version: Str): Page {
+  list-release-commits(version, {})
+},
+(version: Str, params: Map): Page {
+  list-release-commits(version, params, {})
+},
+(version: Str, params: Map, opts: Map): Page {
+  ::api/org-page(`${release-suffix(version)}commits/`, params, opts)
+}
+
+// ---------------------------------------------------------------------------
+// Deploys
+// ---------------------------------------------------------------------------
+
+create-deploy-body
+meta {
+    doc: """The deploy body: `{environment}` plus optional `name`, `url`, `dateStarted`, `dateFinished`, `projects`, unset ones omitted. Exposed for testing."""
+}
+fn
+(environment: Str, options: Map): Map {
+  {...filter-vals(untype(options), is-some), environment: environment}
+}
+
+create-deploy
+meta {
+    doc: """
+    POST /organizations/{org}/releases/{version}/deploys/ - Record that a
+    release was deployed to `environment`. `options`: `name`, `url`,
+    `dateStarted`, `dateFinished` (defaults to now), `projects` (slugs;
+    defaults to all of the release's projects).
+
+    **Example**
+
+    ```hot
+    ::sentry::releases/create-deploy("my-api@1.4.0", "production", {url: "https://github.com/acme/api/actions/runs/1"})
+    ```
+    """
+}
+fn
+(version: Str, environment: Str): Map {
+  create-deploy(version, environment, {})
+},
+(version: Str, environment: Str, options: Map): Map {
+  create-deploy(version, environment, options, {})
+},
+(version: Str, environment: Str, options: Map, opts: Map): Map {
+  ::api/org-json("POST", `${release-suffix(version)}deploys/`, create-deploy-body(environment, options), opts)
+}
+
+list-deploys
+meta {
+    doc: """GET /organizations/{org}/releases/{version}/deploys/ - A release's deploys: `[{id, environment, name, url, dateStarted, dateFinished}]`."""
+}
+fn
+(version: Str): Vec {
+  list-deploys(version, {})
+},
+(version: Str, opts: Map): Vec {
+  path ::api/org-path(`${release-suffix(version)}deploys/`, opts)
+  cond {
+    is-err(path) => { path }
+    => { ::api/collect-all(path, {}, opts) }
+  }
+}

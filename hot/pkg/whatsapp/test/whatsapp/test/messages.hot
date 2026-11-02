@@ -1,0 +1,193 @@
+::whatsapp::test::messages ns
+meta ["test"]
+
+::m ::whatsapp::messages
+
+PHONE "109876543210"
+TO "15551234567"
+
+// ============================================================================
+// Envelope and reply context
+// ============================================================================
+
+test-text-body-minimal-omits-optionals
+meta ["test"] fn () {
+    body ::m/build-text-body(::m/SendTextRequest({phone_number_id: PHONE, to: TO, text: "Hi"}))
+    assert-eq("whatsapp", body.messaging_product)
+    assert-eq("individual", body.recipient_type)
+    assert-eq(TO, body.to)
+    assert-eq("text", body.type)
+    assert-eq({body: "Hi"}, body.text)
+    assert(not(in("context", keys(body))), "no reply_to means no context")
+    assert(not(in("preview_url", keys(body.text))), "unset preview_url is omitted")
+}
+
+test-text-body-reply-and-preview
+meta ["test"] fn () {
+    body ::m/build-text-body(::m/SendTextRequest({
+        phone_number_id: PHONE, to: TO, text: "See https://hot.dev", preview_url: true, reply_to: "wamid.ABC"
+    }))
+    assert-eq({message_id: "wamid.ABC"}, body.context)
+    assert-eq(true, body.text.preview_url)
+}
+
+test-every-send-type-accepts-reply-to
+meta ["test"] fn () {
+    bodies [
+        ::m/build-image-body(::m/SendImageRequest({phone_number_id: PHONE, to: TO, image_id: "1", reply_to: "wamid.R"})),
+        ::m/build-document-body(::m/SendDocumentRequest({phone_number_id: PHONE, to: TO, document_id: "1", reply_to: "wamid.R"})),
+        ::m/build-video-body(::m/SendVideoRequest({phone_number_id: PHONE, to: TO, video_id: "1", reply_to: "wamid.R"})),
+        ::m/build-audio-body(::m/SendAudioRequest({phone_number_id: PHONE, to: TO, audio_id: "1", reply_to: "wamid.R"})),
+        ::m/build-sticker-body(::m/SendStickerRequest({phone_number_id: PHONE, to: TO, sticker_id: "1", reply_to: "wamid.R"})),
+        ::m/build-location-body(::m/SendLocationRequest({phone_number_id: PHONE, to: TO, latitude: Dec(1.5), longitude: Dec(2.5), reply_to: "wamid.R"})),
+        ::m/build-contacts-body(::m/SendContactsRequest({phone_number_id: PHONE, to: TO, contacts: [{name: {formatted_name: "Jane"}}], reply_to: "wamid.R"})),
+        ::m/build-template-body(::m/SendTemplateRequest({phone_number_id: PHONE, to: TO, template_name: "hello_world", language_code: "en_US", reply_to: "wamid.R"})),
+        ::m/build-buttons-body(::m/SendButtonsRequest({phone_number_id: PHONE, to: TO, body_text: "b", buttons: [], reply_to: "wamid.R"})),
+        ::m/build-list-body(::m/SendListRequest({phone_number_id: PHONE, to: TO, body_text: "b", button_text: "Go", sections: [], reply_to: "wamid.R"})),
+        ::m/build-cta-url-body(::m/SendCtaUrlRequest({phone_number_id: PHONE, to: TO, body_text: "b", display_text: "Open", url: "https://hot.dev", reply_to: "wamid.R"})),
+        ::m/build-location-request-body(::m/SendLocationRequestRequest({phone_number_id: PHONE, to: TO, body_text: "b", reply_to: "wamid.R"})),
+        ::m/build-flow-body(::m/SendFlowRequest({phone_number_id: PHONE, to: TO, body_text: "b", flow_cta: "Go", flow_id: "9", reply_to: "wamid.R"}))
+    ]
+    map(bodies, (body) { assert-eq("wamid.R", body.context.message_id, `${body.type} carries context`) })
+}
+
+// ============================================================================
+// Media messages
+// ============================================================================
+
+test-image-prefers-id-and-omits-caption
+meta ["test"] fn () {
+    body ::m/build-image-body(::m/SendImageRequest({phone_number_id: PHONE, to: TO, image_id: "media-1", image_url: "https://x/y.png"}))
+    assert-eq({id: "media-1"}, body.image)
+}
+
+test-image-link-with-caption
+meta ["test"] fn () {
+    body ::m/build-image-body(::m/SendImageRequest({phone_number_id: PHONE, to: TO, image_url: "https://x/y.png", caption: "Look"}))
+    assert-eq({link: "https://x/y.png", caption: "Look"}, body.image)
+}
+
+test-document-filename
+meta ["test"] fn () {
+    body ::m/build-document-body(::m/SendDocumentRequest({phone_number_id: PHONE, to: TO, document_url: "https://x/a.pdf", filename: "a.pdf"}))
+    assert-eq({link: "https://x/a.pdf", filename: "a.pdf"}, body.document)
+}
+
+test-media-object
+meta ["test"] fn () {
+    assert-eq({id: "1"}, ::m/media-object("audio", "1", null))
+    assert-eq({link: "https://x"}, ::m/media-object("audio", null, "https://x"))
+}
+
+test-location-optionals-omitted
+meta ["test"] fn () {
+    body ::m/build-location-body(::m/SendLocationRequest({phone_number_id: PHONE, to: TO, latitude: Dec(37.7749), longitude: Dec(-122.4194)}))
+    assert-eq(["latitude", "longitude"], sort(keys(body.location)))
+}
+
+test-reaction-body
+meta ["test"] fn () {
+    body ::m/build-reaction-body(::m/SendReactionRequest({phone_number_id: PHONE, to: TO, message_id: "wamid.X", emoji: ""}))
+    assert-eq("reaction", body.type)
+    assert-eq({message_id: "wamid.X", emoji: ""}, body.reaction)
+    assert(not(in("context", keys(body))))
+}
+
+test-template-body
+meta ["test"] fn () {
+    plain ::m/build-template-body(::m/SendTemplateRequest({phone_number_id: PHONE, to: TO, template_name: "hello_world", language_code: "en_US"}))
+    assert-eq({name: "hello_world", language: {code: "en_US"}}, plain.template)
+
+    vars ::m/build-template-body(::m/SendTemplateRequest({
+        phone_number_id: PHONE, to: TO, template_name: "order", language_code: "en_US",
+        components: [{type: "body", parameters: [{type: "text", text: "ORDER-1"}]}]
+    }))
+    assert-eq("ORDER-1", first(first(vars.template.components).parameters).text)
+}
+
+// ============================================================================
+// Interactive messages
+// ============================================================================
+
+test-buttons-body
+meta ["test"] fn () {
+    body ::m/build-buttons-body(::m/SendButtonsRequest({
+        phone_number_id: PHONE, to: TO, body_text: "Pick one",
+        buttons: [{type: "reply", reply: {id: "a", title: "A"}}], footer_text: "Thanks"
+    }))
+    assert-eq("interactive", body.type)
+    assert-eq("button", body.interactive.type)
+    assert-eq({text: "Pick one"}, body.interactive.body)
+    assert-eq({text: "Thanks"}, body.interactive.footer)
+    assert(not(in("header", keys(body.interactive))), "unset header omitted")
+}
+
+test-list-body-header-text
+meta ["test"] fn () {
+    body ::m/build-list-body(::m/SendListRequest({
+        phone_number_id: PHONE, to: TO, body_text: "Menu", button_text: "Open",
+        sections: [{title: "S", rows: [{id: "1", title: "One"}]}], header_text: "Today"
+    }))
+    assert-eq({type: "text", text: "Today"}, body.interactive.header)
+    assert-eq("Open", body.interactive.action.button)
+    assert(not(in("footer", keys(body.interactive))))
+}
+
+test-cta-url-body
+meta ["test"] fn () {
+    body ::m/build-cta-url-body(::m/SendCtaUrlRequest({
+        phone_number_id: PHONE, to: TO, body_text: "Invoice ready", display_text: "View", url: "https://hot.dev/i/1"
+    }))
+    assert-eq("cta_url", body.interactive.type)
+    assert-eq({name: "cta_url", parameters: {display_text: "View", url: "https://hot.dev/i/1"}}, body.interactive.action)
+    assert-eq(["action", "body", "type"], sort(keys(body.interactive)), "no header/footer when unset")
+}
+
+test-location-request-body
+meta ["test"] fn () {
+    body ::m/build-location-request-body(::m/SendLocationRequestRequest({phone_number_id: PHONE, to: TO, body_text: "Where are you?"}))
+    assert-eq("location_request_message", body.interactive.type)
+    assert-eq({name: "send_location"}, body.interactive.action)
+    assert-eq({text: "Where are you?"}, body.interactive.body)
+}
+
+test-flow-body-minimal
+meta ["test"] fn () {
+    body ::m/build-flow-body(::m/SendFlowRequest({phone_number_id: PHONE, to: TO, body_text: "Book", flow_cta: "Start", flow_name: "booking"}))
+    action body.interactive.action
+    assert-eq("flow", body.interactive.type)
+    assert-eq("flow", action.name)
+    assert-eq({flow_message_version: "3", flow_cta: "Start", flow_name: "booking"}, action.parameters)
+}
+
+test-flow-body-navigate-payload
+meta ["test"] fn () {
+    body ::m/build-flow-body(::m/SendFlowRequest({
+        phone_number_id: PHONE, to: TO, body_text: "Book", flow_cta: "Start", flow_id: "123",
+        flow_token: "tok", mode: "draft", flow_action: "navigate", screen: "WELCOME", data: {plan: "pro"},
+        header: {type: "text", text: "Hi"}
+    }))
+    p body.interactive.action.parameters
+    assert-eq("123", p.flow_id)
+    assert(not(in("flow_name", keys(p))))
+    assert-eq("tok", p.flow_token)
+    assert-eq("draft", p.mode)
+    assert-eq({screen: "WELCOME", data: {plan: "pro"}}, p.flow_action_payload)
+    assert-eq({type: "text", text: "Hi"}, body.interactive.header)
+}
+
+// ============================================================================
+// Read receipts
+// ============================================================================
+
+test-mark-read-without-typing
+meta ["test"] fn () {
+    body ::m/build-mark-read-body(::m/MarkReadRequest({phone_number_id: PHONE, message_id: "wamid.X"}))
+    assert-eq({messaging_product: "whatsapp", status: "read", message_id: "wamid.X"}, body)
+}
+
+test-mark-read-with-typing
+meta ["test"] fn () {
+    body ::m/build-mark-read-body(::m/MarkReadRequest({phone_number_id: PHONE, message_id: "wamid.X", typing_indicator: true}))
+    assert-eq({type: "text"}, body.typing_indicator)
+}

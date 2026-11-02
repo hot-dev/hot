@@ -3,12 +3,12 @@
 hot.pkg.salesforce {
   name: "hot.dev/salesforce",
   version: "0.1.0",
-  hot-min-version: "2.6.1",
-  description: "Salesforce bindings for Hot. SObject CRUD and SOQL queries with client-credentials or JWT-bearer (connected app) authentication.",
+  hot-min-version: "3.0.2",
+  description: "Salesforce REST API bindings for Hot: sObject CRUD and external-id upserts, auto-paging SOQL, SOSL search, describe, sObject collections and composite, Bulk API 2.0 ingest and query jobs, and limits. Access-token, refresh-token, JWT-bearer and client-credentials auth with per-run session caching.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
-  tags: ["crm", "salesforce"],
+  tags: ["salesforce", "crm", "soql", "bulk-api"],
   deps: {
     "hot.dev/jwt": {
       local: "../jwt",

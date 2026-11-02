@@ -2455,6 +2455,116 @@ run()"#;
         }
     }
 
+    /// Runtime overload dispatch can pick a sibling whose custom parameter type
+    /// is an arrow's target, and that sibling gets the converted value as a
+    /// lone function does, whichever overload is declared last and however the
+    /// type is written. A sibling that declares the argument's own type still
+    /// takes it unconverted. Dispatch used to skip coercion altogether.
+    #[test]
+    fn dispatched_overloads_get_the_implicit_arrow() {
+        let src = r#"::src ns
+Payload type { secret: Str }
+
+::b ns
+Payload ::src/Payload
+E1 type { from: Str }
+Payload -> E1 fn (p: Payload): E1 { E1({from: "arrow"}) }
+
+::c ns
+::alias ::b
+::payloads ::src
+E1 ::b/E1
+Payload ::src/Payload
+arrow-first fn
+(x: E1): Any { x.from },
+(x: Str): Any { "str" }
+arrow-last fn
+(x: Str): Any { "str" },
+(x: E1): Any { x.from }
+qualified fn
+(x: ::b/E1): Any { x.from },
+(x: Str): Any { "str" }
+aliased fn
+(x: ::alias/E1): Any { x.from },
+(x: Str): Any { "str" }
+two-args fn
+(n: Int, x: ::alias/E1): Any { `${n} ${x.from}` },
+(n: Int, x: Str): Any { "str" }
+own-type-first fn
+(x: Payload): Any { "own" },
+(x: E1): Any { x.from },
+(x: Str): Any { "str" }
+own-type-qualified fn
+(x: ::payloads/Payload): Any { "own" },
+(x: E1): Any { x.from },
+(x: Str): Any { "str" }
+tail fn
+(x: ::alias/E1): Any { x.from },
+(x: Vec): Any { tail(first(x)) }
+apply-all fn (x: Any): Vec {
+    [
+        arrow-first(x), arrow-last(x), qualified(x), aliased(x),
+        two-args(1, x), own-type-first(x), own-type-qualified(x)
+    ]
+}
+tail-any fn (x: Any): Any { tail(x) }
+
+::t ns
+p ::src/Payload({secret: "s"})
+already ::b/E1({from: "kept"})
+run fn (): Vec {
+    with-payload ::c/apply-all(p)
+    with-str ::c/apply-all("text")
+    [
+        ...with-payload,
+        ...with-str,
+        ::c/arrow-first(already), ::c/aliased(already),
+        ::c/tail-any([p])
+    ]
+}
+run()
+run()
+run()"#;
+        let expected = strs(&[
+            "arrow", "arrow", "arrow", "arrow", "1 arrow", "own", "own",
+            "str", "str", "str", "str", "str", "str", "str",
+            "kept", "kept",
+            "arrow",
+        ]);
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            let out = compile_and_run_project_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("run failed: {e}"));
+            assert_eq!(out, expected);
+        }
+    }
+
+    /// An arrow's failure halts the call to a dispatched overload, as it does
+    /// for a lone function, on a call and on a self tail call.
+    #[test]
+    fn dispatched_overload_arrow_failure_halts() {
+        let declarations = r#"::t ns
+Bad type { n: Int }
+E1 type { from: Str }
+Bad -> E1 fn (b: Bad): E1 { err("arrow failed") }
+take fn
+(x: E1): Any { x.from },
+(x: Str): Any { "str" }
+tail fn
+(x: E1): Any { x.from },
+(x: Vec): Any { tail(first(x)) }
+call-any fn (x: Any): Any { take(x) }
+tail-any fn (x: Any): Any { tail(x) }
+"#;
+        for call in ["call-any(Bad({n: 1}))", "tail-any([Bad({n: 1})])"] {
+            let src = format!("{declarations}{call}");
+            for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+                let err = compile_and_run_project_with_std_conf(&src, conf)
+                    .expect_err("the arrow's failure halts");
+                assert!(err.contains("arrow failed"), "{call}: {err}");
+            }
+        }
+    }
+
     /// An arrow's source is its qualified type too: a value doesn't run the
     /// arrow declared for a same-named type in another namespace, and a local
     /// type named like a core one has arrows of its own, wherever it's declared.

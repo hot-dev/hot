@@ -6,6 +6,16 @@ meta {
 }
 "https://api.stripe.com"
 
+API_VERSION
+meta {
+    doc: """
+    The Stripe API version this package is written against, sent as the `Stripe-Version` header on every request so responses never depend on the account's default version. Override per project with the `stripe.api.version` context variable, or per call with `RequestOptions({stripe_version: ...})`.
+
+    See https://docs.stripe.com/upgrades and https://docs.stripe.com/changelog.
+    """
+}
+"2026-10-28.endive"
+
 ApiErrors
 meta {
     doc: """

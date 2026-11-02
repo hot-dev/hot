@@ -1,68 +1,212 @@
 ::whatsapp::media ns
+meta {
+    doc: """
+    Media management: upload (multipart, binary-safe), look up, download
+    (as `Bytes`), and delete. Uploaded media persists for 30 days unless
+    deleted; media URLs from `get-media` expire after 5 minutes.
+    """
+}
 
 ::api ::whatsapp::api
 
 // ============================================================================
-// Media Management
+// Upload
 // ============================================================================
+
+build-upload-body
+meta {
+    doc: """
+    Build the `multipart/form-data` body for a media upload as `Bytes`:
+    `messaging_product=whatsapp`, `type={mime-type}`, and the `file` part.
+    The text parts and the content are concatenated as Bytes, so binary
+    content (images, audio) is never reinterpreted as text. `content` may
+    be `Bytes` or `Str` (encoded as UTF-8). Exposed for testing.
+    """
+}
+fn (boundary: Str, content: Bytes | Str, mime-type: Str, filename: Str): Bytes {
+  file-bytes if(is-bytes(content), content, Bytes(content))
+  // Quotes and line breaks would break out of the part header.
+  safe-name replace(replace(replace(replace(filename, "\"", "_"), "\r", "_"), "\n", "_"), "\\", "_")
+  concat(
+    Bytes(`--${boundary}\r\nContent-Disposition: form-data; name="messaging_product"\r\n\r\nwhatsapp\r\n`),
+    Bytes(`--${boundary}\r\nContent-Disposition: form-data; name="type"\r\n\r\n${mime-type}\r\n`),
+    Bytes(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${safe-name}"\r\nContent-Type: ${mime-type}\r\n\r\n`),
+    file-bytes,
+    Bytes(`\r\n--${boundary}--\r\n`)
+  )
+}
+
+UploadMediaRequest type {
+  phone_number_id: Str?,
+  content: Bytes | Str,
+  mime_type: Str,
+  filename: Str?
+}
+
+upload-media
+meta {
+    ctx: {"whatsapp.access.token": {required: false}},
+    doc: """
+    POST /{phone-number-id}/media - Upload media for later sending; returns `{id}`. Pass the id as `image_id`, `document_id`, `audio_id`, `video_id`, or `sticker_id` to a send function. `content` is the file as `Bytes` (e.g. from `download-media`, an HTTP response's `body-bytes`, or a file read) or a `Str` for text files. `filename` defaults to `"upload"`.
+
+    Limits: image (JPEG, PNG) 5 MB; video (MP4, 3GPP) and audio (AAC, AMR, MP3, MP4, OGG/OPUS) 16 MB; document 100 MB; sticker (WebP) 100 KB static / 500 KB animated.
+
+    **Example**
+
+    ```hot
+    ::media ::whatsapp::media
+    ::messages ::whatsapp::messages
+
+    photo ::hot::http/get("https://example.com/photo.png").body-bytes
+    uploaded ::media/upload-media(::media/UploadMediaRequest({
+      phone_number_id: "109876543210",
+      content: photo,
+      mime_type: "image/png",
+      filename: "photo.png"
+    }))
+    ::messages/send-image(::messages/SendImageRequest({
+      phone_number_id: "109876543210",
+      to: "15551234567",
+      image_id: uploaded.id
+    }))
+    ```
+    """
+}
+fn
+(request: UploadMediaRequest): Map {
+  upload-media(request, {})
+},
+(request: UploadMediaRequest, opts: Map): Map {
+  boundary `hot-whatsapp-${Uuid()}`
+  body build-upload-body(boundary, request.content, request.mime_type, or(request.filename, "upload"))
+  ::api/with-phone-number(request.phone_number_id, opts, (id) {
+    ::api/request-bytes("POST", ::api/url(`${id}/media`, opts), `multipart/form-data; boundary=${boundary}`, body, opts)
+  })
+}
+
+// ============================================================================
+// Retrieve, download, delete
+// ============================================================================
+
+media-url
+meta {
+    doc: """The URL for a media id, with the optional `phone_number_id` ownership check. Exposed for testing."""
+}
+fn
+(media-id: Str, phone-number-id: Str?): Str {
+  media-url(media-id, phone-number-id, {})
+},
+(media-id: Str, phone-number-id: Str?, opts: Map): Str {
+  ::api/url(`${::api/segment(media-id)}${::hot::uri/query-string({phone_number_id: phone-number-id})}`, opts)
+}
 
 get-media
 meta {
     doc: """
-Get media metadata by ID. Returns the media URL (valid for 5 minutes), MIME type, file size, and SHA256 hash.
+    GET /{media-id} - Media metadata: `url` (valid for 5 minutes; download it with `download-media`), `mime_type`, `sha256`, `file_size`, `id`. The 2-arity form passes `phone_number_id`, so the call only succeeds when the media belongs to that business number.
 
-The returned URL requires the access token in the Authorization header to download. Use `download-media` for direct download.
+    **Example**
 
-**Example**
+    ```hot
+    ::media ::whatsapp::media
 
-```hot
-::media ::whatsapp::media
-
-response ::media/get-media("media-id-123")
-response.url       // => "https://lookaside.fbsbx.com/..."
-response.mime_type // => "image/jpeg"
-response.sha256    // => "abc123..."
-response.file_size // => 12345
-```
-"""
+    info ::media/get-media("1234567890")
+    info.mime_type // => "image/jpeg"
+    ```
+    """
 }
-fn (media-id: Str): Map {
-  ::api/request("GET", ::api/url(media-id))
+fn
+(media-id: Str): Map {
+  get-media(media-id, {})
+},
+(media-id: Str, opts: Map): Map {
+  ::api/request("GET", media-url(media-id, null, opts), opts)
+},
+(media-id: Str, phone-number-id: Str): Map {
+  get-media(media-id, phone-number-id, {})
+},
+(media-id: Str, phone-number-id: Str, opts: Map): Map {
+  ::api/request("GET", media-url(media-id, phone-number-id, opts), opts)
 }
 
 download-media
 meta {
     doc: """
-Download media content by URL. The URL is obtained from `get-media`. Returns the raw file content as a string.
+    Download media content from a URL returned by `get-media`. Returns the raw file as `Bytes` (binary-safe), or an Err carrying `HttpError`. A 404 usually means the URL expired: call `get-media` again for a fresh one.
 
-**Example**
+    **Example**
 
-```hot
-::media ::whatsapp::media
+    ```hot
+    ::media ::whatsapp::media
 
-info ::media/get-media("media-id-123")
-content ::media/download-media(info.url)
-```
-"""
+    info ::media/get-media("1234567890")
+    bytes ::media/download-media(info.url)
+    length(bytes) // the file size in bytes
+    ```
+    """
 }
-fn (media-url: Str): Any {
-  ::api/request("GET", media-url)
+fn
+(media-url: Str): Bytes {
+  download-media(media-url, {})
+},
+(media-url: Str, opts: Map): Bytes {
+  ::api/download(media-url, opts)
+}
+
+download-media-by-id
+meta {
+    doc: """Look up a media id and download it in one step. Returns `{bytes, mime_type, sha256, file_size, id}`, or the first Err. The usual way to fetch media from an inbound webhook message (`message.image.id`, ...)."""
+}
+fn
+(media-id: Str): Map {
+  download-media-by-id(media-id, {})
+},
+(media-id: Str, opts: Map): Map {
+  info get-media(media-id, opts)
+  cond {
+    is-err(info) => { info }
+    => {
+      bytes download-media(info.url, opts)
+      cond {
+        is-err(bytes) => { bytes }
+        => {
+          {
+            bytes: bytes,
+            mime_type: get(info, "mime_type"),
+            sha256: get(info, "sha256"),
+            file_size: get(info, "file_size"),
+            id: get(info, "id")
+          }
+        }
+      }
+    }
+  }
 }
 
 delete-media
 meta {
     doc: """
-Delete uploaded media by ID.
+    DELETE /{media-id} - Delete uploaded media; returns `{success: true}`. The 2-arity form passes `phone_number_id` so only media owned by that number is deleted.
 
-**Example**
+    **Example**
 
-```hot
-::media ::whatsapp::media
+    ```hot
+    ::media ::whatsapp::media
 
-::media/delete-media("media-id-123")
-```
-"""
+    ::media/delete-media("1234567890")
+    ```
+    """
 }
-fn (media-id: Str): Map {
-  ::api/request("DELETE", ::api/url(media-id))
+fn
+(media-id: Str): Map {
+  delete-media(media-id, {})
+},
+(media-id: Str, opts: Map): Map {
+  ::api/request("DELETE", media-url(media-id, null, opts), opts)
+},
+(media-id: Str, phone-number-id: Str): Map {
+  delete-media(media-id, phone-number-id, {})
+},
+(media-id: Str, phone-number-id: Str, opts: Map): Map {
+  ::api/request("DELETE", media-url(media-id, phone-number-id, opts), opts)
 }

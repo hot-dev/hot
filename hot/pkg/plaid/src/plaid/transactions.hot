@@ -1,0 +1,201 @@
+::plaid::transactions ns
+meta {
+    doc: """
+    Transactions. `/transactions/sync` is Plaid's recommended surface:
+    keep one cursor per Item, call sync when the
+    `SYNC_UPDATES_AVAILABLE` webhook arrives, apply `added`, `modified`
+    and `removed`, then persist `next_cursor`. `sync-all-transactions`
+    runs the `has_more` loop for you, including Plaid's rule that a
+    pagination error restarts the loop from the first cursor.
+    `/transactions/get`, refresh and recurring streams are here too.
+    """
+}
+
+::api ::plaid::api
+
+MUTATION_DURING_PAGINATION "TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION"
+DEFAULT_MAX_PAGES 100
+DEFAULT_MAX_RESTARTS 3
+
+build-sync-request
+meta {
+    doc: """The `/transactions/sync` body: `access_token`, `cursor` (omitted when null or empty, meaning "from the beginning"), and params `count` (1-500, default 100) and `options` (`include_original_description`, `personal_finance_category_version`, `days_requested`, `account_id`). Exposed for testing."""
+}
+fn (access-token: Str, cursor: Str?, params: Map): Map {
+  ::api/compact({
+    access_token: access-token,
+    cursor: if(or(is-null(cursor), eq(cursor, "")), null, cursor),
+    count: get(params, "count"),
+    options: get(params, "options")
+  })
+}
+
+sync-transactions
+meta {
+    doc: """
+    POST /transactions/sync: one page of changes since `cursor` (null on
+    the first call). Returns `{added, modified, removed, next_cursor,
+    has_more, accounts, transactions_update_status}`. Params: `count`,
+    `options`. Most callers want `sync-all-transactions`.
+    """
+}
+fn
+(access-token: Str, cursor: Str?): Map {
+  sync-transactions(access-token, cursor, {})
+},
+(access-token: Str, cursor: Str?, params: Map): Map {
+  sync-transactions(access-token, cursor, params, {})
+},
+(access-token: Str, cursor: Str?, params: Map, opts: Map): Map {
+  ::api/post("/transactions/sync", build-sync-request(access-token, cursor, params), opts)
+}
+
+empty-sync fn (cursor: Str?): Map {
+  {added: [], modified: [], removed: [], accounts: [], next_cursor: cursor, has_more: false, pages: 0}
+}
+
+merge-sync-page
+meta {
+    doc: """Fold one sync page into an accumulated result: concatenates `added`/`modified`/`removed`, keeps the latest `accounts`, `next_cursor`, `has_more` and `transactions_update_status`, counts `pages`. Exposed for testing."""
+}
+fn (acc: Map, page: Map): Map {
+  {
+    added: concat(acc.added, or(get(page, "added"), [])),
+    modified: concat(acc.modified, or(get(page, "modified"), [])),
+    removed: concat(acc.removed, or(get(page, "removed"), [])),
+    accounts: or(get(page, "accounts"), acc.accounts),
+    next_cursor: get(page, "next_cursor"),
+    has_more: eq(get(page, "has_more"), true),
+    transactions_update_status: get(page, "transactions_update_status"),
+    pages: add(acc.pages, 1)
+  }
+}
+
+sync-loop fn (fetch: Fn, start-cursor: Str?, cursor: Str?, params: Map, acc: Map, restarts: Int): Map {
+  max-pages or(get(params, "max-pages"), DEFAULT_MAX_PAGES)
+  max-restarts or(get(params, "max-restarts"), DEFAULT_MAX_RESTARTS)
+  page fetch(cursor)
+  cond {
+    is-err(page) => {
+      e if-err(page, (x) { x })
+      cond {
+        // Plaid: on a pagination error, restart the whole loop from the
+        // cursor of the first page, discarding what was gathered.
+        and(::api/is-error-code(e, MUTATION_DURING_PAGINATION), lt(restarts, max-restarts)) => {
+          sync-loop(fetch, start-cursor, start-cursor, params, empty-sync(start-cursor), add(restarts, 1))
+        }
+        => { page }
+      }
+    }
+    => {
+      merged merge-sync-page(acc, page)
+      cond {
+        not(merged.has_more) => { merged }
+        // Out of page budget: return what we have with has_more still
+        // true. next_cursor is valid; persist it and sync again later.
+        gte(merged.pages, max-pages) => { merged }
+        => { sync-loop(fetch, start-cursor, merged.next_cursor, params, merged, restarts) }
+      }
+    }
+  }
+}
+
+sync-all-with
+meta {
+    doc: """The `has_more` loop of `sync-all-transactions` over any `fetch` function `(cursor) -> page or Err`. Exposed for testing with a stubbed fetch."""
+}
+fn (fetch: Fn, cursor: Str?, params: Map): Map {
+  sync-loop(fetch, cursor, cursor, params, empty-sync(cursor), 0)
+}
+
+sync-all-transactions
+meta {
+    doc: """
+    Sync until `has_more` is false and return the combined changes:
+    `{added, modified, removed, accounts, next_cursor, has_more, pages,
+    transactions_update_status}`. Persist `next_cursor` only after you've
+    applied the changes. Params: `count` and `options` as in
+    `sync-transactions`, `max-pages` (default 100; if hit, the result
+    comes back with `has_more` true and a valid cursor to resume from),
+    `max-restarts` (default 3) for
+    `TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION` restarts.
+
+    **Example**
+
+    ```hot
+    cursor ::hot::store/get(cursors, item-id)
+    changes ::plaid::transactions/sync-all-transactions(access-token, cursor, {count: 500})
+    // apply changes.added / changes.modified / changes.removed, then:
+    ::hot::store/put(cursors, item-id, changes.next_cursor)
+    ```
+    """
+}
+fn
+(access-token: Str, cursor: Str?): Map {
+  sync-all-transactions(access-token, cursor, {})
+},
+(access-token: Str, cursor: Str?, params: Map): Map {
+  sync-all-transactions(access-token, cursor, params, {})
+},
+(access-token: Str, cursor: Str?, params: Map, opts: Map): Map {
+  request-params {count: get(params, "count"), options: get(params, "options")}
+  sync-all-with((c) { sync-transactions(access-token, c, request-params, opts) }, cursor, params)
+}
+
+get-transactions
+meta {
+    doc: """
+    POST /transactions/get: transactions between two `YYYY-MM-DD` dates,
+    offset-paginated. Options (Plaid's `options` object): `account_ids`,
+    `count` (default 100, max 500), `offset`,
+    `include_original_description`, `days_requested`. Returns
+    `{transactions, total_transactions, accounts, item}`. Prefer sync for
+    keeping a copy up to date.
+    """
+}
+fn
+(access-token: Str, start-date: Str, end-date: Str): Map {
+  get-transactions(access-token, start-date, end-date, null)
+},
+(access-token: Str, start-date: Str, end-date: Str, options: Map?): Map {
+  get-transactions(access-token, start-date, end-date, options, {})
+},
+(access-token: Str, start-date: Str, end-date: Str, options: Map?, opts: Map): Map {
+  ::api/post("/transactions/get", {
+    access_token: access-token,
+    start_date: start-date,
+    end_date: end-date,
+    options: options
+  }, opts)
+}
+
+refresh-transactions
+meta {
+    doc: """POST /transactions/refresh: ask Plaid to check the institution now (an add-on product). New data arrives through the usual `SYNC_UPDATES_AVAILABLE` webhook."""
+}
+fn
+(access-token: Str): Map {
+  refresh-transactions(access-token, {})
+},
+(access-token: Str, opts: Map): Map {
+  ::api/post("/transactions/refresh", {access_token: access-token}, opts)
+}
+
+get-recurring-transactions
+meta {
+    doc: """POST /transactions/recurring/get: inflow and outflow streams (subscriptions, payroll, ...) detected from the Item's history. Options: `personal_finance_category_version`. Pass `account_ids` in the 3-arity form. Returns `{inflow_streams, outflow_streams, updated_datetime}`."""
+}
+fn
+(access-token: Str): Map {
+  get-recurring-transactions(access-token, null, null)
+},
+(access-token: Str, account-ids: Vec?, options: Map?): Map {
+  get-recurring-transactions(access-token, account-ids, options, {})
+},
+(access-token: Str, account-ids: Vec?, options: Map?, opts: Map): Map {
+  ::api/post("/transactions/recurring/get", {
+    access_token: access-token,
+    account_ids: account-ids,
+    options: options
+  }, opts)
+}

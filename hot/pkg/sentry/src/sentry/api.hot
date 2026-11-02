@@ -1,0 +1,615 @@
+::sentry::api ns
+meta {
+    doc: """
+    Sentry API plumbing shared by every `::sentry::*` module: base URL
+    selection (SaaS, region, or self-hosted), authentication, readable
+    errors, query strings, and Link-header cursor pagination. Use `json`,
+    `get-page`, and `collect-all` directly for endpoints the curated
+    modules don't cover.
+
+    **Per-call credentials.** Every API-calling function in this package
+    takes an optional trailing `opts` Map, resolved by `resolve`: `opts`
+    first, then context, then the defaults. Nothing from `opts` is written
+    to ctx, so one run can act for many organizations and parallel flows
+    don't share credentials. Credentials in `opts` are masked in call
+    records. A `token` or `org` present but blank or null is an error,
+    never a fallback to context.
+
+    - `token`: the auth token for this call
+    - `org`: the organization slug for this call
+    - `base-url`: a self-hosted instance or explicit host. It needs a
+      `token` in the same `opts`: `sentry.token` is never sent to a per-call
+      URL.
+    - `region`: `us` or `de`, to call `https://{region}.sentry.io`. When
+      `sentry.base.url` is set it needs a `token` too, since that context
+      token belongs to another instance.
+    """,
+    ctx: {
+        "sentry.token": {required: false},
+        "sentry.org": {required: false, secret: false},
+        "sentry.base.url": {required: false, default: "https://sentry.io", secret: false},
+        "sentry.region": {required: false, secret: false}
+    }
+}
+
+::ctx ::hot::ctx
+::uri ::hot::uri
+::re ::hot::regex
+
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+is-ok-response ::hot::http/is-ok-response
+
+// Collect-all helpers stop after this many items unless given a limit.
+DEFAULT_MAX_ITEMS 1000
+
+HttpError
+meta {
+    doc: """A non-2xx Sentry response. `message` is Sentry's `detail` (or its field errors joined into one line), else the text body, else `HTTP <status>`."""
+}
+type {
+    status: Int,
+    headers: Map,
+    body: Any,
+    message: Str
+}
+
+ConfigError
+meta {
+    doc: """Missing configuration (no token or organization). Returned as an Err before any request is sent."""
+}
+type {
+    message: Str
+}
+
+Page
+meta {
+    doc: """
+    One page of a list endpoint. `items` is the page; `next_cursor` is
+    the cursor for the following page, or null on the last page (Sentry's
+    `results="false"`). Pass it back as `cursor` to continue.
+    """
+}
+type {
+    items: Vec,
+    next_cursor: Str?,
+    prev_cursor: Str?,
+    headers: Map
+}
+
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+
+ctx-str fn (key: Str): Str? {
+  value ::ctx/get(key)
+  cond {
+    is-null(value) => { null }
+    is-empty(trim(Str(value))) => { null }
+    => { trim(Str(value)) }
+  }
+}
+
+strip-trailing-slash fn (url: Str): Str {
+  cond {
+    ends-with(url, "/") => { strip-trailing-slash(slice(url, 0, sub(length(url), 1))) }
+    => { url }
+  }
+}
+
+instance-url
+meta {
+    doc: """
+    The Sentry host to call: `sentry.base.url` when set (self-hosted, or
+    an explicit region host), else `https://{sentry.region}.sentry.io`
+    when `sentry.region` is set (`us`, `de`), else `https://sentry.io`.
+    The 2-arity form takes the values explicitly (null for unset).
+    """
+}
+fn
+(): Str {
+  instance-url(ctx-str("sentry.base.url"), ctx-str("sentry.region"))
+},
+(base-url: Str?, region: Str?): Str {
+  cond {
+    is-some(base-url) => { strip-trailing-slash(base-url) }
+    is-some(region) => { `https://${lowercase(region)}.sentry.io` }
+    => { ::sentry/DEFAULT_BASE_URL }
+  }
+}
+
+base-url
+meta {
+    doc: """The API root: `instance-url()` plus `/api/0`."""
+}
+fn (): Str {
+  `${instance-url()}/api/0`
+}
+
+non-blank fn (value: Any): Str? {
+  if(is-str(value), if(is-blank(value), null, trim(value)), null)
+}
+
+blank-error fn (name: Str): Any {
+  err(ConfigError({message: `sentry: ${name} is in the call's opts but is blank or null. Pass a value, or leave ${name} out to use context.`}))
+}
+
+is-blank-in fn (opts: Map, name: Str): Bool {
+  and(in(name, keys(opts)), is-null(non-blank(get(opts, name))))
+}
+
+resolve-from
+meta {
+    doc: """
+    The one resolver, pure: `{token, org, base-url}` for a call from `opts`
+    first, then `ctx-values` (a Map of context variables), then defaults.
+    `base-url` is the API root. An Err carrying `ConfigError` when no token
+    is set, when `token` or `org` is in `opts` but blank or null (that never
+    falls back to context), when `opts` has `base-url` without `token`, or
+    when its `region` is malformed or would send a self-hosted `sentry.token`
+    to sentry.io. `org` may stay null: organization-scoped calls check it.
+    Exposed for testing; `resolve` feeds it the context.
+    """
+}
+fn (opts: Map, ctx-values: Map): Map {
+  opt-token non-blank(get(opts, "token"))
+  opt-url non-blank(get(opts, "base-url"))
+  opt-region non-blank(get(opts, "region"))
+  ctx-url non-blank(get(ctx-values, "sentry.base.url"))
+  value or(opt-token, non-blank(get(ctx-values, "sentry.token")))
+  cond {
+    is-blank-in(opts, "token") => { blank-error("token") }
+    is-blank-in(opts, "org") => { blank-error("org") }
+    and(is-some(opt-url), is-null(opt-token)) => {
+      err(ConfigError({message: "sentry: base-url is in the call's opts without token. Pass token with it. Context credentials are never sent to a per-call URL."}))
+    }
+
+    and(is-some(opt-region), not(::re/is-match(or(opt-region, ""), "^[A-Za-z0-9-]+$"))) => {
+      err(ConfigError({message: "sentry: region in the call's opts is not a region name such as us or de."}))
+    }
+
+    and(is-some(opt-region), is-some(ctx-url), is-null(opt-url), is-null(opt-token)) => {
+      err(ConfigError({message: "sentry: region is in the call's opts without token while sentry.base.url is set. Pass token with it. Context credentials are never sent to a per-call URL."}))
+    }
+
+    is-null(value) => {
+      err(ConfigError({message: "sentry.token is not set. Add an organization auth token (sntrys_...) or a user auth token in Context Variables, or pass {token: ...} in the call's opts."}))
+    }
+
+    => {
+      host instance-url(or(opt-url, if(is-some(opt-region), null, ctx-url)), or(opt-region, non-blank(get(ctx-values, "sentry.region"))))
+      {
+        token: value,
+        org: or(non-blank(get(opts, "org")), non-blank(get(ctx-values, "sentry.org"))),
+        base-url: `${host}/api/0`
+      }
+    }
+  }
+}
+
+resolve
+meta {
+    ctx: {
+        "sentry.token": {required: false},
+        "sentry.org": {required: false, secret: false},
+        "sentry.base.url": {required: false, default: "https://sentry.io", secret: false},
+        "sentry.region": {required: false, secret: false}
+    },
+    doc: """
+    Credentials and settings for one call (see `resolve-from`). A `token`
+    from `opts` is masked in this run's records and never written to ctx.
+
+    **Example**
+
+    ```hot
+    ::sentry::api/resolve({token: "sntrys_tenant_b", region: "de"}).base-url  // "https://de.sentry.io/api/0"
+    ```
+    """
+}
+fn (opts: Map): Map {
+  ::ctx/mark-secret(non-blank(get(opts, "token")))
+  resolve-from(opts, {
+    "sentry.token": ::ctx/get("sentry.token"),
+    "sentry.org": ::ctx/get("sentry.org"),
+    "sentry.base.url": ::ctx/get("sentry.base.url"),
+    "sentry.region": ::ctx/get("sentry.region")
+  })
+}
+
+org
+meta {
+    doc: """The `org` in `opts`, else the `sentry.org` organization slug, or an Err carrying `ConfigError` when it is unset. An `org` in `opts` that is blank or null is an Err too."""
+}
+fn
+(): Str {
+  org({})
+},
+(opts: Map): Str {
+  value or(non-blank(get(opts, "org")), ctx-str("sentry.org"))
+  cond {
+    is-blank-in(opts, "org") => { blank-error("org") }
+    is-null(value) => {
+      err(ConfigError({message: "sentry.org is not set. Add your organization slug (the part after sentry.io/organizations/) in Context Variables, or pass {org: ...} in the call's opts."}))
+    }
+    => { value }
+  }
+}
+
+org-path
+meta {
+    doc: """`/organizations/{org}` plus `suffix`, or an Err when the organization is unset (see `org`)."""
+}
+fn
+(suffix: Str): Str {
+  org-path(suffix, {})
+},
+(suffix: Str, opts: Map): Str {
+  slug org(opts)
+  cond {
+    is-err(slug) => { slug }
+    => { `/organizations/${seg(slug)}${suffix}` }
+  }
+}
+
+seg
+meta {
+    doc: """URL-encode one path segment (issue ids, release versions, project slugs)."""
+}
+fn (value: Any): Str {
+  ::uri/encode(Str(value))
+}
+
+// ---------------------------------------------------------------------------
+// Queries
+// ---------------------------------------------------------------------------
+
+query
+meta {
+    doc: """
+    Build a `?a=1&b=2` suffix from a Map, dropping null values (`""` when
+    nothing is left). Vec values repeat the key — Sentry's form for
+    `project`, `environment`, and `id` filters.
+    """
+}
+fn (params: Map): Str {
+  plain untype(params)
+  pairs mapcat(keys(plain), (k) {
+    value get(plain, k)
+    cond {
+      is-null(value) => { [] }
+      is-vec(value) => {
+        map(filter(value, is-some), (item) { `${::uri/encode(Str(k))}=${::uri/encode(Str(item))}` })
+      }
+      => { [`${::uri/encode(Str(k))}=${::uri/encode(Str(value))}`] }
+    }
+  })
+  cond {
+    is-empty(pairs) => { "" }
+    => { `?${join(pairs, "&")}` }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Link-header pagination
+// ---------------------------------------------------------------------------
+
+unquote fn (value: Str): Str {
+  v trim(value)
+  cond {
+    and(starts-with(v, "\""), ends-with(v, "\"")) => { slice(v, 1, sub(length(v), 1)) }
+    => { v }
+  }
+}
+
+parse-link-entry fn (entry: Str): Map {
+  parts split(trim(entry), ";")
+  target trim(first(parts))
+  url cond {
+    and(starts-with(target, "<"), ends-with(target, ">")) => { slice(target, 1, sub(length(target), 1)) }
+    => { target }
+  }
+
+  reduce(rest(parts), (acc, attr) {
+    pieces split(attr, "=")
+    cond {
+      lt(length(pieces), 2) => { acc }
+      => { assoc(acc, trim(first(pieces)), unquote(join(rest(pieces), "="))) }
+    }
+  }, {url: url})
+}
+
+parse-link-header
+meta {
+    doc: """
+    Parse a Sentry `Link` header into entries `{url, rel, results, cursor}`.
+    Sentry sends a `previous` and a `next` entry on every list response:
+    `<https://…&cursor=0:100:0>; rel="next"; results="true"; cursor="0:100:0"`.
+    """
+}
+fn (header: Str?): Vec {
+  cond {
+    is-null(header) => { [] }
+    is-empty(trim(header)) => { [] }
+    => { map(filter(split(header, ","), (e) { contains(e, "rel=") }), parse-link-entry) }
+  }
+}
+
+link-cursor
+meta {
+    doc: """The cursor of the `relation` entry (`"next"` or `"previous"`) when it has `results="true"`, else null."""
+}
+fn (headers: Map, relation: Str): Str? {
+  entries parse-link-header(or(get(headers, "link"), get(headers, "Link")))
+  entry find-first(entries, (e) { eq(get(e, "rel"), relation) })
+  cond {
+    is-null(entry) => { null }
+    ne(get(entry, "results"), "true") => { null }
+    is-null(get(entry, "cursor")) => { null }
+    is-empty(get(entry, "cursor")) => { null }
+    => { get(entry, "cursor") }
+  }
+}
+
+next-cursor
+meta {
+    doc: """The cursor for the next page from a response's headers, or null on the last page."""
+}
+fn (headers: Map): Str? {
+  link-cursor(headers, "next")
+}
+
+// ---------------------------------------------------------------------------
+// Responses and errors
+// ---------------------------------------------------------------------------
+
+field-errors fn (body: Map): Str {
+  join(map(keys(body), (k) {
+    value get(body, k)
+    text cond {
+      is-vec(value) => { join(map(value, (v) { Str(v) }), ", ") }
+      is-str(value) => { value }
+      => { to-json(value) }
+    }
+    `${k}: ${text}`
+  }), "; ")
+}
+
+error-message
+meta {
+    doc: """One readable line from a failed response: `detail`, else field errors (`version: This field is required.`), else the text body, else `HTTP <status>`."""
+}
+fn (status: Int, body: Any): Str {
+  cond {
+    is-map(body) => {
+      detail get(body, "detail")
+      cond {
+        is-str(detail) => { detail }
+        is-map(detail) => { or(get(detail, "message"), to-json(detail)) }
+        is-empty(body) => { `HTTP ${status}` }
+        => { field-errors(body) }
+      }
+    }
+
+    not(is-str(body)) => { `HTTP ${status}` }
+    is-empty(trim(body)) => { `HTTP ${status}` }
+    => { body }
+  }
+}
+
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
+  HttpError({
+    status: response.status,
+    headers: or(response.headers, {}),
+    body: response.body,
+    message: error-message(response.status, response.body)
+  })
+}
+
+response-data fn (response: HttpResponse): Any {
+  match response.status {
+    204 | 205 => { null }
+    => { response.body }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------
+
+build-request
+meta {
+    doc: """The outgoing `HttpRequest` from resolved settings (see `resolve`). A `""` body sends no `Content-Type`. Pure; exposed for testing."""
+}
+fn (method: Str, path: Str, body: Any, resolved: Map): HttpRequest {
+  auth {Authorization: `Bearer ${resolved.token}`}
+  HttpRequest({
+    method,
+    url: `${resolved.base-url}${path}`,
+    headers: if(eq(body, ""), auth, {...auth, Content-Type: "application/json"}),
+    body: if(eq(body, ""), "", to-json(untype(body)))
+  })
+}
+
+request
+meta {
+    doc: """
+    Send an authenticated request to `{base-url}{path}` with a JSON
+    `body` (`""` for none). Returns the `HttpResponse` on 2xx, or an Err
+    carrying `HttpError` / `ConfigError`. Keeps headers, so callers can
+    read pagination and rate-limit headers.
+    """
+}
+fn
+(method: Str, path: Str, body: Any): HttpResponse {
+  request(method, path, body, {})
+},
+// 4-arity: explicit token override (the instance URL still comes from ctx)
+(method: Str, path: Str, body: Any, token: Str?): HttpResponse {
+  request(method, path, body, {token: token})
+},
+// 4-arity: per-call credentials and settings (see `resolve`)
+(method: Str, path: Str, body: Any, opts: Map): HttpResponse {
+  resolved resolve(opts)
+  cond {
+    is-err(resolved) => { resolved }
+    => {
+      response ::hot::http/request(build-request(method, path, body, resolved))
+      cond {
+        is-err(response) => { response }
+        is-ok-response(response) => { response }
+        => { err(HttpError(response)) }
+      }
+    }
+  }
+}
+
+json
+meta {
+    doc: """
+    Like `request`, but return the decoded JSON body (null for 204).
+
+    **Example**
+
+    ```hot
+    org ::sentry::api/json("GET", "/organizations/my-org/", "")
+    org.name
+    ```
+    """
+}
+fn
+(method: Str, path: Str): Any {
+  json(method, path, "")
+},
+(method: Str, path: Str, body: Any): Any {
+  json(method, path, body, {})
+},
+(method: Str, path: Str, body: Any, opts: Map): Any {
+  response request(method, path, body, opts)
+  cond {
+    is-err(response) => { response }
+    => { response-data(response) }
+  }
+}
+
+org-json
+meta {
+    doc: """`json` against an organization-scoped path (`suffix` follows `/organizations/{org}`)."""
+}
+fn
+(method: Str, suffix: Str): Any {
+  org-json(method, suffix, "")
+},
+(method: Str, suffix: Str, body: Any): Any {
+  org-json(method, suffix, body, {})
+},
+(method: Str, suffix: Str, body: Any, opts: Map): Any {
+  path org-path(suffix, opts)
+  cond {
+    is-err(path) => { path }
+    => { json(method, path, body, opts) }
+  }
+}
+
+to-page
+meta {
+    doc: """Turn a list response into a `Page` (items plus Link-header cursors)."""
+}
+fn (response: HttpResponse): Page {
+  headers or(response.headers, {})
+  data response-data(response)
+  Page({
+    items: if(is-vec(data), data, []),
+    next_cursor: next-cursor(headers),
+    prev_cursor: link-cursor(headers, "previous"),
+    headers: headers
+  })
+}
+
+get-page
+meta {
+    doc: """
+    GET one page of a list endpoint: `path` plus `params` (including
+    `cursor`) as the query string. Returns a `Page`.
+
+    **Example**
+
+    ```hot
+    page ::sentry::api/get-page("/organizations/my-org/repos/", {})
+    page.items
+    ```
+    """
+}
+fn
+(path: Str, params: Map): Page {
+  get-page(path, params, {})
+},
+(path: Str, params: Map, opts: Map): Page {
+  response request("GET", `${path}${query(params)}`, "", opts)
+  cond {
+    is-err(response) => { response }
+    => { to-page(response) }
+  }
+}
+
+org-page
+meta {
+    doc: """`get-page` against an organization-scoped path."""
+}
+fn
+(suffix: Str, params: Map): Page {
+  org-page(suffix, params, {})
+},
+(suffix: Str, params: Map, opts: Map): Page {
+  path org-path(suffix, opts)
+  cond {
+    is-err(path) => { path }
+    => { get-page(path, params, opts) }
+  }
+}
+
+take-up-to fn (items: Vec, max: Int): Vec {
+  if(gt(length(items), max), slice(items, 0, max), items)
+}
+
+collect-from fn (fetch: Fn, params: Map, max: Int, acc: Vec): Vec {
+  page fetch(params)
+  cond {
+    is-err(page) => { page }
+    => {
+      combined concat(acc, page.items)
+      cursor page.next_cursor
+      cond {
+        gte(length(combined), max) => { take-up-to(combined, max) }
+        is-null(cursor) => { combined }
+        is-empty(page.items) => { combined }
+        => { collect-from(fetch, {...params, cursor: cursor}, max, combined) }
+      }
+    }
+  }
+}
+
+collect-pages
+meta {
+    doc: """Walk a cursor-paginated list: call `fetch(params)` (returning a `Page`) and follow `next_cursor` until the last page or `max` items. Pages are fetched serially."""
+}
+fn (fetch: Fn, params: Map, max: Int): Vec {
+  collect-from(fetch, params, max, [])
+}
+
+collect-all
+meta {
+    doc: """Every item of a list endpoint at `path` (with `params`), following cursors up to `max` items (default 1000)."""
+}
+fn
+(path: Str, params: Map): Vec {
+  collect-all(path, params, DEFAULT_MAX_ITEMS)
+},
+(path: Str, params: Map, max: Int): Vec {
+  collect-all(path, params, max, {})
+},
+(path: Str, params: Map, opts: Map): Vec {
+  collect-all(path, params, DEFAULT_MAX_ITEMS, opts)
+},
+(path: Str, params: Map, max: Int, opts: Map): Vec {
+  collect-pages((p) { get-page(path, p, opts) }, params, max)
+}

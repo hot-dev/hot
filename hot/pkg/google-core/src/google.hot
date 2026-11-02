@@ -1,20 +1,40 @@
 ::google ns
 meta {
     doc: """
-    Google API foundation shared by the google-* packages (gmail, drive,
-    sheets, calendar, ...).
+    Google API foundation shared by the google-* packages (drive, gmail,
+    sheets, calendar, ...): credential resolution, a per-run token cache,
+    scope handling, the authenticated request helper, Google-shaped
+    errors with retry classification (`is-retryable`; backoff is left to
+    Hot's run retry policies), `nextPageToken` pagination, and OAuth
+    consent helpers.
 
-    **Authentication** — set ONE of these in context, checked in order:
+    **Credentials** come from context by default, checked in order:
 
-    1. `google.access.token` — a ready OAuth access token you manage
-    2. `google.oauth.client-id` + `google.oauth.client-secret` +
-       `google.oauth.refresh-token` — a user's offline refresh token
-    3. `google.service.account` — a service-account JSON key (the full
-       JSON string); domain-wide delegation via `google.impersonate`
+    1. `google.access.token` - a ready OAuth access token you manage
+    2. `google.oauth.refresh-token` + `google.oauth.client-id` +
+       `google.oauth.client-secret` - a user's offline refresh token
+    3. `google.service.account` - a service-account key (the JSON string);
+       domain-wide delegation via `google.impersonate`
+    4. `google.api.key` - an API key, for public data only
 
-    Service packages request the scopes they need automatically; see
-    `::google::auth/access-token` and `::google::api/request`.
+    Every request helper also takes an `opts` Map whose credential keys
+    (`token`, `refresh-token` + `client-id` + `client-secret`,
+    `service-account` + `subject`, `api-key`) override context for that
+    one call, which is how multi-tenant apps act for many users. They are
+    masked in call records; one that is blank or null is an Err naming the
+    key, never a fallback to context. `scopes` in `opts`, or the
+    `google.scopes` context variable, overrides the scopes a
+    service-account token is minted with.
+
+    **Namespaces**
+
+    - `::google::auth` - credential resolution, scopes, token cache
+    - `::google::api` - `request` / `json`, `HttpError`, `is-retryable`, pagination
+    - `::google::oauth` - `authorize-url`, `exchange-code`, refresh, revoke
     """
 }
 
 TOKEN_URL "https://oauth2.googleapis.com/token"
+AUTH_URL "https://accounts.google.com/o/oauth2/v2/auth"
+REVOKE_URL "https://oauth2.googleapis.com/revoke"
+SCOPE_PREFIX "https://www.googleapis.com/auth/"

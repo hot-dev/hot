@@ -1,11 +1,14 @@
 ::hubspot::integration ns
 meta ["test"]
 
-// Requires ctx: hubspot.token (private app with crm.objects.contacts read)
+// Requires HUBSPOT_TOKEN (private app with crm.objects.contacts.read);
+// skips cleanly when unset. Read-only.
 // Run with: hot test --project pkg-integration-hubspot
 
 test-list-contacts
 meta ["test"] fn () {
-    page ::hubspot::objects/list-objects("contacts", {limit: 1})
-    assert(is-some(page.results), "should return a results array")
+    if(::hubspot::integration::ctx/configured(), {
+        page ::hubspot::objects/list-objects("contacts", {limit: 1})
+        assert(is-some(page.results), "should return a results array")
+    }, null)
 }

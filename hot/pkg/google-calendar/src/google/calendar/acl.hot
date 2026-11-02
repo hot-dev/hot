@@ -1,0 +1,99 @@
+::google::calendar::acl ns
+meta {
+    doc: """
+    Calendar sharing (access control rules): list, share with a user,
+    group, domain or everyone, and remove a rule.
+
+    Roles: `freeBusyReader` (free/busy only), `reader`, `writer`,
+    `owner` (`none` removes access). Scope types: `user`, `group`
+    (email), `domain` (a domain name), `default` (public).
+
+    **Scopes.** Listing uses `calendar.acls.readonly`; sharing and
+    removing `calendar.acls` (`calendar` also works).
+    """
+}
+
+::cal ::google::calendar
+::api ::google::api
+
+ROLES ["none", "freeBusyReader", "reader", "writer", "owner"]
+SCOPE_TYPES ["default", "user", "group", "domain"]
+
+list-acl
+meta {
+    doc: """GET /calendars/{id}/acl - one page of rules: `{items: [{id, role, scope: {type, value}}], nextPageToken?, nextSyncToken?}`. Options: `maxResults`, `pageToken`, `showDeleted`, `syncToken`. Scope: `calendar.acls.readonly`."""
+}
+fn
+(calendar-id: Str): Map {
+  list-acl(calendar-id, {})
+},
+(calendar-id: Str, opts: Map): Map {
+  ::cal/json(::cal/ACL_READ_SCOPE, "GET", ::cal/url(::cal/calendar-path(calendar-id, "/acl"), ::cal/query-params({}, opts)), "", opts)
+}
+
+list-all-acl
+meta {
+    doc: """Every rule on a calendar (all pages). Scope: `calendar.acls.readonly`."""
+}
+fn
+(calendar-id: Str): Vec {
+  list-all-acl(calendar-id, {})
+},
+(calendar-id: Str, opts: Map): Vec {
+  ::api/collect-pages((token) { list-acl(calendar-id, {...opts, pageToken: token}) }, "items")
+}
+
+build-rule
+meta {
+    doc: """An AclRule body (pure): `{role, scope: {type, value?}}`; `value` is omitted for `default`. An Err for an unknown role or scope type, or a missing value."""
+}
+fn (role: Str, scope-type: Str, value: Str?): Map {
+  cond {
+    not(in(role, ROLES)) => { err(`google-calendar: role must be one of ${join(ROLES, ", ")}, got ${to-json(role)}`) }
+    not(in(scope-type, SCOPE_TYPES)) => { err(`google-calendar: scope type must be one of ${join(SCOPE_TYPES, ", ")}, got ${to-json(scope-type)}`) }
+    and(ne(scope-type, "default"), or(is-null(value), eq(trim(or(value, "")), ""))) => { err(`google-calendar: a ${scope-type} rule needs an email or domain`) }
+    eq(scope-type, "default") => { {role: role, scope: {type: "default"}} }
+    => { {role: role, scope: {type: scope-type, value: value}} }
+  }
+}
+
+insert-rule
+meta {
+    doc: """POST /calendars/{id}/acl - add a rule (see `build-rule`). Options: `sendNotifications` (default true: the grantee is emailed). Returns the rule with its `id`. Scope: `calendar.acls`."""
+}
+fn
+(calendar-id: Str, role: Str, scope-type: Str, value: Str?): Map {
+  insert-rule(calendar-id, role, scope-type, value, {})
+},
+(calendar-id: Str, role: Str, scope-type: Str, value: Str?, opts: Map): Map {
+  rule build-rule(role, scope-type, value)
+  if(is-err(rule), rule,
+    ::cal/json(::cal/ACL_SCOPE, "POST", ::cal/url(::cal/calendar-path(calendar-id, "/acl"), ::cal/query-params({}, opts)), rule, opts))
+}
+
+share-calendar
+meta {
+    doc: """
+    Share a calendar with one person: `share-calendar("team@group.calendar.google.com", "ada@example.com", "reader")`.
+    Scope: `calendar.acls`.
+    """
+}
+fn
+(calendar-id: Str, email: Str, role: Str): Map {
+  share-calendar(calendar-id, email, role, {})
+},
+(calendar-id: Str, email: Str, role: Str, opts: Map): Map {
+  insert-rule(calendar-id, role, "user", email, opts)
+}
+
+delete-rule
+meta {
+    doc: """DELETE /calendars/{id}/acl/{ruleId} - remove a rule (rule ids look like `user:ada@example.com`). Returns true. Scope: `calendar.acls`."""
+}
+fn
+(calendar-id: Str, rule-id: Str): Bool {
+  delete-rule(calendar-id, rule-id, {})
+},
+(calendar-id: Str, rule-id: Str, opts: Map): Bool {
+  ::cal/done(::cal/json(::cal/ACL_SCOPE, "DELETE", ::cal/url(::cal/calendar-path(calendar-id, `/acl/${::cal/encode-id(rule-id)}`)), "", opts))
+}

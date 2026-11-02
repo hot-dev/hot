@@ -1,0 +1,203 @@
+::google::drive::permissions ns
+meta {
+    doc: """
+    Sharing: list, get, create, update and delete permissions on files,
+    folders and shared drives (`file-id` may be a shared drive id).
+
+    A permission has a `type` (`user`, `group`, `domain`, `anyone`) and a
+    `role` (`owner`, `organizer`, `fileOrganizer`, `writer`, `commenter`,
+    `reader`). Drive emails users and groups when they are granted access
+    unless you pass `{sendNotificationEmail: false}`; `emailMessage` adds
+    a note. Ownership transfer needs `{transferOwnership: true}` and
+    `role: "owner"`.
+
+    **Scopes.** `drive` (or `drive.file` for files the app created).
+    Listing works with `drive.readonly` / `drive.metadata.readonly`.
+    """
+}
+
+::drive ::google::drive
+::api ::google::api
+
+ROLES ["owner", "organizer", "fileOrganizer", "writer", "commenter", "reader"]
+TYPES ["user", "group", "domain", "anyone"]
+PERMISSION_FIELDS "id,type,role,emailAddress,domain,displayName,expirationTime,deleted,pendingOwner,allowFileDiscovery,permissionDetails"
+LIST_FIELDS "nextPageToken,permissions(id,type,role,emailAddress,domain,displayName,expirationTime,deleted,pendingOwner,allowFileDiscovery,permissionDetails)"
+
+build-permission
+meta {
+    doc: """
+    Build a permission body (pure), validating the grantee `type` and `role`. `target`
+    is the email for `user`/`group`, the domain for `domain`, and ignored
+    for `anyone`. `extra` adds fields such as `expirationTime` or
+    `allowFileDiscovery`.
+
+    ```hot
+    ::google::drive::permissions/build-permission("user", "writer", "ada@example.com")
+    // {type: "user", role: "writer", emailAddress: "ada@example.com"}
+    ```
+    """
+}
+fn
+(grantee: Str, role: Str, target: Str?): Map {
+  build-permission(grantee, role, target, {})
+},
+(grantee: Str, role: Str, target: Str?, extra: Map): Map {
+  needs-email in(grantee, ["user", "group"])
+  needs-domain eq(grantee, "domain")
+  missing-target or(is-null(target), eq(trim(or(target, "")), ""))
+  cond {
+    not(in(grantee, TYPES)) => { err(`google-drive: permission type must be one of ${join(TYPES, ", ")}`) }
+    not(in(role, ROLES)) => { err(`google-drive: permission role must be one of ${join(ROLES, ", ")}`) }
+    and(or(needs-email, needs-domain), missing-target) => { err(`google-drive: a ${grantee} permission needs ${if(needs-email, "an email address", "a domain")}`) }
+    => {
+      ::drive/compact({
+        type: grantee,
+        role: role,
+        emailAddress: if(needs-email, target, null),
+        domain: if(needs-domain, target, null),
+        ...extra
+      })
+    }
+  }
+}
+
+list-permissions
+meta {
+    doc: """GET /files/{id}/permissions - one page (`{permissions, nextPageToken?}`). Options: `pageSize` (max 100), `pageToken`, `fields`, `useDomainAdminAccess`, credentials."""
+}
+fn
+(file-id: Str): Map {
+  list-permissions(file-id, {})
+},
+(file-id: Str, opts: Map): Map {
+  params ::drive/query-params({supportsAllDrives: true, fields: LIST_FIELDS}, opts)
+  ::drive/json(::drive/READ_SCOPE, "GET", ::drive/url(`/files/${::drive/encode-id(file-id)}/permissions`, params), "", opts)
+}
+
+list-all-permissions
+meta {doc: """Every permission on a file (follows `nextPageToken`)."""}
+fn
+(file-id: Str): Vec {
+  list-all-permissions(file-id, {})
+},
+(file-id: Str, opts: Map): Vec {
+  ::api/collect-pages((token) { list-permissions(file-id, {pageSize: 100, ...opts, pageToken: token}) }, "permissions")
+}
+
+get-permission
+meta {doc: """GET /files/{id}/permissions/{permissionId}."""}
+fn
+(file-id: Str, permission-id: Str): Map {
+  get-permission(file-id, permission-id, {})
+},
+(file-id: Str, permission-id: Str, opts: Map): Map {
+  params ::drive/query-params({supportsAllDrives: true, fields: PERMISSION_FIELDS}, opts)
+  ::drive/json(::drive/READ_SCOPE, "GET", ::drive/url(`/files/${::drive/encode-id(file-id)}/permissions/${::drive/encode-id(permission-id)}`, params), "", opts)
+}
+
+create-permission
+meta {
+    doc: """
+    POST /files/{id}/permissions - grant access. `permission` is a body
+    (see `build-permission`). Options: `sendNotificationEmail`,
+    `emailMessage`, `transferOwnership`, `moveToNewOwnersRoot`,
+    `useDomainAdminAccess`, `fields`, credentials.
+    """
+}
+fn
+(file-id: Str, permission: Map): Map {
+  create-permission(file-id, permission, {})
+},
+(file-id: Str, permission: Map, opts: Map): Map {
+  params ::drive/query-params({supportsAllDrives: true, fields: PERMISSION_FIELDS}, opts)
+  ::drive/json(::drive/SCOPE, "POST", ::drive/url(`/files/${::drive/encode-id(file-id)}/permissions`, params), ::drive/compact(permission), opts)
+}
+
+share fn (file-id: Str, grantee: Str, role: Str, target: Str?, opts: Map): Map {
+  permission build-permission(grantee, role, target)
+  if(is-err(permission), permission, create-permission(file-id, permission, opts))
+}
+
+share-with-user
+meta {
+    doc: """
+    Share with one user by email. `role` defaults to `"reader"` in the
+    2-arity form.
+
+    ```hot
+    ::google::drive::permissions/share-with-user(file-id, "ada@example.com", "writer", {sendNotificationEmail: false})
+    ```
+    """
+}
+fn
+(file-id: Str, email: Str): Map {
+  share(file-id, "user", "reader", email, {})
+},
+(file-id: Str, email: Str, role: Str): Map {
+  share(file-id, "user", role, email, {})
+},
+(file-id: Str, email: Str, role: Str, opts: Map): Map {
+  share(file-id, "user", role, email, opts)
+}
+
+share-with-group
+meta {doc: """Share with a Google Group by email."""}
+fn
+(file-id: Str, email: Str, role: Str): Map {
+  share(file-id, "group", role, email, {})
+},
+(file-id: Str, email: Str, role: Str, opts: Map): Map {
+  share(file-id, "group", role, email, opts)
+}
+
+share-with-domain
+meta {
+    doc: """Share with everyone in a Workspace domain (no notification email is sent for domain grants)."""
+}
+fn
+(file-id: Str, domain: Str, role: Str): Map {
+  share(file-id, "domain", role, domain, {})
+},
+(file-id: Str, domain: Str, role: Str, opts: Map): Map {
+  share(file-id, "domain", role, domain, opts)
+}
+
+share-with-anyone
+meta {
+    doc: """Make a file available to anyone with the link (`role` usually `"reader"`). For a publicly searchable file, use `create-permission(id, build-permission("anyone", "reader", null, {allowFileDiscovery: true}))`."""
+}
+fn
+(file-id: Str, role: Str): Map {
+  share(file-id, "anyone", role, null, {})
+},
+(file-id: Str, role: Str, opts: Map): Map {
+  share(file-id, "anyone", role, null, opts)
+}
+
+update-permission
+meta {
+    doc: """PATCH /files/{id}/permissions/{permissionId} - change `role` or `expirationTime`. Options: `transferOwnership`, `removeExpiration`, `useDomainAdminAccess`, credentials."""
+}
+fn
+(file-id: Str, permission-id: Str, changes: Map): Map {
+  update-permission(file-id, permission-id, changes, {})
+},
+(file-id: Str, permission-id: Str, changes: Map, opts: Map): Map {
+  params ::drive/query-params({supportsAllDrives: true, fields: PERMISSION_FIELDS}, opts)
+  ::drive/json(::drive/SCOPE, "PATCH", ::drive/url(`/files/${::drive/encode-id(file-id)}/permissions/${::drive/encode-id(permission-id)}`, params), ::drive/compact(changes), opts)
+}
+
+delete-permission
+meta {
+    doc: """DELETE /files/{id}/permissions/{permissionId} - revoke access. Returns true. Inherited shared-drive permissions must be removed where they are set."""
+}
+fn
+(file-id: Str, permission-id: Str): Bool {
+  delete-permission(file-id, permission-id, {})
+},
+(file-id: Str, permission-id: Str, opts: Map): Bool {
+  params ::drive/query-params({supportsAllDrives: true}, opts)
+  result ::drive/json(::drive/SCOPE, "DELETE", ::drive/url(`/files/${::drive/encode-id(file-id)}/permissions/${::drive/encode-id(permission-id)}`, params), "", opts)
+  if(is-err(result), result, true)
+}

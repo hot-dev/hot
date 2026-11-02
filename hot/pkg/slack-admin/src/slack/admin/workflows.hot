@@ -1,0 +1,155 @@
+::slack::admin::workflows ns
+meta {
+    doc: """
+    `admin.workflows.*`: search workflows across the org, look up who may
+    run them, manage collaborators, and unpublish them. Scope:
+    `admin.workflows:read` / `admin.workflows:write`.
+
+    **Example**
+
+    ```hot
+    ::workflows ::slack::admin::workflows
+
+    orphaned ::workflows/search-all(::workflows/SearchRequest({no_collaborators: true}), 500)
+    ::workflows/unpublish(::workflows/UnpublishRequest({workflow_ids: map(orphaned, (w) { w.id })}))
+    ```
+    """
+}
+
+::api ::slack::admin::api
+
+SearchRequest type {
+  query: Str?,
+  app_id: Str?,
+  collaborator_ids: Vec<Str>?,
+  no_collaborators: Bool?,
+  num_trigger_ids: Int?,
+  source: Str?,
+  sort: Str?,
+  sort_dir: Str?,
+  cursor: Str?,
+  limit: Int?
+}
+
+search
+meta {
+    doc: """
+    admin.workflows.search - Search workflows (`workflows`, `total_found`). `source`: `code` or `workflow_builder`.
+
+    Scope: `admin.workflows:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `search-all`.
+    """
+}
+fn
+(): Map {
+  search(SearchRequest({}))
+},
+(request: SearchRequest): Map {
+  search(request, {})
+},
+(request: SearchRequest, opts: Map): Map {
+  ::api/call("admin.workflows.search", request, opts)
+}
+
+search-all
+meta {
+    doc: """
+    Every `workflows` entry from `admin.workflows.search`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    """
+}
+fn
+(): Vec {
+  search-all(SearchRequest({}), 1000)
+},
+(request: SearchRequest): Vec {
+  search-all(request, 1000)
+},
+(request: SearchRequest, max-items: Int): Vec {
+  search-all(request, max-items, {})
+},
+(request: SearchRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.workflows.search", request, "workflows", max-items, opts)
+}
+
+PermissionsLookupRequest type {
+  workflow_ids: Vec<Str>,
+  max_workflow_triggers: Int?
+}
+
+permissions-lookup
+meta {
+    doc: """
+    admin.workflows.permissions.lookup - Who may run each workflow, by trigger.
+
+    Scope: `admin.workflows:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: PermissionsLookupRequest): Map {
+  permissions-lookup(request, {})
+},
+(request: PermissionsLookupRequest, opts: Map): Map {
+  ::api/call("admin.workflows.permissions.lookup", request, opts)
+}
+
+CollaboratorsAddRequest type {
+  workflow_ids: Vec<Str>,
+  collaborator_ids: Vec<Str>
+}
+
+collaborators-add
+meta {
+    doc: """
+    admin.workflows.collaborators.add - Add collaborators (up to 50 users) to workflows.
+
+    Scope: `admin.workflows:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: CollaboratorsAddRequest): Map {
+  collaborators-add(request, {})
+},
+(request: CollaboratorsAddRequest, opts: Map): Map {
+  ::api/call("admin.workflows.collaborators.add", request, opts)
+}
+
+CollaboratorsRemoveRequest type {
+  workflow_ids: Vec<Str>,
+  collaborator_ids: Vec<Str>
+}
+
+collaborators-remove
+meta {
+    doc: """
+    admin.workflows.collaborators.remove - Remove collaborators from workflows.
+
+    Scope: `admin.workflows:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: CollaboratorsRemoveRequest): Map {
+  collaborators-remove(request, {})
+},
+(request: CollaboratorsRemoveRequest, opts: Map): Map {
+  ::api/call("admin.workflows.collaborators.remove", request, opts)
+}
+
+UnpublishRequest type {
+  workflow_ids: Vec<Str>
+}
+
+unpublish
+meta {
+    doc: """
+    admin.workflows.unpublish - Unpublish workflows.
+
+    Scope: `admin.workflows:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: UnpublishRequest): Map {
+  unpublish(request, {})
+},
+(request: UnpublishRequest, opts: Map): Map {
+  ::api/call("admin.workflows.unpublish", request, opts)
+}

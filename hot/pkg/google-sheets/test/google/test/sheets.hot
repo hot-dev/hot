@@ -1,22 +1,112 @@
 ::google::test::sheets ns
 meta ["test"]
 
-// Hermetic wiring tests: with no google.* context configured, every call
-// must surface google-core's no-credentials Err — proving the cross-
-// namespace call path (sheets -> api -> auth) resolves end to end.
+::sheets ::google::sheets
+::values ::google::sheets::values
+::books ::google::sheets::spreadsheets
+::req ::google::sheets::requests
+::rec ::google::sheets::records
+
+test-urls-encode-ids-and-ranges
+meta ["test"] fn () {
+    assert-eq("https://sheets.googleapis.com/v4/spreadsheets", ::sheets/url(""))
+    assert-eq("/abc/values/My%20Sheet%21A1%3AB2", ::sheets/values-path("abc", "My Sheet!A1:B2"))
+    assert-eq("/abc/values/Log%21A%3AC:append", ::sheets/values-path("abc", "Log!A:C", "append"))
+    assert-eq("https://sheets.googleapis.com/v4/spreadsheets/abc/values:batchGet?valueRenderOption=FORMULA&ranges=A1&ranges=Sheet2%21B2%3AB9",
+      ::sheets/url("/abc/values:batchGet", {valueRenderOption: "FORMULA", ranges: ["A1", "Sheet2!B2:B9"]}))
+}
+
+test-read-and-write-params
+meta ["test"] fn () {
+    assert-eq({}, ::values/read-params({}), "reads send no options unless set")
+    assert-eq({valueRenderOption: "UNFORMATTED_VALUE", dateTimeRenderOption: "FORMATTED_STRING"},
+      ::values/read-params({valueRenderOption: "UNFORMATTED_VALUE", dateTimeRenderOption: "FORMATTED_STRING", token: "ya29.x", majorDimension: null}))
+    assert-eq({valueInputOption: "USER_ENTERED"}, ::values/write-params({}))
+    p ::values/write-params({valueInputOption: "RAW", insertDataOption: "INSERT_ROWS", includeValuesInResponse: true, majorDimension: "COLUMNS", subject: "u@x"})
+    assert-eq({valueInputOption: "RAW", insertDataOption: "INSERT_ROWS", includeValuesInResponse: true}, p, "majorDimension stays in the body; credentials never reach the query")
+    assert-eq({range: "A1", majorDimension: "COLUMNS", values: [[1]]}, ::values/value-range("A1", [[1]], {majorDimension: "COLUMNS"}))
+    assert-eq("ROWS", ::values/value-range("A1", [[1]], {}).majorDimension)
+}
+
+test-batch-update-values-body
+meta ["test"] fn () {
+    b ::values/batch-update-body({"S!B2": [[42]]}, {})
+    assert-eq({valueInputOption: "USER_ENTERED", data: [{range: "S!B2", majorDimension: "ROWS", values: [[42]]}]}, b, "unset response options are omitted")
+    v ::values/batch-update-body([{range: "A1", values: [["x"]], majorDimension: "COLUMNS"}], {valueInputOption: "RAW", includeValuesInResponse: true})
+    assert-eq("RAW", v.valueInputOption)
+    assert-eq(true, v.includeValuesInResponse)
+    assert-eq("COLUMNS", first(v.data).majorDimension)
+}
+
+test-records
+meta ["test"] fn () {
+    grid [["name", "score", "", "note"], ["Ada", 9, "x", "top"], [], ["", ""], ["Bob"]]
+    assert-eq([{name: "Ada", score: 9, note: "top"}, {name: "Bob", score: null, note: null}], ::rec/rows-to-records(grid), "blank headers skipped, short rows padded, blank rows dropped")
+    assert-eq([], ::rec/rows-to-records(null))
+    assert-eq([], ::rec/rows-to-records([["only", "header"]]))
+    recs [{name: "Ada", tags: ["a", "b"]}, {name: "Bob", active: true, n: null}]
+    assert-eq(["name", "tags", "active", "n"], ::rec/record-columns(recs))
+    assert-eq([["name", "active"], ["Ada", ""], ["Bob", true]], ::rec/records-to-grid(recs, ["name", "active"]), "missing values are empty cells")
+    assert-eq([["Ada", "[\"a\",\"b\"]", "", ""], ["Bob", "", true, ""]], ::rec/records-to-rows(recs), "nested values become JSON text")
+}
+
+test-a1-helpers
+meta ["test"] fn () {
+    assert-eq("A", ::rec/column-letter(0))
+    assert-eq("Z", ::rec/column-letter(25))
+    assert-eq("AA", ::rec/column-letter(26))
+    assert-eq("ZZ", ::rec/column-letter(701))
+    assert-eq("AAA", ::rec/column-letter(702))
+    assert-eq("Sheet1!A1:B2", ::rec/a1("Sheet1", "A1:B2"))
+    assert-eq("'Q3 Plan'!A:C", ::rec/a1("Q3 Plan", "A:C"))
+    assert-eq("'Bob''s'", ::rec/a1("Bob's"))
+    assert-eq("A1:B3", ::rec/grid-a1(0, 0, 3, 2))
+    assert-eq("C5:C5", ::rec/grid-a1(4, 2, 1, 1))
+}
+
+test-spreadsheet-bodies
+meta ["test"] fn () {
+    assert-eq({properties: {title: "T"}}, ::books/build-spreadsheet("T", {}), "no sheets, locale or timeZone unless given")
+    b ::books/build-spreadsheet("T", {sheets: ["Leads", {title: "Raw", hidden: true}], timeZone: "America/Chicago"})
+    assert-eq({title: "T", timeZone: "America/Chicago"}, b.properties)
+    assert-eq([{properties: {title: "Leads"}}, {properties: {title: "Raw", hidden: true}}], b.sheets)
+    assert-eq({requests: [{deleteSheet: {sheetId: 3}}]}, ::books/batch-update-body([{deleteSheet: {sheetId: 3}}], {}))
+    assert-eq({ranges: ["A1"], includeGridData: true}, ::books/get-params({ranges: ["A1"], includeGridData: true, token: "t"}))
+}
+
+test-request-builders
+meta ["test"] fn () {
+    assert-eq({addSheet: {properties: {title: "New"}}}, ::req/add-sheet("New"))
+    assert-eq({addSheet: {properties: {title: "N", index: 0, gridProperties: {rowCount: 100}}}}, ::req/add-sheet("N", {index: 0, rowCount: 100}))
+    assert-eq({updateSheetProperties: {properties: {sheetId: 5, title: "X"}, fields: "title"}}, ::req/rename-sheet(5, "X"))
+    assert-eq({updateSheetProperties: {properties: {sheetId: 0, gridProperties: {frozenRowCount: 1}}, fields: "gridProperties.frozenRowCount"}}, ::req/freeze(0, 1))
+    assert-eq("gridProperties.frozenRowCount,gridProperties.frozenColumnCount", ::req/freeze(0, 1, 2).updateSheetProperties.fields)
+    assert-eq({autoResizeDimensions: {dimensions: {sheetId: 0, dimension: "COLUMNS"}}}, ::req/auto-resize(0, "columns"))
+    assert-eq({autoResizeDimensions: {dimensions: {sheetId: 0, dimension: "COLUMNS", startIndex: 0, endIndex: 3}}}, ::req/auto-resize(0, "COLUMNS", 0, 3))
+    assert-eq({sheetId: 0, startRowIndex: 0, endRowIndex: 1}, ::req/grid-range(0, 0, 1))
+    assert-eq({deleteDimension: {range: {sheetId: 2, dimension: "ROWS", startIndex: 4, endIndex: 6}}}, ::req/delete-dimension(2, "ROWS", 4, 6))
+}
+
+test-format-builders
+meta ["test"] fn () {
+    row ::req/grid-range(0, 0, 1)
+    assert-eq({repeatCell: {range: row, cell: {userEnteredFormat: {textFormat: {bold: true}}}, fields: "userEnteredFormat.textFormat.bold"}}, ::req/bold(row))
+    assert-eq("userEnteredFormat(textFormat,backgroundColor)", ::req/format-fields({textFormat: {bold: true}, backgroundColor: {red: 1}}))
+    assert-eq(::req/hex-color("336699"), ::req/rgb(51, 102, 153), "rgb and hex agree")
+    c ::req/hex-color("#336699")
+    assert-eq(0.2, c.red)
+    assert-eq(0.6, c.blue)
+    assert(is-err(::req/hex-color("blue")))
+    assert-eq({type: "CURRENCY", pattern: "$#,##0.00"}, ::req/number-format(row, "currency", "$#,##0.00").repeatCell.cell.userEnteredFormat.numberFormat)
+    assert-eq(2, length(::req/header-row(0)))
+    assert-eq(3, length(::req/header-row(0, ::req/rgb(232, 240, 254))))
+}
 
 test-calls-surface-no-credentials-err
 meta ["test"] fn () {
-    read ::google::sheets/get-values("sheet-id", "Sheet1!A1:B2")
+    read ::values/get-values("sheet-id", "Sheet1!A1:B2")
     assert(is-err(read), "get-values without credentials errs")
     assert(contains(err-message(read), "no credentials"), "the auth error reaches the caller")
-
-    write ::google::sheets/update-values("sheet-id", "Sheet1!A1", [["x"]])
-    assert(is-err(write), "update-values without credentials errs")
-
-    created ::google::sheets/create-spreadsheet("t")
-    assert(is-err(created), "create-spreadsheet without credentials errs")
-
-    batch ::google::sheets/batch-get-values("sheet-id", ["A1", "B2:B9"])
-    assert(is-err(batch), "batch-get-values without credentials errs")
+    assert(is-err(::books/create-spreadsheet("t")))
+    assert(is-err(::values/read-records("sheet-id", "A:B")))
 }

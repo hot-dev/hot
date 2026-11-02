@@ -1,0 +1,422 @@
+::google::drive::upload ns
+meta {
+    doc: """
+    Uploads: binary-safe multipart uploads for small files, resumable
+    uploads (chunked, with status query and resume) for large ones, and
+    content replacement for existing files. `upload-file` and
+    `update-file-content` switch to resumable automatically above 5 MiB.
+
+    Content may be Bytes (sent verbatim), a Str (its UTF-8 bytes), or a
+    Map/Vec (sent as JSON). Bodies are assembled as Bytes, so binary data
+    (0x00, 0xFF, invalid UTF-8) arrives intact.
+
+    **Resumable uploads.** A session is opened with
+    `start-resumable-upload`, then content is PUT in chunks that are
+    multiples of 256 KiB (default 8 MiB, `opts.chunk-size`). After each
+    chunk, Drive's `308 Resume Incomplete` says how much it has stored
+    (its `Range` header), and the next chunk starts from there. When a
+    chunk fails with 429/5xx or a dropped connection, the upload asks Drive
+    for the stored offset (`upload-status`) and carries on from it, once,
+    at once (google-core never waits; use a run `retry` policy for
+    backoff). Sessions stay valid for a week; `resume-upload` continues an
+    interrupted one, in this run or a later one.
+
+    A session URI is sent the call's credentials, so it must be a Google
+    URL (or under `google.drive.api-root`) unless `opts` has its own
+    credential: context credentials never go to another host.
+
+    **Scopes.** `drive` by default; `drive.file` is enough to create files
+    and to update files the app created.
+    """
+}
+
+::drive ::google::drive
+::api ::google::api
+::files ::google::drive::files
+HttpResponse ::hot::http/HttpResponse
+
+RESUMABLE_THRESHOLD 5242880
+CHUNK_ALIGN 262144
+DEFAULT_CHUNK_SIZE 8388608
+GOOGLE_SESSION_URI_PATTERN "^https://[A-Za-z0-9.-]+\\.googleapis\\.com/"
+
+UPLOAD_LOCAL_KEYS ["parent", "parents", "description", "metadata", "resumable", "chunk-size", "convert-to", "file-id"]
+
+CONVERT_TARGETS {
+    document: "application/vnd.google-apps.document",
+    doc: "application/vnd.google-apps.document",
+    spreadsheet: "application/vnd.google-apps.spreadsheet",
+    sheet: "application/vnd.google-apps.spreadsheet",
+    presentation: "application/vnd.google-apps.presentation",
+    slides: "application/vnd.google-apps.presentation"
+}
+
+// ---------------------------------------------------------------------------
+// Body building (pure)
+// ---------------------------------------------------------------------------
+
+to-bytes
+meta {
+    doc: """Upload content as Bytes: Bytes pass through, a Str becomes its UTF-8 bytes, null is empty, and anything else is JSON-encoded."""
+}
+fn (content: Any): Bytes {
+  cond {
+    is-bytes(content) => { content }
+    is-str(content) => { Bytes(content) }
+    is-null(content) => { Bytes([]) }
+    => { Bytes(to-json(untype(content))) }
+  }
+}
+
+new-boundary
+meta {doc: """A random multipart boundary, so file content cannot collide with it."""}
+fn (): Str {
+  `hot-drive-${::hot::random/random-string(32)}`
+}
+
+build-multipart
+meta {
+    doc: """
+    Build a `multipart/related` upload body as Bytes: a JSON metadata
+    part (nulls dropped) and the content part, separated by `boundary`.
+    Content is concatenated as bytes, never interpolated into a string,
+    so binary payloads survive.
+    """
+}
+fn (metadata: Map, content: Any, mime-type: Str, boundary: Str): Bytes {
+  head `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${to-json(::drive/compact(metadata))}\r\n--${boundary}\r\nContent-Type: ${mime-type}\r\n\r\n`
+  tail `\r\n--${boundary}--\r\n`
+  concat(Bytes(head), to-bytes(content), Bytes(tail))
+}
+
+convert-target
+meta {
+    doc: """The Google-native MIME type to convert an upload into: `"document"`/`"doc"`, `"spreadsheet"`/`"sheet"`, `"presentation"`/`"slides"`, or a full MIME type. Null means no conversion."""
+}
+fn (value: Any): Str? {
+  cond {
+    is-null(value) => { null }
+    contains(Str(value), "/") => { Str(value) }
+    is-some(get(CONVERT_TARGETS, lowercase(Str(value)))) => { get(CONVERT_TARGETS, lowercase(Str(value))) }
+    => { err(`google-drive: unknown convert-to "${value}"; use document, spreadsheet, presentation or a MIME type`) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Resumable chunk math (pure)
+// ---------------------------------------------------------------------------
+
+align-chunk-size
+meta {
+    doc: """Round a chunk size down to a multiple of 256 KiB (Drive's requirement for every chunk but the last), at least 256 KiB."""
+}
+fn (size: Int): Int {
+  max(CHUNK_ALIGN, mul(floor(div(size, CHUNK_ALIGN)), CHUNK_ALIGN))
+}
+
+content-range
+meta {
+    doc: """
+    The `Content-Range` for sending bytes `start` up to (not including)
+    `end` of a `total`-byte upload: `content-range(0, 524288, 2000000)` is
+    `"bytes 0-524287/2000000"`. An empty range (`start` = `end`) is the
+    status query form `"bytes */<total>"`.
+    """
+}
+fn (start: Int, end: Int, total: Int): Str {
+  if(gte(start, end), `bytes */${total}`, `bytes ${start}-${sub(end, 1)}/${total}`)
+}
+
+next-offset-from-range
+meta {
+    doc: """The next byte to send after a `308 Resume Incomplete`, from its `Range` header: `"bytes=0-42"` means 43. No header means nothing was stored (0)."""
+}
+fn (range: Str?): Int {
+  cond {
+    or(is-null(range), eq(trim(or(range, "")), "")) => { 0 }
+    => {
+      last-byte ::api/parse-int(last(split(range, "-")))
+      if(is-null(last-byte), 0, add(last-byte, 1))
+    }
+  }
+}
+
+chunk-bounds
+meta {
+    doc: """The `[start, end)` of the chunk beginning at `offset` (pure): `end` is `offset + chunk-size`, capped at `total`."""
+}
+fn (offset: Int, chunk-size: Int, total: Int): Vec {
+  [offset, min(total, add(offset, chunk-size))]
+}
+
+classify-upload-response
+meta {
+    doc: """
+    Interpret the response to a resumable-upload PUT (pure): returns
+    `{state: "complete", file}`, `{state: "incomplete", next-offset}`
+    (from the `Range` header of a 308), or `{state: "retry", error}` for
+    failures worth another try (`error` is what to `err` if there are no
+    tries left: an `HttpError` or a transport message), or an Err (expired
+    session, other 4xx).
+    """
+}
+fn (response: Result): Map {
+  cond {
+    is-err(response) => {
+      message err-message(response)
+      if(::api/is-retryable-transport("PUT", message), {state: "retry", error: message}, response)
+    }
+
+    in(response.status, [200, 201]) => { {state: "complete", file: response.body} }
+    eq(response.status, 308) => {
+      {state: "incomplete", next-offset: next-offset-from-range(get(or(response.headers, {}), "range"))}
+    }
+
+    in(response.status, [404, 410]) => { err("google-drive: the resumable upload session has expired; start a new upload") }
+    ::api/is-retryable-status(response.status, response.body) => {
+      {state: "retry", error: ::api/HttpError(response)}
+    }
+    => { err(::api/HttpError(response)) }
+  }
+}
+
+session-uri-error
+meta {
+    doc: """Why `session-uri` may not be used with these `opts`, or null: it is a Google URL or under `google.drive.api-root`, or `opts` has its own credential. Context credentials are never sent to any other URL."""
+}
+fn (session-uri: Str, opts: Map): Str? {
+  allowed or(
+    ::hot::regex/is-match(session-uri, GOOGLE_SESSION_URI_PATTERN),
+    starts-with(session-uri, `${::drive/api-root()}/`),
+    ::google::auth/has-primary-credential(opts)
+  )
+  if(allowed, null, "google-drive: session-uri is not a Google URL, and the call's opts have no token (or other credential). Pass one with it: context credentials are never sent to a per-call URL.")
+}
+
+// ---------------------------------------------------------------------------
+// Resumable uploads
+// ---------------------------------------------------------------------------
+
+start-resumable-upload
+meta {
+    doc: """
+    POST (or PATCH, with `opts.file-id`) `/upload/drive/v3/files?uploadType=resumable`
+    - open a resumable session for `size` bytes of `mime-type` with the
+    given file `metadata`. Returns the session URI (from `Location`);
+    store it to resume later.
+    """
+}
+fn
+(metadata: Map, mime-type: Str, size: Int): Str {
+  start-resumable-upload(metadata, mime-type, size, {})
+},
+(metadata: Map, mime-type: Str, size: Int, opts: Map): Str {
+  file-id get(opts, "file-id")
+  method if(is-some(file-id), "PATCH", "POST")
+  path if(is-some(file-id), `/files/${::drive/encode-id(file-id)}`, "/files")
+  params ::drive/query-params({uploadType: "resumable", supportsAllDrives: true, fields: ::drive/FILE_FIELDS}, opts, UPLOAD_LOCAL_KEYS)
+  headers {X-Upload-Content-Type: mime-type, X-Upload-Content-Length: Str(size)}
+  response ::api/request(::drive/SCOPE, method, ::drive/upload-url(path, params), headers, ::drive/compact(metadata), ::drive/creds(opts))
+  cond {
+    is-err(response) => { response }
+    not(::hot::http/is-ok-response(response)) => { err(::api/HttpError(response)) }
+    => {
+      location get(or(response.headers, {}), "location")
+      if(is-null(location), err("google-drive: resumable upload started without a Location header"), location)
+    }
+  }
+}
+
+session-put fn (session-uri: Str, range: Str, body: Any, opts: Map): HttpResponse {
+  invalid session-uri-error(session-uri, opts)
+  headers if(eq(body, ""), {Content-Range: range, Content-Length: "0"}, {Content-Range: range})
+  if(is-some(invalid), err(invalid), ::api/request(::drive/SCOPE, "PUT", session-uri, headers, body, opts))
+}
+
+put-range fn (session-uri: Str, chunk: Bytes, start: Int, total: Int, opts: Map): HttpResponse {
+  session-put(session-uri, content-range(start, add(start, length(chunk)), total),
+    if(eq(length(chunk), 0), "", chunk),
+    {...::drive/creds(opts), retry: false})
+}
+
+upload-loop fn (session-uri: Str, bytes: Bytes, offset: Int, chunk-size: Int, attempt: Int, policy: Map, opts: Map): Map {
+  total length(bytes)
+  bounds chunk-bounds(offset, chunk-size, total)
+  chunk slice(bytes, first(bounds), last(bounds))
+  result classify-upload-response(put-range(session-uri, chunk, offset, total, opts))
+  cond {
+    is-err(result) => { result }
+    eq(result.state, "complete") => { result.file }
+
+    // Drive's Range is the truth: continue from it, whatever was sent.
+    eq(result.state, "incomplete") => {
+      next result.next-offset
+      cond {
+        gt(next, offset) => { upload-loop(session-uri, bytes, next, chunk-size, 0, policy, opts) }
+        gte(attempt, policy.max-retries) => { err(`google-drive: resumable upload made no progress at byte ${offset} of ${total}; resume-upload continues it`) }
+        => { upload-loop(session-uri, bytes, next, chunk-size, add(attempt, 1), policy, opts) }
+      }
+    }
+
+    gte(attempt, policy.max-retries) => { err(result.error) }
+
+    // The chunk failed: some of it may still have been stored, so ask.
+    => {
+      status upload-status(session-uri, total, opts)
+      cond {
+        is-err(status) => { status }
+        status.complete => { status.file }
+        => { upload-loop(session-uri, bytes, status.next-offset, chunk-size, add(attempt, 1), policy, opts) }
+      }
+    }
+  }
+}
+
+upload-resumable
+meta {
+    doc: """
+    Send `content` to an open session URI, starting at byte 0 (or
+    `opts.offset`), in `opts.chunk-size` chunks (rounded down to 256 KiB
+    multiples; default 8 MiB), following the offset Drive reports after
+    each one. Returns the created/updated file resource.
+    """
+}
+fn
+(session-uri: Str, content: Any): Map {
+  upload-resumable(session-uri, content, {})
+},
+(session-uri: Str, content: Any, opts: Map): Map {
+  bytes to-bytes(content)
+  chunk align-chunk-size(or(get(opts, "chunk-size"), DEFAULT_CHUNK_SIZE))
+  upload-loop(session-uri, bytes, or(get(opts, "offset"), 0), chunk, 0, ::api/retry-policy(opts), opts)
+}
+
+upload-status
+meta {
+    doc: """
+    Ask Drive how much of a `total`-byte resumable upload it has stored
+    (an empty PUT with `Content-Range: bytes */total`). Returns
+    `{complete, next-offset, file}`: `next-offset` is the next byte to
+    send (from the 308's `Range` header; 0 when nothing is stored), and
+    `file` is the file resource once `complete`. An expired session or a
+    failed query is an Err (`::google::api/is-retryable` says whether to
+    try again later).
+
+    ```hot
+    status ::google::drive::upload/upload-status(session-uri, length(bytes))
+    status.next-offset
+    ```
+    """
+}
+fn
+(session-uri: Str, total: Int): Map {
+  upload-status(session-uri, total, {})
+},
+(session-uri: Str, total: Int, opts: Map): Map {
+  result classify-upload-response(session-put(session-uri, content-range(total, total, total), "", ::drive/creds(opts)))
+  cond {
+    is-err(result) => { result }
+    eq(result.state, "complete") => { {complete: true, next-offset: total, file: result.file} }
+    eq(result.state, "incomplete") => { {complete: false, next-offset: result.next-offset, file: null} }
+    => { err(result.error) }
+  }
+}
+
+resume-upload
+meta {
+    doc: """
+    Continue an interrupted resumable upload of `content` (the same bytes
+    as before): ask Drive for the stored offset and send the rest. Returns
+    the file resource, straight away if Drive already has every byte. An
+    expired session (sessions last a week) is an Err: start a new upload.
+
+    ```hot
+    session ::google::drive::upload/start-resumable-upload({name: "big.bin"}, "application/octet-stream", length(bytes))
+    // ... store `session`; the upload is interrupted ...
+    file ::google::drive::upload/resume-upload(session, bytes)
+    ```
+    """
+}
+fn
+(session-uri: Str, content: Any): Map {
+  resume-upload(session-uri, content, {})
+},
+(session-uri: Str, content: Any, opts: Map): Map {
+  bytes to-bytes(content)
+  status upload-status(session-uri, length(bytes), opts)
+  cond {
+    is-err(status) => { status }
+    status.complete => { status.file }
+    => { upload-resumable(session-uri, bytes, {...opts, offset: status.next-offset}) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// One-call uploads
+// ---------------------------------------------------------------------------
+
+send-content fn (file-id: Str?, metadata: Map, bytes: Bytes, mime-type: Str, opts: Map): Map {
+  resumable or(eq(get(opts, "resumable"), true), gt(length(bytes), RESUMABLE_THRESHOLD))
+  cond {
+    resumable => {
+      session start-resumable-upload(metadata, mime-type, length(bytes), {...opts, file-id: file-id})
+      if(is-err(session), session, upload-resumable(session, bytes, opts))
+    }
+    => {
+      boundary new-boundary()
+      method if(is-some(file-id), "PATCH", "POST")
+      path if(is-some(file-id), `/files/${::drive/encode-id(file-id)}`, "/files")
+      params ::drive/query-params({uploadType: "multipart", supportsAllDrives: true, fields: ::drive/FILE_FIELDS}, opts, UPLOAD_LOCAL_KEYS)
+      ::api/json(::drive/SCOPE, method, ::drive/upload-url(path, params),
+        {Content-Type: `multipart/related; boundary=${boundary}`},
+        build-multipart(metadata, bytes, mime-type, boundary),
+        ::drive/creds(opts))
+    }
+  }
+}
+
+upload-file
+meta {
+    doc: """
+    Create a file with content. A Str fourth argument is the parent folder
+    id; an opts Map takes `parent`/`parents`, `description`, `metadata`
+    (extra fields such as `appProperties`), `convert-to` (`"document"`,
+    `"spreadsheet"`, `"presentation"`: convert on upload, e.g. a .docx or
+    .csv into a Google Doc/Sheet), `resumable: true` to force a resumable
+    upload, `chunk-size`, Drive parameters (`keepRevisionForever`,
+    `ocrLanguage`, `useContentAsIndexableText`, `fields`) and
+    credentials. Returns the file resource.
+
+    ```hot
+    file ::google::drive::upload/upload-file("report.csv", csv-text, "text/csv", folder-id)
+    sheet ::google::drive::upload/upload-file("report", csv-text, "text/csv", {parent: folder-id, convert-to: "spreadsheet"})
+    ```
+    """
+}
+fn
+(name: Str, content: Any, mime-type: Str): Map {
+  upload-file(name, content, mime-type, {})
+},
+(name: Str, content: Any, mime-type: Str, parent: Str): Map {
+  upload-file(name, content, mime-type, {parent: parent})
+},
+(name: Str, content: Any, mime-type: Str, opts: Map): Map {
+  target convert-target(get(opts, "convert-to"))
+  cond {
+    is-err(target) => { target }
+    => { send-content(null, ::files/build-metadata(name, target, opts), to-bytes(content), mime-type, opts) }
+  }
+}
+
+update-file-content
+meta {
+    doc: """PATCH /upload/files/{id} - replace a file's content (a new revision), optionally changing metadata via `opts.metadata` / `description`. Resumable above 5 MiB. Returns the file resource."""
+}
+fn
+(id: Str, content: Any, mime-type: Str): Map {
+  update-file-content(id, content, mime-type, {})
+},
+(id: Str, content: Any, mime-type: Str, opts: Map): Map {
+  metadata ::drive/compact({description: get(opts, "description"), ...or(get(opts, "metadata"), {})})
+  send-content(id, metadata, to-bytes(content), mime-type, opts)
+}

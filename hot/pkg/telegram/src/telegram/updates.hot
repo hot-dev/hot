@@ -1,6 +1,7 @@
 ::telegram::updates ns
 
 api-request ::telegram::api/request
+InputFile ::telegram::api/InputFile
 
 // ============================================================================
 // Webhook Management
@@ -8,7 +9,7 @@ api-request ::telegram::api/request
 
 SetWebhookRequest type {
   url: Str,
-  certificate: Str?,
+  certificate: InputFile?,
   ip_address: Str?,
   max_connections: Int?,
   allowed_updates: Vec<Str>?,
@@ -21,7 +22,7 @@ meta {
     doc: """
 setWebhook - Register a URL to receive incoming updates via webhook. Telegram will POST JSON updates to this URL.
 
-Set `secret_token` (1-256 characters) to receive it in the `X-Telegram-Bot-Api-Secret-Token` header for verification. `allowed_updates` filters which update types are delivered (e.g. `["message", "callback_query"]`).
+For a self-signed certificate, pass its public key as `certificate: ::telegram::api/input-file(pem-bytes, "cert.pem")` (uploaded as multipart). Set `secret_token` (1-256 characters: A-Z, a-z, 0-9, `_`, `-`) to receive it in the `X-Telegram-Bot-Api-Secret-Token` header for verification. `allowed_updates` filters which update types are delivered (e.g. `["message", "callback_query"]`).
 
 **Example**
 
@@ -36,8 +37,13 @@ Set `secret_token` (1-256 characters) to receive it in the `X-Telegram-Bot-Api-S
 ```
 """
 }
-fn (request: SetWebhookRequest): Bool {
-  api-request("setWebhook", untype(request))
+fn
+(request: SetWebhookRequest): Bool {
+  set-webhook(request, {})
+},
+(request: SetWebhookRequest, opts: Map): Bool {
+  if(is-some(request.secret_token), ::hot::ctx/mark-secret(request.secret_token))
+  api-request("setWebhook", untype(request), opts)
 }
 
 DeleteWebhookRequest type {
@@ -48,8 +54,12 @@ delete-webhook
 meta {
     doc: """deleteWebhook - Remove the webhook integration. Set `drop_pending_updates: true` to discard any pending updates."""
 }
-fn (request: DeleteWebhookRequest): Bool {
-  api-request("deleteWebhook", untype(request))
+fn
+(request: DeleteWebhookRequest): Bool {
+  delete-webhook(request, {})
+},
+(request: DeleteWebhookRequest, opts: Map): Bool {
+  api-request("deleteWebhook", untype(request), opts)
 }
 
 get-webhook-info
@@ -69,8 +79,12 @@ response.last_error_date        // => null (no errors)
 ```
 """
 }
-fn (): Map {
-  api-request("getWebhookInfo")
+fn
+(): Map {
+  get-webhook-info({})
+},
+(opts: Map): Map {
+  api-request("getWebhookInfo", {}, opts)
 }
 
 // ============================================================================
@@ -102,8 +116,12 @@ response ::updates/get-updates(::updates/GetUpdatesRequest({
 ```
 """
 }
-fn (request: GetUpdatesRequest): Vec<Map> {
-  api-request("getUpdates", untype(request))
+fn
+(request: GetUpdatesRequest): Vec<Map> {
+  get-updates(request, {})
+},
+(request: GetUpdatesRequest, opts: Map): Vec<Map> {
+  api-request("getUpdates", untype(request), opts)
 }
 
 // ============================================================================
@@ -123,11 +141,14 @@ meta {
   **Example**
 
   ```hot
-  // Using context variable (1-arity)
-  is-valid ::telegram::updates/verify-request(request)
+  check fn (request: ::hot::http/HttpRequest): Bool {
+    // Using context variable (1-arity)
+    a ::telegram::updates/verify-request(request)
 
-  // With explicit secret (2-arity)
-  is-valid ::telegram::updates/verify-request(request, "my-secret-token")
+    // With explicit secret (2-arity)
+    b ::telegram::updates/verify-request(request, "my-secret-token")
+    and(a, b)
+  }
   ```
   """
 }
@@ -144,6 +165,6 @@ fn
   cond {
     is-empty(secret) => { false }
     is-empty(token) => { false }
-    => { secure-compare(secret, token) }
+    => { secure-compare(::hot::ctx/mark-secret(secret), token) }
   }
 }

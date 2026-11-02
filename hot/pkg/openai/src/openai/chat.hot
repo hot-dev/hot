@@ -164,9 +164,17 @@ meta {
     ```
     """
 }
-fn (request: ChatCompletionRequest): ChatCompletionResponse {
-    response api-request("POST", `${::openai/BASE_URL}/chat/completions`, {}, request)
-    if(is-ok-response(response), ChatCompletionResponse(response.body), err(HttpError(response)))
+fn
+(request: ChatCompletionRequest): ChatCompletionResponse {
+    complete(request, {})
+},
+(request: ChatCompletionRequest, opts: Map): ChatCompletionResponse {
+    response api-request("POST", "/chat/completions", {}, request, opts)
+    cond {
+        is-err(response) => { response }
+        is-ok-response(response) => { ChatCompletionResponse(response.body) }
+        => { err(HttpError(response)) }
+    }
 }
 
 // ============================================================================
@@ -217,11 +225,81 @@ meta {
     ```
     """
 }
-fn (request: ChatCompletionRequest): StreamingChatResponse {
+fn
+(request: ChatCompletionRequest): StreamingChatResponse {
+    complete-stream(request, {})
+},
+(request: ChatCompletionRequest, opts: Map): StreamingChatResponse {
     // Force stream: true
     streaming-request {...untype(request), stream: true}
-    response api-request-stream("POST", `${::openai/BASE_URL}/chat/completions`, {}, streaming-request, "sse")
+    response api-request-stream("POST", "/chat/completions", {}, streaming-request, "sse", opts)
     cond {
+        is-err(response) => { response }
+        gte(response.status, 400) => { err(HttpError(response)) }
+        => { StreamingChatResponse(response) }
+    }
+}
+
+// ============================================================================
+// Explicit endpoints (OpenAI-compatible servers)
+// ============================================================================
+
+complete-with
+meta {
+    doc: """
+    `complete` against an explicit `::openai::api/Endpoint` instead of the
+    ctx-configured OpenAI. Reads no ctx, so it works with keyless local
+    servers (Ollama, vLLM, LM Studio) and any OpenAI-compatible provider.
+
+    Returns the decoded response body as a Map (`id`, `choices`, `usage`,
+    ...). It is not coerced to `ChatCompletionResponse`, because
+    compatible servers often omit or add fields. Non-2xx responses return
+    an Err carrying `HttpError`.
+
+    **Example**
+
+    ```hot
+    ep ::openai::api/endpoint("http://localhost:11434/v1")
+    response ::openai::chat/complete-with(ep, {
+        model: "llama3.2",
+        messages: [{role: "user", content: "Say hi"}],
+        max_tokens: 50
+    })
+    response.choices[0].message.content
+    ```
+    """
+}
+fn (ep: ::openai::api/Endpoint, request: Map): Map {
+    response ::openai::api/endpoint-request(ep, "POST", "/chat/completions", {}, request)
+    ::openai::api/endpoint-response(response)
+}
+
+complete-stream-with
+meta {
+    doc: """
+    `complete-stream` against an explicit `::openai::api/Endpoint`. Forces
+    `stream: true` and returns a `StreamingChatResponse` whose body yields
+    SSE events, or an Err carrying `HttpError` on a non-2xx status.
+
+    **Example**
+
+    ```hot
+    ep ::openai::api/endpoint("http://localhost:11434/v1")
+    response ::openai::chat/complete-stream-with(ep, {
+        model: "llama3.2",
+        messages: [{role: "user", content: "Count to 3."}]
+    })
+    for-each(response.body, (event) {
+        print(::openai::chat/extract-chunk-text(event))
+    })
+    ```
+    """
+}
+fn (ep: ::openai::api/Endpoint, request: Map): StreamingChatResponse {
+    streaming-request {...untype(request), stream: true}
+    response ::openai::api/endpoint-request-stream(ep, "POST", "/chat/completions", {}, streaming-request, "sse")
+    cond {
+        is-err(response) => { response }
         gte(response.status, 400) => { err(HttpError(response)) }
         => { StreamingChatResponse(response) }
     }
@@ -257,16 +335,31 @@ meta {
     ```hot
     response ::openai::chat/chat("gpt-4o-mini", "Tell me a story.", "You are a storyteller.", 200)
     ```
+
+    **Example - With a per-call key**
+
+    ```hot
+    response ::openai::chat/chat("gpt-4o-mini", "What is 1+1?", {api-key: tenant-key})
+    ```
     """
 }
 fn
 (model: Str, message: Str): Str {
-    chat(model, message, null, null)
+    chat(model, message, null, null, {})
+},
+(model: Str, message: Str, opts: Map): Str {
+    chat(model, message, null, null, opts)
 },
 (model: Str, message: Str, system: Str): Str {
-    chat(model, message, system, null)
+    chat(model, message, system, null, {})
+},
+(model: Str, message: Str, system: Str, opts: Map): Str {
+    chat(model, message, system, null, opts)
 },
 (model: Str, message: Str, system: Str?, max-tokens: Int?): Str {
+    chat(model, message, system, max-tokens, {})
+},
+(model: Str, message: Str, system: Str?, max-tokens: Int?, opts: Map): Str {
     messages cond {
         is-null(system) => {
             [Message({role: "user", content: message})]
@@ -285,11 +378,11 @@ fn
         max_completion_tokens: or(max-tokens, 1024)
     }
 
-    result complete(ChatCompletionRequest(request))
+    result complete(ChatCompletionRequest(request), opts)
 
-    match result {
-        Result.Err => { err(result) }
-        Result.Ok => {
+    cond {
+        is-err(result) => { result }
+        => {
             first-choice result.choices[0]
             or(first-choice.message.content, "")
         }

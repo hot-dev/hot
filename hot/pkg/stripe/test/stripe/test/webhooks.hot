@@ -124,3 +124,80 @@ fn () {
     request make-request(sign("notanumber", body, TEST_SECRET), body)
     assert(not(::webhooks/verify-request(request, TEST_SECRET)), "non-numeric timestamp should fail")
 }
+
+test-verify-rejects-empty-explicit-secret
+meta ["test"]
+fn () {
+    // An empty key would make signatures forgeable: fail closed.
+    body "{}"
+    ts `${now-seconds()}`
+    request make-request(sign(ts, body, ""), body)
+    assert(not(::webhooks/verify-request(request, "")), "empty secret never verifies")
+}
+
+test-verify-rejects-future-timestamp
+meta ["test"]
+fn () {
+    body "{}"
+    future-ts `${add(now-seconds(), 3600)}`
+    request make-request(sign(future-ts, body, TEST_SECRET), body)
+    assert(not(::webhooks/verify-request(request, TEST_SECRET)), "timestamps an hour ahead fail too")
+}
+
+test-verify-rejects-header-without-timestamp
+meta ["test"]
+fn () {
+    body "{}"
+    sig ::hmac/hmac-sha256(TEST_SECRET, `.${body}`)
+    request make-request(`v1=${sig}`, body)
+    assert(not(::webhooks/verify-request(request, TEST_SECRET, 0)), "a header with no t= never verifies")
+}
+
+test-verify-rejects-missing-body
+meta ["test"]
+fn () {
+    ts `${now-seconds()}`
+    request {headers: {stripe-signature: sign(ts, """{"id": "evt_1"}""", TEST_SECRET)}}
+    assert(not(::webhooks/verify-request(request, TEST_SECRET)), "no body means nothing to match")
+}
+
+test-verify-uses-body-bytes-when-present
+meta ["test"]
+fn () {
+    // body-bytes (set when the body isn't valid UTF-8) is what Stripe signed;
+    // a lossy body-raw must not be used instead.
+    body """{"id": "evt_bytes"}"""
+    ts `${now-seconds()}`
+    request {headers: {stripe-signature: sign(ts, body, TEST_SECRET)}, body-raw: "lossy", body-bytes: Bytes(body)}
+    assert(::webhooks/verify-request(request, TEST_SECRET), "signature over body-bytes verifies")
+}
+
+test-construct-event-returns-event
+meta ["test"]
+fn () {
+    body """{"id": "evt_123", "type": "invoice.paid"}"""
+    ts `${now-seconds()}`
+    request make-request(sign(ts, body, TEST_SECRET), body)
+    event ::webhooks/construct-event(request, TEST_SECRET)
+    assert-eq("evt_123", event.id)
+    assert-eq("invoice.paid", event.type)
+}
+
+test-construct-event-prefers-parsed-body
+meta ["test"]
+fn () {
+    body """{"id": "evt_123"}"""
+    ts `${now-seconds()}`
+    request {headers: {stripe-signature: sign(ts, body, TEST_SECRET)}, body-raw: body, body: {id: "evt_123", parsed: true}}
+    event ::webhooks/construct-event(request, TEST_SECRET)
+    assert-eq(true, event.parsed)
+}
+
+test-construct-event-rejects-bad-signature
+meta ["test"]
+fn () {
+    body """{"id": "evt_123"}"""
+    ts `${now-seconds()}`
+    request make-request(sign(ts, body, "whsec_wrong"), body)
+    assert(is-err(::webhooks/construct-event(request, TEST_SECRET)), "bad signature is an Err")
+}

@@ -1,0 +1,190 @@
+::hubspot::test::opts ns
+meta ["test"]
+
+// Hermetic: no network and no hubspot.* context. A blank token stops every
+// call in the resolver with an Err naming the key, which proves that function
+// passes `opts` through.
+
+::api ::hubspot::api
+::objects ::hubspot::objects
+::contacts ::hubspot::contacts
+::companies ::hubspot::companies
+::deals ::hubspot::deals
+::engagements ::hubspot::engagements
+::notes ::hubspot::notes
+::lists ::hubspot::lists
+::owners ::hubspot::owners
+::pipelines ::hubspot::pipelines
+::properties ::hubspot::properties
+
+BLANK {token: ""}
+
+refused fn (result: Result): Bool {
+    and(is-err(result), contains(err-message(result), "token"), contains(err-message(result), "blank or null"))
+}
+
+test-resolve-opts-override-ctx
+meta ["test"] fn () {
+    resolved ::api/resolve-from({token: "pat-tenant", api-version: "2026-03"}, {"hubspot.token": "pat-ctx", "hubspot.api.version": "2026-01"})
+    assert-eq("pat-tenant", resolved.token)
+    assert-eq("2026-03", resolved.api-version)
+}
+
+test-resolve-ctx-used-when-opts-empty
+meta ["test"] fn () {
+    resolved ::api/resolve-from({}, {"hubspot.token": "pat-ctx", "hubspot.api.version": "2026-01"})
+    assert-eq("pat-ctx", resolved.token)
+    assert-eq("2026-01", resolved.api-version)
+}
+
+test-resolve-defaults
+meta ["test"] fn () {
+    assert-eq(::api/DEFAULT_API_VERSION, ::api/resolve-from({}, {"hubspot.token": "pat-ctx"}).api-version)
+}
+
+test-resolve-missing-token-is-a-clear-error
+meta ["test"] fn () {
+    result ::api/resolve-from({}, {})
+    assert(is-err(result))
+    assert(contains(err-message(result), "hubspot.token is not set"))
+}
+
+test-resolve-blank-token-is-an-error-not-a-fallback
+meta ["test"] fn () {
+    context {"hubspot.token": "pat-ctx"}
+    assert(refused(::api/resolve-from({token: ""}, context)))
+    assert(refused(::api/resolve-from({token: "   "}, context)))
+    assert(refused(::api/resolve-from({token: null}, context)))
+}
+
+test-resolve-marks-the-token-and-returns-it-unchanged
+meta ["test"] fn () {
+    assert-eq("pat-tenant-token", ::api/resolve({token: "pat-tenant-token"}).token)
+}
+
+test-resolve-never-writes-ctx
+meta ["test"] fn () {
+    ::api/resolve({token: "pat-tenant-token", api-version: "2026-03"})
+    assert(ne("pat-tenant-token", ::hot::ctx/get("hubspot.token")))
+    assert(ne("2026-03", ::hot::ctx/get("hubspot.api.version")))
+}
+
+test-build-request
+meta ["test"] fn () {
+    req ::api/build-request("POST", "/crm/x", {X-Extra: "1"}, {a: 1}, "pat-tenant")
+    assert-eq("https://api.hubapi.com/crm/x", req.url)
+    assert-eq("Bearer pat-tenant", req.headers.Authorization)
+    assert-eq("application/json", req.headers.Content-Type)
+    assert-eq("1", req.headers.X-Extra)
+    assert-eq({a: 1}, from-json(req.body))
+}
+
+test-opts-api-version-reaches-the-path
+meta ["test"] fn () {
+    assert-eq("/crm/objects/2026-03/contacts", ::api/crm-path("objects", "/contacts", {api-version: "2026-03"}))
+    assert-eq(`/crm/objects/${::api/DEFAULT_API_VERSION}/contacts`, ::api/crm-path("objects", "/contacts"))
+}
+
+test-explicit-token-arity-resolves-too
+meta ["test"] fn () {
+    assert(refused(::api/json("GET", "/x", {}, "", "")))
+    assert(refused(::api/request("GET", "/x", {}, "", "")))
+}
+
+test-opts-reach-the-transport
+meta ["test"] fn () {
+    assert(refused(::api/json("GET", "/x", BLANK)))
+    assert(refused(::api/json("POST", "/x", {}, {a: 1}, BLANK)))
+    assert(refused(::api/request("GET", "/x", BLANK)))
+    assert(refused(::api/request("POST", "/x", {}, {a: 1}, BLANK)))
+}
+
+test-opts-reach-objects
+meta ["test"] fn () {
+    assert(refused(::objects/get-object("contacts", "1", BLANK)))
+    assert(refused(::objects/get-object("contacts", "1", ["email"], {}, BLANK)))
+    assert(refused(::objects/create-object("contacts", {email: "a"}, BLANK)))
+    assert(refused(::objects/create-object("contacts", {email: "a"}, [], BLANK)))
+    assert(refused(::objects/update-object("contacts", "1", {email: "a"}, BLANK)))
+    assert(refused(::objects/update-object("contacts", "1", {email: "a"}, "email", BLANK)))
+    assert(refused(::objects/archive-object("contacts", "1", BLANK)))
+    assert(refused(::objects/list-objects("contacts", {}, BLANK)))
+    assert(refused(::objects/list-all-objects("contacts", {}, 2, BLANK)))
+    assert(refused(::objects/search-objects("contacts", {}, BLANK)))
+    assert(refused(::objects/search-all-objects("contacts", {}, 2, BLANK)))
+    assert(refused(::objects/batch-read("contacts", ["1"], {}, BLANK)))
+    assert(refused(::objects/batch-create("contacts", [], BLANK)))
+    assert(refused(::objects/batch-update("contacts", [], BLANK)))
+    assert(refused(::objects/batch-upsert("contacts", "email", [], BLANK)))
+    assert(refused(::objects/batch-archive("contacts", [], BLANK)))
+    assert(refused(::objects/associate("contacts", "1", "companies", "2", BLANK)))
+    assert(refused(::objects/associate-with-label("contacts", "1", "companies", "2", 1, "HUBSPOT_DEFINED", BLANK)))
+    assert(refused(::objects/remove-association("contacts", "1", "companies", "2", BLANK)))
+    assert(refused(::objects/list-associations("contacts", "1", "companies", {}, BLANK)))
+}
+
+test-opts-reach-typed-modules
+meta ["test"] fn () {
+    assert(refused(::contacts/create-contact({email: "a"}, BLANK)))
+    assert(refused(::contacts/get-contact("1", BLANK)))
+    assert(refused(::contacts/get-contact("1", ["email"], BLANK)))
+    assert(refused(::contacts/update-contact("1", {email: "a"}, BLANK)))
+    assert(refused(::contacts/find-by-email("a@b.co", BLANK)))
+    assert(refused(::contacts/search-contacts({}, BLANK)))
+    assert(refused(::contacts/upsert-by-email([], BLANK)))
+    assert(refused(::contacts/archive-contact("1", BLANK)))
+    assert(refused(::companies/create-company({name: "a"}, BLANK)))
+    assert(refused(::companies/get-company("1", BLANK)))
+    assert(refused(::companies/update-company("1", {name: "a"}, BLANK)))
+    assert(refused(::companies/find-by-domain("a.co", BLANK)))
+    assert(refused(::companies/search-companies({}, BLANK)))
+    assert(refused(::companies/archive-company("1", BLANK)))
+    assert(refused(::deals/create-deal({dealname: "a"}, BLANK)))
+    assert(refused(::deals/get-deal("1", BLANK)))
+    assert(refused(::deals/update-deal("1", {dealname: "a"}, BLANK)))
+    assert(refused(::deals/search-deals({}, BLANK)))
+    assert(refused(::deals/archive-deal("1", BLANK)))
+}
+
+test-create-property-validation-comes-back-as-an-err
+meta ["test"] fn () {
+    result ::properties/create-property("contacts", {name: "x"}, BLANK)
+    assert(is-err(result))
+    assert(contains(err-message(result), "create-property needs"))
+}
+
+test-opts-reach-the-other-modules
+meta ["test"] fn () {
+    assert(refused(::engagements/create-activity("tasks", {}, [], BLANK)))
+    assert(refused(::engagements/create-task({}, [], BLANK)))
+    assert(refused(::engagements/create-note({}, [], BLANK)))
+    assert(refused(::notes/log-note("contacts", "1", "hi", BLANK)))
+    assert(refused(::lists/create-list("n", "contacts", "MANUAL", {}, BLANK)))
+    assert(refused(::lists/get-list("1", BLANK)))
+    assert(refused(::lists/find-list-by-name("contacts", "n", BLANK)))
+    assert(refused(::lists/search-lists("q", {}, BLANK)))
+    assert(refused(::lists/delete-list("1", BLANK)))
+    assert(refused(::lists/add-members("1", ["2"], BLANK)))
+    assert(refused(::lists/remove-members("1", ["2"], BLANK)))
+    assert(refused(::lists/list-members("1", {}, BLANK)))
+    assert(refused(::owners/list-owners({}, BLANK)))
+    assert(refused(::owners/get-owner("1", BLANK)))
+    assert(refused(::owners/get-owner("1", "email", BLANK)))
+    assert(refused(::owners/find-owner-by-email("a@b.co", BLANK)))
+    assert(refused(::pipelines/list-pipelines("deals", BLANK)))
+    assert(refused(::pipelines/get-pipeline("deals", "p", BLANK)))
+    assert(refused(::pipelines/list-stages("deals", "p", BLANK)))
+    assert(refused(::pipelines/get-stage("deals", "p", "s", BLANK)))
+    assert(refused(::pipelines/find-stage("deals", "p", "s", BLANK)))
+    assert(refused(::properties/list-properties("contacts", {}, BLANK)))
+    assert(refused(::properties/get-property("contacts", "email", BLANK)))
+    assert(refused(::properties/create-property("contacts", {name: "x", label: "X", type: "string", fieldType: "text", groupName: "g"}, BLANK)))
+    assert(refused(::properties/update-property("contacts", "x", {}, BLANK)))
+    assert(refused(::properties/archive-property("contacts", "x", BLANK)))
+}
+
+test-error-message-reads-a-typed-http-error
+meta ["test"] fn () {
+    e ::api/HttpError(::hot::http/HttpResponse({status: 409, headers: {}, body: {message: "Contact already exists", category: "CONFLICT"}}))
+    assert-eq("Contact already exists", ::api/error-message(e))
+}

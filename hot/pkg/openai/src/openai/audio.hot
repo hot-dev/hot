@@ -83,9 +83,17 @@ meta {
     ```
     """
 }
-fn (request: SpeechRequest): Bytes | HttpError {
-    response api-request("POST", `${::openai/BASE_URL}/audio/speech`, {}, request)
-    if(is-ok-response(response), response.body-bytes, err(HttpError(response)))
+fn
+(request: SpeechRequest): Bytes | HttpError {
+    speech(request, {})
+},
+(request: SpeechRequest, opts: Map): Bytes | HttpError {
+    response api-request("POST", "/audio/speech", {}, request, opts)
+    cond {
+        is-err(response) => { response }
+        is-ok-response(response) => { response.body-bytes }
+        => { err(HttpError(response)) }
+    }
 }
 
 // Note: transcriptions and translations require multipart/form-data file uploads
@@ -117,15 +125,22 @@ meta {
     ```
     """
 }
-fn (text: Str): Bytes | HttpError {
-    speak(text, "alloy")
+fn
+(text: Str): Bytes | HttpError {
+    speak(text, "alloy", {})
+},
+(text: Str, opts: Map): Bytes | HttpError {
+    speak(text, "alloy", opts)
 },
 (text: Str, voice: Str): Bytes | HttpError {
+    speak(text, voice, {})
+},
+(text: Str, voice: Str, opts: Map): Bytes | HttpError {
     speech(SpeechRequest({
         model: "tts-1",
         input: text,
         voice: voice
-    }))
+    }), opts)
 }
 
 // =============================================================================

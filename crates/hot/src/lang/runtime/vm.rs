@@ -2998,15 +2998,13 @@ impl VirtualMachine {
                 // the actual arg types better is called instead (see
                 // `overload_for_args`), with the arguments prepared for its
                 // parameters: one that declares a `Result` receives an Err.
-                // Otherwise `coerce_call_args` applies any implicit arrows.
-                let dispatched = self.overload_for_args(function_id, &args);
-                if let Some(chosen) = dispatched {
+                // `coerce_call_args` then applies any implicit arrows to the
+                // parameters of the function called.
+                if let Some(chosen) = self.overload_for_args(function_id, &args) {
                     function_id = chosen;
                 }
-                let mut args = self.prepare_call_args(CallTarget::Function(function_id), args)?;
-                if dispatched.is_none() {
-                    args = self.coerce_call_args(function_id, args)?;
-                }
+                let args = self.prepare_call_args(CallTarget::Function(function_id), args)?;
+                let args = self.coerce_call_args(function_id, args)?;
 
                 // Execute the user function directly
                 let result = match self.execute_user_function(function_id, &args) {
@@ -7487,8 +7485,8 @@ impl VirtualMachine {
     /// wins, as it does at compile time; failing that, the most specific one
     /// that accepts them (a single type, then a union or nullable type, then
     /// `Any`). The resolved overload is kept on ties and when nothing else
-    /// accepts the arguments, so implicit coercion still applies to it.
-    /// Returns the overload to call instead, if any.
+    /// accepts the arguments. Implicit coercion then applies to whichever
+    /// overload is called. Returns the overload to call instead, if any.
     pub(crate) fn overload_for_args(
         &mut self,
         function_id: FunctionId,
@@ -11699,12 +11697,14 @@ impl VirtualMachine {
                 // same-arity sibling (e.g. an `(x: Vec)` overload passing a
                 // Str element back to its own name). The TCO loop runs that
                 // as a regular call. The args are prepared for the function
-                // called.
-                let function_id = self
-                    .overload_for_args(*function_id, &new_args)
-                    .unwrap_or(*function_id);
-                let new_args =
+                // called, and a sibling gets its implicit arrows.
+                let dispatched = self.overload_for_args(*function_id, &new_args);
+                let function_id = dispatched.unwrap_or(*function_id);
+                let mut new_args =
                     self.prepare_call_args(CallTarget::Function(function_id), new_args)?;
+                if dispatched.is_some() {
+                    new_args = self.coerce_call_args(function_id, new_args)?;
+                }
 
                 // Restore instruction pointer before returning tail call request
                 self.instruction_pointer = saved_instruction_pointer;

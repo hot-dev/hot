@@ -1,0 +1,373 @@
+::discord::test::api ns
+meta ["test"]
+
+::api ::discord::api
+::messages ::discord::messages
+::guilds ::discord::guilds
+::users ::discord::users
+::channels ::discord::channels
+::webhooks ::discord::webhooks
+::interactions ::discord::interactions
+
+HttpResponse ::hot::http/HttpResponse
+
+contains-bytes fn (haystack: Bytes, needle: Str): Bool {
+  is-some(::hot::bytes/index-of(haystack, Bytes(needle)))
+}
+
+// ============================================================================
+// Body building: unset optionals are never sent as null
+// ============================================================================
+
+test-modify-guild-member-sends-only-set-fields
+meta ["test"] fn () {
+    req ::guilds/ModifyGuildMemberRequest({guild_id: "g1", user_id: "u1", nick: "Ada"})
+    body ::api/body(req, ["guild_id", "user_id"])
+    assert-eq({nick: "Ada"}, body, "only nick is sent")
+    assert(not(in("channel_id", keys(body))), "channel_id omitted (null would disconnect voice)")
+    assert(not(in("communication_disabled_until", keys(body))), "timeout field omitted (null would lift a timeout)")
+    assert(not(in("roles", keys(body))), "roles omitted")
+}
+
+test-body-clear-sends-explicit-null
+meta ["test"] fn () {
+    req ::guilds/ModifyGuildMemberRequest({guild_id: "g1", user_id: "u1", clear: ["communication_disabled_until"]})
+    body ::api/body(req, ["guild_id", "user_id"])
+    assert-eq(["communication_disabled_until"], keys(body), "only the cleared field")
+    assert(is-null(body.communication_disabled_until), "cleared field is null")
+}
+
+test-body-clear-wins-over-value
+meta ["test"] fn () {
+    body ::api/body({nick: "x", clear: ["nick"]}, [])
+    assert(is-null(body.nick), "clear overrides a set value")
+}
+
+test-body-drops-explicit-nulls-and-control-keys
+meta ["test"] fn () {
+    body ::api/body({channel_id: "c", name: null, reason: "why", files: [], topic: "t"}, ["channel_id"])
+    assert-eq({topic: "t"}, body, "explicit null, reason and files are not body fields")
+}
+
+test-modify-current-user-empty-body
+meta ["test"] fn () {
+    body ::api/body(::users/ModifyCurrentUserRequest({username: "bot"}), [])
+    assert-eq({username: "bot"}, body, "avatar is not nulled")
+}
+
+test-modify-guild-keeps-icon-and-channels
+meta ["test"] fn () {
+    body ::api/body(::guilds/ModifyGuildRequest({guild_id: "g", name: "New"}), ["guild_id"])
+    assert-eq({name: "New"}, body, "icon, splash and channel ids untouched")
+}
+
+test-modify-channel-and-webhook-omit-name
+meta ["test"] fn () {
+    channel ::api/body(::channels/ModifyChannelRequest({channel_id: "c", topic: "t"}), ["channel_id"])
+    assert-eq({topic: "t"}, channel, "modify-channel without name sends no name")
+    hook ::api/body(::webhooks/ModifyWebhookRequest({webhook_id: "w", channel_id: "c2"}), ["webhook_id"])
+    assert-eq({channel_id: "c2"}, hook, "modify-webhook without name sends no name")
+}
+
+test-edit-message-keeps-embeds-and-components
+meta ["test"] fn () {
+    body ::api/body(::messages/EditMessageRequest({channel_id: "c", message_id: "m", content: "edited"}), ["channel_id", "message_id"])
+    assert-eq({content: "edited"}, body, "embeds/components are not nulled")
+}
+
+test-create-message-keeps-every-field
+meta ["test"] fn () {
+    req ::messages/CreateMessageRequest({
+      channel_id: "c",
+      content: "hi",
+      nonce: "n-1",
+      enforce_nonce: true,
+      poll: {question: {text: "Lunch?"}, answers: [{poll_media: {text: "Yes"}}]},
+      attachments: [{id: 0, filename: "a.png"}]
+    })
+    body ::api/body(req, ["channel_id"])
+    assert-eq("n-1", body.nonce, "nonce kept")
+    assert-eq(true, body.enforce_nonce, "enforce_nonce kept")
+    assert-eq("Lunch?", body.poll.question.text, "poll kept")
+    assert-eq(1, length(body.attachments), "attachments kept")
+    assert(not(in("channel_id", keys(body))), "path param not in body")
+}
+
+// ============================================================================
+// URL and query building
+// ============================================================================
+
+test-query-omits-unset-params
+meta ["test"] fn () {
+    assert-eq("?limit=10", ::api/query({limit: 10, around: null, before: null, after: null}))
+    assert-eq("", ::api/query({limit: null}), "no params, no ?")
+    assert-eq("?with_counts=true", ::api/query({with_counts: true}), "booleans encode as true")
+}
+
+test-resolve-from-prefers-opts-then-ctx
+meta ["test"] fn () {
+    ctx-values {"discord.bot.token": "ctx-token"}
+    assert-eq("tenant-token", ::api/resolve-from({token: " tenant-token "}, ctx-values).token)
+    assert-eq("ctx-token", ::api/resolve-from({}, ctx-values).token)
+}
+
+test-resolve-from-blank-token-never-falls-back
+meta ["test"] fn () {
+    for-each(["", "  ", null], (blank) {
+        out ::api/resolve-from({token: blank}, {"discord.bot.token": "ctx-token"})
+        assert(is-err(out), "a blank token is an Err, never ctx")
+        assert(contains(if-err(out, (e) { e }), "token"), "names the key")
+    })
+}
+
+test-resolve-from-no-token
+meta ["test"] fn () {
+    assert(contains(if-err(::api/resolve-from({}, {}), (e) { e }), "discord.bot.token"))
+}
+
+test-resolve-returns-marked-token-unchanged
+meta ["test"] fn () {
+    assert-eq("tenant-bot-token", ::api/resolve({token: "tenant-bot-token"}).token)
+}
+
+test-token-routes-never-send-a-bot-token
+meta ["test"] fn () {
+    ::hot::ctx/set("discord.bot.token", "ctx-bot-token")
+    plain ::api/build-request("POST", "/webhooks/1/tok", {auth: false})
+    assert(not(in("Authorization", keys(plain.headers))), "no ctx token")
+    with-opts ::api/build-request("POST", "/webhooks/1/tok", {auth: false, token: "tenant-bot-token"})
+    assert(not(in("Authorization", keys(with-opts.headers))), "no token from opts")
+    assert(is-err(::api/build-request("POST", "/webhooks/1/tok", {auth: false, token: ""})), "a blank token is still an Err")
+}
+
+test-token-seg-encodes-and-returns-the-value
+meta ["test"] fn () {
+    assert-eq("a%2Fwebhook-token", ::api/token-seg("a/webhook-token"))
+}
+
+test-webhook-tokens-marked-unchanged
+meta ["test"] fn () {
+    hook {id: "1", token: "webhook-token-value"}
+    assert-eq(hook, ::discord::webhooks/mark-webhook-tokens(hook))
+    assert-eq([hook, {id: "2"}], ::discord::webhooks/mark-webhook-tokens([hook, {id: "2"}]))
+}
+
+test-opts-arity-errs-before-any-request
+meta ["test"] fn () {
+    assert(is-err(::discord::users/get-current-user({token: ""})))
+    assert(is-err(::discord::applications/get-current-application({token: null})))
+    assert(is-err(::discord::webhooks/get-webhook(::discord::webhooks/GetWebhookRequest({webhook_id: "1"}), {token: " "})))
+    assert(is-err(::discord::webhooks/get-webhook-with-token(::discord::webhooks/GetWebhookWithTokenRequest({webhook_id: "1", webhook_token: "tok"}), {token: ""})))
+    assert(is-err(::api/request("GET", "https://discord.com/api/v10/users/@me", {}, "", "")), "an empty explicit token is an Err too")
+    assert(is-err(::api/call("GET", "/users/@me", {token: ""})), "a token in call options goes through resolve")
+    callback {interaction_id: "1", interaction_token: "tok", type: 1}
+    assert(is-err(::discord::interactions/create-interaction-response(callback, {token: ""})), "a failed callback isn't reported as true")
+}
+
+test-retry-after-header-non-numeric-is-null
+meta ["test"] fn () {
+    e ::api/HttpError(::hot::http/HttpResponse({status: 429, headers: {"retry-after": "soon"}, body: "busy"}))
+    assert(is-null(e.retry_after), "a malformed header isn't an Err")
+    ok ::api/HttpError(::hot::http/HttpResponse({status: 429, headers: {"retry-after": "1.5"}, body: "busy"}))
+    assert-eq(1.5, ok.retry_after)
+}
+
+test-build-request-url-and-headers
+meta ["test"] fn () {
+    req ::api/build-request("GET", "/channels/123/messages", {query: {limit: 5, before: null}, token: "tkn"})
+    assert-eq("https://discord.com/api/v10/channels/123/messages?limit=5", req.url)
+    assert-eq("Bot tkn", req.headers.Authorization)
+    assert(starts-with(req.headers.User-Agent, "DiscordBot ("), "DiscordBot User-Agent")
+    assert(not(in("Content-Type", keys(req.headers))), "no content type without a body")
+    assert-eq("", req.body, "no body")
+}
+
+test-build-request-json-body
+meta ["test"] fn () {
+    req ::api/build-request("PATCH", "/users/@me", {body: {username: "x"}, token: "tkn"})
+    assert-eq("application/json", req.headers.Content-Type)
+    assert-eq({username: "x"}, from-json(req.body))
+}
+
+test-build-request-without-auth
+meta ["test"] fn () {
+    req ::api/build-request("POST", "/webhooks/1/tok", {body: {content: "x"}, auth: false})
+    assert(not(in("Authorization", keys(req.headers))), "webhook-token routes send no bot token")
+}
+
+test-search-query-is-encoded
+meta ["test"] fn () {
+    req ::api/build-request("GET", "/guilds/1/members/search", {query: {query: "a&b c", limit: null}, token: "t"})
+    assert-eq("https://discord.com/api/v10/guilds/1/members/search?query=a%26b+c", req.url)
+}
+
+test-emoji-segment
+meta ["test"] fn () {
+    assert-eq("%F0%9F%91%8D", ::api/emoji-segment("👍"), "unicode emoji is encoded")
+    assert-eq("%F0%9F%91%8D", ::api/emoji-segment("%F0%9F%91%8D"), "pre-encoded passes through")
+    assert-eq("hotbot%3A123", ::api/emoji-segment("hotbot:123"), "custom emoji name:id")
+}
+
+test-path-segments-are-encoded
+meta ["test"] fn () {
+    assert-eq("a%2Fb", ::api/seg("a/b"), "slashes in tokens cannot escape the path")
+}
+
+test-audit-log-reason-header
+meta ["test"] fn () {
+    assert-eq({}, ::api/reason-headers(null), "no reason, no header")
+    assert-eq({X-Audit-Log-Reason: "Spam%20in%20%23general"}, ::api/reason-headers("Spam in #general"), "URL-encoded")
+    req ::api/build-request("DELETE", "/guilds/1/bans/2", {reason: "appeal accepted", token: "t"})
+    assert-eq("appeal%20accepted", get(req.headers, "X-Audit-Log-Reason"))
+}
+
+// ============================================================================
+// Multipart uploads
+// ============================================================================
+
+test-multipart-body-layout
+meta ["test"] fn () {
+    png Bytes([137, 80, 78, 71, 0, 255, 13, 10])
+    body ::api/multipart-body({content: "see file"}, [{filename: "pic.png", content: png}], "BND")
+    assert(contains-bytes(body, "--BND\r\nContent-Disposition: form-data; name=\"payload_json\"\r\nContent-Type: application/json\r\n\r\n{\"content\":\"see file\"}\r\n"), "payload_json part")
+    assert(contains-bytes(body, "Content-Disposition: form-data; name=\"files[0]\"; filename=\"pic.png\"\r\nContent-Type: image/png\r\n\r\n"), "files[0] part with mime from extension")
+    assert(is-some(::hot::bytes/index-of(body, png)), "binary content intact")
+    assert(contains-bytes(body, "\r\n--BND--\r\n"), "closing boundary")
+}
+
+test-multipart-filename-is-sanitised
+meta ["test"] fn () {
+    body ::api/multipart-body({}, [{filename: "a\"b\r\n.txt", content: "x", content_type: "text/plain"}], "B")
+    assert(contains-bytes(body, "filename=\"a%22b.txt\""), "quotes and CRLF cannot break the header")
+}
+
+test-build-request-with-files
+meta ["test"] fn () {
+    files [{filename: "r.csv", content: "a,b\n", description: "report"}]
+    payload {content: "x", attachments: ::api/attachments-for(files)}
+    req ::api/build-request("POST", "/channels/1/messages", {body: payload, files: files, token: "t", boundary: "XYZ"})
+    assert-eq("multipart/form-data; boundary=XYZ", req.headers.Content-Type)
+    assert(is-bytes(req.body), "multipart body is Bytes")
+    assert(contains-bytes(req.body, "\"attachments\":[{\"id\":0,\"filename\":\"r.csv\",\"description\":\"report\"}]"), "attachments describe files by index")
+}
+
+test-multipart-form-for-stickers
+meta ["test"] fn () {
+    body ::api/multipart-form({name: "shipit", description: "", tags: "rocket", extra: null}, "file", {filename: "s.png", content: Bytes([1, 2])}, "S")
+    assert(contains-bytes(body, "name=\"name\"\r\n\r\nshipit\r\n"), "plain form field")
+    assert(not(contains-bytes(body, "name=\"extra\"")), "null fields dropped")
+    assert(contains-bytes(body, "name=\"file\"; filename=\"s.png\""), "file part")
+}
+
+// ============================================================================
+// Response and error handling
+// ============================================================================
+
+test-to-result-success-and-no-content
+meta ["test"] fn () {
+    assert-eq({id: "1"}, ::api/to-result(HttpResponse({status: 200, headers: {}, body: {id: "1"}})))
+    assert(is-null(::api/to-result(HttpResponse({status: 204, headers: {}, body: ""}))), "204 is null")
+    assert(::api/to-ok(HttpResponse({status: 204, headers: {}, body: ""})), "204 is ok")
+}
+
+test-to-result-error
+meta ["test"] fn () {
+    result ::api/to-result(HttpResponse({status: 403, headers: {}, body: {code: 50013, message: "Missing Permissions"}}))
+    assert(is-err(result), "non-2xx is an Err")
+    e err-value(result)
+    assert-eq(403, e.status)
+    assert-eq(50013, e.body.code)
+    assert(is-null(e.retry_after), "no retry_after outside 429")
+    assert(not(::api/is-rate-limited(e)), "403 is not a rate limit")
+}
+
+test-rate-limit-surfaces-retry-after
+meta ["test"] fn () {
+    result ::api/to-result(HttpResponse({
+      status: 429,
+      headers: {retry-after: "65", x-ratelimit-scope: "user"},
+      body: {message: "You are being rate limited.", retry_after: 64.57, global: false}
+    }))
+    e err-value(result)
+    assert(::api/is-rate-limited(e), "429 is a rate limit")
+    assert-eq(64.57, e.retry_after, "body retry_after preferred")
+    assert-eq(false, e.global)
+    assert-eq("user", e.scope)
+}
+
+test-rate-limit-header-fallback
+meta ["test"] fn () {
+    e err-value(::api/to-ok(HttpResponse({status: 429, headers: {retry-after: "3"}, body: "Too Many Requests"})))
+    assert-eq(Dec("3"), e.retry_after, "Retry-After header when the body has none")
+}
+
+// ============================================================================
+// Pagination
+// ============================================================================
+
+test-paginate-follows-cursor-until-short-page
+meta ["test"] fn () {
+    pages {
+      start: [{id: "1"}, {id: "2"}],
+      "2": [{id: "3"}, {id: "4"}],
+      "4": [{id: "5"}]
+    }
+
+    all ::api/paginate((cursor) { get(pages, or(cursor, "start")) }, (page) { last(page).id }, 2, 100)
+    assert-eq(["1", "2", "3", "4", "5"], map(all, (m) { m.id }))
+}
+
+test-paginate-respects-max-items
+meta ["test"] fn () {
+    all ::api/paginate((cursor) { [{id: "a"}, {id: "b"}] }, (page) { "next" }, 2, 3)
+    assert-eq(3, length(all), "stops at max-items")
+}
+
+// ============================================================================
+// Interactions
+// ============================================================================
+
+test-respond-rejects-unverified
+meta ["test"] fn () {
+    response ::interactions/respond({body: {type: 2}}, false, (i) { ::interactions/pong() })
+    assert-eq(401, response.status)
+}
+
+test-respond-ping-pong
+meta ["test"] fn () {
+    response ::interactions/respond({body: {type: 1}}, true, (i) { fail("handler must not run for PING") })
+    assert-eq(200, response.status)
+    assert-eq({type: 1}, response.body)
+}
+
+test-respond-inline-message
+meta ["test"] fn () {
+    response ::interactions/respond({body: {type: 2, data: {name: "hello", options: [{name: "who", type: 3, value: "Ada"}]}}}, true, (i) {
+      ::interactions/message-response({content: `Hello, ${::interactions/option-value(i, "who")}!`}, true)
+    })
+    assert-eq(4, response.body.type)
+    assert-eq("Hello, Ada!", response.body.data.content)
+    assert-eq(64, response.body.data.flags, "ephemeral flag")
+    assert-eq("application/json", response.headers.content-type)
+}
+
+test-option-value-in-subcommand
+meta ["test"] fn () {
+    interaction {data: {options: [{name: "add", type: 1, options: [{name: "role", type: 8, value: "r1"}]}]}}
+    assert-eq("r1", ::interactions/option-value(interaction, "role"))
+    assert(is-null(::interactions/option-value(interaction, "missing")), "absent option is null")
+}
+
+test-deferred-response-shapes
+meta ["test"] fn () {
+    assert-eq({type: 5}, ::interactions/deferred-response())
+    assert-eq({type: 5, data: {flags: 64}}, ::interactions/deferred-response(true))
+    assert-eq(8, ::interactions/autocomplete-response([{name: "a", value: "a"}]).type)
+}
+
+test-request-types-accept-plain-file-maps
+meta ["test"] fn () {
+    req ::messages/CreateMessageRequest({channel_id: "c", content: "x", files: [{filename: "a.txt", content: "hi"}]})
+    assert-eq(1, length(req.files), "files accept plain maps")
+    assert-eq({content: "x"}, ::api/body(req, ["channel_id"]), "files never go in the JSON body")
+}

@@ -1,0 +1,54 @@
+::whatsapp::test::media ns
+meta ["test"]
+
+::media ::whatsapp::media
+
+// ============================================================================
+// Multipart upload body (binary-safe)
+// ============================================================================
+
+PNG_HEADER Bytes([137, 80, 78, 71, 13, 10, 26, 10, 0, 255, 254])
+
+test-upload-body-is-exact-bytes
+meta ["test"] fn () {
+    body ::media/build-upload-body("B", PNG_HEADER, "image/png", "p.png")
+    expected concat(
+        Bytes("--B\r\nContent-Disposition: form-data; name=\"messaging_product\"\r\n\r\nwhatsapp\r\n"),
+        Bytes("--B\r\nContent-Disposition: form-data; name=\"type\"\r\n\r\nimage/png\r\n"),
+        Bytes("--B\r\nContent-Disposition: form-data; name=\"file\"; filename=\"p.png\"\r\nContent-Type: image/png\r\n\r\n"),
+        PNG_HEADER,
+        Bytes("\r\n--B--\r\n")
+    )
+    assert(is-bytes(body), "upload body is Bytes")
+    assert-eq(expected, body)
+}
+
+test-upload-body-preserves-non-utf8
+meta ["test"] fn () {
+    body ::media/build-upload-body("B", PNG_HEADER, "image/png", "p.png")
+    at ::hot::bytes/index-of(body, PNG_HEADER)
+    assert(is-some(at), "binary content appears verbatim")
+    assert-eq(PNG_HEADER, slice(body, at, add(at, length(PNG_HEADER))))
+}
+
+test-upload-body-accepts-text
+meta ["test"] fn () {
+    body ::media/build-upload-body("B", "hello", "text/plain", "a.txt")
+    assert(is-some(::hot::bytes/index-of(body, Bytes("\r\n\r\nhello\r\n--B--\r\n"))))
+}
+
+test-upload-body-sanitizes-filename
+meta ["test"] fn () {
+    body ::media/build-upload-body("B", "x", "text/plain", "a\"\r\nb.txt")
+    assert(is-some(::hot::bytes/index-of(body, Bytes("filename=\"a___b.txt\""))), "quotes and CRLF cannot break the part header")
+}
+
+// ============================================================================
+// Media URLs
+// ============================================================================
+
+test-media-url
+meta ["test"] fn () {
+    assert-eq(::whatsapp::api/url("123"), ::media/media-url("123", null))
+    assert-eq(::whatsapp::api/url("123?phone_number_id=456"), ::media/media-url("123", "456"))
+}

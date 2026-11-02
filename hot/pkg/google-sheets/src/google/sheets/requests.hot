@@ -1,0 +1,264 @@
+::google::sheets::requests ns
+meta {
+    doc: """
+    Pure builders for `spreadsheets.batchUpdate` requests. Each returns
+    one request Map; pass a Vec of them to
+    `::google::sheets::spreadsheets/batch-update`, which applies them
+    atomically in order.
+
+    Ranges are `GridRange`s with 0-based, end-exclusive indexes on a
+    numeric `sheetId` (not the title; see
+    `::google::sheets::spreadsheets/sheet-id`). Build one with
+    `grid-range`.
+
+    ```hot
+    ::req ::google::sheets::requests
+
+    header ::req/grid-range(0, 0, 1)
+    ::google::sheets::spreadsheets/batch-update(id, [
+      ::req/freeze(0, 1),
+      ::req/bold(header),
+      ::req/background(header, ::req/hex-color("#e8f0fe")),
+      ::req/auto-resize(0, "COLUMNS")
+    ])
+    ```
+    """
+}
+
+::sheets ::google::sheets
+
+DIMENSIONS ["ROWS", "COLUMNS"]
+
+// ---------------------------------------------------------------------------
+// Ranges and colors
+// ---------------------------------------------------------------------------
+
+grid-range
+meta {
+    doc: """A GridRange on `sheet-id` (0-based, end exclusive; null leaves a side unbounded): `grid-range(0, 0, 1)` is the first row; `grid-range(0, 1, null, 2, 4)` is columns C:D from row 2 down."""
+}
+fn
+(sheet-id: Int): Map {
+  {sheetId: sheet-id}
+},
+(sheet-id: Int, start-row: Int?, end-row: Int?): Map {
+  grid-range(sheet-id, start-row, end-row, null, null)
+},
+(sheet-id: Int, start-row: Int?, end-row: Int?, start-column: Int?, end-column: Int?): Map {
+  ::sheets/compact({
+    sheetId: sheet-id,
+    startRowIndex: start-row,
+    endRowIndex: end-row,
+    startColumnIndex: start-column,
+    endColumnIndex: end-column
+  })
+}
+
+rgb
+meta {
+    doc: """A Sheets Color from 0-255 channels: `rgb(26, 115, 232)` is `{red: 0.1019..., green: 0.4509..., blue: 0.9098...}`."""
+}
+fn (red: Int, green: Int, blue: Int): Map {
+  {red: div(Dec(red), 255), green: div(Dec(green), 255), blue: div(Dec(blue), 255)}
+}
+
+hex-color
+meta {
+    doc: """A Sheets Color from a hex string (`"#1a73e8"` or `"1a73e8"`); an Err for anything else."""
+}
+fn (hex: Str): Map {
+  h lowercase(::hot::str/replace(trim(hex), "#", ""))
+  cond {
+    not(::hot::regex/is-match(h, "^[0-9a-f]{6}$")) => { err(`google-sheets: invalid hex color ${to-json(hex)}`) }
+    => {
+      channels ::hot::bytes/to-vec(::hot::hex/decode(h))
+      rgb(first(channels), get(channels, 1), last(channels))
+    }
+  }
+}
+
+dimension fn (value: Str): Str {
+  d uppercase(value)
+  if(in(d, DIMENSIONS), d, err(`google-sheets: dimension must be ROWS or COLUMNS, got ${to-json(value)}`))
+}
+
+dimension-range
+meta {
+    doc: """A DimensionRange: rows or columns `start` (inclusive) to `end` (exclusive) of `sheet-id`; null bounds are open."""
+}
+fn (sheet-id: Int, dim: Str, start: Int?, end: Int?): Map {
+  ::sheets/compact({sheetId: sheet-id, dimension: dimension(dim), startIndex: start, endIndex: end})
+}
+
+// ---------------------------------------------------------------------------
+// Sheets (tabs)
+// ---------------------------------------------------------------------------
+
+add-sheet
+meta {
+    doc: """`addSheet`: a new tab titled `title`. Options: `index` (position), `rowCount`, `columnCount`, `frozenRowCount`, `sheetId` (choose the id), `hidden`."""
+}
+fn
+(title: Str): Map {
+  add-sheet(title, {})
+},
+(title: Str, opts: Map): Map {
+  grid ::sheets/compact({rowCount: get(opts, "rowCount"), columnCount: get(opts, "columnCount"), frozenRowCount: get(opts, "frozenRowCount")})
+  {addSheet: {properties: ::sheets/compact({
+    title: title,
+    sheetId: get(opts, "sheetId"),
+    index: get(opts, "index"),
+    hidden: get(opts, "hidden"),
+    gridProperties: if(is-empty(grid), null, grid)
+  })}}
+}
+
+rename-sheet
+meta {doc: """`updateSheetProperties` setting a tab's title."""}
+fn (sheet-id: Int, title: Str): Map {
+  {updateSheetProperties: {properties: {sheetId: sheet-id, title: title}, fields: "title"}}
+}
+
+delete-sheet
+meta {doc: """`deleteSheet`: remove a tab and its data."""}
+fn (sheet-id: Int): Map {
+  {deleteSheet: {sheetId: sheet-id}}
+}
+
+duplicate-sheet
+meta {
+    doc: """`duplicateSheet`: copy a tab within the spreadsheet as `new-title` (inserted after the source unless `opts.index`)."""
+}
+fn
+(sheet-id: Int, new-title: Str): Map {
+  duplicate-sheet(sheet-id, new-title, {})
+},
+(sheet-id: Int, new-title: Str, opts: Map): Map {
+  {duplicateSheet: ::sheets/compact({sourceSheetId: sheet-id, newSheetName: new-title, insertSheetIndex: get(opts, "index")})}
+}
+
+freeze
+meta {
+    doc: """`updateSheetProperties` freezing the first `rows` rows (and `columns` columns when given). 0 unfreezes. Only the counts you pass are changed."""
+}
+fn
+(sheet-id: Int, rows: Int): Map {
+  freeze(sheet-id, rows, null)
+},
+(sheet-id: Int, rows: Int?, columns: Int?): Map {
+  grid ::sheets/compact({frozenRowCount: rows, frozenColumnCount: columns})
+  fields filter([if(is-some(rows), "gridProperties.frozenRowCount", null), if(is-some(columns), "gridProperties.frozenColumnCount", null)], is-some)
+  {updateSheetProperties: {properties: {sheetId: sheet-id, gridProperties: grid}, fields: join(fields, ",")}}
+}
+
+// ---------------------------------------------------------------------------
+// Rows and columns
+// ---------------------------------------------------------------------------
+
+auto-resize
+meta {
+    doc: """`autoResizeDimensions`: fit `"COLUMNS"` (or `"ROWS"`) to their content, all of them or `start` to `end` (0-based, exclusive)."""
+}
+fn
+(sheet-id: Int, dim: Str): Map {
+  auto-resize(sheet-id, dim, null, null)
+},
+(sheet-id: Int, dim: Str, start: Int?, end: Int?): Map {
+  {autoResizeDimensions: {dimensions: dimension-range(sheet-id, dim, start, end)}}
+}
+
+set-size
+meta {
+    doc: """`updateDimensionProperties` setting the pixel width of columns (or height of rows) `start` to `end`."""
+}
+fn (sheet-id: Int, dim: Str, start: Int, end: Int, pixels: Int): Map {
+  {updateDimensionProperties: {range: dimension-range(sheet-id, dim, start, end), properties: {pixelSize: pixels}, fields: "pixelSize"}}
+}
+
+insert-dimension
+meta {
+    doc: """`insertDimension`: insert empty rows (or columns) at `start` up to `end`, inheriting formatting from the row before unless `inherit-from-before` is false."""
+}
+fn
+(sheet-id: Int, dim: Str, start: Int, end: Int): Map {
+  insert-dimension(sheet-id, dim, start, end, true)
+},
+(sheet-id: Int, dim: Str, start: Int, end: Int, inherit-from-before: Bool): Map {
+  {insertDimension: {range: dimension-range(sheet-id, dim, start, end), inheritFromBefore: and(inherit-from-before, gt(start, 0))}}
+}
+
+delete-dimension
+meta {doc: """`deleteDimension`: delete rows (or columns) `start` to `end`."""}
+fn (sheet-id: Int, dim: Str, start: Int, end: Int): Map {
+  {deleteDimension: {range: dimension-range(sheet-id, dim, start, end)}}
+}
+
+append-dimension
+meta {
+    doc: """`appendDimension`: add `count` empty rows (or columns) at the end of a sheet."""
+}
+fn (sheet-id: Int, dim: Str, count: Int): Map {
+  {appendDimension: {sheetId: sheet-id, dimension: dimension(dim), length: count}}
+}
+
+// ---------------------------------------------------------------------------
+// Formatting
+// ---------------------------------------------------------------------------
+
+format-fields
+meta {
+    doc: """The `fields` mask for a `userEnteredFormat` Map (pure): `{textFormat: {bold: true}, backgroundColor: ...}` gives `"userEnteredFormat(textFormat,backgroundColor)"`, so other formatting is left alone."""
+}
+fn (format: Map): Str {
+  `userEnteredFormat(${join(map(keys(format), Str), ",")})`
+}
+
+repeat-format
+meta {
+    doc: """`repeatCell` applying `format` (a CellFormat: `textFormat`, `backgroundColor`, `horizontalAlignment`, `numberFormat`, `wrapStrategy`, ...) to every cell of `range`. Only the top-level format fields you give are changed; pass `fields` to set the mask yourself."""
+}
+fn
+(range: Map, format: Map): Map {
+  repeat-format(range, format, format-fields(format))
+},
+(range: Map, format: Map, fields: Str): Map {
+  {repeatCell: {range: range, cell: {userEnteredFormat: format}, fields: fields}}
+}
+
+bold
+meta {doc: """Make `range` bold (only `textFormat.bold` changes)."""}
+fn (range: Map): Map {
+  repeat-format(range, {textFormat: {bold: true}}, "userEnteredFormat.textFormat.bold")
+}
+
+background
+meta {doc: """Fill `range` with `color` (from `rgb` or `hex-color`)."""}
+fn (range: Map, color: Map): Map {
+  repeat-format(range, {backgroundColor: color}, "userEnteredFormat.backgroundColor")
+}
+
+number-format
+meta {
+    doc: """Apply a number format: `format-type` is `NUMBER`, `CURRENCY`, `PERCENT`, `DATE`, `TIME`, `DATE_TIME`, `SCIENTIFIC` or `TEXT`; `pattern` is optional (e.g. `"#,##0.00"`, `"yyyy-mm-dd"`)."""
+}
+fn
+(range: Map, format-type: Str): Map {
+  number-format(range, format-type, null)
+},
+(range: Map, format-type: Str, pattern: Str?): Map {
+  repeat-format(range, {numberFormat: ::sheets/compact({type: uppercase(format-type), pattern: pattern})}, "userEnteredFormat.numberFormat")
+}
+
+header-row
+meta {
+    doc: """The usual header treatment as a Vec of requests: freeze row 1 and make it bold (and fill it with `color` when given)."""
+}
+fn
+(sheet-id: Int): Vec {
+  header-row(sheet-id, null)
+},
+(sheet-id: Int, color: Map?): Vec {
+  row grid-range(sheet-id, 0, 1)
+  base [freeze(sheet-id, 1), bold(row)]
+  if(is-null(color), base, concat(base, [background(row, color)]))
+}

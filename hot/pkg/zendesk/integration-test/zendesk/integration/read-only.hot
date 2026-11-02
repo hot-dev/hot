@@ -1,0 +1,69 @@
+::zendesk::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration tests (live Zendesk Support, read-only)
+// =============================================================================
+// Requires ctx: zendesk.subdomain (ZENDESK_SUBDOMAIN) plus either
+// zendesk.email + zendesk.api.token (ZENDESK_EMAIL, ZENDESK_API_TOKEN) or
+// zendesk.oauth.token (ZENDESK_OAUTH_TOKEN). Every test only reads.
+// Without credentials each test records a skip and passes.
+// Run with: hot test --project pkg-integration-zendesk
+
+configured fn (): Bool {
+    has (key) { is-some(::hot::ctx/get(key)) }
+    and(has("zendesk.subdomain"), or(has("zendesk.oauth.token"), and(has("zendesk.email"), has("zendesk.api.token"))))
+}
+
+skip fn (): Bool {
+    println("Zendesk credentials not set - skipping")
+    assert(true, "skipped: no Zendesk credentials")
+}
+
+test-me
+meta ["test"] fn () {
+    cond {
+        not(configured()) => { skip() }
+        => {
+            out ::zendesk::users/me()
+            assert(is-some(out.user.id), "credentials should resolve to a signed-in user")
+        }
+    }
+}
+
+test-list-tickets-cursor
+meta ["test"] fn () {
+    cond {
+        not(configured()) => { skip() }
+        => {
+            page ::zendesk::tickets/list-tickets({page_size: 2})
+            assert(is-vec(page.tickets), "should return a tickets array")
+            assert(lte(length(page.tickets), 2), "page_size caps the page")
+            assert(is-some(page.meta), "cursor pages carry meta")
+        }
+    }
+}
+
+test-search-and-fields
+meta ["test"] fn () {
+    cond {
+        not(configured()) => { skip() }
+        => {
+            hits ::zendesk::search/search("type:ticket status<solved", {per_page: 5})
+            assert(is-vec(hits.results), "search returns results")
+            fields ::zendesk::tickets/list-ticket-fields()
+            assert(gt(length(fields.ticket_fields), 0), "accounts have system ticket fields")
+        }
+    }
+}
+
+test-views-and-macros
+meta ["test"] fn () {
+    cond {
+        not(configured()) => { skip() }
+        => {
+            assert(is-vec(::zendesk::views/list-views({page_size: 5}).views), "views list")
+            assert(is-vec(::zendesk::macros/list-macros({page_size: 5}).macros), "macros list")
+        }
+    }
+}

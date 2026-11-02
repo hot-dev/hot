@@ -1,0 +1,91 @@
+::sentry::projects ns
+meta {
+    doc: """Sentry projects and teams in the organization.""",
+    ctx: {"sentry.token": {required: false}, "sentry.org": {required: false, secret: false}}
+}
+
+::api ::sentry::api
+
+Page ::sentry::api/Page
+
+list-projects
+meta {
+    doc: """GET /organizations/{org}/projects/ - One page of the organization's projects (`query`, `per_page`, `cursor`). Returns a `Page`."""
+}
+fn
+(): Page {
+  list-projects({})
+},
+(params: Map): Page {
+  list-projects(params, {})
+},
+(params: Map, opts: Map): Page {
+  ::api/org-page("/projects/", params, opts)
+}
+
+list-all-projects
+meta {
+    doc: """Every project in the organization, following cursors up to `max` (default 1000)."""
+}
+fn
+(): Vec {
+  list-all-projects(::api/DEFAULT_MAX_ITEMS)
+},
+(max: Int): Vec {
+  list-all-projects(max, {})
+},
+(opts: Map): Vec {
+  list-all-projects(::api/DEFAULT_MAX_ITEMS, opts)
+},
+(max: Int, opts: Map): Vec {
+  ::api/collect-pages((p) { list-projects(p, opts) }, {}, max)
+}
+
+get-project
+meta {
+    doc: """GET /projects/{org}/{project}/ - One project by slug or id: platform, teams, options."""
+}
+fn
+(project: Str): Map {
+  get-project(project, {})
+},
+(project: Str, opts: Map): Map {
+  slug ::api/org(opts)
+  cond {
+    is-err(slug) => { slug }
+    => { ::api/json("GET", `/projects/${::api/seg(slug)}/${::api/seg(project)}/`, "", opts) }
+  }
+}
+
+list-teams
+meta {
+    doc: """GET /organizations/{org}/teams/ - One page of teams (`query`, `detailed`, `per_page`, `cursor`). Returns a `Page`."""
+}
+fn
+(): Page {
+  list-teams({})
+},
+(params: Map): Page {
+  list-teams(params, {})
+},
+(params: Map, opts: Map): Page {
+  ::api/org-page("/teams/", params, opts)
+}
+
+list-all-teams
+meta {
+    doc: """Every team in the organization, following cursors up to `max` (default 1000)."""
+}
+fn
+(): Vec {
+  list-all-teams(::api/DEFAULT_MAX_ITEMS)
+},
+(max: Int): Vec {
+  list-all-teams(max, {})
+},
+(opts: Map): Vec {
+  list-all-teams(::api/DEFAULT_MAX_ITEMS, opts)
+},
+(max: Int, opts: Map): Vec {
+  ::api/collect-pages((p) { list-teams(p, opts) }, {}, max)
+}

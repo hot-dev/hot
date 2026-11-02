@@ -1,16 +1,35 @@
 ::crm::salesforce ns
+meta {
+    doc: """The Salesforce backend for `::crm`: Contact, Account, Opportunity, and Task over `hot.dev/salesforce`. Called through `::crm`; the builders are exposed for testing."""
+}
 
+::ctx ::hot::ctx
 ::sobjects ::salesforce::sobjects
 ::query ::salesforce::query
 
-escape-soql
-meta {
-    doc: """Escape a string for interpolation into a SOQL literal (quotes and backslashes). Exposed for testing."""
+literal ::salesforce::query/literal
+escape-like ::salesforce::query/escape-like
+
+CONTACT_FIELDS ["Id", "Email", "FirstName", "LastName", "Phone", "AccountId"]
+DEAL_FIELDS ["Id", "Name", "StageName", "Amount", "CloseDate", "AccountId"]
+TASK_FIELDS ["Id", "Subject", "Description", "Status", "ActivityDate", "CreatedDate"]
+
+// The LastName Salesforce requires on a new Contact when none is given.
+DEFAULT_LAST_NAME "Unknown"
+
+is-blank-value ::crm/is-blank-value
+
+first-or-null fn (out: Result): Any {
+  cond {
+    is-err(out) => { out }
+    is-empty(out.records) => { null }
+    => { first(out.records) }
+  }
 }
-fn (value: Str): Str {
-  no-backslash join(split(value, "\\"), "\\\\")
-  join(split(no-backslash, "'"), "\\'")
-}
+
+// ============================================================================
+// Normalizers
+// ============================================================================
 
 normalize-contact
 meta {
@@ -22,111 +41,463 @@ fn (record: Map): ::crm/Contact {
     email: get(record, "Email"),
     first-name: get(record, "FirstName"),
     last-name: get(record, "LastName"),
+    phone: get(record, "Phone"),
+    company-id: get(record, "AccountId"),
     provider: "salesforce",
     raw: untype(record)
   })
 }
 
-normalize-company fn (record: Map): ::crm/Company {
+normalize-company
+meta {
+    doc: """Normalize a Salesforce Account into `::crm/Company`; `domain` comes from the custom domain field when configured, else the normalized `Website`. Exposed for testing."""
+}
+fn (record: Map, domain-field: Any): ::crm/Company {
+  raw-domain if(is-null(domain-field), get(record, "Website"), or(get(record, domain-field), get(record, "Website")))
   ::crm/Company({
     id: record.Id,
     name: get(record, "Name"),
-    domain: get(record, "Website"),
+    domain: ::crm/normalize-domain(raw-domain),
     provider: "salesforce",
     raw: untype(record)
   })
 }
 
-to-fields fn (fields: Map): Map {
+normalize-deal
+meta {
+    doc: """Normalize a Salesforce Opportunity into `::crm/Deal`. Exposed for testing."""
+}
+fn (record: Map): ::crm/Deal {
+  ::crm/Deal({
+    id: record.Id,
+    name: get(record, "Name"),
+    stage: get(record, "StageName"),
+    amount: get(record, "Amount"),
+    close-date: get(record, "CloseDate"),
+    company-id: get(record, "AccountId"),
+    provider: "salesforce",
+    raw: untype(record)
+  })
+}
+
+normalize-activity
+meta {
+    doc: """Normalize a Salesforce Task into `::crm/Activity`. Exposed for testing."""
+}
+fn (record: Map): ::crm/Activity {
+  ::crm/Activity({
+    id: record.Id,
+    subject: get(record, "Subject"),
+    body: get(record, "Description"),
+    occurred-at: or(get(record, "CreatedDate"), get(record, "ActivityDate")),
+    provider: "salesforce",
+    raw: untype(record)
+  })
+}
+
+// ============================================================================
+// Field mapping (pure)
+// ============================================================================
+
+contact-fields
+meta {
+    doc: """
+    Map normalized fields to Contact fields, omitting unset ones.
+    `LastName` defaults to "Unknown" only when `for-create` is true:
+    Salesforce requires it on insert, but an update must never overwrite
+    a real last name. `account-id` (or null) sets `AccountId`. Exposed
+    for testing.
+    """
+}
+fn (fields: Map, for-create: Bool, account-id: Any): Map {
+  last-name get(fields, "last-name")
   filter-vals({
     Email: get(fields, "email"),
     FirstName: get(fields, "first-name"),
-    // Salesforce requires LastName on Contact; default when absent.
-    LastName: or(get(fields, "last-name"), "Unknown"),
-    Phone: get(fields, "phone")
+    LastName: if(and(for-create, is-blank-value(last-name)), DEFAULT_LAST_NAME, last-name),
+    Phone: get(fields, "phone"),
+    AccountId: account-id
   }, is-some)
 }
 
-find-contact fn (email: Str): Any {
-  out ::query/soql(`SELECT Id, Email, FirstName, LastName FROM Contact WHERE Email = '${escape-soql(email)}' LIMIT 1`)
+deal-fields
+meta {
+    doc: """Map normalized deal fields to Opportunity fields (`Name`, `StageName`, `Amount`, `CloseDate`, `AccountId`), omitting unset ones. Exposed for testing."""
+}
+fn (fields: Map): Map {
+  filter-vals({
+    Name: get(fields, "name"),
+    StageName: get(fields, "stage"),
+    Amount: get(fields, "amount"),
+    CloseDate: get(fields, "close-date"),
+    AccountId: get(fields, "company-id")
+  }, is-some)
+}
+
+missing-deal-fields
+meta {
+    doc: """The fields an Opportunity insert still needs (`name`, `stage`, `close-date`). Exposed for testing."""
+}
+fn (fields: Map): Vec {
+  filter(["name", "stage", "close-date"], (k) { is-blank-value(get(fields, k)) })
+}
+
+domain-field
+meta {
+    ctx: {"crm.salesforce.domain-field": {required: false, secret: false}},
+    doc: """The custom Account field holding a bare domain (`crm.salesforce.domain-field`, e.g. `Domain__c`), or null to match on `Website`. Must be a plain API name."""
+}
+fn (): Any {
+  configured ::ctx/get("crm.salesforce.domain-field")
   cond {
-    is-err(out) => { out }
-    is-empty(out.records) => { null }
-    => { normalize-contact(first(out.records)) }
+    is-blank-value(configured) => { null }
+    ::hot::regex/is-match(trim(configured), "^[A-Za-z][A-Za-z0-9_]*$") => { trim(configured) }
+    => { err(`crm: crm.salesforce.domain-field '${configured}' is not a field API name`) }
   }
 }
 
-upsert-contact fn (fields: Map): ::crm/Contact {
-  existing find-contact(fields.email)
+account-fields fn (field: Any): Vec {
+  base ["Id", "Name", "Website"]
+  if(is-null(field), base, concat(base, [field]))
+}
+
+build-company-soql
+meta {
+    doc: """
+    The Account lookup for a normalized domain. With a domain field:
+    an exact match on it. Otherwise a `Website LIKE '%domain%'`
+    candidate query, filtered afterwards by `matches-domain` so
+    `www.acme.com`, `https://acme.com/` and `acme.com` all match while
+    `notacme.com` does not. Exposed for testing.
+    """
+}
+fn (domain: Str, field: Any): Str {
+  select `SELECT ${join(account-fields(field), ", ")} FROM Account`
   cond {
-    is-err(existing) => { existing }
-    is-null(existing) => {
-      created ::sobjects/create-record("Contact", to-fields(fields))
-      match created {
-        Result.Err => { err(created) }
+    is-some(field) => { `${select} WHERE ${field} = ${literal(domain)} ORDER BY CreatedDate ASC LIMIT 1` }
+    => { `${select} WHERE Website LIKE '%${escape-like(domain)}%' ORDER BY CreatedDate ASC LIMIT 200` }
+  }
+}
 
-        _ => {
-          fetched ::sobjects/get-record("Contact", created.id, ["Id", "Email", "FirstName", "LastName"])
-          match fetched {
-            Result.Err => { err(fetched) }
+matches-domain
+meta {
+    doc: """True when an Account's `Website` (or domain field) normalizes to `domain`. Exposed for testing."""
+}
+fn (record: Map, domain: Str, field: Any): Bool {
+  value if(is-null(field), get(record, "Website"), get(record, field))
+  eq(::crm/normalize-domain(value), domain)
+}
 
-            _ => { normalize-contact(fetched) }
+build-deals-soql
+meta {
+    doc: """The Opportunity query for a `find-deals` filter (`name`, `stage`, `company-id`, `contact-id` through OpportunityContactRole, `limit`, default 20). Unset keys add no condition. Exposed for testing."""
+}
+fn (criteria: Map): Str {
+  name get(criteria, "name")
+  stage get(criteria, "stage")
+  company-id get(criteria, "company-id")
+  contact-id get(criteria, "contact-id")
+  conditions filter([
+    if(is-blank-value(name), null, `Name = ${literal(name)}`),
+    if(is-blank-value(stage), null, `StageName = ${literal(stage)}`),
+    if(is-blank-value(company-id), null, `AccountId = ${literal(company-id)}`),
+    if(is-blank-value(contact-id), null, `Id IN (SELECT OpportunityId FROM OpportunityContactRole WHERE ContactId = ${literal(contact-id)})`)
+  ], is-some)
+  where-clause if(is-empty(conditions), "", ` WHERE ${join(conditions, " AND ")}`)
+  `SELECT ${join(DEAL_FIELDS, ", ")} FROM Opportunity${where-clause} ORDER BY CreatedDate DESC LIMIT ${or(get(criteria, "limit"), 20)}`
+}
+
+build-task-body
+meta {
+    doc: """The completed Task logged by `log-activity`: `Subject` (option `subject`, default "Note"), `Description`, `Status: Completed`, `WhoId`. Exposed for testing."""
+}
+fn (contact-id: Str, body: Str, options: Map): Map {
+  {
+    Subject: or(get(options, "subject"), "Note"),
+    Description: body,
+    Status: "Completed",
+    WhoId: contact-id
+  }
+}
+
+// ============================================================================
+// Contacts
+// ============================================================================
+
+find-contact fn
+(email: Str): Any {
+  find-contact(email, {})
+},
+(email: Str, opts: Map): Any {
+  found first-or-null(::query/soql(`SELECT ${join(CONTACT_FIELDS, ", ")} FROM Contact WHERE Email = ${literal(email)} ORDER BY CreatedDate ASC LIMIT 1`, {}, opts))
+  cond {
+    is-err(found) => { found }
+    is-null(found) => { null }
+    => { normalize-contact(found) }
+  }
+}
+
+find-account-by-name fn
+(name: Str): Any {
+  find-account-by-name(name, {})
+},
+(name: Str, opts: Map): Any {
+  first-or-null(::query/soql(`SELECT Id FROM Account WHERE Name = ${literal(name)} ORDER BY CreatedDate ASC LIMIT 1`, {}, opts))
+}
+
+resolve-account-id
+meta {
+    doc: """The `AccountId` to write for a contact: `company-id` when given, else the Account named `company` (created when none exists), else null."""
+}
+fn
+(fields: Map): Any {
+  resolve-account-id(fields, {})
+},
+(fields: Map, opts: Map): Any {
+  company-id get(fields, "company-id")
+  company get(fields, "company")
+  cond {
+    not(is-blank-value(company-id)) => { company-id }
+    is-blank-value(company) => { null }
+    => {
+      found find-account-by-name(company, opts)
+      cond {
+        is-err(found) => { found }
+        is-some(found) => { found.Id }
+        => {
+          created ::sobjects/create-record("Account", {Name: company}, opts)
+          cond {
+            is-err(created) => { created }
+            => { created.id }
           }
         }
       }
     }
-    => {
-      updated ::sobjects/update-record("Contact", existing.id, to-fields(fields))
-      match updated {
-        Result.Err => { err(updated) }
-
-        _ => { find-contact(fields.email) }
-      }
-    }
   }
 }
 
-log-activity fn (contact-id: Str, body: Str): Any {
-  ::sobjects/create-record("Task", {
-    Subject: "Note",
-    Description: body,
-    Status: "Completed",
-    WhoId: contact-id
-  })
-}
-
-find-company fn (domain: Str): Any {
-  out ::query/soql(`SELECT Id, Name, Website FROM Account WHERE Website = '${escape-soql(domain)}' LIMIT 1`)
+fetch-contact fn
+(id: Str): ::crm/Contact {
+  fetch-contact(id, {})
+},
+(id: Str, opts: Map): ::crm/Contact {
+  fetched ::sobjects/get-record("Contact", id, CONTACT_FIELDS, opts)
   cond {
-    is-err(out) => { out }
-    is-empty(out.records) => { null }
-    => { normalize-company(first(out.records)) }
+    is-err(fetched) => { fetched }
+    => { normalize-contact(fetched) }
   }
 }
 
-upsert-company fn (fields: Map): ::crm/Company {
-  existing find-company(fields.domain)
-  account-fields filter-vals({
-    Name: or(get(fields, "name"), get(fields, "domain")),
-    Website: get(fields, "domain")
-  }, is-some)
+upsert-contact fn
+(fields: Map): ::crm/Contact {
+  upsert-contact(fields, {})
+},
+(fields: Map, opts: Map): ::crm/Contact {
+  existing find-contact(fields.email, opts)
+  account-id cond {
+    is-err(existing) => { null }
+    => { resolve-account-id(fields, opts) }
+  }
+
   cond {
     is-err(existing) => { existing }
+    is-err(account-id) => { account-id }
     is-null(existing) => {
-      created ::sobjects/create-record("Account", account-fields)
-      match created {
-        Result.Err => { err(created) }
-
-        _ => { find-company(fields.domain) }
+      created ::sobjects/create-record("Contact", contact-fields(fields, true, account-id), opts)
+      cond {
+        is-err(created) => { created }
+        => { fetch-contact(created.id, opts) }
       }
     }
     => {
-      updated ::sobjects/update-record("Account", existing.id, account-fields)
-      match updated {
-        Result.Err => { err(updated) }
-
-        _ => { find-company(fields.domain) }
+      changes contact-fields(fields, false, account-id)
+      updated if(is-empty(changes), null, ::sobjects/update-record("Contact", existing.id, changes, opts))
+      cond {
+        is-err(updated) => { updated }
+        => { fetch-contact(existing.id, opts) }
       }
     }
   }
+}
+
+// ============================================================================
+// Activities
+// ============================================================================
+
+log-activity fn
+(contact-id: Str, body: Str, options: Map): ::crm/Activity {
+  log-activity(contact-id, body, options, {})
+},
+(contact-id: Str, body: Str, options: Map, opts: Map): ::crm/Activity {
+  task build-task-body(contact-id, body, options)
+  created ::sobjects/create-record("Task", task, opts)
+  cond {
+    is-err(created) => { created }
+    => {
+      ::crm/Activity({
+        id: created.id,
+        subject: task.Subject,
+        body: body,
+        occurred-at: null,
+        provider: "salesforce",
+        raw: untype(created)
+      })
+    }
+  }
+}
+
+list-activities fn
+(contact-id: Str, limit: Int): Vec {
+  list-activities(contact-id, limit, {})
+},
+(contact-id: Str, limit: Int, opts: Map): Vec {
+  out ::query/soql(`SELECT ${join(TASK_FIELDS, ", ")} FROM Task WHERE WhoId = ${literal(contact-id)} ORDER BY CreatedDate DESC LIMIT ${limit}`, {}, opts)
+  cond {
+    is-err(out) => { out }
+    => { map(out.records, normalize-activity) }
+  }
+}
+
+// ============================================================================
+// Companies
+// ============================================================================
+
+find-company fn
+(domain: Str): Any {
+  find-company(domain, {})
+},
+(domain: Str, opts: Map): Any {
+  field domain-field()
+  cond {
+    is-err(field) => { field }
+    => {
+      out ::query/soql(build-company-soql(domain, field), {}, opts)
+      cond {
+        is-err(out) => { out }
+        => {
+          hit find-first(out.records, (r) { matches-domain(r, domain, field) })
+          if(is-null(hit), null, normalize-company(hit, field))
+        }
+      }
+    }
+  }
+}
+
+fetch-company fn
+(id: Str, field: Any): ::crm/Company {
+  fetch-company(id, field, {})
+},
+(id: Str, field: Any, opts: Map): ::crm/Company {
+  fetched ::sobjects/get-record("Account", id, account-fields(field), opts)
+  cond {
+    is-err(fetched) => { fetched }
+    => { normalize-company(fetched, field) }
+  }
+}
+
+upsert-company fn
+(fields: Map): ::crm/Company {
+  upsert-company(fields, {})
+},
+(fields: Map, opts: Map): ::crm/Company {
+  domain fields.domain
+  field domain-field()
+  existing find-company(domain, opts)
+  name get(fields, "name")
+  cond {
+    is-err(field) => { field }
+    is-err(existing) => { existing }
+    is-null(existing) => {
+      record filter-vals({Name: or(name, domain), Website: domain}, is-some)
+      with-domain if(is-null(field), record, assoc(record, field, domain))
+      created ::sobjects/create-record("Account", with-domain, opts)
+      cond {
+        is-err(created) => { created }
+        => { fetch-company(created.id, field, opts) }
+      }
+    }
+
+    is-blank-value(name) => { existing }
+    => {
+      updated ::sobjects/update-record("Account", existing.id, {Name: name}, opts)
+      cond {
+        is-err(updated) => { updated }
+        => { fetch-company(existing.id, field, opts) }
+      }
+    }
+  }
+}
+
+// ============================================================================
+// Deals
+// ============================================================================
+
+fetch-deal fn
+(id: Str): ::crm/Deal {
+  fetch-deal(id, {})
+},
+(id: Str, opts: Map): ::crm/Deal {
+  fetched ::sobjects/get-record("Opportunity", id, DEAL_FIELDS, opts)
+  cond {
+    is-err(fetched) => { fetched }
+    => { normalize-deal(fetched) }
+  }
+}
+
+find-deals fn
+(criteria: Map): Vec {
+  find-deals(criteria, {})
+},
+(criteria: Map, opts: Map): Vec {
+  out ::query/soql(build-deals-soql(criteria), {}, opts)
+  cond {
+    is-err(out) => { out }
+    => { map(out.records, normalize-deal) }
+  }
+}
+
+create-deal fn
+(fields: Map): ::crm/Deal {
+  create-deal(fields, {})
+},
+(fields: Map, opts: Map): ::crm/Deal {
+  missing missing-deal-fields(fields)
+  cond {
+    not(is-empty(missing)) => { err(`crm: a Salesforce Opportunity needs ${join(missing, ", ")}`) }
+    => {
+      created ::sobjects/create-record("Opportunity", deal-fields(fields), opts)
+      contact-id get(fields, "contact-id")
+      cond {
+        is-err(created) => { created }
+        => {
+          role if(is-blank-value(contact-id), null, ::sobjects/create-record("OpportunityContactRole", {OpportunityId: created.id, ContactId: contact-id}, opts))
+          cond {
+            is-err(role) => { role }
+            => { fetch-deal(created.id, opts) }
+          }
+        }
+      }
+    }
+  }
+}
+
+update-deal fn
+(id: Str, fields: Map): ::crm/Deal {
+  update-deal(id, fields, {})
+},
+(id: Str, fields: Map, opts: Map): ::crm/Deal {
+  changes deal-fields(fields)
+  updated if(is-empty(changes), null, ::sobjects/update-record("Opportunity", id, changes, opts))
+  cond {
+    is-err(updated) => { updated }
+    => { fetch-deal(id, opts) }
+  }
+}
+
+move-stage fn
+(id: Str, stage: Str): ::crm/Deal {
+  move-stage(id, stage, {})
+},
+(id: Str, stage: Str, opts: Map): ::crm/Deal {
+  update-deal(id, {stage: stage}, opts)
 }
