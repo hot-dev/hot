@@ -438,7 +438,7 @@ fn read_impl(
                     }
                 };
                 match read_result {
-                    Ok(_) => Ok(Val::Bytes(buf)),
+                    Ok(_) => Ok(Val::bytes(buf)),
                     Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                         Err(err_val(format!(
                             "{}: connection closed before {} bytes arrived",
@@ -459,7 +459,7 @@ fn read_impl(
                     Ok(0) => Ok(Val::Null), // clean EOF
                     Ok(n) => {
                         buf.truncate(n);
-                        Ok(Val::Bytes(buf))
+                        Ok(Val::bytes(buf))
                     }
                     Err(e) => Err(err_val(format!("{}: read failed: {}", fn_name, e))),
                 }
@@ -496,7 +496,7 @@ pub fn write(args: &[Val]) -> HotResult<Val> {
     }
 
     let data: Vec<u8> = match &args[1] {
-        Val::Bytes(b) => b.clone(),
+        Val::Bytes(b) => b.to_vec(),
         Val::Str(s) => s.as_bytes().to_vec(),
         _ => {
             return HotResult::Err(err_val(format!("{}: data must be Bytes or Str", FN)));
@@ -630,16 +630,16 @@ mod tests {
                 panic!("Expected connection map");
             }
 
-            let written = unwrap_ok(write(&[conn.clone(), Val::Bytes(vec![1, 2, 3, 4, 5])]));
+            let written = unwrap_ok(write(&[conn.clone(), Val::bytes(vec![1, 2, 3, 4, 5])]));
             assert_eq!(written, Val::Int(5));
 
             let echoed = unwrap_ok(read_exact(&[conn.clone(), Val::Int(5)]));
-            assert_eq!(echoed, Val::Bytes(vec![1, 2, 3, 4, 5]));
+            assert_eq!(echoed, Val::bytes(vec![1, 2, 3, 4, 5]));
 
             // Str data is written as UTF-8
             unwrap_ok(write(&[conn.clone(), Val::from("hey")]));
             let echoed = unwrap_ok(read(&[conn.clone(), Val::Int(1024)]));
-            assert_eq!(echoed, Val::Bytes(b"hey".to_vec()));
+            assert_eq!(echoed, Val::bytes(b"hey".to_vec()));
 
             unwrap_ok(close(std::slice::from_ref(&conn)));
             let open = unwrap_ok(is_open(std::slice::from_ref(&conn)));
@@ -668,7 +668,7 @@ mod tests {
         tokio::task::spawn_blocking(move || {
             let conn = unwrap_ok(connect(&[Val::from("127.0.0.1"), Val::Int(port as i64)]));
             let data = unwrap_ok(read_exact(&[conn.clone(), Val::Int(2)]));
-            assert_eq!(data, Val::Bytes(vec![0xAB, 0xCD]));
+            assert_eq!(data, Val::bytes(vec![0xAB, 0xCD]));
             // Peer closed: read returns Null
             let eof = unwrap_ok(read(&[conn.clone(), Val::Int(16)]));
             assert_eq!(eof, Val::Null);

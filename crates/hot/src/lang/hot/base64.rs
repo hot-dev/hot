@@ -28,7 +28,7 @@ pub fn decode(args: &[Val]) -> HotResult<Val> {
     };
 
     match general_purpose::STANDARD.decode(&**base64_str) {
-        Ok(bytes) => HotResult::Ok(Val::Bytes(bytes)),
+        Ok(bytes) => HotResult::Ok(Val::bytes(bytes)),
         Err(e) => HotResult::Err(Val::from(format!("Base64 decode error: {}", e))),
     }
 }
@@ -73,7 +73,7 @@ pub fn decode_url(args: &[Val]) -> HotResult<Val> {
     };
 
     match general_purpose::URL_SAFE_NO_PAD_INDIFFERENT.decode(&**base64_str) {
-        Ok(bytes) => HotResult::Ok(Val::Bytes(bytes)),
+        Ok(bytes) => HotResult::Ok(Val::bytes(bytes)),
         Err(e) => HotResult::Err(Val::from(format!("Base64 URL decode error: {}", e))),
     }
 }
@@ -82,7 +82,7 @@ pub fn decode_url(args: &[Val]) -> HotResult<Val> {
 fn get_bytes_from_arg(arg: &Val) -> Result<Vec<u8>, String> {
     match arg {
         Val::Str(s) => Ok(s.as_bytes().to_vec()),
-        Val::Bytes(bytes) => Ok(bytes.clone()),
+        Val::Bytes(bytes) => Ok(bytes.to_vec()),
         Val::Vec(vec) => {
             let mut result = Vec::new();
             for val in vec.iter() {
@@ -120,7 +120,7 @@ mod tests {
     #[test]
     fn test_encode_bytes() {
         let bytes = vec![72, 101, 108, 108, 111]; // "Hello"
-        let result = encode(&[Val::Bytes(bytes)]);
+        let result = encode(&[Val::bytes(bytes)]);
         match result {
             HotResult::Ok(Val::Str(encoded)) => {
                 assert_eq!(&*encoded, "SGVsbG8=");
@@ -170,7 +170,7 @@ mod tests {
         let result = decode(&[Val::from("SGVsbG8=")]);
         match result {
             HotResult::Ok(Val::Bytes(bytes)) => {
-                assert_eq!(bytes, vec![72, 101, 108, 108, 111]);
+                assert_eq!(*bytes, vec![72, 101, 108, 108, 111]);
             }
             _ => panic!("Expected decoded bytes"),
         }
@@ -198,20 +198,20 @@ mod tests {
     #[test]
     fn test_decode_url_with_or_without_padding() {
         let result = decode_url(&[Val::from("aGk=")]);
-        assert!(matches!(result, HotResult::Ok(Val::Bytes(ref b)) if b == b"hi"));
+        assert!(matches!(result, HotResult::Ok(Val::Bytes(ref b)) if b.as_slice() == b"hi"));
 
         let result = decode_url(&[Val::from("aGk")]);
-        assert!(matches!(result, HotResult::Ok(Val::Bytes(ref b)) if b == b"hi"));
+        assert!(matches!(result, HotResult::Ok(Val::Bytes(ref b)) if b.as_slice() == b"hi"));
 
         let result = decode_url(&[Val::from("aA==")]);
-        assert!(matches!(result, HotResult::Ok(Val::Bytes(ref b)) if b == b"h"));
+        assert!(matches!(result, HotResult::Ok(Val::Bytes(ref b)) if b.as_slice() == b"h"));
 
         let result = decode_url(&[Val::from("aA")]);
-        assert!(matches!(result, HotResult::Ok(Val::Bytes(ref b)) if b == b"h"));
+        assert!(matches!(result, HotResult::Ok(Val::Bytes(ref b)) if b.as_slice() == b"h"));
 
         // URL-safe alphabet: `_` is 63, standard `/` is rejected
         let result = decode_url(&[Val::from("aGk_")]);
-        assert!(matches!(result, HotResult::Ok(Val::Bytes(ref b)) if b == b"hi?"));
+        assert!(matches!(result, HotResult::Ok(Val::Bytes(ref b)) if b.as_slice() == b"hi?"));
         assert!(matches!(
             decode_url(&[Val::from("aGk/")]),
             HotResult::Err(_)
@@ -232,10 +232,10 @@ mod tests {
 
     #[test]
     fn test_encode_url_stays_unpadded() {
-        let result = encode_url(&[Val::Bytes(b"hi".to_vec())]);
+        let result = encode_url(&[Val::bytes(b"hi".to_vec())]);
         assert!(matches!(result, HotResult::Ok(Val::Str(ref s)) if &**s == "aGk"));
 
-        let result = encode_url(&[Val::Bytes(b"h".to_vec())]);
+        let result = encode_url(&[Val::bytes(b"h".to_vec())]);
         assert!(matches!(result, HotResult::Ok(Val::Str(ref s)) if &**s == "aA"));
     }
 }

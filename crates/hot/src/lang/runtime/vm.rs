@@ -1613,6 +1613,20 @@ impl VirtualMachine {
         }
     }
 
+    /// Register a key given to a native.
+    pub fn register_secret_key(&mut self, key: &Val) {
+        if let Some(ctx) = &self.execution_context {
+            ctx.secret_values.register_key(key);
+        }
+    }
+
+    /// Register a credential a native has just made.
+    pub fn register_minted_secret(&mut self, value: &Val) {
+        if let Some(ctx) = &self.execution_context {
+            ctx.secret_values.register_minted(value);
+        }
+    }
+
     /// Like [`Self::register_secret_value`], for a value masked only where it
     /// is the whole value.
     pub fn register_secret_value_exact(&mut self, value: &Val) {
@@ -11297,12 +11311,10 @@ impl VirtualMachine {
             Val::Str(s) => {
                 // String access: try to parse property as an index for character access
                 if let Ok(index) = property.parse::<usize>() {
-                    let chars: Vec<char> = s.chars().collect();
-                    if index < chars.len() {
-                        Ok(Val::from(chars[index].to_string()))
-                    } else {
-                        Ok(Val::Null) // Index out of bounds returns null
-                    }
+                    // Index out of bounds returns null
+                    Ok(s.chars()
+                        .nth(index)
+                        .map_or(Val::Null, |c| Val::from(c.to_string())))
                 } else {
                     // Property is not a valid index
                     Ok(Val::Null)
@@ -12203,7 +12215,7 @@ mod tests {
             crate::val::Val::from("a string that is not a var ref"),
             crate::val::Val::Bool(true),
             crate::val::Val::Byte(0xAB),
-            crate::val::Val::Bytes(vec![1, 2, 3]),
+            crate::val::Val::bytes(vec![1, 2, 3]),
             crate::val::Val::Null,
         ];
 

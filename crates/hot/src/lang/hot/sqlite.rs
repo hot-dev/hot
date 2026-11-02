@@ -241,9 +241,9 @@ fn column_value(stmt: *mut ffi::sqlite3_stmt, col: i32) -> Val {
                 let ptr = ffi::sqlite3_column_blob(stmt, col);
                 let len = ffi::sqlite3_column_bytes(stmt, col) as usize;
                 if ptr.is_null() || len == 0 {
-                    Val::Bytes(Vec::new())
+                    Val::bytes(Vec::new())
                 } else {
-                    Val::Bytes(std::slice::from_raw_parts(ptr as *const u8, len).to_vec())
+                    Val::bytes(std::slice::from_raw_parts(ptr as *const u8, len).to_vec())
                 }
             }
             _ => Val::Null,

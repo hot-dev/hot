@@ -1,0 +1,220 @@
+::hot::csv ns
+meta {
+    doc: """
+    CSV and TSV parsing and serialization (RFC 4180).
+
+    Use `from-csv` for a file that fits in memory, and `iter-csv` to read one
+    row at a time. Input must be UTF-8. A leading byte order mark is dropped.
+
+    **Values stay Str.** Nothing is inferred, so ZIP codes, account numbers and
+    IDs keep their leading zeros and big numbers aren't rounded. The `types`
+    option converts the columns you name.
+
+    **Bad input is an Err naming the line.** That covers an unclosed quote, a
+    quote inside an unquoted field, text after a closing quote, invalid UTF-8,
+    and a row with the wrong number of fields. Errors name lines, rows and
+    columns, and never hold a cell's value.
+
+    **Read options**
+    - `delimiter`: the field separator, one ASCII character. Default `","`, or a tab for `from-tsv` and `iter-tsv`
+    - `quote`: the quote character. Default `"\""`. `false` makes quotes ordinary text, as in TSV files that don't quote
+    - `header`: whether the first row names the columns. Default `true`, or `false` when `columns` is given. With `false` and no `columns`, each row is a `Vec`
+    - `columns`: column names, for data with no header. With `header: true` as well, they replace the file's header row, which is skipped
+    - `comment`: a character that starts a comment line, such as `"#"`. Default none
+    - `trim`: remove whitespace around each cell. Default `false`
+    - `skip-empty`: also skip rows whose cells are all empty, like `,,,`. Blank lines are always skipped. Default `false`
+    - `strict`: with `false`, a short row is padded with null and a long row's extra cells stay out of the Map. In a `Vec` row they are kept. Default `true`, which makes the wrong field count an Err
+    - `types`: a Map of column name to `"Int"`, `"Dec"` or `"Bool"`. An empty cell becomes null; any other cell that can't convert is an Err naming the row and column
+
+    Unknown option names are an Err, so a misspelling can't change how a file parses.
+
+    **Write options**
+    - `delimiter`, `quote`: as above. `quote` must be a character here
+    - `columns`: which columns to write and in what order. Default: every key, in the order first seen across the rows
+    - `header`: whether to write the column names. Default `true`
+    - `line-ending`: `"\n"` (default) or `"\r\n"`
+    - `escape-formulas`: prefix a Str starting with `=`, `+`, `-`, `@`, tab or carriage return with `'`, so a spreadsheet won't run it as a formula. Default `false` because it changes the data: nothing removes the `'` when the file is read back. Use it for files people open in a spreadsheet
+
+    **What Hot records.** Hot records each call's arguments and return value, and
+    CSV rows often hold personal data, so choose how you read them with that in mind:
+    - `from-csv` records every row inline in its `call.return_value`, and again in the `call.args` of each function you pass them to. Stored JSON is about twice the size of the file, and more with long column names. Blob storage doesn't help, since it only moves large single values, not many small cells
+    - On PostgreSQL, a value of more than 256 MB as JSON can't be stored, and **the run fails even though your code finished**. Long column names and short cells reach that from a file of about 30 MB
+    - `iter-csv` over `read-file-stream`, with a lambda, records no rows. Text you pass in yourself is recorded as an argument. A named function called with a row records that row in its own call, up to the run's limit on recorded calls, 10,000 by default
+    - Registered secrets are masked in cells and in CSV text. A column named like a credential, such as `password`, is masked once it is a Map key, but not in the text passed to `from-csv`
+
+    Use `iter-csv` for large files and for files holding personal data.
+
+    **Size limits.** `from-csv` refuses input over 64 MB and more than 16 million
+    cells. `iter-csv` refuses a single row over 64 MB, and has no limit on the
+    file. Raise them with `HOT_MAX_PARSE_INPUT_BYTES` and `HOT_MAX_COLLECTION_SIZE`.
+    """
+}
+
+
+from-csv
+meta {
+    core: true,
+    doc: """
+    Parse CSV text into rows. The first row is the header, and each later row
+    is a Map keyed by it. Any malformed input makes the whole call an Err, with
+    no partial result. See the namespace docs for the options.
+
+    **Example**
+
+    ```hot
+    rows from-csv("id,zip\n1,02134\n")
+    rows[0].zip  // "02134"
+
+    from-csv("id,active\n1,TRUE\n", {types: {id: "Int", active: "Bool"}})
+    // [{id: 1, active: true}]
+
+    from-csv("a;b\n1;2\n", {delimiter: ";"})  // [{a: "1", b: "2"}]
+    from-csv("1,2\n3,4\n", {header: false})   // [["1", "2"], ["3", "4"]]
+    from-csv("1,2\n", {columns: ["a", "b"]})   // [{a: "1", b: "2"}]
+    ```
+    """
+}
+fn
+(text: Str | Bytes): Vec<Map> {
+    call-lib(::hot::csv/from-csv, [text])
+},
+(text: Str | Bytes, opts: Map): Vec {
+    call-lib(::hot::csv/from-csv, [text, opts])
+}
+
+
+from-tsv
+meta {
+    core: true,
+    doc: """
+    Parse tab-separated text into rows. The same as `from-csv`, with a tab as
+    the delimiter.
+
+    **Example**
+
+    ```hot
+    from-tsv("id\tname\n1\tAda\n")  // [{id: "1", name: "Ada"}]
+    ```
+    """
+}
+fn
+(text: Str | Bytes): Vec<Map> {
+    call-lib(::hot::csv/from-tsv, [text])
+},
+(text: Str | Bytes, opts: Map): Vec {
+    call-lib(::hot::csv/from-tsv, [text, opts])
+}
+
+
+iter-csv
+meta {
+    core: true,
+    doc: """
+    Read CSV one row at a time, without holding the file in memory. `source` is
+    an iterator of Str or Bytes chunks, such as `read-file-stream` or a raw
+    `request-stream` body, or the text itself. Chunks can split anywhere. It takes
+    the same options as `from-csv`.
+
+    Rows are read as they're asked for, so a bad line becomes an Err only when
+    the reader gets there, after earlier rows have been processed. A row before
+    it, in the same block of input, may not be yielded. Rows can't be replayed:
+    a run or task that starts again starts again from the first row. An iterator
+    works only in the run that made it, so it can't be sent in an event or to a
+    task.
+
+    Use `for-each` or `reduce`. `map`, `filter` and `collect` build a Vec of
+    every result, which holds the file in memory.
+
+    **Example**
+
+    ```hot
+    rows iter-csv(read-file-stream("customers.csv"), {types: {id: "Int"}})
+    for-each(rows, (row) { import-customer(row) })
+
+    response ::hot::http/get-stream("https://example.com/export.csv")
+    total reduce(iter-csv(response.body), (sum, row) { add(sum, Dec(row.amount)) }, 0)
+    ```
+    """
+}
+fn
+(source: Iter | Str | Bytes): Iter {
+    call-lib(::hot::csv/iter-csv, [source])
+},
+(source: Iter | Str | Bytes, opts: Map): Iter {
+    call-lib(::hot::csv/iter-csv, [source, opts])
+}
+
+
+iter-tsv
+meta {
+    core: true,
+    doc: """
+    Read tab-separated text one row at a time. The same as `iter-csv`, with a
+    tab as the delimiter.
+
+    **Example**
+
+    ```hot
+    for-each(iter-tsv(read-file-stream("data.tsv")), (row) { print(row) })
+    ```
+    """
+}
+fn
+(source: Iter | Str | Bytes): Iter {
+    call-lib(::hot::csv/iter-tsv, [source])
+},
+(source: Iter | Str | Bytes, opts: Map): Iter {
+    call-lib(::hot::csv/iter-tsv, [source, opts])
+}
+
+
+to-csv
+meta {
+    core: true,
+    doc: """
+    Write rows as CSV text. `rows` is a Vec of Maps or a Vec of Vecs. Null is
+    written as an empty field, and Int, Dec and Bool as text. A Map, Vec or Bytes
+    in a cell is an Err naming the column. See the namespace docs for the options.
+
+    **Example**
+
+    ```hot
+    to-csv([{id: 1, name: "Ada, Countess"}])
+    // "id,name\n1,\"Ada, Countess\"\n"
+
+    to-csv([[1, 2], [3, 4]])                  // "1,2\n3,4\n"
+    to-csv([{a: 1, b: 2}], {columns: ["b"]})  // "b\n2\n"
+    to-csv([{a: "=SUM(A1)"}], {escape-formulas: true})  // "a\n'=SUM(A1)\n"
+    ```
+    """
+}
+fn
+(rows: Vec): Str {
+    call-lib(::hot::csv/to-csv, [rows])
+},
+(rows: Vec, opts: Map): Str {
+    call-lib(::hot::csv/to-csv, [rows, opts])
+}
+
+
+to-tsv
+meta {
+    core: true,
+    doc: """
+    Write rows as tab-separated text. The same as `to-csv`, with a tab as the
+    delimiter.
+
+    **Example**
+
+    ```hot
+    to-tsv([{id: 1, name: "Ada"}])  // "id\tname\n1\tAda\n"
+    ```
+    """
+}
+fn
+(rows: Vec): Str {
+    call-lib(::hot::csv/to-tsv, [rows])
+},
+(rows: Vec, opts: Map): Str {
+    call-lib(::hot::csv/to-tsv, [rows, opts])
+}
