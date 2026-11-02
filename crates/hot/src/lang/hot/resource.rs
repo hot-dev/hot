@@ -433,7 +433,7 @@ pub fn load(args: &[Val]) -> HotResult<Val> {
         Some(entry) => match resource_path_for_read(&registry, entry)
             .and_then(|path| std::fs::read(path).map_err(|error| error.to_string()))
         {
-            Ok(bytes) => HotResult::Ok(Val::Bytes(bytes)),
+            Ok(bytes) => HotResult::Ok(Val::bytes(bytes)),
             Err(e) => HotResult::Err(Val::from(format!(
                 "::hot::resource/load: failed to read '{}': {}",
                 rel, e
@@ -654,7 +654,7 @@ mod tests {
 
         let bytes = load(&[Val::from("hello.txt")]);
         match bytes {
-            HotResult::Ok(Val::Bytes(b)) => assert_eq!(b, b"world".to_vec()),
+            HotResult::Ok(Val::Bytes(b)) => assert_eq!(*b, b"world".to_vec()),
             other => panic!("unexpected: {:?}", other),
         }
 
@@ -761,7 +761,7 @@ mod tests {
 
         let _guard = ThreadRegistryGuard::install(registry.clone());
         match load(&[Val::from("hello.txt")]) {
-            HotResult::Ok(Val::Bytes(b)) => assert_eq!(b, b"world".to_vec()),
+            HotResult::Ok(Val::Bytes(b)) => assert_eq!(*b, b"world".to_vec()),
             other => panic!("expected ok via thread-local, got: {:?}", other),
         }
         drop(_guard);

@@ -198,7 +198,7 @@ fn read_file_bytes_direct(path: &str) -> HotResult<Val> {
     };
 
     match std::fs::read(&normalized) {
-        Ok(bytes) => HotResult::Ok(Val::Bytes(bytes)),
+        Ok(bytes) => HotResult::Ok(Val::bytes(bytes)),
         Err(e) => HotResult::Err(Val::from(format!("Failed to read file: {}", e))),
     }
 }
@@ -797,7 +797,7 @@ fn read_file_bytes_internal(
     };
 
     match block_on_file_op(file_storage.read_file(path, ctx)) {
-        Ok(bytes) => HotResult::Ok(Val::Bytes(bytes)),
+        Ok(bytes) => HotResult::Ok(Val::bytes(bytes)),
         Err(e) => HotResult::Err(Val::from(e)),
     }
 }
@@ -1217,7 +1217,7 @@ mod tests {
         let result = read_file_bytes_direct(file_path.to_str().unwrap());
         match result {
             HotResult::Ok(Val::Bytes(bytes)) => {
-                assert_eq!(bytes, content);
+                assert_eq!(*bytes, content);
             }
             HotResult::Ok(other) => panic!("Expected Bytes, got {:?}", other),
             HotResult::Err(e) => panic!("Expected success, got error: {:?}", e),

@@ -27,7 +27,7 @@ pub fn decode(args: &[Val]) -> HotResult<Val> {
     };
 
     match hex::decode(&**hex_str) {
-        Ok(bytes) => HotResult::Ok(Val::Bytes(bytes)),
+        Ok(bytes) => HotResult::Ok(Val::bytes(bytes)),
         Err(e) => HotResult::Err(Val::from(format!("::hot::hex/decode: Invalid hex: {}", e))),
     }
 }
@@ -55,7 +55,7 @@ pub fn is_valid(args: &[Val]) -> HotResult<Val> {
 fn get_bytes_from_arg(arg: &Val) -> Result<Vec<u8>, String> {
     match arg {
         Val::Str(s) => Ok(s.as_bytes().to_vec()),
-        Val::Bytes(b) => Ok(b.clone()),
+        Val::Bytes(b) => Ok(b.to_vec()),
         Val::Vec(vec) => {
             let mut result = Vec::new();
             for val in vec.iter() {
@@ -79,7 +79,7 @@ mod tests {
     #[test]
     fn test_encode() {
         let bytes = vec![0x48, 0x65, 0x6c, 0x6c, 0x6f]; // "Hello"
-        let result = encode(&[Val::Bytes(bytes)]);
+        let result = encode(&[Val::bytes(bytes)]);
         match result {
             HotResult::Ok(Val::Str(hex)) => {
                 assert_eq!(&*hex, "48656c6c6f");
@@ -104,7 +104,7 @@ mod tests {
         let result = decode(&[Val::from("48656c6c6f")]);
         match result {
             HotResult::Ok(Val::Bytes(bytes)) => {
-                assert_eq!(bytes, vec![0x48, 0x65, 0x6c, 0x6c, 0x6f]);
+                assert_eq!(*bytes, vec![0x48, 0x65, 0x6c, 0x6c, 0x6f]);
             }
             _ => panic!("Expected bytes"),
         }
