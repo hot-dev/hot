@@ -1668,6 +1668,132 @@ label fn match (x: ::k/Kind): Str {
         }
     }
 
+    /// Two namespaces may each declare a same-named type and an arrow to it
+    /// from one source. Each arrow answers for its own target, whether called
+    /// as a constructor or implicitly at a parameter, and whichever namespace
+    /// loads last. The registry used to key targets by short name, so the last
+    /// arrow declared ran for both, and a redacting arrow never ran.
+    #[test]
+    fn same_named_arrow_targets_keep_to_their_namespaces() {
+        let src = r#"::src ns
+Payload type { secret: Str }
+Tri type { s: Int }
+
+::a ns
+Payload ::src/Payload
+Tri ::src/Tri
+Fail type { from: Str }
+Geom enum open { Dot }
+Payload -> Fail fn (p: Payload): Fail { Fail({from: "a"}) }
+Tri -> Geom.Tri
+build fn (p: Any): Any { Fail(p) }
+take fn (f: Fail): Any { f.from }
+through-any fn (x: Any): Any { take(x) }
+shape fn match (g: Geom): Str {
+    Geom.Tri => { "a tri" }
+    _ => { "a other" }
+}
+shape-any fn (x: Any): Str { shape(x) }
+
+::b ns
+Payload ::src/Payload
+Tri ::src/Tri
+Fail type { from: Str }
+Geom enum open { Dot }
+Payload -> Fail fn (p: Payload): Fail { Fail({from: "b"}) }
+Tri -> Geom.Tri
+build fn (p: Any): Any { Fail(p) }
+take fn (f: Fail): Any { f.from }
+through-any fn (x: Any): Any { take(x) }
+shape fn match (g: Geom): Str {
+    Geom.Tri => { "b tri" }
+    _ => { "b other" }
+}
+shape-any fn (x: Any): Str { shape(x) }
+
+::imports ns
+Fail ::a/Fail
+Other ::b/Fail
+take fn (f: Fail): Any { f.from }
+take-other fn (f: Other): Any { f.from }
+through-any fn (x: Any): Any { take(x) }
+through-any-other fn (x: Any): Any { take-other(x) }
+
+::t ns
+p ::src/Payload({secret: "s"})
+t ::src/Tri({s: 1})
+run fn (): Vec {
+    [
+        ::a/build(p).from, ::b/build(p).from,
+        ::a/through-any(p), ::b/through-any(p),
+        ::a/shape-any(t), ::b/shape-any(t),
+        ::imports/through-any(p), ::imports/through-any-other(p),
+        is-type(::a/build(p), ::a/Fail), is-type(::b/build(p), ::b/Fail),
+        is-type(::a/build(p), ::b/Fail)
+    ]
+}
+run()
+run()
+run()"#;
+        let Val::Vec(mut expected) = strs(&["a", "b", "a", "b", "a tri", "b tri", "a", "b"]) else {
+            unreachable!()
+        };
+        expected.extend([Val::Bool(true), Val::Bool(true), Val::Bool(false)]);
+        let expected = Val::Vec(expected);
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            let out = compile_and_run_project_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("run failed: {e}"));
+            assert_eq!(out, expected);
+        }
+    }
+
+    /// An arrow's source is its qualified type too: a value doesn't run the
+    /// arrow declared for a same-named type in another namespace, and a local
+    /// type named like a core one has arrows of its own, wherever it's declared.
+    #[test]
+    fn same_named_arrow_sources_keep_to_their_namespaces() {
+        let src = r#"::a ns
+Secret type { value: Str }
+Out type { kind: Str }
+Secret -> Out fn (s: Secret): Out { Out({kind: "from a"}) }
+Secret -> Str fn (s: Secret): Str { "core str" }
+build fn (x: Any): Any { Out(x) }
+
+::b ns
+Secret type { kind: Str }
+make fn (): Any { Secret({kind: "copied"}) }
+
+::c ns
+Reduced type { text: Str }
+Holder type { n: Int }
+Holder -> Reduced fn (h: Holder): Reduced { Reduced({text: "local type"}) }
+local fn (h: Any): Any { Reduced(h).text }
+
+::t ns
+run fn (): Vec {
+    [
+        ::a/build(::a/Secret({value: "v"})).kind,
+        ::a/build(::b/make()).kind,
+        Str(::a/Secret({value: "v"})),
+        ::c/local(::c/Holder({n: 1}))
+    ]
+}
+run()
+run()
+run()"#;
+        let expected = Val::Vec(vec![
+            Val::from("from a"),
+            Val::from("copied"),
+            Val::from("core str"),
+            Val::from("local type"),
+        ]);
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            let out = compile_and_run_project_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("run failed: {e}"));
+            assert_eq!(out, expected);
+        }
+    }
+
     /// A type from another namespace takes named arguments when it is
     /// imported in a body, as `Sh ::geo/Shape`, as well as at the top of the
     /// namespace. The local import names the type it is bound to, even over
