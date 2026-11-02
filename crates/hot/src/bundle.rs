@@ -263,7 +263,7 @@ impl<'a> ManifestDataParser<'a> {
         }
         self.skip_whitespace();
         self.expect_char(')')?;
-        Ok(Val::Bytes(bytes))
+        Ok(Val::bytes(bytes))
     }
 
     fn parse_constructor_byte(&mut self) -> Result<u8, String> {
@@ -1931,8 +1931,8 @@ mod tests {
         );
         inner.insert(Val::from("raw-control"), Val::from("bell\u{7}escape\u{1b}"));
         inner.insert(Val::from("byte"), Val::Byte(7));
-        inner.insert(Val::from("bytes"), Val::Bytes(vec![0, 128, 255]));
-        inner.insert(Val::from("empty-bytes"), Val::Bytes(Vec::new()));
+        inner.insert(Val::from("bytes"), Val::bytes(vec![0, 128, 255]));
+        inner.insert(Val::from("empty-bytes"), Val::bytes(Vec::new()));
         let mut manifest_map = IndexMap::new();
         manifest_map.insert(Val::from("hot.bundle.writer-forms"), Val::map(inner));
         let manifest = Val::map(manifest_map);

@@ -177,7 +177,8 @@ pub enum Val {
     Map(Arc<IndexMap<Val, Val>>),
     Box(Box<dyn ValBox>),
     Byte(u8),
-    Bytes(Vec<u8>),
+    /// Shares its storage the way Vec and Map do.
+    Bytes(Arc<Vec<u8>>),
     Null,
 }
 
@@ -1051,7 +1052,7 @@ impl From<u8> for Val {
 // Implementation of From<Vec<u8>> for Val
 impl From<Vec<u8>> for Val {
     fn from(bytes: Vec<u8>) -> Self {
-        Val::Bytes(bytes)
+        Val::bytes(bytes)
     }
 }
 
@@ -1474,7 +1475,7 @@ fn serde_json_to_val(value: serde_json::Value) -> Val {
                         if let Some(serde_json::Value::Array(items)) = obj.get("$val")
                             && let Some(bytes) = json_array_to_bytes(items)
                         {
-                            return Val::Bytes(bytes);
+                            return Val::bytes(bytes);
                         }
                     }
                     _ => {
@@ -1721,6 +1722,11 @@ impl Val {
     /// A Map value holding `entries`.
     pub fn map(entries: IndexMap<Val, Val>) -> Self {
         Val::Map(Arc::new(entries))
+    }
+
+    /// A Bytes value holding `bytes`.
+    pub fn bytes(bytes: Vec<u8>) -> Self {
+        Val::Bytes(Arc::new(bytes))
     }
 
     /// Creates a new empty map value
@@ -3232,7 +3238,7 @@ mod tests {
         assert_ne!(byte_val, int_negative);
 
         // Test Bytes <-> Vec equality
-        let bytes_val = Val::Bytes(vec![10, 20, 30]);
+        let bytes_val = Val::bytes(vec![10, 20, 30]);
         let vec_val = Val::vec(vec![Val::Int(10), Val::Int(20), Val::Int(30)]);
         assert_eq!(bytes_val, vec_val);
         assert_eq!(vec_val, bytes_val);
@@ -4774,11 +4780,11 @@ mod tests {
 
     #[test]
     fn test_val_roundtrip_bytes() {
-        assert_roundtrip(&Val::Bytes(vec![]), "empty bytes");
-        assert_roundtrip(&Val::Bytes(vec![0, 1, 2, 3]), "bytes sequence");
-        assert_roundtrip(&Val::Bytes(vec![255, 0, 127, 128]), "bytes edge values");
+        assert_roundtrip(&Val::bytes(vec![]), "empty bytes");
+        assert_roundtrip(&Val::bytes(vec![0, 1, 2, 3]), "bytes sequence");
+        assert_roundtrip(&Val::bytes(vec![255, 0, 127, 128]), "bytes edge values");
         // Test binary data that looks like base64
-        assert_roundtrip(&Val::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]), "bytes deadbeef");
+        assert_roundtrip(&Val::bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]), "bytes deadbeef");
     }
 
     #[test]
@@ -4787,7 +4793,7 @@ mod tests {
         assert_eq!(byte_json["$type"], HOT_BYTE_TYPE);
         assert_eq!(byte_json["$val"], serde_json::json!(42));
 
-        let bytes_json = serde_json::to_value(Val::Bytes(vec![1, 2, 3])).unwrap();
+        let bytes_json = serde_json::to_value(Val::bytes(vec![1, 2, 3])).unwrap();
         assert_eq!(bytes_json["$type"], HOT_BYTES_TYPE);
         assert_eq!(bytes_json["$val"], serde_json::json!([1, 2, 3]));
     }
@@ -4806,7 +4812,7 @@ mod tests {
             "$val": [1, 2, 3],
         }))
         .unwrap();
-        assert_eq!(bytes, Val::Bytes(vec![1, 2, 3]));
+        assert_eq!(bytes, Val::bytes(vec![1, 2, 3]));
     }
 
     #[test]
@@ -4909,7 +4915,7 @@ mod tests {
             }),
             // Val::Box is special - tested separately
             Val::Byte(42),
-            Val::Bytes(vec![1, 2, 3]),
+            Val::bytes(vec![1, 2, 3]),
             Val::Null,
         ];
 

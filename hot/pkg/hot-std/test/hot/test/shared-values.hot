@@ -141,6 +141,19 @@ meta ["test"] fn () {
     assert-eq("b", rec.v)
 }
 
+test-bytes-operations-leave-the-original
+meta ["test"] fn () {
+    b Bytes([1, 2, 3])
+    held {b: b}
+    joined concat(b, Bytes([4]))
+    part slice(b, 1, 3)
+    assert-eq(Bytes([1, 2, 3, 4]), joined)
+    assert-eq(Bytes([2, 3]), part)
+    assert-eq(Bytes([1, 2, 3]), b)
+    assert-eq(Bytes([1, 2, 3]), held.b)
+    assert-eq(Bytes([1, 2, 3]), same(b))
+}
+
 test-a-nested-value-read-out-is-its-own-value
 meta ["test"] fn () {
     m {nested: {b: 2}, list: [1, 2]}
