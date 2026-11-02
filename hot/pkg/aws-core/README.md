@@ -33,7 +33,7 @@ resolved.region                     // "eu-west-1"
 
 - `access-key-id`, `secret-access-key`, `session-token`: when `opts` has credentials, the context credentials are ignored for the call, session token included. A null or blank `session-token` means no session token.
 - `credentials`: a ready `Credentials` value, instead of those keys.
-- `region`: signing and endpoint region.
+- `region`: signing and endpoint region. It goes into a hostname, so it must be a plain AWS region name like `us-east-1`, from `opts` or context. With a custom endpoint it only signs, so a store's own name like `auto` is fine.
 - `endpoint`: base URL replacing the AWS endpoint.
 
 These are errors, so that a tenant with a missing key never runs on the project's credentials:
@@ -41,6 +41,7 @@ These are errors, so that a tenant with a missing key never runs on the project'
 - `access-key-id`, `secret-access-key` or `credentials` in `opts` but null or blank (leave it out to use context)
 - half a key pair, or a session token alone
 - an `endpoint` in `opts` without credentials in `opts`: the project's access key id and signatures never go to a host set per call
+- a region, bucket or endpoint that could change where the request goes, such as one with `/`, `@`, a backslash or a control character. The error doesn't repeat the value.
 
 ## Provided Functions
 

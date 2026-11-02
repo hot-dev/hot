@@ -117,3 +117,10 @@ meta ["test"] fn () {
     assert-eq("m", listed.next_marker)
     assert-eq("f", ::functions/get-function-configuration("f", answer({}, {FunctionName: "f"})).function_name)
 }
+
+test-unsafe-region-never-reaches-the-request
+meta ["test"] fn () {
+    out ::functions/get-function("f", {...echo(), region: "evil.example/"})
+    assert(is-err(out), "it would be interpolated into the hostname")
+    assert(not(contains(err-value(out), "evil.example")), "the value isn't echoed")
+}

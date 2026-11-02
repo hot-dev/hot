@@ -135,7 +135,7 @@ minio {
 ::s3/get-object("my-bucket", "file.txt", minio)
 ```
 
-On AWS itself, requests use the regional virtual-hosted form, `https://<bucket>.s3.<region>.amazonaws.com`. Pass `path-style: true` for `https://s3.<region>.amazonaws.com/<bucket>`. Buckets with dots in their names use path-style automatically, because the TLS certificate doesn't cover them.
+On AWS itself, requests use the regional virtual-hosted form, `https://<bucket>.s3.<region>.amazonaws.com`. Pass `path-style: true` for `https://s3.<region>.amazonaws.com/<bucket>`. Buckets with dots in their names use path-style automatically, because the TLS certificate doesn't cover them, and so do legacy names with uppercase letters or underscores. A bucket name that isn't valid at all, such as one with `/` or `@`, is an Err before anything is signed.
 
 ## Binary objects and file metadata
 

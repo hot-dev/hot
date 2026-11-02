@@ -100,3 +100,65 @@ meta ["test"] fn () {
     assert-eq("urn:ietf:params:oauth:grant-type:jwt-bearer", body.grant_type)
     assert-eq("signed.jwt.here", body.assertion)
 }
+
+// ============================================================================
+// Masking: every value still reaches the caller unchanged
+// ============================================================================
+
+test-builders-return-credentials-unchanged
+meta ["test"] fn () {
+    exchange ::oauth2/build-exchange-body({client-id: "id", client-secret: "client-secret-value", code: "code-value-long", redirect-uri: "https://cb/", code-verifier: "verifier-value"})
+    assert-eq("client-secret-value", exchange.client_secret)
+    assert-eq("code-value-long", exchange.code)
+    assert-eq("verifier-value", exchange.code_verifier)
+
+    refreshed ::oauth2/build-refresh-body({client-id: "id", client-secret: "client-secret-value", refresh-token: "refresh-value"})
+    assert-eq("refresh-value", refreshed.refresh_token)
+    assert-eq("client-secret-value", refreshed.client_secret)
+
+    credentials ::oauth2/build-client-credentials-body({client-id: "id", client-secret: "client-secret-value"})
+    assert-eq("client-secret-value", credentials.client_secret)
+
+    assert-eq("signed.jwt.value", ::oauth2/build-jwt-bearer-body("signed.jwt.value").assertion)
+}
+
+test-pkce-still-computes-after-marking
+meta ["test"] fn () {
+    v ::oauth2/pkce-verifier()
+    assert(is-str(v), "the marked verifier is still a Str")
+    assert-eq(43, length(v))
+    assert-eq(::oauth2/pkce-challenge(v), ::oauth2/pkce-challenge(v))
+    assert(ne(v, ::oauth2/pkce-challenge(v)))
+}
+
+test-mark-tokens-returns-the-reply-unchanged
+meta ["test"] fn () {
+    reply {access_token: "access-value", refresh_token: "refresh-value", id_token: "id-value", expires_in: 3600, token_type: "bearer"}
+    assert-eq(reply, ::oauth2/mark-tokens(reply))
+    assert-eq("access_token=access-value&x=1", ::oauth2/mark-tokens("access_token=access-value&x=1"), "a reply that isn't JSON")
+    assert-eq({expires_in: 1}, ::oauth2/mark-tokens({expires_in: 1}), "no tokens at all")
+}
+
+test-token-result
+meta ["test"] fn () {
+    ok ::oauth2/token-result(::hot::http/HttpResponse({status: 200, headers: {}, body: {access_token: "access-value", id_token: "id-value"}}))
+    assert-eq("access-value", ok.access_token)
+    assert-eq("id-value", ok.id_token)
+
+    refused ::oauth2/token-result(::hot::http/HttpResponse({status: 401, headers: {}, body: {error: "invalid_client", client_secret: "echoed-secret"}}))
+    assert(is-err(refused))
+    assert-eq(401, err-value(refused).status)
+    assert-eq("invalid_client", err-value(refused).body.error)
+
+    assert(is-err(::oauth2/token-result(err("connection refused"))), "a transport Err passes through")
+}
+
+test-grants-return-a-checkable-err-when-the-endpoint-is-down
+meta ["test"] fn () {
+    url "http://127.0.0.1:1/token"
+    assert(is-err(::oauth2/exchange-code(url, {client-id: "id", client-secret: "client-secret-value", code: "code-value-long", redirect-uri: "https://cb/", code-verifier: "verifier-value"})))
+    assert(is-err(::oauth2/refresh(url, {client-id: "id", client-secret: "client-secret-value", refresh-token: "refresh-value"})))
+    assert(is-err(::oauth2/client-credentials(url, {client-id: "id", client-secret: "client-secret-value"})))
+    assert(is-err(::oauth2/jwt-bearer(url, "signed.jwt.value")))
+    assert(is-err(::oauth2/token-request(url, {grant_type: "password", password: "password-value"})))
+}

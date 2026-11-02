@@ -110,3 +110,10 @@ meta ["test"] fn () {
     assert-eq("m1", ::publish/publish("t", "m", {}, amz({MessageId: "m1"})).message_id)
     assert-eq("t1", ::topics/create-topic("n", {}, amz({TopicArn: "t1"})).topic_arn)
 }
+
+test-unsafe-region-never-reaches-the-request
+meta ["test"] fn () {
+    out ::topics/list-topics({...echo(), region: "evil.example/"})
+    assert(is-err(out), "it would be interpolated into the hostname")
+    assert(not(contains(err-value(out), "evil.example")), "the value isn't echoed")
+}

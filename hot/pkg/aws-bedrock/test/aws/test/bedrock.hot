@@ -172,3 +172,17 @@ meta ["test"] fn () {
     models ::models/list-foundation-models(answer({}, {modelSummaries: [{modelId: "m"}]}))
     assert-eq("m", first(models.models).model_id)
 }
+
+test-unsafe-region-never-reaches-the-request
+meta ["test"] fn () {
+    out ::models/list-foundation-models({...echo(), region: "evil.example/"})
+    assert(is-err(out), "it would be interpolated into the hostname")
+    assert(not(contains(err-value(out), "evil.example")), "the value isn't echoed")
+}
+
+test-unsafe-region-in-the-streaming-and-chat-paths
+meta ["test"] fn () {
+    bad {...echo(), region: "a.b/c"}
+    assert(is-err(::converse/converse-stream(MODEL, [{role: "user", content: [{text: "hi"}]}], bad)))
+    assert(is-err(::chat/chat(MODEL, "hi", bad)))
+}

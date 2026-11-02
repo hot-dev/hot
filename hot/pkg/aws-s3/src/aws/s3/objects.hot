@@ -8,7 +8,6 @@
 HttpResponse ::hot::http/HttpResponse
 is-ok-response ::hot::http/is-ok-response
 
-resolve ::aws::core/resolve
 send-signed ::aws::core/send-signed
 response-header ::aws::core/response-header
 parse-int ::aws::core/parse-int
@@ -148,7 +147,7 @@ meta {
 }
 fn
 (bucket: Str, key: Str, body: Any, content_type: Str, opts: Map): PutObjectResponse | AwsError {
-    if-ok(resolve(opts), (resolved) {
+    if-ok(::api/resolve(opts, bucket), (resolved) {
         url ::api/object-url(bucket, key, resolved)
 
         body-wire if(or(is-str(body), is-bytes(body)), body, to-json(body))
@@ -197,7 +196,7 @@ meta {
 }
 fn
 (bucket: Str, key: Str, opts: Map): GetObjectResponse | AwsError {
-    if-ok(resolve(opts), (resolved) {
+    if-ok(::api/resolve(opts, bucket), (resolved) {
         response send-signed("GET", ::api/object-url(bucket, key, resolved), "s3", resolved, {}, "")
 
         cond {
@@ -232,7 +231,7 @@ meta {
 }
 fn
 (bucket: Str, key: Str, opts: Map): DeleteObjectResponse | AwsError {
-    if-ok(resolve(opts), (resolved) {
+    if-ok(::api/resolve(opts, bucket), (resolved) {
         response send-signed("DELETE", ::api/object-url(bucket, key, resolved), "s3", resolved, {}, "")
 
         cond {
@@ -298,7 +297,7 @@ meta {
 }
 fn
 (bucket: Str, prefix: Str, max_keys: Int, continuation_token: Str?, opts: Map): ListObjectsResponse | AwsError {
-    if-ok(resolve(opts), (resolved) {
+    if-ok(::api/resolve(opts, bucket), (resolved) {
         url `${::api/bucket-url(bucket, resolved)}/?${list-query(prefix, max_keys, continuation_token, opts)}`
 
         response send-signed("GET", url, "s3", resolved, {}, "")
@@ -356,7 +355,7 @@ meta {
 }
 fn
 (source_bucket: Str, source_key: Str, dest_bucket: Str, dest_key: Str, opts: Map): CopyObjectResponse | AwsError {
-    if-ok(resolve(opts), (resolved) {
+    if-ok(::api/resolve(opts, source_bucket, dest_bucket), (resolved) {
         url ::api/object-url(dest_bucket, dest_key, resolved)
 
         // x-amz-copy-source must be URL-encoded
@@ -409,7 +408,7 @@ meta {
 }
 fn
 (bucket: Str, key: Str, opts: Map): HeadObjectResponse | AwsError {
-    if-ok(resolve(opts), (resolved) {
+    if-ok(::api/resolve(opts, bucket), (resolved) {
         response send-signed("HEAD", ::api/object-url(bucket, key, resolved), "s3", resolved, {}, "")
 
         cond {
@@ -475,7 +474,7 @@ meta {
 }
 fn
 (bucket: Str, key: Str, content_type: Str, opts: Map): CreateMultipartUploadResponse | AwsError {
-    if-ok(resolve(opts), (resolved) {
+    if-ok(::api/resolve(opts, bucket), (resolved) {
         url `${::api/object-url(bucket, key, resolved)}?uploads`
 
         response send-signed("POST", url, "s3", resolved, {"Content-Type": content_type}, "")
@@ -520,7 +519,7 @@ meta {
 }
 fn
 (bucket: Str, key: Str, upload_id: Str, part_number: Int, body: Str | Bytes, opts: Map): UploadPartResponse | AwsError {
-    if-ok(resolve(opts), (resolved) {
+    if-ok(::api/resolve(opts, bucket), (resolved) {
         url `${::api/object-url(bucket, key, resolved)}?partNumber=${part_number}&uploadId=${uri-encode(upload_id)}`
 
         response send-signed("PUT", url, "s3", resolved, {}, body)
@@ -575,7 +574,7 @@ meta {
 }
 fn
 (bucket: Str, key: Str, upload_id: Str, parts: Vec, opts: Map): CompleteMultipartUploadResponse | AwsError {
-    if-ok(resolve(opts), (resolved) {
+    if-ok(::api/resolve(opts, bucket), (resolved) {
         url `${::api/object-url(bucket, key, resolved)}?uploadId=${uri-encode(upload_id)}`
 
         response send-signed("POST", url, "s3", resolved, {"Content-Type": "application/xml"}, complete-multipart-body(parts))
@@ -618,7 +617,7 @@ meta {
 }
 fn
 (bucket: Str, key: Str, upload_id: Str, opts: Map): Bool | AwsError {
-    if-ok(resolve(opts), (resolved) {
+    if-ok(::api/resolve(opts, bucket), (resolved) {
         url `${::api/object-url(bucket, key, resolved)}?uploadId=${uri-encode(upload_id)}`
 
         response send-signed("DELETE", url, "s3", resolved, {}, "")

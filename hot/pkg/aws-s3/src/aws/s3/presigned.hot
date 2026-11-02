@@ -6,16 +6,15 @@
 
 ::api ::aws::s3::api
 
-resolve ::aws::core/resolve
 sign-url ::aws::core/sign-url
 
 // Presign one request with resolved settings
 presign
 meta {
-    doc: """A presigned URL for `method` on an object, with credentials, region and endpoint from `opts`."""
+    doc: """A presigned URL for `method` on an object, with credentials, region and endpoint from `opts`. An Err when the bucket or region isn't valid."""
 }
 fn (method: Str, bucket: Str, key: Str, expires_in: Int, opts: Map): Str {
-    if-ok(resolve(opts), (resolved) {
+    if-ok(::api/resolve(opts, bucket), (resolved) {
         sign-url(method, ::api/object-url(bucket, key, resolved), resolved.region, "s3", resolved.credentials, expires_in)
     })
 }

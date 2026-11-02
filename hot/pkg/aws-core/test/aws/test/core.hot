@@ -247,8 +247,8 @@ meta ["test"] fn () {
 
 test-s3-endpoint-is-regional
 meta ["test"] fn () {
-    assert-eq("https://b.s3.us-east-1.amazonaws.com", ::aws::core/s3-endpoint("b", "us-east-1"), "not the legacy global endpoint")
-    assert-eq("https://b.s3.eu-west-1.amazonaws.com", ::aws::core/s3-endpoint("b", "eu-west-1"))
+    assert-eq("https://bkt.s3.us-east-1.amazonaws.com", ::aws::core/s3-endpoint("bkt", "us-east-1"), "not the legacy global endpoint")
+    assert-eq("https://bkt.s3.eu-west-1.amazonaws.com", ::aws::core/s3-endpoint("bkt", "eu-west-1"))
 }
 
 // ---------------------------------------------------------------------------
@@ -444,6 +444,174 @@ meta ["test"] fn () {
 }
 
 // ---------------------------------------------------------------------------
+// Names that become part of a URL
+// ---------------------------------------------------------------------------
+
+// Each of these could end or re-point a hostname if it were interpolated
+UNSAFE_NAMES fn (): Vec {
+    [
+        "evil.example/",
+        "a.b/c",
+        "x@y",
+        "x@evil.example",
+        "a\\b",
+        "evil.example\\",
+        "a\nb",
+        "a\tb",
+        "a\rb",
+        `a${Str(Bytes([0]))}b`,
+        `a${Str(Bytes([1]))}b`,
+        `a${Str(Bytes([127]))}b`,
+        "a b",
+        "a?b",
+        "a#b",
+        "a:b",
+        "a%2Fb"
+    ]
+}
+
+test-region-rejects-unsafe-names-from-opts-and-ctx
+meta ["test"] fn () {
+    for-each(concat(UNSAFE_NAMES(), ["us-east-1\n", " us-east-1", "us-east-1 ", "us-east-1.evil.example", "US-EAST-1"]), (name) {
+        from-opts ::aws::core/resolve-from({region: name}, CTX)
+        assert(is-err(from-opts), `opts.region accepted ${name}`)
+        assert(contains(err-value(from-opts), "opts.region"))
+        assert(not(contains(err-value(from-opts), name)), "the value isn't echoed")
+
+        with-keys ::aws::core/resolve-from({region: name, "access-key-id": "a", "secret-access-key": "b"}, {})
+        assert(is-err(with-keys), "whose credentials they are makes no difference")
+
+        from-ctx ::aws::core/resolve-from({}, {...CTX, "aws.region": name})
+        assert(is-err(from-ctx), `aws.region accepted ${name}`)
+        assert(contains(err-value(from-ctx), "aws.region"))
+        assert(not(contains(err-value(from-ctx), name)))
+
+        with-ctx-override ::aws::core/resolve-from({region: "eu-west-1"}, {...CTX, "aws.region": name})
+        assert-eq("eu-west-1", with-ctx-override.region, "a good opts region is what gets used")
+    })
+}
+
+test-region-accepts-aws-names
+meta ["test"] fn () {
+    for-each(["us-east-1", "eu-west-3", "ap-southeast-2", "me-central-1", "cn-north-1", "us-gov-west-1", "us-iso-east-1", "us-isob-east-1", "eusc-de-east-1"], (name) {
+        assert-eq(name, ::aws::core/resolve-from({region: name}, CTX).region, "per-call region with ctx credentials")
+        assert-eq(name, ::aws::core/resolve-from({}, {...CTX, "aws.region": name}).region)
+    })
+}
+
+test-region-with-a-custom-endpoint-only-signs
+meta ["test"] fn () {
+    own {"access-key-id": "a", "secret-access-key": "b", endpoint: "https://store.example.com"}
+    assert-eq("auto", ::aws::core/resolve-from({...own, region: "auto"}, {}).region, "R2")
+    assert-eq("my_Region-1", ::aws::core/resolve-from({...own, region: "my_Region-1"}, {}).region, "a MinIO admin's name")
+    assert-eq("auto", ::aws::core/resolve-from({region: "auto"}, {...CTX, "aws.endpoint": "http://localhost:9000"}).region, "an endpoint in ctx")
+    assert(is-err(::aws::core/resolve-from({region: "auto"}, CTX)), "no endpoint: it would go in an AWS hostname")
+
+    for-each(UNSAFE_NAMES(), (name) {
+        assert(is-err(::aws::core/resolve-from({...own, region: name}, {})), `accepted ${name}`)
+    })
+    assert(is-err(::aws::core/resolve-from({...own, region: "a.b"}, {})), "a dot doesn't belong in a scope segment")
+}
+
+test-non-string-region
+meta ["test"] fn () {
+    assert(is-err(::aws::core/resolve-from({region: 5}, CTX)))
+    assert(is-err(::aws::core/resolve-from({region: ["us-east-1"]}, CTX)))
+}
+
+test-endpoint-builders-reject-unsafe-regions
+meta ["test"] fn () {
+    for-each(concat(UNSAFE_NAMES(), ["auto", "us-east-1.evil.example"]), (name) {
+        assert(is-err(::aws::core/s3-endpoint("my-bucket", name)), `s3-endpoint accepted ${name}`)
+        assert(is-err(::aws::core/ses-endpoint(name)), name)
+        assert(is-err(::aws::core/lambda-endpoint(name)), name)
+        assert(is-err(::aws::core/sqs-endpoint(name)), name)
+        assert(is-err(::aws::core/dynamodb-endpoint(name)), name)
+        assert(is-err(::aws::core/secrets-manager-endpoint(name)), name)
+        assert(is-err(::aws::core/bedrock-endpoint(name)), name)
+        assert(is-err(::aws::core/bedrock-runtime-endpoint(name)), name)
+        assert(is-err(::aws::core/service-url({region: name}, "sqs")), name)
+        assert(not(contains(err-value(::aws::core/sqs-endpoint(name)), name)), "the value isn't echoed")
+    })
+}
+
+test-endpoint-builders-keep-their-urls
+meta ["test"] fn () {
+    assert-eq("https://email.eu-west-1.amazonaws.com", ::aws::core/ses-endpoint("eu-west-1"))
+    assert-eq("https://lambda.eu-west-1.amazonaws.com", ::aws::core/lambda-endpoint("eu-west-1"))
+    assert-eq("https://sqs.eu-west-1.amazonaws.com", ::aws::core/sqs-endpoint("eu-west-1"))
+    assert-eq("https://dynamodb.eu-west-1.amazonaws.com", ::aws::core/dynamodb-endpoint("eu-west-1"))
+    assert-eq("https://secretsmanager.eu-west-1.amazonaws.com", ::aws::core/secrets-manager-endpoint("eu-west-1"))
+    assert-eq("https://bedrock.eu-west-1.amazonaws.com", ::aws::core/bedrock-endpoint("eu-west-1"))
+    assert-eq("https://bedrock-runtime.eu-west-1.amazonaws.com", ::aws::core/bedrock-runtime-endpoint("eu-west-1"))
+}
+
+test-check-bucket
+meta ["test"] fn () {
+    for-each(concat(UNSAFE_NAMES(), ["ab", "..", "a..b", ".abc", "abc.", "-abc", "abc-", "evil.example./", "bucket/../other"]), (name) {
+        out ::aws::core/check-bucket(name)
+        assert(is-err(out), `check-bucket accepted ${name}`)
+        assert(not(contains(err-value(out), name)), "the value isn't echoed")
+        assert(is-err(::aws::core/s3-endpoint(name, "us-east-1")), `s3-endpoint accepted ${name}`)
+    })
+    assert(is-err(::aws::core/check-bucket("")))
+    assert(is-err(::aws::core/check-bucket(5)))
+    assert(is-err(::aws::core/check-bucket(::hot::str/pad-start("a", 256, "a"))), "too long")
+    assert-eq(255, length(::aws::core/check-bucket(::hot::str/pad-start("a", 255, "a"))), "a legacy length")
+}
+
+test-bucket-names-that-stay-valid
+meta ["test"] fn () {
+    for-each(["my-bucket", "abc", "my.dotted.bucket", "www.example.com", "Legacy_Bucket", "a--b"], (name) {
+        assert-eq(name, ::aws::core/check-bucket(name))
+    })
+    assert(::aws::core/is-virtual-host-bucket("my-bucket"))
+    assert(not(::aws::core/is-virtual-host-bucket("my.dotted.bucket")), "the TLS wildcard doesn't match dots")
+    assert(not(::aws::core/is-virtual-host-bucket("Legacy_Bucket")))
+    assert(not(::aws::core/is-virtual-host-bucket(::hot::str/pad-start("a", 64, "a"))), "a DNS label stops at 63")
+}
+
+test-s3-endpoint-uses-path-style-when-it-must
+meta ["test"] fn () {
+    assert-eq("https://s3.us-east-1.amazonaws.com/my.dotted.bucket", ::aws::core/s3-endpoint("my.dotted.bucket", "us-east-1"))
+    assert-eq("https://s3.eu-west-1.amazonaws.com/Legacy_Bucket", ::aws::core/s3-endpoint("Legacy_Bucket", "eu-west-1"))
+}
+
+test-endpoint-must-be-a-plain-url
+meta ["test"] fn () {
+    own {"access-key-id": "a", "secret-access-key": "b"}
+    for-each(["https://x@evil.example", "https://user:pw@evil.example/", "https://good.example\\@evil.example", "https://a b/", "https://h/p?q=1", "https://h/p#f", "ftp://h", "h:9000", "https://h\n.example"], (value) {
+        out ::aws::core/resolve-from({...own, endpoint: value}, {})
+        assert(is-err(out), `accepted ${value}`)
+        assert(not(contains(err-value(out), value)), "the value isn't echoed: it could carry user info")
+    })
+    assert(is-err(::aws::core/resolve-from({}, {...CTX, "aws.endpoint": "https://x@evil.example"})))
+    for-each(["http://localhost:9000", "https://acct.r2.cloudflarestorage.com", "http://[::1]:9000", "https://gw.example.com/s3", "http://127.0.0.1:4566"], (value) {
+        assert-eq(value, ::aws::core/resolve-from({...own, endpoint: value}, {}).endpoint)
+    })
+}
+
+test-signing-refuses-unsafe-targets
+meta ["test"] fn () {
+    for-each(["https://x@evil.example/", "https://user:pw@evil.example/k", "https://good.example\\@evil.example/", "https://h/a\\b", "https://h/a\nb", `https://h/a${Str(Bytes([1]))}b`, "https://a b/"], (url) {
+        assert(is-err(::aws::core/sign-request("GET", url, "us-east-1", "s3", creds(), {}, "", DATE)), `signed for ${url}`)
+        assert(is-err(::aws::core/sign-url("GET", url, "us-east-1", "s3", creds(), 60, DATE)), `presigned ${url}`)
+    })
+    for-each(UNSAFE_NAMES(), (region) {
+        assert(is-err(::aws::core/sign-request("GET", `${BUCKET_HOST}/k`, region, "s3", creds(), {}, "", DATE)), `signed in ${region}`)
+        assert(is-err(::aws::core/sign-url("GET", `${BUCKET_HOST}/k`, region, "s3", creds(), 60, DATE)), `presigned in ${region}`)
+    })
+    assert(is-err(::aws::core/sign-url("GET", `${BUCKET_HOST}/k`, "evil.example/", "s3", creds())))
+    assert(not(is-err(::aws::core/sign-request("GET", "http://[::1]:9000/k", "auto", "s3", creds(), {}, "", DATE))), "an IPv6 store")
+}
+
+test-request-opts-refuses-unsafe-region-argument
+meta ["test"] fn () {
+    opts {"access-key-id": "a", "secret-access-key": "b", transport: (req) { fail("nothing may be sent") }}
+    assert(is-err(::aws::core/request("GET", "https://x.example.com/", "x", "evil.example/", {}, "", opts)))
+}
+
+// ---------------------------------------------------------------------------
 // send-signed
 // ---------------------------------------------------------------------------
 
@@ -485,6 +653,26 @@ meta ["test"] fn () {
     binary-body Bytes([0, 255])
     binary ::aws::core/resolve(fixed-response({"content-type": "application/octet-stream"}, binary-body))
     assert-eq(binary-body, ::aws::core/send-signed("GET", "https://x.example.com/", "x", binary, {}, "").body, "other Bytes aren't touched")
+}
+
+test-send-signed-types-a-plain-map-response
+meta ["test"] fn () {
+    // The runtime's HTTP response is a plain Map
+    plain {
+        "access-key-id": "a",
+        "secret-access-key": "b",
+        transport: (req) { {status: 403, headers: {"content-type": "application/json"}, body: {error: "denied"}, body-bytes: Bytes("{\"error\":\"denied\"}")} }
+    }
+
+    response ::aws::core/send-signed("GET", "https://x.example.com/", "x", ::aws::core/resolve(plain), {}, "")
+    assert(is-type(response, ::hot::http/HttpResponse))
+    assert(is-bytes(response.body-bytes))
+
+    failure ::aws::core/AwsError(response)
+    assert-eq(403, failure.status)
+    assert-eq("denied", failure.body.error)
+    assert(not(in("body-bytes", keys(untype(failure)))), "the arrow ran: an error carries no copy of the body as bytes")
+    assert(not(in("headers", keys(untype(failure)))))
 }
 
 test-request-opts-arity

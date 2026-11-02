@@ -45,7 +45,7 @@ assert-signed fn (request: Any, url: Str, method: Str) {
     assert(is-null(::hot::ctx/get("aws.access-key-id")), "no ctx writes")
 }
 
-B "https://b.s3.eu-west-1.amazonaws.com"
+B "https://bkt.s3.eu-west-1.amazonaws.com"
 
 // ---------------------------------------------------------------------------
 // URLs
@@ -54,24 +54,129 @@ B "https://b.s3.eu-west-1.amazonaws.com"
 test-bucket-url-forms
 meta ["test"] fn () {
     aws {region: "us-east-1"}
-    assert-eq("https://b.s3.us-east-1.amazonaws.com", ::api/bucket-url("b", aws), "regional in us-east-1 too")
-    assert-eq("https://b.s3.eu-west-1.amazonaws.com", ::api/bucket-url("b", {region: "eu-west-1"}))
+    assert-eq("https://bkt.s3.us-east-1.amazonaws.com", ::api/bucket-url("bkt", aws), "regional in us-east-1 too")
+    assert-eq("https://bkt.s3.eu-west-1.amazonaws.com", ::api/bucket-url("bkt", {region: "eu-west-1"}))
     assert-eq("https://s3.us-east-1.amazonaws.com/my.dotted.bucket", ::api/bucket-url("my.dotted.bucket", aws), "the TLS wildcard doesn't match dots")
-    assert-eq("https://s3.us-east-1.amazonaws.com/b", ::api/bucket-url("b", {...aws, path-style: true}))
+    assert-eq("https://s3.us-east-1.amazonaws.com/bkt", ::api/bucket-url("bkt", {...aws, path-style: true}))
 
-    assert-eq("http://localhost:9000/b", ::api/bucket-url("b", {region: "us-east-1", endpoint: "http://localhost:9000"}), "custom endpoints default to path-style")
-    assert-eq("https://acct.r2.cloudflarestorage.com/b", ::api/bucket-url("b", {region: "auto", endpoint: "https://acct.r2.cloudflarestorage.com"}))
-    assert-eq("https://b.store.example.com", ::api/bucket-url("b", {region: "auto", endpoint: "https://store.example.com", path-style: false}))
-    assert-eq("http://b.store.example.com:9000", ::api/bucket-url("b", {region: "auto", endpoint: "http://store.example.com:9000", path-style: false}))
+    assert-eq("http://localhost:9000/bkt", ::api/bucket-url("bkt", {region: "us-east-1", endpoint: "http://localhost:9000"}), "custom endpoints default to path-style")
+    assert-eq("https://acct.r2.cloudflarestorage.com/bkt", ::api/bucket-url("bkt", {region: "auto", endpoint: "https://acct.r2.cloudflarestorage.com"}))
+    assert-eq("https://bkt.store.example.com", ::api/bucket-url("bkt", {region: "auto", endpoint: "https://store.example.com", path-style: false}))
+    assert-eq("http://bkt.store.example.com:9000", ::api/bucket-url("bkt", {region: "auto", endpoint: "http://store.example.com:9000", path-style: false}))
 }
 
 test-object-url-encodes-the-key
 meta ["test"] fn () {
     r {region: "eu-west-1"}
-    assert-eq(`${B}/a/b.txt`, ::api/object-url("b", "a/b.txt", r))
-    assert-eq(`${B}/my%20file/%C3%A9%2B%26%3F%23.txt`, ::api/object-url("b", "my file/é+&?#.txt", r))
-    assert-eq(`${B}/100%25`, ::api/object-url("b", "100%", r))
-    assert-eq(`${B}//lead`, ::api/object-url("b", "/lead", r), "a leading slash is part of the key")
+    assert-eq(`${B}/a/b.txt`, ::api/object-url("bkt", "a/b.txt", r))
+    assert-eq(`${B}/my%20file/%C3%A9%2B%26%3F%23.txt`, ::api/object-url("bkt", "my file/é+&?#.txt", r))
+    assert-eq(`${B}/100%25`, ::api/object-url("bkt", "100%", r))
+    assert-eq(`${B}//lead`, ::api/object-url("bkt", "/lead", r), "a leading slash is part of the key")
+}
+
+test-bucket-url-falls-back-to-path-style
+meta ["test"] fn () {
+    assert-eq("https://s3.us-east-1.amazonaws.com/Legacy_Bucket", ::api/bucket-url("Legacy_Bucket", {region: "us-east-1"}), "uppercase doesn't survive a hostname")
+    store {region: "auto", endpoint: "https://store.example.com", path-style: false}
+    assert-eq("https://store.example.com/my.dotted.bucket", ::api/bucket-url("my.dotted.bucket", store), "the hostname form only when it can be one")
+}
+
+// ---------------------------------------------------------------------------
+// Names that become part of a URL
+// ---------------------------------------------------------------------------
+
+// A transport that fails the test if anything is sent: it must never be reached.
+no-send fn (): Map {
+    {
+        "access-key-id": "AKIDOPTS",
+        "secret-access-key": "opts-secret",
+        region: "eu-west-1",
+        transport: (req) { fail("nothing may be sent") }
+    }
+}
+
+UNSAFE_NAMES fn (): Vec {
+    [
+        "evil.example/",
+        "a.b/c",
+        "x@y",
+        "a\\b",
+        "a\nb",
+        "a\tb",
+        `a${Str(Bytes([0]))}b`,
+        `a${Str(Bytes([127]))}b`,
+        ".."
+    ]
+}
+
+assert-refused fn (result: Result, name: Str) {
+    assert(is-err(result), `accepted ${name}`)
+    assert(not(contains(err-value(result), name)), "the value isn't echoed")
+}
+
+test-unsafe-buckets-never-reach-the-request
+meta ["test"] fn () {
+    for-each(UNSAFE_NAMES(), (name) {
+        o no-send()
+        assert-refused(::objects/put-object(name, "k", "hi", "text/plain", o), name)
+        assert-refused(::objects/put-object(name, "k", "hi", o), name)
+        assert-refused(::objects/get-object(name, "k", o), name)
+        assert-refused(::objects/delete-object(name, "k", o), name)
+        assert-refused(::objects/head-object(name, "k", o), name)
+        assert-refused(::objects/list-objects(name, o), name)
+        assert-refused(::objects/list-objects(name, "p/", 5, null, o), name)
+        assert-refused(::objects/copy-object(name, "a", "good-bucket", "c", o), name)
+        assert-refused(::objects/copy-object("good-bucket", "a", name, "c", o), name)
+        assert-refused(::objects/create-multipart-upload(name, "k", o), name)
+        assert-refused(::objects/upload-part(name, "k", "u", 1, "data", o), name)
+        assert-refused(::objects/complete-multipart-upload(name, "k", "u", [], o), name)
+        assert-refused(::objects/abort-multipart-upload(name, "k", "u", o), name)
+        assert-refused(::buckets/create-bucket(name, o), name)
+        assert-refused(::buckets/create-bucket(name, "eu-west-1", o), name)
+        assert-refused(::buckets/delete-bucket(name, o), name)
+        assert-refused(::buckets/head-bucket(name, o), name)
+        assert-refused(::presigned/generate-presigned-url(name, "k", o), name)
+        assert-refused(::presigned/generate-presigned-url(name, "k", 60, o), name)
+        assert-refused(::presigned/generate-presigned-upload-url(name, "k", o), name)
+        assert-refused(::presigned/generate-presigned-delete-url(name, "k", o), name)
+        assert(is-err(::api/bucket-url(name, {region: "eu-west-1"})))
+        assert(is-err(::api/object-url(name, "k", {region: "eu-west-1"})))
+        assert(is-err(::api/bucket-url(name, {region: "auto", endpoint: "http://localhost:9000"})))
+    })
+}
+
+test-unsafe-regions-never-reach-the-request
+meta ["test"] fn () {
+    for-each(UNSAFE_NAMES(), (name) {
+        o {...no-send(), region: name}
+        assert-refused(::objects/put-object("my-bucket", "k", "hi", "text/plain", o), name)
+        assert-refused(::objects/get-object("my-bucket", "k", o), name)
+        assert-refused(::objects/list-objects("my-bucket", o), name)
+        assert-refused(::buckets/list-buckets(o), name)
+        assert-refused(::buckets/create-bucket("my-bucket", name, no-send()), name)
+        assert-refused(::presigned/generate-presigned-url("my-bucket", "k", o), name)
+        assert-refused(::presigned/generate-presigned-url("my-bucket", "k", 60, o), name)
+        assert-refused(::presigned/generate-presigned-upload-url("my-bucket", "k", o), name)
+        assert-refused(::presigned/generate-presigned-delete-url("my-bucket", "k", o), name)
+    })
+}
+
+test-reported-injection
+meta ["test"] fn () {
+    // Built https://acme.s3.evil.example/.amazonaws.com before, and signed for it
+    out ::objects/get-object("acme", "k", {...no-send(), region: "evil.example/"})
+    assert(is-err(out))
+    assert(contains(err-value(out), "opts.region"))
+}
+
+test-a-dotted-bucket-still-works
+meta ["test"] fn () {
+    request sent(::objects/get-object("my.dotted.bucket", "a b", echo()))
+    assert-eq("https://s3.eu-west-1.amazonaws.com/my.dotted.bucket/a%20b", request.url)
+    assert-eq("s3.eu-west-1.amazonaws.com", get(request.headers, "Host"))
+    url ::presigned/generate-presigned-url("my.dotted.bucket", "k", echo())
+    assert(starts-with(url, "https://s3.eu-west-1.amazonaws.com/my.dotted.bucket/k?"), url)
+    assert-eq("/my.dotted.bucket/a%20b", get(sent(::objects/copy-object("my.dotted.bucket", "a b", "dest-bucket", "c", echo())).headers, "x-amz-copy-source"))
 }
 
 // ---------------------------------------------------------------------------
@@ -80,33 +185,33 @@ meta ["test"] fn () {
 
 test-objects-opts-reach-the-request
 meta ["test"] fn () {
-    assert-signed(sent(::objects/put-object("b", "a b.txt", "hi", "text/plain", echo())), `${B}/a%20b.txt`, "PUT")
-    assert-signed(sent(::objects/put-object("b", "k", "hi", echo())), `${B}/k`, "PUT")
-    assert-signed(sent(::objects/get-object("b", "a b.txt", echo())), `${B}/a%20b.txt`, "GET")
-    assert-signed(sent(::objects/delete-object("b", "a b.txt", echo())), `${B}/a%20b.txt`, "DELETE")
-    assert-signed(sent(::objects/head-object("b", "a b.txt", echo())), `${B}/a%20b.txt`, "HEAD")
-    assert-signed(sent(::objects/copy-object("s", "a b.txt", "b", "c d.txt", echo())), `${B}/c%20d.txt`, "PUT")
-    assert-signed(sent(::objects/create-multipart-upload("b", "k", echo())), `${B}/k?uploads`, "POST")
-    assert-signed(sent(::objects/upload-part("b", "k", "u", 1, "data", echo())), `${B}/k?partNumber=1&uploadId=u`, "PUT")
-    assert-signed(sent(::objects/complete-multipart-upload("b", "k", "u", [], echo())), `${B}/k?uploadId=u`, "POST")
-    assert-signed(sent(::objects/abort-multipart-upload("b", "k", "u", echo())), `${B}/k?uploadId=u`, "DELETE")
-    assert-signed(sent(::objects/list-objects("b", echo())), `${B}/?list-type=2&prefix=&max-keys=1000&encoding-type=url`, "GET")
+    assert-signed(sent(::objects/put-object("bkt", "a b.txt", "hi", "text/plain", echo())), `${B}/a%20b.txt`, "PUT")
+    assert-signed(sent(::objects/put-object("bkt", "k", "hi", echo())), `${B}/k`, "PUT")
+    assert-signed(sent(::objects/get-object("bkt", "a b.txt", echo())), `${B}/a%20b.txt`, "GET")
+    assert-signed(sent(::objects/delete-object("bkt", "a b.txt", echo())), `${B}/a%20b.txt`, "DELETE")
+    assert-signed(sent(::objects/head-object("bkt", "a b.txt", echo())), `${B}/a%20b.txt`, "HEAD")
+    assert-signed(sent(::objects/copy-object("src", "a b.txt", "bkt", "c d.txt", echo())), `${B}/c%20d.txt`, "PUT")
+    assert-signed(sent(::objects/create-multipart-upload("bkt", "k", echo())), `${B}/k?uploads`, "POST")
+    assert-signed(sent(::objects/upload-part("bkt", "k", "u", 1, "data", echo())), `${B}/k?partNumber=1&uploadId=u`, "PUT")
+    assert-signed(sent(::objects/complete-multipart-upload("bkt", "k", "u", [], echo())), `${B}/k?uploadId=u`, "POST")
+    assert-signed(sent(::objects/abort-multipart-upload("bkt", "k", "u", echo())), `${B}/k?uploadId=u`, "DELETE")
+    assert-signed(sent(::objects/list-objects("bkt", echo())), `${B}/?list-type=2&prefix=&max-keys=1000&encoding-type=url`, "GET")
 }
 
 test-buckets-opts-reach-the-request
 meta ["test"] fn () {
     base "https://s3.eu-west-1.amazonaws.com"
     assert-signed(sent(::buckets/list-buckets(echo())), `${base}/`, "GET")
-    assert-signed(sent(::buckets/create-bucket("b", echo())), `${base}/b`, "PUT")
-    assert-signed(sent(::buckets/create-bucket("b", "eu-west-1", echo())), `${base}/b`, "PUT")
-    assert-signed(sent(::buckets/delete-bucket("b", echo())), `${base}/b`, "DELETE")
-    assert-signed(sent(::buckets/head-bucket("b", echo())), `${base}/b`, "HEAD")
+    assert-signed(sent(::buckets/create-bucket("bkt", echo())), `${base}/bkt`, "PUT")
+    assert-signed(sent(::buckets/create-bucket("bkt", "eu-west-1", echo())), `${base}/bkt`, "PUT")
+    assert-signed(sent(::buckets/delete-bucket("bkt", echo())), `${base}/bkt`, "DELETE")
+    assert-signed(sent(::buckets/head-bucket("bkt", echo())), `${base}/bkt`, "HEAD")
 }
 
 test-create-bucket-region-argument-signs
 meta ["test"] fn () {
-    request sent(::buckets/create-bucket("b", "ap-south-1", echo()))
-    assert-eq("https://s3.ap-south-1.amazonaws.com/b", request.url)
+    request sent(::buckets/create-bucket("bkt", "ap-south-1", echo()))
+    assert-eq("https://s3.ap-south-1.amazonaws.com/bkt", request.url)
     assert(contains(get(request.headers, "Authorization"), "/ap-south-1/s3/aws4_request"))
     assert(contains(request.body, "<LocationConstraint>ap-south-1</LocationConstraint>"))
 }
@@ -114,15 +219,15 @@ meta ["test"] fn () {
 test-custom-endpoint-signs-its-host
 meta ["test"] fn () {
     opts {...echo(), endpoint: "http://localhost:9000/", region: "us-east-1"}
-    request sent(::objects/get-object("b", "a b.txt", opts))
-    assert-eq("http://localhost:9000/b/a%20b.txt", request.url)
+    request sent(::objects/get-object("bkt", "a b.txt", opts))
+    assert-eq("http://localhost:9000/bkt/a%20b.txt", request.url)
     assert-eq("localhost:9000", get(request.headers, "Host"), "the Host is the endpoint's, port included")
-    assert-eq("http://localhost:9000/b/?list-type=2&prefix=&max-keys=1000&encoding-type=url", sent(::objects/list-objects("b", opts)).url)
-    assert-eq("http://localhost:9000/b", sent(::buckets/head-bucket("b", opts)).url)
+    assert-eq("http://localhost:9000/bkt/?list-type=2&prefix=&max-keys=1000&encoding-type=url", sent(::objects/list-objects("bkt", opts)).url)
+    assert-eq("http://localhost:9000/bkt", sent(::buckets/head-bucket("bkt", opts)).url)
     assert-eq("http://localhost:9000/", sent(::buckets/list-buckets(opts)).url)
 
-    r2 sent(::objects/put-object("b", "k", "hi", {...echo(), endpoint: "https://acct.r2.cloudflarestorage.com", region: "auto"}))
-    assert-eq("https://acct.r2.cloudflarestorage.com/b/k", r2.url)
+    r2 sent(::objects/put-object("bkt", "k", "hi", {...echo(), endpoint: "https://acct.r2.cloudflarestorage.com", region: "auto"}))
+    assert-eq("https://acct.r2.cloudflarestorage.com/bkt/k", r2.url)
     assert(contains(get(r2.headers, "Authorization"), "/auto/s3/aws4_request"))
 }
 
@@ -133,16 +238,16 @@ assert-missing-credentials fn (result: Result) {
 
 test-missing-credentials-is-a-checkable-error
 meta ["test"] fn () {
-    assert-missing-credentials(::objects/get-object("b", "k"))
-    assert-missing-credentials(::objects/put-object("b", "k", "hi"))
-    assert-missing-credentials(::objects/list-objects("b"))
+    assert-missing-credentials(::objects/get-object("bkt", "k"))
+    assert-missing-credentials(::objects/put-object("bkt", "k", "hi"))
+    assert-missing-credentials(::objects/list-objects("bkt"))
     assert-missing-credentials(::buckets/list-buckets())
-    assert-missing-credentials(::presigned/generate-presigned-url("b", "k"))
+    assert-missing-credentials(::presigned/generate-presigned-url("bkt", "k"))
 }
 
 test-blank-opts-key-never-reaches-the-request
 meta ["test"] fn () {
-    out ::objects/get-object("b", "k", {...echo(), "secret-access-key": ""})
+    out ::objects/get-object("bkt", "k", {...echo(), "secret-access-key": ""})
     assert(is-err(out))
     assert(contains(err-value(out), "opts.secret-access-key"))
 }
@@ -151,11 +256,11 @@ test-endpoint-without-credentials-never-sends
 meta ["test"] fn () {
     // A transport that would fail the test if anything were sent
     opts {endpoint: "https://elsewhere.example.com", region: "auto", transport: (req) { fail("nothing may be sent") }}
-    out ::objects/get-object("b", "k", opts)
+    out ::objects/get-object("bkt", "k", opts)
     assert(is-err(out))
     assert(contains(err-value(out), "opts.endpoint"))
     assert(contains(err-value(out), "opts.access-key-id"))
-    assert(is-err(::presigned/generate-presigned-url("b", "k", opts)), "presigned URLs too")
+    assert(is-err(::presigned/generate-presigned-url("bkt", "k", opts)), "presigned URLs too")
 }
 
 // ---------------------------------------------------------------------------
@@ -165,14 +270,14 @@ meta ["test"] fn () {
 test-put-object-bodies-and-headers
 meta ["test"] fn () {
     data Bytes([0, 255, 195, 40])
-    binary sent(::objects/put-object("b", "k", data, "image/png", echo()))
+    binary sent(::objects/put-object("bkt", "k", data, "image/png", echo()))
     assert-eq(data, binary.body, "Bytes go as they are")
     assert-eq("image/png", get(binary.headers, "Content-Type"))
-    assert-eq("{\"a\":1}", sent(::objects/put-object("b", "k", {a: 1}, "application/json", echo())).body, "a Map becomes JSON")
-    assert-eq("application/octet-stream", get(sent(::objects/put-object("b", "k", "x", echo())).headers, "Content-Type"))
-    assert-eq("b.s3.eu-west-1.amazonaws.com", get(binary.headers, "Host"))
+    assert-eq("{\"a\":1}", sent(::objects/put-object("bkt", "k", {a: 1}, "application/json", echo())).body, "a Map becomes JSON")
+    assert-eq("application/octet-stream", get(sent(::objects/put-object("bkt", "k", "x", echo())).headers, "Content-Type"))
+    assert-eq("bkt.s3.eu-west-1.amazonaws.com", get(binary.headers, "Host"))
 
-    out ::objects/put-object("b", "k", "x", answer({etag: "\"abc\"", "x-amz-version-id": "v1"}, ""))
+    out ::objects/put-object("bkt", "k", "x", answer({etag: "\"abc\"", "x-amz-version-id": "v1"}, ""))
     assert-eq("\"abc\"", out.etag)
     assert-eq("v1", out.version_id)
 }
@@ -180,7 +285,7 @@ meta ["test"] fn () {
 test-get-object-reads-lowercase-headers-and-keeps-bytes
 meta ["test"] fn () {
     data Bytes([0, 255, 195, 40])
-    out ::objects/get-object("b", "k", answer({
+    out ::objects/get-object("bkt", "k", answer({
         "content-type": "image/png",
         "content-length": "4",
         etag: "\"abc\"",
@@ -195,7 +300,7 @@ meta ["test"] fn () {
 
 test-head-object-fills-metadata
 meta ["test"] fn () {
-    out ::objects/head-object("b", "k", answer({
+    out ::objects/head-object("bkt", "k", answer({
         "content-type": "application/json",
         "content-length": "1024",
         etag: "\"abc\"",
@@ -206,34 +311,34 @@ meta ["test"] fn () {
     assert-eq("\"abc\"", out.etag)
     assert-eq("Wed, 01 Mar 2023 12:00:00 GMT", out.last_modified)
 
-    odd ::objects/head-object("b", "k", answer({"content-length": "nope"}, ""))
+    odd ::objects/head-object("bkt", "k", answer({"content-length": "nope"}, ""))
     assert(is-null(odd.content_length), "a bad length doesn't fail the call")
 }
 
 test-delete-object-reads-headers
 meta ["test"] fn () {
-    out ::objects/delete-object("b", "k", answer({"x-amz-delete-marker": "true", "x-amz-version-id": "v2"}, ""))
+    out ::objects/delete-object("bkt", "k", answer({"x-amz-delete-marker": "true", "x-amz-version-id": "v2"}, ""))
     assert-eq(true, out.delete_marker)
     assert-eq("v2", out.version_id)
-    assert(is-null(::objects/delete-object("b", "k", answer({}, "")).delete_marker))
+    assert(is-null(::objects/delete-object("bkt", "k", answer({}, "")).delete_marker))
 }
 
 test-copy-object-encodes-source
 meta ["test"] fn () {
-    request sent(::objects/copy-object("src", "a b/é.txt", "b", "c", echo()))
+    request sent(::objects/copy-object("src", "a b/é.txt", "bkt", "c", echo()))
     assert-eq("/src/a%20b/%C3%A9.txt", get(request.headers, "x-amz-copy-source"))
 }
 
 test-copy-object-responses
 meta ["test"] fn () {
     ok-xml "<CopyObjectResult><LastModified>2023-03-01T12:00:00.000Z</LastModified><ETag>abc</ETag></CopyObjectResult>"
-    out ::objects/copy-object("s", "a", "b", "c", answer({}, ok-xml))
+    out ::objects/copy-object("src", "a", "bkt", "c", answer({}, ok-xml))
     assert-eq("abc", out.etag)
     assert-eq("2023-03-01T12:00:00.000Z", out.last_modified)
 
-    assert(is-null(::objects/copy-object("s", "a", "b", "c", answer({}, "")).etag), "an empty 200")
+    assert(is-null(::objects/copy-object("src", "a", "bkt", "c", answer({}, "")).etag), "an empty 200")
 
-    failed ::objects/copy-object("s", "a", "b", "c", answer({}, "<Error><Code>InternalError</Code></Error>"))
+    failed ::objects/copy-object("src", "a", "bkt", "c", answer({}, "<Error><Code>InternalError</Code></Error>"))
     assert(is-err(failed), "S3 can fail a copy after answering 200")
     assert-eq(200, err-value(failed).status)
 }
@@ -251,15 +356,15 @@ meta ["test"] fn () {
 
 test-list-objects-arities
 meta ["test"] fn () {
-    url sent(::objects/list-objects("b", "p/", 5, "tok=", {...echo(), delimiter: "/"})).url
+    url sent(::objects/list-objects("bkt", "p/", 5, "tok=", {...echo(), delimiter: "/"})).url
     assert-eq(`${B}/?list-type=2&prefix=p%2F&max-keys=5&encoding-type=url&continuation-token=tok%3D&delimiter=%2F`, url)
-    assert-eq(`${B}/?list-type=2&prefix=p%2F&max-keys=5&encoding-type=url`, sent(::objects/list-objects("b", "p/", 5, echo())).url)
-    assert-eq(`${B}/?list-type=2&prefix=p%2F&max-keys=1000&encoding-type=url`, sent(::objects/list-objects("b", "p/", echo())).url)
+    assert-eq(`${B}/?list-type=2&prefix=p%2F&max-keys=5&encoding-type=url`, sent(::objects/list-objects("bkt", "p/", 5, echo())).url)
+    assert-eq(`${B}/?list-type=2&prefix=p%2F&max-keys=1000&encoding-type=url`, sent(::objects/list-objects("bkt", "p/", echo())).url)
 }
 
 LIST_XML """<?xml version="1.0" encoding="UTF-8"?>
 <ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
-  <Name>b</Name>
+  <Name>bkt</Name>
   <Prefix>my+dir%2F</Prefix>
   <KeyCount>2</KeyCount>
   <MaxKeys>1000</MaxKeys>
@@ -284,8 +389,8 @@ LIST_XML """<?xml version="1.0" encoding="UTF-8"?>
 
 test-parse-list-objects
 meta ["test"] fn () {
-    out ::objects/list-objects("b", "my dir/", {...answer({}, LIST_XML), delimiter: "/"})
-    assert-eq("b", out.name)
+    out ::objects/list-objects("bkt", "my dir/", {...answer({}, LIST_XML), delimiter: "/"})
+    assert-eq("bkt", out.name)
     assert-eq("my dir/", out.prefix, "keys and prefixes are decoded")
     assert-eq(2, out.key_count)
     assert-eq(1000, out.max_keys)
@@ -306,7 +411,7 @@ meta ["test"] fn () {
 
 test-parse-empty-listing
 meta ["test"] fn () {
-    out ::objects/parse-list-objects-response("<ListBucketResult><Name>b</Name><KeyCount>0</KeyCount></ListBucketResult>")
+    out ::objects/parse-list-objects-response("<ListBucketResult><Name>bkt</Name><KeyCount>0</KeyCount></ListBucketResult>")
     assert-eq([], out.contents)
     assert-eq([], out.common_prefixes)
     assert(is-null(out.prefix))
@@ -331,27 +436,27 @@ meta ["test"] fn () {
 
 test-create-multipart-upload
 meta ["test"] fn () {
-    xml "<InitiateMultipartUploadResult><Bucket>b</Bucket><Key>k</Key><UploadId>VXBsb2Fk/+=</UploadId></InitiateMultipartUploadResult>"
-    out ::objects/create-multipart-upload("b", "a b", "video/mp4", answer({}, xml))
+    xml "<InitiateMultipartUploadResult><Bucket>bkt</Bucket><Key>k</Key><UploadId>VXBsb2Fk/+=</UploadId></InitiateMultipartUploadResult>"
+    out ::objects/create-multipart-upload("bkt", "a b", "video/mp4", answer({}, xml))
     assert-eq("VXBsb2Fk/+=", out.upload_id)
-    assert-eq("b", out.bucket)
+    assert-eq("bkt", out.bucket)
     assert-eq("a b", out.key)
 
-    request sent(::objects/create-multipart-upload("b", "a b", "video/mp4", echo()))
+    request sent(::objects/create-multipart-upload("bkt", "a b", "video/mp4", echo()))
     assert-eq(`${B}/a%20b?uploads`, request.url)
     assert-eq("video/mp4", get(request.headers, "Content-Type"))
-    assert-eq("application/octet-stream", get(sent(::objects/create-multipart-upload("b", "a", echo())).headers, "Content-Type"))
+    assert-eq("application/octet-stream", get(sent(::objects/create-multipart-upload("bkt", "a", echo())).headers, "Content-Type"))
 }
 
 test-upload-part
 meta ["test"] fn () {
     data Bytes([0, 255, 195, 40])
-    request sent(::objects/upload-part("b", "a b", "up/load+=", 3, data, echo()))
+    request sent(::objects/upload-part("bkt", "a b", "up/load+=", 3, data, echo()))
     assert-eq(`${B}/a%20b?partNumber=3&uploadId=up%2Fload%2B%3D`, request.url, "the upload id is encoded")
     assert-eq(data, request.body, "Bytes go as they are")
     assert-eq("964f2654baa736d82bff0a92bf9e0fb6aab491d2ffe26d33d162c1f975e07457", get(request.headers, "x-amz-content-sha256"), "hashed as bytes")
 
-    out ::objects/upload-part("b", "k", "u", 3, data, answer({etag: "\"part3\""}, ""))
+    out ::objects/upload-part("bkt", "k", "u", 3, data, answer({etag: "\"part3\""}, ""))
     assert-eq(3, out.part_number)
     assert-eq("\"part3\"", out.etag)
 }
@@ -367,25 +472,25 @@ meta ["test"] fn () {
 
 test-complete-multipart-upload
 meta ["test"] fn () {
-    request sent(::objects/complete-multipart-upload("b", "k", "u/1", [{part_number: 1, etag: "x"}], echo()))
+    request sent(::objects/complete-multipart-upload("bkt", "k", "u/1", [{part_number: 1, etag: "x"}], echo()))
     assert-eq(`${B}/k?uploadId=u%2F1`, request.url)
     assert-eq("application/xml", get(request.headers, "Content-Type"))
     assert(contains(request.body, "<PartNumber>1</PartNumber><ETag>x</ETag>"))
 
-    xml "<CompleteMultipartUploadResult><Location>https://b/k</Location><Bucket>b</Bucket><Key>k</Key><ETag>final-2</ETag></CompleteMultipartUploadResult>"
-    out ::objects/complete-multipart-upload("b", "k", "u", [], answer({}, xml))
+    xml "<CompleteMultipartUploadResult><Location>https://b/k</Location><Bucket>bkt</Bucket><Key>k</Key><ETag>final-2</ETag></CompleteMultipartUploadResult>"
+    out ::objects/complete-multipart-upload("bkt", "k", "u", [], answer({}, xml))
     assert-eq("final-2", out.etag)
     assert-eq("https://b/k", out.location)
     assert-eq("k", out.key)
 
-    failed ::objects/complete-multipart-upload("b", "k", "u", [], answer({}, "<Error><Code>InternalError</Code></Error>"))
+    failed ::objects/complete-multipart-upload("bkt", "k", "u", [], answer({}, "<Error><Code>InternalError</Code></Error>"))
     assert(is-err(failed), "S3 can fail this after answering 200")
 }
 
 test-abort-multipart-upload
 meta ["test"] fn () {
-    assert-eq(true, ::objects/abort-multipart-upload("b", "k", "u", answer({}, "")))
-    assert(is-err(::objects/abort-multipart-upload("b", "k", "u", echo())))
+    assert-eq(true, ::objects/abort-multipart-upload("bkt", "k", "u", answer({}, "")))
+    assert(is-err(::objects/abort-multipart-upload("bkt", "k", "u", echo())))
 }
 
 // ---------------------------------------------------------------------------
@@ -404,9 +509,9 @@ meta ["test"] fn () {
 
 test-bucket-responses
 meta ["test"] fn () {
-    assert-eq("/b", ::buckets/create-bucket("b", answer({location: "/b"}, "")).location)
-    assert-eq(true, ::buckets/delete-bucket("b", answer({}, "")))
-    head ::buckets/head-bucket("b", answer({"x-amz-bucket-region": "eu-west-1"}, ""))
+    assert-eq("/b", ::buckets/create-bucket("bkt", answer({location: "/b"}, "")).location)
+    assert-eq(true, ::buckets/delete-bucket("bkt", answer({}, "")))
+    head ::buckets/head-bucket("bkt", answer({"x-amz-bucket-region": "eu-west-1"}, ""))
     assert-eq(true, head.exists)
     assert-eq("eu-west-1", head.region)
 }
@@ -417,20 +522,20 @@ meta ["test"] fn () {
 
 test-presigned-opts
 meta ["test"] fn () {
-    url ::presigned/generate-presigned-url("b", "a b.pdf", 600, echo())
+    url ::presigned/generate-presigned-url("bkt", "a b.pdf", 600, echo())
     assert(starts-with(url, `${B}/a%20b.pdf?X-Amz-Algorithm=AWS4-HMAC-SHA256`), url)
     assert(contains(url, "X-Amz-Credential=AKIDOPTS%2F"), url)
     assert(contains(url, "%2Feu-west-1%2Fs3%2Faws4_request"), url)
     assert(contains(url, "X-Amz-Expires=600&"), url)
 
-    assert(contains(::presigned/generate-presigned-url("b", "k", echo()), "X-Amz-Expires=3600&"))
-    assert(contains(::presigned/generate-presigned-upload-url("b", "k", 60, echo()), "X-Amz-Credential=AKIDOPTS%2F"))
-    assert(contains(::presigned/generate-presigned-upload-url("b", "k", echo()), "X-Amz-Credential=AKIDOPTS%2F"))
-    assert(contains(::presigned/generate-presigned-delete-url("b", "k", 60, echo()), "X-Amz-Credential=AKIDOPTS%2F"))
-    assert(contains(::presigned/generate-presigned-delete-url("b", "k", echo()), "X-Amz-Credential=AKIDOPTS%2F"))
+    assert(contains(::presigned/generate-presigned-url("bkt", "k", echo()), "X-Amz-Expires=3600&"))
+    assert(contains(::presigned/generate-presigned-upload-url("bkt", "k", 60, echo()), "X-Amz-Credential=AKIDOPTS%2F"))
+    assert(contains(::presigned/generate-presigned-upload-url("bkt", "k", echo()), "X-Amz-Credential=AKIDOPTS%2F"))
+    assert(contains(::presigned/generate-presigned-delete-url("bkt", "k", 60, echo()), "X-Amz-Credential=AKIDOPTS%2F"))
+    assert(contains(::presigned/generate-presigned-delete-url("bkt", "k", echo()), "X-Amz-Credential=AKIDOPTS%2F"))
 
-    custom ::presigned/generate-presigned-url("b", "k", {...echo(), endpoint: "http://localhost:9000"})
-    assert(starts-with(custom, "http://localhost:9000/b/k?"), custom)
+    custom ::presigned/generate-presigned-url("bkt", "k", {...echo(), endpoint: "http://localhost:9000"})
+    assert(starts-with(custom, "http://localhost:9000/bkt/k?"), custom)
 }
 
 // ---------------------------------------------------------------------------
@@ -440,7 +545,7 @@ meta ["test"] fn () {
 test-to-doc-file
 meta ["test"] fn () {
     object ::objects/S3Object({key: "reports/2024/q1.pdf", size: 42, last_modified: "2023-03-01T12:00:00.000Z", etag: "\"abc\"", storage_class: "STANDARD"})
-    doc ::objects/to-doc-file(object, "b")
+    doc ::objects/to-doc-file(object, "bkt")
     assert-eq("aws-s3", doc.provider)
     assert-eq("reports/2024/q1.pdf", doc.id)
     assert-eq("reports/2024/q1.pdf", doc.path)
@@ -450,7 +555,7 @@ meta ["test"] fn () {
     assert-eq("2023-03-01T12:00:00.000Z", doc.modified)
     assert(is-null(doc.created))
     assert-eq(["reports/2024/"], doc.parents)
-    assert-eq("b", doc.drive-id)
+    assert-eq("bkt", doc.drive-id)
     assert-eq("abc", doc.version, "the ETag, without quotes")
     assert-eq(false, doc.is-folder)
     assert-eq(false, doc.trashed)
@@ -486,18 +591,18 @@ meta ["test"] fn () {
 
 test-to-doc-files
 meta ["test"] fn () {
-    listing ::objects/list-objects("b", {...answer({}, LIST_XML), delimiter: "/"})
+    listing ::objects/list-objects("bkt", {...answer({}, LIST_XML), delimiter: "/"})
     docs ::objects/to-doc-files(listing)
     assert-eq(4, length(docs))
     assert-eq("my dir/a&b+c.txt", first(docs).id)
-    assert-eq("b", first(docs).drive-id)
+    assert-eq("bkt", first(docs).drive-id)
     assert-eq(true, last(docs).is-folder)
     assert-eq("my dir/sub2/", last(docs).path)
 }
 
 test-root-namespace-exports
 meta ["test"] fn () {
-    assert(contains(::aws::s3/generate-presigned-url("b", "k", echo()), "AKIDOPTS"))
-    assert(is-err(::aws::s3/abort-multipart-upload("b", "k", "u", echo())))
+    assert(contains(::aws::s3/generate-presigned-url("bkt", "k", echo()), "AKIDOPTS"))
+    assert(is-err(::aws::s3/abort-multipart-upload("bkt", "k", "u", echo())))
     assert-eq("k", ::aws::s3/to-doc-file({key: "k"}).id)
 }

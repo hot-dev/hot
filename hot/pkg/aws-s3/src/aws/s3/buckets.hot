@@ -14,7 +14,6 @@ eq ::hot::cmp/eq
 resolve ::aws::core/resolve
 send-signed ::aws::core/send-signed
 uri-encode ::aws::core/uri-encode
-get-region ::aws::core/get-region
 AwsError ::aws::core/AwsError
 
 // S3 Bucket type
@@ -112,7 +111,7 @@ meta {
 }
 fn
 (bucket: Str, region: Str, opts: Map): CreateBucketResponse | AwsError {
-    if-ok(resolve({...opts, region: region}), (resolved) {
+    if-ok(::api/resolve({...opts, region: region}, bucket), (resolved) {
         url `${::api/base-url(resolved)}/${uri-encode(bucket)}`
 
         // Create bucket configuration for non-us-east-1 regions
@@ -140,7 +139,7 @@ fn
     create-bucket(bucket, region, {})
 },
 (bucket: Str): CreateBucketResponse | AwsError {
-    create-bucket(bucket, get-region())
+    create-bucket(bucket, {})
 }
 
 // Delete a bucket
@@ -159,7 +158,7 @@ meta {
 }
 fn
 (bucket: Str, opts: Map): Bool | AwsError {
-    if-ok(resolve(opts), (resolved) {
+    if-ok(::api/resolve(opts, bucket), (resolved) {
         url `${::api/base-url(resolved)}/${uri-encode(bucket)}`
 
         response send-signed("DELETE", url, "s3", resolved, {}, "")
@@ -190,7 +189,7 @@ meta {
 }
 fn
 (bucket: Str, opts: Map): HeadBucketResponse | AwsError {
-    if-ok(resolve(opts), (resolved) {
+    if-ok(::api/resolve(opts, bucket), (resolved) {
         url `${::api/base-url(resolved)}/${uri-encode(bucket)}`
 
         response send-signed("HEAD", url, "s3", resolved, {}, "")
