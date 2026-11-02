@@ -161,7 +161,7 @@ pub fn find(args: &[Val]) -> HotResult<Val> {
                     let (start, end) = char_span(val, &m, (0, 0));
                     map.insert(Val::from("start"), pos(start));
                     map.insert(Val::from("end"), pos(end));
-                    HotResult::Ok(Val::Map(Box::new(map)))
+                    HotResult::Ok(Val::map(map))
                 }
                 None => HotResult::Ok(Val::Null),
             }
@@ -203,9 +203,9 @@ pub fn find_all(args: &[Val]) -> HotResult<Val> {
                 scanned = (m.end(), end);
                 map.insert(Val::from("start"), pos(start));
                 map.insert(Val::from("end"), pos(end));
-                matches.push(Val::Map(Box::new(map)));
+                matches.push(Val::map(map));
             }
-            HotResult::Ok(Val::Vec(matches))
+            HotResult::Ok(Val::vec(matches))
         }
         (Val::Str(_), _) => HotResult::Err(Val::from("find-all pattern must be a string")),
         _ => HotResult::Err(Val::from("find-all value must be a string")),
@@ -288,7 +288,7 @@ pub fn split(args: &[Val]) -> HotResult<Val> {
                 }
                 parts.push(Val::from(p.to_string()));
             }
-            HotResult::Ok(Val::Vec(parts))
+            HotResult::Ok(Val::vec(parts))
         }
         (Val::Str(_), _) => HotResult::Err(Val::from("split pattern must be a string")),
         _ => HotResult::Err(Val::from("split value must be a string")),
@@ -322,8 +322,8 @@ pub fn capture(args: &[Val]) -> HotResult<Val> {
                             None => Val::Null,
                         })
                         .collect();
-                    map.insert(Val::from("groups"), Val::Vec(groups));
-                    HotResult::Ok(Val::Map(Box::new(map)))
+                    map.insert(Val::from("groups"), Val::vec(groups));
+                    HotResult::Ok(Val::map(map))
                 }
                 None => HotResult::Ok(Val::Null),
             }
@@ -367,10 +367,10 @@ pub fn capture_all(args: &[Val]) -> HotResult<Val> {
                         None => Val::Null,
                     })
                     .collect();
-                map.insert(Val::from("groups"), Val::Vec(groups));
-                matches.push(Val::Map(Box::new(map)));
+                map.insert(Val::from("groups"), Val::vec(groups));
+                matches.push(Val::map(map));
             }
-            HotResult::Ok(Val::Vec(matches))
+            HotResult::Ok(Val::vec(matches))
         }
         (Val::Str(_), _) => HotResult::Err(Val::from("capture-all pattern must be a string")),
         _ => HotResult::Err(Val::from("capture-all value must be a string")),

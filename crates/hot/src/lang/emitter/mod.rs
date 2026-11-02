@@ -128,7 +128,7 @@ impl EngineEvent {
             "static_scope": static_scope,
             "runtime_path": runtime_path,
             "call_depth": call_depth as i64,
-            "args": Val::Vec(args),
+            "args": Val::vec(args),
             "start_time": start_time.to_rfc3339(),
             "flow": flow.unwrap_or(Val::Null),
         });
@@ -496,7 +496,7 @@ impl EngineEventFilter {
         match val {
             Val::Vec(patterns) => {
                 let mut regexes = Vec::new();
-                for pattern in patterns {
+                for pattern in patterns.iter() {
                     if let Val::Str(pattern_str) = pattern {
                         match Regex::new(pattern_str) {
                             Ok(regex) => regexes.push(regex),

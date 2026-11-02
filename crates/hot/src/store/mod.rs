@@ -941,8 +941,8 @@ mod tests {
         inner.insert(Val::from("name"), Val::from(name));
         let mut outer = indexmap::IndexMap::new();
         outer.insert(Val::from("$type"), Val::from("::hot::store/Map"));
-        outer.insert(Val::from("$val"), Val::Map(Box::new(inner)));
-        Val::Map(Box::new(outer))
+        outer.insert(Val::from("$val"), Val::map(inner));
+        Val::map(outer)
     }
 
     fn map_val_with_embedding(name: &str, embedding: Val) -> Val {
@@ -951,8 +951,8 @@ mod tests {
         inner.insert(Val::from("embedding"), embedding);
         let mut outer = indexmap::IndexMap::new();
         outer.insert(Val::from("$type"), Val::from("::hot::store/Map"));
-        outer.insert(Val::from("$val"), Val::Map(Box::new(inner)));
-        Val::Map(Box::new(outer))
+        outer.insert(Val::from("$val"), Val::map(inner));
+        Val::map(outer)
     }
 
     fn typed_val(type_name: &str, payload: Option<Val>) -> Val {
@@ -961,7 +961,7 @@ mod tests {
         if let Some(payload) = payload {
             outer.insert(Val::from("$val"), payload);
         }
-        Val::Map(Box::new(outer))
+        Val::map(outer)
     }
 
     #[test]
@@ -1023,7 +1023,7 @@ mod tests {
         em.insert(Val::from("dimensions"), Val::Int(1536));
         em.insert(Val::from("text-search"), Val::Bool(true));
         em.insert(Val::from("on-error"), Val::from("fail"));
-        let embedding = typed_val("::hot::store/Embedding", Some(Val::Map(Box::new(em))));
+        let embedding = typed_val("::hot::store/Embedding", Some(Val::map(em)));
         let val = map_val_with_embedding(
             "docs",
             typed_val("::hot::store/EmbeddingOptions.Embedding", Some(embedding)),
@@ -1047,7 +1047,7 @@ mod tests {
         em.insert(Val::from("dimensions"), Val::Int(2));
         em.insert(Val::from("embed-fn"), Val::from("test-embed"));
         em.insert(Val::from("embed-batch-fn"), Val::from("test-embed-batch"));
-        let embedding = typed_val("::hot::store/Embedding", Some(Val::Map(Box::new(em))));
+        let embedding = typed_val("::hot::store/Embedding", Some(Val::map(em)));
         let val = map_val_with_embedding(
             "docs",
             typed_val("::hot::store/EmbeddingOptions.Embedding", Some(embedding)),
@@ -1093,7 +1093,7 @@ mod tests {
         em.insert(Val::from("field"), Val::from("body"));
         em.insert(Val::from("dimensions"), Val::Int(1536));
 
-        let embedding = typed_val("::hot::store/Embedding", Some(Val::Map(Box::new(em))));
+        let embedding = typed_val("::hot::store/Embedding", Some(Val::map(em)));
         let val = map_val_with_embedding(
             "docs",
             typed_val("::hot::store/EmbeddingOptions.Embedding", Some(embedding)),
@@ -1114,8 +1114,8 @@ mod tests {
         inner.insert(Val::from("not-name"), Val::from("oops"));
         let mut outer = indexmap::IndexMap::new();
         outer.insert(Val::from("$type"), Val::from("::hot::store/Map"));
-        outer.insert(Val::from("$val"), Val::Map(Box::new(inner)));
-        let val = Val::Map(Box::new(outer));
+        outer.insert(Val::from("$val"), Val::map(inner));
+        let val = Val::map(outer);
         assert!(store_map_config_from_val(&val).is_err());
     }
 

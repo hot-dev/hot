@@ -83,7 +83,7 @@ fn request_with_policy(
 
         headers = match map.get(&Val::from("headers")) {
             Some(Val::Map(m)) => m.clone(),
-            Some(Val::Null) | None => Box::new(IndexMap::new()),
+            Some(Val::Null) | None => std::sync::Arc::new(IndexMap::new()),
             _ => {
                 return HotResult::Err(err_val(
                     "::hot::http/request: headers must be a map".to_string(),
@@ -393,11 +393,11 @@ async fn make_http_request(
     // Build response map
     let mut response_map: IndexMap<Val, Val> = IndexMap::new();
     response_map.insert(Val::from("status"), Val::Int(status));
-    response_map.insert(Val::from("headers"), Val::Map(Box::new(response_headers)));
+    response_map.insert(Val::from("headers"), Val::map(response_headers));
     response_map.insert(Val::from("body"), body_val);
     response_map.insert(Val::from("body-bytes"), body_bytes_val);
 
-    HotResult::Ok(Val::Map(Box::new(response_map)))
+    HotResult::Ok(Val::constructed("::hot::http/HttpResponse", response_map))
 }
 
 /// Make an HTTP GET request
@@ -685,7 +685,7 @@ impl HttpStreamIterator {
             event_map.insert(Val::from("id"), Val::from(id_str));
         }
 
-        Some(Val::Map(Box::new(event_map)))
+        Some(Val::map(event_map))
     }
 
     /// Parse NDJSON (newline-delimited JSON) chunk
@@ -718,7 +718,7 @@ impl HttpStreamIterator {
         } else if objects.len() == 1 {
             objects.pop().unwrap()
         } else {
-            Val::Vec(objects)
+            Val::vec(objects)
         }
     }
 }
@@ -814,7 +814,7 @@ fn request_stream_with_policy(
 
         headers = match map.get(&Val::from("headers")) {
             Some(Val::Map(m)) => m.clone(),
-            Some(Val::Null) | None => Box::new(IndexMap::new()),
+            Some(Val::Null) | None => std::sync::Arc::new(IndexMap::new()),
             _ => {
                 return HotResult::Err(err_val(
                     "::hot::http/request-stream: headers must be a map".to_string(),
@@ -981,10 +981,13 @@ async fn make_streaming_request(
     // Build response map with iterator as body
     let mut response_map: IndexMap<Val, Val> = IndexMap::new();
     response_map.insert(Val::from("status"), Val::Int(status));
-    response_map.insert(Val::from("headers"), Val::Map(Box::new(response_headers)));
+    response_map.insert(Val::from("headers"), Val::map(response_headers));
     response_map.insert(Val::from("body"), Val::Box(Box::new(iter_box)));
 
-    HotResult::Ok(Val::Map(Box::new(response_map)))
+    HotResult::Ok(Val::constructed(
+        "::hot::http/StreamingHttpResponse",
+        response_map,
+    ))
 }
 
 #[cfg(test)]
@@ -1016,10 +1019,10 @@ mod tests {
         url
     }
 
-    /// Helper to unwrap HotResult
+    /// Helper to unwrap HotResult, down to a response's fields
     fn unwrap_result(result: HotResult<Val>) -> Val {
         match result {
-            HotResult::Ok(v) => v,
+            HotResult::Ok(v) => crate::val::as_fields(&v).clone(),
             HotResult::Err(e) => panic!("Expected Ok, got Err: {:?}", e),
         }
     }
@@ -1257,6 +1260,55 @@ mod tests {
         assert!(error.to_string().contains("unsupported method"), "{error}");
     }
 
+    // A response carries its declared type, so a `HttpResponse -> T` arrow
+    // applies to it (`T(response)`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn responses_are_tagged_with_their_declared_type() {
+        let app = Router::new().route("/", axum::routing::get(|| async { "ok" }));
+        let url = start_mock_server(app).await;
+        let result = make_http_request(
+            "GET",
+            &url,
+            &IndexMap::new(),
+            &Val::Null,
+            DestinationPolicy::AllowPrivate,
+            DEFAULT_MAX_RESPONSE_BYTES,
+        )
+        .await;
+        let HotResult::Ok(Val::Map(response)) = result else {
+            panic!("expected a response: {result:?}");
+        };
+        assert_eq!(
+            crate::val::tagged_type_name(&response),
+            Some("::hot::http/HttpResponse")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn streaming_responses_are_tagged_with_their_declared_type() {
+        let app = Router::new().route("/", axum::routing::get(|| async { "ok" }));
+        let url = start_mock_server(app).await;
+        let response = tokio::task::spawn_blocking(move || {
+            request_stream(&[
+                Val::from("GET"),
+                Val::from(url),
+                Val::map_empty(),
+                Val::from(""),
+                Val::from("raw"),
+            ])
+        })
+        .await
+        .unwrap();
+        let HotResult::Ok(response) = response else {
+            panic!("expected a response: {response:?}");
+        };
+        assert!(response.is_type("::hot::http/StreamingHttpResponse"));
+        assert!(matches!(
+            crate::val::as_fields(&response).get("status"),
+            Some(Val::Int(200))
+        ));
+    }
+
     #[tokio::test]
     async fn public_only_policy_rejects_local_http_destination() {
         let app = Router::new().route("/", axum::routing::get(|| async { "nope" }));
@@ -1456,7 +1508,9 @@ mod tests {
                         // Handle both single values and vectors (multiple lines in one chunk)
                         match value {
                             Val::Null => continue,
-                            Val::Vec(items) => objects.extend(items),
+                            Val::Vec(items) => {
+                                objects.extend(std::sync::Arc::unwrap_or_clone(items))
+                            }
                             other => objects.push(other),
                         }
                     }
@@ -1544,7 +1598,7 @@ mod tests {
                 Val::from("POST"),
                 Val::from(url),
                 Val::map_empty(),
-                Val::Map(Box::new(body_map)),
+                Val::map(body_map),
             ]);
             unwrap_result(result)
         })
@@ -1586,11 +1640,11 @@ mod tests {
 
         let mut body_map: IndexMap<Val, Val> = IndexMap::new();
         body_map.insert(Val::from("greeting"), Val::from("hello"));
-        req_map.insert(Val::from("body"), Val::Map(Box::new(body_map)));
+        req_map.insert(Val::from("body"), Val::map(body_map));
         // headers omitted — should default to empty
 
         let response = tokio::task::spawn_blocking(move || {
-            let result = request(&[Val::Map(Box::new(req_map))]);
+            let result = request(&[Val::map(req_map)]);
             unwrap_result(result)
         })
         .await
@@ -1632,14 +1686,14 @@ mod tests {
 
         let mut headers_map: IndexMap<Val, Val> = IndexMap::new();
         headers_map.insert(Val::from("x-custom-header"), Val::from("test-value"));
-        req_map.insert(Val::from("headers"), Val::Map(Box::new(headers_map)));
+        req_map.insert(Val::from("headers"), Val::map(headers_map));
 
         let mut body_map: IndexMap<Val, Val> = IndexMap::new();
         body_map.insert(Val::from("data"), Val::from("test"));
-        req_map.insert(Val::from("body"), Val::Map(Box::new(body_map)));
+        req_map.insert(Val::from("body"), Val::map(body_map));
 
         let response = tokio::task::spawn_blocking(move || {
-            let result = request(&[Val::Map(Box::new(req_map))]);
+            let result = request(&[Val::map(req_map)]);
             unwrap_result(result)
         })
         .await
@@ -1682,14 +1736,14 @@ mod tests {
 
         let mut body_map: IndexMap<Val, Val> = IndexMap::new();
         body_map.insert(Val::from("msg"), Val::from("wrapped"));
-        inner_map.insert(Val::from("body"), Val::Map(Box::new(body_map)));
+        inner_map.insert(Val::from("body"), Val::map(body_map));
 
         let mut req_map: IndexMap<Val, Val> = IndexMap::new();
         req_map.insert(Val::from("$type"), Val::from("::hot::http/HttpRequest"));
-        req_map.insert(Val::from("$val"), Val::Map(Box::new(inner_map)));
+        req_map.insert(Val::from("$val"), Val::map(inner_map));
 
         let response = tokio::task::spawn_blocking(move || {
-            let result = request(&[Val::Map(Box::new(req_map))]);
+            let result = request(&[Val::map(req_map)]);
             unwrap_result(result)
         })
         .await

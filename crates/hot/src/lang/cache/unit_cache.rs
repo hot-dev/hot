@@ -502,7 +502,7 @@ mod tests {
                 type_annotation: None,
                 src: None,
             },
-            crate::lang::ast::Value::Val(Val::Map(Box::new(map)), None),
+            crate::lang::ast::Value::Val(Val::map(map), None),
         );
 
         let ns = Namespace {
@@ -735,7 +735,7 @@ mod tests {
                 type_annotation: None,
                 src: None,
             },
-            crate::lang::ast::Value::Val(Val::Map(Box::new(map)), None),
+            crate::lang::ast::Value::Val(Val::map(map), None),
         );
 
         // 3. TemplateLiteral with Expression
