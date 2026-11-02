@@ -29,6 +29,7 @@ now ::hot::time/now
 
 is-str ::hot::type/is-str
 is-bytes ::hot::type/is-bytes
+is-map ::hot::type/is-map
 
 // AWS Credentials type
 Credentials
@@ -57,13 +58,63 @@ type {
     body: Any
 }
 
+str-or-null fn (value: Any): Str? {
+    if(is-str(value), value, null)
+}
+
+// `com.amazon.coral.service#ThrottlingException` and `ValidationException:http://...` name the same thing as their plain forms.
+error-code-name fn (code: Str?): Str? {
+    if(is-null(code), null, first(split(last(split(code, "#")), ":")))
+}
+
+xml-child-text fn (elem: Any, name: Str): Str? {
+    child ::hot::xml/child(elem, name)
+    if(is-null(child), null, ::hot::xml/text(child))
+}
+
+// S3 answers `<Error><Code>`; query APIs answer `<ErrorResponse><Error><Code>` with `<RequestId>` beside it.
+xml-error-fields fn (root: Result): Map {
+    cond {
+        is-err(root) => { {} }
+        => {
+            inner ::hot::xml/child(root, "Error")
+            elem if(is-null(inner), root, inner)
+            {
+                code: xml-child-text(elem, "Code"),
+                message: xml-child-text(elem, "Message"),
+                request_id: or(xml-child-text(elem, "RequestId"), xml-child-text(root, "RequestId"))
+            }
+        }
+    }
+}
+
+error-fields
+meta {
+    doc: """The `code`, `message` and `request_id` an AWS error body carries, from JSON (`__type`, `code`, `message`) or XML (`<Code>`, `<Message>`, `<RequestId>`). A field the body doesn't carry is missing. Exposed for testing."""
+}
+fn (body: Any): Map {
+    cond {
+        is-map(body) => {
+            {
+                code: or(str-or-null(get(body, "__type")), str-or-null(get(body, "code")), str-or-null(get(body, "Code"))),
+                message: or(str-or-null(get(body, "message")), str-or-null(get(body, "Message")), str-or-null(get(body, "errorMessage"))),
+                request_id: or(str-or-null(get(body, "RequestId")), str-or-null(get(body, "requestId")))
+            }
+        }
+
+        and(is-str(body), starts-with(trim(body), "<")) => { xml-error-fields(::hot::xml/from-xml(body)) }
+        => { {} }
+    }
+}
+
 // Convert HTTP response to AwsError
 HttpResponse -> AwsError fn (response: HttpResponse): AwsError {
+    fields error-fields(response.body)
     AwsError({
         status: response.status,
-        code: null,
-        message: null,
-        request_id: null,
+        code: error-code-name(or(get(fields, "code"), response-header(response, "x-amzn-errortype"))),
+        message: or(get(fields, "message"), `aws: HTTP ${response.status}`),
+        request_id: or(get(fields, "request_id"), response-header(response, "x-amzn-requestid"), response-header(response, "x-amz-request-id")),
         body: response.body
     })
 }
@@ -439,9 +490,8 @@ parse-json-body
 meta {
     doc: """
     Return `response` as an `HttpResponse`, with a JSON body parsed when the runtime left it
-    as Bytes (`application/x-amz-json-1.0` and `-1.1` responses). The runtime's response is a
-    plain Map, and only a typed one takes the `HttpResponse -> AwsError` arrow: without this
-    an `AwsError` would be that Map, carrying the headers and `body-bytes` too.
+    as Bytes (`application/x-amz-json-1.0` and `-1.1` responses). A `transport` in opts can
+    return a plain Map, so the result is typed here for `AwsError(response)` to run its arrow.
     """
 }
 fn (response: Result): Any {

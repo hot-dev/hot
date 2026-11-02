@@ -657,7 +657,7 @@ meta ["test"] fn () {
 
 test-send-signed-types-a-plain-map-response
 meta ["test"] fn () {
-    // The runtime's HTTP response is a plain Map
+    // A transport can return a plain Map
     plain {
         "access-key-id": "a",
         "secret-access-key": "b",
@@ -673,6 +673,33 @@ meta ["test"] fn () {
     assert-eq("denied", failure.body.error)
     assert(not(in("body-bytes", keys(untype(failure)))), "the arrow ran: an error carries no copy of the body as bytes")
     assert(not(in("headers", keys(untype(failure)))))
+}
+
+test-aws-error-from-json-xml-and-empty-bodies
+meta ["test"] fn () {
+    json ::aws::core/AwsError(::hot::http/HttpResponse({status: 400, headers: {"x-amzn-requestid": "req-1"}, body: {"__type": "com.amazonaws.dynamodb.v20120810#ResourceNotFoundException", message: "no table"}}))
+    assert-eq("ResourceNotFoundException", json.code)
+    assert-eq("no table", json.message)
+    assert-eq("req-1", json.request_id)
+
+    header ::aws::core/AwsError(::hot::http/HttpResponse({status: 400, headers: {"x-amzn-errortype": "ValidationException:http://internal/"}, body: {Message: "bad model"}}))
+    assert-eq("ValidationException", header.code)
+    assert-eq("bad model", header.message)
+
+    s3 ::aws::core/AwsError(::hot::http/HttpResponse({status: 404, headers: {}, body: "<?xml version=\"1.0\"?><Error><Code>NoSuchKey</Code><Message>The key &amp; more</Message><RequestId>r2</RequestId></Error>"}))
+    assert-eq("NoSuchKey", s3.code)
+    assert-eq("The key & more", s3.message)
+    assert-eq("r2", s3.request_id)
+
+    query ::aws::core/AwsError(::hot::http/HttpResponse({status: 403, headers: {}, body: "<ErrorResponse><Error><Type>Sender</Type><Code>InvalidClientTokenId</Code><Message>bad token</Message></Error><RequestId>r3</RequestId></ErrorResponse>"}))
+    assert-eq("InvalidClientTokenId", query.code)
+    assert-eq("r3", query.request_id)
+
+    for-each(["", "upstream boom", "<not xml", null], (body) {
+        e ::aws::core/AwsError(::hot::http/HttpResponse({status: 502, headers: {}, body: body}))
+        assert-eq("aws: HTTP 502", e.message)
+        assert(is-null(e.code))
+    })
 }
 
 test-request-opts-arity

@@ -58,7 +58,7 @@ These are errors, so that a tenant with a missing key never runs on the project'
 ## Types
 
 - `Credentials` - AWS credential container
-- `AwsError` - Standard error type for AWS API failures
+- `AwsError` - Standard error type for AWS API failures, with `code`, `message` and `request_id` read from the response
 
 ## Documentation
 
