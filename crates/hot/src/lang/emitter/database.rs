@@ -68,6 +68,8 @@ struct DatabaseEngineEventEmitterProcessor {
     open_calls: AHashMap<(Uuid, Uuid), OpenCall>,
     /// Runs that ended: nothing more will stop their open calls.
     ended_runs: Vec<Uuid>,
+    /// Runs with rows written, and how far those rows are masked.
+    written_runs: AHashMap<Uuid, WrittenRun>,
     /// When present, large call/run payload leaves are spilled to blob storage
     /// (after secret masking) before JSON serialization.
     blob_store: Option<Arc<BlobStore>>,
@@ -79,6 +81,17 @@ struct DatabaseEngineEventEmitterProcessor {
 struct ProcessorFlushRequest {
     run_id: Option<Uuid>,
     completion: oneshot::Sender<Result<(), String>>,
+}
+
+/// A run's call rows hold nothing of what it registered after `generation`,
+/// unless a later generation is on its way to the writer.
+struct WrittenRun {
+    execution_context: ExecutionContext,
+    generation: u64,
+    /// A run may register secrets in a loop, and each pass reads all its rows.
+    remask_after: Instant,
+    remask_interval: Duration,
+    last_written: Instant,
 }
 
 /// A call whose row has args masked as of `generation` of its run's secrets.
@@ -111,6 +124,7 @@ struct CallEngineEventBatch {
 }
 
 const BATCH_INTERVAL: Duration = Duration::from_millis(500);
+const MAX_REMASK_INTERVAL: Duration = Duration::from_secs(30);
 
 impl DatabaseEngineEventEmitter {
     /// Creates a new DatabaseEngineEventEmitter with an existing database pool (preferred)
@@ -391,6 +405,7 @@ impl DatabaseEngineEventEmitterProcessor {
             pending_calls: IndexMap::new(),
             open_calls: AHashMap::new(),
             ended_runs: Vec::new(),
+            written_runs: AHashMap::new(),
             blob_store,
             max_calls_per_run,
             call_budgets: AHashMap::new(),
@@ -450,9 +465,7 @@ impl DatabaseEngineEventEmitterProcessor {
 
     /// Once a run ends, record how many of its calls it didn't.
     fn finish_call_budget(&mut self, run_id: Uuid) {
-        if !self.open_calls.is_empty() {
-            self.ended_runs.push(run_id);
-        }
+        self.ended_runs.push(run_id);
         let Some(budget) = self.call_budgets.get_mut(&run_id) else {
             return;
         };
@@ -472,6 +485,8 @@ impl DatabaseEngineEventEmitterProcessor {
             return;
         }
         self.last_budget_prune = Instant::now();
+        self.written_runs
+            .retain(|_, run| run.last_written.elapsed() < IDLE_CALL_BUDGET_TTL);
         self.call_budgets.retain(|_, budget| {
             let ttl = if budget.finished {
                 FINISHED_CALL_BUDGET_TTL
@@ -735,6 +750,18 @@ impl DatabaseEngineEventEmitterProcessor {
         for batch in sorted_batches {
             let call_id_str = batch.call_id.to_string();
 
+            // Read before masking, like the generation below.
+            self.written_runs
+                .entry(batch.execution_context.run_id)
+                .or_insert_with(|| WrittenRun {
+                    execution_context: batch.execution_context.clone(),
+                    generation: batch.execution_context.secret_values.generation(),
+                    remask_after: Instant::now(),
+                    remask_interval: BATCH_INTERVAL,
+                    last_written: Instant::now(),
+                })
+                .last_written = Instant::now();
+
             // Read before masking: a secret registered during this write makes
             // the row stale, and writing it again is harmless.
             if batch.stop_time.is_none() {
@@ -806,13 +833,35 @@ impl DatabaseEngineEventEmitterProcessor {
             });
         }
 
+        let ended = std::mem::take(&mut self.ended_runs);
+        self.remask_written_runs(&ended);
+
         // After the writes above, for calls of a run that ended without their
         // stop: they had this last chance, and hold what the run did.
-        if !self.ended_runs.is_empty() {
-            let ended = std::mem::take(&mut self.ended_runs);
+        if !ended.is_empty() {
             self.open_calls
                 .retain(|(run_id, _), _| !ended.contains(run_id));
         }
+    }
+
+    /// Have the rows of runs that registered a secret since they were written
+    /// masked again, after the writes already queued. A run that ended doesn't
+    /// wait its turn, as this is its last chance.
+    fn remask_written_runs(&mut self, ended: &[Uuid]) {
+        let now = Instant::now();
+        for (run_id, run) in &mut self.written_runs {
+            let generation = run.execution_context.secret_values.generation();
+            if generation != run.generation && (run.remask_after <= now || ended.contains(run_id)) {
+                run.generation = generation;
+                run.remask_after = now + run.remask_interval;
+                run.remask_interval = (run.remask_interval * 2).min(MAX_REMASK_INTERVAL);
+                self.writer.write(DatabaseWrite::RemaskCalls {
+                    execution_context: Box::new(run.execution_context.clone()),
+                });
+            }
+        }
+        self.written_runs
+            .retain(|run_id, _| !ended.contains(run_id));
     }
 
     /// Serialize a `Val` to JSON for storage in a Postgres `jsonb` column,
@@ -1752,7 +1801,7 @@ mod tests {
     /// that stopped and was written before it keeps what it had: the limit
     /// `resources/docs/language/meta.md` documents.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_finished_call_is_masked_only_until_it_is_written() {
+    async fn a_secret_registered_later_masks_finished_calls_already_written() {
         let db = crate::db::test_db().await;
         let execution_context = persisted_execution_context(&db).await;
         let emitter = DatabaseEngineEventEmitter::new_with_pool(db.clone());
@@ -1772,9 +1821,136 @@ mod tests {
         emitter.emit(EngineEvent::run_stop(&execution_context, Val::Null));
         emitter.shutdown().await.unwrap();
 
+        for call_id in [written, pending] {
+            let args = stored_call(&db, call_id).await.0.unwrap();
+            assert!(!args.contains(LATE_SECRET), "{args}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_running_run_masks_rows_it_wrote_before_a_secret() {
+        let db = crate::db::test_db().await;
+        let execution_context = persisted_execution_context(&db).await;
+        let emitter = DatabaseEngineEventEmitter::new_with_pool(db.clone());
+        emitter.emit(EngineEvent::run_start(&execution_context));
+
+        let written = Uuid::now_v7();
+        emitter.emit(start_event(&execution_context, written, None, LATE_SECRET));
+        emitter.emit(stop_event(&execution_context, written, LATE_SECRET, None));
+        emitter.flush_async().await.unwrap();
+        let stored = stored_call(&db, written).await;
+        assert!(stored.1.unwrap().contains(LATE_SECRET));
+
+        execution_context
+            .secret_values
+            .register(&Val::from(LATE_SECRET));
+        emitter.flush_async().await.unwrap();
+        let (args, return_value, _) = stored_call(&db, written).await;
+        assert!(!args.unwrap().contains(LATE_SECRET));
+        assert!(!return_value.unwrap().contains(LATE_SECRET));
+        emitter.shutdown().await.unwrap();
+    }
+
+    /// Calls can't be updated until this trigger is dropped.
+    async fn block_call_updates(db: &crate::db::DatabasePool) {
+        let crate::db::DatabasePool::Sqlite(pool) = db else {
+            panic!("test_db should return SQLite");
+        };
+        sqlx::query(
+            "CREATE TRIGGER block_call_updates BEFORE UPDATE ON call \
+             BEGIN SELECT RAISE(ABORT, 'blocked'); END",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn unblock_call_updates(db: &crate::db::DatabasePool) {
+        let crate::db::DatabasePool::Sqlite(pool) = db else {
+            panic!("test_db should return SQLite");
+        };
+        sqlx::query("DROP TRIGGER block_call_updates")
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn masking_written_calls_survives_a_brief_failure() {
+        let db = crate::db::test_db().await;
+        let execution_context = persisted_execution_context(&db).await;
+        let emitter = DatabaseEngineEventEmitter::new_with_pool(db.clone());
+        emitter.emit(EngineEvent::run_start(&execution_context));
+        let written = Uuid::now_v7();
+        emitter.emit(start_event(&execution_context, written, None, LATE_SECRET));
+        emitter.emit(stop_event(&execution_context, written, "done", None));
+        emitter.flush_async().await.unwrap();
+
+        block_call_updates(&db).await;
+        execution_context
+            .secret_values
+            .register(&Val::from(LATE_SECRET));
+        let unblocking = {
+            let db = db.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                unblock_call_updates(&db).await;
+            })
+        };
+        emitter.flush_async().await.unwrap();
+        unblocking.await.unwrap();
+
+        let args = stored_call(&db, written).await.0.unwrap();
+        assert!(!args.contains(LATE_SECRET), "{args}");
+        emitter.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_reports_written_calls_it_could_not_mask() {
+        let db = crate::db::test_db().await;
+        let execution_context = persisted_execution_context(&db).await;
+        let emitter = DatabaseEngineEventEmitter::new_with_pool(db.clone());
+        emitter.emit(EngineEvent::run_start(&execution_context));
+        let written = Uuid::now_v7();
+        emitter.emit(start_event(&execution_context, written, None, LATE_SECRET));
+        emitter.emit(stop_event(&execution_context, written, "done", None));
+        emitter.flush_async().await.unwrap();
+
+        block_call_updates(&db).await;
+        execution_context
+            .secret_values
+            .register(&Val::from(LATE_SECRET));
+        assert!(emitter.flush_async().await.is_err());
+        assert!(emitter.shutdown().await.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_that_keeps_registering_is_not_read_again_each_flush() {
+        let db = crate::db::test_db().await;
+        let execution_context = persisted_execution_context(&db).await;
+        let emitter = DatabaseEngineEventEmitter::new_with_pool(db.clone());
+        emitter.emit(EngineEvent::run_start(&execution_context));
+        let written = Uuid::now_v7();
+        emitter.emit(start_event(&execution_context, written, None, LATE_SECRET));
+        emitter.emit(stop_event(&execution_context, written, "done", None));
+        emitter.flush_async().await.unwrap();
+
+        // The first registration masks at once, the next waits its turn, and
+        // the end of the run doesn't wait.
+        execution_context
+            .secret_values
+            .register(&Val::from("first-registered-secret"));
+        emitter.flush_async().await.unwrap();
+        execution_context
+            .secret_values
+            .register(&Val::from(LATE_SECRET));
+        emitter.flush_async().await.unwrap();
         let args = stored_call(&db, written).await.0.unwrap();
         assert!(args.contains(LATE_SECRET), "{args}");
-        let args = stored_call(&db, pending).await.0.unwrap();
+
+        emitter.emit(EngineEvent::run_stop(&execution_context, Val::Null));
+        emitter.shutdown().await.unwrap();
+        let args = stored_call(&db, written).await.0.unwrap();
         assert!(!args.contains(LATE_SECRET), "{args}");
     }
 

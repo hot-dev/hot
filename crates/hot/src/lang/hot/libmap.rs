@@ -958,23 +958,23 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         // HMAC functions
         map.insert(
             "::hot::hmac/hmac-sha256".to_string(),
-            HotLibFn::LibFn(hmac::hmac_sha256),
+            HotLibFn::VmAwareFn(hmac::hmac_sha256_secret),
         );
         map.insert(
             "::hot::hmac/hmac-sha256-bytes".to_string(),
-            HotLibFn::LibFn(hmac::hmac_sha256_bytes),
+            HotLibFn::VmAwareFn(hmac::hmac_sha256_bytes_secret),
         );
         map.insert(
             "::hot::hmac/hmac-sha512".to_string(),
-            HotLibFn::LibFn(hmac::hmac_sha512),
+            HotLibFn::VmAwareFn(hmac::hmac_sha512_secret),
         );
         map.insert(
             "::hot::hmac/hmac-sha1".to_string(),
-            HotLibFn::LibFn(hmac::hmac_sha1),
+            HotLibFn::VmAwareFn(hmac::hmac_sha1_secret),
         );
         map.insert(
             "::hot::hmac/hmac-verify".to_string(),
-            HotLibFn::LibFn(hmac::hmac_verify),
+            HotLibFn::VmAwareFn(hmac::hmac_verify_secret),
         );
 
         // Hex encoding functions
@@ -1044,13 +1044,13 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         // Key derivation functions
         map.insert(
             "::hot::crypto/pbkdf2-hmac-sha256".to_string(),
-            HotLibFn::LibFn(crypto::pbkdf2_hmac_sha256),
+            HotLibFn::VmAwareFn(crypto::pbkdf2_hmac_sha256_secret),
         );
 
         // RSA signatures (JWT RS256, GitHub Apps, Google service accounts)
         map.insert(
             "::hot::crypto/rsa-sha256-sign".to_string(),
-            HotLibFn::LibFn(crypto::rsa_sha256_sign),
+            HotLibFn::VmAwareFn(crypto::rsa_sha256_sign_secret),
         );
         map.insert(
             "::hot::crypto/rsa-sha256-verify".to_string(),
