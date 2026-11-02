@@ -386,6 +386,8 @@ Two independent filters do this.
 
 A registered value is masked wherever it appears inside a string, as itself or URL-encoded, form-encoded, JSON-escaped or base64-encoded, including base64 of a longer string like `Basic base64(user:secret)`. Inside a Map or Vec, each value is registered separately. So is a JSON object held in a string, like a service account key, and the credential after the scheme in `Bearer <credential>`.
 
+The same goes for bytes: a `Bytes` value holding a registered value or a credential field is masked whole, wherever it is recorded. So are bytes rendered as numbers, as in `Bytes([83, 69, ...])`, which is how a failure's message shows them when an `Err` holds a response's `body-bytes`, and a Vec holding nothing but bytes. An `Err` that `hot run` prints as a program's result is masked too. Any other result is the program's output, and is printed as it is.
+
 Values shorter than 8 bytes are masked only where they are the whole value, because inside other text they would match by chance. `true`, `false`, `null` and `""` are never masked.
 
 **Credential fields** are masked whether or not anything registered their values, by the field's name, in any case and in `snake_case`, `kebab-case`, `dot.case` or `camelCase`. A prefix doesn't matter: `stripe_api_key` matches `api_key`. The names, in full, are in `CREDENTIAL_FIELDS` in `crates/hot/src/lang/masking.rs`:
