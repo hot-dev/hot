@@ -64,6 +64,18 @@ fn (value: Any): Bool {
   or(is-null(value), and(is-str(value), is-empty(trim(value))))
 }
 
+// The credential keys of the provider packages' opts.
+CREDENTIAL_KEYS ["token", "access-token", "refresh-token", "client-secret", "app-secret", "api-key", "private-key", "private-key-passphrase", "service-account", "access-key-id", "secret-access-key", "session-token"]
+
+mark-credentials
+meta {
+    doc: """Mask the credentials in a source's or call's `opts` in this run's call records, before anything else handles them. The provider package marks them too, but only once a call reaches it. Returns `opts` unchanged."""
+}
+fn (opts: Any): Any {
+  if(is-map(opts), ::hot::ctx/mark-secret(map(CREDENTIAL_KEYS, (k) { get(opts, k) })))
+  opts
+}
+
 provider-name
 meta {
     doc: """
@@ -73,6 +85,7 @@ meta {
     """
 }
 fn (value: Any): Str {
+  if(is-map(value), mark-credentials(get(value, "opts")))
   raw cond {
     is-map(value) => { get(value, "provider") }
     => { value }
@@ -138,6 +151,7 @@ meta {
     """
 }
 fn (source: Map, opts: Map): Map {
+  mark-credentials(opts)
   call-opts filter-keys(opts, (k) { not(in(k, LOCAL_KEYS)) })
   {...or(get(source, "opts"), {}), ...call-opts}
 }

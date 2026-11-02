@@ -41,7 +41,7 @@ test-key-and-url-encoding
 meta ["test"] fn () {
     assert-eq("inbox/Q3%20report%20%26%20notes%2B1.pdf", ::s3/encode-key("inbox/Q3 report & notes+1.pdf"), "segments encoded, slashes kept")
     assert-eq("a/%C3%A9t%C3%A9.txt", ::s3/encode-key("a/été.txt"))
-    assert-eq("https://acme.s3.amazonaws.com", ::s3/bucket-url("acme", "us-east-1", null))
+    assert-eq("https://acme.s3.us-east-1.amazonaws.com", ::s3/bucket-url("acme", "us-east-1", null))
     assert-eq("https://acme.s3.eu-west-1.amazonaws.com", ::s3/bucket-url("acme", "eu-west-1", ""))
     assert-eq("http://localhost:9000/acme", ::s3/bucket-url("acme", "us-east-1", "http://localhost:9000/"), "an endpoint means path style")
     assert-eq("https://acme.s3.amazonaws.com/inbox/a%20b.txt", ::s3/object-url("https://acme.s3.amazonaws.com", "inbox/a b.txt"))
@@ -221,7 +221,7 @@ meta ["test"] fn () {
     })
     assert(is-err(::s3/resolve-from(acme, {}, CTX_KEYS, "evil.example/")), "a bad default region too")
     assert-eq("https://acme.s3.eu-west-1.amazonaws.com", ::s3/resolve-from(acme, {region: "eu-west-1"}, CTX_KEYS, "us-east-1").base)
-    assert-eq("https://my.dotted_Bucket-1.s3.amazonaws.com", ::s3/resolve-from({provider: "s3", bucket: "my.dotted_Bucket-1"}, {}, CTX_KEYS, "us-east-1").base)
+    assert-eq("https://s3.us-east-1.amazonaws.com/my.dotted_Bucket-1", ::s3/resolve-from({provider: "s3", bucket: "my.dotted_Bucket-1"}, {}, CTX_KEYS, "us-east-1").base)
     // With an endpoint the bucket is an encoded path segment, and the keys are the caller's own.
     keys {endpoint: "http://localhost:9000", access-key-id: "OWN", secret-access-key: "own-secret"}
     assert-eq("http://localhost:9000/a%2Fb", ::s3/resolve-from({provider: "s3", bucket: "a/b"}, keys, CTX_KEYS, "us-east-1").base)

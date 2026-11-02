@@ -51,6 +51,7 @@ fn (opts: Map): Map {
     can_preview: get(opts, "can-preview"),
     can_edit: get(opts, "can-edit")
   }, is-some)
+  ::hot::ctx/mark-secret(get(opts, "password"))
   filter-vals({
     access: get(opts, "access"),
     password: get(opts, "password"),
@@ -132,6 +133,7 @@ meta {
     doc: """The `BoxApi` header value for shared-link access (pure): `shared_link=<url>` plus `&shared_link_password=<pw>` when a password is given, in the raw form Box documents (no URL encoding)."""
 }
 fn (shared-link: Str, password: Str?): Str {
+  ::hot::ctx/mark-secret(password)
   base `shared_link=${trim(shared-link)}`
   if(::box/is-blank(password), base, `${base}&shared_link_password=${or(password, "")}`)
 }
@@ -148,6 +150,7 @@ fn
   get-shared-item(shared-link, password, {})
 },
 (shared-link: Str, password: Str?, opts: Map): Map {
+  ::hot::ctx/mark-secret(password)
   params ::box/query-params({}, opts)
   ::box/json-with("GET", ::box/url("/shared_items", params), {boxapi: boxapi-header(shared-link, password)}, "", opts)
 }

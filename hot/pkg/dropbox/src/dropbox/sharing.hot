@@ -30,6 +30,7 @@ meta {
 }
 fn (opts: Map): Map? {
   given if(is-map(get(opts, "settings")), get(opts, "settings"), {})
+  ::hot::ctx/mark-secret([get(opts, "link_password"), get(given, "link_password")])
   flat filter-keys(::api/api-params(opts), (k) { in(k, SETTING_KEYS) })
   settings filter-vals({...given, ...flat}, is-some)
   if(is-empty(settings), null, settings)
@@ -145,5 +146,6 @@ fn
   get-shared-link-metadata(url, {})
 },
 (url: Str, opts: Map): Map {
+  ::hot::ctx/mark-secret(get(opts, "link_password"))
   ::api/rpc("sharing/get_shared_link_metadata", ::api/build-arg({url: url}, opts), opts)
 }
