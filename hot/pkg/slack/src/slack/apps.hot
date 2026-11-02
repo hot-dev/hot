@@ -122,6 +122,7 @@ fn
   apps-uninstall(request, {})
 },
 (request: AppsUninstallRequest, opts: Map): AppsUninstallResponse {
+  ::hot::ctx/mark-secret(request.client_secret)
   response api-request("GET", `${::slack::core/BASE_URL}/apps.uninstall?client_id=${request.client_id}&client_secret=${request.client_secret}`, {}, "", opts)
   if(is-ok-response(response), AppsUninstallResponse(response.body), err(HttpError(response)))
 }

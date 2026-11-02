@@ -69,6 +69,7 @@ meta {
     The credential for one call: `opts` over the `resend.api.key` context variable
     (see `resolve-from`). Per-call credentials stay in the call; nothing is
     written to ctx, so parallel flows and tenants never share them.
+    A credential from `opts` is masked in the run's call records.
 
     **Example**
 
@@ -78,6 +79,7 @@ meta {
     """
 }
 fn (opts: Map): Map {
+  ::ctx/mark-secret(opts.api-key)
   resolve-from(opts, {"resend.api.key": ::ctx/get("resend.api.key")})
 }
 
@@ -115,6 +117,7 @@ fn
 },
 // 5-arity: explicit api key override
 (method: Str, url: Str, additional-headers: Map, body: Any, api-key: Str): HttpResponse {
+  ::ctx/mark-secret(api-key)
   default-headers {
     Authorization: `Bearer ${api-key}`
   }

@@ -52,7 +52,9 @@ meta {
     doc: """Sign a GitHub App JWT (RS256) from the App id and its PEM private key (the `.pem` GitHub generates — PKCS#1 `BEGIN RSA PRIVATE KEY` — or a PKCS#8 conversion)."""
 }
 fn (app-id: Any, private-key-pem: Str): Str {
-  ::jwt/sign(build-app-claims(app-id), private-key-pem, "RS256")
+  ::ctx/mark-secret(private-key-pem)
+  signed ::jwt/sign(build-app-claims(app-id), private-key-pem, "RS256")
+  if(is-err(signed), signed, ::ctx/mark-secret(signed))
 }
 
 // Authenticate an App-level call with its JWT, keeping only the settings
@@ -72,7 +74,8 @@ meta {
     it explicitly via the final arity of `::github::api/request`/`json`.
     To act for many installations in one run, pass `app-id`, `private-key`
     and `installation-id` in any function's `opts` instead. `opts` here
-    takes `base-url` and `api-version`.
+    takes `base-url` and `api-version`. The minted token is masked in the
+    run's call records.
     """
 }
 fn
@@ -85,7 +88,14 @@ fn
     Result.Err => { err(bearer) }
 
     _ => {
-      ::github::api/json("POST", `/app/installations/${installation-id}/access_tokens`, {}, {}, bearer-opts(bearer, opts))
+      minted ::github::api/json("POST", `/app/installations/${installation-id}/access_tokens`, {}, {}, bearer-opts(bearer, opts))
+      cond {
+        is-err(minted) => { minted }
+        => {
+          ::ctx/mark-secret(minted.token)
+          minted
+        }
+      }
     }
   }
 }

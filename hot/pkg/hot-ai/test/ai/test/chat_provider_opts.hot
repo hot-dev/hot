@@ -472,3 +472,12 @@ meta ["test"] fn () {
     with-opts ChatOptions({chat-fn: legacy-prompt, model: "m", provider-opts: TENANT})
     assert-unsupported(() { ::chat/complete-prompt(with-opts, "hello", null) }, "ChatOptions.chat-fn")
 }
+
+test-marking-leaves-provider-opts-unchanged
+meta ["test"] fn () {
+    fn-value (request: Any) { request }
+    provider-opts {token: "tenant-credential-a", endpoint: "https://gw.example.com", path-style: true, region: "eu-west-1", transport: fn-value}
+    assert(is-null(::chat/mark-provider-opts(provider-opts)))
+    plain {token: "tenant-credential-a", endpoint: "https://gw.example.com", region: "eu-west-1"}
+    assert-eq(plain, from-json(::chat/run-loop(ChatOptions({chat-opts-fn: echo-opts, model: "m", provider-opts: plain}), "hi")))
+}

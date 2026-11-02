@@ -51,6 +51,7 @@ fn
 },
 // 4-arity: explicit token override
 (method: Str, path: Str, body: Any, token: Str): Any {
+  ::ctx/mark-secret(token)
   headers cond {
     eq(body, "") => { {Authorization: `Bearer ${token}`} }
     => { {Authorization: `Bearer ${token}`, Content-Type: "application/json"} }

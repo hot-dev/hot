@@ -56,7 +56,7 @@ meta {
     The instance and key for one call: `opts` over the context variables
     over the default URL (see `resolve-from`). Per-call credentials stay in
     the call; nothing is written to ctx, so parallel flows and tenants
-    never share them.
+    never share them. A credential from `opts` is masked in the run's call records.
 
     **Example**
 
@@ -67,6 +67,7 @@ meta {
     """
 }
 fn (opts: Map): Map {
+  ::ctx/mark-secret(opts.api-key)
   resolve-from(opts, {
     "qdrant.url": ::ctx/get("qdrant.url"),
     "qdrant.api.key": ::ctx/get("qdrant.api.key")

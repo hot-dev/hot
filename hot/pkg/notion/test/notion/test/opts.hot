@@ -131,3 +131,8 @@ meta ["test"] fn () {
     assert(reaches(::pages/get-page("p", {token: "tenant", base-url: "http://127.0.0.1:1"})), "control: with a credential it reaches the socket")
     ::hot::ctx/set-secret("notion.token", before)
 }
+
+test-resolve-marks-the-opts-credential-and-returns-it-unchanged
+meta ["test"] fn () {
+    assert-eq("tenant-credential-a", ::api/resolve({token: "tenant-credential-a"}).token)
+}

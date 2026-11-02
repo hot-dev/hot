@@ -110,6 +110,7 @@ fn
   create-user(request, {})
 },
 (request: CreateUserRequest, opts: Map): AuthUser {
+  ::hot::ctx/mark-secret(request.password)
   body {}
     |> assoc-some("email", request.email)
     |> assoc-some("phone", request.phone)
@@ -159,6 +160,7 @@ fn
   update-user-by-id(request, {})
 },
 (request: UpdateUserByIdRequest, opts: Map): AuthUser {
+  ::hot::ctx/mark-secret(request.password)
   body {}
     |> assoc-some("email", request.email)
     |> assoc-some("phone", request.phone)
@@ -227,6 +229,7 @@ fn
   generate-link(request, {})
 },
 (request: GenerateLinkRequest, opts: Map): GenerateLinkResponse {
+  ::hot::ctx/mark-secret(request.password)
   body {type: request.type, email: request.email}
     |> assoc-some("password", request.password)
     |> assoc-some("redirect_to", request.redirect_to)

@@ -261,3 +261,10 @@ meta ["test"] fn () {
     assert(not(reaches(out)), "no request was attempted")
     ::hot::ctx/set-secret("supabase.anon.key", before)
 }
+
+test-resolve-marks-the-opts-credential-and-returns-it-unchanged
+meta ["test"] fn () {
+    resolved ::api/resolve({url: "https://t.supabase.co", anon-key: "tenant-credential-a", service-key: "tenant-credential-b"})
+    assert-eq("tenant-credential-a", resolved.anon-key)
+    assert-eq("tenant-credential-b", resolved.service-key)
+}

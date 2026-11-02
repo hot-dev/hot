@@ -24,6 +24,8 @@ model ::bedrock/get-foundation-model("anthropic.claude-3-haiku-20240307-v1:0")
 
 Pass `opts` as the last argument of any function to use other credentials for that call, so one run can serve many tenants. Nothing is written to context, so this is safe in parallel flows.
 
+A per-call credential is masked in the run's call records, including inside strings like `Bearer ${key}`. A secret shorter than 8 bytes is masked only as a whole value. Records of your own calls that finished before this one may already be written, so mark a credential your code fetches with `::hot::ctx/mark-secret` as soon as you have it.
+
 ```hot
 ::bedrock ::aws::bedrock
 

@@ -51,6 +51,7 @@ fn
 },
 // 2-arity: per-call opts ({signing-secret}), then ctx
 (request: HttpRequest, opts: Map): Bool {
+  ::ctx/mark-secret(opts.signing-secret)
   cond {
     in("signing-secret", keys(opts)) => { verify-request(request, or(get(opts, "signing-secret"), "")) }
     => { verify-request(request) }
@@ -58,6 +59,7 @@ fn
 },
 // 3-arity: explicit replay tolerance in seconds (0 disables the check)
 (request: HttpRequest, signing-secret: Str, tolerance-seconds: Int): Bool {
+  ::ctx/mark-secret(signing-secret)
   // Extract the timestamp and signature from headers
   timestamp get(request.headers, "x-slack-request-timestamp", "")
   signature get(request.headers, "x-slack-signature", "")

@@ -316,3 +316,9 @@ meta ["test"] fn () {
     assert(contains(Str(err-value(result)), "xai.management.api.key"), "that names the ctx key")
     ::ctx/set("xai.management.api.key", before)
 }
+
+test-resolve-marks-the-opts-credential-and-returns-it-unchanged
+meta ["test"] fn () {
+    assert-eq("tenant-credential-a", ::api/resolve({api-key: "tenant-credential-a"}).api-key)
+    assert-eq("tenant-credential-m", ::api/resolve-management({management-api-key: "tenant-credential-m"}).api-key)
+}

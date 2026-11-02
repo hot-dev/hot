@@ -249,3 +249,8 @@ test-sanitize-url-still-strips-token-params-on-the-opts-path
 meta ["test"] fn () {
   assert-eq("https://slack.com/api/x?a=1", ::api/sanitize-url("https://slack.com/api/x?token=t&a=1"))
 }
+
+test-resolve-marks-the-opts-credential-and-returns-it-unchanged
+meta ["test"] fn () {
+    assert-eq("tenant-credential-a", ::api/resolve({api-key: "tenant-credential-a"}).api-key)
+}

@@ -488,13 +488,26 @@ OauthV2AccessResponse type {
 
 oauth-v2-access
 meta {
-    doc: """POST /oauth.v2.access - Exchange a temporary OAuth verifier code for an access token. Used during the OAuth 2.0 flow to complete app installation."""
+    doc: """POST /oauth.v2.access - Exchange a temporary OAuth verifier code for an access token. Used during the OAuth 2.0 flow to complete app installation. The client secret and the tokens returned are masked in the run's call records."""
 }
 fn
 (request: OauthV2AccessRequest): OauthV2AccessResponse {
   oauth-v2-access(request, {})
 },
 (request: OauthV2AccessRequest, opts: Map): OauthV2AccessResponse {
+  ::hot::ctx/mark-secret(request.client_secret)
   response api-request("POST", `${::slack::core/BASE_URL}/oauth.v2.access`, {}, request, opts)
-  if(is-ok-response(response), OauthV2AccessResponse(response.body), err(HttpError(response)))
+  cond {
+    is-ok-response(response) => {
+      user or(response.body.authed_user, {})
+      ::hot::ctx/mark-secret([
+        response.body.access_token,
+        response.body.refresh_token,
+        user.access_token,
+        user.refresh_token
+      ])
+      OauthV2AccessResponse(response.body)
+    }
+    => { err(HttpError(response)) }
+  }
 }

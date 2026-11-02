@@ -169,3 +169,8 @@ meta ["test"] fn () {
   body ::api/encode-body(::emails/POSTEmailsRequest({from: "a@example.com", to: ["b@example.com"], subject: "s"}))
   assert-eq({from: "a@example.com", to: ["b@example.com"], subject: "s"}, from-json(body))
 }
+
+test-resolve-marks-the-opts-credential-and-returns-it-unchanged
+meta ["test"] fn () {
+    assert-eq("tenant-credential-a", ::api/resolve({api-key: "tenant-credential-a"}).api-key)
+}

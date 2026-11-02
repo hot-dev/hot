@@ -148,3 +148,8 @@ meta ["test"] fn () {
   message failure(::qd/count-points, ["docs", {}, {url: DEAD_URL}])
   assert(contains(message, `${DEAD_URL}/collections/docs/points/count`))
 }
+
+test-resolve-marks-the-opts-credential-and-returns-it-unchanged
+meta ["test"] fn () {
+    assert-eq("tenant-credential-a", ::api/resolve({url: DEAD_URL, api-key: "tenant-credential-a"}).api-key)
+}

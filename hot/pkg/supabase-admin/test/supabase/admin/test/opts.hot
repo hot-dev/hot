@@ -125,3 +125,8 @@ meta ["test"] fn () {
     assert(reaches(::projects/get-project("r", {access-token: "tenant", base-url: "http://127.0.0.1:1"})), "control: with a credential it reaches the socket")
     ::hot::ctx/set-secret("supabase.access.token", before)
 }
+
+test-resolve-marks-the-opts-credential-and-returns-it-unchanged
+meta ["test"] fn () {
+    assert-eq("tenant-credential-a", ::api/resolve({access-token: "tenant-credential-a"}).access-token)
+}

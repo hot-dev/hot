@@ -59,6 +59,7 @@ fn
 },
 // 5-arity: explicit instance URL + API key override ("" sends no auth header)
 (method: Str, path: Str, body: Any, url: Str, api-key: Str): Any {
+  ::ctx/mark-secret(api-key)
   base-headers cond {
     is-empty(api-key) => { {} }
     => { {api-key: api-key} }

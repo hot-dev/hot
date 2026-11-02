@@ -40,6 +40,8 @@ Notion's API cannot delete or resolve comments — plan for them to persist.
 
 Every function that calls Notion takes an optional trailing `opts` Map, so one run can act for many workspaces and parallel flows don't share credentials. Nothing from `opts` is written to ctx.
 
+A per-call credential is masked in the run's call records, including inside strings like `Bearer ${key}`. A secret shorter than 8 bytes is masked only as a whole value. Records of your own calls that finished before this one may already be written, so mark a credential your code fetches with `::hot::ctx/mark-secret` as soon as you have it.
+
 | Key | Effect |
 |---|---|
 | `token` | The integration secret or OAuth token for this call, instead of `notion.token` |

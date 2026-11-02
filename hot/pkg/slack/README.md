@@ -18,6 +18,8 @@ Set the `slack.api.key` context variable to your Slack Bot User OAuth Token via 
 
 Every function that calls Slack takes an optional trailing `opts` Map, so one run can act for several workspaces. `api-key` replaces `slack.api.key` for that call only. Nothing is written to ctx, so parallel flows can't see each other's tokens. A null or blank `api-key` is an error, never a fallback to the context token.
 
+A per-call credential is masked in the run's call records, including inside strings like `Bearer ${key}`. A secret shorter than 8 bytes is masked only as a whole value. Records of your own calls that finished before this one may already be written, so mark a credential your code fetches with `::hot::ctx/mark-secret` as soon as you have it.
+
 To verify webhooks per app, pass the signing secret directly or as `signing-secret` in `opts`, in place of the `slack.signing.secret` context variable.
 
 ```hot

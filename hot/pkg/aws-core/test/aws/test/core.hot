@@ -527,3 +527,12 @@ meta ["test"] fn () {
     assert-eq("1523477145.713", ::aws::core/opt-str(1523477145.713))
     assert-eq("x", ::aws::core/opt-str("x"))
 }
+
+test-resolve-marks-the-opts-credential-and-returns-it-unchanged
+meta ["test"] fn () {
+    keys ::aws::core/resolve({access-key-id: "AKIDOPTS", secret-access-key: "opts-secret", session-token: "opts-session"})
+    assert-eq("opts-secret", keys.credentials.secret_access_key)
+    assert-eq("opts-session", keys.credentials.session_token)
+    given ::aws::core/Credentials({access_key_id: "AKIDVALUE", secret_access_key: "value-secret", session_token: null})
+    assert-eq("value-secret", ::aws::core/resolve({credentials: given}).credentials.secret_access_key)
+}

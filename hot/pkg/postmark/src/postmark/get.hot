@@ -857,5 +857,11 @@ fn
 },
 (request: GetCurrentServerConfigurationRequest, opts: Map): GetCurrentServerConfigurationResponse {
   response api-request("GET", `${::postmark/BASE_URL}/server`, {}, "", opts)
-  if(is-ok-response(response), GetCurrentServerConfigurationResponse(response.body), err(HttpError(response)))
+  cond {
+    is-ok-response(response) => {
+      ::hot::ctx/mark-secret(response.body.ApiTokens)
+      GetCurrentServerConfigurationResponse(response.body)
+    }
+    => { err(HttpError(response)) }
+  }
 }

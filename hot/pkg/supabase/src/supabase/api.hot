@@ -125,7 +125,7 @@ meta {
     },
     doc: """
     Credentials for one call (see `resolve-from`). `opts` values are never
-    written to ctx.
+    written to ctx. A credential from `opts` is masked in the run's call records.
 
     **Example**
 
@@ -136,6 +136,7 @@ meta {
     """
 }
 fn (opts: Map): Map {
+  ::hot::ctx/mark-secret([opts.anon-key, opts.api-key, opts.service-key, opts.service-role-key])
   resolve-from(opts, ::core/sources())
 }
 
@@ -297,6 +298,7 @@ do-request fn
   do-request(method, path, additional-headers, body, apikey, bearer-token, ::core/project-url())
 },
 (method: Str, path: Str, additional-headers: Map, body: Any, apikey: Str, bearer-token: Str, base-url: Str): HttpResponse {
+  ::hot::ctx/mark-secret([apikey, bearer-token])
   http-request(build-request(method, path, additional-headers, body, apikey, bearer-token, base-url))
 }
 
@@ -403,6 +405,7 @@ do-raw-body-request fn
   do-raw-body-request(method, path, additional-headers, body-raw, apikey, bearer-token, ::core/project-url())
 },
 (method: Str, path: Str, additional-headers: Map, body-raw: Str, apikey: Str, bearer-token: Str, base-url: Str): HttpResponse {
+  ::hot::ctx/mark-secret([apikey, bearer-token])
   url `${base-url}${path}`
 
   default-headers {

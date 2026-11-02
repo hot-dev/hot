@@ -335,3 +335,8 @@ meta ["test"] fn () {
     assert-eq("https://ghe.example.com/api/v3", ::api/resolve-from(identity, {"github.token": "ctx-token"}).base-url)
     assert(is-null(get(::api/resolve-from(identity, {"github.token": "ctx-token"}), "token")), "the context token stays out")
 }
+
+test-resolve-marks-the-opts-credential-and-returns-it-unchanged
+meta ["test"] fn () {
+    assert-eq("tenant-credential-a", ::api/resolve({token: "tenant-credential-a"}).token)
+}

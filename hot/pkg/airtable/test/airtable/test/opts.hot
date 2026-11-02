@@ -135,3 +135,8 @@ meta ["test"] fn () {
   assert(reached-http(short-list))
   assert(reached-http(short-comments))
 }
+
+test-resolve-marks-the-opts-credential-and-returns-it-unchanged
+meta ["test"] fn () {
+    assert-eq("tenant-credential-a", ::api/resolve({token: "tenant-credential-a"}).token)
+}

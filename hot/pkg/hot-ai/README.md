@@ -117,7 +117,7 @@ answer ::ai::chat/run-loop(opts, "What is 17 + 25?")
 - A null or blank credential in `provider-opts` is a failure, never a fallback to ctx. Leave the key out to use ctx.
 - A `base-url` in `provider-opts` needs a credential there too, and `management-base-url` needs `management-api-key`: a ctx key is never sent to a per-call URL.
 - `::ai::rag` uses `chat-opts-fn` too. `count-tokens-fn` and a store's `embed-fn` take no `provider-opts`: bind a per-call key in a closure.
-- The run loop keeps `provider-opts` out of chat history, step and delta stream records, skill context and failure payloads. Hot does store function arguments in the run's call records, and only masks ctx secrets, so `provider-opts` is stored there as plain text.
+- The run loop keeps `provider-opts` out of chat history, step and delta stream records, skill context and failure payloads, and masks each credential in it in the run's call records, including inside strings like `Bearer ${key}`. A secret shorter than 8 bytes is masked only as a whole value. Records of your own calls that finished before the run loop may already be written, so mark a credential your code fetches with `::hot::ctx/mark-secret` as soon as you have it.
 
 ### `::ai::memory` — Three-level scoped memory
 

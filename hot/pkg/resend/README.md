@@ -18,6 +18,8 @@ Set the `resend.api.key` context variable to your Resend API key, or pass a key 
 
 Every function that calls Resend takes an optional trailing `opts` Map, so one run can send for several accounts. `api-key` replaces `resend.api.key` for that call only. Nothing is written to ctx, so parallel flows can't see each other's keys. A null or blank `api-key` is an error, never a fallback to the context key.
 
+A per-call credential is masked in the run's call records, including inside strings like `Bearer ${key}`. A secret shorter than 8 bytes is masked only as a whole value. Records of your own calls that finished before this one may already be written, so mark a credential your code fetches with `::hot::ctx/mark-secret` as soon as you have it.
+
 ```hot
 ::emails ::resend::emails
 

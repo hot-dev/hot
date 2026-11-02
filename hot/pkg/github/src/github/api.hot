@@ -148,7 +148,9 @@ meta {
     Credentials and settings for one call (see `resolve-from`): returns
     `{token, base-url, api-version}` or an Err. A GitHub App identity in
     `opts` is exchanged for an installation token here, cached by a hash
-    of the identity. `opts` values are never written to ctx.
+    of the identity. `opts` values are never written to ctx. The token, the
+    private key and a token minted from them are masked in the run's call
+    records.
 
     **Example**
 
@@ -158,6 +160,7 @@ meta {
     """
 }
 fn (opts: Map): Map {
+  ::ctx/mark-secret([opts.token, opts.private-key])
   resolved resolve-from(opts, {"github.token": ::ctx/get("github.token")})
   cond {
     is-err(resolved) => { resolved }
@@ -223,6 +226,7 @@ fn
   request(method, path, additional-headers, body, {})
 },
 (method: Str, path: Str, additional-headers: Map, body: Any, token: Str): HttpResponse {
+  ::ctx/mark-secret(token)
   ::hot::http/request(build-request(method, path, additional-headers, body, {...settings-from({}), token: token}))
 },
 // 5-arity: per-call credentials and settings (see `resolve`)

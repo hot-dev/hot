@@ -91,6 +91,7 @@ meta {
     doc: """
     Credentials and settings for one call (see `resolve-from`). `opts`
     values are never written to ctx.
+    A credential from `opts` is masked in the run's call records.
 
     **Example**
 
@@ -100,6 +101,7 @@ meta {
     """
 }
 fn (opts: Map): Map {
+  ::ctx/mark-secret(opts.token)
   resolve-from(opts, {"notion.token": ::ctx/get("notion.token")})
 }
 
@@ -138,6 +140,7 @@ fn
 },
 // 5-arity: explicit token override
 (method: Str, path: Str, additional-headers: Map, body: Any, token: Str): HttpResponse {
+  ::ctx/mark-secret(token)
   ::hot::http/request(build-request(method, path, additional-headers, body, {...settings-from({}), token: token}))
 },
 // 5-arity: per-call credentials and settings (see `resolve`)

@@ -190,3 +190,8 @@ meta ["test"] fn () {
   body ::api/encode-body(::send/SendEmailRequest({To: "a@example.com"}))
   assert-eq("{\"To\":\"a@example.com\"}", body)
 }
+
+test-resolve-marks-the-opts-credential-and-returns-it-unchanged
+meta ["test"] fn () {
+    assert-eq("tenant-credential-a", ::api/resolve({server-token: "tenant-credential-a"}).server-token)
+}

@@ -233,6 +233,8 @@ result ::functions/invoke(::functions/InvokeFunctionRequest({
 
 Every function that sends a request takes an optional trailing `opts` Map, so one run can reach many projects and parallel flows don't share credentials. Nothing from `opts` is written to ctx. Filters and `*Request` types stay pure: `opts` goes on the call that sends the request, including the `*-as`, `*-service`, `*-response` and `*-http-response` variants.
 
+A per-call credential is masked in the run's call records, including inside strings like `Bearer ${key}`. A secret shorter than 8 bytes is masked only as a whole value. Records of your own calls that finished before this one may already be written, so mark a credential your code fetches with `::hot::ctx/mark-secret` as soon as you have it.
+
 | Key | Replaces |
 |---|---|
 | `url` | `supabase.url` (not secret; shown in call logs) |

@@ -79,6 +79,7 @@ meta {
     doc: """
     Credentials and settings for one call (see `resolve-from`). `opts`
     values are never written to ctx.
+    A credential from `opts` is masked in the run's call records.
 
     **Example**
 
@@ -88,6 +89,7 @@ meta {
     """
 }
 fn (opts: Map): Map {
+  ::ctx/mark-secret(opts.api-key)
   resolve-from(opts, {"attio.api.key": ::ctx/get("attio.api.key")})
 }
 
@@ -141,6 +143,7 @@ fn
 },
 // 4-arity: explicit API key override
 (method: Str, path: Str, body: Any, api-key: Str): Any {
+  ::ctx/mark-secret(api-key)
   send-json(build-request(method, path, body, {api-key: api-key, base-url: ::attio/BASE_URL}))
 },
 // 4-arity: per-call credentials and settings (see `resolve`)

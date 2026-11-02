@@ -188,7 +188,14 @@ fn
   get-api-keys(project-ref, {})
 },
 (project-ref: Str, opts: Map): Vec<ApiKey> {
-  ::api/request("GET", `/projects/${project-ref}/api-keys`, {}, {}, opts)
+  api-keys ::api/request("GET", `/projects/${project-ref}/api-keys`, {}, {}, opts)
+  cond {
+    is-err(api-keys) => { api-keys }
+    => {
+      ::hot::ctx/mark-secret(map(api-keys, (entry) { entry.api_key }))
+      api-keys
+    }
+  }
 }
 
 // ============================================================================

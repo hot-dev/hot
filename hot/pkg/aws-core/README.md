@@ -16,6 +16,8 @@ AWS packages read these context variables, unless a call passes credentials in `
 
 Every function in the AWS service packages takes `opts` as its last argument. `resolve(opts)` turns it into the credentials, region and endpoint for that call: `opts` first, then context, then defaults. Nothing is written to context, so one run can serve many tenants, in parallel flows too.
 
+A per-call credential is masked in the run's call records, including inside strings like `Bearer ${key}`. A secret shorter than 8 bytes is masked only as a whole value. Records of your own calls that finished before this one may already be written, so mark a credential your code fetches with `::hot::ctx/mark-secret` as soon as you have it.
+
 ```hot
 ::core ::aws::core
 

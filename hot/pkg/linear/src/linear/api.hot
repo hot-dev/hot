@@ -88,6 +88,7 @@ meta {
     doc: """
     Credentials and settings for one call (see `resolve-from`). `opts`
     values are never written to ctx.
+    A credential from `opts` is masked in the run's call records.
 
     **Example**
 
@@ -97,6 +98,7 @@ meta {
     """
 }
 fn (opts: Map): Map {
+  ::ctx/mark-secret(opts.api-key)
   resolve-from(opts, {"linear.api.key": ::ctx/get("linear.api.key")})
 }
 
@@ -151,6 +153,7 @@ fn
   graphql(query, variables, {})
 },
 (query: Str, variables: Map, api-key: Str): Any {
+  ::ctx/mark-secret(api-key)
   send-graphql(build-request(query, variables, {api-key: api-key, base-url: ::linear/GRAPHQL_URL}))
 },
 // 3-arity: per-call credentials and settings (see `resolve`)

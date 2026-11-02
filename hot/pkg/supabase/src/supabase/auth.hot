@@ -29,6 +29,20 @@ AuthResponse type {
   weak_password: Map?
 }
 
+session-with-tokens-masked
+meta {
+    doc: """Mask a session's access and refresh tokens in the run's call records and return the session as is. An Err passes through."""
+}
+fn (session: Result): Any {
+  cond {
+    is-err(session) => { session }
+    => {
+      ::hot::ctx/mark-secret([session.access_token, session.refresh_token])
+      session
+    }
+  }
+}
+
 // ============================================================================
 // Sign Up
 // ============================================================================
@@ -70,6 +84,7 @@ fn
   sign-up(request, {})
 },
 (request: SignUpRequest, opts: Map): AuthResponse {
+  ::hot::ctx/mark-secret(request.password)
   security if(is-some(request.captcha_token), {captcha_token: request.captcha_token}, null)
   body {password: request.password}
     |> assoc-some("email", request.email)
@@ -80,7 +95,7 @@ fn
     |> assoc-some("code_challenge_method", request.code_challenge_method)
     |> assoc-some("gotrue_meta_security", security)
 
-  ::api/request("POST", "/auth/v1/signup", {}, body, opts)
+  session-with-tokens-masked(::api/request("POST", "/auth/v1/signup", {}, body, opts))
 }
 
 // ============================================================================
@@ -119,13 +134,14 @@ fn
   sign-in-password(request, {})
 },
 (request: SignInPasswordRequest, opts: Map): AuthResponse {
+  ::hot::ctx/mark-secret(request.password)
   security if(is-some(request.captcha_token), {captcha_token: request.captcha_token}, null)
   body {password: request.password}
     |> assoc-some("email", request.email)
     |> assoc-some("phone", request.phone)
     |> assoc-some("gotrue_meta_security", security)
 
-  ::api/request("POST", "/auth/v1/token?grant_type=password", {}, body, opts)
+  session-with-tokens-masked(::api/request("POST", "/auth/v1/token?grant_type=password", {}, body, opts))
 }
 
 SignInOtpRequest type {
@@ -226,7 +242,7 @@ fn
     |> assoc-some("phone", request.phone)
     |> assoc-some("redirect_to", request.redirect_to)
 
-  ::api/request("POST", "/auth/v1/verify", {}, body, opts)
+  session-with-tokens-masked(::api/request("POST", "/auth/v1/verify", {}, body, opts))
 }
 
 // ============================================================================
@@ -254,7 +270,8 @@ fn
   refresh-token(refresh-token-value, {})
 },
 (refresh-token-value: Str, opts: Map): AuthResponse {
-  ::api/request("POST", "/auth/v1/token?grant_type=refresh_token", {}, {refresh_token: refresh-token-value}, opts)
+  ::hot::ctx/mark-secret(refresh-token-value)
+  session-with-tokens-masked(::api/request("POST", "/auth/v1/token?grant_type=refresh_token", {}, {refresh_token: refresh-token-value}, opts))
 }
 
 ExchangeCodeRequest type {
@@ -271,7 +288,7 @@ fn
   exchange-code(request, {})
 },
 (request: ExchangeCodeRequest, opts: Map): AuthResponse {
-  ::api/request("POST", "/auth/v1/token?grant_type=pkce", {}, untype(request), opts)
+  session-with-tokens-masked(::api/request("POST", "/auth/v1/token?grant_type=pkce", {}, untype(request), opts))
 }
 
 // ============================================================================
@@ -360,6 +377,7 @@ fn
   update-user(request, access-token, {})
 },
 (request: UpdateUserRequest, access-token: Str, opts: Map): User {
+  ::hot::ctx/mark-secret(request.password)
   body {}
     |> assoc-some("email", request.email)
     |> assoc-some("phone", request.phone)

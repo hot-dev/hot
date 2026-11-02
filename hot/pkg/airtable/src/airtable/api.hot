@@ -48,6 +48,7 @@ meta {
     The credential for one call: `opts` over the `airtable.token` context variable
     (see `resolve-from`). Per-call credentials stay in the call; nothing is
     written to ctx, so parallel flows and tenants never share them.
+    A credential from `opts` is masked in the run's call records.
 
     **Example**
 
@@ -57,5 +58,6 @@ meta {
     """
 }
 fn (opts: Map): Map {
+  ::ctx/mark-secret(opts.token)
   resolve-from(opts, {"airtable.token": ::ctx/get("airtable.token")})
 }

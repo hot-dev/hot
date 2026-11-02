@@ -38,7 +38,7 @@ models ::xai::models/list({api-key: tenant-key})
 
 A blank or null key in `opts` is an error, never a fallback to ctx, so a tenant with a missing key can't run on your project's key. Leave the key out of `opts` to use ctx.
 
-Hot stores the arguments of every function call in the run's call records and only masks ctx secrets, so a key passed in `opts` is stored there as plain text.
+A per-call credential is masked in the run's call records, including inside strings like `Bearer ${key}`. A secret shorter than 8 bytes is masked only as a whole value. Records of your own calls that finished before this one may already be written, so mark a credential your code fetches with `::hot::ctx/mark-secret` as soon as you have it.
 
 ## Usage
 

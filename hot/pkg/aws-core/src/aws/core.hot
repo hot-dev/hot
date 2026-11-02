@@ -231,6 +231,20 @@ fn (opts: Map?, ctx-values: Map): Map {
     }
 }
 
+// Mask the credentials opts carries in the run's call records. A Credentials value is unwrapped
+// so that its fields are what gets registered.
+mark-opts-credentials fn (opts: Map?): Null {
+    o if(is-null(opts), {}, untype(opts))
+    given o.credentials
+    ::ctx/mark-secret([
+        o.access-key-id,
+        o.secret-access-key,
+        o.session-token,
+        if(is-null(given), null, untype(given))
+    ])
+    null
+}
+
 resolve
 meta {
     doc: """
@@ -254,7 +268,7 @@ meta {
       `HttpResponse`, used instead of the network. For tests.
 
     Per-call credentials stay in the call. Nothing is written to ctx, so parallel
-    flows and tenants never share them.
+    flows and tenants never share them, and they are masked in the run's call records.
 
     **Example**
 
@@ -273,6 +287,7 @@ meta {
 }
 fn
 (opts: Map?): Map {
+    mark-opts-credentials(opts)
     resolve-from(opts, {
         "aws.access-key-id": ::ctx/get("aws.access-key-id"),
         "aws.secret-access-key": ::ctx/get("aws.secret-access-key"),
@@ -635,11 +650,12 @@ meta {
     doc: """Derive AWS signing key using HMAC-SHA256 chain"""
 }
 fn (secret_key: Str, date_stamp: Str, region: Str, service: Str): Bytes {
-    // date -> region -> service -> "aws4_request", each keyed on the last
-    hmac-sha256-bytes(`AWS4${secret_key}`, date_stamp)
-        |> hmac-sha256-bytes(region)
-        |> hmac-sha256-bytes(service)
-        |> hmac-sha256-bytes("aws4_request")
+    // date -> region -> service -> "aws4_request", each keyed on the last. Each one can sign
+    // for its scope, so each is masked in the run's call records.
+    date-key ::ctx/mark-secret(hmac-sha256-bytes(`AWS4${secret_key}`, date_stamp))
+    region-key ::ctx/mark-secret(hmac-sha256-bytes(date-key, region))
+    service-key ::ctx/mark-secret(hmac-sha256-bytes(region-key, service))
+    ::ctx/mark-secret(hmac-sha256-bytes(service-key, "aws4_request"))
 }
 
 // Create the canonical request string
@@ -690,6 +706,8 @@ fn
     sign-request(method, url, region, service, credentials, headers, payload, get-amz-date())
 },
 (method: Str, url: Str, region: Str, service: Str, credentials: Credentials, headers: Map, payload: Str | Bytes, amz-date: Str): Map {
+    ::ctx/mark-secret(untype(credentials))
+
     // Parse URL
     url-parts parse-url(url)
 
@@ -793,6 +811,7 @@ fn
     sign-url(method, url, region, service, credentials, expires_in, get-amz-date())
 },
 (method: Str, url: Str, region: Str, service: Str, credentials: Credentials, expires_in: Int, amz-date: Str): Str {
+    ::ctx/mark-secret(untype(credentials))
     // Parse URL to get host, path, and existing query
     url-parts parse-url(url)
     host lowercase(url-parts.host)

@@ -3,7 +3,7 @@
 hot.pkg.aws-bedrock {
   name: "hot.dev/aws-bedrock",
   version: "1.3.0",
-  hot-min-version: "2.6.1",
+  hot-min-version: "3.0.2",
   description: "AWS Bedrock API bindings for foundation model inference (Claude, Titan, Llama, Mistral, and more).",
   author: "Hot Dev",
   email: "support@hot.dev",

@@ -16,9 +16,9 @@ meta {
     The key goes in a header, never the URL, so it can't end up in a logged
     URL or an error message.
 
-    **Call records.** Hot stores the arguments of every function call in the
-    run's call records and only masks ctx secrets, so a key passed in `opts`
-    is stored there as plain text.
+    **Call records.** A key passed in `opts` is masked in the run's call
+    records, including inside strings like `Bearer ${key}`. A key shorter than
+    8 bytes is masked only as a whole value.
     """
 }
 
@@ -126,7 +126,8 @@ meta {
     doc: """
     Settings for one call: `opts` over ctx over defaults (see `resolve-from`).
     With an `api-key` in `opts`, the ctx key is not read, and a blank one is
-    an Err rather than a fallback to ctx. Nothing is written to ctx.
+    an Err rather than a fallback to ctx. Nothing is written to ctx, and the
+    key from `opts` is masked in the run's call records.
 
     **Example**
 
@@ -145,6 +146,7 @@ fn
 },
 (opts: Map): Map {
   options or(opts, {})
+  ::ctx/mark-secret(options.api-key)
   has-explicit-key in("api-key", keys(options))
   resolve-from(options, {
     "gemini.api.key": if(has-explicit-key, null, ::ctx/get("gemini.api.key")),

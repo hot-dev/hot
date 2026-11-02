@@ -44,9 +44,10 @@ meta {
     credential: a tenant's call never falls back to the project's ctx key.
 
     The run loop never puts `provider-opts` in chat history, step or delta
-    stream records, skill context or failure payloads. Hot does store function
-    arguments in the run's call records, and only masks ctx secrets, so
-    `provider-opts` is stored there as plain text.
+    stream records, skill context or failure payloads. It marks each credential
+    in it with `::hot::ctx/mark-secret`, so call records mask it, including inside
+    strings like `Bearer ${key}`. A credential shorter than 8 bytes is masked only
+    as a whole value.
     """
 }
 
@@ -311,10 +312,33 @@ fn (opts: ChatOptions): Any {
 
 PROVIDER_SETTING_KEYS ["base-url", "management-base-url", "api-version", "region", "environment"]
 
+// Keys in `provider-opts` that hold no secret, left readable in call records.
+PROVIDER_PLAIN_KEYS ["base-url", "management-base-url", "api-version", "region", "environment", "endpoint", "path-style", "transport"]
+
 is-blank-opt
 meta { doc: """Internal: true for null and for a blank Str.""" }
 fn (value: Any): Bool {
     or(is-null(value), and(is-str(value), is-empty(trim(value))))
+}
+
+mark-provider-opts
+meta {
+    doc: """
+    Internal: mask every credential in `provider-opts` in the run's call records.
+    Every key but the settings in `PROVIDER_SETTING_KEYS` and `endpoint`,
+    `path-style` and `transport` counts. Registered first thing in a run, this
+    also masks the records of the calls still open above it.
+    """
+}
+fn (provider-opts: Map?): Null {
+    opts or(provider-opts, {})
+    for-each(keys(opts), (key) {
+        cond {
+            in(key, PROVIDER_PLAIN_KEYS) => { null }
+            => { ::hot::ctx/mark-secret(opts[key]) }
+        }
+    })
+    null
 }
 
 check-provider-opts
@@ -334,6 +358,7 @@ meta {
     """
 }
 fn (provider-opts: Map?): Null {
+    mark-provider-opts(provider-opts)
     for-each(keys(or(provider-opts, {})), (key) {
         cond {
             and(is-blank-opt(get(provider-opts, key)), not(in(key, PROVIDER_SETTING_KEYS))) => {
@@ -1014,8 +1039,8 @@ meta {
       `ProviderRegistration`. Plain `chat-fn` and `chat-stream-fn` can't
       receive it, so setting it for them is a failure naming the provider. So
       is a null or blank credential, or a `base-url` without a credential: a
-      tenant's call never falls back to the project's ctx key. Stored as plain text in the run's call records, like
-      any function argument, but in nothing else the run loop stores or emits.
+      tenant's call never falls back to the project's ctx key. Masked in the run's
+      call records, and in nothing else the run loop stores or emits.
     - `system` — system prompt prepended to every call.
     - `tools` — tools the model is allowed to call from `run-loop`.
     - `skills` — vector of skill-meta'd functions to advertise to the
@@ -1213,6 +1238,7 @@ meta {
     """
 }
 fn (opts: ChatOptions, messages: Vec<Message>): Str {
+    mark-provider-opts(opts.provider-opts)
     max-iter or(opts.max-iterations, DEFAULT_MAX_ITERATIONS)
     base-tools or(opts.tools, [])
     resolver ::ai::skill/effective-resolver(opts.skill-resolver, opts.skills)
@@ -1526,6 +1552,7 @@ meta {
     """
 }
 fn (opts: ChatOptions, messages: Vec<Message>, on-delta: Fn?): Str {
+    mark-provider-opts(opts.provider-opts)
     max-iter or(opts.max-iterations, DEFAULT_MAX_ITERATIONS)
     base-tools or(opts.tools, [])
     resolver ::ai::skill/effective-resolver(opts.skill-resolver, opts.skills)

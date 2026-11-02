@@ -165,3 +165,8 @@ meta ["test"] fn () {
     assert(reaches(::teams/viewer({api-key: "tenant", base-url: "http://127.0.0.1:1"})), "control: with a credential it reaches the socket")
     ::hot::ctx/set-secret("linear.api.key", before)
 }
+
+test-resolve-marks-the-opts-credential-and-returns-it-unchanged
+meta ["test"] fn () {
+    assert-eq("tenant-credential-a", ::api/resolve({api-key: "tenant-credential-a"}).api-key)
+}

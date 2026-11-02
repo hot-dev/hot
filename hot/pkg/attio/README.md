@@ -46,6 +46,8 @@ attrs ::records/list-attributes("people")
 
 Every function that calls Attio takes an optional trailing `opts` Map, so one run can act for many workspaces and parallel flows don't share credentials. Nothing from `opts` is written to ctx.
 
+A per-call credential is masked in the run's call records, including inside strings like `Bearer ${key}`. A secret shorter than 8 bytes is masked only as a whole value. Records of your own calls that finished before this one may already be written, so mark a credential your code fetches with `::hot::ctx/mark-secret` as soon as you have it.
+
 | Key | Effect |
 |---|---|
 | `api-key` | The access token for this call, instead of `attio.api.key` |
