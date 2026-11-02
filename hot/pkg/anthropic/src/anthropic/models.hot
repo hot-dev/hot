@@ -62,21 +62,33 @@ fn
 },
 (opts: Map): ModelsListResponse {
     response api-call("GET", `/v1/models`, {}, "", opts)
-    if(is-ok-response(response), ModelsListResponse(response.body), err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { ModelsListResponse(response.body) }
+      => { err(HttpError(response)) }
+    }
 },
 (limit: Int): ModelsListResponse {
     list(limit, {})
 },
 (limit: Int, opts: Map): ModelsListResponse {
     response api-call("GET", `/v1/models?limit=${limit}`, {}, "", opts)
-    if(is-ok-response(response), ModelsListResponse(response.body), err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { ModelsListResponse(response.body) }
+      => { err(HttpError(response)) }
+    }
 },
 (limit: Int, after_id: Str): ModelsListResponse {
     list(limit, after_id, {})
 },
 (limit: Int, after_id: Str, opts: Map): ModelsListResponse {
     response api-call("GET", `/v1/models?limit=${limit}&after_id=${after_id}`, {}, "", opts)
-    if(is-ok-response(response), ModelsListResponse(response.body), err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { ModelsListResponse(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 get
@@ -102,5 +114,9 @@ fn (model_id: Str): Model {
 },
 (model_id: Str, opts: Map): Model {
     response api-call("GET", `/v1/models/${model_id}`, {}, "", opts)
-    if(is-ok-response(response), Model(response.body), err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { Model(response.body) }
+      => { err(HttpError(response)) }
+    }
 }

@@ -153,6 +153,7 @@ fn
         response send-signed("POST", url, "ses", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { SendEmailResponse({
                 message_id: response.body.MessageId
             }) }
@@ -282,6 +283,7 @@ fn
         response send-signed("POST", url, "ses", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { SendEmailResponse({
                 message_id: response.body.MessageId
             }) }
@@ -337,6 +339,7 @@ fn
         response send-signed("POST", url, "ses", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { SendEmailResponse({
                 message_id: response.body.MessageId
             }) }

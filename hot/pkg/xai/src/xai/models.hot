@@ -52,7 +52,11 @@ fn (): ModelsListResponse | HttpError {
 },
 (opts: Map): ModelsListResponse | HttpError {
     response api-call("GET", `/models`, {}, "", opts)
-    if(is-ok-response(response), ModelsListResponse(response.body), err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { ModelsListResponse(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 get
@@ -76,7 +80,11 @@ fn (model-id: Str): Model | HttpError {
 },
 (model-id: Str, opts: Map): Model | HttpError {
     response api-call("GET", `/models/${model-id}`, {}, "", opts)
-    if(is-ok-response(response), Model(response.body), err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { Model(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 // ============================================================================

@@ -86,6 +86,7 @@ fn
         response send-signed("POST", url, "dynamodb", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { QueryResponse({
                 items: if(is-null(response.body.Items), [], response.body.Items),
                 count: response.body.Count,
@@ -203,6 +204,7 @@ fn
         response send-signed("POST", url, "dynamodb", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { ScanResponse({
                 items: if(is-null(response.body.Items), [], response.body.Items),
                 count: response.body.Count,

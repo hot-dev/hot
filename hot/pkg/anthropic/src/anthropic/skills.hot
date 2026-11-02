@@ -79,14 +79,22 @@ fn
 },
 (opts: Map): SkillsListResponse {
     response api-call("GET", `/v1/skills`, {anthropic-beta: BETA_HEADER}, "", opts)
-    if(is-ok-response(response), SkillsListResponse(response.body), err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { SkillsListResponse(response.body) }
+      => { err(HttpError(response)) }
+    }
 },
 (limit: Int): SkillsListResponse {
     list(limit, {})
 },
 (limit: Int, opts: Map): SkillsListResponse {
     response api-call("GET", `/v1/skills?limit=${limit}`, {anthropic-beta: BETA_HEADER}, "", opts)
-    if(is-ok-response(response), SkillsListResponse(response.body), err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { SkillsListResponse(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 get
@@ -109,7 +117,11 @@ fn (skill_id: Str): Skill {
 },
 (skill_id: Str, opts: Map): Skill {
     response api-call("GET", `/v1/skills/${skill_id}`, {anthropic-beta: BETA_HEADER}, "", opts)
-    if(is-ok-response(response), Skill(response.body), err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { Skill(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 create
@@ -137,7 +149,11 @@ fn (request: CreateSkillRequest): Skill {
 },
 (request: CreateSkillRequest, opts: Map): Skill {
     response api-call("POST", `/v1/skills`, {anthropic-beta: BETA_HEADER}, request, opts)
-    if(is-ok-response(response), Skill(response.body), err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { Skill(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 delete
@@ -159,5 +175,9 @@ fn (skill_id: Str): Map {
 },
 (skill_id: Str, opts: Map): Map {
     response api-call("DELETE", `/v1/skills/${skill_id}`, {anthropic-beta: BETA_HEADER}, "", opts)
-    if(is-ok-response(response), response.body, err(HttpError(response)))
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { response.body }
+      => { err(HttpError(response)) }
+    }
 }

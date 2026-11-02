@@ -80,6 +80,7 @@ fn
         response send-signed("POST", url, "sns", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { CreateTopicResponse({
                 topic_arn: response.body.TopicArn
             }) }
@@ -130,6 +131,7 @@ fn
         response send-signed("POST", url, "sns", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { { success: true } }
             => { AwsError(response) }
         }
@@ -175,6 +177,7 @@ fn
         response send-signed("POST", url, "sns", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { ListTopicsResponse({
                 topics: if(is-null(response.body.Topics), [], map(response.body.Topics, Topic({ topic_arn: %.TopicArn }))),
                 next_token: response.body.NextToken
@@ -225,6 +228,7 @@ fn
         response send-signed("POST", url, "sns", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { GetTopicAttributesResponse({
                 attributes: if(is-null(response.body.Attributes), {}, response.body.Attributes)
             }) }
@@ -270,6 +274,7 @@ fn
         response send-signed("POST", url, "sns", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { { success: true } }
             => { AwsError(response) }
         }
@@ -313,6 +318,7 @@ fn
         response send-signed("POST", url, "sns", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { { success: true } }
             => { AwsError(response) }
         }
@@ -353,6 +359,7 @@ fn
         response send-signed("POST", url, "sns", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { { success: true } }
             => { AwsError(response) }
         }
@@ -394,6 +401,7 @@ fn
         response send-signed("POST", url, "sns", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { { tags: if(is-null(response.body.Tags), [], response.body.Tags) } }
             => { AwsError(response) }
         }

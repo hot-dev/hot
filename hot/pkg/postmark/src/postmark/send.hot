@@ -61,7 +61,11 @@ fn
 },
 (request: SendEmailRequest, opts: Map): SendEmailResponse {
   response api-request("POST", `${::postmark/BASE_URL}/email`, {}, request, opts)
-  if(is-ok-response(response), SendEmailResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { SendEmailResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 // Convenience alias
@@ -82,7 +86,11 @@ fn
 },
 (request: SendEmailBatchRequest, opts: Map): SendEmailBatchResponse {
   response api-request("POST", `${::postmark/BASE_URL}/email/batch`, {}, request, opts)
-  if(is-ok-response(response), SendEmailBatchResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { SendEmailBatchResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 EmailWithTemplateRequest type {
@@ -138,7 +146,11 @@ fn
 },
 (request: SendEmailWithTemplateRequest, opts: Map): SendEmailWithTemplateResponse {
   response api-request("POST", `${::postmark/BASE_URL}/email/withTemplate`, {}, request, opts)
-  if(is-ok-response(response), SendEmailWithTemplateResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { SendEmailWithTemplateResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 SendEmailTemplatedBatchRequest type {
@@ -161,5 +173,9 @@ fn
 },
 (request: SendEmailBatchWithTemplatesRequest, opts: Map): SendEmailBatchWithTemplatesResponse {
   response api-request("POST", `${::postmark/BASE_URL}/email/batchWithTemplates`, {}, request, opts)
-  if(is-ok-response(response), SendEmailBatchWithTemplatesResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { SendEmailBatchWithTemplatesResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

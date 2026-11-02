@@ -52,7 +52,11 @@ fn
 },
 (request: GETApiKeysRequest, opts: Map): GETApiKeysResponse {
   response api-request("GET", `${::resend/BASE_URL}/api-keys`, {}, "", opts)
-  if(is-ok-response(response), GETApiKeysResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { GETApiKeysResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 POSTApiKeysRequest type {
@@ -78,6 +82,7 @@ fn
 (request: POSTApiKeysRequest, opts: Map): POSTApiKeysResponse {
   response api-request("POST", `${::resend/BASE_URL}/api-keys`, {}, request, opts)
   cond {
+    is-err(response) => { response }
     is-ok-response(response) => {
       ::hot::ctx/mark-secret(response.body.token)
       POSTApiKeysResponse(response.body)
@@ -102,5 +107,9 @@ fn
 },
 (request: DELETEApiKeysApiKeyIdRequest, opts: Map): DELETEApiKeysApiKeyIdResponse {
   response api-request("DELETE", `${::resend/BASE_URL}/api-keys/${request.api-key-id}`, {}, "", opts)
-  if(is-ok-response(response), ok(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ok(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

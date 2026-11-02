@@ -41,7 +41,11 @@ fn
 },
 (request: DeleteTemplateRequest, opts: Map): DeleteTemplateResponse {
   response api-request("DELETE", `${::postmark/BASE_URL}/templates/${request.template-id-or-alias}`, {}, "", opts)
-  if(is-ok-response(response), DeleteTemplateResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { DeleteTemplateResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 DeleteInboundRuleRequest type {
@@ -62,5 +66,9 @@ fn
 },
 (request: DeleteInboundRuleRequest, opts: Map): DeleteInboundRuleResponse {
   response api-request("DELETE", `${::postmark/BASE_URL}/triggers/inboundrules/${request.triggerid}`, {}, "", opts)
-  if(is-ok-response(response), DeleteInboundRuleResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { DeleteInboundRuleResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

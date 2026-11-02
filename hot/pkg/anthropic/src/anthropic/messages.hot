@@ -183,7 +183,11 @@ fn (request: MessagesPostRequest): MessagesPostResponse {
 },
 (request: MessagesPostRequest, opts: Map): MessagesPostResponse {
   response api-call("POST", "/v1/messages", {}, request, opts)
-  if(is-ok-response(response), MessagesPostResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { MessagesPostResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 // ============================================================================

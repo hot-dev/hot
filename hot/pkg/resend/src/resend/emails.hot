@@ -106,7 +106,11 @@ fn
 },
 (request: POSTEmailsRequest, opts: Map): POSTEmailsResponse {
   response api-request("POST", `${::resend/BASE_URL}/emails`, {}, request, opts)
-  if(is-ok-response(response), POSTEmailsResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { POSTEmailsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 GETEmailsEmailIdRequest type {
@@ -152,7 +156,11 @@ fn
 },
 (request: GETEmailsEmailIdRequest, opts: Map): GETEmailsEmailIdResponse {
   response api-request("GET", `${::resend/BASE_URL}/emails/${request.email-id}`, {}, "", opts)
-  if(is-ok-response(response), GETEmailsEmailIdResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { GETEmailsEmailIdResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 PATCHEmailsEmailIdRequest type {
@@ -174,7 +182,11 @@ fn
 },
 (request: PATCHEmailsEmailIdRequest, opts: Map): PATCHEmailsEmailIdResponse {
   response api-request("PATCH", `${::resend/BASE_URL}/emails/${request.email-id}`, {}, "", opts)
-  if(is-ok-response(response), PATCHEmailsEmailIdResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { PATCHEmailsEmailIdResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 POSTEmailsEmailIdCancelRequest type {
@@ -205,7 +217,11 @@ fn
 },
 (request: POSTEmailsEmailIdCancelRequest, opts: Map): POSTEmailsEmailIdCancelResponse {
   response api-request("POST", `${::resend/BASE_URL}/emails/${request.email-id}/cancel`, {}, "", opts)
-  if(is-ok-response(response), POSTEmailsEmailIdCancelResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { POSTEmailsEmailIdCancelResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 POSTEmailsBatchResponse type {
@@ -245,5 +261,9 @@ fn
 },
 (emails: Vec<SendEmailRequest>, opts: Map): POSTEmailsBatchResponse {
   response api-request("POST", `${::resend/BASE_URL}/emails/batch`, {}, emails, opts)
-  if(is-ok-response(response), POSTEmailsBatchResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { POSTEmailsBatchResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

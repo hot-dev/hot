@@ -128,6 +128,7 @@ fn
         response send-signed("POST", url, "sqs", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { SendMessageResponse({
                 message_id: response.body.MessageId,
                 md5_of_message_body: response.body.MD5OfMessageBody,
@@ -193,6 +194,7 @@ fn
         response send-signed("POST", url, "sqs", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { ReceiveMessageResponse({
                 messages: cond {
                     is-null(response.body.Messages) => { [] }
@@ -270,6 +272,7 @@ fn
         response send-signed("POST", url, "sqs", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { DeleteMessageResponse({ success: true }) }
             => { err(AwsError(response)) }
         }
@@ -314,6 +317,7 @@ fn
         response send-signed("POST", url, "sqs", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { DeleteMessageResponse({ success: true }) }
             => { err(AwsError(response)) }
         }
@@ -355,6 +359,7 @@ fn
         response send-signed("POST", url, "sqs", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { DeleteMessageResponse({ success: true }) }
             => { err(AwsError(response)) }
         }
@@ -403,6 +408,7 @@ fn
         response send-signed("POST", url, "sqs", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { SendMessageBatchResponse({
                 successful: cond {
                     is-null(response.body.Successful) => { [] }
@@ -467,6 +473,7 @@ fn
         response send-signed("POST", url, "sqs", resolved, headers, body)
 
         cond {
+            is-err(response) => { response }
             is-ok-response(response) => { DeleteMessageBatchResponse({
                 successful: cond {
                     is-null(response.body.Successful) => { [] }

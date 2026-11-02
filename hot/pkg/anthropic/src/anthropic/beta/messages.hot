@@ -129,7 +129,11 @@ fn (request: BetaMessagesPostRequest): BetaMessagesPostResponse {
 },
 (request: BetaMessagesPostRequest, opts: Map): BetaMessagesPostResponse {
   response api-call("POST", `/v1/messages?beta=true`, {}, request, opts)
-  if(is-ok-response(response), BetaMessagesPostResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { BetaMessagesPostResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 BetaMessagesCountTokensPostRequest type {
@@ -189,7 +193,11 @@ fn (request: BetaMessagesCountTokensPostRequest): BetaMessagesCountTokensPostRes
 },
 (request: BetaMessagesCountTokensPostRequest, opts: Map): BetaMessagesCountTokensPostResponse {
   response api-call("POST", `/v1/messages/count_tokens?beta=true`, {}, request, opts)
-  if(is-ok-response(response), BetaMessagesCountTokensPostResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { BetaMessagesCountTokensPostResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 BetaMessagesCountTokensPostRequest type {
@@ -230,5 +238,9 @@ fn (request: BetaMessagesCountTokensPostRequest): BetaMessagesCountTokensPostRes
 },
 (request: BetaMessagesCountTokensPostRequest, opts: Map): BetaMessagesCountTokensPostResponse {
   response api-call("POST", `/v1/messages/count_tokens`, {}, request, opts)
-  if(is-ok-response(response), BetaMessagesCountTokensPostResponse(response.body), err(HttpError(response)))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { BetaMessagesCountTokensPostResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
