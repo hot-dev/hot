@@ -2378,6 +2378,83 @@ run()"#;
         }
     }
 
+    /// A parameter's type written in full, through a namespace alias, or by a
+    /// namespace that only imports it gets the implicit arrow as a short name
+    /// does, and same-named targets stay apart. The signature lookup read a
+    /// slash in the type as the end of the function's name, and the alias
+    /// existed only at compile time, so the function received the value
+    /// unconverted.
+    #[test]
+    fn qualified_and_aliased_parameter_types_get_the_implicit_arrow() {
+        let src = r#"::src ns
+Payload type { secret: Str }
+
+::b::api ns
+Payload ::src/Payload
+E1 type { from: Str }
+Kind enum open { Plain }
+Payload -> E1 fn (p: Payload): E1 { E1({from: "b"}) }
+Payload -> Kind.Wrapped
+
+::other ns
+Payload ::src/Payload
+E1 type { from: Str }
+Payload -> E1 fn (p: Payload): E1 { E1({from: "other"}) }
+
+::reexport ns
+E1 ::b::api/E1
+
+::c ns
+::alias ::b::api
+::second ::other
+::again ::reexport
+take-qualified fn (x: ::b::api/E1): Any { x.from }
+take-alias fn (x: ::alias/E1): Any { x.from }
+take-second fn (x: ::second/E1): Any { x.from }
+take-reexport fn (x: ::reexport/E1): Any { x.from }
+take-alias-reexport fn (x: ::again/E1): Any { x.from }
+take-pair fn (n: Int, x: ::alias/E1, s: Str): Any { `${n} ${x.from} ${s}` }
+take-enum fn match (x: ::alias/Kind): Str {
+    ::alias/Kind.Wrapped => { "wrapped" }
+    _ => { "other" }
+}
+take-nested fn (x: ::alias/E1): Any {
+    inner fn (y: ::alias/E1): Any { y.from }
+    inner(x)
+}
+qualified-any fn (x: Any): Any { take-qualified(x) }
+alias-any fn (x: Any): Any { take-alias(x) }
+second-any fn (x: Any): Any { take-second(x) }
+reexport-any fn (x: Any): Any { take-reexport(x) }
+alias-reexport-any fn (x: Any): Any { take-alias-reexport(x) }
+pair-any fn (x: Any): Any { take-pair(1, x, "s") }
+enum-any fn (x: Any): Any { take-enum(x) }
+nested-any fn (x: Any): Any { take-nested(x) }
+
+::t ns
+p ::src/Payload({secret: "s"})
+already ::b::api/E1({from: "kept"})
+run fn (): Vec {
+    [
+        ::c/qualified-any(p), ::c/alias-any(p), ::c/second-any(p),
+        ::c/reexport-any(p), ::c/alias-reexport-any(p),
+        ::c/pair-any(p), ::c/enum-any(p), ::c/nested-any(p),
+        ::c/qualified-any(already), ::c/alias-any(already)
+    ]
+}
+run()
+run()
+run()"#;
+        let expected = strs(&[
+            "b", "b", "other", "b", "b", "1 b s", "wrapped", "b", "kept", "kept",
+        ]);
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            let out = compile_and_run_project_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("run failed: {e}"));
+            assert_eq!(out, expected);
+        }
+    }
+
     /// An arrow's source is its qualified type too: a value doesn't run the
     /// arrow declared for a same-named type in another namespace, and a local
     /// type named like a core one has arrows of its own, wherever it's declared.
