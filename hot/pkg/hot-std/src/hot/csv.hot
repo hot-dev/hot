@@ -37,8 +37,8 @@ meta {
 
     **What Hot records.** Hot records each call's arguments and return value, and
     CSV rows often hold personal data, so choose how you read them with that in mind:
-    - `from-csv` records every row inline in its `call.return_value`, and again in the `call.args` of each function you pass them to. Stored JSON is about twice the size of the file, and more with long column names. Blob storage doesn't help, since it only moves large single values, not many small cells
-    - On PostgreSQL, a value of more than 256 MB as JSON can't be stored, and **the run fails even though your code finished**. Long column names and short cells reach that from a file of about 30 MB
+    - `from-csv` records every row, in its `call.return_value` and again in the `call.args` of each function you pass them to. As JSON they're about twice the size of the file, and more with long column names. Over 1 MB they go to blob storage, one blob per value, and read back as they were. They aren't found by call payload search. Recording a large value also takes time and memory: on a 50 MB file, `from-csv` took about ten times as long with recording on, and twice the memory
+    - With blob storage off, or if writing to it fails, a value over 32 MB is recorded as `::hot::blob/Omitted` with its size, in place of the rows
     - `iter-csv` over `read-file-stream`, with a lambda, records no rows. Text you pass in yourself is recorded as an argument. A named function called with a row records that row in its own call, up to the run's limit on recorded calls, 10,000 by default
     - Registered secrets are masked in cells and in CSV text. A column named like a credential, such as `password`, is masked once it is a Map key, but not in the text passed to `from-csv`
 
