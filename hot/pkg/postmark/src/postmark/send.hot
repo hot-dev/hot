@@ -55,8 +55,12 @@ meta {
     ```
     """
 }
-fn (request: SendEmailRequest): SendEmailResponse {
-  response api-request("POST", `${::postmark/BASE_URL}/email`, {}, request)
+fn
+(request: SendEmailRequest): SendEmailResponse {
+  send-single-email(request, {})
+},
+(request: SendEmailRequest, opts: Map): SendEmailResponse {
+  response api-request("POST", `${::postmark/BASE_URL}/email`, {}, request, opts)
   if(is-ok-response(response), SendEmailResponse(response.body), err(HttpError(response)))
 }
 
@@ -72,8 +76,12 @@ SendEmailBatchResponse type Vec<Map>
 
 send-batch-emails
 meta {doc: """Send a batch of emails in a single API call."""}
-fn (request: SendEmailBatchRequest): SendEmailBatchResponse {
-  response api-request("POST", `${::postmark/BASE_URL}/email/batch`, {}, request)
+fn
+(request: SendEmailBatchRequest): SendEmailBatchResponse {
+  send-batch-emails(request, {})
+},
+(request: SendEmailBatchRequest, opts: Map): SendEmailBatchResponse {
+  response api-request("POST", `${::postmark/BASE_URL}/email/batch`, {}, request, opts)
   if(is-ok-response(response), SendEmailBatchResponse(response.body), err(HttpError(response)))
 }
 
@@ -124,8 +132,12 @@ send-email-using-template
 meta {
     doc: """Send an email using a pre-defined Postmark template, identified by TemplateId or TemplateAlias."""
 }
-fn (request: SendEmailWithTemplateRequest): SendEmailWithTemplateResponse {
-  response api-request("POST", `${::postmark/BASE_URL}/email/withTemplate`, {}, request)
+fn
+(request: SendEmailWithTemplateRequest): SendEmailWithTemplateResponse {
+  send-email-using-template(request, {})
+},
+(request: SendEmailWithTemplateRequest, opts: Map): SendEmailWithTemplateResponse {
+  response api-request("POST", `${::postmark/BASE_URL}/email/withTemplate`, {}, request, opts)
   if(is-ok-response(response), SendEmailWithTemplateResponse(response.body), err(HttpError(response)))
 }
 
@@ -143,7 +155,11 @@ SendEmailBatchWithTemplatesResponse type Vec<Map>
 
 send-batch-email-using-templates
 meta {doc: """Send a batch of emails using templates in a single API call."""}
-fn (request: SendEmailBatchWithTemplatesRequest): SendEmailBatchWithTemplatesResponse {
-  response api-request("POST", `${::postmark/BASE_URL}/email/batchWithTemplates`, {}, request)
+fn
+(request: SendEmailBatchWithTemplatesRequest): SendEmailBatchWithTemplatesResponse {
+  send-batch-email-using-templates(request, {})
+},
+(request: SendEmailBatchWithTemplatesRequest, opts: Map): SendEmailBatchWithTemplatesResponse {
+  response api-request("POST", `${::postmark/BASE_URL}/email/batchWithTemplates`, {}, request, opts)
   if(is-ok-response(response), SendEmailBatchWithTemplatesResponse(response.body), err(HttpError(response)))
 }

@@ -21,7 +21,11 @@ get-bounce-dump
 meta {
     doc: """Retrieve the raw SMTP dump for a specific bounce, useful for diagnosing delivery issues."""
 }
-fn (request: GETBouncesBounceidDumpRequest): GETBouncesBounceidDumpResponse {
-  response api-request("GET", `${::postmark/BASE_URL}/bounces/${request.bounceid}/dump`)
+fn
+(request: GETBouncesBounceidDumpRequest): GETBouncesBounceidDumpResponse {
+  get-bounce-dump(request, {})
+},
+(request: GETBouncesBounceidDumpRequest, opts: Map): GETBouncesBounceidDumpResponse {
+  response api-request("GET", `${::postmark/BASE_URL}/bounces/${request.bounceid}/dump`, {}, "", opts)
   if(is-ok-response(response), GETBouncesBounceidDumpResponse(response.body), err(HttpError(response)))
 }

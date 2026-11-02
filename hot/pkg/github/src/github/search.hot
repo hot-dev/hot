@@ -16,7 +16,10 @@ fn
   search-repos(query, {})
 },
 (query: Str, params: Map): Map {
-  ::api/json("GET", search-path("repositories", query, params))
+  search-repos(query, params, {})
+},
+(query: Str, params: Map, opts: Map): Map {
+  ::api/json("GET", search-path("repositories", query, params), {}, "", opts)
 }
 
 search-issues
@@ -39,7 +42,10 @@ fn
   search-issues(query, {})
 },
 (query: Str, params: Map): Map {
-  ::api/json("GET", search-path("issues", query, params))
+  search-issues(query, params, {})
+},
+(query: Str, params: Map, opts: Map): Map {
+  ::api/json("GET", search-path("issues", query, params), {}, "", opts)
 }
 
 search-code
@@ -51,5 +57,8 @@ fn
   search-code(query, {})
 },
 (query: Str, params: Map): Map {
-  ::api/json("GET", search-path("code", query, params))
+  search-code(query, params, {})
+},
+(query: Str, params: Map, opts: Map): Map {
+  ::api/json("GET", search-path("code", query, params), {}, "", opts)
 }

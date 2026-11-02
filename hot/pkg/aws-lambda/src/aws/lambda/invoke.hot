@@ -2,13 +2,14 @@
 
 // Lambda invocation operations
 
-http-request ::hot::http/request
 HttpResponse ::hot::http/HttpResponse
 is-ok-response ::hot::http/is-ok-response
 
-get-credentials ::aws::core/get-credentials
-get-region ::aws::core/get-region
-sign-request ::aws::core/sign-request
+resolve ::aws::core/resolve
+send-signed ::aws::core/send-signed
+service-url ::aws::core/service-url
+response-header ::aws::core/response-header
+uri-encode ::aws::core/uri-encode
 AwsError ::aws::core/AwsError
 
 // Invoke response type
@@ -42,37 +43,42 @@ meta {
     """
 }
 fn
-(function_name: Str, payload: Any, invocation_type: Str, log_type: Str): InvokeResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
+(function_name: Str, payload: Any, invocation_type: Str?, log_type: Str?, opts: Map): InvokeResponse | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        url `${service-url(resolved, "lambda")}/2015-03-31/functions/${uri-encode(function_name)}/invocations`
 
-    url `https://lambda.${region}.amazonaws.com/2015-03-31/functions/${function_name}/invocations`
+        body if(is-null(payload), "", if(or(is-str(payload), is-bytes(payload)), payload, to-json(payload)))
 
-    body if(is-null(payload), "", if(is-map(payload), to-json(payload), payload))
+        headers {
+            "Content-Type": "application/json",
+            "X-Amz-Invocation-Type": invocation_type,
+            "X-Amz-Log-Type": log_type
+        }
 
-    headers {
-        "Content-Type": "application/json",
-        "X-Amz-Invocation-Type": invocation_type,
-        "X-Amz-Log-Type": log_type,
-        "Host": `lambda.${region}.amazonaws.com`
-    }
+        response send-signed("POST", url, "lambda", resolved, headers, body)
 
-    signed-headers sign-request("POST", url, region, "lambda", credentials, headers, body)
-
-    response http-request("POST", url, signed-headers, body)
-
-    cond {
-        is-ok-response(response) => { InvokeResponse({
-            status_code: response.status,
-            function_error: response.headers.X-Amz-Function-Error,
-            log_result: response.headers.X-Amz-Log-Result,
-            payload: response.body,
-            executed_version: response.headers.X-Amz-Executed-Version
-        }) }
-        => { err(AwsError(response)) }
-    }
+        cond {
+            is-ok-response(response) => { InvokeResponse({
+                status_code: response.status,
+                function_error: response-header(response, "X-Amz-Function-Error"),
+                log_result: response-header(response, "X-Amz-Log-Result"),
+                payload: response.body,
+                executed_version: response-header(response, "X-Amz-Executed-Version")
+            }) }
+            => { err(AwsError(response)) }
+        }
+    })
 },
-(function_name: Str, payload: Any, invocation_type: Str): InvokeResponse | AwsError {
+(function_name: Str, payload: Any, invocation_type: Str?, opts: Map): InvokeResponse | AwsError {
+    invoke(function_name, payload, invocation_type, "None", opts)
+},
+(function_name: Str, payload: Any, opts: Map): InvokeResponse | AwsError {
+    invoke(function_name, payload, "RequestResponse", "None", opts)
+},
+(function_name: Str, payload: Any, invocation_type: Str?, log_type: Str?): InvokeResponse | AwsError {
+    invoke(function_name, payload, invocation_type, log_type, {})
+},
+(function_name: Str, payload: Any, invocation_type: Str?): InvokeResponse | AwsError {
     invoke(function_name, payload, invocation_type, "None")
 },
 (function_name: Str, payload: Any): InvokeResponse | AwsError {
@@ -100,6 +106,9 @@ meta {
     """
 }
 fn
+(function_name: Str, payload: Any, opts: Map): InvokeResponse | AwsError {
+    invoke(function_name, payload, "Event", "None", opts)
+},
 (function_name: Str, payload: Any): InvokeResponse | AwsError {
     invoke(function_name, payload, "Event", "None")
 },
@@ -124,6 +133,9 @@ meta {
     """
 }
 fn
+(function_name: Str, payload: Any, opts: Map): InvokeResponse | AwsError {
+    invoke(function_name, payload, "RequestResponse", "Tail", opts)
+},
 (function_name: Str, payload: Any): InvokeResponse | AwsError {
     invoke(function_name, payload, "RequestResponse", "Tail")
 },
@@ -148,6 +160,9 @@ meta {
     """
 }
 fn
+(function_name: Str, payload: Any, opts: Map): InvokeResponse | AwsError {
+    invoke(function_name, payload, "DryRun", "None", opts)
+},
 (function_name: Str, payload: Any): InvokeResponse | AwsError {
     invoke(function_name, payload, "DryRun", "None")
 },

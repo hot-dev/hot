@@ -2,13 +2,13 @@
 
 // SQS Message operations
 
-http-request ::hot::http/request
 HttpResponse ::hot::http/HttpResponse
 is-ok-response ::hot::http/is-ok-response
 
-get-credentials ::aws::core/get-credentials
 get-region ::aws::core/get-region
-sign-request ::aws::core/sign-request
+resolve ::aws::core/resolve
+send-signed ::aws::core/send-signed
+service-url ::aws::core/service-url
 AwsError ::aws::core/AwsError
 
 // Message attribute type
@@ -107,39 +107,41 @@ meta {
     """
 }
 fn
-(queue_url: Str, message_body: Str, delay_seconds: Int, message_attributes: Map?): SendMessageResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
+(queue_url: Str, message_body: Str, delay_seconds: Int, message_attributes: Map?, opts: Map): SendMessageResponse | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        attrs if(is-null(message_attributes), {}, message_attributes)
 
-    attrs if(is-null(message_attributes), {}, message_attributes)
+        body to-json({
+            QueueUrl: queue_url,
+            MessageBody: message_body,
+            DelaySeconds: delay_seconds,
+            MessageAttributes: attrs
+        })
 
-    body to-json({
-        QueueUrl: queue_url,
-        MessageBody: message_body,
-        DelaySeconds: delay_seconds,
-        MessageAttributes: attrs
+        url `${service-url(resolved, "sqs")}/`
+
+        headers {
+            "Content-Type": "application/x-amz-json-1.0",
+            "X-Amz-Target": "AmazonSQS.SendMessage"
+        }
+
+        response send-signed("POST", url, "sqs", resolved, headers, body)
+
+        cond {
+            is-ok-response(response) => { SendMessageResponse({
+                message_id: response.body.MessageId,
+                md5_of_message_body: response.body.MD5OfMessageBody,
+                sequence_number: response.body.SequenceNumber
+            }) }
+            => { err(AwsError(response)) }
+        }
     })
-
-    url `https://sqs.${region}.amazonaws.com/`
-
-    headers {
-        "Content-Type": "application/x-amz-json-1.0",
-        "X-Amz-Target": "AmazonSQS.SendMessage",
-        "Host": `sqs.${region}.amazonaws.com`
-    }
-
-    signed-headers sign-request("POST", url, region, "sqs", credentials, headers, body)
-
-    response http-request("POST", url, signed-headers, body)
-
-    cond {
-        is-ok-response(response) => { SendMessageResponse({
-            message_id: response.body.MessageId,
-            md5_of_message_body: response.body.MD5OfMessageBody,
-            sequence_number: response.body.SequenceNumber
-        }) }
-        => { err(AwsError(response)) }
-    }
+},
+(queue_url: Str, message_body: Str, opts: Map): SendMessageResponse | AwsError {
+    send-message(queue_url, message_body, 0, {}, opts)
+},
+(queue_url: Str, message_body: Str, delay_seconds: Int, message_attributes: Map?): SendMessageResponse | AwsError {
+    send-message(queue_url, message_body, delay_seconds, message_attributes, {})
 },
 (queue_url: Str, message_body: Str, delay_seconds: Int): SendMessageResponse | AwsError {
     send-message(queue_url, message_body, delay_seconds, {})
@@ -170,47 +172,55 @@ meta {
     """
 }
 fn
-(queue_url: Str, max_messages: Int, wait_time_seconds: Int, visibility_timeout: Int): ReceiveMessageResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
+(queue_url: Str, max_messages: Int, wait_time_seconds: Int, visibility_timeout: Int, opts: Map): ReceiveMessageResponse | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        body to-json({
+            QueueUrl: queue_url,
+            MaxNumberOfMessages: max_messages,
+            WaitTimeSeconds: wait_time_seconds,
+            VisibilityTimeout: visibility_timeout,
+            AttributeNames: ["All"],
+            MessageAttributeNames: ["All"]
+        })
 
-    body to-json({
-        QueueUrl: queue_url,
-        MaxNumberOfMessages: max_messages,
-        WaitTimeSeconds: wait_time_seconds,
-        VisibilityTimeout: visibility_timeout,
-        AttributeNames: ["All"],
-        MessageAttributeNames: ["All"]
+        url `${service-url(resolved, "sqs")}/`
+
+        headers {
+            "Content-Type": "application/x-amz-json-1.0",
+            "X-Amz-Target": "AmazonSQS.ReceiveMessage"
+        }
+
+        response send-signed("POST", url, "sqs", resolved, headers, body)
+
+        cond {
+            is-ok-response(response) => { ReceiveMessageResponse({
+                messages: cond {
+                    is-null(response.body.Messages) => { [] }
+                    => { map(response.body.Messages, Message({
+                    message_id: %.MessageId,
+                    receipt_handle: %.ReceiptHandle,
+                    body: %.Body,
+                    md5_of_body: %.MD5OfBody,
+                    attributes: %.Attributes,
+                    message_attributes: %.MessageAttributes
+                })) }
+                }
+            }) }
+            => { err(AwsError(response)) }
+        }
     })
-
-    url `https://sqs.${region}.amazonaws.com/`
-
-    headers {
-        "Content-Type": "application/x-amz-json-1.0",
-        "X-Amz-Target": "AmazonSQS.ReceiveMessage",
-        "Host": `sqs.${region}.amazonaws.com`
-    }
-
-    signed-headers sign-request("POST", url, region, "sqs", credentials, headers, body)
-
-    response http-request("POST", url, signed-headers, body)
-
-    cond {
-        is-ok-response(response) => { ReceiveMessageResponse({
-            messages: cond {
-                is-null(response.body.Messages) => { [] }
-                => { map(response.body.Messages, Message({
-                message_id: %.MessageId,
-                receipt_handle: %.ReceiptHandle,
-                body: %.Body,
-                md5_of_body: %.MD5OfBody,
-                attributes: %.Attributes,
-                message_attributes: %.MessageAttributes
-            })) }
-            }
-        }) }
-        => { err(AwsError(response)) }
-    }
+},
+(queue_url: Str, max_messages: Int, wait_time_seconds: Int, opts: Map): ReceiveMessageResponse | AwsError {
+    receive-messages(queue_url, max_messages, wait_time_seconds, 30, opts)
+},
+(queue_url: Str, max_messages: Int, opts: Map): ReceiveMessageResponse | AwsError {
+    receive-messages(queue_url, max_messages, 0, 30, opts)
+},
+(queue_url: Str, opts: Map): ReceiveMessageResponse | AwsError {
+    receive-messages(queue_url, 1, 0, 30, opts)
+},
+(queue_url: Str, max_messages: Int, wait_time_seconds: Int, visibility_timeout: Int): ReceiveMessageResponse | AwsError {
+    receive-messages(queue_url, max_messages, wait_time_seconds, visibility_timeout, {})
 },
 (queue_url: Str, max_messages: Int, wait_time_seconds: Int): ReceiveMessageResponse | AwsError {
     receive-messages(queue_url, max_messages, wait_time_seconds, 30)
@@ -242,31 +252,31 @@ meta {
     ```
     """
 }
-fn (queue_url: Str, receipt_handle: Str): DeleteMessageResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
+fn
+(queue_url: Str, receipt_handle: Str, opts: Map): DeleteMessageResponse | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        body to-json({
+            QueueUrl: queue_url,
+            ReceiptHandle: receipt_handle
+        })
 
-    body to-json({
-        QueueUrl: queue_url,
-        ReceiptHandle: receipt_handle
+        url `${service-url(resolved, "sqs")}/`
+
+        headers {
+            "Content-Type": "application/x-amz-json-1.0",
+            "X-Amz-Target": "AmazonSQS.DeleteMessage"
+        }
+
+        response send-signed("POST", url, "sqs", resolved, headers, body)
+
+        cond {
+            is-ok-response(response) => { DeleteMessageResponse({ success: true }) }
+            => { err(AwsError(response)) }
+        }
     })
-
-    url `https://sqs.${region}.amazonaws.com/`
-
-    headers {
-        "Content-Type": "application/x-amz-json-1.0",
-        "X-Amz-Target": "AmazonSQS.DeleteMessage",
-        "Host": `sqs.${region}.amazonaws.com`
-    }
-
-    signed-headers sign-request("POST", url, region, "sqs", credentials, headers, body)
-
-    response http-request("POST", url, signed-headers, body)
-
-    cond {
-        is-ok-response(response) => { DeleteMessageResponse({ success: true }) }
-        => { err(AwsError(response)) }
-    }
+},
+(queue_url: Str, receipt_handle: Str): DeleteMessageResponse | AwsError {
+    delete-message(queue_url, receipt_handle, {})
 }
 
 // Change message visibility timeout
@@ -285,32 +295,32 @@ meta {
     ```
     """
 }
-fn (queue_url: Str, receipt_handle: Str, visibility_timeout: Int): DeleteMessageResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
+fn
+(queue_url: Str, receipt_handle: Str, visibility_timeout: Int, opts: Map): DeleteMessageResponse | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        body to-json({
+            QueueUrl: queue_url,
+            ReceiptHandle: receipt_handle,
+            VisibilityTimeout: visibility_timeout
+        })
 
-    body to-json({
-        QueueUrl: queue_url,
-        ReceiptHandle: receipt_handle,
-        VisibilityTimeout: visibility_timeout
+        url `${service-url(resolved, "sqs")}/`
+
+        headers {
+            "Content-Type": "application/x-amz-json-1.0",
+            "X-Amz-Target": "AmazonSQS.ChangeMessageVisibility"
+        }
+
+        response send-signed("POST", url, "sqs", resolved, headers, body)
+
+        cond {
+            is-ok-response(response) => { DeleteMessageResponse({ success: true }) }
+            => { err(AwsError(response)) }
+        }
     })
-
-    url `https://sqs.${region}.amazonaws.com/`
-
-    headers {
-        "Content-Type": "application/x-amz-json-1.0",
-        "X-Amz-Target": "AmazonSQS.ChangeMessageVisibility",
-        "Host": `sqs.${region}.amazonaws.com`
-    }
-
-    signed-headers sign-request("POST", url, region, "sqs", credentials, headers, body)
-
-    response http-request("POST", url, signed-headers, body)
-
-    cond {
-        is-ok-response(response) => { DeleteMessageResponse({ success: true }) }
-        => { err(AwsError(response)) }
-    }
+},
+(queue_url: Str, receipt_handle: Str, visibility_timeout: Int): DeleteMessageResponse | AwsError {
+    change-message-visibility(queue_url, receipt_handle, visibility_timeout, {})
 }
 
 // Purge all messages from a queue
@@ -328,30 +338,30 @@ meta {
     ```
     """
 }
-fn (queue_url: Str): DeleteMessageResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
+fn
+(queue_url: Str, opts: Map): DeleteMessageResponse | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        body to-json({
+            QueueUrl: queue_url
+        })
 
-    body to-json({
-        QueueUrl: queue_url
+        url `${service-url(resolved, "sqs")}/`
+
+        headers {
+            "Content-Type": "application/x-amz-json-1.0",
+            "X-Amz-Target": "AmazonSQS.PurgeQueue"
+        }
+
+        response send-signed("POST", url, "sqs", resolved, headers, body)
+
+        cond {
+            is-ok-response(response) => { DeleteMessageResponse({ success: true }) }
+            => { err(AwsError(response)) }
+        }
     })
-
-    url `https://sqs.${region}.amazonaws.com/`
-
-    headers {
-        "Content-Type": "application/x-amz-json-1.0",
-        "X-Amz-Target": "AmazonSQS.PurgeQueue",
-        "Host": `sqs.${region}.amazonaws.com`
-    }
-
-    signed-headers sign-request("POST", url, region, "sqs", credentials, headers, body)
-
-    response http-request("POST", url, signed-headers, body)
-
-    cond {
-        is-ok-response(response) => { DeleteMessageResponse({ success: true }) }
-        => { err(AwsError(response)) }
-    }
+},
+(queue_url: Str): DeleteMessageResponse | AwsError {
+    purge-queue(queue_url, {})
 }
 
 // Send messages in batch
@@ -375,49 +385,49 @@ meta {
     ```
     """
 }
-fn (queue_url: Str, entries: Vec<Map>): SendMessageBatchResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
+fn
+(queue_url: Str, entries: Vec<Map>, opts: Map): SendMessageBatchResponse | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        body to-json({
+            QueueUrl: queue_url,
+            Entries: entries
+        })
 
-    body to-json({
-        QueueUrl: queue_url,
-        Entries: entries
+        url `${service-url(resolved, "sqs")}/`
+
+        headers {
+            "Content-Type": "application/x-amz-json-1.0",
+            "X-Amz-Target": "AmazonSQS.SendMessageBatch"
+        }
+
+        response send-signed("POST", url, "sqs", resolved, headers, body)
+
+        cond {
+            is-ok-response(response) => { SendMessageBatchResponse({
+                successful: cond {
+                    is-null(response.body.Successful) => { [] }
+                    => { map(response.body.Successful, BatchResultEntry({
+                    id: %.Id,
+                    message_id: %.MessageId,
+                    md5_of_message_body: %.MD5OfMessageBody
+                })) }
+                },
+                failed: cond {
+                    is-null(response.body.Failed) => { [] }
+                    => { map(response.body.Failed, BatchErrorEntry({
+                    id: %.Id,
+                    sender_fault: %.SenderFault,
+                    code: %.Code,
+                    message: %.Message
+                })) }
+                }
+            }) }
+            => { err(AwsError(response)) }
+        }
     })
-
-    url `https://sqs.${region}.amazonaws.com/`
-
-    headers {
-        "Content-Type": "application/x-amz-json-1.0",
-        "X-Amz-Target": "AmazonSQS.SendMessageBatch",
-        "Host": `sqs.${region}.amazonaws.com`
-    }
-
-    signed-headers sign-request("POST", url, region, "sqs", credentials, headers, body)
-
-    response http-request("POST", url, signed-headers, body)
-
-    cond {
-        is-ok-response(response) => { SendMessageBatchResponse({
-            successful: cond {
-                is-null(response.body.Successful) => { [] }
-                => { map(response.body.Successful, BatchResultEntry({
-                id: %.Id,
-                message_id: %.MessageId,
-                md5_of_message_body: %.MD5OfMessageBody
-            })) }
-            },
-            failed: cond {
-                is-null(response.body.Failed) => { [] }
-                => { map(response.body.Failed, BatchErrorEntry({
-                id: %.Id,
-                sender_fault: %.SenderFault,
-                code: %.Code,
-                message: %.Message
-            })) }
-            }
-        }) }
-        => { err(AwsError(response)) }
-    }
+},
+(queue_url: Str, entries: Vec<Map>): SendMessageBatchResponse | AwsError {
+    send-message-batch(queue_url, entries, {})
 }
 
 // Delete messages in batch
@@ -439,47 +449,47 @@ meta {
     ```
     """
 }
-fn (queue_url: Str, entries: Vec<Map>): DeleteMessageBatchResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
+fn
+(queue_url: Str, entries: Vec<Map>, opts: Map): DeleteMessageBatchResponse | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        body to-json({
+            QueueUrl: queue_url,
+            Entries: entries
+        })
 
-    body to-json({
-        QueueUrl: queue_url,
-        Entries: entries
+        url `${service-url(resolved, "sqs")}/`
+
+        headers {
+            "Content-Type": "application/x-amz-json-1.0",
+            "X-Amz-Target": "AmazonSQS.DeleteMessageBatch"
+        }
+
+        response send-signed("POST", url, "sqs", resolved, headers, body)
+
+        cond {
+            is-ok-response(response) => { DeleteMessageBatchResponse({
+                successful: cond {
+                    is-null(response.body.Successful) => { [] }
+                    => { map(response.body.Successful, BatchResultEntry({
+                    id: %.Id,
+                    message_id: %.MessageId,
+                    md5_of_message_body: %.MD5OfMessageBody
+                })) }
+                },
+                failed: cond {
+                    is-null(response.body.Failed) => { [] }
+                    => { map(response.body.Failed, BatchErrorEntry({
+                    id: %.Id,
+                    sender_fault: %.SenderFault,
+                    code: %.Code,
+                    message: %.Message
+                })) }
+                }
+            }) }
+            => { err(AwsError(response)) }
+        }
     })
-
-    url `https://sqs.${region}.amazonaws.com/`
-
-    headers {
-        "Content-Type": "application/x-amz-json-1.0",
-        "X-Amz-Target": "AmazonSQS.DeleteMessageBatch",
-        "Host": `sqs.${region}.amazonaws.com`
-    }
-
-    signed-headers sign-request("POST", url, region, "sqs", credentials, headers, body)
-
-    response http-request("POST", url, signed-headers, body)
-
-    cond {
-        is-ok-response(response) => { DeleteMessageBatchResponse({
-            successful: cond {
-                is-null(response.body.Successful) => { [] }
-                => { map(response.body.Successful, BatchResultEntry({
-                id: %.Id,
-                message_id: %.MessageId,
-                md5_of_message_body: %.MD5OfMessageBody
-            })) }
-            },
-            failed: cond {
-                is-null(response.body.Failed) => { [] }
-                => { map(response.body.Failed, BatchErrorEntry({
-                id: %.Id,
-                sender_fault: %.SenderFault,
-                code: %.Code,
-                message: %.Message
-            })) }
-            }
-        }) }
-        => { err(AwsError(response)) }
-    }
+},
+(queue_url: Str, entries: Vec<Map>): DeleteMessageBatchResponse | AwsError {
+    delete-message-batch(queue_url, entries, {})
 }

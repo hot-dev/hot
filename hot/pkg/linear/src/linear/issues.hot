@@ -40,6 +40,9 @@ fn
   list-issues({})
 },
 (options: Map): Map {
+  list-issues(options, {})
+},
+(options: Map, opts: Map): Map {
   query ```
   query Issues($filter: IssueFilter, $first: Int, $after: String) {
     issues(filter: $filter, first: $first, after: $after) {
@@ -54,7 +57,7 @@ fn
     after: get(options, "after")
   }
 
-  data ::api/graphql(query, filter-vals(variables, is-some))
+  data ::api/graphql(query, filter-vals(variables, is-some), opts)
   match data {
     Result.Err => { err(data) }
 
@@ -66,13 +69,17 @@ get-issue
 meta {
     doc: """Fetch one issue by id or identifier (e.g. "ENG-123")."""
 }
-fn (id: Str): Map {
+fn
+(id: Str): Map {
+  get-issue(id, {})
+},
+(id: Str, opts: Map): Map {
   query ```
   query Issue($id: String!) {
     issue(id: $id) { ${ISSUE_FIELDS} }
   }
   ```
-  data ::api/graphql(query, {id: id})
+  data ::api/graphql(query, {id: id}, opts)
   match data {
     Result.Err => { err(data) }
 
@@ -115,6 +122,9 @@ fn
   create-issue(team-id, title, {})
 },
 (team-id: Str, title: Str, options: Map): Map {
+  create-issue(team-id, title, options, {})
+},
+(team-id: Str, title: Str, options: Map, opts: Map): Map {
   query ```
   mutation CreateIssue($input: IssueCreateInput!) {
     issueCreate(input: $input) {
@@ -123,7 +133,7 @@ fn
     }
   }
   ```
-  data ::api/graphql(query, {input: build-create-input(team-id, title, options)})
+  data ::api/graphql(query, {input: build-create-input(team-id, title, options)}, opts)
   match data {
     Result.Err => { err(data) }
 
@@ -135,7 +145,11 @@ update-issue
 meta {
     doc: """Update an issue's fields (IssueUpdateInput: `title`, `description`, `priority`, `stateId`, `assigneeId`, ...)."""
 }
-fn (id: Str, changes: Map): Map {
+fn
+(id: Str, changes: Map): Map {
+  update-issue(id, changes, {})
+},
+(id: Str, changes: Map, opts: Map): Map {
   query ```
   mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {
     issueUpdate(id: $id, input: $input) {
@@ -144,7 +158,7 @@ fn (id: Str, changes: Map): Map {
     }
   }
   ```
-  data ::api/graphql(query, {id: id, input: changes})
+  data ::api/graphql(query, {id: id, input: changes}, opts)
   match data {
     Result.Err => { err(data) }
 
@@ -156,7 +170,11 @@ create-comment
 meta {
     doc: """Comment on an issue (markdown body)."""
 }
-fn (issue-id: Str, body: Str): Map {
+fn
+(issue-id: Str, body: Str): Map {
+  create-comment(issue-id, body, {})
+},
+(issue-id: Str, body: Str, opts: Map): Map {
   query ```
   mutation CreateComment($input: CommentCreateInput!) {
     commentCreate(input: $input) {
@@ -165,7 +183,7 @@ fn (issue-id: Str, body: Str): Map {
     }
   }
   ```
-  data ::api/graphql(query, {input: {issueId: issue-id, body: body}})
+  data ::api/graphql(query, {input: {issueId: issue-id, body: body}}, opts)
   match data {
     Result.Err => { err(data) }
 
@@ -182,6 +200,9 @@ fn
   list-comments(issue-id, {})
 },
 (issue-id: Str, options: Map): Map {
+  list-comments(issue-id, options, {})
+},
+(issue-id: Str, options: Map, opts: Map): Map {
   query """
   query Comments($id: String!, $first: Int, $after: String) {
     issue(id: $id) {
@@ -198,7 +219,7 @@ fn
     after: get(options, "after")
   }
 
-  data ::api/graphql(query, filter-vals(variables, is-some))
+  data ::api/graphql(query, filter-vals(variables, is-some), opts)
   match data {
     Result.Err => { err(data) }
 
@@ -210,13 +231,17 @@ archive-issue
 meta {
     doc: """Archive an issue (it stays queryable but leaves active views). Returns true on success."""
 }
-fn (id: Str): Bool {
+fn
+(id: Str): Bool {
+  archive-issue(id, {})
+},
+(id: Str, opts: Map): Bool {
   query """
   mutation ArchiveIssue($id: String!) {
     issueArchive(id: $id) { success }
   }
   """
-  data ::api/graphql(query, {id: id})
+  data ::api/graphql(query, {id: id}, opts)
   match data {
     Result.Err => { err(data) }
 
@@ -228,13 +253,17 @@ delete-issue
 meta {
     doc: """Move an issue to the trash (recoverable in Linear for a grace period). Returns true on success."""
 }
-fn (id: Str): Bool {
+fn
+(id: Str): Bool {
+  delete-issue(id, {})
+},
+(id: Str, opts: Map): Bool {
   query """
   mutation DeleteIssue($id: String!) {
     issueDelete(id: $id) { success }
   }
   """
-  data ::api/graphql(query, {id: id})
+  data ::api/graphql(query, {id: id}, opts)
   match data {
     Result.Err => { err(data) }
 
@@ -246,7 +275,11 @@ search-issues
 meta {
     doc: """Full-text issue search. Returns `{nodes, pageInfo}`."""
 }
-fn (term: Str): Map {
+fn
+(term: Str): Map {
+  search-issues(term, {})
+},
+(term: Str, opts: Map): Map {
   query ```
   query Search($term: String!) {
     searchIssues(term: $term) {
@@ -255,7 +288,7 @@ fn (term: Str): Map {
     }
   }
   ```
-  data ::api/graphql(query, {term: term})
+  data ::api/graphql(query, {term: term}, opts)
   match data {
     Result.Err => { err(data) }
 

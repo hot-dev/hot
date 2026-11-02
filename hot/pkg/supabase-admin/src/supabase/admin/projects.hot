@@ -58,16 +58,24 @@ projects ::projects/list-projects()
 ```
 """
 }
-fn (): Vec<Project> {
-  ::api/request("GET", "/projects")
+fn
+(): Vec<Project> {
+  list-projects({})
+},
+(opts: Map): Vec<Project> {
+  ::api/request("GET", "/projects", {}, {}, opts)
 }
 
 get-project
 meta {
     doc: """Get details for a specific project by its reference ID."""
 }
-fn (project-ref: Str): Project {
-  ::api/request("GET", `/projects/${project-ref}`)
+fn
+(project-ref: Str): Project {
+  get-project(project-ref, {})
+},
+(project-ref: Str, opts: Map): Project {
+  ::api/request("GET", `/projects/${project-ref}`, {}, {}, opts)
 }
 
 CreateProjectRequest type {
@@ -99,7 +107,11 @@ project.id  // => "new-project-ref"
 ```
 """
 }
-fn (request: CreateProjectRequest): Project {
+fn
+(request: CreateProjectRequest): Project {
+  create-project(request, {})
+},
+(request: CreateProjectRequest, opts: Map): Project {
   body {
     name: request.name,
     organization_id: request.organization_id,
@@ -109,15 +121,19 @@ fn (request: CreateProjectRequest): Project {
     |> assoc-some("db_pass", request.db_pass)
     |> assoc-some("kps_enabled", request.kps_enabled)
 
-  ::api/request("POST", "/projects", {}, body)
+  ::api/request("POST", "/projects", {}, body, opts)
 }
 
 delete-project
 meta {
     doc: """Delete a Supabase project. This is permanent and cannot be undone."""
 }
-fn (project-ref: Str): Map {
-  ::api/request("DELETE", `/projects/${project-ref}`)
+fn
+(project-ref: Str): Map {
+  delete-project(project-ref, {})
+},
+(project-ref: Str, opts: Map): Map {
+  ::api/request("DELETE", `/projects/${project-ref}`, {}, {}, opts)
 }
 
 // ============================================================================
@@ -128,16 +144,24 @@ pause-project
 meta {
     doc: """Pause a project (free tier only). Paused projects stop all services but retain data."""
 }
-fn (project-ref: Str): Map {
-  ::api/request("POST", `/projects/${project-ref}/pause`, {}, {})
+fn
+(project-ref: Str): Map {
+  pause-project(project-ref, {})
+},
+(project-ref: Str, opts: Map): Map {
+  ::api/request("POST", `/projects/${project-ref}/pause`, {}, {}, opts)
 }
 
 restore-project
 meta {
     doc: """Restore a paused project."""
 }
-fn (project-ref: Str): Map {
-  ::api/request("POST", `/projects/${project-ref}/restore`, {}, {})
+fn
+(project-ref: Str): Map {
+  restore-project(project-ref, {})
+},
+(project-ref: Str, opts: Map): Map {
+  ::api/request("POST", `/projects/${project-ref}/restore`, {}, {}, opts)
 }
 
 // ============================================================================
@@ -159,8 +183,19 @@ keys ::projects/get-api-keys("my-project-ref")
 ```
 """
 }
-fn (project-ref: Str): Vec<ApiKey> {
-  ::api/request("GET", `/projects/${project-ref}/api-keys`)
+fn
+(project-ref: Str): Vec<ApiKey> {
+  get-api-keys(project-ref, {})
+},
+(project-ref: Str, opts: Map): Vec<ApiKey> {
+  api-keys ::api/request("GET", `/projects/${project-ref}/api-keys`, {}, {}, opts)
+  cond {
+    is-err(api-keys) => { api-keys }
+    => {
+      ::hot::ctx/mark-secret(map(api-keys, (entry) { entry.api_key }))
+      api-keys
+    }
+  }
 }
 
 // ============================================================================
@@ -171,8 +206,12 @@ get-postgrest-config
 meta {
     doc: """Get the PostgREST configuration for a project (exposed schemas, max rows, pool size)."""
 }
-fn (project-ref: Str): Map {
-  ::api/request("GET", postgrest-path(project-ref))
+fn
+(project-ref: Str): Map {
+  get-postgrest-config(project-ref, {})
+},
+(project-ref: Str, opts: Map): Map {
+  ::api/request("GET", postgrest-path(project-ref), {}, {}, opts)
 }
 
 UpdatePostgrestConfigRequest type {
@@ -187,14 +226,18 @@ update-postgrest-config
 meta {
     doc: """Update PostgREST configuration."""
 }
-fn (request: UpdatePostgrestConfigRequest): Map {
+fn
+(request: UpdatePostgrestConfigRequest): Map {
+  update-postgrest-config(request, {})
+},
+(request: UpdatePostgrestConfigRequest, opts: Map): Map {
   body {}
     |> assoc-some("db_schema", request.db_schema)
     |> assoc-some("max_rows", request.max_rows)
     |> assoc-some("db_extra_search_path", request.db_extra_search_path)
     |> assoc-some("db_pool", request.db_pool)
 
-  ::api/request("PATCH", postgrest-path(request.project_ref), {}, body)
+  ::api/request("PATCH", postgrest-path(request.project_ref), {}, body, opts)
 }
 
 get-database-openapi
@@ -206,23 +249,34 @@ fn
   get-database-openapi(project-ref, null)
 },
 (project-ref: Str, schema: Str?): Map {
-  ::api/request("GET", database-openapi-path(project-ref, schema))
+  get-database-openapi(project-ref, schema, {})
+},
+(project-ref: Str, schema: Str?, opts: Map): Map {
+  ::api/request("GET", database-openapi-path(project-ref, schema), {}, {}, opts)
 }
 
 get-auth-config
 meta {
     doc: """Get the authentication (GoTrue) configuration for a project."""
 }
-fn (project-ref: Str): Map {
-  ::api/request("GET", `/projects/${project-ref}/config/auth`)
+fn
+(project-ref: Str): Map {
+  get-auth-config(project-ref, {})
+},
+(project-ref: Str, opts: Map): Map {
+  ::api/request("GET", `/projects/${project-ref}/config/auth`, {}, {}, opts)
 }
 
 update-auth-config
 meta {
     doc: """Update authentication configuration. Pass a Map of auth config fields to update."""
 }
-fn (project-ref: Str, config: Map): Map {
-  ::api/request("PATCH", `/projects/${project-ref}/config/auth`, {}, config)
+fn
+(project-ref: Str, config: Map): Map {
+  update-auth-config(project-ref, config, {})
+},
+(project-ref: Str, config: Map, opts: Map): Map {
+  ::api/request("PATCH", `/projects/${project-ref}/config/auth`, {}, config, opts)
 }
 
 // ============================================================================
@@ -238,13 +292,20 @@ fn
   get-project-health(project-ref, ["db", "auth", "storage", "rest", "realtime"])
 },
 (project-ref: Str, services: Vec<Str>): Vec<ProjectHealth> {
-  ::api/request("GET", health-path(project-ref, services))
+  get-project-health(project-ref, services, {})
+},
+(project-ref: Str, services: Vec<Str>, opts: Map): Vec<ProjectHealth> {
+  ::api/request("GET", health-path(project-ref, services), {}, {}, opts)
 }
 
 get-project-usage
 meta {
     doc: """Get usage metrics for a project (database size, storage, bandwidth, etc.)."""
 }
-fn (project-ref: Str): Map {
-  ::api/request("GET", `/projects/${project-ref}/usage`)
+fn
+(project-ref: Str): Map {
+  get-project-usage(project-ref, {})
+},
+(project-ref: Str, opts: Map): Map {
+  ::api/request("GET", `/projects/${project-ref}/usage`, {}, {}, opts)
 }

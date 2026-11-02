@@ -3,7 +3,7 @@ meta {
     doc: """Anthropic Message Batches API - Process large volumes of messages asynchronously with 50% cost reduction."""
 }
 
-api-request ::anthropic::api/request
+api-call ::anthropic::api/call
 HttpError ::anthropic::api/HttpError
 is-ok-response ::hot::http/is-ok-response
 
@@ -79,7 +79,10 @@ meta {
     """
 }
 fn (request: CreateBatchRequest): MessageBatch {
-    response api-request("POST", `${::anthropic/BASE_URL}/v1/messages/batches`, {}, request)
+    create(request, {})
+},
+(request: CreateBatchRequest, opts: Map): MessageBatch {
+    response api-call("POST", `/v1/messages/batches`, {}, request, opts)
     if(is-ok-response(response), MessageBatch(response.body), err(HttpError(response)))
 }
 
@@ -107,11 +110,17 @@ meta {
 }
 fn
 (): BatchesListResponse {
-    response api-request("GET", `${::anthropic/BASE_URL}/v1/messages/batches`)
+    list({})
+},
+(opts: Map): BatchesListResponse {
+    response api-call("GET", `/v1/messages/batches`, {}, "", opts)
     if(is-ok-response(response), BatchesListResponse(response.body), err(HttpError(response)))
 },
 (limit: Int): BatchesListResponse {
-    response api-request("GET", `${::anthropic/BASE_URL}/v1/messages/batches?limit=${limit}`)
+    list(limit, {})
+},
+(limit: Int, opts: Map): BatchesListResponse {
+    response api-call("GET", `/v1/messages/batches?limit=${limit}`, {}, "", opts)
     if(is-ok-response(response), BatchesListResponse(response.body), err(HttpError(response)))
 }
 
@@ -131,7 +140,10 @@ meta {
     """
 }
 fn (batch_id: Str): MessageBatch {
-    response api-request("GET", `${::anthropic/BASE_URL}/v1/messages/batches/${batch_id}`)
+    get(batch_id, {})
+},
+(batch_id: Str, opts: Map): MessageBatch {
+    response api-call("GET", `/v1/messages/batches/${batch_id}`, {}, "", opts)
     if(is-ok-response(response), MessageBatch(response.body), err(HttpError(response)))
 }
 
@@ -150,7 +162,10 @@ meta {
     """
 }
 fn (batch_id: Str): MessageBatch {
-    response api-request("POST", `${::anthropic/BASE_URL}/v1/messages/batches/${batch_id}/cancel`)
+    cancel(batch_id, {})
+},
+(batch_id: Str, opts: Map): MessageBatch {
+    response api-call("POST", `/v1/messages/batches/${batch_id}/cancel`, {}, "", opts)
     if(is-ok-response(response), MessageBatch(response.body), err(HttpError(response)))
 }
 
@@ -169,6 +184,9 @@ meta {
     """
 }
 fn (batch_id: Str): Any {
-    response api-request("GET", `${::anthropic/BASE_URL}/v1/messages/batches/${batch_id}/results`)
+    results(batch_id, {})
+},
+(batch_id: Str, opts: Map): Any {
+    response api-call("GET", `/v1/messages/batches/${batch_id}/results`, {}, "", opts)
     if(is-ok-response(response), response.body, err(HttpError(response)))
 }

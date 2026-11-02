@@ -1,6 +1,6 @@
 ::aws::bedrock ns
 meta {
-    ctx: {"aws.access-key-id": {required: true}, "aws.secret-access-key": {required: true}, "aws.session-token": {required: false}, "aws.region": {required: false}}
+    ctx: {"aws.access-key-id": {required: false}, "aws.secret-access-key": {required: false}, "aws.session-token": {required: false}, "aws.region": {required: false, secret: false}, "aws.endpoint": {required: false, secret: false}}
 }
 
 // AWS Bedrock Package

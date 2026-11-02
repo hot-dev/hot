@@ -35,17 +35,21 @@ invoke-response-from-http fn (response: ::api/HttpResponse): InvokeResponse {
   })
 }
 
-invoke-http-response fn (request: InvokeFunctionRequest): ::api/HttpResponse {
+invoke-http-response fn
+(request: InvokeFunctionRequest): ::api/HttpResponse {
+  invoke-http-response(request, {})
+},
+(request: InvokeFunctionRequest, opts: Map): ::api/HttpResponse {
   cond {
     and(is-some(request.service), request.service) => {
-      ::api/request-raw-service("POST", function-path(request.name), invoke-headers(request), or(request.body, {}))
+      ::api/request-raw-service("POST", function-path(request.name), invoke-headers(request), or(request.body, {}), opts)
     }
 
     is-some(request.access-token) => {
-      ::api/request-raw-as("POST", function-path(request.name), invoke-headers(request), or(request.body, {}), request.access-token)
+      ::api/request-raw-as("POST", function-path(request.name), invoke-headers(request), or(request.body, {}), request.access-token, opts)
     }
     => {
-      ::api/request-raw("POST", function-path(request.name), invoke-headers(request), or(request.body, {}))
+      ::api/request-raw("POST", function-path(request.name), invoke-headers(request), or(request.body, {}), opts)
     }
   }
 }
@@ -74,22 +78,39 @@ result ::functions/invoke(::functions/InvokeFunctionRequest({
 ```
 """
 }
-fn (request: InvokeFunctionRequest): Any {
-  ::api/body-or-error(invoke-http-response(request))
+fn
+(request: InvokeFunctionRequest): Any {
+  invoke(request, {})
+},
+(request: InvokeFunctionRequest, opts: Map): Any {
+  ::api/body-or-error(invoke-http-response(request, opts))
 }
 
-invoke-response fn (request: InvokeFunctionRequest): InvokeResponse {
-  response invoke-http-response(request)
+invoke-response fn
+(request: InvokeFunctionRequest): InvokeResponse {
+  invoke-response(request, {})
+},
+(request: InvokeFunctionRequest, opts: Map): InvokeResponse {
+  response invoke-http-response(request, opts)
   cond {
+    is-err(response) => { response }
     not(::api/is-ok-response(response)) => { err(::api/HttpError(response)) }
     => { invoke-response-from-http(response) }
   }
 }
 
-invoke-as fn (request: InvokeFunctionRequest, access-token: Str): Any {
-  invoke({...untype(request), access-token: access-token})
+invoke-as fn
+(request: InvokeFunctionRequest, access-token: Str): Any {
+  invoke-as(request, access-token, {})
+},
+(request: InvokeFunctionRequest, access-token: Str, opts: Map): Any {
+  invoke({...untype(request), access-token: access-token}, opts)
 }
 
-invoke-service fn (request: InvokeFunctionRequest): Any {
-  invoke({...untype(request), service: true})
+invoke-service fn
+(request: InvokeFunctionRequest): Any {
+  invoke-service(request, {})
+},
+(request: InvokeFunctionRequest, opts: Map): Any {
+  invoke({...untype(request), service: true}, opts)
 }

@@ -59,7 +59,16 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/airtable/test",
     "./hot/pkg/anthropic/test",
     "./hot/pkg/attio/test",
+    "./hot/pkg/aws-bedrock/test",
+    "./hot/pkg/aws-core/test",
+    "./hot/pkg/aws-dynamodb/test",
     "./hot/pkg/aws-eventstream/test",
+    "./hot/pkg/aws-lambda/test",
+    "./hot/pkg/aws-s3/test",
+    "./hot/pkg/aws-secrets-manager/test",
+    "./hot/pkg/aws-ses/test",
+    "./hot/pkg/aws-sns/test",
+    "./hot/pkg/aws-sqs/test",
     "./hot/pkg/cal-com/test",
     "./hot/pkg/cloudflare/test",
     "./hot/pkg/crm/test",
@@ -68,6 +77,7 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/elevenlabs/test",
     "./hot/pkg/ffmpeg/test",
     "./hot/pkg/firecrawl/test",
+    "./hot/pkg/gemini/test",
     "./hot/pkg/github/test",
     "./hot/pkg/google-calendar/test",
     "./hot/pkg/google-core/test",
@@ -80,6 +90,7 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/hubspot/test",
     "./hot/pkg/imagemagick/test",
     "./hot/pkg/intercom/test",
+    "./hot/pkg/json-rpc/test",
     "./hot/pkg/jwt/test",
     "./hot/pkg/libreoffice/test",
     "./hot/pkg/linear/test",
@@ -98,6 +109,7 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/qdrant/test",
     "./hot/pkg/qwen/test",
     "./hot/pkg/redis/test",
+    "./hot/pkg/resend/test",
     "./hot/pkg/salesforce/test",
     "./hot/pkg/sentry/test",
     "./hot/pkg/shopify/test",
@@ -116,6 +128,7 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/web-search/test",
     "./hot/pkg/whatsapp/test",
     "./hot/pkg/whisper/test",
+    "./hot/pkg/xai/test",
     "./hot/pkg/zendesk/test"
 ]
 hot.project.hot-pkg-all.test.capture true
@@ -401,6 +414,62 @@ hot.project.pkg-test-qwen.deps {
     "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" },
     "hot.dev/openai": { "local": "./hot/pkg/openai" }
 }
+
+// AWS family unit tests (SigV4 signing, request building, resolvers; hermetic)
+hot.project.pkg-test-aws.src.paths [
+    "./hot/pkg/aws-core/src",
+    "./hot/pkg/aws-bedrock/src",
+    "./hot/pkg/aws-dynamodb/src",
+    "./hot/pkg/aws-eventstream/src",
+    "./hot/pkg/aws-lambda/src",
+    "./hot/pkg/aws-s3/src",
+    "./hot/pkg/aws-secrets-manager/src",
+    "./hot/pkg/aws-ses/src",
+    "./hot/pkg/aws-sns/src",
+    "./hot/pkg/aws-sqs/src"
+]
+hot.project.pkg-test-aws.test.paths [
+    "./hot/pkg/aws-core/test",
+    "./hot/pkg/aws-bedrock/test",
+    "./hot/pkg/aws-dynamodb/test",
+    "./hot/pkg/aws-eventstream/test",
+    "./hot/pkg/aws-lambda/test",
+    "./hot/pkg/aws-s3/test",
+    "./hot/pkg/aws-secrets-manager/test",
+    "./hot/pkg/aws-ses/test",
+    "./hot/pkg/aws-sns/test",
+    "./hot/pkg/aws-sqs/test"
+]
+hot.project.pkg-test-aws.test.capture true
+hot.project.pkg-test-aws.deps {}
+
+// gemini unit tests (request building, credential resolver; hermetic)
+hot.project.pkg-test-gemini.src.paths ["./hot/pkg/gemini/src"]
+hot.project.pkg-test-gemini.test.paths ["./hot/pkg/gemini/test"]
+hot.project.pkg-test-gemini.test.capture true
+hot.project.pkg-test-gemini.deps {
+    "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" }
+}
+
+// xai unit tests (request building, credential resolver; hermetic)
+hot.project.pkg-test-xai.src.paths ["./hot/pkg/xai/src"]
+hot.project.pkg-test-xai.test.paths ["./hot/pkg/xai/test"]
+hot.project.pkg-test-xai.test.capture true
+hot.project.pkg-test-xai.deps {
+    "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" }
+}
+
+// postmark unit tests (request building, credential resolver; hermetic)
+hot.project.pkg-test-postmark.src.paths ["./hot/pkg/postmark/src"]
+hot.project.pkg-test-postmark.test.paths ["./hot/pkg/postmark/test"]
+hot.project.pkg-test-postmark.test.capture true
+hot.project.pkg-test-postmark.deps {}
+
+// resend unit tests (request building, credential resolver; hermetic)
+hot.project.pkg-test-resend.src.paths ["./hot/pkg/resend/src"]
+hot.project.pkg-test-resend.test.paths ["./hot/pkg/resend/test"]
+hot.project.pkg-test-resend.test.capture true
+hot.project.pkg-test-resend.deps {}
 
 // supabase unit tests (pure-Hot filter/query builders, no network required)
 hot.project.pkg-test-supabase.src.paths ["./hot/pkg/supabase/src"]

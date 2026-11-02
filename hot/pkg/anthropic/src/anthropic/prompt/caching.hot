@@ -1,6 +1,6 @@
 ::anthropic::prompt::caching ns
 
-api-request ::anthropic::api/request
+api-call ::anthropic::api/call
 HttpError ::anthropic::api/HttpError
 is-ok-response ::hot::http/is-ok-response
 
@@ -146,6 +146,9 @@ meta {
     """
 }
 fn (request: PromptCachingBetaMessagesPostRequest): PromptCachingBetaMessagesPostResponse {
-  response api-request("POST", `${::anthropic/BASE_URL}/v1/messages?beta=prompt_caching`, {}, request)
+  beta-messages-post(request, {})
+},
+(request: PromptCachingBetaMessagesPostRequest, opts: Map): PromptCachingBetaMessagesPostResponse {
+  response api-call("POST", `/v1/messages?beta=prompt_caching`, {}, request, opts)
   if(is-ok-response(response), PromptCachingBetaMessagesPostResponse(response.body), err(HttpError(response)))
 }

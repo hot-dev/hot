@@ -5,7 +5,7 @@
 // https://ai.google.dev/gemini-api/docs/imagen
 // ============================================================================
 
-api-request ::gemini::api/request
+api-call ::gemini::api/call
 HttpError ::gemini::api/HttpError
 is-ok-response ::hot::http/is-ok-response
 FileMeta ::hot::file/FileMeta
@@ -86,7 +86,11 @@ meta {
     ```
     """
 }
-fn (request: GenerateImageRequest): GenerateImageResponse | HttpError {
+fn
+(request: GenerateImageRequest): GenerateImageResponse | HttpError {
+    generate(request, {})
+},
+(request: GenerateImageRequest, opts: Map): GenerateImageResponse | HttpError {
     // Build the request body for Imagen
     body {
         instances: [{prompt: request.prompt}],
@@ -111,8 +115,7 @@ fn (request: GenerateImageRequest): GenerateImageResponse | HttpError {
         )
     }
 
-    url `${::gemini/BASE_URL}/v1/models/${IMAGEN_MODEL}:predict`
-    response api-request("POST", url, {}, body)
+    response api-call("POST", `/v1/models/${IMAGEN_MODEL}:predict`, {}, body, opts)
 
     if(is-ok-response(response), GenerateImageResponse(response.body), err(HttpError(response)))
 }
@@ -157,7 +160,13 @@ fn
     generate-to-file(path, {prompt: prompt})
 },
 (path: Str, request: GenerateImageRequest): AIMedia | HttpError {
-    response generate(request)
+    generate-to-file(path, request, {})
+},
+(path: Str, prompt: Str, opts: Map): AIMedia | HttpError {
+    generate-to-file(path, {prompt: prompt}, opts)
+},
+(path: Str, request: GenerateImageRequest, opts: Map): AIMedia | HttpError {
+    response generate(request, opts)
 
     match response {
         HttpError => { response }
@@ -231,8 +240,12 @@ meta {
     ```
     """
 }
-fn (directory: Str, request: GenerateImageRequest): AIMediaBatch | HttpError {
-    response generate(request)
+fn
+(directory: Str, request: GenerateImageRequest): AIMediaBatch | HttpError {
+    generate-batch-to-files(directory, request, {})
+},
+(directory: Str, request: GenerateImageRequest, opts: Map): AIMediaBatch | HttpError {
+    response generate(request, opts)
 
     match response {
         HttpError => { response }
@@ -317,7 +330,11 @@ meta {
     ```
     """
 }
-fn (prompt: Str): Map | HttpError {
+fn
+(prompt: Str): Map | HttpError {
+    generate-inline(prompt, {})
+},
+(prompt: Str, opts: Map): Map | HttpError {
     body {
         contents: [{role: "user", parts: [{text: prompt}]}],
         generationConfig: {
@@ -325,8 +342,7 @@ fn (prompt: Str): Map | HttpError {
         }
     }
 
-    url `${::gemini/BASE_URL}/v1beta/models/${FLASH_IMAGE_MODEL}:generateContent`
-    response api-request("POST", url, {}, body)
+    response api-call("POST", `/v1beta/models/${FLASH_IMAGE_MODEL}:generateContent`, {}, body, opts)
 
     if(is-ok-response(response), ok(response.body), err(HttpError(response)))
 }
@@ -349,8 +365,12 @@ meta {
     ```
     """
 }
-fn (path: Str, prompt: Str): AIMedia | HttpError {
-    response generate-inline(prompt)
+fn
+(path: Str, prompt: Str): AIMedia | HttpError {
+    generate-inline-to-file(path, prompt, {})
+},
+(path: Str, prompt: Str, opts: Map): AIMedia | HttpError {
+    response generate-inline(prompt, opts)
 
     match response {
         HttpError => { response }

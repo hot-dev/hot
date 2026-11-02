@@ -3,15 +3,16 @@
 // S3 Object operations
 
 ::ctx ::hot::ctx
+::api ::aws::s3::api
 
-http-request ::hot::http/request
 HttpResponse ::hot::http/HttpResponse
 is-ok-response ::hot::http/is-ok-response
 
-get-credentials ::aws::core/get-credentials
-get-region ::aws::core/get-region
-s3-endpoint ::aws::core/s3-endpoint
-sign-request ::aws::core/sign-request
+send-signed ::aws::core/send-signed
+response-header ::aws::core/response-header
+parse-int ::aws::core/parse-int
+uri-encode ::aws::core/uri-encode
+uri-encode-path ::aws::core/uri-encode-path
 AwsError ::aws::core/AwsError
 
 is-str ::hot::type/is-str
@@ -39,29 +40,35 @@ ListObjectsResponse type {
     continuation_token: Str?,
     next_continuation_token: Str?,
     start_after: Str?,
-    contents: Vec<S3Object>?
+    contents: Vec<S3Object>?,
+    delimiter: Str?,
+    common_prefixes: Vec<Str>?
 }
 
-// Parse S3Object from XML element
-parse-s3-object fn (elem: Any): S3Object {
+// Text of a child element, or null when it's absent
+child-text fn (elem: Any, name: Str): Str? {
+    child ::xml/child(elem, name)
+    cond {
+        ne(child, null) => { ::xml/text(child) }
+        => { null }
+    }
+}
+
+// Decode a listed value when the response says it encoded them.
+// A store that ignores encoding-type sends plain keys, where + is a plus.
+listed-text fn (elem: Any, name: Str, encoded: Bool): Str? {
+    value child-text(elem, name)
+    if(encoded, ::api/decode-listed(value), value)
+}
+
+// Parse S3Object from XML element. Listings ask for URL-encoded keys.
+parse-s3-object fn (elem: Any, encoded: Bool): S3Object {
     S3Object({
-        key: ::xml/text(::xml/child(elem, "Key")),
-        size: cond {
-            ne(::xml/child(elem, "Size"), null) => { Int(::xml/text(::xml/child(elem, "Size"))) }
-            => { null }
-        },
-        last_modified: cond {
-            ne(::xml/child(elem, "LastModified"), null) => { ::xml/text(::xml/child(elem, "LastModified")) }
-            => { null }
-        },
-        etag: cond {
-            ne(::xml/child(elem, "ETag"), null) => { ::xml/text(::xml/child(elem, "ETag")) }
-            => { null }
-        },
-        storage_class: cond {
-            ne(::xml/child(elem, "StorageClass"), null) => { ::xml/text(::xml/child(elem, "StorageClass")) }
-            => { null }
-        }
+        key: listed-text(elem, "Key", encoded),
+        size: parse-int(child-text(elem, "Size")),
+        last_modified: child-text(elem, "LastModified"),
+        etag: child-text(elem, "ETag"),
+        storage_class: child-text(elem, "StorageClass")
     })
 }
 
@@ -69,41 +76,24 @@ parse-s3-object fn (elem: Any): S3Object {
 parse-list-objects-response fn (xml-str: Str): ListObjectsResponse {
     root ::xml/from-xml(xml-str)
     contents-elems ::xml/children(root, "Contents")
+    prefix-elems ::xml/children(root, "CommonPrefixes")
+    encoded eq(child-text(root, "EncodingType"), "url")
 
     ListObjectsResponse({
-        name: cond {
-            ne(::xml/child(root, "Name"), null) => { ::xml/text(::xml/child(root, "Name")) }
-            => { null }
-        },
-        prefix: cond {
-            ne(::xml/child(root, "Prefix"), null) => { ::xml/text(::xml/child(root, "Prefix")) }
-            => { null }
-        },
-        key_count: cond {
-            ne(::xml/child(root, "KeyCount"), null) => { Int(::xml/text(::xml/child(root, "KeyCount"))) }
-            => { null }
-        },
-        max_keys: cond {
-            ne(::xml/child(root, "MaxKeys"), null) => { Int(::xml/text(::xml/child(root, "MaxKeys"))) }
-            => { null }
-        },
+        name: child-text(root, "Name"),
+        prefix: listed-text(root, "Prefix", encoded),
+        key_count: parse-int(child-text(root, "KeyCount")),
+        max_keys: parse-int(child-text(root, "MaxKeys")),
         is_truncated: cond {
             ne(::xml/child(root, "IsTruncated"), null) => { eq(::xml/text(::xml/child(root, "IsTruncated")), "true") }
             => { null }
         },
-        continuation_token: cond {
-            ne(::xml/child(root, "ContinuationToken"), null) => { ::xml/text(::xml/child(root, "ContinuationToken")) }
-            => { null }
-        },
-        next_continuation_token: cond {
-            ne(::xml/child(root, "NextContinuationToken"), null) => { ::xml/text(::xml/child(root, "NextContinuationToken")) }
-            => { null }
-        },
-        start_after: cond {
-            ne(::xml/child(root, "StartAfter"), null) => { ::xml/text(::xml/child(root, "StartAfter")) }
-            => { null }
-        },
-        contents: map(contents-elems, parse-s3-object)
+        continuation_token: child-text(root, "ContinuationToken"),
+        next_continuation_token: child-text(root, "NextContinuationToken"),
+        start_after: listed-text(root, "StartAfter", encoded),
+        contents: map(contents-elems, parse-s3-object(%, encoded)),
+        delimiter: listed-text(root, "Delimiter", encoded),
+        common_prefixes: map(prefix-elems, (elem) { listed-text(elem, "Prefix", encoded) })
     })
 }
 
@@ -156,33 +146,35 @@ meta {
     """
 }
 fn
+(bucket: Str, key: Str, body: Any, content_type: Str, opts: Map): PutObjectResponse | AwsError {
+    if-ok(::api/resolve(opts, bucket), (resolved) {
+        url ::api/object-url(bucket, key, resolved)
+
+        body-wire if(or(is-str(body), is-bytes(body)), body, to-json(body))
+
+        headers {
+            "Content-Type": content_type
+        }
+
+        response send-signed("PUT", url, "s3", resolved, headers, body-wire)
+
+        cond {
+            is-ok-response(response) => { PutObjectResponse({
+                etag: response-header(response, "ETag"),
+                version_id: response-header(response, "x-amz-version-id")
+            }) }
+            => { err(AwsError(response)) }
+        }
+    })
+},
+(bucket: Str, key: Str, body: Any, opts: Map): PutObjectResponse | AwsError {
+    put-object(bucket, key, body, "application/octet-stream", opts)
+},
 (bucket: Str, key: Str, body: Any, content_type: Str): PutObjectResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
-    endpoint s3-endpoint(bucket, region)
-    url `${endpoint}/${key}`
-
-    body-wire if(or(is-str(body), is-bytes(body)), body, to-json(body))
-
-    headers {
-        "Content-Type": content_type,
-        "Host": `${bucket}.s3.${region}.amazonaws.com`
-    }
-
-    signed-headers sign-request("PUT", url, region, "s3", credentials, headers, body-wire)
-
-    response http-request("PUT", url, signed-headers, body-wire)
-
-    cond {
-        is-ok-response(response) => { PutObjectResponse({
-            etag: response.headers.ETag,
-            version_id: null
-        }) }
-        => { err(AwsError(response)) }
-    }
+    put-object(bucket, key, body, content_type, {})
 },
 (bucket: Str, key: Str, body: Any): PutObjectResponse | AwsError {
-    put-object(bucket, key, body, "application/octet-stream")
+    put-object(bucket, key, body, "application/octet-stream", {})
 }
 
 // Get an object from S3
@@ -197,33 +189,31 @@ meta {
     result ::aws::s3::objects/get-object("my-bucket", "path/to/file.txt")
     result.body  // => "Hello!"
     ```
+
+    `body` is decoded: text as a Str, JSON parsed. For a binary object, or to get the
+    stored bytes exactly, read `body-bytes`.
     """
 }
-fn (bucket: Str, key: Str): GetObjectResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
-    endpoint s3-endpoint(bucket, region)
-    url `${endpoint}/${key}`
+fn
+(bucket: Str, key: Str, opts: Map): GetObjectResponse | AwsError {
+    if-ok(::api/resolve(opts, bucket), (resolved) {
+        response send-signed("GET", ::api/object-url(bucket, key, resolved), "s3", resolved, {}, "")
 
-    headers {
-        "Host": `${bucket}.s3.${region}.amazonaws.com`
-    }
-
-    signed-headers sign-request("GET", url, region, "s3", credentials, headers, "")
-
-    response http-request("GET", url, signed-headers, "")
-
-    cond {
-        is-ok-response(response) => { GetObjectResponse({
-            body: response.body,
-            body-bytes: response.body-bytes,
-            content_type: response.headers.content_type,
-            content_length: null,
-            etag: response.headers.ETag,
-            last_modified: null
-        }) }
-        => { err(AwsError(response)) }
-    }
+        cond {
+            is-ok-response(response) => { GetObjectResponse({
+                body: response.body,
+                body-bytes: response.body-bytes,
+                content_type: response-header(response, "Content-Type"),
+                content_length: parse-int(response-header(response, "Content-Length")),
+                etag: response-header(response, "ETag"),
+                last_modified: response-header(response, "Last-Modified")
+            }) }
+            => { err(AwsError(response)) }
+        }
+    })
+},
+(bucket: Str, key: Str): GetObjectResponse | AwsError {
+    get-object(bucket, key, {})
 }
 
 // Delete an object from S3
@@ -239,27 +229,42 @@ meta {
     ```
     """
 }
-fn (bucket: Str, key: Str): DeleteObjectResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
-    endpoint s3-endpoint(bucket, region)
-    url `${endpoint}/${key}`
+fn
+(bucket: Str, key: Str, opts: Map): DeleteObjectResponse | AwsError {
+    if-ok(::api/resolve(opts, bucket), (resolved) {
+        response send-signed("DELETE", ::api/object-url(bucket, key, resolved), "s3", resolved, {}, "")
 
-    headers {
-        "Host": `${bucket}.s3.${region}.amazonaws.com`
-    }
+        cond {
+            is-ok-response(response) => { DeleteObjectResponse({
+                delete_marker: if(is-null(response-header(response, "x-amz-delete-marker")), null, eq(response-header(response, "x-amz-delete-marker"), "true")),
+                version_id: response-header(response, "x-amz-version-id")
+            }) }
+            => { err(AwsError(response)) }
+        }
+    })
+},
+(bucket: Str, key: Str): DeleteObjectResponse | AwsError {
+    delete-object(bucket, key, {})
+}
 
-    signed-headers sign-request("DELETE", url, region, "s3", credentials, headers, "")
-
-    response http-request("DELETE", url, signed-headers, "")
-
-    cond {
-        is-ok-response(response) => { DeleteObjectResponse({
-            delete_marker: null,
-            version_id: null
-        }) }
-        => { err(AwsError(response)) }
-    }
+// The query string for ListObjectsV2, every value encoded
+list-query
+meta {
+    doc: """The ListObjectsV2 query string. Exposed for testing. `encoding-type=url` makes S3 URL-encode keys in the response, so any key survives the XML."""
+}
+fn (prefix: Str?, max_keys: Int, continuation_token: Str?, opts: Map): Str {
+    delimiter get(opts, "delimiter")
+    start-after get(opts, "start-after")
+    params [
+        "list-type=2",
+        `prefix=${uri-encode(or(prefix, ""))}`,
+        `max-keys=${max_keys}`,
+        "encoding-type=url",
+        if(is-null(continuation_token), null, `continuation-token=${uri-encode(or(continuation_token, ""))}`),
+        if(is-null(delimiter), null, `delimiter=${uri-encode(or(delimiter, ""))}`),
+        if(is-null(start-after), null, `start-after=${uri-encode(or(start-after, ""))}`)
+    ]
+    filter(params, is-some) |> join("&")
 }
 
 // List objects in an S3 bucket (uses ListObjectsV2 API)
@@ -281,43 +286,48 @@ meta {
 
     // List all objects in a bucket
     result ::aws::s3::objects/list-objects("my-bucket")
+
+    // One "folder" level: keys under photos/, and the next level as common_prefixes
+    result ::aws::s3::objects/list-objects("my-bucket", "photos/", {delimiter: "/"})
+    result.common_prefixes  // => ["photos/2024/", "photos/2025/"]
     ```
+
+    `opts` takes `delimiter` and `start-after` besides the usual `resolve` keys.
     """
 }
 fn
-(bucket: Str, prefix: Str, max_keys: Int, continuation_token: Str?): ListObjectsResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
-    endpoint s3-endpoint(bucket, region)
+(bucket: Str, prefix: Str?, max_keys: Int, continuation_token: Str?, opts: Map): ListObjectsResponse | AwsError {
+    if-ok(::api/resolve(opts, bucket), (resolved) {
+        url `${::api/bucket-url(bucket, resolved)}/?${list-query(prefix, max_keys, continuation_token, opts)}`
 
-    // Build URL with optional continuation token
-    base-url `${endpoint}?list-type=2&prefix=${prefix}&max-keys=${max_keys}`
-    url cond {
-        ne(continuation_token, null) => { `${base-url}&continuation-token=${continuation_token}` }
-        => { base-url }
-    }
+        response send-signed("GET", url, "s3", resolved, {}, "")
 
-    headers {
-        "Host": `${bucket}.s3.${region}.amazonaws.com`
-    }
-
-    signed-headers sign-request("GET", url, region, "s3", credentials, headers, "")
-
-    response http-request("GET", url, signed-headers, "")
-
-    cond {
-        is-ok-response(response) => { parse-list-objects-response(response.body) }
-        => { err(AwsError(response)) }
-    }
+        cond {
+            is-ok-response(response) => { parse-list-objects-response(::api/body-text(response.body)) }
+            => { err(AwsError(response)) }
+        }
+    })
 },
-(bucket: Str, prefix: Str, max_keys: Int): ListObjectsResponse | AwsError {
-    list-objects(bucket, prefix, max_keys, null)
+(bucket: Str, prefix: Str?, max_keys: Int, opts: Map): ListObjectsResponse | AwsError {
+    list-objects(bucket, prefix, max_keys, null, opts)
 },
-(bucket: Str, prefix: Str): ListObjectsResponse | AwsError {
-    list-objects(bucket, prefix, 1000, null)
+(bucket: Str, prefix: Str?, opts: Map): ListObjectsResponse | AwsError {
+    list-objects(bucket, prefix, 1000, null, opts)
+},
+(bucket: Str, opts: Map): ListObjectsResponse | AwsError {
+    list-objects(bucket, "", 1000, null, opts)
+},
+(bucket: Str, prefix: Str?, max_keys: Int, continuation_token: Str?): ListObjectsResponse | AwsError {
+    list-objects(bucket, prefix, max_keys, continuation_token, {})
+},
+(bucket: Str, prefix: Str?, max_keys: Int): ListObjectsResponse | AwsError {
+    list-objects(bucket, prefix, max_keys, null, {})
+},
+(bucket: Str, prefix: Str?): ListObjectsResponse | AwsError {
+    list-objects(bucket, prefix, 1000, null, {})
 },
 (bucket: Str): ListObjectsResponse | AwsError {
-    list-objects(bucket, "", 1000, null)
+    list-objects(bucket, "", 1000, null, {})
 }
 
 // Copy object response
@@ -343,43 +353,42 @@ meta {
     ```
     """
 }
-fn (source_bucket: Str, source_key: Str, dest_bucket: Str, dest_key: Str): CopyObjectResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
-    endpoint s3-endpoint(dest_bucket, region)
-    url `${endpoint}/${dest_key}`
+fn
+(source_bucket: Str, source_key: Str, dest_bucket: Str, dest_key: Str, opts: Map): CopyObjectResponse | AwsError {
+    if-ok(::api/resolve(opts, source_bucket, dest_bucket), (resolved) {
+        url ::api/object-url(dest_bucket, dest_key, resolved)
 
-    // x-amz-copy-source must be URL-encoded
-    copy-source `/${source_bucket}/${source_key}`
-
-    headers {
-        "Host": `${dest_bucket}.s3.${region}.amazonaws.com`,
-        "x-amz-copy-source": copy-source
-    }
-
-    signed-headers sign-request("PUT", url, region, "s3", credentials, headers, "")
-
-    response http-request("PUT", url, signed-headers, "")
-
-    cond {
-        and(is-ok-response(response), is-str(response.body)) => {
-            // Parse XML response
-            xml ::xml/from-xml(response.body)
-            CopyObjectResponse({
-                etag: cond {
-                    ne(::xml/child(xml, "ETag"), null) => { ::xml/text(::xml/child(xml, "ETag")) }
-                    => { null }
-                },
-                last_modified: cond {
-                    ne(::xml/child(xml, "LastModified"), null) => { ::xml/text(::xml/child(xml, "LastModified")) }
-                    => { null }
-                }
-            })
+        // x-amz-copy-source must be URL-encoded
+        headers {
+            "x-amz-copy-source": `/${uri-encode(source_bucket)}/${uri-encode-path(source_key)}`
         }
-        // OK but no XML body (e.g. empty 200)
-        is-ok-response(response) => { CopyObjectResponse({etag: null, last_modified: null}) }
-        => { err(AwsError(response)) }
-    }
+
+        response send-signed("PUT", url, "s3", resolved, headers, "")
+        body if(is-ok-response(response), ::api/body-text(response.body), "")
+
+        cond {
+            and(is-ok-response(response), is-str(body), ne(body, "")) => {
+                // Parse XML response
+                xml ::xml/from-xml(body)
+                cond {
+                    // A copy can fail after S3 has answered 200
+                    eq(xml.tag, "Error") => { err(AwsError(response)) }
+                    => {
+                        CopyObjectResponse({
+                            etag: child-text(xml, "ETag"),
+                            last_modified: child-text(xml, "LastModified")
+                        })
+                    }
+                }
+            }
+            // OK but no XML body (e.g. empty 200)
+            is-ok-response(response) => { CopyObjectResponse({etag: null, last_modified: null}) }
+            => { err(AwsError(response)) }
+        }
+    })
+},
+(source_bucket: Str, source_key: Str, dest_bucket: Str, dest_key: Str): CopyObjectResponse | AwsError {
+    copy-object(source_bucket, source_key, dest_bucket, dest_key, {})
 }
 
 // Head an object (get metadata without body)
@@ -397,27 +406,362 @@ meta {
     ```
     """
 }
-fn (bucket: Str, key: Str): HeadObjectResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
-    endpoint s3-endpoint(bucket, region)
-    url `${endpoint}/${key}`
+fn
+(bucket: Str, key: Str, opts: Map): HeadObjectResponse | AwsError {
+    if-ok(::api/resolve(opts, bucket), (resolved) {
+        response send-signed("HEAD", ::api/object-url(bucket, key, resolved), "s3", resolved, {}, "")
 
-    headers {
-        "Host": `${bucket}.s3.${region}.amazonaws.com`
-    }
+        cond {
+            is-ok-response(response) => { HeadObjectResponse({
+                content_type: response-header(response, "Content-Type"),
+                content_length: parse-int(response-header(response, "Content-Length")),
+                etag: response-header(response, "ETag"),
+                last_modified: response-header(response, "Last-Modified")
+            }) }
+            => { err(AwsError(response)) }
+        }
+    })
+},
+(bucket: Str, key: Str): HeadObjectResponse | AwsError {
+    head-object(bucket, key, {})
+}
 
-    signed-headers sign-request("HEAD", url, region, "s3", credentials, headers, "")
+// =============================================================================
+// Multipart upload
+// =============================================================================
 
-    response http-request("HEAD", url, signed-headers, "")
+// Create multipart upload response
+CreateMultipartUploadResponse type {
+    bucket: Str?,
+    key: Str?,
+    upload_id: Str?
+}
 
+// Upload part response; pass these to complete-multipart-upload
+UploadPartResponse type {
+    part_number: Int,
+    etag: Str?
+}
+
+// Complete multipart upload response
+CompleteMultipartUploadResponse type {
+    location: Str?,
+    bucket: Str?,
+    key: Str?,
+    etag: Str?
+}
+
+// Start a multipart upload
+create-multipart-upload
+meta {
+    doc: """
+    Start a multipart upload and get its `upload_id`. Upload the parts with
+    `upload-part`, then finish with `complete-multipart-upload`, or give up with
+    `abort-multipart-upload`: parts of an unfinished upload are stored and billed
+    until it is completed or aborted.
+
+    **Example**
+
+    ```hot
+    upload ::aws::s3::objects/create-multipart-upload("my-bucket", "video.mp4", "video/mp4")
+
+    part-1 ::aws::s3::objects/upload-part("my-bucket", "video.mp4", upload.upload_id, 1, first-chunk)
+    part-2 ::aws::s3::objects/upload-part("my-bucket", "video.mp4", upload.upload_id, 2, last-chunk)
+
+    ::aws::s3::objects/complete-multipart-upload("my-bucket", "video.mp4", upload.upload_id, [part-1, part-2])
+    ```
+    """
+}
+fn
+(bucket: Str, key: Str, content_type: Str, opts: Map): CreateMultipartUploadResponse | AwsError {
+    if-ok(::api/resolve(opts, bucket), (resolved) {
+        url `${::api/object-url(bucket, key, resolved)}?uploads`
+
+        response send-signed("POST", url, "s3", resolved, {"Content-Type": content_type}, "")
+
+        cond {
+            is-ok-response(response) => {
+                root ::xml/from-xml(::api/body-text(response.body))
+                CreateMultipartUploadResponse({
+                    bucket: bucket,
+                    key: key,
+                    upload_id: child-text(root, "UploadId")
+                })
+            }
+            => { err(AwsError(response)) }
+        }
+    })
+},
+(bucket: Str, key: Str, opts: Map): CreateMultipartUploadResponse | AwsError {
+    create-multipart-upload(bucket, key, "application/octet-stream", opts)
+},
+(bucket: Str, key: Str, content_type: Str): CreateMultipartUploadResponse | AwsError {
+    create-multipart-upload(bucket, key, content_type, {})
+},
+(bucket: Str, key: Str): CreateMultipartUploadResponse | AwsError {
+    create-multipart-upload(bucket, key, "application/octet-stream", {})
+}
+
+// Upload one part
+upload-part
+meta {
+    doc: """
+    Upload one part of a multipart upload. `part_number` is 1 to 10000. Every part
+    except the last must be at least 5 MiB. Send Bytes for binary data.
+
+    **Example**
+
+    ```hot
+    part ::aws::s3::objects/upload-part("my-bucket", "video.mp4", upload-id, 1, chunk)
+    part.etag  // keep this for complete-multipart-upload
+    ```
+    """
+}
+fn
+(bucket: Str, key: Str, upload_id: Str, part_number: Int, body: Str | Bytes, opts: Map): UploadPartResponse | AwsError {
+    if-ok(::api/resolve(opts, bucket), (resolved) {
+        url `${::api/object-url(bucket, key, resolved)}?partNumber=${part_number}&uploadId=${uri-encode(upload_id)}`
+
+        response send-signed("PUT", url, "s3", resolved, {}, body)
+
+        cond {
+            is-ok-response(response) => { UploadPartResponse({
+                part_number: part_number,
+                etag: response-header(response, "ETag")
+            }) }
+            => { err(AwsError(response)) }
+        }
+    })
+},
+(bucket: Str, key: Str, upload_id: Str, part_number: Int, body: Str | Bytes): UploadPartResponse | AwsError {
+    upload-part(bucket, key, upload_id, part_number, body, {})
+}
+
+// Escape text for an XML element
+xml-escape fn (text: Str): Str {
+    text
+        |> ::aws::core/replace-all-char("&", "&amp;")
+        |> ::aws::core/replace-all-char("<", "&lt;")
+        |> ::aws::core/replace-all-char(">", "&gt;")
+}
+
+complete-multipart-body
+meta {
+    doc: """The CompleteMultipartUpload XML for `parts` (`UploadPartResponse` values or `{part_number, etag}` Maps), sorted by part number as S3 requires. Exposed for testing."""
+}
+fn (parts: Vec): Str {
+    elems sort-by(map(parts, untype), %.part_number)
+        |> map((part) { `<Part><PartNumber>${part.part_number}</PartNumber><ETag>${xml-escape(or(part.etag, ""))}</ETag></Part>` })
+        |> join("")
+    `<CompleteMultipartUpload xmlns="http://s3.amazonaws.com/doc/2006-03-01/">${elems}</CompleteMultipartUpload>`
+}
+
+// Finish a multipart upload
+complete-multipart-upload
+meta {
+    doc: """
+    Finish a multipart upload, assembling the parts into the object. `parts` are the
+    results of `upload-part`, or `{part_number, etag}` Maps. S3 can answer 200 and then
+    report a failure in the body; that comes back as an `err(AwsError)` like any other.
+
+    **Example**
+
+    ```hot
+    result ::aws::s3::objects/complete-multipart-upload("my-bucket", "video.mp4", upload-id, [part-1, part-2])
+    result.etag
+    ```
+    """
+}
+fn
+(bucket: Str, key: Str, upload_id: Str, parts: Vec, opts: Map): CompleteMultipartUploadResponse | AwsError {
+    if-ok(::api/resolve(opts, bucket), (resolved) {
+        url `${::api/object-url(bucket, key, resolved)}?uploadId=${uri-encode(upload_id)}`
+
+        response send-signed("POST", url, "s3", resolved, {"Content-Type": "application/xml"}, complete-multipart-body(parts))
+
+        cond {
+            is-ok-response(response) => {
+                root ::xml/from-xml(::api/body-text(response.body))
+                cond {
+                    eq(root.tag, "Error") => { err(AwsError(response)) }
+                    => {
+                        CompleteMultipartUploadResponse({
+                            location: child-text(root, "Location"),
+                            bucket: bucket,
+                            key: key,
+                            etag: child-text(root, "ETag")
+                        })
+                    }
+                }
+            }
+            => { err(AwsError(response)) }
+        }
+    })
+},
+(bucket: Str, key: Str, upload_id: Str, parts: Vec): CompleteMultipartUploadResponse | AwsError {
+    complete-multipart-upload(bucket, key, upload_id, parts, {})
+}
+
+// Abandon a multipart upload
+abort-multipart-upload
+meta {
+    doc: """
+    Abort a multipart upload and free the parts uploaded so far. Returns true.
+
+    **Example**
+
+    ```hot
+    ::aws::s3::objects/abort-multipart-upload("my-bucket", "video.mp4", upload-id)
+    ```
+    """
+}
+fn
+(bucket: Str, key: Str, upload_id: Str, opts: Map): Bool | AwsError {
+    if-ok(::api/resolve(opts, bucket), (resolved) {
+        url `${::api/object-url(bucket, key, resolved)}?uploadId=${uri-encode(upload_id)}`
+
+        response send-signed("DELETE", url, "s3", resolved, {}, "")
+
+        cond {
+            is-ok-response(response) => { true }
+            => { err(AwsError(response)) }
+        }
+    })
+},
+(bucket: Str, key: Str, upload_id: Str): Bool | AwsError {
+    abort-multipart-upload(bucket, key, upload_id, {})
+}
+
+// =============================================================================
+// Provider-neutral file metadata
+// =============================================================================
+
+FOLDER_MIME "inode/directory"
+
+DocFile
+meta {
+    doc: """
+    Provider-neutral file metadata: the field names of `::google::drive/DocFile`, plus
+    `path`, so a documents package can treat S3 like Drive, Dropbox, Box and OneDrive.
+
+    **Fields**
+    - `provider` - `"aws-s3"`
+    - `id`, `path` - the object key
+    - `name` - the last path segment of the key
+    - `mime-type` - the stored type when known, else from the key's extension
+      (`application/octet-stream` when unknown; `inode/directory` for folders)
+    - `size`, `modified`
+    - `created` - always null; S3 doesn't record it apart from `modified`
+    - `parents` - the key's parent prefix, empty at the top of the bucket
+    - `drive-id` - the bucket, when known
+    - `web-url`, `revision-id`, `md5`, `sha256`, `shortcut-target-id` - always null
+      (an ETag is only sometimes an MD5)
+    - `version` - the ETag, without its quotes
+    - `is-folder` - the key ends in `/`
+    - `is-google-native`, `is-shortcut`, `trashed` - always false
+    - `export-formats` - always empty
+    - `raw` - what was normalised
+    """
+}
+type {
+    provider: Str,
+    id: Str,
+    name: Str,
+    mime-type: Str,
+    path: Str?,
+    size: Int?,
+    modified: Str?,
+    created: Str?,
+    parents: Vec,
+    drive-id: Str?,
+    web-url: Str?,
+    version: Str?,
+    revision-id: Str?,
+    md5: Str?,
+    sha256: Str?,
+    is-folder: Bool,
+    is-google-native: Bool,
+    is-shortcut: Bool,
+    shortcut-target-id: Str?,
+    trashed: Bool,
+    export-formats: Vec,
+    raw: Map
+}
+
+// The key split into segments, ignoring the slash that ends a folder key
+key-segments fn (key: Str): Vec {
+    filter(split(key, "/"), ne(%, ""))
+}
+
+// An ETag without the quotes S3 puts around it
+bare-etag fn (etag: Str?): Str? {
     cond {
-        is-ok-response(response) => { HeadObjectResponse({
-            content_type: response.headers.content_type,
-            content_length: null,
-            etag: response.headers.ETag,
-            last_modified: null
-        }) }
-        => { err(AwsError(response)) }
+        is-null(etag) => { null }
+        => { ::aws::core/replace-all-char(etag, "\"", "") }
     }
+}
+
+to-doc-file
+meta {
+    doc: """
+    Normalise an `S3Object` (or a Map with `key`, `size`, `last_modified`, `etag`, and
+    optionally `content_type`) into a `DocFile`. Pass `bucket` to fill `drive-id`.
+    `head-object` and `get-object` results don't carry the key, so add it:
+    `to-doc-file({...untype(head), key: key})`.
+
+    **Example**
+
+    ```hot
+    listing ::aws::s3::objects/list-objects("my-bucket", "reports/")
+    files map(listing.contents, ::aws::s3::objects/to-doc-file(%, "my-bucket"))
+    ```
+    """
+}
+fn
+(object: Any, bucket: Str?): DocFile {
+    o untype(object)
+    key or(get(o, "key"), "")
+    segments key-segments(key)
+    name if(is-empty(segments), key, last(segments))
+    is-folder ends-with(key, "/")
+    parent-segments if(is-empty(segments), [], slice(segments, 0, sub(length(segments), 1)))
+    from-name or(::hot::mime/from-path(name), "application/octet-stream")
+
+    DocFile({
+        provider: "aws-s3",
+        id: key,
+        name: name,
+        mime-type: if(is-folder, FOLDER_MIME, or(get(o, "content_type"), from-name)),
+        path: key,
+        size: get(o, "size"),
+        modified: get(o, "last_modified"),
+        created: null,
+        parents: if(is-empty(parent-segments), [], [`${join(parent-segments, "/")}/`]),
+        drive-id: bucket,
+        web-url: null,
+        version: bare-etag(get(o, "etag")),
+        revision-id: null,
+        md5: null,
+        sha256: null,
+        is-folder: is-folder,
+        is-google-native: false,
+        is-shortcut: false,
+        shortcut-target-id: null,
+        trashed: false,
+        export-formats: [],
+        raw: o
+    })
+},
+(object: Any): DocFile {
+    to-doc-file(object, null)
+}
+
+to-doc-files
+meta {
+    doc: """Every entry of a `ListObjectsResponse` as `DocFile`s: the objects, then the `common_prefixes` as folders. `drive-id` is the listing's bucket."""
+}
+fn (listing: ListObjectsResponse): Vec {
+    objects map(or(listing.contents, []), to-doc-file(%, listing.name))
+    folders map(or(listing.common_prefixes, []), (prefix) { to-doc-file({key: prefix}, listing.name) })
+    concat(objects, folders)
 }

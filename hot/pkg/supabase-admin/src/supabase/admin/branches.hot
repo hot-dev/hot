@@ -35,8 +35,12 @@ branches ::branches/list-branches("my-project-ref")
 ```
 """
 }
-fn (project-ref: Str): Vec<Branch> {
-  ::api/request("GET", `/projects/${project-ref}/branches`)
+fn
+(project-ref: Str): Vec<Branch> {
+  list-branches(project-ref, {})
+},
+(project-ref: Str, opts: Map): Vec<Branch> {
+  ::api/request("GET", `/projects/${project-ref}/branches`, {}, {}, opts)
 }
 
 CreateBranchRequest type {
@@ -64,36 +68,52 @@ branch ::branches/create-branch(::branches/CreateBranchRequest({
 ```
 """
 }
-fn (request: CreateBranchRequest): Branch {
+fn
+(request: CreateBranchRequest): Branch {
+  create-branch(request, {})
+},
+(request: CreateBranchRequest, opts: Map): Branch {
   body {branch_name: request.branch_name}
     |> assoc-some("git_branch", request.git_branch)
     |> assoc-some("region", request.region)
 
-  ::api/request("POST", `/projects/${request.project_ref}/branches`, {}, body)
+  ::api/request("POST", `/projects/${request.project_ref}/branches`, {}, body, opts)
 }
 
 get-branch
 meta {
     doc: """Get details for a specific branch by its ID."""
 }
-fn (branch-id: Str): Branch {
-  ::api/request("GET", branch-path(branch-id))
+fn
+(branch-id: Str): Branch {
+  get-branch(branch-id, {})
+},
+(branch-id: Str, opts: Map): Branch {
+  ::api/request("GET", branch-path(branch-id), {}, {}, opts)
 }
 
 delete-branch
 meta {
     doc: """Delete a preview branch."""
 }
-fn (branch-id: Str): Map {
-  ::api/request("DELETE", `/branches/${branch-id}`)
+fn
+(branch-id: Str): Map {
+  delete-branch(branch-id, {})
+},
+(branch-id: Str, opts: Map): Map {
+  ::api/request("DELETE", `/branches/${branch-id}`, {}, {}, opts)
 }
 
 get-branch-config
 meta {
     doc: """Get the database configuration for a branch."""
 }
-fn (branch-id: Str): Map {
-  ::api/request("GET", branch-path(branch-id))
+fn
+(branch-id: Str): Map {
+  get-branch-config(branch-id, {})
+},
+(branch-id: Str, opts: Map): Map {
+  ::api/request("GET", branch-path(branch-id), {}, {}, opts)
 }
 
 UpdateBranchConfigRequest type {
@@ -108,44 +128,64 @@ update-branch-config
 meta {
     doc: """Update branch configuration (git branch association, reset behavior, persistence)."""
 }
-fn (request: UpdateBranchConfigRequest): Map {
+fn
+(request: UpdateBranchConfigRequest): Map {
+  update-branch-config(request, {})
+},
+(request: UpdateBranchConfigRequest, opts: Map): Map {
   body {}
     |> assoc-some("git_branch", request.git_branch)
     |> assoc-some("reset_on_push", request.reset_on_push)
     |> assoc-some("persistent", request.persistent)
     |> assoc-some("status", request.status)
 
-  ::api/request("PATCH", branch-path(request.branch_id), {}, body)
+  ::api/request("PATCH", branch-path(request.branch_id), {}, body, opts)
 }
 
 push-branch
 meta {
     doc: """Push migrations to a preview branch database."""
 }
-fn (branch-id: Str): Map {
-  ::api/request("POST", `/branches/${branch-id}/push`, {}, {})
+fn
+(branch-id: Str): Map {
+  push-branch(branch-id, {})
+},
+(branch-id: Str, opts: Map): Map {
+  ::api/request("POST", `/branches/${branch-id}/push`, {}, {}, opts)
 }
 
 reset-branch
 meta {
     doc: """Reset a preview branch database to match the parent project."""
 }
-fn (branch-id: Str): Map {
-  ::api/request("POST", `/branches/${branch-id}/reset`, {}, {})
+fn
+(branch-id: Str): Map {
+  reset-branch(branch-id, {})
+},
+(branch-id: Str, opts: Map): Map {
+  ::api/request("POST", `/branches/${branch-id}/reset`, {}, {}, opts)
 }
 
 merge-branch
 meta {
     doc: """Merge a preview branch into the parent project."""
 }
-fn (branch-id: Str): Map {
-  ::api/request("POST", `/branches/${branch-id}/merge`, {}, {})
+fn
+(branch-id: Str): Map {
+  merge-branch(branch-id, {})
+},
+(branch-id: Str, opts: Map): Map {
+  ::api/request("POST", `/branches/${branch-id}/merge`, {}, {}, opts)
 }
 
 disable-preview-branching
 meta {
     doc: """Disable preview branching for a project. This deletes all existing preview branches."""
 }
-fn (project-ref: Str): Map {
-  ::api/request("DELETE", `/projects/${project-ref}/branches`)
+fn
+(project-ref: Str): Map {
+  disable-preview-branching(project-ref, {})
+},
+(project-ref: Str, opts: Map): Map {
+  ::api/request("DELETE", `/projects/${project-ref}/branches`, {}, {}, opts)
 }
