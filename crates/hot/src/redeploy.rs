@@ -339,7 +339,7 @@ fn bundle_project_conf(conf: &Val, name: &str, dir: &Path) -> Result<Val, String
     }
     let project = crate::val!({
         "src": {"paths": [dir.join("hot/src").to_string_lossy().into_owned()]},
-        "deps": Val::Map(Box::new(deps)),
+        "deps": Val::map(deps),
     });
     let mut root = match conf {
         Val::Map(map) => (**map).clone(),
@@ -350,8 +350,8 @@ fn bundle_project_conf(conf: &Val, name: &str, dir: &Path) -> Result<Val, String
         _ => indexmap::IndexMap::new(),
     };
     projects.insert(Val::from(name), project);
-    root.insert(Val::from("project"), Val::Map(Box::new(projects)));
-    Ok(Val::Map(Box::new(root)))
+    root.insert(Val::from("project"), Val::map(projects));
+    Ok(Val::map(root))
 }
 
 /// The packages a bundle carries under `hot/pkg`, named as the build named

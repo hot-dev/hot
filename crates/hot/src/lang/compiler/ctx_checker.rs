@@ -347,7 +347,7 @@ mod tests {
         .into_iter()
         .collect();
 
-        let config = parse_key_config("rate.limit", &Val::Map(Box::new(config_map)));
+        let config = parse_key_config("rate.limit", &Val::map(config_map));
 
         assert_eq!(config.key, "rate.limit");
         assert!(!config.required); // default implies not required
@@ -364,14 +364,14 @@ mod tests {
                 parse_key_config("api.key", &Val::map_empty()),
                 parse_key_config(
                     "rate.limit",
-                    &Val::Map(Box::new(
+                    &Val::map(
                         [
                             (Val::from("default"), Val::Int(1000)),
                             (Val::from("secret"), Val::Bool(false)),
                         ]
                         .into_iter()
                         .collect(),
-                    )),
+                    ),
                 ),
             ],
             source_file: None,

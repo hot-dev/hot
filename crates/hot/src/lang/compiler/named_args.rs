@@ -501,7 +501,7 @@ pub(super) fn into_map_call(mut call: FnCall) -> FnCall {
         entries.insert(Val::from(arg.name.unwrap_or_default()), value);
     }
     call.args = vec![FnCallArg {
-        value: Value::Val(Val::Map(Box::new(entries)), Some("Map".to_string())),
+        value: Value::Val(Val::map(entries), Some("Map".to_string())),
         lazy: false,
         spread: false,
         name: None,

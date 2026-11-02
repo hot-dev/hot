@@ -204,8 +204,9 @@ plain maps, which claim no type and are not checked.
 Where a value meets a constraint, Hot only converts numbers exactly: an `Int`
 becomes a `Dec`, and a whole `Dec` such as `5.0` becomes an `Int`. `7.9` is
 rejected rather than truncated, and `"5"` is rejected rather than parsed.
-Convert explicitly first, as in `Port(Int(text))`. Parameters without a
-constraint keep their usual conversions.
+Convert explicitly first, as in `Port(Int(text))`. A parameter without a
+constraint doesn't convert these either: `x: Int` keeps a `7.9` or a `"5"` that
+reaches it through an `Any` value. See [Type Coercion](/docs/language/types#type-coercion).
 
 ## Checked Before Running
 

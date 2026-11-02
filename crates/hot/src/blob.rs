@@ -255,8 +255,8 @@ impl BlobRefVal {
 
         let mut map = IndexMap::new();
         map.insert(Val::from("$type"), Val::from(BLOB_REF_TYPE));
-        map.insert(Val::from("$val"), Val::Map(Box::new(inner)));
-        Val::Map(Box::new(map))
+        map.insert(Val::from("$val"), Val::map(inner));
+        Val::map(map)
     }
 
     /// Parse a Val that may be a BlobRef typed map. Returns None if the value
@@ -530,7 +530,7 @@ impl BlobStore {
                     *val = blob_ref;
                 }
                 Val::Vec(items) => {
-                    for (i, item) in items.iter_mut().enumerate() {
+                    for (i, item) in Arc::make_mut(items).iter_mut().enumerate() {
                         let saved_len = path.len();
                         path.push_str(&format!("[{i}]"));
                         self.spill_in_place(item, scope, source, source_id, path, stats)
@@ -548,7 +548,7 @@ impl BlobStore {
                         return Ok(());
                     }
                     // Spill values only; map keys keep their semantics.
-                    for (k, v) in m.iter_mut() {
+                    for (k, v) in Arc::make_mut(m).iter_mut() {
                         let saved_len = path.len();
                         match k {
                             Val::Str(key) => path.push_str(&format!(".{key}")),
@@ -834,12 +834,12 @@ impl BlobStore {
             }
             match val {
                 Val::Vec(items) => {
-                    for item in items.iter_mut() {
+                    for item in Arc::make_mut(items).iter_mut() {
                         self.rehydrate_in_place(item, scope, budget, used).await?;
                     }
                 }
                 Val::Map(m) => {
-                    for (_k, v) in m.iter_mut() {
+                    for (_k, v) in Arc::make_mut(m).iter_mut() {
                         self.rehydrate_in_place(v, scope, budget, used).await?;
                     }
                 }
@@ -1035,7 +1035,7 @@ mod tests {
         let mut m = IndexMap::new();
         m.insert(Val::from("$type"), Val::from(BLOB_REF_TYPE));
         m.insert(Val::from("$val"), val!({"id": "not-a-uuid"}));
-        let forged = Val::Map(Box::new(m));
+        let forged = Val::map(m);
         assert!(BlobRefVal::from_val(&forged).is_err());
     }
 

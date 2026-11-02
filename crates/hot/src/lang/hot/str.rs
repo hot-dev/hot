@@ -25,7 +25,7 @@ pub fn split(args: &[Val]) -> HotResult<Val> {
         };
 
         let parts: Vec<Val> = string.split(&**delimiter).map(Val::from).collect();
-        HotResult::Ok(Val::Vec(parts))
+        HotResult::Ok(Val::vec(parts))
     }
 }
 
@@ -294,6 +294,7 @@ pub fn pad_start(args: &[Val]) -> HotResult<Val> {
     let pad_pattern: String = if args.len() == 3 {
         match &args[2] {
             Val::Str(s) => (**s).to_owned(),
+            Val::Null => return HotResult::Err(Val::from("pad-start pad must be a string")),
             other => other.to_string().trim_matches('"').to_string(),
         }
     } else {
@@ -337,6 +338,7 @@ pub fn pad_end(args: &[Val]) -> HotResult<Val> {
     let pad_pattern: String = if args.len() == 3 {
         match &args[2] {
             Val::Str(s) => (**s).to_owned(),
+            Val::Null => return HotResult::Err(Val::from("pad-end pad must be a string")),
             other => other.to_string().trim_matches('"').to_string(),
         }
     } else {

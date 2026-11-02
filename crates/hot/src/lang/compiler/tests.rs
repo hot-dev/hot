@@ -1714,7 +1714,7 @@ fn test_extract_send_definition_order_irrelevant() {
 fn test_summarize_mcp_servers_map_with_url() {
     let mut entry = indexmap::IndexMap::new();
     entry.insert(Val::from("url"), Val::from("https://mcp.example.com/mcp"));
-    let servers = Val::Vec(vec![Val::Map(Box::new(entry))]);
+    let servers = Val::vec(vec![Val::map(entry)]);
 
     let summary = AgentDef::summarize_mcp_servers(&servers).expect("summary");
     let Val::Vec(items) = summary else {
@@ -1737,9 +1737,9 @@ fn test_summarize_mcp_servers_named_wrapper() {
     inner.insert(Val::from("url"), Val::from("https://t.example.com/mcp"));
 
     let mut wrapper = indexmap::IndexMap::new();
-    wrapper.insert(Val::from("time"), Val::Map(Box::new(inner)));
+    wrapper.insert(Val::from("time"), Val::map(inner));
 
-    let servers = Val::Vec(vec![Val::Map(Box::new(wrapper))]);
+    let servers = Val::vec(vec![Val::map(wrapper)]);
     let summary = AgentDef::summarize_mcp_servers(&servers).expect("summary");
     let Val::Vec(items) = summary else {
         panic!("expected Vec");
@@ -1764,7 +1764,7 @@ fn test_summarize_mcp_servers_named_wrapper() {
 
 #[test]
 fn test_summarize_mcp_servers_qualified_str_treated_as_ref() {
-    let servers = Val::Vec(vec![Val::from("::env/weather-config")]);
+    let servers = Val::vec(vec![Val::from("::env/weather-config")]);
     let summary = AgentDef::summarize_mcp_servers(&servers).expect("summary");
     let Val::Vec(items) = summary else {
         panic!("expected Vec");
@@ -1787,7 +1787,7 @@ fn test_summarize_mcp_servers_non_vec_returns_none() {
 
 #[test]
 fn test_summarize_mcp_servers_empty_vec() {
-    let servers = Val::Vec(vec![]);
+    let servers = Val::vec(vec![]);
     let summary = AgentDef::summarize_mcp_servers(&servers).expect("summary");
     let Val::Vec(items) = summary else {
         panic!("expected Vec");

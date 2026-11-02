@@ -17,7 +17,7 @@ pub fn uuid_v4(args: &[Val]) -> HotResult<Val> {
     let mut result = IndexMap::new();
     result.insert(Val::from("$type"), Val::from("::hot::uuid/Uuid"));
     result.insert(Val::from("$val"), Val::from(uuid_str));
-    HotResult::Ok(Val::Map(Box::new(result)))
+    HotResult::Ok(Val::map(result))
 }
 
 /// Generate a UUID v7 (timestamp-based with counter for uniqueness)
@@ -34,7 +34,7 @@ pub fn uuid_v7(args: &[Val]) -> HotResult<Val> {
     let mut result = IndexMap::new();
     result.insert(Val::from("$type"), Val::from("::hot::uuid/Uuid"));
     result.insert(Val::from("$val"), Val::from(uuid_str));
-    HotResult::Ok(Val::Map(Box::new(result)))
+    HotResult::Ok(Val::map(result))
 }
 
 /// Generate a nil UUID (all zeros)
@@ -145,5 +145,5 @@ pub fn uuid_constructor(args: &[Val]) -> HotResult<Val> {
     uuid_map.insert(Val::from("$type"), Val::from("::hot::uuid/Uuid"));
     uuid_map.insert(Val::from("$val"), Val::from(uuid_str));
 
-    HotResult::Ok(Val::Map(Box::new(uuid_map)))
+    HotResult::Ok(Val::map(uuid_map))
 }

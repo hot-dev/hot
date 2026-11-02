@@ -215,3 +215,26 @@ meta ["test"] fn () {
     assert-eq("héy", Short(concat("hé", "y")), "three characters pass though the Str is four bytes")
     assert(is-err(Short(concat("hé", "yy"))), "four characters fail")
 }
+
+null-through-any fn (): Any { get({}, "missing") }
+
+test-null-fails-at-a-str-parameter
+meta ["test"] fn () {
+    n null-through-any()
+    assert(is-err(lowercase(n)), "a bare core call fails on null")
+    assert(is-err(::hot::str/lowercase(n)), "a qualified call fails on null too")
+    assert(is-err(::hot::str/trim(n)), "trim fails on null")
+    assert(is-err(::hot::str/contains(n, "a")), "contains fails on null")
+    assert(is-err(::hot::regex/is-match(n, "a")), "is-match fails on null")
+    assert(is-err(::hot::uri/encode(n)), "uri encode fails on null")
+    assert(is-err(pad-start("a", 3, n)), "pad-start fails on a null pad")
+    assert(is-err(pad-end("a", 3, n)), "pad-end fails on a null pad")
+}
+
+test-str-nullable-parameters-accept-null
+meta ["test"] fn () {
+    n null-through-any()
+    assert-eq(true, is-empty(n), "is-empty takes null")
+    assert-eq(true, ::hot::str/is-empty(n), "::hot::str/is-empty takes null")
+    assert-eq(false, ::hot::uri/is-valid(n), "::hot::uri/is-valid takes null")
+}

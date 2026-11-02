@@ -229,6 +229,6 @@ meta {
     ```
     """
 }
-fn (uri: Str): Bool {
+fn (uri: Str?): Bool {
     call-lib(::hot::uri/is-valid, [uri])
 }

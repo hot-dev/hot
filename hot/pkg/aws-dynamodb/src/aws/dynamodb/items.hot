@@ -56,7 +56,7 @@ meta {
     """
 }
 fn
-(table_name: Str, item: Map, condition_expression: Str, expression_attribute_values: Map): PutItemResponse | AwsError {
+(table_name: Str, item: Map, condition_expression: Str?, expression_attribute_values: Map?): PutItemResponse | AwsError {
     region get-region()
     credentials get-credentials()
 
@@ -115,7 +115,7 @@ meta {
     """
 }
 fn
-(table_name: Str, key: Map, consistent_read: Bool, projection_expression: Str): GetItemResponse | AwsError {
+(table_name: Str, key: Map, consistent_read: Bool, projection_expression: Str?): GetItemResponse | AwsError {
     region get-region()
     credentials get-credentials()
 
@@ -173,7 +173,7 @@ meta {
     """
 }
 fn
-(table_name: Str, key: Map, condition_expression: Str, expression_attribute_values: Map): DeleteItemResponse | AwsError {
+(table_name: Str, key: Map, condition_expression: Str?, expression_attribute_values: Map?): DeleteItemResponse | AwsError {
     region get-region()
     credentials get-credentials()
 
@@ -238,7 +238,7 @@ meta {
     """
 }
 fn
-(table_name: Str, key: Map, update_expression: Str, expression_attribute_values: Map, expression_attribute_names: Map): UpdateItemResponse | AwsError {
+(table_name: Str, key: Map, update_expression: Str, expression_attribute_values: Map, expression_attribute_names: Map?): UpdateItemResponse | AwsError {
     region get-region()
     credentials get-credentials()
 

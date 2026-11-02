@@ -11,7 +11,10 @@ use indexmap::IndexMap;
 /// reads as the values those names have.
 fn resolved_meta(vm: &mut crate::lang::runtime::vm::VirtualMachine, meta: &Val) -> HotResult<Val> {
     match vm.resolve_meta_refs(meta) {
-        Ok(val) => HotResult::Ok(val),
+        Ok(val) => {
+            vm.note_meta_read(&val);
+            HotResult::Ok(val)
+        }
         Err(e) => HotResult::Err(Val::from(format!("::hot::meta/get: {}", e))),
     }
 }
@@ -257,6 +260,7 @@ pub fn get(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
         // First check for a hidden metadata variable that the compiler emits for locals
         let hidden = format!("__meta__{}", var_name);
         if let Some(hidden_meta) = lookup_local(vm, &hidden) {
+            vm.note_meta_read(&hidden_meta);
             return HotResult::Ok(hidden_meta);
         }
 
@@ -285,7 +289,7 @@ pub fn get(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
                 Val::Bytes(_) => "Bytes",
             };
             map.insert(Val::from("type"), Val::from(type_name.to_string()));
-            return HotResult::Ok(Val::Map(Box::new(map)));
+            return HotResult::Ok(Val::map(map));
         }
     }
 
@@ -324,9 +328,9 @@ pub fn is_test(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) 
     let is_test_result = match metadata_result {
         // If metadata is a vector, check if it contains "test"
         Val::Vec(items) => {
-            for item in items {
+            for item in items.iter() {
                 if let Val::Str(s) = item
-                    && &*s == "test"
+                    && &**s == "test"
                 {
                     return HotResult::Ok(Val::Bool(true));
                 }
@@ -476,7 +480,7 @@ pub fn source(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
                         file_path
                     );
 
-                    return HotResult::Ok(Val::Map(Box::new(source_map)));
+                    return HotResult::Ok(Val::map(source_map));
                 }
             }
         }
@@ -498,7 +502,7 @@ pub fn source(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
     source_map.insert(Val::from("column"), Val::Null);
     source_map.insert(Val::from("position"), Val::Null);
 
-    HotResult::Ok(Val::Map(Box::new(source_map)))
+    HotResult::Ok(Val::map(source_map))
 }
 
 /// Parse a JSON string into a Val
@@ -510,7 +514,7 @@ fn parse_json_to_val(json_str: &str) -> Result<Val, String> {
         // Parse as array
         let inner = &json_str[1..json_str.len() - 1].trim();
         if inner.is_empty() {
-            return Ok(Val::Vec(vec![]));
+            return Ok(Val::vec(vec![]));
         }
 
         // Simple array parsing - split by comma and parse each element
@@ -534,7 +538,7 @@ fn parse_json_to_val(json_str: &str) -> Result<Val, String> {
                 elements.push(Val::from(element.to_string()));
             }
         }
-        Ok(Val::Vec(elements))
+        Ok(Val::vec(elements))
     } else if json_str.starts_with('{') && json_str.ends_with('}') {
         // Parse as object
         let inner = &json_str[1..json_str.len() - 1].trim();
@@ -578,7 +582,7 @@ fn parse_json_to_val(json_str: &str) -> Result<Val, String> {
                 map.insert(key, value);
             }
         }
-        Ok(Val::Map(Box::new(map)))
+        Ok(Val::map(map))
     } else if json_str.starts_with('"') && json_str.ends_with('"') {
         // String
         Ok(Val::from(json_str[1..json_str.len() - 1].to_string()))

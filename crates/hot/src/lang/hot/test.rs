@@ -156,7 +156,7 @@ pub fn record_sent(event_type: &str, data: &Val) -> bool {
         Some(harness) => {
             let mut event = crate::val!({"type": event_type, "data": data.clone()});
             if let (Val::Map(fields), Ok(now)) = (&mut event, harness_now(&harness)) {
-                fields.insert(Val::from("sent-at"), time::instant_val(now));
+                Arc::make_mut(fields).insert(Val::from("sent-at"), time::instant_val(now));
             }
             harness.sent.lock().push(event);
             true
@@ -351,7 +351,7 @@ pub fn record_runs(args: &[Val]) -> HotResult<Val> {
 pub fn take_runs(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::test/take-runs", args, 0);
     match harness_for("::hot::test/take-runs") {
-        Ok(harness) => HotResult::Ok(Val::Vec(std::mem::take(&mut *harness.runs.lock()))),
+        Ok(harness) => HotResult::Ok(Val::vec(std::mem::take(&mut *harness.runs.lock()))),
         Err(e) => HotResult::Err(e),
     }
 }
@@ -400,19 +400,19 @@ pub fn event_handlers(
             }
         }
     }
-    HotResult::Ok(Val::Map(Box::new(
+    HotResult::Ok(Val::map(
         handlers
             .into_iter()
-            .map(|(event_type, names)| (Val::from(event_type), Val::Vec(names)))
+            .map(|(event_type, names)| (Val::from(event_type), Val::vec(names)))
             .collect(),
-    )))
+    ))
 }
 
 /// The events sent since the last call, oldest first.
 pub fn take_sent(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::test/take-sent", args, 0);
     match harness_for("::hot::test/take-sent") {
-        Ok(harness) => HotResult::Ok(Val::Vec(std::mem::take(&mut *harness.sent.lock()))),
+        Ok(harness) => HotResult::Ok(Val::vec(std::mem::take(&mut *harness.sent.lock()))),
         Err(e) => HotResult::Err(e),
     }
 }
@@ -435,7 +435,7 @@ fn armed_schedule(data: &Val, now: i128) -> Result<ArmedSchedule, String> {
     let function =
         super::schedule::function_name(data.get(&Val::from("fn")).unwrap_or(&Val::Null))?;
     let args = match data.get(&Val::from("args")) {
-        None | Some(Val::Null) => Val::Vec(Vec::new()),
+        None | Some(Val::Null) => Val::vec(Vec::new()),
         Some(args @ Val::Vec(_)) => args.clone(),
         Some(other) => return Err(format!("expected Vec for args, got {other}")),
     };
@@ -527,7 +527,7 @@ pub fn schedules(args: &[Val]) -> HotResult<Val> {
             let schedules = harness.schedules.lock();
             let mut order: Vec<&ArmedSchedule> = schedules.iter().collect();
             order.sort_by_key(|s| s.at);
-            HotResult::Ok(Val::Vec(
+            HotResult::Ok(Val::vec(
                 order.into_iter().map(ArmedSchedule::to_val).collect(),
             ))
         }
@@ -727,19 +727,19 @@ mod harness_tests {
     #[test]
     fn the_run_log_is_taken_once_and_cleared_by_reset() {
         let _harness = ThreadHarnessGuard::install(Arc::new(TestHarness::default()));
-        ok(record_runs(&[Val::Vec(vec![
+        ok(record_runs(&[Val::vec(vec![
             Val::from("a"),
             Val::from("b"),
         ])]));
-        ok(record_runs(&[Val::Vec(vec![Val::from("c")])]));
+        ok(record_runs(&[Val::vec(vec![Val::from("c")])]));
         assert_eq!(
             ok(take_runs(&[])),
-            Val::Vec(vec![Val::from("a"), Val::from("b"), Val::from("c")])
+            Val::vec(vec![Val::from("a"), Val::from("b"), Val::from("c")])
         );
-        assert_eq!(ok(take_runs(&[])), Val::Vec(Vec::new()));
-        ok(record_runs(&[Val::Vec(vec![Val::from("d")])]));
+        assert_eq!(ok(take_runs(&[])), Val::vec(Vec::new()));
+        ok(record_runs(&[Val::vec(vec![Val::from("d")])]));
         ok(reset(&[]));
-        assert_eq!(ok(take_runs(&[])), Val::Vec(Vec::new()));
+        assert_eq!(ok(take_runs(&[])), Val::vec(Vec::new()));
         assert_eq!(ok(in_test_run(&[])), Val::Bool(true));
     }
 
@@ -748,7 +748,7 @@ mod harness_tests {
         assert_eq!(ok(in_test_run(&[])), Val::Bool(false));
         assert!(matches!(take_runs(&[]), HotResult::Err(_)));
         assert!(matches!(
-            record_runs(&[Val::Vec(Vec::new())]),
+            record_runs(&[Val::vec(Vec::new())]),
             HotResult::Err(_)
         ));
     }

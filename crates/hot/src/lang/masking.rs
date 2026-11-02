@@ -128,7 +128,7 @@ impl SecretValues {
                 }
             }
             Val::Vec(items) => {
-                for child in items {
+                for child in items.iter() {
                     self.register_hashed(child, hashes);
                 }
             }
@@ -173,7 +173,7 @@ fn collect_values(value: &Val, out: &mut Vec<Vec<u8>>) {
             }
         }
         Val::Vec(items) => {
-            for child in items {
+            for child in items.iter() {
                 collect_values(child, out);
             }
         }
@@ -667,7 +667,7 @@ impl<'a> RecordMask<'a> {
         }
         match value {
             Val::Map(map) => {
-                let masked: indexmap::IndexMap<Val, Val> = map
+                let masked: indexmap::IndexMap<Val, Val> = Arc::unwrap_or_clone(map)
                     .into_iter()
                     .map(|(key, child)| {
                         let credential = matches!(&key, Val::Str(name) if is_credential_field(name))
@@ -680,9 +680,14 @@ impl<'a> RecordMask<'a> {
                         }
                     })
                     .collect();
-                Val::Map(Box::new(masked))
+                Val::map(masked)
             }
-            Val::Vec(items) => Val::Vec(items.into_iter().map(|v| self.mask_val(v)).collect()),
+            Val::Vec(items) => Val::vec(
+                Arc::unwrap_or_clone(items)
+                    .into_iter()
+                    .map(|v| self.mask_val(v))
+                    .collect(),
+            ),
             Val::Str(text) => match self.mask_text(&text) {
                 Cow::Borrowed(_) => Val::Str(text),
                 Cow::Owned(masked) => Val::from(masked),
@@ -746,14 +751,18 @@ impl<'a> RecordMask<'a> {
             return value;
         };
         match value {
-            Val::Map(map) => Val::Map(Box::new(
-                map.into_iter()
+            Val::Map(map) => Val::map(
+                Arc::unwrap_or_clone(map)
+                    .into_iter()
                     .map(|(key, child)| (self.mask_delivered(key), self.mask_delivered(child)))
                     .collect(),
-            )),
-            Val::Vec(items) => {
-                Val::Vec(items.into_iter().map(|v| self.mask_delivered(v)).collect())
-            }
+            ),
+            Val::Vec(items) => Val::vec(
+                Arc::unwrap_or_clone(items)
+                    .into_iter()
+                    .map(|v| self.mask_delivered(v))
+                    .collect(),
+            ),
             Val::Str(text) => match matcher.mask(&text) {
                 Cow::Borrowed(_) => Val::Str(text),
                 Cow::Owned(masked) => Val::from(masked),
@@ -1135,6 +1144,33 @@ mod tests {
             masked_text(&[secret], &format!("client_secret={secret}&page=2")),
             "client_secret=<secret>&page=2"
         );
+    }
+
+    // A constructed value (`{$type, $val}`), as a real HTTP response is, masks
+    // like the plain Map it wraps, and keeps its type.
+    #[test]
+    fn masks_fields_inside_a_constructed_value() {
+        let fields = || {
+            let Val::Map(fields) = crate::val!({
+                "status": 200,
+                "headers": {"authorization": "Bearer abc123"},
+                "body": {"password": "hunter2", "note": "kept"},
+            }) else {
+                panic!("a map");
+            };
+            Arc::unwrap_or_clone(fields)
+        };
+        let masked = mask_plain(Val::constructed("::hot::http/HttpResponse", fields()));
+        assert!(masked.is_type("::hot::http/HttpResponse"));
+        assert_eq!(
+            crate::val::as_fields(&masked),
+            &mask_plain(Val::map(fields())),
+            "a tagged response masks as its plain fields do"
+        );
+        let text = masked.to_string();
+        assert!(!text.contains("abc123"), "{text}");
+        assert!(!text.contains("hunter2"), "{text}");
+        assert!(text.contains("kept"), "{text}");
     }
 
     #[test]

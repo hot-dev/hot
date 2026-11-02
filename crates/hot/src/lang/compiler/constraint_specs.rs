@@ -319,7 +319,7 @@ impl Compiler {
                     .zip(members)
                     .map(|(spec, member)| spec.unwrap_or_else(|| self.base_spec(member)))
                     .collect();
-                Some(node("union", vec![("members", Val::Vec(members))]))
+                Some(node("union", vec![("members", Val::vec(members))]))
             }
             TypeExpr::Literal(_) => Some(self.literal_spec(std::slice::from_ref(type_expr), None)),
         }
@@ -368,7 +368,7 @@ impl Compiler {
             }
             TypeExpr::Union(members) => {
                 let members = members.iter().map(|m| self.full_spec(m)).collect();
-                node("union", vec![("members", Val::Vec(members))])
+                node("union", vec![("members", Val::vec(members))])
             }
             TypeExpr::Literal(_) => self.literal_spec(std::slice::from_ref(type_expr), None),
         }
@@ -382,7 +382,7 @@ impl Compiler {
                 _ => None,
             })
             .collect();
-        let mut entries = vec![("values", Val::Vec(values))];
+        let mut entries = vec![("values", Val::vec(values))];
         if let Some(type_name) = type_name {
             entries.push(("type", Val::from(type_name)));
         }
@@ -605,7 +605,7 @@ impl Compiler {
     fn refine_node(&self, base: Val, refinement: &Refinement, constraint: &str) -> Val {
         let mut node = refine_node(base, refinement, constraint);
         if let (Some(fast), Val::Map(entries)) = (self.fast_form(refinement), &mut node) {
-            entries.insert(Val::from("fast"), fast);
+            std::sync::Arc::make_mut(entries).insert(Val::from("fast"), fast);
         }
         node
     }
@@ -909,7 +909,7 @@ impl Compiler {
         if let Some((function, index)) = boundary.proof {
             entries.push((
                 Val::from("proof"),
-                Val::Vec(vec![Val::Int(i64::from(function)), Val::Int(index as i64)]),
+                Val::vec(vec![Val::Int(i64::from(function)), Val::Int(index as i64)]),
             ));
         }
         self.program
@@ -949,7 +949,7 @@ impl Compiler {
             .collect();
         Some(match specs.len() {
             1 => specs.into_iter().next().unwrap_or(Val::Null),
-            _ => node("union", vec![("members", Val::Vec(specs))]),
+            _ => node("union", vec![("members", Val::vec(specs))]),
         })
     }
 

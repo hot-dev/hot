@@ -141,7 +141,7 @@ impl<'a> ManifestDataParser<'a> {
         self.skip_whitespace();
         let mut map = IndexMap::new();
         if self.consume_char('}') {
-            return Ok(Val::Map(Box::new(map)));
+            return Ok(Val::map(map));
         }
 
         loop {
@@ -167,7 +167,7 @@ impl<'a> ManifestDataParser<'a> {
             }
         }
 
-        Ok(Val::Map(Box::new(map)))
+        Ok(Val::map(map))
     }
 
     fn parse_vec(&mut self, depth: usize) -> Result<Val, String> {
@@ -175,7 +175,7 @@ impl<'a> ManifestDataParser<'a> {
         self.skip_whitespace();
         let mut values = Vec::new();
         if self.consume_char(']') {
-            return Ok(Val::Vec(values));
+            return Ok(Val::vec(values));
         }
 
         loop {
@@ -191,7 +191,7 @@ impl<'a> ManifestDataParser<'a> {
             }
         }
 
-        Ok(Val::Vec(values))
+        Ok(Val::vec(values))
     }
 
     /// Decode exactly the string form `Val::format_hot` emits: only `\n`,
@@ -774,7 +774,7 @@ fn normalize_manifest_artifact_source_path(
 ) -> Val {
     let mut val = val.clone();
     if let Val::Map(map) = &mut val {
-        normalize_manifest_source_field(map, "file", normalizer);
+        normalize_manifest_source_field(std::sync::Arc::make_mut(map), "file", normalizer);
     }
     val
 }
@@ -832,9 +832,9 @@ pub fn create_manifest(
                 &source_path_normalizer,
             ));
         }
-        handlers_map.insert(Val::from(event_type.clone()), Val::Vec(handler_list));
+        handlers_map.insert(Val::from(event_type.clone()), Val::vec(handler_list));
     }
-    let handlers_entries = Val::Map(Box::new(handlers_map));
+    let handlers_entries = Val::map(handlers_map);
 
     // Convert scheduled functions to manifest format - organize by cron expression
     let mut schedules_map = indexmap::IndexMap::new();
@@ -847,9 +847,9 @@ pub fn create_manifest(
                 &source_path_normalizer,
             ));
         }
-        schedules_map.insert(Val::from(cron_expr.clone()), Val::Vec(function_list));
+        schedules_map.insert(Val::from(cron_expr.clone()), Val::vec(function_list));
     }
-    let schedules_entries = Val::Map(Box::new(schedules_map));
+    let schedules_entries = Val::map(schedules_map);
 
     // Convert MCP tools to manifest format - organize by service
     let mut mcp_tools_map = indexmap::IndexMap::new();
@@ -861,9 +861,9 @@ pub fn create_manifest(
                 &source_path_normalizer,
             ));
         }
-        mcp_tools_map.insert(Val::from(service.clone()), Val::Vec(tool_list));
+        mcp_tools_map.insert(Val::from(service.clone()), Val::vec(tool_list));
     }
-    let mcp_tools_entries = Val::Map(Box::new(mcp_tools_map));
+    let mcp_tools_entries = Val::map(mcp_tools_map);
 
     // Convert webhooks to manifest format - organize by service
     let mut webhooks_map = indexmap::IndexMap::new();
@@ -875,9 +875,9 @@ pub fn create_manifest(
                 &source_path_normalizer,
             ));
         }
-        webhooks_map.insert(Val::from(service.clone()), Val::Vec(entry_list));
+        webhooks_map.insert(Val::from(service.clone()), Val::vec(entry_list));
     }
-    let webhooks_entries = Val::Map(Box::new(webhooks_map));
+    let webhooks_entries = Val::map(webhooks_map);
 
     // Convert ctx_requirements to manifest format.
     //
@@ -902,7 +902,7 @@ pub fn create_manifest(
                             Val::from(source_path_normalizer.normalize(src)),
                         );
                     }
-                    entries.push(Val::Map(Box::new(entry)));
+                    entries.push(Val::map(entry));
                 }
             }
             entries.sort_by(|a, b| {
@@ -942,15 +942,15 @@ pub fn create_manifest(
                         Val::from(source_path_normalizer.normalize(file)),
                     );
                 }
-                Val::Map(Box::new(entry))
+                Val::map(entry)
             })
             .collect();
         if !fn_reqs.is_empty() {
-            box_map.insert(Val::from("functions"), Val::Vec(fn_reqs));
+            box_map.insert(Val::from("functions"), Val::vec(fn_reqs));
         }
-        Val::Map(Box::new(box_map))
+        Val::map(box_map)
     } else {
-        Val::Map(Box::new(indexmap::IndexMap::new()))
+        Val::map(indexmap::IndexMap::new())
     };
 
     // Convert agents to manifest format — flat Vec of agent_val maps
@@ -983,10 +983,10 @@ pub fn create_manifest(
             .map(|t| Val::from(t.event_name.as_str()))
             .collect();
         if !event_names.is_empty() {
-            send_targets_map.insert(Val::from(fn_key.as_str()), Val::Vec(event_names));
+            send_targets_map.insert(Val::from(fn_key.as_str()), Val::vec(event_names));
         }
     }
-    let send_targets_entries = Val::Map(Box::new(send_targets_map));
+    let send_targets_entries = Val::map(send_targets_map);
 
     // Convert resources to manifest format. Each entry carries the
     // user-facing rel-path (the same key that `::hot::resource/load(rel)`
@@ -1699,7 +1699,7 @@ pub fn read_bundle_manifest_unchecked(extract_dir: &Path) -> Result<BundleManife
     // Extract file hashes from the files array
     let mut file_hashes = Vec::new();
     if let Some(Val::Vec(files)) = info.get(&Val::from("files")) {
-        for file_val in files {
+        for file_val in files.iter() {
             if let Val::Map(file_map) = file_val {
                 let path = file_map
                     .get(&Val::from("path"))
@@ -1934,11 +1934,8 @@ mod tests {
         inner.insert(Val::from("bytes"), Val::Bytes(vec![0, 128, 255]));
         inner.insert(Val::from("empty-bytes"), Val::Bytes(Vec::new()));
         let mut manifest_map = IndexMap::new();
-        manifest_map.insert(
-            Val::from("hot.bundle.writer-forms"),
-            Val::Map(Box::new(inner)),
-        );
-        let manifest = Val::Map(Box::new(manifest_map));
+        manifest_map.insert(Val::from("hot.bundle.writer-forms"), Val::map(inner));
+        let manifest = Val::map(manifest_map);
 
         let parsed = parse_manifest_data(&manifest.pretty_print()).unwrap();
         assert_eq!(parsed, manifest);

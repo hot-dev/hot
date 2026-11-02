@@ -188,7 +188,7 @@ fn merge_trailing_meta(var: &mut Var, trailing: Val) {
             val: Val::Map(mut existing),
         }) => {
             if let Val::Map(trailing_map) = trailing {
-                existing.extend(*trailing_map);
+                Arc::make_mut(&mut existing).extend(Arc::unwrap_or_clone(trailing_map));
             }
             var.meta = Some(Meta {
                 val: Val::Map(existing),
@@ -4027,7 +4027,7 @@ impl Parser {
         self.expect_token(&TokenType::RightBrace)?;
 
         if spread_entries.is_empty() {
-            Ok(Value::Val(Val::Map(Box::new(map)), Some("Map".to_string())))
+            Ok(Value::Val(Val::map(map), Some("Map".to_string())))
         } else {
             // Map with spread entries needs special AST representation
             Ok(Value::MapWithSpread {
@@ -4150,7 +4150,7 @@ impl Parser {
 
         self.expect_token(&TokenType::RightBracket)?;
 
-        Ok(Value::Val(Val::Vec(elements), Some("Vec".to_string())))
+        Ok(Value::Val(Val::vec(elements), Some("Vec".to_string())))
     }
 
     /// Parse block expression - handles { value } or { statement1 statement2 }
@@ -7968,13 +7968,18 @@ fn val_replace_placeholders(v: Val) -> Val {
             }
         }
         Val::Map(m) => {
-            let new_map = m
+            let new_map = Arc::unwrap_or_clone(m)
                 .into_iter()
                 .map(|(k, v)| (k, val_replace_placeholders(v)))
                 .collect();
-            Val::Map(Box::new(new_map))
+            Val::map(new_map)
         }
-        Val::Vec(v) => Val::Vec(v.into_iter().map(val_replace_placeholders).collect()),
+        Val::Vec(v) => Val::vec(
+            Arc::unwrap_or_clone(v)
+                .into_iter()
+                .map(val_replace_placeholders)
+                .collect(),
+        ),
         other => other,
     }
 }

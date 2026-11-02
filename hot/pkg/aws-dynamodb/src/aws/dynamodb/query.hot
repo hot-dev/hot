@@ -58,7 +58,7 @@ meta {
     """
 }
 fn
-(table_name: Str, key_condition_expression: Str, expression_attribute_values: Map, expression_attribute_names: Map, filter_expression: Str, limit: Int, exclusive_start_key: Map, scan_index_forward: Bool, index_name: Str): QueryResponse | AwsError {
+(table_name: Str, key_condition_expression: Str, expression_attribute_values: Map, expression_attribute_names: Map?, filter_expression: Str?, limit: Int?, exclusive_start_key: Map?, scan_index_forward: Bool, index_name: Str?): QueryResponse | AwsError {
     region get-region()
     credentials get-credentials()
 
@@ -162,7 +162,7 @@ meta {
     """
 }
 fn
-(table_name: Str, filter_expression: Str, expression_attribute_values: Map, expression_attribute_names: Map, limit: Int, exclusive_start_key: Map): ScanResponse | AwsError {
+(table_name: Str, filter_expression: Str?, expression_attribute_values: Map?, expression_attribute_names: Map?, limit: Int?, exclusive_start_key: Map?): ScanResponse | AwsError {
     region get-region()
     credentials get-credentials()
 

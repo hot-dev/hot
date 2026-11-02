@@ -2023,7 +2023,7 @@ pub async fn load_build_manifest_data(
                         if let crate::val::Val::Str(event_type_str) = event_type
                             && let crate::val::Val::Vec(handlers) = handlers_list
                         {
-                            for handler_val in handlers {
+                            for handler_val in handlers.iter() {
                                 if let Err(e) =
                                     crate::db::EventHandler::insert_event_handler_from_val(
                                         db,
@@ -2058,7 +2058,7 @@ pub async fn load_build_manifest_data(
                         {
                             let mut function_entries = Vec::new();
 
-                            for function_val in functions {
+                            for function_val in functions.iter() {
                                 if let Some(entry) =
                                     val_to_scheduled_function_entry(function_val, cron_expr_str)
                                 {
@@ -2100,7 +2100,7 @@ pub async fn load_build_manifest_data(
                         if let crate::val::Val::Str(service) = service_key
                             && let crate::val::Val::Vec(tools) = tools_list
                         {
-                            for tool_val in tools {
+                            for tool_val in tools.iter() {
                                 if let Err(e) = crate::db::McpTool::insert_mcp_tool_from_val(
                                     db, build_id, service, tool_val,
                                 )
@@ -2124,7 +2124,7 @@ pub async fn load_build_manifest_data(
                         if let crate::val::Val::Str(service) = service_key
                             && let crate::val::Val::Vec(entries) = entries_list
                         {
-                            for entry_val in entries {
+                            for entry_val in entries.iter() {
                                 if let Err(e) = crate::db::Webhook::insert_webhook_from_val(
                                     db,
                                     build_id,
@@ -2148,7 +2148,7 @@ pub async fn load_build_manifest_data(
                 if let Some(crate::val::Val::Vec(agents_list)) =
                     bundle_map.get(&crate::val::Val::from("agents"))
                 {
-                    for agent_val in agents_list {
+                    for agent_val in agents_list.iter() {
                         if let Err(e) =
                             crate::db::Agent::insert_agent_from_val(db, build_id, env_id, agent_val)
                                 .await
@@ -2165,7 +2165,7 @@ pub async fn load_build_manifest_data(
                 if let Some(crate::val::Val::Vec(workflows_list)) =
                     bundle_map.get(&crate::val::Val::from("workflows"))
                 {
-                    for workflow_val in workflows_list {
+                    for workflow_val in workflows_list.iter() {
                         if let Err(e) = crate::db::Workflow::insert_workflow_from_val(
                             db,
                             build_id,
@@ -2320,7 +2320,7 @@ pub fn extract_ctx_requirements_detailed_from_build(
                     bundle_map.get(&crate::val::Val::from("ctx_requirements"))
                 && let crate::val::Val::Vec(ctx_reqs) = ctx_reqs_val
             {
-                for req in ctx_reqs {
+                for req in ctx_reqs.iter() {
                     match req {
                         // New shape: {key, declared-by, source-file}
                         crate::val::Val::Map(entry_map) => {
@@ -3094,14 +3094,14 @@ hot.pkg.demo {
             Val::from(pkg_dir.to_string_lossy().as_ref()),
         );
         let mut deps = indexmap::IndexMap::new();
-        deps.insert(Val::from("hot.dev/demo-pkg"), Val::Map(Box::new(dep_spec)));
+        deps.insert(Val::from("hot.dev/demo-pkg"), Val::map(dep_spec));
         let mut project = indexmap::IndexMap::new();
-        project.insert(Val::from("deps"), Val::Map(Box::new(deps)));
+        project.insert(Val::from("deps"), Val::map(deps));
         let mut projects = indexmap::IndexMap::new();
-        projects.insert(Val::from("demo"), Val::Map(Box::new(project)));
+        projects.insert(Val::from("demo"), Val::map(project));
         let mut conf = indexmap::IndexMap::new();
-        conf.insert(Val::from("project"), Val::Map(Box::new(projects)));
-        let conf = Val::Map(Box::new(conf));
+        conf.insert(Val::from("project"), Val::map(projects));
+        let conf = Val::map(conf);
 
         let ctx = BuildContext::new(
             None,

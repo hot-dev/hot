@@ -210,6 +210,173 @@ sixteen-mb reduce(range(20), (acc, _i) { concat(acc, acc) }, "0123456789abcdef")
         }
     }
 
+    /// Reading a Map or Vec shares its storage rather than copying it, which
+    /// is what makes a read cost the same at any size. Each entry of the result
+    /// holds the same collection, reached by a different read: a copy on any of
+    /// those paths gives that entry an allocation of its own. The JIT reads
+    /// values through different code, so both modes run.
+    #[test]
+    fn reads_share_collection_storage() {
+        let src = r#"::t ns
+same fn (x) { x }
+annotated fn (x: Map): Map { x }
+bound fn (x) {
+    y x
+    z y
+    z
+}
+held fn (x) {
+    box {x: x}
+    box.x
+}
+reads fn (m: Map, v: Vec) {
+    reader () { m }
+    called map([1, 2], (i) { same(m) })
+    mapped map([1], (i) { v })
+    listed [m, v]
+    {
+        m: [same(m), annotated(m), bound(m), reader(), called[0], called[1], listed[0], held(m)],
+        v: [same(v), bound(v), mapped[0], listed[1], held(v)],
+        child: [m.child, get(m, "child"), same(m).child],
+        item: [v[0], first(v), get(v, 0), same(v)[0]],
+    }
+}
+run fn () {
+    m {child: {a: 1}, other: 2}
+    v [{b: 1}, {b: 2}]
+    {m, v, reads: reads(m, v)}
+}
+run()
+run()
+run()"#;
+        for conf in [
+            Some(val!({"jit": {"mode": "off"}})),
+            Some(val!({"jit": {"threshold": 1}})),
+        ] {
+            let label = format!("{conf:?}");
+            let out = compile_and_run_with_std_conf(src, conf).expect("run");
+            let field = |value: &Val, name: &str| value.get(name).expect(name);
+            let reads = field(&out, "reads");
+            let m = field(&out, "m");
+            let v = field(&out, "v");
+            let child = field(&m, "child");
+            let Val::Vec(items) = &v else {
+                panic!("v is {v:?}");
+            };
+            for (expected, name) in [
+                (&m, "m"),
+                (&v, "v"),
+                (&child, "child"),
+                (&items[0], "item"),
+            ] {
+                let Val::Vec(held) = field(&reads, name) else {
+                    panic!("{name} is not a Vec");
+                };
+                for (index, value) in held.iter().enumerate() {
+                    let shared = match (expected, value) {
+                        (Val::Map(a), Val::Map(b)) => Arc::ptr_eq(a, b),
+                        (Val::Vec(a), Val::Vec(b)) => Arc::ptr_eq(a, b),
+                        _ => false,
+                    };
+                    assert!(shared, "{label}: read {index} of {name} was copied: {value:?}");
+                }
+            }
+        }
+    }
+
+    /// The other half of sharing: writing one holder of a collection leaves
+    /// every other holder as it was, in both JIT modes. `shared-values.hot`
+    /// covers the language's writes one by one.
+    #[test]
+    fn writes_leave_the_other_holders_of_a_collection() {
+        let src = r#"::t ns
+write fn (m: Map): Map {
+    m.child.a 2
+    m
+}
+m {child: {a: 1}}
+held [m]
+written write(m)
+grown assoc(m, "b", 1)
+[m.child.a, held[0].child.a, written.child.a, length(m), length(grown)]"#;
+        assert_same_with_and_without_jit(src, &val!([1, 1, 2, 1, 2]));
+    }
+
+    /// A read costs the same whatever the size of the collection. One that
+    /// scaled would take thousands of times longer on the large collection, so
+    /// the margin leaves only that able to fail this. `bench-large-reads.hot`
+    /// prints the numbers.
+    #[test]
+    fn reads_cost_the_same_at_any_size() {
+        let src = r#"::t ns
+ignore-it fn (coll, i) { i }
+fastest-ms fn (f: Fn): Int {
+    tries map(range(3), (_try) {
+        start ::hot::time/epoch-millis(::hot::time/now())
+        done map(range(500), (i) { f(i) })
+        sub(::hot::time/epoch-millis(::hot::time/now()), start)
+    })
+    reduce(tries, min(%1, %2), first(tries))
+}
+rows fn (n: Int): Vec {
+    map(range(n), (i) { {k: `k-${i}`, v: "some text in the value"} })
+}
+timings fn (n: Int): Map {
+    v rows(n)
+    m index-by(v, %.k)
+    {
+        map-pass: fastest-ms((i) { ignore-it(m, i) }),
+        map-get: fastest-ms((i) { get(m, "k-0") }),
+        map-dot: fastest-ms((i) { m.k-0 }),
+        map-length: fastest-ms((i) { length(m) }),
+        vec-pass: fastest-ms((i) { ignore-it(v, i) }),
+        vec-index: fastest-ms((i) { v[0] }),
+        vec-first: fastest-ms((i) { first(v) }),
+    }
+}
+{small: timings(10), large: timings(200000)}"#;
+        for conf in [
+            Some(val!({"jit": {"mode": "off"}})),
+            Some(val!({"jit": {"threshold": 1}})),
+        ] {
+            let label = format!("{conf:?}");
+            let out = compile_and_run_with_std_conf(src, conf).expect("run");
+            let (Some(Val::Map(small)), Some(Val::Map(large))) = (out.get("small"), out.get("large"))
+            else {
+                panic!("{label}: unexpected result {out:?}");
+            };
+            for (read, small_ms) in small.iter() {
+                let (Val::Int(small_ms), Some(Val::Int(large_ms))) = (small_ms, large.get(read)) else {
+                    panic!("{label}: {read} has no timing");
+                };
+                assert!(
+                    *large_ms <= small_ms * 20 + 100,
+                    "{label}: {read} took {small_ms}ms on 10 entries, {large_ms}ms on 200000"
+                );
+            }
+        }
+    }
+
+    /// Meta keeps a call written in it unevaluated, and the call runs when the
+    /// value read from meta is passed to a function. That needs a walk over the
+    /// argument, which every other program is spared.
+    #[test]
+    fn a_call_in_meta_runs_when_its_value_is_passed() {
+        let src = r#"::t ns
+bump fn (n: Int): Int { add(n, 1) }
+same fn (x) { x }
+f meta {count: bump(1), list: [bump(2)], plain: 1} fn () { 1 }
+g fn () {
+    m ::hot::meta/get(f)
+    out same(m)
+    [out.count, out.list, out.plain, same(m.list)]
+}
+g()"#;
+        let expected = val!([2, [3], 1, [3]]);
+        let out = compile_and_run_with_std_ast(src).expect("run");
+        assert_eq!(out, expected);
+    }
+
     /// Helper to compile and execute Hot code with hot-std included
     pub(super) fn compile_and_run_with_std(source: &str) -> Result<Val, String> {
         compile_and_run_with_std_conf(source, None)
@@ -267,7 +434,7 @@ make-error(3)"#;
     }
 
     fn strs(values: &[&str]) -> Val {
-        Val::Vec(values.iter().map(|s| Val::from(*s)).collect())
+        Val::vec(values.iter().map(|s| Val::from(*s)).collect())
     }
 
     /// A value imported from another namespace evaluates in its home
@@ -463,6 +630,118 @@ probe("abc")"#;
         }
     }
 
+    /// Serve `requests` HTTP requests on a local port with a fixed JSON reply,
+    /// and return the port's base URL.
+    fn serve_json(requests: usize) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!("http://{}", listener.local_addr().expect("addr"));
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(requests) {
+                let Ok(mut stream) = stream else { return };
+                let mut seen = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => seen.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let body = r#"{"secret":"account-123"}"#;
+                let reply = format!(
+                    "HTTP/1.1 404 Not Found\r\ncontent-type: application/json\r\nx-trace: abc\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(reply.as_bytes());
+            }
+        });
+        url
+    }
+
+    /// A real response has its declared type, so `Target(response)` runs the
+    /// `HttpResponse -> Target` arrow instead of copying fields, here dropping
+    /// a body the arrow redacts. It used to be an untagged Map, so the arrow
+    /// only ran for values built with `HttpResponse(...)`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn real_http_response_runs_a_declared_arrow() {
+        let src = |url: &str| {
+            format!(
+                r#"::t ns
+::http ::hot::http
+HttpResponse ::http/HttpResponse
+HttpRequest ::http/HttpRequest
+Target type {{ status: Int, body: Any, message: Str? }}
+HttpResponse -> Target fn (r: HttpResponse): Target {{
+    Target({{status: r.status, body: "redacted", message: `arrow ran ${{r.status}}`}})
+}}
+typed-param fn (x: HttpResponse): Target {{ Target(x) }}
+describe fn match (r: Any): Str {{
+    HttpResponse => {{ "a response" }}
+    => {{ "something else" }}
+}}
+probe fn (): Vec {{
+    r ::http/request("GET", "{url}", {{}}, "")
+    fetched ::http/get("{url}")
+    sent ::http/request(HttpRequest({{method: "GET", url: "{url}"}}))
+    direct Target(r)
+    via-param typed-param(r)
+    via-get Target(fetched)
+    via-request Target(sent)
+    tagged from-json(to-json(r))
+    plain from-json(to-json(untype(r)))
+    spread {{...r, extra: 1}}
+    [
+        direct.message, direct.body, via-param.message,
+        via-get.message, via-request.message,
+        r.status, r.body.secret, get(r.headers, "x-trace"),
+        get(r, "status"), is-type(r, HttpResponse), describe(r),
+        ::http/is-ok-response(r), is-map(untype(r)),
+        is-type(tagged, HttpResponse), is-type(plain, HttpResponse), plain.status,
+        spread.status, get(assoc(r, "status", 201), "status"),
+    ]
+}}
+probe()
+probe()
+probe()"#
+            )
+        };
+        let expected = Val::vec(vec![
+            Val::from("arrow ran 404"),
+            Val::from("redacted"),
+            Val::from("arrow ran 404"),
+            Val::from("arrow ran 404"),
+            Val::from("arrow ran 404"),
+            Val::Int(404),
+            Val::from("account-123"),
+            Val::from("abc"),
+            Val::Int(404),
+            Val::Bool(true),
+            Val::from("a response"),
+            Val::Bool(false),
+            Val::Bool(true),
+            Val::Bool(true),
+            Val::Bool(false),
+            Val::Int(404),
+            Val::Int(404),
+            Val::Int(201),
+        ]);
+        for conf in [
+            crate::val!({"jit": {"mode": "disabled"}}),
+            crate::val!({"jit": {"threshold": 1}}),
+        ] {
+            // HTTP natives block on the runtime, so they run off its threads.
+            let program = src(&serve_json(9));
+            let run_conf = conf.clone();
+            let out = tokio::task::spawn_blocking(move || {
+                compile_and_run_with_std_conf(&program, Some(run_conf))
+            })
+            .await
+            .expect("the run finishes")
+            .unwrap_or_else(|e| panic!("{conf:?}: {e}"));
+            assert_eq!(out, expected, "{conf:?}");
+        }
+    }
+
     /// A lambda bound at top level and called by name receives an Err in a
     /// `Result` parameter. The by-name call found only functions named `f`,
     /// not the lambda its dispatch runs, so the argument was consumed.
@@ -474,7 +753,7 @@ r err("boom")
 [f(err("boom")), f(r), f(ok(1))]"#;
         assert_same_with_and_without_jit(
             src,
-            &Val::Vec(vec![Val::Bool(true), Val::Bool(true), Val::Bool(false)]),
+            &Val::vec(vec![Val::Bool(true), Val::Bool(true), Val::Bool(false)]),
         );
     }
 
@@ -501,7 +780,7 @@ c Email({value: "m@b.com"})
 Point type fn (x: Int, y: Int): Point { Point({x, y}) }
 p Point(10, 20)
 [p.x, p.y]"#;
-        assert_same_with_and_without_jit(point, &Val::Vec(vec![Val::Int(10), Val::Int(20)]));
+        assert_same_with_and_without_jit(point, &Val::vec(vec![Val::Int(10), Val::Int(20)]));
     }
 
     /// A Map that is not a literal (a variable or a call result) selects the
@@ -828,13 +1107,13 @@ lazy-param fn (lazy before: Any): Int { before(7) }
 ]"#;
         assert_same_with_and_without_jit(
             src,
-            &Val::Vec(vec![
+            &Val::vec(vec![
                 Val::Int(12),
                 Val::Int(12),
                 Val::Int(10),
-                Val::Vec(vec![Val::Int(5), Val::Int(10)]),
+                Val::vec(vec![Val::Int(5), Val::Int(10)]),
                 Val::from("custom"),
-                Val::Vec(vec![Val::Int(101)]),
+                Val::vec(vec![Val::Int(101)]),
                 Val::Int(0),
                 Val::Int(0),
             ]),
@@ -885,7 +1164,109 @@ sq %(mul(%, %))
 [apply-twice(3, add(%, 2)), invoke(4, sq), invoke(4, (v) { mul(v, 3) }), with-local(5)]"#;
         assert_same_with_and_without_jit(
             src,
-            &Val::Vec(vec![Val::Int(7), Val::Int(16), Val::Int(12), Val::Int(15)]),
+            &Val::vec(vec![Val::Int(7), Val::Int(16), Val::Int(12), Val::Int(15)]),
+        );
+    }
+
+    /// A null argument reaches a `Str` parameter as null, called directly or
+    /// from a caller typed `Any`. `Null -> Str` is for `Str(null)` and
+    /// interpolation, which still give "".
+    #[test]
+    fn null_stays_null_at_a_str_parameter_with_and_without_jit() {
+        let src = r#"::t ns
+f fn (x: Str): Any { [is-type(x, Null), x] }
+via-any fn (a: Any): Any { f(a) }
+via-any("warm")
+via-any("warm")
+via-any("warm")
+[via-any(null), f(null), f("s"), Str(null), `[${null}]`]"#;
+        let null_pair = Val::vec(vec![Val::Bool(true), Val::Null]);
+        assert_same_with_and_without_jit(
+            src,
+            &Val::vec(vec![
+                null_pair.clone(),
+                null_pair,
+                Val::vec(vec![Val::Bool(false), Val::from("s")]),
+                Val::from(""),
+                Val::from("[]"),
+            ]),
+        );
+    }
+
+    /// Implicit arrows fire the same way in both tiers: one involving a user
+    /// type applies, a primitive to primitive one doesn't. One parameter
+    /// without an arrow, such as a nullable one or a generic with a comma in
+    /// its type, doesn't stop another parameter's arrow.
+    #[test]
+    fn implicit_arrows_match_with_and_without_jit() {
+        let src = r#"::t ns
+Tri type { s: Int }
+Label type { s: Str }
+Geom enum open { Dot }
+Tri -> Geom.Tri
+Label -> Str fn (l: Label): Str { l.s }
+Str -> Label fn (s: Str): Label { Label({s: s}) }
+
+kind fn match (g: Geom): Str {
+    Geom.Tri => { "tri" }
+    _ => { "other" }
+}
+take-str fn (x: Str): Any { x }
+take-label fn (l: Label): Any { l.s }
+typed-call fn (t: Tri): Str { kind(t) }
+any-call fn (a: Any): Str { kind(a) }
+any-str fn (a: Any): Any { take-str(a) }
+any-label fn (a: Any): Any { take-label(a) }
+through-map fn (t: Tri): Vec { map([t], kind) }
+through-lambda fn (t: Tri): Str {
+    call-kind (g: Geom) { kind(g) }
+    call-kind(t)
+}
+beside-nullable fn (a: Str?, g: Geom): Str { kind(g) }
+call-nullable fn (t: Tri): Str { beside-nullable("x", t) }
+beside-generic fn (m: Map<Str, Int>, g: Geom, h: Geom): Str { kind(h) }
+call-generic fn (t: Tri): Str { beside-generic({}, t, t) }
+countdown fn cond (g: Geom, n: Int, t: Tri): Str {
+    eq(n, 0) => { kind(g) }
+    => {
+        result countdown(t, sub(n, 1), t)
+        result
+    }
+}
+tail-countdown fn cond (g: Geom, n: Int, t: Tri): Str {
+    eq(n, 0) => { kind(g) }
+    => { tail-countdown(t, sub(n, 1), t) }
+}
+t Tri({s: 1})
+run fn (): Vec {
+    [
+        typed-call(t), any-call(t),
+        any-str(Label({s: "from-label"})), any-str(5), any-str(true),
+        any-label("from-str"),
+        call-nullable(t), call-generic(t),
+        countdown(Geom.Dot, 2, t), tail-countdown(Geom.Dot, 2, t),
+        through-map(t), through-lambda(t)
+    ]
+}
+run()
+run()
+run()"#;
+        assert_same_with_and_without_jit(
+            src,
+            &Val::vec(vec![
+                Val::from("tri"),
+                Val::from("tri"),
+                Val::from("from-label"),
+                Val::Int(5),
+                Val::Bool(true),
+                Val::from("from-str"),
+                Val::from("tri"),
+                Val::from("tri"),
+                Val::from("tri"),
+                Val::from("tri"),
+                strs(&["other"]),
+                Val::from("tri"),
+            ]),
         );
     }
 
@@ -921,10 +1302,10 @@ ser-map fn (n: Int): Map {
 [all-vec(), all-map(), par-vec(3), ser-map(3)]"#;
         assert_same_with_and_without_jit(
             src,
-            &Val::Vec(vec![
-                Val::Vec(vec![Val::Int(1), Val::Int(2), Val::Int(3)]),
+            &Val::vec(vec![
+                Val::vec(vec![Val::Int(1), Val::Int(2), Val::Int(3)]),
                 crate::val!({"a": 1, "b": 2}),
-                Val::Vec(vec![Val::Int(4), Val::Int(6)]),
+                Val::vec(vec![Val::Int(4), Val::Int(6)]),
                 crate::val!({"a": 4, "b": 6}),
             ]),
         );
@@ -1198,7 +1579,7 @@ sizes fn cond-all (n: Int): All<Map> {
 ]"#;
         assert_same_with_and_without_jit(
             src,
-            &Val::Vec(vec![
+            &Val::vec(vec![
                 strs(&["Critter.Bird"]),
                 strs(&["Critter.Dog"]),
                 strs(&["positive", "big"]),
@@ -2032,7 +2413,7 @@ probe fn (): Vec {
 probe()
 probe()
 probe()"#;
-        let expected = Val::Vec(vec![
+        let expected = Val::vec(vec![
             Val::Int(610),
             Val::Dec(fastnum::D256::from(5) / fastnum::D256::from(2)),
             Val::Bool(false),
@@ -2659,7 +3040,7 @@ probe()"#;
         let interp =
             compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"mode": "off"}})))
                 .expect("interpreted checks");
-        let expected = Val::Vec(vec![
+        let expected = Val::vec(vec![
             Val::Int(80),
             Val::from("err"),
             Val::from("a"),
