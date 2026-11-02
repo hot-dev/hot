@@ -391,7 +391,19 @@ pub(crate) async fn run_run(
             }
             Ok(result)
         }
-        Err(e) => Err(format!("Execution error: {}", e)),
+        Err(e) => {
+            // Terminal output and CI logs get what the run's records get.
+            let e = match &execution_context {
+                Some(ctx) => hot::lang::masking::RecordMask::new(
+                    &ctx.secret_values,
+                    &ctx.secret_value_hashes,
+                )
+                .mask_text(&e)
+                .into_owned(),
+                None => e,
+            };
+            Err(format!("Execution error: {}", e))
+        }
     };
 
     // Shutdown emitter and event publisher to flush any pending events

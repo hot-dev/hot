@@ -414,6 +414,15 @@ impl From<EventMessage> for Message {
         if let (Val::Map(map), Some(original_urls)) = (&mut body, original_urls) {
             map.insert(Val::from("webhook_original_urls"), original_urls);
         }
+        // What the API handler identified as secret in the request, for the
+        // worker to find in the event: hashes only, never the values.
+        let hashes = &event_msg.body.execution_context.secret_value_hashes;
+        if let (Val::Map(map), false) = (&mut body, hashes.is_empty()) {
+            map.insert(
+                Val::from("secret_value_hashes"),
+                Val::Vec(hashes.iter().map(|hash| Val::Int(*hash as i64)).collect()),
+            );
+        }
 
         Message {
             id: event_msg.id,
@@ -614,7 +623,17 @@ impl TryFrom<Message> for EventMessage {
             origin_run_id: origin_run_id_opt,
             retry_attempt: ctx_val.get_int_or_default("retry_attempt", 0) as i16,
             secret_keys: AHashSet::new(),
-            secret_value_hashes: AHashSet::new(),
+            secret_value_hashes: match msg.body.get("secret_value_hashes") {
+                Some(Val::Vec(hashes)) => hashes
+                    .iter()
+                    .filter_map(|hash| match hash {
+                        Val::Int(hash) => Some(*hash as u64),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => AHashSet::new(),
+            },
+            secret_values: Default::default(),
             access_id: ctx_val.get("access_id").and_then(|v| {
                 if let crate::val::Val::Str(s) = v {
                     Uuid::parse_str(s.as_ref()).ok()
@@ -1299,6 +1318,57 @@ mod tests {
         let event_val = message.body.get("event").expect("event envelope");
         assert!(event_val.get("event_id").is_some());
         assert!(event_val.get("event_data").is_none());
+    }
+
+    #[test]
+    fn test_secret_value_hashes_survive_the_queue_but_values_do_not() {
+        let secret = "request-secret-value";
+        let event = Event::new(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            "hot:call".to_string(),
+            crate::val!({"caller": {"auth": {"key": secret}}}),
+        );
+        let mut ctx = ExecutionContext::new(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            4,
+            Some(Uuid::now_v7()),
+            Some(Uuid::now_v7()),
+            Some(Uuid::now_v7()),
+            Some(Uuid::now_v7()),
+        );
+        let hash = crate::lang::masking::value_hash(&Val::from(secret));
+        ctx.secret_value_hashes.insert(hash);
+        // One with the high bit set too, since these travel as an i64.
+        ctx.secret_value_hashes.insert(u64::MAX - 1);
+        ctx.secret_values.register(&Val::from(secret));
+        let message: Message = EventMessage {
+            id: event.event_id,
+            head: AHashMap::new(),
+            body: EventMessageBody {
+                event,
+                execution_context: ctx,
+            },
+        }
+        .into();
+
+        assert!(!format!("{:?}", message.body).contains(secret));
+        let parsed = EventMessage::try_from(message).unwrap();
+        assert!(
+            parsed
+                .body
+                .execution_context
+                .secret_value_hashes
+                .contains(&hash)
+        );
+        assert!(
+            parsed
+                .body
+                .execution_context
+                .secret_value_hashes
+                .contains(&(u64::MAX - 1))
+        );
     }
 
     #[test]
