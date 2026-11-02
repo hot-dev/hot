@@ -1078,9 +1078,10 @@ async fn migrations_retry_after_waiting_out_a_lock_timeout() -> TestResult {
     result
 }
 
+/// Both pollers run this at once, so it must not match its own text.
 const BUILD_SESSION: &str = "SELECT pid FROM pg_stat_activity \
-     WHERE datname=current_database() AND pid<>pg_backend_pid() AND state='active' \
-     AND query LIKE '%CREATE INDEX CONCURRENTLY%'";
+     WHERE datname=current_database() AND state='active' \
+     AND query LIKE '%CREATE INDEX CONCURRENTLY%' AND query NOT LIKE '%pg_stat_activity%'";
 
 /// 025 builds an index that every trace write maintains, on what can be a very
 /// large table. It must neither block those writes nor give up on the build
