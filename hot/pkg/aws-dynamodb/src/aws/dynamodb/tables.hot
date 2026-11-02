@@ -2,13 +2,13 @@
 
 // DynamoDB table operations
 
-http-request ::hot::http/request
 HttpResponse ::hot::http/HttpResponse
 is-ok-response ::hot::http/is-ok-response
 
-get-credentials ::aws::core/get-credentials
-get-region ::aws::core/get-region
-sign-request ::aws::core/sign-request
+resolve ::aws::core/resolve
+send-signed ::aws::core/send-signed
+service-url ::aws::core/service-url
+opt-str ::aws::core/opt-str
 AwsError ::aws::core/AwsError
 
 // List tables response
@@ -58,39 +58,45 @@ meta {
     """
 }
 fn
-(limit: Int?, exclusive_start_table_name: Str?): ListTablesResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
+(limit: Int?, exclusive_start_table_name: Str?, opts: Map): ListTablesResponse | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        url `${service-url(resolved, "dynamodb")}/`
 
-    url `https://dynamodb.${region}.amazonaws.com/`
+        request-body if(is-null(limit), {}, { Limit: limit })
 
-    request-body if(is-null(limit), {}, { Limit: limit })
+        with-start merge(request-body, filter-vals({
+            ExclusiveStartTableName: exclusive_start_table_name
+        }, is-some))
 
-    with-start merge(request-body, filter-vals({
-        ExclusiveStartTableName: exclusive_start_table_name
-    }, is-some))
+        body to-json(with-start)
 
-    body to-json(with-start)
+        headers {
+            "Content-Type": "application/x-amz-json-1.0",
+            "X-Amz-Target": "DynamoDB_20120810.ListTables"
+        }
 
-    headers {
-        "Content-Type": "application/x-amz-json-1.0",
-        "X-Amz-Target": "DynamoDB_20120810.ListTables",
-        "Host": `dynamodb.${region}.amazonaws.com`
-    }
+        response send-signed("POST", url, "dynamodb", resolved, headers, body)
 
-    signed-headers sign-request("POST", url, region, "dynamodb", credentials, headers, body)
-
-    response http-request("POST", url, signed-headers, body)
-
-    cond {
-        is-ok-response(response) => { ListTablesResponse({
-            table_names: if(is-null(response.body.TableNames), [], response.body.TableNames),
-            last_evaluated_table_name: response.body.LastEvaluatedTableName
-        }) }
-        => { err(AwsError(response)) }
-    }
+        cond {
+            is-err(response) => { response }
+            is-ok-response(response) => { ListTablesResponse({
+                table_names: if(is-null(response.body.TableNames), [], response.body.TableNames),
+                last_evaluated_table_name: response.body.LastEvaluatedTableName
+            }) }
+            => { err(AwsError(response)) }
+        }
+    })
 },
-(limit: Int): ListTablesResponse | AwsError {
+(limit: Int?, opts: Map): ListTablesResponse | AwsError {
+    list-tables(limit, null, opts)
+},
+(opts: Map): ListTablesResponse | AwsError {
+    list-tables(100, null, opts)
+},
+(limit: Int?, exclusive_start_table_name: Str?): ListTablesResponse | AwsError {
+    list-tables(limit, exclusive_start_table_name, {})
+},
+(limit: Int?): ListTablesResponse | AwsError {
     list-tables(limit, null)
 },
 (): ListTablesResponse | AwsError {
@@ -113,47 +119,48 @@ meta {
     ```
     """
 }
-fn (table_name: Str): DescribeTableResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
+fn
+(table_name: Str, opts: Map): DescribeTableResponse | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        url `${service-url(resolved, "dynamodb")}/`
 
-    url `https://dynamodb.${region}.amazonaws.com/`
+        body to-json({
+            TableName: table_name
+        })
 
-    body to-json({
-        TableName: table_name
-    })
+        headers {
+            "Content-Type": "application/x-amz-json-1.0",
+            "X-Amz-Target": "DynamoDB_20120810.DescribeTable"
+        }
 
-    headers {
-        "Content-Type": "application/x-amz-json-1.0",
-        "X-Amz-Target": "DynamoDB_20120810.DescribeTable",
-        "Host": `dynamodb.${region}.amazonaws.com`
-    }
+        response send-signed("POST", url, "dynamodb", resolved, headers, body)
 
-    signed-headers sign-request("POST", url, region, "dynamodb", credentials, headers, body)
-
-    response http-request("POST", url, signed-headers, body)
-
-    cond {
-        is-ok-response(response) => { DescribeTableResponse({
-            table: cond {
-                is-null(response.body.Table) => { null }
-                => { TableDescription({
-                table_name: response.body.Table.TableName,
-                table_status: response.body.Table.TableStatus,
-                table_arn: response.body.Table.TableArn,
-                table_id: response.body.Table.TableId,
-                creation_date_time: response.body.Table.CreationDateTime,
-                key_schema: response.body.Table.KeySchema,
-                attribute_definitions: response.body.Table.AttributeDefinitions,
-                provisioned_throughput: response.body.Table.ProvisionedThroughput,
-                billing_mode_summary: response.body.Table.BillingModeSummary,
-                item_count: response.body.Table.ItemCount,
-                table_size_bytes: response.body.Table.TableSizeBytes,
-                global_secondary_indexes: response.body.Table.GlobalSecondaryIndexes,
-                local_secondary_indexes: response.body.Table.LocalSecondaryIndexes
+        cond {
+            is-err(response) => { response }
+            is-ok-response(response) => { DescribeTableResponse({
+                table: cond {
+                    is-null(response.body.Table) => { null }
+                    => { TableDescription({
+                    table_name: response.body.Table.TableName,
+                    table_status: response.body.Table.TableStatus,
+                    table_arn: response.body.Table.TableArn,
+                    table_id: response.body.Table.TableId,
+                    creation_date_time: opt-str(response.body.Table.CreationDateTime),
+                    key_schema: response.body.Table.KeySchema,
+                    attribute_definitions: response.body.Table.AttributeDefinitions,
+                    provisioned_throughput: response.body.Table.ProvisionedThroughput,
+                    billing_mode_summary: response.body.Table.BillingModeSummary,
+                    item_count: response.body.Table.ItemCount,
+                    table_size_bytes: response.body.Table.TableSizeBytes,
+                    global_secondary_indexes: response.body.Table.GlobalSecondaryIndexes,
+                    local_secondary_indexes: response.body.Table.LocalSecondaryIndexes
+                }) }
+                }
             }) }
-            }
-        }) }
-        => { err(AwsError(response)) }
-    }
+            => { err(AwsError(response)) }
+        }
+    })
+},
+(table_name: Str): DescribeTableResponse | AwsError {
+    describe-table(table_name, {})
 }

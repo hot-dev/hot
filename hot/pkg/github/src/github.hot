@@ -22,6 +22,11 @@ meta {
     open-prs ::pulls/list-pulls("hot-dev", "hot", {state: "open"})
     ```
 
+    **Per-call credentials.** Every API-calling function takes an optional
+    trailing `opts` Map (`token`, or `app-id`, `private-key` and
+    `installation-id`, plus `base-url` and `api-version`). See
+    `::github::api`.
+
     Webhook verification lives at `::github::webhooks/verify-request`
     (X-Hub-Signature-256 with the `github.webhook.secret` context
     variable).

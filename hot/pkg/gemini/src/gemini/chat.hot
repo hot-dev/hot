@@ -4,8 +4,8 @@
 // Google Gemini Chat - Convenience Functions with Streaming
 // ============================================================================
 
-api-request ::gemini::api/request
-api-request-stream ::gemini::api/request-stream
+api-call ::gemini::api/call
+api-call-stream ::gemini::api/call-stream
 HttpError ::gemini::api/HttpError
 is-ok-response ::hot::http/is-ok-response
 
@@ -131,10 +131,18 @@ meta {
     ```
     """
 }
-fn (model: Str, request: GenerateContentRequest): GenerateContentResponse {
+fn
+(model: Str, request: GenerateContentRequest): GenerateContentResponse {
+    generate(model, request, {})
+},
+(model: Str, request: GenerateContentRequest, opts: Map): GenerateContentResponse {
     // Use v1beta for systemInstruction support
-    response api-request("POST", `${::gemini/BASE_URL}/v1beta/models/${model}:generateContent`, {}, request)
-    if(is-ok-response(response), GenerateContentResponse(response.body), err(HttpError(response)))
+    response api-call("POST", `/v1beta/models/${model}:generateContent`, {}, request, opts)
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { GenerateContentResponse(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 // ============================================================================
@@ -164,10 +172,13 @@ meta {
     ```
     """
 }
-fn (model: Str, request: GenerateContentRequest): StreamingGenerateResponse {
+fn
+(model: Str, request: GenerateContentRequest): StreamingGenerateResponse {
+    generate-stream(model, request, {})
+},
+(model: Str, request: GenerateContentRequest, opts: Map): StreamingGenerateResponse {
     // Use v1beta for systemInstruction support, alt=sse for SSE streaming
-    url `${::gemini/BASE_URL}/v1beta/models/${model}:streamGenerateContent?alt=sse`
-    response api-request-stream("POST", url, {}, request, "sse")
+    response api-call-stream("POST", `/v1beta/models/${model}:streamGenerateContent?alt=sse`, {}, request, "sse", opts)
     cond {
         gte(response.status, 400) => { err(HttpError(response)) }
         => { StreamingGenerateResponse(response) }
@@ -183,7 +194,7 @@ meta {
     doc: """
     Simple chat - send a message and get a response string. This is the highest-level convenience function for single-turn chat.
 
-    Accepts 2 to 4 arguments: model, message, optional system instruction, and optional max tokens.
+    Accepts 2 to 4 arguments: model, message, optional system instruction, and optional max tokens. Any of those forms also takes a trailing `opts` Map (see `::gemini::api/resolve`).
 
     **Example**
 
@@ -204,6 +215,12 @@ meta {
     ```hot
     answer ::gemini::chat/chat("gemini-2.0-flash", "Write a haiku about coding.", null, 100)
     ```
+
+    **With a per-call API key**
+
+    ```hot
+    answer ::gemini::chat/chat("gemini-2.0-flash", "Hello!", {api-key: "tenant-key"})
+    ```
     """
 }
 fn
@@ -214,13 +231,23 @@ fn
     chat(model, message, system, null)
 },
 (model: Str, message: Str, system: Str?, max-tokens: Int?): Str {
-    request {
+    chat(model, message, system, max-tokens, {})
+},
+(model: Str, message: Str, opts: Map): Str {
+    chat(model, message, null, null, opts)
+},
+(model: Str, message: Str, system: Str?, opts: Map): Str {
+    chat(model, message, system, null, opts)
+},
+(model: Str, message: Str, system: Str?, max-tokens: Int?, opts: Map): Str {
+    base {
         contents: [Content({role: "user", parts: [Part({text: message})]})],
-        systemInstruction: if(is-null(system), null, Content({role: "user", parts: [Part({text: system})]})),
         generationConfig: GenerationConfig({maxOutputTokens: or(max-tokens, 1024)})
     }
 
-    result generate(model, GenerateContentRequest(request))
+    request if(is-null(system), base, assoc(base, "systemInstruction", Content({role: "user", parts: [Part({text: system})]})))
+
+    result generate(model, GenerateContentRequest(request), opts)
 
     match result {
         Result.Err => { err(result) }

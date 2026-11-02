@@ -9,7 +9,7 @@ Provider-specific code (Anthropic, OpenAI, xAI, Gemini) stays in the user's proj
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/hot-ai": "1.8.1"
+"hot.dev/hot-ai": "1.9.0"
 ```
 
 ## Namespaces
@@ -97,6 +97,27 @@ Markdown-authored skills use `*.skill.md` files under the project's
 files that export `Skill` values. Because generated skills construct
 `::ai::skill/Skill`, projects with Markdown skill resources must include
 `"hot.dev/hot-ai"` in `hot.project.<name>.deps`.
+
+### Per-call provider credentials
+
+`ChatOptions.provider-opts` carries a provider's `opts` (`api-key`, `base-url`, and so on) through `run-loop` and `run-loop-stream`, so one run can serve many tenants without touching ctx. It reaches the function in the `chat-opts-fn` or `chat-stream-opts-fn` slot, on `ChatOptions` or on a `ProviderRegistration`:
+
+```hot
+opts ::ai::chat/ChatOptions({
+    chat-opts-fn: ::anthropic::chat-tools/chat-with-tools,
+    model: "claude-sonnet-4-5",
+    provider-opts: {api-key: tenant-key}
+})
+
+answer ::ai::chat/run-loop(opts, "What is 17 + 25?")
+```
+
+- The contracts are `(model, messages, system, tools, provider-opts)` and `(model, messages, system, tools, on-delta, provider-opts)`.
+- A plain `chat-fn` or `chat-stream-fn` keeps working without `provider-opts`, but can't receive it: setting `provider-opts` for one is a failure naming the provider.
+- A null or blank credential in `provider-opts` is a failure, never a fallback to ctx. Leave the key out to use ctx.
+- A `base-url` in `provider-opts` needs a credential there too, and `management-base-url` needs `management-api-key`: a ctx key is never sent to a per-call URL.
+- `::ai::rag` uses `chat-opts-fn` too. `count-tokens-fn` and a store's `embed-fn` take no `provider-opts`: bind a per-call key in a closure.
+- The run loop keeps `provider-opts` out of chat history, step and delta stream records, skill context and failure payloads, and masks each credential in it in the run's call records, including inside strings like `Bearer ${key}`. A secret shorter than 8 bytes is masked only as a whole value. Records of your own calls that finished before the run loop may already be written, so mark a credential your code fetches with `::hot::ctx/mark-secret` as soon as you have it.
 
 ### `::ai::memory` — Three-level scoped memory
 

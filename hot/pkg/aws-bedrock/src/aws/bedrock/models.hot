@@ -2,13 +2,13 @@
 
 // Bedrock model management operations
 
-http-request ::hot::http/request
 HttpResponse ::hot::http/HttpResponse
 is-ok-response ::hot::http/is-ok-response
 
-get-credentials ::aws::core/get-credentials
-get-region ::aws::core/get-region
-sign-request ::aws::core/sign-request
+resolve ::aws::core/resolve
+send-signed ::aws::core/send-signed
+service-url ::aws::core/service-url
+uri-encode ::aws::core/uri-encode
 AwsError ::aws::core/AwsError
 
 // Foundation model type
@@ -57,69 +57,74 @@ meta {
     """
 }
 fn
-(by_provider: Str?, by_customization_type: Str?, by_output_modality: Str?, by_inference_type: Str?): ListFoundationModelsResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
+(by_provider: Str?, by_customization_type: Str?, by_output_modality: Str?, by_inference_type: Str?, opts: Map): ListFoundationModelsResponse | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        base-url `${service-url(resolved, "bedrock")}/foundation-models`
 
-    base-url `https://bedrock.${region}.amazonaws.com/foundation-models`
+        // Build query parameters
+        params []
 
-    // Build query parameters
-    params []
+        params-with-provider cond {
+            is-null(by_provider) => { params }
+            => { concat(params, [`byProvider=${uri-encode(by_provider)}`]) }
+        }
 
-    params-with-provider cond {
-        is-null(by_provider) => { params }
-        => { concat(params, [`byProvider=${by_provider}`]) }
-    }
+        params-with-custom cond {
+            is-null(by_customization_type) => { params-with-provider }
+            => { concat(params-with-provider, [`byCustomizationType=${uri-encode(by_customization_type)}`]) }
+        }
 
-    params-with-custom cond {
-        is-null(by_customization_type) => { params-with-provider }
-        => { concat(params-with-provider, [`byCustomizationType=${by_customization_type}`]) }
-    }
+        params-with-output cond {
+            is-null(by_output_modality) => { params-with-custom }
+            => { concat(params-with-custom, [`byOutputModality=${uri-encode(by_output_modality)}`]) }
+        }
 
-    params-with-output cond {
-        is-null(by_output_modality) => { params-with-custom }
-        => { concat(params-with-custom, [`byOutputModality=${by_output_modality}`]) }
-    }
+        params-with-inference cond {
+            is-null(by_inference_type) => { params-with-output }
+            => { concat(params-with-output, [`byInferenceType=${uri-encode(by_inference_type)}`]) }
+        }
 
-    params-with-inference cond {
-        is-null(by_inference_type) => { params-with-output }
-        => { concat(params-with-output, [`byInferenceType=${by_inference_type}`]) }
-    }
+        query-string if(eq(length(params-with-inference), 0), "", `?${join(params-with-inference, "&")}`)
 
-    query-string if(eq(length(params-with-inference), 0), "", `?${join(params-with-inference, "&")}`)
+        url `${base-url}${query-string}`
 
-    url `${base-url}${query-string}`
+        headers {}
 
-    headers {
-        "Host": `bedrock.${region}.amazonaws.com`
-    }
+        response send-signed("GET", url, "bedrock", resolved, headers, "")
 
-    signed-headers sign-request("GET", url, region, "bedrock", credentials, headers, "")
-
-    response http-request("GET", url, signed-headers, "")
-
-    cond {
-        is-ok-response(response) => { ListFoundationModelsResponse({
-            models: cond {
-                is-null(response.body.modelSummaries) => { [] }
-                => { map(response.body.modelSummaries, FoundationModel({
-                model_arn: %.modelArn,
-                model_id: %.modelId,
-                model_name: %.modelName,
-                provider_name: %.providerName,
-                input_modalities: %.inputModalities,
-                output_modalities: %.outputModalities,
-                response_streaming_supported: %.responseStreamingSupported,
-                customizations_supported: %.customizationsSupported,
-                inference_types_supported: %.inferenceTypesSupported,
-                model_lifecycle: %.modelLifecycle
-            })) }
-            }
-        }) }
-        => { err(AwsError(response)) }
-    }
+        cond {
+            is-err(response) => { response }
+            is-ok-response(response) => { ListFoundationModelsResponse({
+                models: cond {
+                    is-null(response.body.modelSummaries) => { [] }
+                    => { map(response.body.modelSummaries, FoundationModel({
+                    model_arn: %.modelArn,
+                    model_id: %.modelId,
+                    model_name: %.modelName,
+                    provider_name: %.providerName,
+                    input_modalities: %.inputModalities,
+                    output_modalities: %.outputModalities,
+                    response_streaming_supported: %.responseStreamingSupported,
+                    customizations_supported: %.customizationsSupported,
+                    inference_types_supported: %.inferenceTypesSupported,
+                    model_lifecycle: %.modelLifecycle
+                })) }
+                }
+            }) }
+            => { err(AwsError(response)) }
+        }
+    })
 },
-(by_provider: Str): ListFoundationModelsResponse | AwsError {
+(by_provider: Str?, opts: Map): ListFoundationModelsResponse | AwsError {
+    list-foundation-models(by_provider, null, null, null, opts)
+},
+(opts: Map): ListFoundationModelsResponse | AwsError {
+    list-foundation-models(null, null, null, null, opts)
+},
+(by_provider: Str?, by_customization_type: Str?, by_output_modality: Str?, by_inference_type: Str?): ListFoundationModelsResponse | AwsError {
+    list-foundation-models(by_provider, by_customization_type, by_output_modality, by_inference_type, {})
+},
+(by_provider: Str?): ListFoundationModelsResponse | AwsError {
     list-foundation-models(by_provider, null, null, null)
 },
 (): ListFoundationModelsResponse | AwsError {
@@ -141,40 +146,40 @@ meta {
     ```
     """
 }
-fn (model_identifier: Str): GetFoundationModelResponse | AwsError {
-    region get-region()
-    credentials get-credentials()
+fn
+(model_identifier: Str, opts: Map): GetFoundationModelResponse | AwsError {
+    if-ok(resolve(opts), (resolved) {
+        url `${service-url(resolved, "bedrock")}/foundation-models/${uri-encode(model_identifier)}`
 
-    url `https://bedrock.${region}.amazonaws.com/foundation-models/${model_identifier}`
+        headers {}
 
-    headers {
-        "Host": `bedrock.${region}.amazonaws.com`
-    }
+        response send-signed("GET", url, "bedrock", resolved, headers, "")
 
-    signed-headers sign-request("GET", url, region, "bedrock", credentials, headers, "")
-
-    response http-request("GET", url, signed-headers, "")
-
-    cond {
-        is-ok-response(response) => { GetFoundationModelResponse({
-            model: cond {
-                is-null(response.body.modelDetails) => { null }
-                => { FoundationModel({
-                model_arn: response.body.modelDetails.modelArn,
-                model_id: response.body.modelDetails.modelId,
-                model_name: response.body.modelDetails.modelName,
-                provider_name: response.body.modelDetails.providerName,
-                input_modalities: response.body.modelDetails.inputModalities,
-                output_modalities: response.body.modelDetails.outputModalities,
-                response_streaming_supported: response.body.modelDetails.responseStreamingSupported,
-                customizations_supported: response.body.modelDetails.customizationsSupported,
-                inference_types_supported: response.body.modelDetails.inferenceTypesSupported,
-                model_lifecycle: response.body.modelDetails.modelLifecycle
+        cond {
+            is-err(response) => { response }
+            is-ok-response(response) => { GetFoundationModelResponse({
+                model: cond {
+                    is-null(response.body.modelDetails) => { null }
+                    => { FoundationModel({
+                    model_arn: response.body.modelDetails.modelArn,
+                    model_id: response.body.modelDetails.modelId,
+                    model_name: response.body.modelDetails.modelName,
+                    provider_name: response.body.modelDetails.providerName,
+                    input_modalities: response.body.modelDetails.inputModalities,
+                    output_modalities: response.body.modelDetails.outputModalities,
+                    response_streaming_supported: response.body.modelDetails.responseStreamingSupported,
+                    customizations_supported: response.body.modelDetails.customizationsSupported,
+                    inference_types_supported: response.body.modelDetails.inferenceTypesSupported,
+                    model_lifecycle: response.body.modelDetails.modelLifecycle
+                }) }
+                }
             }) }
-            }
-        }) }
-        => { err(AwsError(response)) }
-    }
+            => { err(AwsError(response)) }
+        }
+    })
+},
+(model_identifier: Str): GetFoundationModelResponse | AwsError {
+    get-foundation-model(model_identifier, {})
 }
 
 // Common model IDs for convenience

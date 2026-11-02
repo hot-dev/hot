@@ -1,0 +1,146 @@
+::aws::test::ses ns
+meta ["test"]
+
+// Hermetic: no network, no aws.* context. A `transport` in opts stands in for the network.
+
+::email ::aws::ses::email
+
+HttpResponse ::hot::http/HttpResponse
+
+// Every call is answered 418 with the signed request as the body.
+echo fn (): Map {
+    {
+        "access-key-id": "AKIDOPTS",
+        "secret-access-key": "opts-secret",
+        region: "eu-west-1",
+        transport: (req) { HttpResponse({status: 418, headers: {}, body: req}) }
+    }
+}
+
+// The request a call would have sent.
+sent fn (result: Result): Any {
+    if(is-err(result), err-value(result).body, result.body)
+}
+
+// Every call is answered 200 with these headers and body.
+answer fn (headers: Map, body: Any): Map {
+    {
+        "access-key-id": "AKIDOPTS",
+        "secret-access-key": "opts-secret",
+        region: "eu-west-1",
+        transport: (req) { HttpResponse({status: 200, headers: headers, body: body, body-bytes: if(is-bytes(body), body, Bytes(""))}) }
+    }
+}
+
+// Answered 200 with an AWS JSON body, which the runtime hands over as Bytes.
+amz fn (body: Map): Map {
+    answer({"content-type": "application/x-amz-json-1.0"}, Bytes(to-json(body)))
+}
+
+assert-missing-credentials fn (result: Result) {
+    assert(is-err(result))
+    assert(contains(err-value(result), "aws.access-key-id"))
+}
+
+URL "https://email.eu-west-1.amazonaws.com/v2/email/outbound-emails"
+
+assert-request fn (result: Result) {
+    request sent(result)
+    assert-eq(URL, request.url)
+    assert-eq("POST", request.method)
+    auth get(request.headers, "Authorization")
+    assert(contains(auth, "Credential=AKIDOPTS/"), auth)
+    assert(contains(auth, "/eu-west-1/ses/aws4_request"), auth)
+    assert(is-null(::hot::ctx/get("aws.access-key-id")), "no ctx writes")
+}
+
+request-with fn (content: Any): Any {
+    ::email/SendEmailRequest({
+        from_email_address: "from@example.com",
+        destination: ::email/Destination({to_addresses: ["to@example.com"]}),
+        content: content,
+        reply_to_addresses: null,
+        configuration_set_name: null
+    })
+}
+
+simple fn (text: Str?, html: Str?): Any {
+    ::email/EmailContent({simple: ::email/Message({subject: "S", body: ::email/Body({text: text, html: html})})})
+}
+
+test-opts-reach-the-request
+meta ["test"] fn () {
+    assert-request(::email/send-email(request-with(simple("t", null)), echo()))
+    assert-request(::email/send-simple-email("f@e.com", ["t@e.com"], "S", "text", echo()))
+    assert-request(::email/send-simple-email("f@e.com", ["t@e.com"], "S", "text", "<b>h</b>", echo()))
+    assert-request(::email/send-raw-email("From: a@e.com\nSubject: x\n\nbody", echo()))
+    assert-request(::email/send-templated-email("f@e.com", ["t@e.com"], "T", {a: 1}, echo()))
+}
+
+test-existing-arities-read-ctx
+meta ["test"] fn () {
+    assert-missing-credentials(::email/send-simple-email("f@e.com", ["t@e.com"], "S", "text"))
+    assert-missing-credentials(::email/send-raw-email("From: a@e.com\n\nx"))
+    assert-missing-credentials(::email/send-templated-email("f@e.com", ["t@e.com"], "T", {a: 1}))
+}
+
+test-simple-body-leaves-unset-parts-out
+meta ["test"] fn () {
+    body ::email/send-email-body(request-with(simple("text", null)))
+    assert-eq({Data: "text"}, body.Content.Simple.Body.Text)
+    assert(not(in("Html", keys(body.Content.Simple.Body))), "not sent as JSON null")
+    assert(not(in("ConfigurationSetName", keys(body))))
+    assert(not(in("Raw", keys(body.Content))))
+
+    text-only from-json(sent(::email/send-simple-email("f@e.com", ["t@e.com"], "S", "text", echo())).body)
+    assert(not(in("Html", keys(text-only.Content.Simple.Body))), "the text-only arity sends no empty Html")
+}
+
+test-configuration-set-is-sent
+meta ["test"] fn () {
+    request ::email/SendEmailRequest({
+        from_email_address: "f@e.com",
+        destination: ::email/Destination({to_addresses: ["t@e.com"]}),
+        content: simple("t", null),
+        reply_to_addresses: ["r@e.com"],
+        configuration_set_name: "tracking"
+    })
+    body ::email/send-email-body(request)
+    assert-eq("tracking", body.ConfigurationSetName)
+    assert-eq(["r@e.com"], body.ReplyToAddresses)
+}
+
+test-raw-message-is-base64
+meta ["test"] fn () {
+    raw "From: a@e.com\nSubject: Hi there\n\nbody"
+    encoded ::hot::base64/encode(raw)
+    assert-eq(encoded, ::email/raw-message-data(raw), "SES requires the whole message Base64 encoded")
+    assert-eq(encoded, ::email/raw-message-data(encoded), "already encoded passes through")
+
+    body from-json(sent(::email/send-raw-email(raw, echo())).body)
+    assert-eq(encoded, body.Content.Raw.Data)
+
+    via-request ::email/send-email-body(request-with(::email/EmailContent({raw: raw})))
+    assert-eq(encoded, via-request.Content.Raw.Data, "send-email honours raw content")
+    assert(not(in("Simple", keys(via-request.Content))))
+}
+
+test-template-content-in-send-email
+meta ["test"] fn () {
+    template ::email/TemplateContent({template_name: "T", template_data: {a: 1}})
+    body ::email/send-email-body(request-with(::email/EmailContent({template: template})))
+    assert-eq("T", body.Content.Template.TemplateName)
+    assert-eq("{\"a\":1}", body.Content.Template.TemplateData)
+}
+
+test-response
+meta ["test"] fn () {
+    assert-eq("m1", ::email/send-raw-email("From: a@e.com\n\nx", answer({}, {MessageId: "m1"})).message_id)
+}
+
+test-unsafe-region-never-reaches-the-request
+meta ["test"] fn () {
+    out ::email/send-raw-email("From: a@e.com\n\nx", {...echo(), region: "evil.example/"})
+    assert(is-err(out), "it would be interpolated into the hostname")
+    assert(not(contains(err-value(out), "evil.example")), "the value isn't echoed")
+}

@@ -107,6 +107,7 @@ meta {
     """
 }
 fn (options: Map): RedisConnection {
+    ::hot::ctx/mark-secret(::coll/get(options, "password", null))
     host ::coll/get(options, "host", "127.0.0.1")
     port ::coll/get(options, "port", 6379)
     tcp-opts if(is-null(options.timeout), {}, {timeout: options.timeout})

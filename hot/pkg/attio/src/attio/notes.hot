@@ -30,8 +30,12 @@ meta {
     ```
     """
 }
-fn (parent-object: Str, parent-record-id: Str, title: Str, content: Str): Map {
-  out ::api/json("POST", "/notes", build-note-payload(parent-object, parent-record-id, title, content))
+fn
+(parent-object: Str, parent-record-id: Str, title: Str, content: Str): Map {
+  create-note(parent-object, parent-record-id, title, content, {})
+},
+(parent-object: Str, parent-record-id: Str, title: Str, content: Str, opts: Map): Map {
+  out ::api/json("POST", "/notes", build-note-payload(parent-object, parent-record-id, title, content), opts)
   match out {
     Result.Err => { err(out) }
 
@@ -43,16 +47,24 @@ list-notes
 meta {
     doc: """GET /notes?parent_object=&parent_record_id= - The notes on a record."""
 }
-fn (parent-object: Str, parent-record-id: Str): Map {
-  ::api/json("GET", `/notes?parent_object=${parent-object}&parent_record_id=${parent-record-id}`)
+fn
+(parent-object: Str, parent-record-id: Str): Map {
+  list-notes(parent-object, parent-record-id, {})
+},
+(parent-object: Str, parent-record-id: Str, opts: Map): Map {
+  ::api/json("GET", `/notes?parent_object=${parent-object}&parent_record_id=${parent-record-id}`, "", opts)
 }
 
 delete-note
 meta {
     doc: """DELETE /notes/{id} - Delete a note."""
 }
-fn (note-id: Str): Any {
-  ::api/json("DELETE", `/notes/${note-id}`)
+fn
+(note-id: Str): Any {
+  delete-note(note-id, {})
+},
+(note-id: Str, opts: Map): Any {
+  ::api/json("DELETE", `/notes/${note-id}`, "", opts)
 }
 
 // Tasks moved to ::attio::tasks (create/list/update/delete).

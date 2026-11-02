@@ -46,9 +46,17 @@ meta {
     ```
     """
 }
-fn (request: GETApiKeysRequest): GETApiKeysResponse {
-  response api-request("GET", `${::resend/BASE_URL}/api-keys`)
-  if(is-ok-response(response), GETApiKeysResponse(response.body), err(HttpError(response)))
+fn
+(request: GETApiKeysRequest): GETApiKeysResponse {
+  retrieve-list-api-keys(request, {})
+},
+(request: GETApiKeysRequest, opts: Map): GETApiKeysResponse {
+  response api-request("GET", `${::resend/BASE_URL}/api-keys`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { GETApiKeysResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 POSTApiKeysRequest type {
@@ -65,11 +73,22 @@ POSTApiKeysResponse type {
 
 create-new-api-key
 meta {
-    doc: """Create a new API key with specified name, permission level, and optional domain restriction."""
+    doc: """Create a new API key with specified name, permission level, and optional domain restriction. The new key is masked in the run's call records."""
 }
-fn (request: POSTApiKeysRequest): POSTApiKeysResponse {
-  response api-request("POST", `${::resend/BASE_URL}/api-keys`, {}, request)
-  if(is-ok-response(response), POSTApiKeysResponse(response.body), err(HttpError(response)))
+fn
+(request: POSTApiKeysRequest): POSTApiKeysResponse {
+  create-new-api-key(request, {})
+},
+(request: POSTApiKeysRequest, opts: Map): POSTApiKeysResponse {
+  response api-request("POST", `${::resend/BASE_URL}/api-keys`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => {
+      ::hot::ctx/mark-secret(response.body.token)
+      POSTApiKeysResponse(response.body)
+    }
+    => { err(HttpError(response)) }
+  }
 }
 
 DELETEApiKeysApiKeyIdRequest type {
@@ -82,7 +101,15 @@ DELETEApiKeysApiKeyIdResponse type Map
 
 remove-existing-api-key
 meta {doc: """Permanently delete an API key. This cannot be undone."""}
-fn (request: DELETEApiKeysApiKeyIdRequest): DELETEApiKeysApiKeyIdResponse {
-  response api-request("DELETE", `${::resend/BASE_URL}/api-keys/${request.api-key-id}`)
-  if(is-ok-response(response), ok(response.body), err(HttpError(response)))
+fn
+(request: DELETEApiKeysApiKeyIdRequest): DELETEApiKeysApiKeyIdResponse {
+  remove-existing-api-key(request, {})
+},
+(request: DELETEApiKeysApiKeyIdRequest, opts: Map): DELETEApiKeysApiKeyIdResponse {
+  response api-request("DELETE", `${::resend/BASE_URL}/api-keys/${request.api-key-id}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { ok(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

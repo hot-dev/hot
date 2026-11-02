@@ -9,6 +9,10 @@ meta {
     - `qdrant.url` — e.g. `http://localhost:6333` or your cloud cluster URL
     - `qdrant.api.key` — optional for local, required for cloud
 
+    Every API function also takes a trailing `opts` Map, so one run can use
+    several instances: `{url: ..., api-key: ...}` replaces the context
+    values for that call. A per-call `url` never borrows the context key.
+
     **Quick start**
 
     ```hot
@@ -26,7 +30,12 @@ meta {
 
 ::ctx ::hot::ctx
 
-base-url fn
+base-url
+meta {
+    ctx: {"qdrant.url": {required: false, secret: false}},
+    doc: """The instance URL without a trailing slash: the `qdrant.url` context variable or the local default, or the given URL."""
+}
+fn
 (): Str {
   base-url(or(::ctx/get("qdrant.url"), "http://localhost:6333"))
 },
@@ -34,12 +43,23 @@ base-url fn
   if(ends-with(url, "/"), slice(url, 0, sub(length(url), 1)), url)
 }
 
-request fn
+request
+meta {
+    ctx: {"qdrant.url": {required: false, secret: false}, "qdrant.api.key": {required: false}},
+    doc: """The request behind every function: `opts` (`{url, api-key}`), then the context variables, then the local default (see `::qdrant::api/resolve`)."""
+}
+fn
 (method: Str, path: Str, body: Any): Any {
-  request(method, path, body, base-url(), or(::ctx/get("qdrant.api.key"), ""))
+  request(method, path, body, {})
+},
+// 4-arity: per-call opts ({url, api-key}), then ctx, then the local default
+(method: Str, path: Str, body: Any, opts: Map): Any {
+  resolved ::qdrant::api/resolve(opts)
+  request(method, path, body, resolved.url, resolved.api-key)
 },
 // 5-arity: explicit instance URL + API key override ("" sends no auth header)
 (method: Str, path: Str, body: Any, url: Str, api-key: Str): Any {
+  ::ctx/mark-secret(api-key)
   base-headers cond {
     is-empty(api-key) => { {} }
     => { {api-key: api-key} }
@@ -70,39 +90,57 @@ request fn
 
 list-collections
 meta {
-    ctx: {"qdrant.url": {required: false}, "qdrant.api.key": {required: false}},
+    ctx: {"qdrant.url": {required: false, secret: false}, "qdrant.api.key": {required: false}},
     doc: """GET /collections - The instance's collections."""
 }
-fn (): Map {
-  request("GET", "/collections", "")
+fn
+(): Map {
+  list-collections({})
+},
+(opts: Map): Map {
+  request("GET", "/collections", "", opts)
 }
 
 create-collection
 meta {
-    doc: """PUT /collections/{name} - Create a collection. The 3-arity form sets the distance metric ("Cosine" default, "Euclid", "Dot")."""
+    doc: """PUT /collections/{name} - Create a collection. The 3-arity form sets the distance metric ("Cosine" default, "Euclid", "Dot") or takes `opts`; the 4-arity form takes both."""
 }
 fn
 (name: Str, dimension: Int): Any {
   create-collection(name, dimension, "Cosine")
 },
+(name: Str, dimension: Int, opts: Map): Any {
+  create-collection(name, dimension, "Cosine", opts)
+},
 (name: Str, dimension: Int, distance: Str): Any {
-  request("PUT", `/collections/${name}`, {vectors: {size: dimension, distance: distance}})
+  create-collection(name, dimension, distance, {})
+},
+(name: Str, dimension: Int, distance: Str, opts: Map): Any {
+  request("PUT", `/collections/${name}`, {vectors: {size: dimension, distance: distance}}, opts)
 }
 
 get-collection
 meta {
     doc: """GET /collections/{name} - Collection info: vector config, point count, status."""
 }
-fn (name: Str): Map {
-  request("GET", `/collections/${name}`, "")
+fn
+(name: Str): Map {
+  get-collection(name, {})
+},
+(name: Str, opts: Map): Map {
+  request("GET", `/collections/${name}`, "", opts)
 }
 
 delete-collection
 meta {
     doc: """DELETE /collections/{name} - Drop a collection and its points."""
 }
-fn (name: Str): Any {
-  request("DELETE", `/collections/${name}`, "")
+fn
+(name: Str): Any {
+  delete-collection(name, {})
+},
+(name: Str, opts: Map): Any {
+  request("DELETE", `/collections/${name}`, "", opts)
 }
 
 // ---------------------------------------------------------------------------
@@ -123,8 +161,12 @@ meta {
     ```
     """
 }
-fn (collection: Str, points: Vec): Any {
-  request("PUT", `/collections/${collection}/points?wait=true`, {points: points})
+fn
+(collection: Str, points: Vec): Any {
+  upsert-points(collection, points, {})
+},
+(collection: Str, points: Vec, opts: Map): Any {
+  request("PUT", `/collections/${collection}/points?wait=true`, {points: points}, opts)
 }
 
 search
@@ -148,24 +190,36 @@ meta {
     ```
     """
 }
-fn (collection: Str, options: Map): Vec {
-  request("POST", `/collections/${collection}/points/search`, {limit: 10, ...options})
+fn
+(collection: Str, options: Map): Vec {
+  search(collection, options, {})
+},
+(collection: Str, options: Map, opts: Map): Vec {
+  request("POST", `/collections/${collection}/points/search`, {limit: 10, ...options}, opts)
 }
 
 get-points
 meta {
     doc: """POST /collections/{name}/points - Retrieve points by ids (payloads included)."""
 }
-fn (collection: Str, ids: Vec): Vec {
-  request("POST", `/collections/${collection}/points`, {ids: ids, with_payload: true})
+fn
+(collection: Str, ids: Vec): Vec {
+  get-points(collection, ids, {})
+},
+(collection: Str, ids: Vec, opts: Map): Vec {
+  request("POST", `/collections/${collection}/points`, {ids: ids, with_payload: true}, opts)
 }
 
 delete-points
 meta {
     doc: """POST /collections/{name}/points/delete - Delete by ids (`{points: [...]}`) or by filter (`{filter: {...}}`)."""
 }
-fn (collection: Str, selector: Map): Any {
-  request("POST", `/collections/${collection}/points/delete?wait=true`, selector)
+fn
+(collection: Str, selector: Map): Any {
+  delete-points(collection, selector, {})
+},
+(collection: Str, selector: Map, opts: Map): Any {
+  request("POST", `/collections/${collection}/points/delete?wait=true`, selector, opts)
 }
 
 count-points
@@ -178,4 +232,8 @@ fn
 },
 (collection: Str, filter: Map): Map {
   request("POST", `/collections/${collection}/points/count`, {filter: filter})
+},
+// With opts, an empty filter counts everything: `count-points(name, {}, opts)`.
+(collection: Str, filter: Map, opts: Map): Map {
+  request("POST", `/collections/${collection}/points/count`, if(is-empty(filter), {}, {filter: filter}), opts)
 }

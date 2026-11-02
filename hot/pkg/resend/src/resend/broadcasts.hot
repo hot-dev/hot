@@ -66,9 +66,17 @@ retrieve-list-broadcasts
 meta {
     doc: """Retrieve all broadcasts in your Resend account, including draft, scheduled, and sent."""
 }
-fn (request: GETBroadcastsRequest): GETBroadcastsResponse {
-  response api-request("GET", `${::resend/BASE_URL}/broadcasts`)
-  if(is-ok-response(response), GETBroadcastsResponse(response.body), err(HttpError(response)))
+fn
+(request: GETBroadcastsRequest): GETBroadcastsResponse {
+  retrieve-list-broadcasts(request, {})
+},
+(request: GETBroadcastsRequest, opts: Map): GETBroadcastsResponse {
+  response api-request("GET", `${::resend/BASE_URL}/broadcasts`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { GETBroadcastsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 POSTBroadcastsRequest type {
@@ -92,9 +100,17 @@ create-broadcast
 meta {
     doc: """Create a new broadcast draft targeting a specific audience. Must be sent separately via send-or-schedule-broadcast."""
 }
-fn (request: POSTBroadcastsRequest): POSTBroadcastsResponse {
-  response api-request("POST", `${::resend/BASE_URL}/broadcasts`, {}, request)
-  if(is-ok-response(response), POSTBroadcastsResponse(response.body), err(HttpError(response)))
+fn
+(request: POSTBroadcastsRequest): POSTBroadcastsResponse {
+  create-broadcast(request, {})
+},
+(request: POSTBroadcastsRequest, opts: Map): POSTBroadcastsResponse {
+  response api-request("POST", `${::resend/BASE_URL}/broadcasts`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { POSTBroadcastsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 GETBroadcastsIdRequest type {
@@ -120,9 +136,17 @@ retrieve-single-broadcast
 meta {
     doc: """Retrieve a single broadcast by its ID, including status, schedule, and content details."""
 }
-fn (request: GETBroadcastsIdRequest): GETBroadcastsIdResponse {
-  response api-request("GET", `${::resend/BASE_URL}/broadcasts/${request.id}`)
-  if(is-ok-response(response), GETBroadcastsIdResponse(response.body), err(HttpError(response)))
+fn
+(request: GETBroadcastsIdRequest): GETBroadcastsIdResponse {
+  retrieve-single-broadcast(request, {})
+},
+(request: GETBroadcastsIdRequest, opts: Map): GETBroadcastsIdResponse {
+  response api-request("GET", `${::resend/BASE_URL}/broadcasts/${request.id}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { GETBroadcastsIdResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 DELETEBroadcastsIdRequest type {
@@ -140,9 +164,17 @@ remove-existing-broadcast-that-is-draft-status
 meta {
     doc: """Remove an existing broadcast. Only broadcasts in draft status can be deleted."""
 }
-fn (request: DELETEBroadcastsIdRequest): DELETEBroadcastsIdResponse {
-  response api-request("DELETE", `${::resend/BASE_URL}/broadcasts/${request.id}`)
-  if(is-ok-response(response), DELETEBroadcastsIdResponse(response.body), err(HttpError(response)))
+fn
+(request: DELETEBroadcastsIdRequest): DELETEBroadcastsIdResponse {
+  remove-existing-broadcast-that-is-draft-status(request, {})
+},
+(request: DELETEBroadcastsIdRequest, opts: Map): DELETEBroadcastsIdResponse {
+  response api-request("DELETE", `${::resend/BASE_URL}/broadcasts/${request.id}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { DELETEBroadcastsIdResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 POSTBroadcastsIdSendRequest type {
@@ -158,7 +190,15 @@ send-or-schedule-broadcast
 meta {
     doc: """Send a broadcast immediately or schedule it for later delivery via scheduled_at."""
 }
-fn (id: Str, request: POSTBroadcastsIdSendRequest): POSTBroadcastsIdSendResponse {
-  response api-request("POST", `${::resend/BASE_URL}/broadcasts/${id}/send`, {}, request)
-  if(is-ok-response(response), POSTBroadcastsIdSendResponse(response.body), err(HttpError(response)))
+fn
+(id: Str, request: POSTBroadcastsIdSendRequest): POSTBroadcastsIdSendResponse {
+  send-or-schedule-broadcast(id, request, {})
+},
+(id: Str, request: POSTBroadcastsIdSendRequest, opts: Map): POSTBroadcastsIdSendResponse {
+  response api-request("POST", `${::resend/BASE_URL}/broadcasts/${id}/send`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { POSTBroadcastsIdSendResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

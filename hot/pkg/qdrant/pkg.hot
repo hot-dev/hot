@@ -2,8 +2,8 @@
 
 hot.pkg.qdrant {
   name: "hot.dev/qdrant",
-  version: "0.1.0",
-  hot-min-version: "2.6.0",
+  version: "0.2.0",
+  hot-min-version: "3.0.2",
   description: "Qdrant vector database bindings for Hot. Collections and points (upsert/search/retrieve/delete) for self-hosted or cloud RAG.",
   author: "Hot Dev",
   email: "support@hot.dev",
