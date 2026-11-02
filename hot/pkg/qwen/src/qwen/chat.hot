@@ -203,9 +203,17 @@ meta {
     ```
     """
 }
-fn (request: ChatCompletionRequest): ChatCompletionResponse | HttpError {
-    response ::qwen::api/request("POST", "/chat/completions", {}, request-body(request))
-    if(is-ok-response(response), ChatCompletionResponse(response.body), err(HttpError(response)))
+fn
+(request: ChatCompletionRequest): ChatCompletionResponse | HttpError {
+    complete(request, {})
+},
+(request: ChatCompletionRequest, opts: Map): ChatCompletionResponse | HttpError {
+    response ::qwen::api/request("POST", "/chat/completions", {}, request-body(request), opts)
+    cond {
+        is-err(response) => { response }
+        is-ok-response(response) => { ChatCompletionResponse(response.body) }
+        => { err(HttpError(response)) }
+    }
 }
 
 request-body
@@ -253,11 +261,16 @@ meta {
     ```
     """
 }
-fn (request: ChatCompletionRequest): StreamingChatResponse | HttpError {
+fn
+(request: ChatCompletionRequest): StreamingChatResponse | HttpError {
+    complete-stream(request, {})
+},
+(request: ChatCompletionRequest, opts: Map): StreamingChatResponse | HttpError {
     // Force stream: true
     streaming-request {...request-body(request), stream: true}
-    response ::qwen::api/request-stream("POST", "/chat/completions", {}, streaming-request)
+    response ::qwen::api/request-stream("POST", "/chat/completions", {}, streaming-request, opts)
     cond {
+        is-err(response) => { response }
         gte(response.status, 400) => { err(HttpError(response)) }
         => { StreamingChatResponse(response) }
     }
@@ -289,12 +302,21 @@ meta {
 }
 fn
 (model: Str, message: Str): Str {
-    chat(model, message, null, null)
+    chat(model, message, null, null, {})
+},
+(model: Str, message: Str, opts: Map): Str {
+    chat(model, message, null, null, opts)
 },
 (model: Str, message: Str, system: Str): Str {
-    chat(model, message, system, null)
+    chat(model, message, system, null, {})
+},
+(model: Str, message: Str, system: Str, opts: Map): Str {
+    chat(model, message, system, null, opts)
 },
 (model: Str, message: Str, system: Str?, max-tokens: Int?): Str {
+    chat(model, message, system, max-tokens, {})
+},
+(model: Str, message: Str, system: Str?, max-tokens: Int?, opts: Map): Str {
     messages cond {
         is-null(system) => {
             [Message({role: "user", content: message})]
@@ -313,11 +335,11 @@ fn
         max_tokens: or(max-tokens, 4096)
     }
 
-    response complete(ChatCompletionRequest(request))
+    response complete(ChatCompletionRequest(request), opts)
 
-    match response {
-        Result.Err => { err(response) }
-        Result.Ok => { extract-response-text(response) }
+    cond {
+        is-err(response) => { response }
+        => { extract-response-text(response) }
     }
 }
 

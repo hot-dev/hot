@@ -23,9 +23,69 @@ required-secret fn (values: Vec<Any>, label: Str, sources: Str): Str {
   value
 }
 
+sources-from
+meta {
+    doc: """
+    The values every Supabase call starts from, without per-call options
+    (pure), from `values`, a Map of context and environment variables by
+    name. The precedence is:
+
+    - URL: `supabase.url`, `SUPABASE_URL`
+    - anon key: `supabase.anon.key`, `supabase.api.key`,
+      `SUPABASE_ANON_KEY`, `SUPABASE_API_KEY`
+    - service key: `supabase.service.key`, `supabase.service.role.key`,
+      `SUPABASE_SERVICE_KEY`, `SUPABASE_SERVICE_ROLE_KEY`
+
+    Returns `{url, anon-key, service-key}`, each null when unset.
+    """
+}
+fn (values: Map): Map {
+  {
+    url: first-secret([get(values, "supabase.url"), get(values, "SUPABASE_URL")]),
+    anon-key: first-secret([
+      get(values, "supabase.anon.key"),
+      get(values, "supabase.api.key"),
+      get(values, "SUPABASE_ANON_KEY"),
+      get(values, "SUPABASE_API_KEY")
+    ]),
+    service-key: first-secret([
+      get(values, "supabase.service.key"),
+      get(values, "supabase.service.role.key"),
+      get(values, "SUPABASE_SERVICE_KEY"),
+      get(values, "SUPABASE_SERVICE_ROLE_KEY")
+    ])
+  }
+}
+
+sources
+meta {
+    ctx: {
+        "supabase.url": {required: false, secret: false},
+        "supabase.anon.key": {required: false},
+        "supabase.api.key": {required: false},
+        "supabase.service.key": {required: false},
+        "supabase.service.role.key": {required: false}
+    },
+    doc: """The live context and environment values, by `sources-from`."""
+}
+fn (): Map {
+  sources-from({
+    "supabase.url": ::ctx/get("supabase.url"),
+    "supabase.anon.key": ::ctx/get("supabase.anon.key"),
+    "supabase.api.key": ::ctx/get("supabase.api.key"),
+    "supabase.service.key": ::ctx/get("supabase.service.key"),
+    "supabase.service.role.key": ::ctx/get("supabase.service.role.key"),
+    "SUPABASE_URL": ::env/get("SUPABASE_URL", ""),
+    "SUPABASE_ANON_KEY": ::env/get("SUPABASE_ANON_KEY", ""),
+    "SUPABASE_API_KEY": ::env/get("SUPABASE_API_KEY", ""),
+    "SUPABASE_SERVICE_KEY": ::env/get("SUPABASE_SERVICE_KEY", ""),
+    "SUPABASE_SERVICE_ROLE_KEY": ::env/get("SUPABASE_SERVICE_ROLE_KEY", "")
+  })
+}
+
 project-url
 meta {
-    ctx: {"supabase.url": {required: true}},
+    ctx: {"supabase.url": {required: false, secret: false}},
     doc: """Return the Supabase project URL from context. Example: `https://xxxx.supabase.co`."""
 }
 fn (): Str {
@@ -37,7 +97,7 @@ fn (): Str {
 
 anon-key
 meta {
-    ctx: {"supabase.anon.key": {required: true}},
+    ctx: {"supabase.anon.key": {required: false}},
     doc: """Return the Supabase anon/public key from context."""
 }
 fn (): Str {

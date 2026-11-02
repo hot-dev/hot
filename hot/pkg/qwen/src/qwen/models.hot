@@ -46,9 +46,17 @@ meta {
     ```
     """
 }
-fn (): ModelsListResponse | HttpError {
-    response ::qwen::api/request("GET", "/models")
-    if(is-ok-response(response), ModelsListResponse(response.body), err(HttpError(response)))
+fn
+(): ModelsListResponse | HttpError {
+    list({})
+},
+(opts: Map): ModelsListResponse | HttpError {
+    response ::qwen::api/request("GET", "/models", {}, "", opts)
+    cond {
+        is-err(response) => { response }
+        is-ok-response(response) => { ModelsListResponse(response.body) }
+        => { err(HttpError(response)) }
+    }
 }
 
 get
@@ -67,9 +75,17 @@ meta {
     ```
     """
 }
-fn (model-id: Str): Model | HttpError {
-    response ::qwen::api/request("GET", model-path(model-id))
-    if(is-ok-response(response), Model(response.body), err(HttpError(response)))
+fn
+(model-id: Str): Model | HttpError {
+    get(model-id, {})
+},
+(model-id: Str, opts: Map): Model | HttpError {
+    response ::qwen::api/request("GET", model-path(model-id), {}, "", opts)
+    cond {
+        is-err(response) => { response }
+        is-ok-response(response) => { Model(response.body) }
+        => { err(HttpError(response)) }
+    }
 }
 
 model-path

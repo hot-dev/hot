@@ -25,7 +25,9 @@ decoded ::jwt/decode(token)
 decoded.header.kid
 ```
 
-Verification returns the payload claims or an Err describing the failure (bad signature, expired, wrong issuer/audience) — branch with `is-err` / `if-err`. Clock-skew leeway defaults to 60 seconds. `verify-es256` requires Hot 3.0.2 or later; everything else works on 2.6.1.
+Verification returns the payload claims or an Err describing the failure (bad signature, expired, wrong issuer/audience) — branch with `is-err` / `if-err`. Clock-skew leeway defaults to 60 seconds. This package requires Hot 3.0.2 or later.
+
+Shared secrets and private keys passed to `sign` and `verify`, and the tokens `sign` returns, are masked in the run's call records, including inside longer strings. The values themselves come back unchanged. A secret shorter than 8 bytes is masked only as a whole value. The `n`/`e` and `x`/`y` arguments of `verify-rs256` and `verify-es256` are public keys, so they stay readable.
 
 ## License
 

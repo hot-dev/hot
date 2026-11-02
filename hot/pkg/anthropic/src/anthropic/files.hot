@@ -3,7 +3,7 @@ meta {
     doc: """Anthropic Files API (Beta) - Upload and manage files for use across API calls."""
 }
 
-api-request ::anthropic::api/request
+api-call ::anthropic::api/call
 HttpError ::anthropic::api/HttpError
 is-ok-response ::hot::http/is-ok-response
 
@@ -60,11 +60,17 @@ meta {
 }
 fn
 (): FilesListResponse {
-    response api-request("GET", `${::anthropic/BASE_URL}/v1/files`, {anthropic-beta: BETA_HEADER})
+    list({})
+},
+(opts: Map): FilesListResponse {
+    response api-call("GET", `/v1/files`, {anthropic-beta: BETA_HEADER}, "", opts)
     if(is-ok-response(response), FilesListResponse(response.body), err(HttpError(response)))
 },
 (limit: Int): FilesListResponse {
-    response api-request("GET", `${::anthropic/BASE_URL}/v1/files?limit=${limit}`, {anthropic-beta: BETA_HEADER})
+    list(limit, {})
+},
+(limit: Int, opts: Map): FilesListResponse {
+    response api-call("GET", `/v1/files?limit=${limit}`, {anthropic-beta: BETA_HEADER}, "", opts)
     if(is-ok-response(response), FilesListResponse(response.body), err(HttpError(response)))
 }
 
@@ -85,7 +91,10 @@ meta {
     """
 }
 fn (file_id: Str): FileMetadata {
-    response api-request("GET", `${::anthropic/BASE_URL}/v1/files/${file_id}`, {anthropic-beta: BETA_HEADER})
+    get(file_id, {})
+},
+(file_id: Str, opts: Map): FileMetadata {
+    response api-call("GET", `/v1/files/${file_id}`, {anthropic-beta: BETA_HEADER}, "", opts)
     if(is-ok-response(response), FileMetadata(response.body), err(HttpError(response)))
 }
 
@@ -104,7 +113,10 @@ meta {
     """
 }
 fn (file_id: Str): Map {
-    response api-request("DELETE", `${::anthropic/BASE_URL}/v1/files/${file_id}`, {anthropic-beta: BETA_HEADER})
+    delete(file_id, {})
+},
+(file_id: Str, opts: Map): Map {
+    response api-call("DELETE", `/v1/files/${file_id}`, {anthropic-beta: BETA_HEADER}, "", opts)
     if(is-ok-response(response), response.body, err(HttpError(response)))
 }
 
@@ -123,7 +135,10 @@ meta {
     """
 }
 fn (file_id: Str): Any {
-    response api-request("GET", `${::anthropic/BASE_URL}/v1/files/${file_id}/content`, {anthropic-beta: BETA_HEADER})
+    download(file_id, {})
+},
+(file_id: Str, opts: Map): Any {
+    response api-call("GET", `/v1/files/${file_id}/content`, {anthropic-beta: BETA_HEADER}, "", opts)
     if(is-ok-response(response), response.body, err(HttpError(response)))
 }
 

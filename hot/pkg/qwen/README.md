@@ -10,13 +10,13 @@ Add this to the `deps` in your `hot.hot` file:
 "hot.dev/qwen": "1.0.3"
 ```
 
-It pulls in `hot.dev/openai` 1.3.0 and `hot.dev/hot-ai` 1.8.1.
+It pulls in `hot.dev/openai` 1.3.0 and `hot.dev/hot-ai` 1.9.0.
 
 ## Setup
 
 | Context Variable | Description |
 |---|---|
-| `qwen.api.key` | Model Studio (DashScope) API key, `DASHSCOPE_API_KEY` in Alibaba's docs. Keys are bound to the region they were created in. |
+| `qwen.api.key` | Model Studio (DashScope) API key, `DASHSCOPE_API_KEY` in Alibaba's docs. Keys are bound to the region they were created in. A call with no key here or in its `opts` is an Err naming both. |
 | `qwen.region` | Optional. `intl` (Singapore, default), `us` (Virginia), `cn` (Beijing), `hk` (Hong Kong), `eu` (Frankfurt) or `jp` (Tokyo). Region ids such as `us-east-1` and names such as `singapore` also work. |
 | `qwen.workspace.id` | Optional. Use the workspace domain `https://{id}.{region-id}.maas.aliyuncs.com/compatible-mode/v1`. Required for `eu` and `jp`, which have no shared domain. |
 | `qwen.base.url` | Optional. Overrides everything above, for example to use a proxy. |
@@ -40,6 +40,41 @@ A ctx file:
     "qwen.region": ::hot::env/get("QWEN_REGION", "")
 }, (v) { not(is-empty(v)) }))
 ```
+
+## Per-call credentials
+
+Every function that calls the API takes a trailing `opts` Map that wins over ctx for that call, so one run can serve many tenants. Nothing is written to ctx.
+
+| `opts` key | ctx key | Notes |
+| --- | --- | --- |
+| `api-key` | `qwen.api.key` | Present but null or blank is an Err, never a fallback to ctx |
+| `region` | `qwen.region` | Needs `api-key` in `opts`. Must be a known region or alias |
+| `workspace-id` | `qwen.workspace.id` | Needs `api-key` in `opts`. Must be a plain DNS label. Without `region` it uses `qwen.region` |
+| `base-url` | `qwen.base.url` | Needs `api-key` in `opts`. Wins over `region` and `workspace-id` |
+| `endpoint` | | An `::openai::api/Endpoint`, on its own. Reads no ctx |
+
+`qwen.api.key` is never sent to a per-call host: `region`, `workspace-id` or `base-url` without `api-key` is an Err naming both. A per-call `region` doesn't use `qwen.workspace.id`, because a workspace lives in one region.
+
+```hot
+answer ::qwen::chat/chat("qwen3.8-flash", "What is the capital of France?", {api-key: tenant-key, region: "us"})
+vector ::qwen::embeddings/embed("Hello world", {api-key: tenant-key})
+models ::qwen::models/list({api-key: tenant-key, region: "eu", workspace-id: "llm-abc123"})
+```
+
+The hot-ai run loop passes `ChatOptions.provider-opts` through to Qwen's registration:
+
+```hot
+ask fn (tenant-key: Str, question: Str): Str {
+    opts ::ai::chat/ChatOptions({
+        model: "qwen3.8-flash",
+        providers: ::ai::chat/with-providers([::qwen::ai/provider()]),
+        provider-opts: {api-key: tenant-key, region: "us"}
+    })
+    ::ai::chat/run-loop(opts, question)
+}
+```
+
+Keys passed in `opts` or an `Endpoint` are masked in the run's call records, including inside strings like `Bearer ${key}`. A key shorter than 8 bytes is masked only as a whole value.
 
 ## Quick start
 
@@ -65,7 +100,7 @@ println(::chat/extract-response-text(response))
 
 ### Agent loop with tools (hot-ai)
 
-`::qwen::ai/provider()` registers Qwen for models whose id starts with `qwen`. Use `qwen/<model>` for other models Model Studio hosts, such as `qwen/deepseek-v4.1-flash`; the `qwen/` part is stripped before the request.
+`::qwen::ai/provider()` registers Qwen for models whose id starts with `qwen`. Use `qwen/<model>` for other models Model Studio hosts, such as `qwen/deepseek-v4.1-flash`; the `qwen/` part is stripped before the request. Its `variant` is `Provider.Qwen`, so Qwen keeps its own identity in the registry.
 
 ```hot
 add-numbers
@@ -84,9 +119,9 @@ ask fn (question: Str): Str {
 }
 ```
 
-`QwenOptions` sets the Qwen-specific fields on every request: `max-tokens` (default 4096, sent as `max_tokens`), `enable-thinking`, `thinking-budget`, `preserve-thinking`, `enable-search`, `search-options`, `enable-code-interpreter`, `top-k`, `repetition-penalty`, `reasoning-effort`, and `extra` for anything else. Unset fields are not sent, so model defaults apply. `::qwen::ai/chat-fn(opts)` and `chat-stream-fn(opts)` return the bound functions for `ChatOptions.chat-fn` / `chat-stream-fn`. `provider-for(endpoint, opts)` takes an explicit endpoint, such as `::qwen::api/endpoint-for("us", null, key)`, and reads no ctx.
+`QwenOptions` sets the Qwen-specific fields on every request: `max-tokens` (default 4096, sent as `max_tokens`), `enable-thinking`, `thinking-budget`, `preserve-thinking`, `enable-search`, `search-options`, `enable-code-interpreter`, `top-k`, `repetition-penalty`, `reasoning-effort`, and `extra` for anything else. Unset fields are not sent, so model defaults apply. `::qwen::ai/chat-fn(opts)` and `chat-stream-fn(opts)` return the bound functions for `ChatOptions.chat-fn` / `chat-stream-fn`, and `chat-opts-fn(opts)` and `chat-stream-opts-fn(opts)` those for `chat-opts-fn` / `chat-stream-opts-fn`. `provider-for(endpoint, opts)` takes an explicit endpoint, such as `::qwen::api/endpoint-for("us", null, key)`, and reads no ctx.
 
-Build the registry inside a function, as above: `provider()` reads ctx, which is set when the run starts.
+Build the registry inside a function, as above: `provider()` reads ctx, which is set when the run starts. It builds without `qwen.api.key`, and a call is then an Err unless `provider-opts` carries an `api-key`.
 
 ### Streaming
 
@@ -199,12 +234,12 @@ for-each(::qwen::models/list().data, (model) { println(model.id) })
 
 | Module | Functions |
 |---|---|
-| `::qwen` | `base-url`, `resolve-base-url`, `region-info`, `REGIONS`, `BASE_URL`, `BASE_URL_US`, `BASE_URL_CN`, `BASE_URL_HK` |
+| `::qwen` | `base-url`, `resolve-base-url`, `region-info`, `is-workspace-id`, `REGIONS`, `BASE_URL`, `BASE_URL_US`, `BASE_URL_CN`, `BASE_URL_HK` |
 | `::qwen::chat` | `complete`, `complete-stream`, `chat`, `request-body`, message helpers, `extract-response-text`, `extract-chunk-text`, `extract-chunk-reasoning`, `is-stream-done` |
-| `::qwen::ai` | `provider`, `provider-for`, `chat-fn`, `chat-stream-fn`, `QwenOptions`, `extra-body`, `request-options`, `compatible`, `is-qwen-model` |
+| `::qwen::ai` | `provider`, `provider-for`, `chat-fn`, `chat-stream-fn`, `chat-opts-fn`, `chat-stream-opts-fn`, `QwenOptions`, `extra-body`, `request-options`, `compatible`, `is-qwen-model`, `QWEN_PROVIDER` |
 | `::qwen::embeddings` | `create`, `embed`, `embed-batch`, `request-body` |
 | `::qwen::models` | `list`, `get`, `model-path`, model id constants |
-| `::qwen::api` | `endpoint`, `endpoint-for`, `request`, `request-stream` |
+| `::qwen::api` | `resolve`, `endpoint`, `endpoint-for`, `request`, `request-stream` |
 
 ## Models
 

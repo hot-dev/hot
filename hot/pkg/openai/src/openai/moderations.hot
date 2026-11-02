@@ -89,9 +89,17 @@ meta {
     ```
     """
 }
-fn (request: ModerationRequest): ModerationResponse {
-    response api-request("POST", `${::openai::api/base-url()}/moderations`, {}, request)
-    if(is-ok-response(response), ModerationResponse(response.body), err(HttpError(response)))
+fn
+(request: ModerationRequest): ModerationResponse {
+    create(request, {})
+},
+(request: ModerationRequest, opts: Map): ModerationResponse {
+    response api-request("POST", "/moderations", {}, request, opts)
+    cond {
+        is-err(response) => { response }
+        is-ok-response(response) => { ModerationResponse(response.body) }
+        => { err(HttpError(response)) }
+    }
 }
 
 // =============================================================================
@@ -109,18 +117,21 @@ meta {
     is-flagged ::openai::moderations/check("Hello world")
     // Returns: false
     ```
+
+    A failed call is an Err, never `false`: "not flagged" must mean the API
+    said so.
     """
 }
-fn (text: Str): Bool {
-    response create(ModerationRequest({input: text}))
+fn
+(text: Str): Bool {
+    check(text, {})
+},
+(text: Str, opts: Map): Bool {
+    response create(ModerationRequest({input: text}), opts)
 
-    match response {
-        ModerationResponse => {
-            cond {
-                gt(length(response.results), 0) => { response.results[0].flagged }
-                => { false }
-            }
-        }
+    cond {
+        is-err(response) => { response }
+        gt(length(response.results), 0) => { response.results[0].flagged }
         => { false }
     }
 }

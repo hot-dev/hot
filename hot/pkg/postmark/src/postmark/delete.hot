@@ -35,8 +35,12 @@ meta {
     ```
     """
 }
-fn (request: DeleteTemplateRequest): DeleteTemplateResponse {
-  response api-request("DELETE", `${::postmark/BASE_URL}/templates/${request.template-id-or-alias}`)
+fn
+(request: DeleteTemplateRequest): DeleteTemplateResponse {
+  delete-template(request, {})
+},
+(request: DeleteTemplateRequest, opts: Map): DeleteTemplateResponse {
+  response api-request("DELETE", `${::postmark/BASE_URL}/templates/${request.template-id-or-alias}`, {}, "", opts)
   if(is-ok-response(response), DeleteTemplateResponse(response.body), err(HttpError(response)))
 }
 
@@ -52,7 +56,11 @@ DeleteInboundRuleResponse type {
 
 delete-single-trigger
 meta {doc: """Delete a single inbound rule trigger by its ID."""}
-fn (request: DeleteInboundRuleRequest): DeleteInboundRuleResponse {
-  response api-request("DELETE", `${::postmark/BASE_URL}/triggers/inboundrules/${request.triggerid}`)
+fn
+(request: DeleteInboundRuleRequest): DeleteInboundRuleResponse {
+  delete-single-trigger(request, {})
+},
+(request: DeleteInboundRuleRequest, opts: Map): DeleteInboundRuleResponse {
+  response api-request("DELETE", `${::postmark/BASE_URL}/triggers/inboundrules/${request.triggerid}`, {}, "", opts)
   if(is-ok-response(response), DeleteInboundRuleResponse(response.body), err(HttpError(response)))
 }

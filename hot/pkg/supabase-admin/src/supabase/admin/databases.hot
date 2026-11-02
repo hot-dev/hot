@@ -40,32 +40,48 @@ config ::databases/get-postgres-config("my-project-ref")
 ```
 """
 }
-fn (project-ref: Str): Map {
-  ::api/request("GET", `/projects/${project-ref}/config/database/postgres`)
+fn
+(project-ref: Str): Map {
+  get-postgres-config(project-ref, {})
+},
+(project-ref: Str, opts: Map): Map {
+  ::api/request("GET", `/projects/${project-ref}/config/database/postgres`, {}, {}, opts)
 }
 
 update-postgres-config
 meta {
     doc: """Update Postgres configuration. Pass a Map of config fields (e.g. `{statement_timeout: "30s", max_connections: 200}`)."""
 }
-fn (project-ref: Str, config: Map): Map {
-  ::api/request("PUT", `/projects/${project-ref}/config/database/postgres`, {}, config)
+fn
+(project-ref: Str, config: Map): Map {
+  update-postgres-config(project-ref, config, {})
+},
+(project-ref: Str, config: Map, opts: Map): Map {
+  ::api/request("PUT", `/projects/${project-ref}/config/database/postgres`, {}, config, opts)
 }
 
 get-pooler-config
 meta {
     doc: """Get the current Supavisor connection pooler configuration."""
 }
-fn (project-ref: Str): Vec<Map> {
-  ::api/request("GET", pooler-path(project-ref))
+fn
+(project-ref: Str): Vec<Map> {
+  get-pooler-config(project-ref, {})
+},
+(project-ref: Str, opts: Map): Vec<Map> {
+  ::api/request("GET", pooler-path(project-ref), {}, {}, opts)
 }
 
 update-pooler-config
 meta {
     doc: """Update the Supavisor connection pooler configuration."""
 }
-fn (project-ref: Str, config: Map): Map {
-  ::api/request("PATCH", pooler-path(project-ref), {}, config)
+fn
+(project-ref: Str, config: Map): Map {
+  update-pooler-config(project-ref, config, {})
+},
+(project-ref: Str, config: Map, opts: Map): Map {
+  ::api/request("PATCH", pooler-path(project-ref), {}, config, opts)
 }
 
 // ============================================================================
@@ -87,8 +103,12 @@ backups ::databases/list-backups("my-project-ref")
 ```
 """
 }
-fn (project-ref: Str): Vec<Backup> {
-  ::api/request("GET", `/projects/${project-ref}/database/backups`)
+fn
+(project-ref: Str): Vec<Backup> {
+  list-backups(project-ref, {})
+},
+(project-ref: Str, opts: Map): Vec<Backup> {
+  ::api/request("GET", `/projects/${project-ref}/database/backups`, {}, {}, opts)
 }
 
 // ============================================================================
@@ -99,8 +119,12 @@ list-migrations
 meta {
     doc: """List database migrations that have been run on a project."""
 }
-fn (project-ref: Str): Vec<Migration> {
-  ::api/request("GET", `/projects/${project-ref}/database/migrations`)
+fn
+(project-ref: Str): Vec<Migration> {
+  list-migrations(project-ref, {})
+},
+(project-ref: Str, opts: Map): Vec<Migration> {
+  ::api/request("GET", `/projects/${project-ref}/database/migrations`, {}, {}, opts)
 }
 
 // ============================================================================
@@ -129,8 +153,12 @@ result ::databases/run-query(::databases/RunQueryRequest({
 ```
 """
 }
-fn (request: RunQueryRequest): Any {
-  ::api/request("POST", `/projects/${request.project_ref}/database/query`, {}, {query: request.query})
+fn
+(request: RunQueryRequest): Any {
+  run-query(request, {})
+},
+(request: RunQueryRequest, opts: Map): Any {
+  ::api/request("POST", `/projects/${request.project_ref}/database/query`, {}, {query: request.query}, opts)
 }
 
 // ============================================================================
@@ -141,16 +169,24 @@ list-read-replicas
 meta {
     doc: """List read replicas for a project."""
 }
-fn (project-ref: Str): Vec<Map> {
-  ::api/request("GET", `/projects/${project-ref}/read-replicas`)
+fn
+(project-ref: Str): Vec<Map> {
+  list-read-replicas(project-ref, {})
+},
+(project-ref: Str, opts: Map): Vec<Map> {
+  ::api/request("GET", `/projects/${project-ref}/read-replicas`, {}, {}, opts)
 }
 
 get-readonly-mode
 meta {
     doc: """Check if the project database is in read-only mode."""
 }
-fn (project-ref: Str): Map {
-  ::api/request("GET", `/projects/${project-ref}/readonly`)
+fn
+(project-ref: Str): Map {
+  get-readonly-mode(project-ref, {})
+},
+(project-ref: Str, opts: Map): Map {
+  ::api/request("GET", `/projects/${project-ref}/readonly`, {}, {}, opts)
 }
 
 // ============================================================================
@@ -161,14 +197,22 @@ get-upgrade-status
 meta {
     doc: """Get the current database upgrade status."""
 }
-fn (project-ref: Str): Map {
-  ::api/request("GET", `/projects/${project-ref}/upgrade/status`)
+fn
+(project-ref: Str): Map {
+  get-upgrade-status(project-ref, {})
+},
+(project-ref: Str, opts: Map): Map {
+  ::api/request("GET", `/projects/${project-ref}/upgrade/status`, {}, {}, opts)
 }
 
 list-available-versions
 meta {
     doc: """List available Postgres versions for upgrade."""
 }
-fn (project-ref: Str): Map {
-  ::api/request("GET", upgrade-eligibility-path(project-ref))
+fn
+(project-ref: Str): Map {
+  list-available-versions(project-ref, {})
+},
+(project-ref: Str, opts: Map): Map {
+  ::api/request("GET", upgrade-eligibility-path(project-ref), {}, {}, opts)
 }

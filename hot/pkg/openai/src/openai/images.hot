@@ -121,15 +121,23 @@ meta {
     ```
     """
 }
-fn (request: CreateImageRequest): CreateImageResponse | HttpError {
+fn
+(request: CreateImageRequest): CreateImageResponse | HttpError {
+    generate(request, {})
+},
+(request: CreateImageRequest, opts: Map): CreateImageResponse | HttpError {
     // Default to dall-e-3 model if not specified
     final-request cond {
         is-null(request.model) => { {...untype(request), model: "dall-e-3"} }
         => { request }
     }
 
-    response api-request("POST", `${::openai::api/base-url()}/images/generations`, {}, final-request)
-    if(is-ok-response(response), CreateImageResponse(response.body), err(HttpError(response)))
+    response api-request("POST", "/images/generations", {}, final-request, opts)
+    cond {
+        is-err(response) => { response }
+        is-ok-response(response) => { CreateImageResponse(response.body) }
+        => { err(HttpError(response)) }
+    }
 }
 
 edit
@@ -147,9 +155,17 @@ meta {
     ```
     """
 }
-fn (request: EditImageRequest): CreateImageResponse | HttpError {
-    response api-request("POST", `${::openai::api/base-url()}/images/edits`, {}, request)
-    if(is-ok-response(response), CreateImageResponse(response.body), err(HttpError(response)))
+fn
+(request: EditImageRequest): CreateImageResponse | HttpError {
+    edit(request, {})
+},
+(request: EditImageRequest, opts: Map): CreateImageResponse | HttpError {
+    response api-request("POST", "/images/edits", {}, request, opts)
+    cond {
+        is-err(response) => { response }
+        is-ok-response(response) => { CreateImageResponse(response.body) }
+        => { err(HttpError(response)) }
+    }
 }
 
 variation
@@ -166,9 +182,17 @@ meta {
     ```
     """
 }
-fn (request: VariationImageRequest): CreateImageResponse | HttpError {
-    response api-request("POST", `${::openai::api/base-url()}/images/variations`, {}, request)
-    if(is-ok-response(response), CreateImageResponse(response.body), err(HttpError(response)))
+fn
+(request: VariationImageRequest): CreateImageResponse | HttpError {
+    variation(request, {})
+},
+(request: VariationImageRequest, opts: Map): CreateImageResponse | HttpError {
+    response api-request("POST", "/images/variations", {}, request, opts)
+    cond {
+        is-err(response) => { response }
+        is-ok-response(response) => { CreateImageResponse(response.body) }
+        => { err(HttpError(response)) }
+    }
 }
 
 // ============================================================================
@@ -210,17 +234,23 @@ meta {
 }
 fn
 (path: Str, prompt: Str): AIMedia | HttpError {
-    generate-to-file(path, CreateImageRequest({prompt: prompt}))
+    generate-to-file(path, CreateImageRequest({prompt: prompt}), {})
+},
+(path: Str, prompt: Str, opts: Map): AIMedia | HttpError {
+    generate-to-file(path, CreateImageRequest({prompt: prompt}), opts)
 },
 (path: Str, request: CreateImageRequest): AIMedia | HttpError {
+    generate-to-file(path, request, {})
+},
+(path: Str, request: CreateImageRequest, opts: Map): AIMedia | HttpError {
     // Force base64 response format for file writing
     final-request {...untype(request), response_format: "b64_json"}
 
-    response generate(CreateImageRequest(final-request))
+    response generate(CreateImageRequest(final-request), opts)
 
-    match response {
-        HttpError => { response }
-        CreateImageResponse => {
+    cond {
+        is-err(response) => { response }
+        => {
             data response.data
             cond {
                 or(is-null(data), is-zero(length(data))) => {
@@ -287,17 +317,22 @@ meta {
     Note: DALL-E 3 only supports n=1, so this will make multiple API calls.
     """
 }
-fn (path-template: Str, prompt: Str, count: Int): AIMediaBatch {
+fn
+(path-template: Str, prompt: Str, count: Int): AIMediaBatch {
+    generate-batch-to-files(path-template, prompt, count, {})
+},
+(path-template: Str, prompt: Str, count: Int, opts: Map): AIMediaBatch {
     // DALL-E 3 only supports n=1, so we need multiple requests
     // For DALL-E 2, we could use n>1 in a single request
     results map(range(0, count), (i) {
         file-path ::hot::str/replace(path-template, "{n}", Str(i))
 
-        result generate-to-file(file-path, prompt)
+        result generate-to-file(file-path, prompt, opts)
 
-        match result {
-            AIMedia.Image => { {success: true, media: result} }
-            HttpError => { {success: false, error: AIMediaError({index: i, message: Str(result.body)})} }
+        cond {
+            is-err(result) => { {success: false, error: AIMediaError({index: i, message: err-message(result)})} }
+            is-type(result, AIMedia) => { {success: true, media: result} }
+            => { {success: false, error: AIMediaError({index: i, message: Str(result.body)})} }
         }
     })
 
@@ -332,10 +367,17 @@ meta {
     ```
     """
 }
-fn (prompt: Str): Str | HttpError {
-    create-image(prompt, null)
+fn
+(prompt: Str): Str | HttpError {
+    create-image(prompt, null, {})
+},
+(prompt: Str, opts: Map): Str | HttpError {
+    create-image(prompt, null, opts)
 },
 (prompt: Str, size: Str?): Str | HttpError {
+    create-image(prompt, size, {})
+},
+(prompt: Str, size: Str?, opts: Map): Str | HttpError {
     request {
         prompt: prompt,
         response_format: "url"
@@ -346,11 +388,11 @@ fn (prompt: Str): Str | HttpError {
         => { {...request, size: size} }
     }
 
-    response generate(CreateImageRequest(final-request))
+    response generate(CreateImageRequest(final-request), opts)
 
-    match response {
-        HttpError => { response }
-        CreateImageResponse => {
+    cond {
+        is-err(response) => { response }
+        => {
             data response.data
             cond {
                 or(is-null(data), is-zero(length(data))) => { "" }

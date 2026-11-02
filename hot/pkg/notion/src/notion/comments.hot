@@ -28,8 +28,12 @@ meta {
     ```
     """
 }
-fn (target: Map, text: Str): Map {
-  ::api/json("POST", "/comments", {}, build-comment-payload(target, text))
+fn
+(target: Map, text: Str): Map {
+  create-comment(target, text, {})
+},
+(target: Map, text: Str, opts: Map): Map {
+  ::api/json("POST", "/comments", {}, build-comment-payload(target, text), opts)
 }
 
 list-comments
@@ -41,5 +45,8 @@ fn
   list-comments(block-id, {})
 },
 (block-id: Str, options: Map): Map {
-  ::api/json("GET", `/comments${::hot::uri/query-string({block_id: block-id, ...options})}`)
+  list-comments(block-id, options, {})
+},
+(block-id: Str, options: Map, opts: Map): Map {
+  ::api/json("GET", `/comments${::hot::uri/query-string({block_id: block-id, ...options})}`, {}, "", opts)
 }

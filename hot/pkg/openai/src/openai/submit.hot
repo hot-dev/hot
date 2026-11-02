@@ -100,7 +100,15 @@ submit-tool-outputs-run
 meta {
     doc: """POST /threads/{thread_id}/runs/{run_id}/submit_tool_outputs - Submit tool call outputs to continue a run that requires action."""
 }
-fn (thread-id: Str, run-id: Str, request: SubmitToolOuputsToRunRequest): SubmitToolOuputsToRunResponse {
-  response api-request("POST", `${::openai::api/base-url()}/threads/${thread-id}/runs/${run-id}/submit_tool_outputs`, {}, request)
-  if(is-ok-response(response), SubmitToolOuputsToRunResponse(response.body), err(HttpError(response)))
+fn
+(thread-id: Str, run-id: Str, request: SubmitToolOuputsToRunRequest): SubmitToolOuputsToRunResponse {
+  submit-tool-outputs-run(thread-id, run-id, request, {})
+},
+(thread-id: Str, run-id: Str, request: SubmitToolOuputsToRunRequest, opts: Map): SubmitToolOuputsToRunResponse {
+  response api-request("POST", `/threads/${thread-id}/runs/${run-id}/submit_tool_outputs`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { SubmitToolOuputsToRunResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

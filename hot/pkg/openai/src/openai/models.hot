@@ -42,9 +42,17 @@ meta {
     ```
     """
 }
-fn (): ModelsListResponse {
-    response api-request("GET", `${::openai::api/base-url()}/models`)
-    if(is-ok-response(response), ModelsListResponse(response.body), err(HttpError(response)))
+fn
+(): ModelsListResponse {
+    list({})
+},
+(opts: Map): ModelsListResponse {
+    response api-request("GET", "/models", {}, "", opts)
+    cond {
+        is-err(response) => { response }
+        is-ok-response(response) => { ModelsListResponse(response.body) }
+        => { err(HttpError(response)) }
+    }
 }
 
 get
@@ -64,7 +72,15 @@ meta {
     ```
     """
 }
-fn (model_id: Str): Model {
-    response api-request("GET", `${::openai::api/base-url()}/models/${model_id}`)
-    if(is-ok-response(response), Model(response.body), err(HttpError(response)))
+fn
+(model_id: Str): Model {
+    get(model_id, {})
+},
+(model_id: Str, opts: Map): Model {
+    response api-request("GET", `/models/${model_id}`, {}, "", opts)
+    cond {
+        is-err(response) => { response }
+        is-ok-response(response) => { Model(response.body) }
+        => { err(HttpError(response)) }
+    }
 }

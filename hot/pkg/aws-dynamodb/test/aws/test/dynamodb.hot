@@ -1,0 +1,137 @@
+::aws::test::dynamodb ns
+meta ["test"]
+
+// Hermetic: no network, no aws.* context. A `transport` in opts stands in for the network.
+
+::items ::aws::dynamodb::items
+::query ::aws::dynamodb::query
+::batch ::aws::dynamodb::batch
+::tables ::aws::dynamodb::tables
+
+HttpResponse ::hot::http/HttpResponse
+
+// Every call is answered 418 with the signed request as the body.
+echo fn (): Map {
+    {
+        "access-key-id": "AKIDOPTS",
+        "secret-access-key": "opts-secret",
+        region: "eu-west-1",
+        transport: (req) { HttpResponse({status: 418, headers: {}, body: req}) }
+    }
+}
+
+// The request a call would have sent.
+sent fn (result: Result): Any {
+    if(is-err(result), err-value(result).body, result.body)
+}
+
+// Every call is answered 200 with these headers and body.
+answer fn (headers: Map, body: Any): Map {
+    {
+        "access-key-id": "AKIDOPTS",
+        "secret-access-key": "opts-secret",
+        region: "eu-west-1",
+        transport: (req) { HttpResponse({status: 200, headers: headers, body: body, body-bytes: if(is-bytes(body), body, Bytes(""))}) }
+    }
+}
+
+// Answered 200 with an AWS JSON body, which the runtime hands over as Bytes.
+amz fn (body: Map): Map {
+    answer({"content-type": "application/x-amz-json-1.0"}, Bytes(to-json(body)))
+}
+
+assert-missing-credentials fn (result: Result) {
+    assert(is-err(result))
+    assert(contains(err-value(result), "aws.access-key-id"))
+}
+
+KEY {pk: {S: "a"}}
+
+assert-target fn (result: Result, target: Str) {
+    request sent(result)
+    assert-eq("https://dynamodb.eu-west-1.amazonaws.com/", request.url)
+    assert-eq(`DynamoDB_20120810.${target}`, get(request.headers, "X-Amz-Target"))
+    auth get(request.headers, "Authorization")
+    assert(contains(auth, "Credential=AKIDOPTS/"), auth)
+    assert(contains(auth, "/eu-west-1/dynamodb/aws4_request"), auth)
+    assert(is-null(::hot::ctx/get("aws.access-key-id")), "no ctx writes")
+}
+
+test-items-opts-reach-the-request
+meta ["test"] fn () {
+    assert-target(::items/put-item("t", KEY, echo()), "PutItem")
+    assert-target(::items/put-item("t", KEY, "c", {}, echo()), "PutItem")
+    assert-target(::items/get-item("t", KEY, echo()), "GetItem")
+    assert-target(::items/get-item("t", KEY, true, echo()), "GetItem")
+    assert-target(::items/get-item("t", KEY, true, "p", echo()), "GetItem")
+    assert-target(::items/delete-item("t", KEY, echo()), "DeleteItem")
+    assert-target(::items/update-item("t", KEY, "SET a = :a", {}, null, echo()), "UpdateItem")
+}
+
+test-query-opts-reach-the-request
+meta ["test"] fn () {
+    assert-target(::query/query("t", "k", {}, echo()), "Query")
+    assert-target(::query/query("t", "k", {}, 5, echo()), "Query")
+    assert-target(::query/query-index("t", "i", "k", {}, echo()), "Query")
+    assert-target(::query/query-index("t", "i", "k", {}, 5, echo()), "Query")
+    assert-target(::query/scan("t", echo()), "Scan")
+    assert-target(::query/scan("t", 5, echo()), "Scan")
+    assert-target(::query/scan("t", "f", {}, echo()), "Scan")
+}
+
+test-batch-opts-reach-the-request
+meta ["test"] fn () {
+    assert-target(::batch/batch-get-item({}, echo()), "BatchGetItem")
+    assert-target(::batch/batch-write-item({}, echo()), "BatchWriteItem")
+}
+
+test-tables-opts-reach-the-request
+meta ["test"] fn () {
+    assert-target(::tables/list-tables(echo()), "ListTables")
+    assert-target(::tables/list-tables(5, echo()), "ListTables")
+    assert-target(::tables/describe-table("t", echo()), "DescribeTable")
+}
+
+test-map-arguments-stay-what-they-were
+meta ["test"] fn () {
+    // The item is the item, not opts; opts come after
+    body from-json(sent(::items/put-item("t", {pk: {S: "x"}}, echo())).body)
+    assert-eq({pk: {S: "x"}}, body.Item)
+    assert-missing-credentials(::items/put-item("t", KEY))
+    assert-missing-credentials(::batch/batch-get-item({}))
+    assert-missing-credentials(::query/query("t", "k", {":a": {S: "x"}}))
+    assert-missing-credentials(::query/query("t", "k", {":a": {S: "x"}}, 5))
+    assert-missing-credentials(::tables/list-tables())
+}
+
+test-unset-optionals-arent-sent
+meta ["test"] fn () {
+    body from-json(sent(::query/query("t", "k", {}, echo())).body)
+    for-each(["FilterExpression", "Limit", "ExclusiveStartKey", "IndexName"], (field) {
+        assert(not(in(field, keys(body))), field)
+    })
+}
+
+test-amz-json-responses-are-parsed
+meta ["test"] fn () {
+    // application/x-amz-json-1.0: these came back null when the body stayed Bytes
+    item ::items/get-item("t", KEY, amz({Item: {name: {S: "Alice"}}}))
+    assert-eq("Alice", item.item.name.S)
+
+    found ::query/query("t", "k", {}, amz({Items: [{a: {N: "1"}}], Count: 1, ScannedCount: 2}))
+    assert-eq(1, found.count)
+    assert-eq(1, length(found.items))
+
+    assert-eq(["a"], ::tables/list-tables(amz({TableNames: ["a"]})).table_names)
+
+    described ::tables/describe-table("t", amz({Table: {TableName: "t", TableStatus: "ACTIVE", CreationDateTime: 1.5, ItemCount: 3}}))
+    assert-eq("ACTIVE", described.table.table_status)
+    assert-eq("1.5", described.table.creation_date_time, "an epoch number, declared Str")
+}
+
+test-unsafe-region-never-reaches-the-request
+meta ["test"] fn () {
+    out ::tables/describe-table("t", {...echo(), region: "evil.example/"})
+    assert(is-err(out), "it would be interpolated into the hostname")
+    assert(not(contains(err-value(out), "evil.example")), "the value isn't echoed")
+}

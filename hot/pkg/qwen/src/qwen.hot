@@ -15,6 +15,10 @@ meta {
 
     API keys are bound to the region they were created in; a key sent to
     another region's endpoint gets a 401.
+
+    A region or workspace id builds a hostname, so both are checked strictly:
+    a region must be one of `REGIONS` or its aliases, and a workspace id a
+    plain DNS label. For one call, see `::qwen::api/resolve`.
     """
 }
 
@@ -70,6 +74,25 @@ REGION_ALIASES {
     jp: "jp", japan: "jp", tokyo: "jp", "ap-northeast-1": "jp"
 }
 
+is-workspace-id
+meta {
+    doc: """
+    True when `value` can be a workspace id: a plain DNS label of letters,
+    digits and inner hyphens. Anything else could change which host a request
+    goes to, so it never gets into a URL.
+
+    **Example**
+
+    ```hot
+    ::qwen/is-workspace-id("llm-abc123")        // => true
+    ::qwen/is-workspace-id("evil.example/x?y")  // => false
+    ```
+    """
+}
+fn (value: Str): Bool {
+    is-some(::hot::regex/first-match(value, "^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$"))
+}
+
 region-info
 meta {
     doc: """
@@ -98,7 +121,8 @@ meta {
     doc: """
     Pure base-URL selection: an explicit `base-url` wins, then a workspace
     domain when `workspace-id` is set, then the region's shared domain.
-    Regions without a shared domain (`eu`, `jp`) need a workspace id.
+    Regions without a shared domain (`eu`, `jp`) need a workspace id. A
+    workspace id that isn't a plain DNS label is an Err (see `is-workspace-id`).
 
     **Example**
 
@@ -115,9 +139,13 @@ fn (base-url: Str?, region: Str?, workspace-id: Str?): Str {
     ws trim(or(workspace-id, ""))
     cond {
         not(is-empty(explicit)) => { ::openai::api/normalize-base-url(explicit) }
+        and(not(is-empty(ws)), not(is-workspace-id(ws))) => {
+            err("qwen: the workspace id is not a plain DNS label. Use letters, digits and hyphens only.")
+        }
         => {
             info region-info(region)
             cond {
+                is-err(info) => { info }
                 not(is-empty(ws)) => { `https://${ws}.${info.id}.maas.aliyuncs.com${COMPATIBLE_PATH}` }
                 is-null(info.base-url) => {
                     err(`qwen.region '${region}' has no shared domain; set qwen.workspace.id (or qwen.base.url)`)

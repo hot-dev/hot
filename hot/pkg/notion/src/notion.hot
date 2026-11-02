@@ -9,6 +9,10 @@ meta {
     the integration's comment capabilities; `::notion::users` needs a
     user-information capability (`users/me` works with any level).
 
+    **Per-call credentials.** Every API-calling function takes an optional
+    trailing `opts` Map (`token`, `api-version`, `base-url`). See
+    `::notion::api`.
+
     **Quick start**
 
     ```hot

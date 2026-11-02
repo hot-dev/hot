@@ -14,10 +14,44 @@ Add this to the `deps` in your `hot.hot` file:
 
 | Context Variable | Description |
 |---|---|
-| `openai.api.key` | OpenAI API key (`sk-...`). Required by every function that uses the default endpoint. |
+| `openai.api.key` | OpenAI API key (`sk-...`). A call with no key here or in its `opts` is an Err naming both. |
 | `openai.base.url` | Optional. Base URL for every `::openai::*` call. Default `https://api.openai.com/v1`. Set it to route the package through a gateway or proxy that speaks the OpenAI API. |
 
 Functions that take an explicit `::openai::api/Endpoint` read neither variable.
+
+## Per-call credentials
+
+Every typed function takes a trailing `opts` Map that wins over ctx for that call, so one run can serve many tenants. Nothing is written to ctx.
+
+| `opts` key | ctx key | Notes |
+| --- | --- | --- |
+| `api-key` | `openai.api.key` | Sent as `Authorization: Bearer <key>`. Present but null or blank is an Err, never a fallback to ctx |
+| `base-url` | `openai.base.url` | For proxies and gateways. In `opts` it needs `api-key` in `opts` too: the ctx key is never sent to a per-call URL |
+| `endpoint` | | An `::openai::api/Endpoint`, on its own. Reads no ctx. A keyless one sends no `Authorization` header, which is how local servers work |
+
+```hot
+answer ::openai::chat/chat("gpt-4o-mini", "Hello!", {api-key: tenant-key})
+models ::openai::models/list({api-key: tenant-key})
+vector ::openai::embeddings/embed("Hello world", {api-key: tenant-key})
+local-models ::openai::models/list({endpoint: ::openai::api/endpoint("http://localhost:11434/v1")})
+```
+
+The hot-ai run loop passes `ChatOptions.provider-opts` through to the `chat-opts-fn` and `chat-stream-opts-fn` slots:
+
+```hot
+ask fn (tenant-key: Str, question: Str): Str {
+    opts ::ai::chat/ChatOptions({
+        chat-opts-fn: ::openai::chat-tools/chat-with-tools,
+        model: "gpt-4o-mini",
+        provider-opts: {api-key: tenant-key}
+    })
+    ::ai::chat/run-loop(opts, question)
+}
+```
+
+Keys passed in `opts` or an `Endpoint` are masked in the run's call records, including inside strings like `Bearer ${key}`. A key shorter than 8 bytes is masked only as a whole value. Failures come back as Errs, including a key `opts` can't use, so one tenant's bad key is an `is-err` check for that call.
+
+`::openai::api/request` and `request-stream` also take a full URL. The key goes to it only when it is on the call's base URL (same scheme, host, port and path prefix), or when `opts` carries its own `api-key`. A URL whose host can't be read safely, with userinfo, backslashes or control characters, is always refused.
 
 ## Quick start
 
@@ -89,7 +123,7 @@ With no key (null or `""`) no `Authorization` header is sent. `complete-with` an
 
 ### hot-ai providers for compatible servers
 
-`::openai::compatible/provider` builds an `::ai::chat/ProviderRegistration` that reuses the chat-tools adapter for both `chat-fn` and `chat-stream-fn`. Give it a name, base URL, key and model prefix. Models that start with the prefix are routed to it, and the prefix is stripped before the request:
+`::openai::compatible/provider` builds an `::ai::chat/ProviderRegistration` that reuses the chat-tools adapter for `chat-fn`, `chat-stream-fn` and their `provider-opts` counterparts. Give it a name, base URL, key and model prefix. Models that start with the prefix are routed to it, and the prefix is stripped before the request. Its `variant` is `Provider.Compat({name})`, so a compatible server keeps its own identity and never passes for OpenAI:
 
 ```hot
 ::compat ::openai::compatible
@@ -131,11 +165,11 @@ deepseek fn (): ::ai::chat/ProviderRegistration {
 - `stream-usage: false`: omit `stream_options: {include_usage: true}` for servers that reject it.
 - `extra-body`: provider-specific fields merged into every request (Qwen's `enable_thinking`, OpenRouter's `provider` routing, ...).
 
-`::compat/chat-fn(p)` and `::compat/chat-stream-fn(p)` return the bound functions for `ChatOptions.chat-fn` when you don't need registry routing. `::compat/list-models(p)` and `::compat/create-embeddings(p, request)` call `/models` and `/embeddings` on the same endpoint.
+`::compat/chat-fn(p)` and `::compat/chat-stream-fn(p)` return the bound functions for `ChatOptions.chat-fn` when you don't need registry routing, and `chat-opts-fn(p)` and `chat-stream-opts-fn(p)` do the same for `ChatOptions.chat-opts-fn`. `::compat/list-models(p)` and `::compat/create-embeddings(p, request)` call `/models` and `/embeddings` on the same endpoint. `list-models`, `create-embeddings` and the opts-taking chat functions apply a call's `opts` over the provider's endpoint: `api-key`, `base-url` (with `api-key` when the provider has a key), or a whole `endpoint`.
 
 The `hot.dev/openai-compatible` package ships ready-made presets (Ollama, vLLM, LM Studio, Groq, OpenRouter, DeepSeek, Together, Fireworks, Mistral, Cerebras, Perplexity) on top of this, and `hot.dev/qwen` uses it for Alibaba Cloud Model Studio.
 
-Low-level: `::openai::api/endpoint-request(ep, method, path, headers?, body?)`, `endpoint-request-stream(...)`, and the pure `build-endpoint-request(...)`, `endpoint-headers(...)`, `join-url(...)` and `normalize-base-url(...)` helpers.
+Low-level: `::openai::api/endpoint-request(ep, method, path, headers?, body?)`, `endpoint-request-stream(...)`, and the pure `build-endpoint-request(...)`, `endpoint-headers(...)`, `target-url(...)`, `join-url(...)` and `normalize-base-url(...)` helpers.
 
 ## Function overview
 
@@ -143,8 +177,8 @@ Low-level: `::openai::api/endpoint-request(ep, method, path, headers?, body?)`, 
 |---|---|
 | `::openai::chat` | Chat Completions: `complete`, `complete-stream`, `chat`, message helpers, SSE chunk helpers, and `complete-with` / `complete-stream-with` for explicit endpoints |
 | `::openai::chat-tools` | hot-ai adapter: `chat-with-tools`, `chat-with-tools-stream`, `*-options` and `*-at` (explicit endpoint) variants, `count-tokens` heuristic |
-| `::openai::compatible` | `CompatibleProvider`, `provider`, `chat-fn`, `chat-stream-fn`, `list-models`, `create-embeddings` |
-| `::openai::api` | Authenticated requests, `base-url`, `Endpoint`, `endpoint`, `default-endpoint`, `endpoint-request` |
+| `::openai::compatible` | `CompatibleProvider`, `provider`, `resolve`, `chat-fn`, `chat-stream-fn`, `chat-opts-fn`, `chat-stream-opts-fn`, `list-models`, `create-embeddings` |
+| `::openai::api` | Authenticated requests, `resolve`, `base-url`, `Endpoint`, `endpoint`, `with-opts`, `default-endpoint`, `endpoint-request` |
 | `::openai::models`, `::openai::embeddings`, `::openai::images`, `::openai::audio`, `::openai::moderations`, `::openai::realtime` | Typed wrappers for those APIs |
 | `::openai::create`, `get`, `list`, `retrieve`, `modify`, `update`, `delete`, `cancel`, ... | Generated bindings for the rest of the REST API (Responses, Files, Batches, Fine-tuning, Vector Stores, Assistants, Evals, Containers) |
 | `::openai::organization` | Admin API keys, projects, users, invites, usage and costs |
@@ -152,6 +186,7 @@ Low-level: `::openai::api/endpoint-request(ep, method, path, headers?, body?)`, 
 ## Notes and limits
 
 - Isolated runtimes block outbound requests to localhost and private addresses. A local Ollama/vLLM/LM Studio endpoint works only where the runtime allows private destinations: `hot.network.allow-private true` in `hot.hot` (or `HOT_NETWORK_ALLOW_PRIVATE=true`) when `hot.engine.isolation` is on. Hosted Hot Cloud runs need a publicly reachable endpoint.
+- `organization` and `project` are not settings of this package. To send `OpenAI-Organization` or `OpenAI-Project`, put them in an `Endpoint`'s `headers`.
 - Explicit-endpoint calls return plain Maps rather than the typed `ChatCompletionResponse`, because compatible servers differ in which fields they return.
 - The adapter omits `tools` when the tool list is empty, because servers reject `tools: []`.
 - `count-tokens` is a character heuristic (about 4 characters per token); pass an exact counter through `ChatOptions.count-tokens-fn` when it matters.

@@ -82,9 +82,17 @@ meta {
     ```
     """
 }
-fn (request: EmbeddingRequest): EmbeddingResponse {
-    response api-request("POST", `${::openai::api/base-url()}/embeddings`, {}, request)
-    if(is-ok-response(response), EmbeddingResponse(response.body), err(HttpError(response)))
+fn
+(request: EmbeddingRequest): EmbeddingResponse {
+    create(request, {})
+},
+(request: EmbeddingRequest, opts: Map): EmbeddingResponse {
+    response api-request("POST", "/embeddings", {}, request, opts)
+    cond {
+        is-err(response) => { response }
+        is-ok-response(response) => { EmbeddingResponse(response.body) }
+        => { err(HttpError(response)) }
+    }
 }
 
 // =============================================================================
@@ -102,24 +110,29 @@ meta {
     vector ::openai::embeddings/embed("Hello world")
     // Returns: Vec<Dec> with 1536 dimensions
     ```
+
+    API errors, and credentials `opts` can't use, come back as an Err.
     """
 }
-fn (text: Str): Vec<Dec> {
-    embed(text, "text-embedding-3-small")
+fn
+(text: Str): Vec<Dec> {
+    embed(text, "text-embedding-3-small", {})
+},
+(text: Str, opts: Map): Vec<Dec> {
+    embed(text, "text-embedding-3-small", opts)
 },
 (text: Str, model: Str): Vec<Dec> {
+    embed(text, model, {})
+},
+(text: Str, model: Str, opts: Map): Vec<Dec> {
     response create(EmbeddingRequest({
         input: text,
         model: model
-    }))
+    }), opts)
 
-    match response {
-        EmbeddingResponse => {
-            cond {
-                gt(length(response.data), 0) => { response.data[0].embedding }
-                => { [] }
-            }
-        }
+    cond {
+        is-err(response) => { response }
+        gt(length(response.data), 0) => { response.data[0].embedding }
         => { [] }
     }
 }

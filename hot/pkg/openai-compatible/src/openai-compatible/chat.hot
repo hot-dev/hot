@@ -5,6 +5,10 @@ meta {
     Request and message shapes are OpenAI's (`::openai::chat/Message`,
     roles `system`, `developer`, `user`, `assistant`, `tool`); the request
     is a Map so provider-specific fields pass straight through.
+
+    Every function that calls the API takes a trailing `opts` Map, applied
+    over the provider's endpoint for that call (see
+    `::openai::compatible/resolve`): `api-key`, `base-url`, or `endpoint`.
     """
 }
 
@@ -70,8 +74,16 @@ meta {
     ```
     """
 }
-fn (p: CompatibleProvider, request: Map): Map {
-    ::oai/complete-with(p.endpoint, prepare-request(p, request))
+fn
+(p: CompatibleProvider, request: Map): Map {
+    complete(p, request, {})
+},
+(p: CompatibleProvider, request: Map, opts: Map): Map {
+    ep ::compat/resolve(p, opts)
+    cond {
+        is-err(ep) => { ep }
+        => { ::oai/complete-with(ep, prepare-request(p, request)) }
+    }
 }
 
 complete-stream
@@ -95,7 +107,12 @@ meta {
     ```
     """
 }
-fn (p: CompatibleProvider, request: Map): StreamingChatResponse {
+fn
+(p: CompatibleProvider, request: Map): StreamingChatResponse {
+    complete-stream(p, request, {})
+},
+(p: CompatibleProvider, request: Map, opts: Map): StreamingChatResponse {
+    ep ::compat/resolve(p, opts)
     options ::compat/request-options(p)
     prepared prepare-request(p, request)
     with-usage cond {
@@ -105,7 +122,10 @@ fn (p: CompatibleProvider, request: Map): StreamingChatResponse {
         => { prepared }
     }
 
-    ::oai/complete-stream-with(p.endpoint, with-usage)
+    cond {
+        is-err(ep) => { ep }
+        => { ::oai/complete-stream-with(ep, with-usage) }
+    }
 }
 
 chat
@@ -123,12 +143,21 @@ meta {
 }
 fn
 (p: CompatibleProvider, model: Str, message: Str): Str {
-    chat(p, model, message, null)
+    chat(p, model, message, null, {})
+},
+(p: CompatibleProvider, model: Str, message: Str, opts: Map): Str {
+    chat(p, model, message, null, opts)
 },
 (p: CompatibleProvider, model: Str, message: Str, system: Str?): Str {
+    chat(p, model, message, system, {})
+},
+(p: CompatibleProvider, model: Str, message: Str, system: Str?, opts: Map): Str {
     messages if(is-null(system), [user-message(message)], [system-message(system), user-message(message)])
-    response complete(p, {model: model, messages: messages})
-    reply-text(response)
+    response complete(p, {model: model, messages: messages}, opts)
+    cond {
+        is-err(response) => { response }
+        => { reply-text(response) }
+    }
 }
 
 reply-text

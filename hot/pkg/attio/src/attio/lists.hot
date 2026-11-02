@@ -6,8 +6,12 @@ list-lists
 meta {
     doc: """GET /lists - The workspace's lists (pipelines, curated collections)."""
 }
-fn (): Map {
-  ::api/json("GET", "/lists")
+fn
+(): Map {
+  list-lists({})
+},
+(opts: Map): Map {
+  ::api/json("GET", "/lists", "", opts)
 }
 
 add-entry
@@ -31,13 +35,16 @@ fn
   add-entry(list, parent, {})
 },
 (list: Str, parent: Map, entry-values: Map): Map {
+  add-entry(list, parent, entry-values, {})
+},
+(list: Str, parent: Map, entry-values: Map, opts: Map): Map {
   out ::api/json("POST", `/lists/${list}/entries`, {
     data: {
       parent_object: parent.parent_object,
       parent_record_id: parent.parent_record_id,
       entry_values: entry-values
     }
-  })
+  }, opts)
   match out {
     Result.Err => { err(out) }
 
@@ -54,13 +61,20 @@ fn
   query-entries(list, {})
 },
 (list: Str, options: Map): Map {
-  ::api/json("POST", `/lists/${list}/entries/query`, options)
+  query-entries(list, options, {})
+},
+(list: Str, options: Map, opts: Map): Map {
+  ::api/json("POST", `/lists/${list}/entries/query`, options, opts)
 }
 
 delete-entry
 meta {
     doc: """DELETE /lists/{list}/entries/{id} - Remove an entry from a list (the parent record is untouched)."""
 }
-fn (list: Str, entry-id: Str): Any {
-  ::api/json("DELETE", `/lists/${list}/entries/${entry-id}`)
+fn
+(list: Str, entry-id: Str): Any {
+  delete-entry(list, entry-id, {})
+},
+(list: Str, entry-id: Str, opts: Map): Any {
+  ::api/json("DELETE", `/lists/${list}/entries/${entry-id}`, "", opts)
 }

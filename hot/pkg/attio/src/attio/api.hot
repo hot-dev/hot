@@ -1,7 +1,24 @@
 ::attio::api ns
-meta {ctx: {"attio.api.key": {required: true}}}
+meta {
+    ctx: {"attio.api.key": {required: false}},
+    doc: """
+    Transport for Attio's v2 API.
+
+    **Per-call credentials.** Every API-calling function in this package
+    takes an optional trailing `opts` Map, resolved by `resolve`: `opts`
+    first, then the `attio.api.key` context variable, then the defaults.
+    Nothing from `opts` is written to ctx, so one run can act for many
+    workspaces and parallel flows don't share credentials. An `api-key`
+    present but blank or null is an error, never a fallback to context.
+
+    - `api-key`: the access token for this call
+    - `base-url`: another API root, such as a proxy. It needs an `api-key`
+      in the same `opts`: `attio.api.key` is never sent to a per-call URL.
+    """
+}
 
 ::ctx ::hot::ctx
+::re ::hot::regex
 
 http-request ::hot::http/request
 is-ok-response ::hot::http/is-ok-response
@@ -22,35 +39,118 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   })
 }
 
+non-blank fn (value: Any): Str? {
+  if(is-str(value), if(is-empty(trim(value)), null, trim(value)), null)
+}
+
+blank-credential
+meta {
+    doc: """The first of `names` that `opts` has but with a blank or null value, else null. Such a key is an error, never a fallback to context: a tenant whose key is missing must not run on the project's credentials."""
+}
+fn (opts: Map, names: Vec): Str? {
+  find-first(names, (name) { and(in(name, keys(opts)), is-null(non-blank(get(opts, name)))) })
+}
+
+resolve-from
+meta {
+    doc: """The one resolver, pure: `{api-key, base-url}` for a call from `opts` first, then `ctx-values` (a Map of context variables), then defaults. An Err when no API key is set, when `api-key` is in `opts` but blank or null (that never falls back to context), or when `opts` has `base-url` without `api-key`. Exposed for testing; `resolve` feeds it the context."""
+}
+fn (opts: Map, ctx-values: Map): Map {
+  api-key or(non-blank(get(opts, "api-key")), non-blank(get(ctx-values, "attio.api.key")))
+  base-url or(non-blank(get(opts, "base-url")), ::attio/BASE_URL)
+  blank blank-credential(opts, ["api-key"])
+  cond {
+    is-some(blank) => {
+      err(`attio: ${blank} is in the call's opts but is blank or null. Pass a value, or leave ${blank} out to use attio.api.key.`)
+    }
+
+    and(is-some(non-blank(get(opts, "base-url"))), is-null(non-blank(get(opts, "api-key")))) => {
+      err("attio: base-url is in the call's opts without api-key. Pass api-key with it. Context credentials are never sent to a per-call URL.")
+    }
+
+    is-null(api-key) => { err("attio: attio.api.key is not set. Add it in Context Variables, or pass {api-key: ...} in the call's opts.") }
+    => { {api-key: api-key, base-url: ::re/replace-all(base-url, "/+$", "")} }
+  }
+}
+
+resolve
+meta {
+    ctx: {"attio.api.key": {required: false}},
+    doc: """
+    Credentials and settings for one call (see `resolve-from`). `opts`
+    values are never written to ctx.
+    A credential from `opts` is masked in the run's call records.
+
+    **Example**
+
+    ```hot
+    ::attio::api/resolve({api-key: "tenant-b-token"}).base-url  // "https://api.attio.com/v2"
+    ```
+    """
+}
+fn (opts: Map): Map {
+  ::ctx/mark-secret(opts.api-key)
+  resolve-from(opts, {"attio.api.key": ::ctx/get("attio.api.key")})
+}
+
+build-request
+meta {
+    doc: """The outgoing `HttpRequest` from resolved settings (see `resolve`). A `""` body sends no `Content-Type`. Pure; exposed for testing."""
+}
+fn (method: Str, path: Str, body: Any, resolved: Map): HttpRequest {
+  headers cond {
+    eq(body, "") => { {Authorization: `Bearer ${resolved.api-key}`} }
+    => { {Authorization: `Bearer ${resolved.api-key}`, Content-Type: "application/json"} }
+  }
+
+  encoded-body if(eq(body, ""), "", to-json(untype(body)))
+
+  HttpRequest({
+    method,
+    url: `${resolved.base-url}${path}`,
+    headers: headers,
+    body: encoded-body
+  })
+}
+
+send-json fn (req: HttpRequest): Any {
+  response ::hot::http/request(req)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response.body }
+    => { err(HttpError(response)) }
+  }
+}
+
 json
 meta {
-    doc: """Make an authenticated Attio request and unwrap: the decoded JSON body on 2xx (Attio wraps payloads in `data`), or an Err carrying `HttpError`."""
+    doc: """
+    Make an authenticated Attio request and unwrap: the decoded JSON body on 2xx (Attio wraps payloads in `data`), or an Err carrying `HttpError`.
+
+    **Example**
+
+    ```hot
+    me ::attio::api/json("GET", "/self", "", {api-key: "tenant-b-token"})
+    ```
+    """
 }
 fn
 (method: Str, path: Str): Any {
   json(method, path, "")
 },
 (method: Str, path: Str, body: Any): Any {
-  json(method, path, body, ::ctx/get("attio.api.key"))
+  json(method, path, body, {})
 },
 // 4-arity: explicit API key override
 (method: Str, path: Str, body: Any, api-key: Str): Any {
-  headers cond {
-    eq(body, "") => { {Authorization: `Bearer ${api-key}`} }
-    => { {Authorization: `Bearer ${api-key}`, Content-Type: "application/json"} }
-  }
-
-  encoded-body if(eq(body, ""), "", to-json(untype(body)))
-
-  response ::hot::http/request(HttpRequest({
-    method,
-    url: `${::attio/BASE_URL}${path}`,
-    headers: headers,
-    body: encoded-body
-  }))
+  ::ctx/mark-secret(api-key)
+  send-json(build-request(method, path, body, {api-key: api-key, base-url: ::attio/BASE_URL}))
+},
+// 4-arity: per-call credentials and settings (see `resolve`)
+(method: Str, path: Str, body: Any, opts: Map): Any {
+  resolved resolve(opts)
   cond {
-    is-err(response) => { response }
-    is-ok-response(response) => { response.body }
-    => { err(HttpError(response)) }
+    is-err(resolved) => { resolved }
+    => { send-json(build-request(method, path, body, resolved)) }
   }
 }

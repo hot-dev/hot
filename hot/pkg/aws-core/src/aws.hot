@@ -1,6 +1,6 @@
 ::aws ns
 meta {
-    ctx: {"aws.access-key-id": {required: true}, "aws.secret-access-key": {required: true}, "aws.session-token": {required: false}, "aws.region": {required: false}}
+    ctx: {"aws.access-key-id": {required: false}, "aws.secret-access-key": {required: false}, "aws.session-token": {required: false}, "aws.region": {required: false, secret: false}, "aws.endpoint": {required: false, secret: false}}
 }
 
 // AWS Core Package
@@ -15,6 +15,7 @@ AwsError ::aws::core/AwsError
 sign-request ::aws::core/sign-request
 get-credentials ::aws::core/get-credentials
 get-region ::aws::core/get-region
+resolve ::aws::core/resolve
 
 // Default AWS region
 DEFAULT_REGION "us-east-1"
