@@ -703,6 +703,7 @@ async fn run_action_handler(
         retry_attempt: if is_retry { run.retry_attempt + 1 } else { 0 },
         secret_keys: AHashSet::new(), // Will be populated from ctx metadata
         secret_value_hashes: AHashSet::new(),
+        secret_values: Default::default(),
         access_id: None, // Dashboard-initiated, no API access log
         agent_type: None,
         queue_timing: None,

@@ -66,6 +66,7 @@ find
 meta {
     doc: """
     Return first match of regex `pattern` in `value` with position info.
+    `start` and `end` are character positions, as `slice` takes.
 
     **Example**
 

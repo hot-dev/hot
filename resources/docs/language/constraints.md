@@ -124,8 +124,9 @@ A predicate must:
   functions it calls.
 - **Finish quickly.** Each check has an instruction and call-depth budget.
 
-`length` of a `Str` counts UTF-8 bytes, not characters, so `length("café")` is
-`5`. Keep that in mind when you bound text length.
+`length` of a `Str` counts characters (Unicode code points), so
+`length("café")` is `4`. To bound its encoded size, use `length(Bytes(s))`,
+which is `5`.
 
 A `where` predicate is an ordinary function argument under Hot's `%` rule, so
 an implicit `%` lambda can't appear inside it. Write an inner function
@@ -251,15 +252,13 @@ MCP and agent tool schemas include a constraint's common shapes:
 
 - Comparisons with a literal bound, and `between`, become `minimum` and
   `maximum`.
-- Length bounds on a `Vec` become `minItems` and `maxItems`.
+- Length bounds on a `Vec` become `minItems` and `maxItems`, and on a `Str`
+  they become `minLength` and `maxLength`.
 - `::hot::regex/is-match` with a literal pattern becomes `pattern`.
 - `in` with a literal list becomes `enum`.
 - A literal union becomes a typed `enum`, such as
   `{"type": "string", "enum": ["USD", "EUR", "GBP"]}`.
 
-Length bounds on a `Str` don't become `minLength` or `maxLength`, because
-`length` counts bytes and JSON Schema counts characters. Like every other
-predicate, they are still enforced, and the schema's description states them.
 A precondition goes in the tool's description.
 
 ## Summary

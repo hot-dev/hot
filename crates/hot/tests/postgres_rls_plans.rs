@@ -51,7 +51,8 @@ impl Drop for TestRoleCleanup {
 /// barrier, so each admission check and scheduler poll that joins on one
 /// reads the whole org table.
 #[tokio::test]
-async fn root_org_joins_probe_the_org_key_under_rls() -> Result<(), Box<dyn std::error::Error>> {
+async fn hot_path_statements_keep_their_plans_under_rls() -> Result<(), Box<dyn std::error::Error>>
+{
     let Ok(admin_uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
         eprintln!("skipping PostgreSQL RLS test: HOT_TEST_POSTGRES_URI not set");
         return Ok(());
@@ -132,6 +133,21 @@ async fn root_org_joins_probe_the_org_key_under_rls() -> Result<(), Box<dyn std:
     assert!(
         unbounded_org_scans(&coalesce) > 0,
         "COALESCE is bounded under RLS now; this test no longer guards anything:\n{coalesce}"
+    );
+    // Counting an account's traces reads the environment index alone, never
+    // the trace heap, which is most of a large database.
+    let lines: Vec<String> = sqlx::query_scalar(
+        "EXPLAIN SELECT COUNT(*)::bigint, MIN(c.start_time) FROM call c \
+         WHERE c.env_id = ANY($1) AND c.start_time > NOW() - ($2 || ' days')::interval",
+    )
+    .bind(vec![Uuid::new_v4()])
+    .bind("30")
+    .fetch_all(&scheduler)
+    .await?;
+    let call_plan = lines.join("\n");
+    assert!(
+        call_plan.contains("Index Only Scan using call_env_start_time_idx"),
+        "{call_plan}"
     );
     raw.close().await;
     admin.close().await;

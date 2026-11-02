@@ -656,9 +656,9 @@ fn custom_type_to_schema_ctx(
 }
 
 /// Add a refinement's keywords to its base type's schema. Length bounds
-/// become `minItems`/`maxItems` on arrays. On strings they are described
-/// instead: Hot's `length` counts UTF-8 bytes, and `minLength`/`maxLength`
-/// count characters. A predicate with no schema form is described.
+/// become `minItems`/`maxItems` on arrays and `minLength`/`maxLength` on
+/// strings, where both Hot's `length` and JSON Schema count characters. A
+/// predicate with no schema form is described.
 fn apply_refinement(schema: Val, refinement: &RefinementSchema) -> Val {
     let Val::Map(mut map) = schema else {
         return schema;
@@ -671,14 +671,10 @@ fn apply_refinement(schema: Val, refinement: &RefinementSchema) -> Val {
         })
         .unwrap_or_default();
     let mut describe = refinement.describe;
-    let mut byte_length = false;
     for (keyword, value) in &refinement.keywords {
         let keyword = match (keyword.as_str(), base_type.as_str()) {
-            ("$minLength" | "$maxLength", "string") => {
-                describe = true;
-                byte_length = true;
-                continue;
-            }
+            ("$minLength", "string") => "minLength",
+            ("$maxLength", "string") => "maxLength",
             ("$minLength", "array") => "minItems",
             ("$maxLength", "array") => "maxItems",
             ("$minLength" | "$maxLength", _) => {
@@ -690,10 +686,7 @@ fn apply_refinement(schema: Val, refinement: &RefinementSchema) -> Val {
         map.insert(Val::from(keyword), value.clone());
     }
     if describe {
-        let mut text = format!("Must satisfy: {}", refinement.source);
-        if byte_length {
-            text.push_str(" (length counts UTF-8 bytes)");
-        }
+        let text = format!("Must satisfy: {}", refinement.source);
         let description = match map.get(&Val::from("description")) {
             Some(Val::Str(existing)) => format!("{existing}. {text}"),
             _ => text,

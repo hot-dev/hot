@@ -112,7 +112,8 @@ label match find-status(id) {
 
 A parameter declared `Result` receives its argument as it is, an `Err`
 included. Any other parameter consumes its argument: an `Ok` unwraps, and an
-`Err` halts before the function body runs. This holds however the function is
+`Err` halts before the function body runs, and the halt names the parameter
+and function that consumed it. This holds however the function is
 called: directly, through a higher-order function such as `map`, or with
 `call`. The exception is a `fn match` with `Result` arms: its first parameter
 receives an `Err` intact, so the `Result.Err` arm can handle it (see
@@ -124,7 +125,9 @@ describe fn (r: Any): Str {
   if(is-err(r), "failed", "succeeded")   // never reached for Err values
 }
 
-describe(err("boom"))   // Runtime error: Result error: boom
+describe(err("boom"))
+// Runtime error: Result error: boom (an Err passed to parameter `r` of
+// ::app/describe; declare the parameter `Result` to receive Errs)
 
 // ✅ A `Result` parameter receives the Result as it is
 describe fn (r: Result): Str {
@@ -135,6 +138,26 @@ describe(err("boom"))   // "failed"
 describe(ok(42))        // "succeeded"
 describe(42)            // "succeeded": any value is an implicit Ok
 ```
+
+The same rule covers every callee:
+
+- **Lambdas** consume like functions. `(x) { ... }` and `%` placeholders
+  halt on an `Err`; `(x: Result) { ... }` receives it.
+- **Collection literals** hold values without consuming them. `[ok-val, some-err]`
+  is a Vec whose second element is the `Err`; reading `v[1]` into a
+  consuming parameter is what halts.
+- **Natives** consume unless they inspect Results. `is-null`, `add`, and
+  `length` need a value, so `is-null(err(...))` halts. The Result-aware
+  checks — `is-ok`, `is-err`, `is-result`, `is-type`, `is-truthy`, `not`,
+  `if`, `if-ok`, `if-err`, `ok-value`, `err-value`, `err-message`, `tap` — receive an `Err`
+  as it is.
+- **`and` and `or`** treat an `Err` as falsy and do not halt: `and(err(...), x)`
+  returns the `Err`, `or(err(...), x)` returns `x`. Consuming the `Err` that
+  `and` returns halts as usual.
+
+Each halt names what consumed the `Err`: a parameter of a named function
+(`::app/describe`), a parameter of a lambda, or an argument of a native such
+as `::hot::type/is-null`.
 
 This composes with `OnErr.Preserve` (see Pattern 5) to classify per-item outcomes without halting the batch:
 
@@ -266,8 +289,10 @@ values in the result:
 
 {{snippet:errors#preserve-domain-errors}}
 
-`OnErr` applies only to normal `err(...)` / `Result.Err(...)` values. It does
-not catch `fail()`, `cancel()`, or hard runtime errors.
+`OnErr` applies only to normal `err(...)` / `Result.Err(...)` values that the
+callback returns. It does not catch `fail()`, `cancel()`, or hard runtime
+errors, or an `Err` consumed inside the callback, which is a halt: to keep such
+an Err as the item's result, test it with `is-err` or `if-ok` and return it.
 
 ### The Error Payload Convention
 
