@@ -401,6 +401,9 @@ rate fn match (s: Severity): Int {
 A parameter type can name one variant, in full if it's from another namespace. A sibling overload that declares the enum takes the other variants:
 
 ```hot
+Circle type { radius: Dec }
+Shape enum { Circle(Circle), Dot }
+
 area fn
 (s: Shape.Circle): Dec { mul(s.radius, s.radius) },
 (s: Shape): Dec { 0.0 }
