@@ -81,7 +81,7 @@ Run just the task worker (processes `::hot::task` and `::hot::box` tasks):
 hot task-worker
 ```
 
-Local `::hot::box` tasks need Docker. If Docker is not running, `hot task-worker` (and `hot dev`) will log a warning and box starts will fail.
+Local `::hot::box` tasks need Docker. If Docker does not answer when `hot task-worker` (or `hot dev`) starts, as when Docker is not installed, or Docker Desktop is stopped or still starting, the task worker still runs code tasks and logs `Hot Box is unavailable on this task worker: ...` at startup. Box tasks wait in the queue and run once Docker answers. The worker tries Docker every 15 seconds, and logs the message again as a warning, at most once an attempt, when a box task came back and had to wait; a box task that has waited a while can take up to 2 minutes more to start after Docker answers. If Docker stops after the task worker reached it, box tasks fail until Docker is back. See [What a Worker Admits](/docs/box#what-a-worker-admits).
 
 ### hot scheduler
 
@@ -481,14 +481,17 @@ Manage the database in `hot.db.uri`:
 ```bash
 hot db status                    # Show the connection and pending migrations
 hot db migrate                   # Apply pending migrations
+hot db migrate --status          # Print the migration level as one JSON line; changes nothing
 hot db provision-store-indexes   # Create PostgreSQL vector indexes for stores
 hot db port-v1-to-v2             # Port a Hot 1.x SQLite database to Hot 2
 hot db redeploy                  # Redeploy the deployments another major version built
+hot db move-storage              # Move builds or files to another storage backend
 ```
 
-On PostgreSQL, `hot db migrate` and `hot db provision-store-indexes` connect
-with the schema owner in `--db.migration-uri` (or `HOT_DB_MIGRATION_URI`).
-Services keep using the restricted runtime login in `--db.uri`:
+On PostgreSQL, `hot db migrate`, including `--status`, and
+`hot db provision-store-indexes` connect with the schema owner in
+`--db.migration-uri` (or `HOT_DB_MIGRATION_URI`), which must name the same database
+as `--db.uri`. Services keep using the restricted runtime login in `--db.uri`:
 
 ```bash
 hot db migrate \
@@ -496,10 +499,19 @@ hot db migrate \
   --db.migration-uri "postgres://hot_owner:<password>@db.example.com/hot"
 ```
 
+`hot db status` is for people. `hot db migrate --status` is for tools: it exits
+non-zero when it can't read the migration ledger, and earlier releases don't have
+it. See [Troubleshooting Migrations](/docs/migrations#troubleshooting-migrations).
+
 After an upgrade to a new major version, `hot db redeploy` builds every
 deployment from the earlier version again, checks it, and deploys the ones that
 pass. `--dry-run` changes nothing, `--notify` emails the admins of each account
 whose project fails, and `--org <slug>` limits the run to one organization.
+
+`hot db move-storage` moves builds, or files and internal blobs, to another
+storage backend while Hot is stopped, and `--skip-file <FILE>` leaves behind the
+objects a file lists; see
+[Switching Backends](/docs/configuration/storage#switching-backends).
 
 See [Self-Hosted PostgreSQL](/docs/configuration/postgres) for the setup, and
 [Migrations and Upgrades](/docs/migrations) for `port-v1-to-v2` and

@@ -768,6 +768,17 @@ impl OrgPlan {
 ///
 /// Returns -1 for unlimited (never delete).
 pub async fn call_deletion_days_for_org(db: &DatabasePool, org_id: &Uuid) -> i32 {
+    call_deletion_days_for_org_or(db, org_id, -1).await
+}
+
+/// As [`call_deletion_days_for_org`], except that an organization with no
+/// plan, as on a self-hosted installation, keeps calls for `no_plan_days`
+/// (-1: forever). An explicit per-org override still wins.
+pub async fn call_deletion_days_for_org_or(
+    db: &DatabasePool,
+    org_id: &Uuid,
+    no_plan_days: i32,
+) -> i32 {
     // A failed lookup must keep data: 0 would make retention delete everything.
     let root_id = match super::org::Org::billing_owner_id_for(db, org_id).await {
         Ok(id) => id,
@@ -806,7 +817,8 @@ pub async fn call_deletion_days_for_org(db: &DatabasePool, org_id: &Uuid) -> i32
     // No org override — resolve from plan + dynamic next-tier lookup
     let subscription = match OrgPlan::get_by_org_id(db, org_id).await {
         Ok(s) => s,
-        Err(_) => return -1, // no subscription = self-hosted / local dev
+        Err(PlanError::NotFound) => return no_plan_days, // self-hosted / local dev
+        Err(_) => return -1,
     };
 
     let plan = match subscription.get_plan(db).await {
@@ -832,6 +844,23 @@ pub async fn call_deletion_days_for_org(db: &DatabasePool, org_id: &Uuid) -> i32
         Err(PlanError::NotFound) => retention.saturating_mul(2), // top tier, no next plan
         Err(_) => -1,                                            // lookup failed: keep data
     }
+}
+
+/// The call retention to tell an organization about: what its features say,
+/// unless they say unlimited while the installation deletes the calls of
+/// organizations without a plan after `no_plan_days`
+/// ([`crate::db::get_call_retention_days`]).
+pub async fn call_retention_days_for_org(
+    db: &DatabasePool,
+    org_id: &Uuid,
+    features: &super::features::Features,
+    no_plan_days: i32,
+) -> i32 {
+    let days = features.call_retention_days();
+    if days >= 0 || no_plan_days < 0 {
+        return days;
+    }
+    call_deletion_days_for_org_or(db, org_id, no_plan_days).await
 }
 
 /// Organization Usage Tracking

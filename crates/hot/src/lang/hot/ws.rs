@@ -5,6 +5,7 @@
 
 use crate::lang::hot::iter::{HotIterator, IteratorBox};
 use crate::lang::hot::r#type::HotResult;
+use crate::outbound::DestinationPolicy;
 use crate::val::Val;
 use futures::{SinkExt, StreamExt};
 use indexmap::IndexMap;
@@ -13,9 +14,11 @@ use std::any::Any;
 use std::hash::Hasher;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::handshake::client::Request;
 use tokio_tungstenite::tungstenite::http;
 
 type WsReceiver = Arc<Mutex<mpsc::Receiver<Result<Val, String>>>>;
@@ -203,6 +206,19 @@ impl HotIterator for WsMessageIterator {
 /// # Returns
 /// A Map `{id: Str, messages: Iterator, $ws: WsConnectionHandle}`
 pub fn connect(args: &[Val]) -> HotResult<Val> {
+    connect_with_policy(args, DestinationPolicy::AllowPrivate)
+}
+
+/// `connect` for user code, which reaches only the destinations its outbound
+/// policy allows, as with `::hot::http` and `::hot::tcp`.
+pub fn connect_vm(
+    vm: &mut crate::lang::runtime::vm::VirtualMachine,
+    args: &[Val],
+) -> HotResult<Val> {
+    connect_with_policy(args, DestinationPolicy::from_vm(vm))
+}
+
+fn connect_with_policy(args: &[Val], policy: DestinationPolicy) -> HotResult<Val> {
     if args.is_empty() || args.len() > 2 {
         return HotResult::Err(err_val(
             "::hot::ws/connect: expected 1-2 args (url [, options])".to_string(),
@@ -235,10 +251,47 @@ pub fn connect(args: &[Val]) -> HotResult<Val> {
         IndexMap::new()
     };
 
-    tokio::runtime::Handle::current().block_on(async { ws_connect_async(&url, &headers).await })
+    tokio::runtime::Handle::current()
+        .block_on(async { ws_connect_async(&url, &headers, &policy).await })
 }
 
-async fn ws_connect_async(url: &str, headers: &IndexMap<Val, Val>) -> HotResult<Val> {
+/// Open the TCP connection for `request`, to addresses `policy` allows,
+/// resolved immediately before connecting.
+async fn connect_socket(
+    request: &Request,
+    policy: &DestinationPolicy,
+) -> Result<TcpStream, String> {
+    if policy.egress_proxy().is_some() {
+        // The proxy carries HTTP(S) requests only.
+        return Err(
+            "WebSocket connections are unavailable when outbound traffic must use the egress proxy"
+                .to_string(),
+        );
+    }
+    let uri = request.uri();
+    let default_port = match uri.scheme_str() {
+        Some("ws") => 80,
+        Some("wss") => 443,
+        _ => return Err("URL scheme must be ws or wss".to_string()),
+    };
+    let host = uri.host().ok_or("URL must include a host")?;
+    let host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    let addrs = policy
+        .resolve_host(host, uri.port_u16().unwrap_or(default_port))
+        .await?;
+    TcpStream::connect(addrs.as_slice())
+        .await
+        .map_err(|e| format!("connection failed: {e}"))
+}
+
+async fn ws_connect_async(
+    url: &str,
+    headers: &IndexMap<Val, Val>,
+    policy: &DestinationPolicy,
+) -> HotResult<Val> {
     let mut request = match url.into_client_request() {
         Ok(r) => r,
         Err(e) => return HotResult::Err(err_val(format!("::hot::ws/connect: invalid URL: {}", e))),
@@ -261,15 +314,20 @@ async fn ws_connect_async(url: &str, headers: &IndexMap<Val, Val>) -> HotResult<
         }
     }
 
-    let (ws_stream, _response) = match tokio_tungstenite::connect_async(request).await {
-        Ok(r) => r,
-        Err(e) => {
-            return HotResult::Err(err_val(format!(
-                "::hot::ws/connect: connection failed: {}",
-                e
-            )));
-        }
+    let socket = match connect_socket(&request, policy).await {
+        Ok(socket) => socket,
+        Err(e) => return HotResult::Err(err_val(format!("::hot::ws/connect: {e}"))),
     };
+    let (ws_stream, _response) =
+        match tokio_tungstenite::client_async_tls_with_config(request, socket, None, None).await {
+            Ok(r) => r,
+            Err(e) => {
+                return HotResult::Err(err_val(format!(
+                    "::hot::ws/connect: connection failed: {}",
+                    e
+                )));
+            }
+        };
 
     let (mut write, mut read) = ws_stream.split();
 
@@ -625,5 +683,76 @@ mod tests {
         let val = Val::bytes(vec![1, 2, 3]);
         let msg = val_to_message(&val);
         assert!(matches!(msg, Message::Binary(_)));
+    }
+
+    /// Start a WebSocket echo server; returns its port.
+    async fn start_echo_server() -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let Ok(mut ws) = tokio_tungstenite::accept_async(socket).await else {
+                        return;
+                    };
+                    while let Some(Ok(msg)) = ws.next().await {
+                        if (msg.is_text() || msg.is_binary()) && ws.send(msg).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        port
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn user_code_reaches_only_destinations_its_policy_allows() {
+        let port = start_echo_server().await;
+        tokio::task::spawn_blocking(move || {
+            let local = format!("ws://127.0.0.1:{port}/");
+            // Trusted callers connect anywhere.
+            let conn = match connect(&[Val::from(local.clone())]) {
+                HotResult::Ok(conn) => conn,
+                HotResult::Err(e) => panic!("connect failed: {e:?}"),
+            };
+            assert!(matches!(
+                send(&[conn.clone(), Val::from("hi")]),
+                HotResult::Ok(_)
+            ));
+            match receive(std::slice::from_ref(&conn)) {
+                HotResult::Ok(msg) => assert_eq!(msg, Val::from("hi")),
+                HotResult::Err(e) => panic!("receive failed: {e:?}"),
+            }
+            let _ = close(&[conn]);
+
+            for url in [
+                local,
+                format!("ws://[::1]:{port}/"),
+                "ws://169.254.169.254/computeMetadata/v1/".to_string(),
+                "wss://[::ffff:10.0.0.1]/".to_string(),
+            ] {
+                match connect_with_policy(&[Val::from(url.clone())], DestinationPolicy::PublicOnly)
+                {
+                    HotResult::Err(e) => {
+                        assert!(format!("{e:?}").contains("is blocked"), "{url}: {e:?}")
+                    }
+                    HotResult::Ok(_) => panic!("{url} must stay blocked"),
+                }
+            }
+
+            let rules = crate::outbound::OutboundRules::from_conf(
+                &crate::val!({"network": {"egress-proxy": "http://proxy.internal:3128"}}),
+            )
+            .unwrap()
+            .unwrap();
+            let proxied = DestinationPolicy::Restricted(Arc::new(rules));
+            match connect_with_policy(&[Val::from("wss://example.com/")], proxied) {
+                HotResult::Err(e) => assert!(format!("{e:?}").contains("egress proxy"), "{e:?}"),
+                HotResult::Ok(_) => panic!("WebSocket connections must not bypass the proxy"),
+            }
+        })
+        .await
+        .unwrap();
     }
 }

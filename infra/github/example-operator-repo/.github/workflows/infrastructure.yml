@@ -1,0 +1,49 @@
+name: infrastructure
+
+# Plans every pull request; applies on merge, or when run by hand on main,
+# after the production environment's reviewers approve the plan. Changing
+# this file (an upgrade bumps `uses:` and `hot_version` here) plans and
+# applies too. Every morning it checks for drift: the run fails if the
+# installation no longer matches main.
+on:
+  pull_request:
+    paths: ['installation/**', '.github/workflows/infrastructure.yml']
+  push:
+    branches: [main]
+    paths: ['installation/**', '.github/workflows/infrastructure.yml']
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+jobs:
+  hot:
+    uses: hot-dev/hot/.github/workflows/selfhost-plan.yml@v3.0.2
+    with:
+      hot_version: v3.0.2
+      cloud: aws
+      # scalable for a scalable installation, here and in the release and
+      # command workflows.
+      preset: single-machine
+      apply: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+      drift_check: ${{ github.event_name == 'schedule' }}
+      environment: production
+      aws_region: us-east-1
+      aws_plan_role: arn:aws:iam::123456789012:role/hot-example-plan
+      aws_apply_role: arn:aws:iam::123456789012:role/hot-example-apply
+      # Apply asks for a 4-hour session, and AWS refuses one longer than this
+      # role's maximum session duration, which is an hour unless the role says
+      # otherwise. The state bootstrap's role allows 4 hours; for another,
+      # raise its maximum or set aws_apply_session_seconds to what it allows.
+      # On Google Cloud, in place of `cloud: aws` and the aws_ lines, with values
+      # from the state bootstrap's outputs:
+      #   cloud: gcp
+      #   gcp_workload_identity_provider: projects/123456789012/locations/global/workloadIdentityPools/hot-github/providers/github
+      #   gcp_plan_service_account: hot-github-plan@example-project.iam.gserviceaccount.com
+      #   gcp_apply_service_account: hot-github-apply@example-project.iam.gserviceaccount.com
+    secrets:
+      state_encryption_passphrase: ${{ secrets.HOT_STATE_ENCRYPTION_PASSPHRASE }}

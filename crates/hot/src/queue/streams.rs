@@ -32,7 +32,7 @@ use uuid::Uuid;
 use zstd::{Decoder, Encoder};
 
 /// Default consumer group name for Hot queues
-const DEFAULT_CONSUMER_GROUP: &str = "hot-workers";
+pub(crate) const DEFAULT_CONSUMER_GROUP: &str = "hot-workers";
 
 /// Maximum number of retries before moving to dead letter queue
 const MAX_PROCESSING_RETRIES: usize = 3;

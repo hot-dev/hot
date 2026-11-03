@@ -1810,14 +1810,21 @@ impl SqliteQueueAdmin {
                     sqlx::query_scalar("SELECT COUNT(*) FROM queue_message WHERE state = 2")
                         .fetch_one(&pool)
                         .await?;
-                summary.total_pending += pending;
-                summary.total_processing += processing;
-                summary.total_deadletter += deadletter;
-                summary.queues.push(QueueStatus {
+                // A retried message waits from when it became available again.
+                let now = now_ms();
+                let oldest_available_ms: Option<i64> = sqlx::query_scalar(
+                    "SELECT MIN(available_at_ms) FROM queue_message WHERE state = 0 AND available_at_ms <= ?",
+                )
+                .bind(now)
+                .fetch_one(&pool)
+                .await?;
+                summary.push(QueueStatus {
                     name,
                     pending,
                     processing,
                     deadletter,
+                    oldest_pending_secs: oldest_available_ms
+                        .map(|available_ms| (now - available_ms).max(0) / 1000),
                 });
             }
             pool.close().await;
@@ -1907,6 +1914,7 @@ mod tests {
         let event_queue = test_queue::<String>(temp.path(), "hot:event");
         let task_queue = test_queue::<String>(temp.path(), "hot:task");
 
+        let started = std::time::Instant::now();
         event_queue.enqueue("leased".to_string()).await.unwrap();
         event_queue.enqueue("ready".to_string()).await.unwrap();
         let leased = event_queue.claim_now().await.unwrap().unwrap();
@@ -1920,6 +1928,18 @@ mod tests {
         assert_eq!(before.total_pending, 1);
         assert_eq!(before.total_processing, 1);
         assert_eq!(before.total_deadletter, 1);
+        let waits: Vec<_> = before
+            .queues
+            .iter()
+            .map(|queue| (queue.name.as_str(), queue.oldest_pending_secs))
+            .collect();
+        // "ready" has waited since it was enqueued, which a slow runner can
+        // put past a second ago (the extra second absorbs clock rounding).
+        let waited = started.elapsed().as_secs() as i64 + 1;
+        let event_wait = before.queues[0].oldest_pending_secs.unwrap_or(-1);
+        assert!((0..=waited).contains(&event_wait), "{waits:?}");
+        assert_eq!(waits, [("hot:event", Some(event_wait)), ("hot:task", None)]);
+        assert_eq!(before.oldest_pending_secs, Some(event_wait));
 
         let snapshots = admin.message_snapshots().await.unwrap();
         assert_eq!(snapshots.len(), 3);
@@ -1946,8 +1966,31 @@ mod tests {
         assert_eq!(after.total_pending, 0);
         assert_eq!(after.total_processing, 0);
         assert_eq!(after.total_deadletter, 0);
+        assert_eq!(after.oldest_pending_secs, None);
 
         drop(leased);
+    }
+
+    #[tokio::test]
+    async fn admin_status_counts_a_retry_backing_off_as_pending_with_no_wait() {
+        let temp = tempfile::tempdir().unwrap();
+        let queue = test_queue::<String>(temp.path(), "hot:event");
+        queue.enqueue("retry".to_string()).await.unwrap();
+        // As release_for_retry leaves it: ready again once the backoff ends.
+        sqlx::query("UPDATE queue_message SET available_at_ms = ?")
+            .bind(now_ms() + 60_000)
+            .execute(queue.shared.pool())
+            .await
+            .unwrap();
+
+        let status = SqliteQueueAdmin::new(temp.path().to_path_buf())
+            .status()
+            .await
+            .unwrap();
+        assert_eq!(
+            (status.total_pending, status.oldest_pending_secs),
+            (1, None)
+        );
     }
 
     #[tokio::test]

@@ -48,6 +48,8 @@ Once a domain is active, use it anywhere you'd use `api.hot.dev`:
 
 The domain routes to the same Hot API surface, so all existing [API keys](/docs/authentication#api-keys), [MCP services](/docs/mcp), and [webhooks](/docs/webhooks) work automatically.
 
+On a self-hosted installation, a name the API already treats as its own is not resolved as a custom domain. See [API Hostnames](/docs/configuration#api-hostnames).
+
 ## Removing a Domain
 
 Click **Remove Domain** on the domain detail page to delete a custom domain. This soft-deletes the domain and queues cleanup of the associated provider resources.
