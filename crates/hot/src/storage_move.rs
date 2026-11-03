@@ -1374,7 +1374,10 @@ mod tests {
         let local = target(FileStorageType::Local)
             .configure(&Val::map_empty(), StorageRole::File)
             .unwrap();
-        assert_eq!(local.get_str("file.storage.path"), "/data/files");
+        assert_eq!(
+            std::path::Path::new(&local.get_str("file.storage.path")),
+            std::path::absolute("/data/files").unwrap()
+        );
         // Records keep the path, and Hot may run from another directory.
         let relative = MoveTarget {
             path: "data/files".into(),
@@ -1522,7 +1525,7 @@ mod tests {
         {
             assert_eq!(backend, "s3");
             let old = old.unwrap();
-            let suffix = old.rsplit('/').next().unwrap();
+            let suffix = old.rsplit(['/', '\\']).next().unwrap();
             assert!(
                 stored.as_deref().unwrap().ends_with(suffix),
                 "{path}: {stored:?} keeps {suffix}"

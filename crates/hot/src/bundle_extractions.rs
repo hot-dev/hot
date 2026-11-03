@@ -262,10 +262,18 @@ fn is_file_at_path(file: &File, path: &Path) -> bool {
     }
 }
 
-/// Elsewhere, an open file can't be unlinked out from under its path.
-#[cfg(not(unix))]
-fn is_file_at_path(_file: &File, _path: &Path) -> bool {
-    true
+/// Whether `file` is still the file at `path`. Rust unlinks a file that is
+/// still open here too, so the path alone doesn't answer this.
+#[cfg(windows)]
+fn is_file_at_path(file: &File, path: &Path) -> bool {
+    use same_file::Handle;
+    match (
+        file.try_clone().and_then(Handle::from_file),
+        Handle::from_path(path),
+    ) {
+        (Ok(open), Ok(current)) => open == current,
+        _ => false,
+    }
 }
 
 /// Whether a deployment runs this build, or is about to. A newer deployment
