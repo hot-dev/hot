@@ -19,6 +19,17 @@ CONFIGURATION_SCHEMA = 1
 # The oldest release this one upgrades from directly; the deploy agent refuses
 # larger jumps. Raise it when a release drops an upgrade path.
 UPGRADE_POLICY = Path(__file__).with_name("upgrade-policy.json")
+# Hosts render and provision with the renderer their image carries, so a
+# release names the renderer version it was built with, and older host
+# images refuse it.
+RENDERER = ROOT / "infra/runtime/render.py"
+
+
+def renderer_version(path=RENDERER):
+    match = re.search(r"^RENDERER_VERSION = ([0-9]+)$", path.read_text(), re.M)
+    if not match:
+        raise ValueError(f"No RENDERER_VERSION in {path}")
+    return int(match.group(1))
 
 
 def version_key(version):
@@ -57,6 +68,7 @@ def build(release, hot_image, upstream, migrations_root=ROOT / "resources/db", p
         "configuration_schema": CONFIGURATION_SCHEMA,
         "migrations": {"latest": postgres},
         "upgrade": {"minimum_source": minimum},
+        "minimum_renderer": renderer_version(),
         "images": images,
     }
 
