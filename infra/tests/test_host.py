@@ -151,15 +151,16 @@ def data_disk(*flags, signatures="", wipefs_exit=0, probe_exit=2, label=""):
 GB = 2**30
 
 
-def pool_activate(env="", data=None, avail=100 * GB, fallocate_exit=0, args=(), table=None, held=False):
+def pool_activate(env="", data=None, avail=100 * GB, df_exit=0, fallocate_exit=0, args=(), table=None, held=False):
     """Run kata-devpool-activate with args against stub disk tools, with
     /etc/hot/host.env holding env. data is the (size, allocated bytes) of a
     pool data file left from before, held whether it carries the marker of a
-    file that held its space before, avail is what df reports free, and
-    fallocate exits with fallocate_exit, keeping the file it was asked to fill,
-    as fallocate does when it runs out of space. table is the running pool's
-    device-mapper table, or None when no pool is set up. Returns the finished
-    process, every tool call, and the files left in the pool's directory."""
+    file that held its space before, avail is what df reports free, unless
+    df fails with df_exit, and fallocate exits with fallocate_exit, keeping
+    the file it was asked to fill, as fallocate does when it runs out of
+    space. table is the running pool's device-mapper table, or None when no
+    pool is set up. Returns the finished process, every tool call, and the
+    files left in the pool's directory."""
     with tempfile.TemporaryDirectory() as tmp:
         directory = Path(tmp)
         pool, state, calls = directory / "devmapper", directory / "state", directory / "calls"
@@ -183,7 +184,9 @@ def pool_activate(env="", data=None, avail=100 * GB, fallocate_exit=0, args=(), 
             # GNU stat -c, for the two formats the script asks for.
             "stat": f'read size held < {state}/$(basename "$3")\n'
                     f'case "$2" in %s) echo "$size";; "%b * %B") echo "$(( held / 512 )) * 512";; *) exit 9;; esac',
-            "df": f'[ "$*" = "-B1 --output=avail /var/lib/kata" ] || exit 9\necho Avail\necho " {avail}"',
+            "df": f'[ "$*" = "-B1 --output=avail /var/lib/kata" ] || exit 9\n'
+                  f'[ {df_exit} = 0 ] || {{ echo "df: /var/lib/kata: Input/output error" >&2; exit {df_exit}; }}\n'
+                  f'echo Avail\necho " {avail}"',
             "fallocate": f'{record}\ntouch "$3"\nexit {fallocate_exit}',
             "truncate": f'{record}\ntouch "$3"',
             "install": f'{record}\nmkdir -p "$4"',
@@ -481,6 +484,20 @@ class HostImage(unittest.TestCase):
         self.assertEqual(unit_lines('/etc/systemd/system/kata-containerd.service', "SyslogLevelPrefix"), [])
         # Nothing is written, attached or created, so the retry every few seconds costs nothing.
         self.assertEqual((calls, left), ([], []))
+
+    def test_a_disk_whose_free_space_cannot_be_read_is_refused_and_left_alone(self):
+        cases = {
+            "activation": ({}, []),
+            "hold": ({"data": (40 * GB, 39 * GB), "args": ["--hold"], "table": self.HELD, "held": True},
+                     ["data", "held"]),
+        }
+        for name, (kwargs, before) in cases.items():
+            with self.subTest(name):
+                result, calls, left = pool_activate("HOT_BOX_POOL_PREALLOCATE=1\n", df_exit=1, **kwargs)
+                self.assertEqual(result.returncode, 1)
+                # At err priority, as the other refusals are, so the host journal carries it.
+                self.assertIn("<3>Cannot read the data disk's free space", result.stderr)
+                self.assertEqual((calls, left), ([], before))
 
     def test_a_sparse_pool_from_before_is_filled_counting_only_its_holes(self):
         env = "HOT_BOX_POOL_GB=100\nHOT_BOX_POOL_PREALLOCATE=1\n"

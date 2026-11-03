@@ -430,8 +430,8 @@ if [[ "$HOT_BOX_POOL_PREALLOCATE" == 1 ]]; then
         if [[ "$mode" == --hold || ( "$created" == 0 && -f "$dir/held" ) ]]; then
             margin=$(( 64 * 1024 * 1024 ))
         fi
-        avail=$(df -B1 --output=avail /var/lib/kata | tail -n 1)
-        [[ "$avail" =~ ^\ *[0-9]+$ ]] || { echo "Cannot read the data disk's free space" >&2; exit 1; }
+        avail=$(df -B1 --output=avail /var/lib/kata | tail -n 1) && [[ "$avail" =~ ^\ *[0-9]+$ ]] ||
+            { echo "<3>Cannot read the data disk's free space" >&2; exit 1; }
         if (( needed + margin > avail )); then
             if [[ "$mode" == --hold ]]; then
                 echo "<3>The box storage pool has $(( needed / 1024 / 1024 )) MB of its data file no longer held," \
