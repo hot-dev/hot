@@ -186,10 +186,14 @@ class Recorder:
         return [call for call in calls if not call.startswith("ps ") and agent_module.MIGRATION_STATUS_JOB not in call]
 
 
-def undelivered_secrets(tmp):
+def undelivered_secrets(tmp, release=None):
     """The secret files a deployed bundle names that were not delivered:
-    Compose refuses to start a service without its files."""
-    compose = json.loads(next(Path(tmp, "releases").glob("*/bundle/compose.json")).read_text())
+    Compose refuses to start a service without its files. With more than one
+    release on the host, `release` names the bundle: directory order differs
+    between filesystems, so the first one found is not always the same."""
+    bundles = sorted(Path(tmp, "releases").glob(f"{release or '*'}/bundle/compose.json"))
+    assert len(bundles) == 1, f"name the release to check among {[b.parent.parent.name for b in bundles]}"
+    compose = json.loads(bundles[0].read_text())
     assert compose["secrets"]
     return sorted(secret["file"] for secret in compose["secrets"].values() if not Path(secret["file"]).is_file())
 
@@ -4924,6 +4928,7 @@ class DataMoves(UpgradeHarness):
 
     def assert_a_failed_move_from_a_stopped_start_gives_the_secrets_back(self, failing, **moving):
         self.agent.command("drain-and-stop", request_id="s1")
+        installed = self.agent.state()["release"]
         self.failing = failing
         status = self.move(**moving)
         self.assertEqual(status["state"], "failed", status)
@@ -4931,7 +4936,9 @@ class DataMoves(UpgradeHarness):
         self.assertIn("Hot stays stopped, as it was before this deploy", status["recovery"])
         self.assertTrue(self.agent.state()["stopped"])
         self.assert_installed_secrets()
-        self.assertEqual(undelivered_secrets(self.tmp.name), [])
+        # The release that failed to move stays on the host beside it; the
+        # installed one is what a start runs.
+        self.assertEqual(undelivered_secrets(self.tmp.name, installed), [])
 
     def test_a_failed_database_move_from_a_stopped_start_gives_the_secrets_back(self):
         self.assert_a_failed_move_from_a_stopped_start_gives_the_secrets_back("restore-postgres")
