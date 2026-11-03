@@ -51,8 +51,10 @@ Implemented:
   and boxes use that ([Security updates](#security-updates)); they never run the
   copy in the guest image. SSH is masked, and Packer builds without SSH. Kata
   state lives on the data disk and stays off until it is mounted; box storage
-  is capped by `HOT_BOX_POOL_GB`, and each box's `/data` is a file beside it, which
-  Hot's disk budget limits ([At capacity](#capacity-retention-and-cost)); a
+  is capped by `HOT_BOX_POOL_GB`, its pool takes its space on the disk when it starts
+  where a local PostgreSQL or Valkey shares that disk (`HOT_BOX_POOL_PREALLOCATE`), and
+  each box's `/data` is a file beside it, which Hot's disk budget limits
+  ([At capacity](#capacity-retention-and-cost)); a
   mangle-table baseline keeps guests off metadata, the host, other guests, and
   private ranges outside the allowlist, and with an egress proxy limits them to the
   proxy and their resolvers. Docker
@@ -505,7 +507,7 @@ Hot's own email, and both firing and resolving are sent.
 | `scheduler-stopped` | No dispatching scheduler for 10 minutes | Schedules are not firing. `restart-service scheduler`, which is refused while a failed or interrupted deploy's possibly partly applied migrations hold it; the refusal says what clears the hold. The scheduler exits if it loses its database lock, so check database connectivity too, and read its `logs`. A replacement host's scheduler keeps restarting until a dead host's database session gives up the lock. A deploy does not fail on this, so this alert is what reports a lock that never frees. |
 | `dependencies-unreachable` | PostgreSQL or Valkey unreachable for 10 minutes | Check the data service, its security group or firewall, and its status page. |
 | `not-ready` | App or API not answering for 15 minutes | Check `services-unhealthy` and the ingress certificate. The ingress starts without the app or API and answers 502 until their names resolve, and it can use an old address for up to 10 seconds after one moves. |
-| `disk-pressure` | Data disk over 85% for 15 minutes | Grow the disk with a larger size. Moving builds and files to object storage stops them growing on the disk, but no command deletes what is there ([Capacity, retention, and cost](#capacity-retention-and-cost)). |
+| `disk-pressure` | Data disk over 85% for 15 minutes. With a local PostgreSQL or Valkey, the box pool's data file counts as used from the start: 40, 100, or 200 GB by size | Grow the disk with a larger size. Moving builds and files to object storage stops them growing on the disk, but no command deletes what is there ([Capacity, retention, and cost](#capacity-retention-and-cost)). |
 | `backup-stale` | Single machine only: no snapshot for 30 hours, or no backup status | Check the snapshot policy or schedule in the console. |
 | `certificate-expiring` | The ingress certificate expires within 14 days | Put the renewed chain and key in the operator secret, then `restart-service ingress`. |
 | `queue-backlog` | More than `monitoring.queue_backlog_alert` jobs (default 1000) queued for 15 minutes | Workers are not keeping up. Check `services-unhealthy` and the worker's `logs`; then move to a larger size, or on a scalable installation raise `scaling.worker.max` or `scaling.task_worker.max`. |
@@ -633,7 +635,7 @@ still queues on GitHub, one run per installation.
 | Command | Does |
 | --- | --- |
 | `status` | The deployed release, previous release, and migration level |
-| `diagnostics` | Versions (release, migrations, host image, Kata, the `hotbox` in use), effective configuration, each service's state, health, and image digest, the Hot services' environment, data-service modes and reachability, the current health metrics, and up to 500 objects a storage move could not move. With Docker or the operator secret not answering, it says so (`services_error`, `health_error`, `dependencies_error`) and reports the rest |
+| `diagnostics` | Versions (release, migrations, host image, Kata, the `hotbox` in use), effective configuration, each service's state, health, and image digest, the Hot services' environment, data-service modes and reachability, the current health metrics, up to 500 objects a storage move could not move, and, on a task host whose Kata containerd or box pool is down or whose pool started sparse under a local database, why under `box_pool` ([At capacity](#capacity-retention-and-cost)). With Docker or the operator secret not answering, it says so (`services_error`, `health_error`, `dependencies_error`) and reports the rest |
 | `logs SERVICE` | The newest 200 lines (at most 48,000 characters) of a Hot service, the ingress, or a local data service, within 2 minutes |
 | `backup` | An on-demand `pg_dump` of a local database to the data disk, refused unless the disk has room for another like the newest dump, plus 256 MB. A failed one leaves nothing behind. A finished one stays on the disk: no command deletes it, so it counts toward `disk-pressure` from then on. On a stopped installation it starts only the data services |
 | `restart-service SERVICE` | Delivers secrets again and recreates one service; the scheduler stops before it starts, and `app` or `api` also recreates the ingress, a brief interruption. Refused when the operator secret added or removed an entry for that service (run `deploy-now`); when an entry that service mounts is empty (for `app` or `api`, also an ingress entry), or holds a `HOT_NETWORK_EGRESS_PROXY` Hot refuses, since the service would exit on it and the running one keeps its value; for `app`, when a sign-in pair is half set or blank; after a partly failed storage move (fix the cause and run `deploy-now`, or put the storage setting back, apply, and run `deploy-now`); after a deploy that upgraded and moved the data failed or was cut short, when the installed bundle still describes the old copy (run `deploy-now`); while a roll-back is unfinished; while a `drain-and-stop` cut short or failed is unfinished (the next cycle stops the rest of Hot: run `restart-service` once it has, or `deploy-now` to start all of Hot); and, for `scheduler`, while a failed or interrupted deploy's possibly partly applied migrations hold it. The refusal says what clears it. Until the service is up again, the state and `status` carry `restarting`, `{SERVICE: request ID}`. A restart cut short, or one that failed after it began, is done again each cycle (about every 30 seconds) until it works, and answered `restarted` with the original request ID; `deploy-now`, a reboot's start, a roll-back, and a finished deploy start it too. A failed one's report has a `recovery` field. On a stopped installation, or when that field says nothing will start the service, run `restart-service` again or `deploy-now` |
@@ -2356,7 +2358,10 @@ of the runtime image, for triage. The scan never blocks a release.
 2. If the release notes say the host image changed, rebuild it with
    `images/build-host.sh` and set `host_image`. The apply replaces the
    instance and keeps the data disk. On GCP, lift the instance's deletion
-   protection first, as in [Recovery](#recovery). A release that needs a newer
+   protection first, as in [Recovery](#recovery). With a local PostgreSQL or Valkey,
+   the new VM's box pool takes its full space on the data disk as it starts, even one an
+   older image left sparse, and box tasks wait until the disk has room for it
+   ([At capacity](#capacity-retention-and-cost)). A release that needs a newer
    renderer refuses an older image and says to build one from its tag. A release
    that changes `hotbox` needs no rebuild. Each start of a task worker, whatever
    starts it, first copies the release's own `hotbox` from its digest-pinned runtime
@@ -2456,17 +2461,85 @@ past its 1,280. `medium` is the way to more room.
 - Tasks beyond the concurrent limit wait in the queue, and the work queue
   grows in Valkey, which never evicts (`noeviction`). When Valkey's memory
   is full, new work is refused with errors rather than dropped.
-- Box tasks cannot exceed their storage pool. A box's `/data` is a fully allocated
-  file beside the pool, in `data/box-data` on the data disk. Hot's disk budget
-  (`HOT_TASK_WORKER_DISK_MB` less 10 GB) bounds it, and that budget and the pool
-  together fit the data disk on every size. A box fails with
-  `Requested /data volume could not be provisioned` when its file cannot be allocated, or
-  when the data disk has less free for non-root writers than the disk budget counts for
-  the box (8,448 MB for a default box), which leaves room for its root filesystem and for
-  PostgreSQL. Space ext4 reserves for root does not count (5% by default: 5, 10, and
-  25 GB by size). These limits bound box storage and do not set it apart: the pool's
-  files are sparse, and box writes draw on the same free space as PostgreSQL and any
-  local builds and files, so `disk-pressure` remains the warning.
+- Box tasks cannot exceed their storage pool, which holds their images and writable
+  root filesystems. A box's `/data` is a fully allocated file beside the pool, in
+  `data/box-data` on the data disk. Hot's disk budget (`HOT_TASK_WORKER_DISK_MB` less
+  10 GB) bounds it, and that budget and the pool together fit the data disk on every
+  size. A box fails with `Requested /data volume could not be provisioned` when its file
+  cannot be allocated, or when the data disk has less free for non-root writers than the
+  disk budget counts for the box (8,448 MB for a default box): `the disk has N MB
+  available, less than the M MB counted for a box with a K MB /data`. Space ext4 reserves
+  for root does not count (5% by default: 5, 10, and 25 GB by size).
+- Where a local PostgreSQL or Valkey shares the data disk with the task worker, as on
+  any single machine with a local data service, the agent writes
+  `HOT_BOX_POOL_PREALLOCATE=1` to `/etc/hot/host.env`, and the pool's data file takes
+  its full size on the disk when the pool starts: 40, 100, or 200 GB by size, or the
+  size of a pool file from before, since a pool keeps its first size. Its metadata file
+  (a tenth of the pool, plus 1 GB) stays sparse. The pool then runs with
+  `no_discard_passdown`: what boxes delete frees blocks inside the pool, not space on
+  the disk. The data file does not stay fully held. When a box first writes part of a 64
+  KiB pool block, the pool zeroes the block, which turns that part of the file back into
+  a hole, and `hot-box-pool-hold.timer` fills the holes again every minute while the
+  disk has room for them and 64 MB. So what boxes write into holes punched within that
+  minute takes the database's free space, and while the disk is too full to fill them,
+  all the holes do; the host journal then reports it at err priority every minute. Block
+  zeroing stays on: without it a box could read blocks another box freed. On such a host
+  the margin the free-space check above keeps past a box's `/data` is room left for
+  PostgreSQL. On a scalable task host, whose disk holds no database, the pool stays
+  sparse (`HOT_BOX_POOL_PREALLOCATE=0`), box writes take their space from the disk as
+  they come, and that margin covers the box's image and root filesystem. Builds, files,
+  and dumps still grow on the disk either way, so `disk-pressure` remains the warning.
+  None of this has run on a real dm-thin pool ([Real-account
+  qualification](#real-account-qualification)).
+- The held data file counts as used disk from the pool's start, in `df` and in
+  `DataDiskUsedPercent`: 40, 100, and 200 GB on `small`, `medium`, and `large`. That
+  leaves about 40, 60, and 200 GB for everything else on the disk before `disk-pressure`
+  at 85%, against about 80, 160, and 400 GB with a sparse pool. Everything else is
+  PostgreSQL, Valkey, builds, files, dumps, extracted bundles, and models, and the
+  `/data` files of running boxes, which Hot's disk budget lets reach 10, 30, and 70 GB
+  by size until those boxes end. On `medium`, busy boxes can take half of it. What a
+  box deletes stays in the data file until a box writes over it, so the data disk's
+  snapshots can grow by up to the pool's size.
+- When the disk has no room for the pool to take its space as it starts, after a
+  reboot, on a replaced VM, or after a host image upgrade, which replaces the VM, the
+  pool refuses to start, and Kata's containerd with it. It needs what its data file
+  still lacks, plus 1 GB to spare (64 MB for a data file that held its space before),
+  free for non-root writers, and nothing on the disk changes. Box tasks then wait in the
+  queue, and none fail; code tasks, Hot's other services, and the scheduler run. The task
+  worker logs `Hot Box is unavailable on this task worker: Kata's containerd is not
+  running on this host` at startup, then a warning ending `; deferring queue message`
+  for each box task it leaves queued. It tries containerd again every 15 seconds,
+  kata-containerd retries the pool every 5 seconds, and box tasks run once it starts. A
+  deploy, and the start after a boot (`resumed`), finish with a `warning` that includes
+  `Kata's containerd did not start: its box pool holds its space on this data disk`, which
+  names what is missing, and `diagnostics` carries the same text under `box_pool`. The
+  host journal has the pool's refusal at err priority. No alarm fires for it. The way
+  out is a larger size: change `size` and apply, which grows the disk first
+  ([Resizing](#resizing)), then run `deploy-now`. `large` has no larger size, and no
+  command deletes data from the disk; that takes roughly 265 GB of other data on its
+  500 GB disk, once ext4's inode tables, journal, and 5% reserve are counted.
+- A pool that started sparse before its host was to hold its space, for instance after
+  Valkey moved from managed to local, still passes discards down to its data file and
+  stays sparse until it next starts. Each deploy and `diagnostics` then warn with
+  `Kata's box pool started sparse, before it was to hold its space on the data disk`.
+  Reboot the VM from the cloud console, which stops Hot until it is
+  back, and the pool takes its space as it starts. Where the disk has too little room for
+  that and the margin, the warning says so instead: grow the disk with a larger size and
+  apply, which stops and starts the VM ([Resizing](#resizing)), then run `deploy-now`;
+  the pool holds its space as it starts once the disk has room for it.
+- Where Kata's containerd is not running, or the box pool is not active, for any other
+  reason, on a scalable task host too, the same reports warn with `Kata's containerd is
+  not running (STATE)` or `Kata's box pool is not active, so neither is its containerd`.
+  Box tasks wait in the queue as above where containerd did not answer when the task
+  worker started, or another task host runs them on a scalable installation. A task
+  worker that reached containerd before it stopped takes box tasks, which fail or
+  retry. `deploy-now` starts containerd again; where it still does not start, that
+  deploy fails with the error, and the host journal has kata-containerd.service's
+  failed starts.
+- When PostgreSQL and Valkey move off the disk, `HOT_BOX_POOL_PREALLOCATE` goes back to
+  0 once the data has moved, and the timer stops filling holes. A data file that held its
+  space keeps what it holds, counted as used: nothing frees it on purpose or reports it,
+  and nothing needs doing.
 - Services have memory limits: one that exceeds its limit is restarted
   without taking the others down. Box VMs run outside those limits. On a single machine,
   each size's caps, one default box for each container slot, and 1 GB for the host fit
@@ -2482,9 +2555,10 @@ past its 1,280. `medium` is the way to more room.
   `HOT_STORE_EMBEDDING_MODEL` to `bge-small-en-v1.5` in `settings`, give the map an
   `Embedding` with its own provider, or move to a larger size. Set the model before a
   map embeds: a map already created refuses a changed model until it is recreated.
-- `disk-pressure` alerts at 85% of the data disk. Extracted bundles for every
-  deployed build are on the data disk and count toward it. A worker removes a
-  build's extraction within about 5 minutes once no deployment needs it and nothing
+- `disk-pressure` alerts at 85% of the data disk. With a local PostgreSQL or Valkey,
+  the box pool's held data file counts toward it from the start (above). Extracted
+  bundles for every deployed build are on the data disk and count toward it. A worker
+  removes a build's extraction within about 5 minutes once no deployment needs it and nothing
   is running it, and all of them are cleared and extracted again when the worker or
   task worker starts. Downloaded embedding models are there too, the task worker's
   apart, so a model both use is stored twice: about 440 MB for the default model.
@@ -2519,7 +2593,8 @@ are then collected once nothing else references them, after a day's grace.
 Builds and files stay until users delete them.
 
 **Cost drivers.** The VM runs all the time and dominates the cost. Then come:
-- the data disk and its snapshots;
+- the data disk and its snapshots, which with a local PostgreSQL or Valkey can grow
+  by up to the box pool's size, since what boxes delete stays in its data file;
 - NAT for outbound traffic (AWS NAT gateway, GCP Cloud NAT) and, when
   enabled, the load balancers for public endpoints;
 - managed PostgreSQL and Valkey instances (high availability doubles them);
@@ -2559,7 +2634,10 @@ forecast spend reaches 100%. Budgets alert; they never cap spending.
 
 Hot is down from `drain-and-stop` until the deploy reports `deployed`.
 - **Box storage does not grow.** Its pool files are created once, so the
-  pool keeps its first size although `HOT_BOX_POOL_GB` changes.
+  pool keeps its first size although `HOT_BOX_POOL_GB` changes. A pool that holds its
+  space keeps holding that first size. A larger size grows the disk before the host is
+  configured, so it is the way out when the pool has no room to start
+  ([At capacity](#capacity-retention-and-cost)).
 - **Managed data follows the size** when `data.postgres.tier`,
   `storage_gb`, or `data.valkey.node_type` are unset. RDS and ElastiCache
   apply the change in their maintenance window, and until then every plan shows it
@@ -2634,6 +2712,20 @@ says:
   - A real Google sign-in on an installation, as a new invited address and as the first
     administrator: no test reaches the token exchange, and no installation has run it.
     The same goes for GitHub's sign-in, which shares that exchange.
+  - On a single machine with a local database, the box pool on dm-thin, which no test
+    has run: only the loop device's half was measured. Run it on AWS, from a Session
+    Manager shell (`aws ssm start-session --target INSTANCE`, then `sudo`) opened by an
+    administrator whose policy allows the default shell document: the release role has
+    no shell, and on GCP the host image offers no route to one. Confirm the pool
+    activates with `no_discard_passdown` (`dmsetup table hot-devpool`); without a
+    shell, a `diagnostics` with no `box_pool` entry on a single machine with a local
+    database shows the same. Fill a box's writable root filesystem, outside `/tmp` and
+    `/data`, to its 30 GB limit (containerd's `base_image_size`); boxes cannot fill the
+    pool itself, since `small` runs one at a time and `medium` and `large` reach 60 and
+    120 GB of their 100 and 200 GB at once. Then delete it, and check that the
+    allocation of `/var/lib/kata/devmapper/data` (`du -B1`) stays the same once
+    `hot-box-pool-hold.timer` has run, and that PostgreSQL keeps writing. Also a start
+    refused for room, then after a larger size, apply, and `deploy-now`.
   - `test_psql_connects_through_a_service_file` on the first GitHub run.
 - AWS:
   - `selfhost.py maintenance start` and `end` under the release role, on both

@@ -71,6 +71,21 @@ further quarter of `/data` against the disk budget. A box that could never fit
 fails at once with `Requested resources exceed worker capacity`. One that only has
 to wait for others to finish stays queued.
 
+A task worker whose box backend has not been reached since the worker started (the
+Docker socket was missing, or the Kata backend could not start: containerd and its
+devmapper snapshotter did not answer, or the guest network or DNS setup failed)
+still runs code tasks. Its box tasks wait in the queue and do not fail, and the
+worker logs `Hot Box is unavailable on this task worker: ...` at startup, with the
+reason in the same log line, and again for each box task it defers. It tries the
+backend every 15 seconds and runs the waiting box tasks once it answers, or another
+task worker with a backend takes them. There is no time limit on the wait, and a box
+too large for the worker fails only once the backend answers.
+A Docker daemon that hangs behind a socket that is there does not count as missing:
+its box tasks are taken and fail or retry. On Hot's self-hosted stacks, on a host
+whose local PostgreSQL or Valkey shares the data disk, Kata's containerd stays down
+while the box pool cannot take its space there; see
+[the self-hosting guide](https://github.com/hot-dev/hot/blob/main/infra/README.md).
+
 On Hot's self-hosted AWS and Google Cloud stacks, the installation's size sets the
 budgets, and with them the largest preset a host admits. A box with no `size` fits
 on all of them.
@@ -132,14 +147,14 @@ Both modes provide `/data` (disk-backed) and `/tmp` (tmpfs) as writable director
 On Linux, a box's `/data` is a file the task worker allocates in full before the
 box starts, wherever the filesystem supports that, in `task.data-volume-dir`
 (`HOT_TASK_DATA_VOLUME_DIR`, default `/tmp/hot-data-volumes`). The file stays
-allocated for the box's lifetime, whatever the box writes. The disk must also have
-room for the box's image and writable root, as
-[the disk budget counts them](#what-a-worker-admits), so a default 5,120 MB `/data`
-needs 8,448 MB free. Only space free to non-root writers counts, not blocks reserved
-for root. With less, the box fails:
+allocated for the box's lifetime, whatever the box writes. Before allocating it,
+the task worker checks that the disk has free all of the box's
+[disk budget](#what-a-worker-admits), which also counts its image and writable
+root, so a default 5,120 MB `/data` needs 8,448 MB free. Only space free to
+non-root writers counts, not blocks reserved for root. With less, the box fails:
 
 ```text
-Requested /data volume could not be provisioned: Data volume I/O error: the disk has N MB available, less than the M MB a box with a K MB /data may use
+Requested /data volume could not be provisioned: Data volume I/O error: the disk has N MB available, less than the M MB counted for a box with a K MB /data
 ```
 
 On a tmpfs directory the file isn't allocated: the box uses memory as it writes, and
@@ -284,7 +299,7 @@ task ::box/start(BoxConf({
 
 ## Local Development
 
-Running `::hot::box/start` locally requires **Docker** (Docker Desktop or Docker Engine). The `hot dev` command starts a task worker that uses Docker to run containers. If Docker is not installed or not running, `hot dev` will log a warning at startup, and any `::hot::box/start` calls will fail.
+Running `::hot::box/start` locally requires **Docker** (Docker Desktop or Docker Engine). The `hot dev` command starts a task worker that uses Docker to run containers. If the Docker socket is missing, as when Docker is not installed or Docker Desktop is stopped, the task worker still runs code tasks and logs `Hot Box is unavailable on this task worker: ...` at startup and for each box task it defers. Box tasks wait in the queue, with no time limit, and run once Docker answers: the worker tries every 15 seconds. A Docker that is stopped while its socket file is still there, or on Windows, where Docker listens on a named pipe, fails box tasks instead. See [What a Worker Admits](/docs/box#what-a-worker-admits).
 
 ```bash
 # Ensure Docker is running, then:

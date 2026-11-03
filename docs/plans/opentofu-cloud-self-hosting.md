@@ -261,7 +261,11 @@ them on the host before admitting tasks. Never silently downgrade Kata isolation
 Derive task memory/concurrency from remaining capacity after reserving CPU,
 memory, and disk for the OS, PostgreSQL, Valkey, ingress, and app/API/worker.
 Give task scratch storage its own limits, so a job cannot take more than its share
-of a disk it shares with the database.
+of a disk it shares with the database. That holds where a local database shares
+the disk and the box pool's data file is held, except for holes block zeroing
+punches that `hot-box-pool-hold.timer` has not yet refilled, which is all of them
+while the disk is too full to refill them (see the devmapper item under
+[Box task host](#box-task-host)).
 The current standalone task-worker sizing defaults are not single-VM defaults.
 
 Record the resolved installation configuration and release manifest so an
@@ -1128,14 +1132,35 @@ Changes for self-hosting:
       rootfs, so a release that changes `hotbox` needs no host image rebuild. No
       test has run this bind mount through Kata's shim.
 - [x] Put the devmapper pool on its own volume, or give it a hard size limit
-      derived from the size label, so box storage cannot fill the PostgreSQL
-      disk.
-      Sparse pool files sized by `HOT_BOX_POOL_GB` in `/etc/hot/host.env`;
-      the agent writes it from the size label. That bounds box storage and does not
-      set it apart: the pool's files and each box's `/data` take their space from the
-      data disk that PostgreSQL uses, so on a disk already holding other data a box
-      can still fill it. Admission refuses a box when the disk has too little free for
-      non-root writers, and `disk-pressure` remains the warning.
+      derived from the size label, and keep box storage from filling the
+      PostgreSQL disk where it can.
+      Pool files sized by `HOT_BOX_POOL_GB` in `/etc/hot/host.env`, which the agent
+      writes from the size label. That bounds box storage. Where a local PostgreSQL or
+      Valkey shares the data disk, the agent also writes `HOT_BOX_POOL_PREALLOCATE=1`
+      (it counts the configured and the installed data modes, so it stays 1 through a
+      move off the disk until the data has moved), and `kata-devpool-activate`
+      fallocates the pool's data file when the pool starts and runs the pool with
+      `no_discard_passdown`. The promise holds only partly there. dm-thin zeroes a
+      64 KiB block when a box first writes part of it, and the loop device turns that
+      into a hole in the file; `hot-box-pool-hold.timer` fills the holes every minute
+      while the disk has room for them and 64 MB. Between its runs, what boxes write
+      into new holes takes the database's free space, and while the disk is too full to
+      fill them, all the holes do, so box storage can still fill the disk then; the
+      host journal reports that at err priority every minute. Block zeroing stays on,
+      since without it a box could read another box's freed blocks. The metadata file
+      stays sparse. Each box's `/data` is a separate, fully allocated file beside the
+      pool, bounded by Hot's disk budget, and admission refuses a box when the disk
+      has too little free for non-root writers. Builds, files, and dumps still grow
+      on the disk, so `disk-pressure` remains the warning.
+      On a scalable task host, whose disk holds no database, the pool stays sparse.
+      The held file counts as used disk (40, 100, 200 GB by size). Where the disk
+      cannot hold the rest of the file plus 1 GB as the pool starts (64 MB for a file
+      that held its space before), the pool and Kata's containerd do not start, box
+      tasks wait in the queue while code tasks run, and the deploy's warning and
+      `diagnostics` (`box_pool`) say to grow the disk with a larger size. A pool that
+      started sparse holds its space only after it starts again, so the agent warns
+      until the VM reboots. dm-thin itself has not run in any test, only the loop
+      device's half; qualification on a real host remains.
 - [ ] On one VM, containers use the instance identity, so AWS needs IMDS hop
       limit 2. The guest chain and the `PublicOnly` policy remain the
       metadata boundaries for box and normal execution. Qualify both.

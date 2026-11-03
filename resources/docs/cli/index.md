@@ -81,7 +81,7 @@ Run just the task worker (processes `::hot::task` and `::hot::box` tasks):
 hot task-worker
 ```
 
-Local `::hot::box` tasks need Docker. If Docker is not running, `hot task-worker` (and `hot dev`) will log a warning and box starts will fail.
+Local `::hot::box` tasks need Docker. Without a Docker socket, as when Docker is not installed or Docker Desktop is stopped, `hot task-worker` (and `hot dev`) still runs code tasks and logs `Hot Box is unavailable on this task worker: ...` at startup and for each box task it defers. Box tasks wait in the queue and run once Docker answers, with the worker trying every 15 seconds. A Docker that is stopped while its socket file is still there, or on Windows, fails box tasks instead. See [What a Worker Admits](/docs/box#what-a-worker-admits).
 
 ### hot scheduler
 
