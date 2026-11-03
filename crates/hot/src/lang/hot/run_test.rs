@@ -2081,7 +2081,7 @@ run()"#;
                 Val::from("tri"),
                 Val::from("tri"),
                 Val::from("tri"),
-                strs(&["other"]),
+                strs(&["tri"]),
                 Val::from("tri"),
             ]),
         );
@@ -2937,6 +2937,142 @@ run()"#;
             "str", "str", "str", "str", "str", "str", "str",
             "kept", "kept",
             "arrow",
+        ]);
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            let out = compile_and_run_project_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("run failed: {e}"));
+            assert_eq!(out, expected);
+        }
+    }
+
+    /// An overload set routes a tagged argument to the overload it has an arrow
+    /// to, built-in parameter types included, whichever overload is declared
+    /// last. Overloads that take the argument as it is still win, and an
+    /// unrelated custom type doesn't get in the way. Calls and `map` callbacks
+    /// dispatch alike.
+    #[test]
+    fn overload_dispatch_routes_through_arrows() {
+        let src = r#"::a ns
+Label type { text: Str }
+Other type { n: Int }
+Point type { x: Int }
+Tag type { name: Str }
+Label -> Str fn (l: Label): Str { l.text }
+Point -> Vec fn (p: Point): Vec { [p.x] }
+Label -> Tag fn (l: Label): Tag { Tag({name: l.text}) }
+str-first fn
+(s: Str): Any { `str ${s}` },
+(v: Vec): Any { "vec" }
+str-last fn
+(v: Vec): Any { "vec" },
+(s: Str): Any { `str ${s}` }
+past-others fn
+(i: Int): Any { "int" },
+(s: Str): Any { `str ${s}` },
+(v: Vec): Any { "vec" },
+(b: Bool): Any { "bool" }
+two-args fn
+(n: Int, s: Str): Any { `${n} ${s}` },
+(n: Int, v: Vec): Any { "vec" }
+past-custom fn
+(s: Str): Any { `str ${s}` },
+(o: Other): Any { "other" }
+custom-target fn
+(t: Tag): Any { `tag ${t.name}` },
+(o: Other): Any { "other" }
+own-type fn
+(s: Str): Any { `str ${s}` },
+(l: Label): Any { "own" },
+(v: Vec): Any { "vec" }
+any-sibling fn
+(s: Str): Any { `str ${s}` },
+(x: Any): Any { "any" },
+(v: Vec): Any { "vec" }
+union-sibling fn
+(u: Label | Int): Any { "union" },
+(s: Str): Any { `str ${s}` }
+lone fn (s: Str): Any { `str ${s}` }
+
+::t ns
+l ::a/Label({text: "l"})
+hold fn (x: Any): Any { x }
+run fn (): Vec {
+    label hold(l)
+    point hold(::a/Point({x: 1}))
+    by-value ::a/str-first
+    callbacks flatten([
+        map([label], ::a/str-first), map([label], ::a/str-last),
+        map([label], ::a/past-custom), map(["s", label], ::a/past-others),
+        map([label], ::a/lone), [by-value(label)], [call("::a/str-last", [label])]
+    ])
+    [
+        ::a/str-first(label), ::a/str-last(label), ::a/past-others(label),
+        ::a/two-args(1, label), ::a/past-custom(label), ::a/custom-target(label),
+        ::a/own-type(label), ::a/any-sibling(label), ::a/union-sibling(label),
+        ::a/str-first(point), ::a/str-first("s"), ::a/str-last([1]),
+        ...callbacks
+    ]
+}
+run()
+run()
+run()"#;
+        let expected = strs(&[
+            "str l", "str l", "str l", "1 l", "str l", "tag l", "own", "any", "union",
+            "vec", "str s", "vec",
+            "str l", "str l", "str l", "str s", "str l", "str l", "str l", "str l",
+        ]);
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            let out = compile_and_run_project_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("run failed: {e}"));
+            assert_eq!(out, expected);
+        }
+    }
+
+    /// Arrows that reach two overloads don't choose between them: the call stays
+    /// on the overload it resolved to, whose parameter check then reports the
+    /// mismatch. Neither does an argument route where its arrow can't run: at a
+    /// nullable type, or a built-in value to a built-in type.
+    #[test]
+    fn overload_dispatch_does_not_guess_between_arrows() {
+        let src = r#"::a ns
+Label type { text: Str }
+Label -> Str fn (l: Label): Str { l.text }
+Label -> Vec fn (l: Label): Vec { [l.text] }
+two fn
+(s: Str): Any { "str" },
+(v: Vec): Any { "vec" },
+(i: Int): Any { "int" }
+keeps-resolved fn
+(s: Str): Any { "str" },
+(v: Vec): Any { "vec" }
+nullable fn
+(s: Str?): Any { "str" },
+(i: Int): Any { "int" }
+builtin-value fn
+(s: Str): Any { "str" },
+(v: Vec): Any { "vec" }
+
+::t ns
+l ::a/Label({text: "l"})
+hold fn (x: Any): Any { x }
+describe fn (r: Result): Any { if-err(r, (e) { e.message }) }
+run fn (): Vec {
+    label hold(l)
+    [
+        describe(::a/two(label)),
+        ::a/keeps-resolved(label),
+        describe(::a/nullable(label)),
+        describe(::a/builtin-value(hold(1)))
+    ]
+}
+run()
+run()
+run()"#;
+        let expected = strs(&[
+            "parameter `i` of `::a/two` expected Int, got Label",
+            "vec",
+            "parameter `i` of `::a/nullable` expected Int, got Label",
+            "parameter `v` of `::a/builtin-value` expected Vec, got Int",
         ]);
         for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
             let out = compile_and_run_project_with_std_conf(src, conf)

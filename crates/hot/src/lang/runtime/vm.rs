@@ -555,35 +555,98 @@ struct OverloadSet {
 const OVERLOAD_RANK_EXACT: u32 = 0;
 const OVERLOAD_RANK_LOOSE: u32 = 1;
 const OVERLOAD_RANK_ANY: u32 = 2;
+/// A custom type that isn't the argument's. It may be an alias or a literal
+/// union, so it accepts, and counts as `OVERLOAD_RANK_ANY`; see `OverloadFit`.
+const OVERLOAD_RANK_UNKNOWN: u32 = 3;
+/// A built-in type the argument reaches only through an arrow. It outweighs any
+/// number of parameters that accept their arguments as they are.
+const OVERLOAD_RANK_ARROW: u32 = 1 << 16;
+
+/// How an overload accepts a call's arguments.
+#[derive(Clone, Copy)]
+struct OverloadFit {
+    function_id: FunctionId,
+    /// Summed rank over the parameters.
+    rank: u32,
+    /// An arrow converts one of the arguments.
+    arrow: bool,
+    /// A tagged argument is at a custom type that isn't its own and has no
+    /// arrow to it, so it fits only if that type turns out to be an alias.
+    unknown: bool,
+}
 
 impl OverloadCandidate {
-    /// Summed rank over the parameters, or `None` when a parameter does not
-    /// accept its argument. `names` are the arguments' dispatch type names,
-    /// and `maps` whether each is structurally a Map.
-    fn rank(
+    /// The overload's fit, or `None` when a parameter does not accept its
+    /// argument. `names` are the arguments' dispatch type names, `maps` whether
+    /// each is structurally a Map, and `arrow_to` whether a tagged argument has
+    /// an implicit arrow to a declared type.
+    fn fit(
         &self,
         names: &[std::borrow::Cow<'_, str>],
         maps: &[bool],
         variadic: bool,
-    ) -> Option<u32> {
+        arrow_to: impl Fn(&str, &str) -> bool,
+    ) -> Option<OverloadFit> {
         if !variadic && self.param_types.len() != names.len() {
             return None;
         }
+        // `coerce_call_args` converts only when each argument has its parameter.
+        let coerces = self.param_types.len() == names.len();
         // A rest parameter's type is each of its values' type.
         let rest = self.param_types.len().saturating_sub(1);
-        let mut total = 0;
+        let mut fit = OverloadFit {
+            function_id: self.function_id,
+            rank: 0,
+            arrow: false,
+            unknown: false,
+        };
         for (i, name) in names.iter().enumerate() {
             let param = if variadic { i.min(rest) } else { i };
             let declared = self.param_types.get(param)?;
-            total += if self.lazy_params.get(param).copied().unwrap_or(false) {
+            if self.lazy_params.get(param).copied().unwrap_or(false) {
                 // Lazy arguments arrive as thunks, so their type is unknown.
-                OVERLOAD_RANK_ANY
-            } else {
-                overload_param_rank(declared, name, maps.get(i).copied().unwrap_or(false))?
+                fit.rank += OVERLOAD_RANK_ANY;
+                continue;
+            }
+            let rank = overload_param_rank(declared, name, maps.get(i).copied().unwrap_or(false));
+            let arrow = coerces
+                && matches!(rank, None | Some(OVERLOAD_RANK_UNKNOWN))
+                && arrow_to(name, declared);
+            fit.arrow |= arrow;
+            fit.rank += match rank {
+                Some(OVERLOAD_RANK_UNKNOWN) => {
+                    fit.unknown |= !arrow && is_tagged_dispatch_name(name);
+                    OVERLOAD_RANK_ANY
+                }
+                Some(rank) => rank,
+                None if arrow => OVERLOAD_RANK_ARROW,
+                None => return None,
             };
         }
-        Some(total)
+        Some(fit)
     }
+}
+
+/// Whether a dispatch type name (see `dispatch_type_name`) is a value's type
+/// tag. An Err isn't converted: it is passed on as it is.
+fn is_tagged_dispatch_name(name: &str) -> bool {
+    !matches!(
+        name,
+        "Str"
+            | "Int"
+            | "Dec"
+            | "Bool"
+            | "Null"
+            | "Vec"
+            | "Map"
+            | "Bytes"
+            | "Byte"
+            | "Fn"
+            | "Namespace"
+            | "Iter"
+            | "Any"
+            | "::hot::type/Result.Err"
+    )
 }
 
 /// Whether a declared type names the argument's type or, for an enum, a variant
@@ -609,7 +672,7 @@ fn short_type_name(path: &str) -> &str {
 /// Rank how the declared parameter type `declared` accepts an argument with
 /// dispatch type name `actual`. Only builtin type names reject: a custom name
 /// may be a type alias, a literal union of builtin values, or the target of a
-/// coercion arrow, so it accepts without preference.
+/// coercion arrow, so it accepts as `OVERLOAD_RANK_UNKNOWN`.
 fn overload_param_rank(declared: &str, actual: &str, is_map: bool) -> Option<u32> {
     let declared = declared.trim();
     if declared.is_empty() || declared == "Any" || actual == "Any" {
@@ -664,7 +727,7 @@ fn overload_param_rank(declared: &str, actual: &str, is_map: bool) -> Option<u32
             (best, rank) => best.or(rank),
         };
     }
-    best.or(unknown.then_some(OVERLOAD_RANK_ANY))
+    best.or(unknown.then_some(OVERLOAD_RANK_UNKNOWN))
 }
 
 /// Split `s` on `sep` outside `<...>`, where type parameters can contain it.
@@ -6020,7 +6083,7 @@ impl VirtualMachine {
             .overload_for_args(function_id, args)
             .unwrap_or(function_id);
         self.dispatch_cache.insert(cache_key, function_id);
-        self.execute_user_function(function_id, args)
+        self.execute_compiled_user_function(function_id, args)
     }
 
     /// UNIFIED VARIABLE/FUNCTION LOOKUP - Single canonical method for all resolution
@@ -6278,7 +6341,7 @@ impl VirtualMachine {
                 args.len(),
                 cached_fn_id
             );
-            return self.execute_user_function(cached_fn_id, args);
+            return self.execute_compiled_user_function(cached_fn_id, args);
         }
 
         // 2c. CORE FUNCTIONS - Check if it's an auto-imported core function
@@ -6931,13 +6994,16 @@ impl VirtualMachine {
         )
     }
 
-    /// Public helper to execute a compiled user function by id for `call`
+    /// Public helper to execute a compiled user function by id for `call`,
+    /// and for callbacks. Their arguments get the implicit arrows a direct
+    /// call's do.
     pub fn execute_compiled_user_function(
         &mut self,
         function_id: u32,
         args: &[Val],
     ) -> VmResult<Val> {
-        self.execute_user_function(function_id, args)
+        let coerced = self.coerce_args_of_value_call(function_id, args)?;
+        self.execute_user_function(function_id, coerced.as_deref().unwrap_or(args))
     }
 
     /// Call a function bypassing unified_function_lookup to avoid recursion
@@ -7042,7 +7108,7 @@ impl VirtualMachine {
                         let function_id = self
                             .overload_for_args(function_id, args)
                             .unwrap_or(function_id);
-                        return self.execute_user_function(function_id, args);
+                        return self.execute_compiled_user_function(function_id, args);
                     }
 
                     if function_name.starts_with("::") && function_name.contains('/') {
@@ -7583,9 +7649,12 @@ impl VirtualMachine {
     /// overloads, the one declared with exactly the runtime argument types
     /// wins, as it does at compile time; failing that, the most specific one
     /// that accepts them (a single type, then a union or nullable type, then
-    /// `Any`). The resolved overload is kept on ties and when nothing else
-    /// accepts the arguments. Implicit coercion then applies to whichever
-    /// overload is called. Returns the overload to call instead, if any.
+    /// `Any`). A declared arrow counts as accepting a tagged argument, behind
+    /// every overload that takes it as it is, but ahead of a custom type it has
+    /// nothing to do with. The resolved overload is kept on ties and when
+    /// nothing else accepts the arguments. Implicit coercion then applies to
+    /// whichever overload is called. Returns the overload to call instead, if
+    /// any.
     pub(crate) fn overload_for_args(
         &mut self,
         function_id: FunctionId,
@@ -7636,36 +7705,65 @@ impl VirtualMachine {
         let Some(resolved) = set.candidates.iter().find(|c| c.function_id == function_id) else {
             return function_id;
         };
-        let eligible = |c: &&OverloadCandidate| c.lazy_params == resolved.lazy_params;
-        let mut best = resolved
-            .rank(names, maps, set.variadic)
-            .map(|rank| (rank, function_id));
-        for candidate in set.candidates.iter().filter(eligible) {
-            if candidate.function_id == function_id {
-                continue;
-            }
-            if let Some(rank) = candidate.rank(names, maps, set.variadic)
-                && best.is_none_or(|(best_rank, _)| rank < best_rank)
-            {
-                best = Some((rank, candidate.function_id));
+        let arrow_to = |name: &str, declared: &str| {
+            is_tagged_dispatch_name(name)
+                && self
+                    .find_coercion_target(name, short_type_name(name), declared)
+                    .is_some()
+        };
+        let fits: Vec<OverloadFit> = set
+            .candidates
+            .iter()
+            .filter(|c| c.lazy_params == resolved.lazy_params)
+            .filter_map(|c| c.fit(names, maps, set.variadic, arrow_to))
+            .collect();
+        let fit_of = |id: FunctionId| fits.iter().find(|fit| fit.function_id == id);
+        let mut best = fit_of(function_id);
+        for fit in &fits {
+            if best.is_none_or(|best| fit.rank < best.rank) {
+                best = Some(fit);
             }
         }
         // The overload whose key spells the argument types settles a tie, but a
         // short name in that key may be a different type from the argument's.
         let short_names: Vec<&str> = names.iter().map(|name| short_type_name(name)).collect();
         let exact_key = format!("{}:{}", set.prefix, short_names.join(","));
-        if let Some(&id) = self.function_mapping.get(&exact_key)
-            && let Some(rank) = set
-                .candidates
-                .iter()
-                .filter(eligible)
-                .find(|c| c.function_id == id)
-                .and_then(|c| c.rank(names, maps, set.variadic))
-            && best.is_none_or(|(best_rank, _)| rank <= best_rank)
+        if let Some(fit) = self
+            .function_mapping
+            .get(&exact_key)
+            .and_then(|&id| fit_of(id))
+            && best.is_none_or(|best| fit.rank <= best.rank)
         {
-            return id;
+            best = Some(fit);
         }
-        best.map_or(function_id, |(_, id)| id)
+        let Some(best) = best else {
+            return function_id;
+        };
+        // Reached by arrows alone, the arguments have no reason to prefer one
+        // overload over another that is as good, so neither is picked.
+        if best.rank >= OVERLOAD_RANK_ARROW
+            && best.function_id != function_id
+            && fits.iter().filter(|fit| fit.rank == best.rank).count() > 1
+        {
+            return function_id;
+        }
+        if best.unknown {
+            // A declared arrow says more than a type that may be an alias.
+            let mut arrows = fits.iter().filter(|fit| fit.arrow && !fit.unknown);
+            if let Some(first) = arrows.next() {
+                let (lowest, count) = arrows.fold((first, 1), |(lowest, count), fit| {
+                    match fit.rank.cmp(&lowest.rank) {
+                        std::cmp::Ordering::Less => (fit, 1),
+                        std::cmp::Ordering::Equal => (lowest, count + 1),
+                        std::cmp::Ordering::Greater => (lowest, count),
+                    }
+                });
+                if count == 1 {
+                    return lowest.function_id;
+                }
+            }
+        }
+        best.function_id
     }
 
     /// Compiled code makes self calls natively, skipping the runtime overload
@@ -7801,17 +7899,42 @@ impl VirtualMachine {
             return Ok(args);
         }
         for (arg, param_type) in args.iter_mut().zip(expected.iter()) {
-            // An exact number conversion ahead of the callee, so that compiled
-            // code for the parameter's own type can take the call.
-            if let Some(converted) = exact_number_for_param(arg, param_type) {
-                *arg = converted;
-                continue;
-            }
-            if let Some(coerced) = self.run_implicit_arrow(arg, param_type)? {
+            if let Some(coerced) = self.coerce_call_arg(arg, param_type)? {
                 *arg = coerced;
             }
         }
         Ok(args)
+    }
+
+    /// `coerce_call_args` for arguments held by reference, as a callback's are.
+    /// `None` when they all pass unchanged, which is the usual case.
+    fn coerce_args_of_value_call(
+        &mut self,
+        function_id: FunctionId,
+        args: &[Val],
+    ) -> VmResult<Option<Vec<Val>>> {
+        let Some(expected) = self.lookup_typed_param_signature(function_id) else {
+            return Ok(None);
+        };
+        if expected.len() != args.len() {
+            return Ok(None);
+        }
+        let mut coerced_args = None;
+        for (i, (arg, param_type)) in args.iter().zip(expected.iter()).enumerate() {
+            if let Some(coerced) = self.coerce_call_arg(arg, param_type)? {
+                coerced_args.get_or_insert_with(|| args.to_vec())[i] = coerced;
+            }
+        }
+        Ok(coerced_args)
+    }
+
+    fn coerce_call_arg(&mut self, arg: &Val, param_type: &str) -> VmResult<Option<Val>> {
+        // An exact number conversion ahead of the callee, so that compiled
+        // code for the parameter's own type can take the call.
+        if let Some(converted) = exact_number_for_param(arg, param_type) {
+            return Ok(Some(converted));
+        }
+        self.run_implicit_arrow(arg, param_type)
     }
 
     /// The implicit arrows that can reach each of `function_id`'s parameters,
