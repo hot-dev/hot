@@ -14,7 +14,14 @@
 
             <h1 class="text-xl font-bold mb-2">Check your email</h1>
 
-            {% if already_pending %}
+            {% if invite_only %}
+            <p class="text-gray-600 dark:text-gray-400 mb-4">
+                Signing up here requires an invitation. If you have one, sign up through the link in your invitation.
+            </p>
+            <p class="text-gray-600 dark:text-gray-400">
+                A new verification email goes out only for a sign-up that started from that link:
+            </p>
+            {% elif already_pending %}
             <p class="text-gray-600 dark:text-gray-400">
                 We've already sent a verification email to:
             </p>
@@ -26,6 +33,11 @@
 
             <p class="font-mono text-red-600 dark:text-red-400 mt-2 mb-4">{{ email }}</p>
 
+            {% if invite_only %}
+            <p class="text-sm text-gray-600 dark:text-gray-400">
+                If your sign-up started from your invitation link, use the link in the verification email.
+            </p>
+            {% else %}
             <p class="text-sm text-gray-600 dark:text-gray-400">
                 Click the link in the email to verify your account and complete your registration.
             </p>
@@ -35,6 +47,7 @@
                 After verifying, you'll add a card for verification &mdash; you won't be charged.
             </p>
             {% endif %}
+            {% endif %}
         </div>
 
         <div class="border-t border-gray-200 dark:border-gray-700 pt-6">
@@ -43,12 +56,20 @@
                 You've reached the resend limit for this email address.
             </p>
             <p class="text-sm text-gray-500 dark:text-gray-400">
+                {% if invite_only %}
+                If your sign-up started from your invitation link, check your spam folder for the verification email, try again
+                {% else %}
                 Check your spam folder for one of the earlier emails, try again
+                {% endif %}
                 later, or contact <a href="mailto:support@hot.dev" class="link">support@hot.dev</a> if you're stuck.
             </p>
             {% else %}
             <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
+                {% if invite_only %}
+                Didn't get that verification email? Check your spam folder or request a new one.
+                {% else %}
                 Didn't receive the email? Check your spam folder or request a new one.
+                {% endif %}
             </p>
 
             <form action="/resend-verification" method="post">

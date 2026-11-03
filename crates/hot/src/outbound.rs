@@ -1,8 +1,9 @@
 //! Shared outbound HTTP client setup and destination validation for
 //! user-controlled network clients.
 
+use ipnet::{IpNet, Ipv4Net};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use url::Url;
 
@@ -31,27 +32,74 @@ fn bundled_root_certificates() -> &'static [reqwest::Certificate] {
     &ROOTS
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DestinationPolicy {
+    /// No restriction: trusted callers and development without isolation.
     AllowPrivate,
+    /// No restriction, with HTTP(S) through `network.egress-proxy`: user code
+    /// without isolation when the operator set a proxy.
+    AllowPrivateViaProxy(Url),
+    /// Public destinations only.
     PublicOnly,
+    /// Public destinations, plus the operator's private allowlist, minus the
+    /// fixed deny set and the installation's own endpoints.
+    Restricted(Arc<OutboundRules>),
 }
 
 impl DestinationPolicy {
     pub fn from_vm(vm: &crate::lang::runtime::vm::VirtualMachine) -> Self {
-        if vm.is_isolation_enabled()
-            && !vm
-                .get_conf()
-                .get_bool_or_default("network.allow-private", false)
-        {
-            Self::PublicOnly
+        if vm.is_isolation_enabled() {
+            Self::for_isolated(vm.get_conf(), LegacyAllowPrivate::Honor)
         } else {
-            Self::AllowPrivate
+            Self::without_isolation(vm.get_conf())
         }
     }
 
-    pub fn validate_ip(self, ip: IpAddr) -> Result<(), String> {
-        if self == Self::AllowPrivate || is_public_destination(ip) {
+    /// The policy for code without isolation: any destination, through the
+    /// egress proxy when one is set. An invalid proxy fails closed to public
+    /// destinations, as invalid rules do under isolation.
+    fn without_isolation(conf: &crate::val::Val) -> Self {
+        match egress_proxy_setting(conf) {
+            Ok(None) => Self::AllowPrivate,
+            Ok(Some(proxy)) => Self::AllowPrivateViaProxy(proxy),
+            Err(error) => {
+                tracing::error!("Ignoring invalid outbound network rules: {error}");
+                Self::PublicOnly
+            }
+        }
+    }
+
+    /// The policy for code under isolation. Invalid rules fail closed to
+    /// public destinations; services reject them at startup with
+    /// [`validate_user_code_conf`].
+    fn for_isolated(conf: &crate::val::Val, legacy: LegacyAllowPrivate) -> Self {
+        match OutboundRules::parse(conf, legacy) {
+            Ok(Some(rules)) => Self::Restricted(Arc::new(rules)),
+            Ok(None) => Self::PublicOnly,
+            Err(error) => {
+                tracing::error!("Ignoring invalid outbound network rules: {error}");
+                Self::PublicOnly
+            }
+        }
+    }
+
+    pub fn validate_ip(&self, ip: IpAddr) -> Result<(), String> {
+        self.check(None, ip)
+    }
+
+    /// Whether some destinations are refused, so connections must go to the
+    /// addresses checked here and nowhere else.
+    pub fn restricts_destinations(&self) -> bool {
+        matches!(self, Self::PublicOnly | Self::Restricted(_))
+    }
+
+    fn check(&self, host: Option<&str>, ip: IpAddr) -> Result<(), String> {
+        let allowed = match self {
+            Self::AllowPrivate | Self::AllowPrivateViaProxy(_) => true,
+            Self::PublicOnly => is_public_destination(ip),
+            Self::Restricted(rules) => rules.allows(host, ip),
+        };
+        if allowed {
             Ok(())
         } else {
             Err(format!(
@@ -60,7 +108,7 @@ impl DestinationPolicy {
         }
     }
 
-    pub async fn resolve_host(self, host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
+    pub async fn resolve_host(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
         let mut addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
             .await
             .map_err(|e| format!("failed to resolve {host}: {e}"))?
@@ -71,19 +119,24 @@ impl DestinationPolicy {
             return Err(format!("{host} resolved to no addresses"));
         }
         for addr in &addrs {
-            self.validate_ip(addr.ip())?;
+            self.check(Some(host), addr.ip())?;
         }
         Ok(addrs)
     }
 
     pub async fn resolve_url(&self, url: &Url) -> Result<Vec<SocketAddr>, String> {
         let host = url
-            .host_str()
+            .host()
             .ok_or_else(|| "outbound URL must include a host".to_string())?;
         let port = url
             .port_or_known_default()
             .ok_or_else(|| "outbound URL has no known port".to_string())?;
-        self.resolve_host(host, port).await
+        match host {
+            url::Host::Domain(host) => self.resolve_host(host, port).await,
+            // Not `host_str`, which keeps an IPv6 address's brackets.
+            url::Host::Ipv4(ip) => self.resolve_host(&ip.to_string(), port).await,
+            url::Host::Ipv6(ip) => self.resolve_host(&ip.to_string(), port).await,
+        }
     }
 
     /// Alert destinations are server-side configuration, not VM calls. Hosted
@@ -93,9 +146,11 @@ impl DestinationPolicy {
         if !conf.get_bool_or_default("engine.isolation", false)
             && conf.get_bool_or_default("network.allow-private", false)
         {
-            Self::AllowPrivate
+            Self::without_isolation(conf)
         } else {
-            Self::PublicOnly
+            // Isolated alert delivery has never honored `allow-private`; only
+            // the explicit allowlists open private destinations.
+            Self::for_isolated(conf, LegacyAllowPrivate::Ignore)
         }
     }
 
@@ -103,7 +158,7 @@ impl DestinationPolicy {
     /// addresses into a no-redirect client. This closes DNS rebinding and
     /// redirect-to-private-address gaps.
     pub async fn pinned_http_client(
-        self,
+        &self,
         url: &Url,
         timeout: Duration,
         connect_timeout: Duration,
@@ -111,19 +166,266 @@ impl DestinationPolicy {
         if !matches!(url.scheme(), "http" | "https") {
             return Err("outbound URL scheme must be http or https".to_string());
         }
-        let host = url
-            .host_str()
-            .ok_or_else(|| "outbound URL must include a host".to_string())?;
-        let addrs = self.resolve_url(url).await?;
-
-        client_builder()
+        let builder = client_builder()
             .timeout(timeout)
             .connect_timeout(connect_timeout)
-            .redirect(reqwest::redirect::Policy::none())
-            .resolve_to_addrs(host, &addrs)
+            .redirect(reqwest::redirect::Policy::none());
+        self.route(url, builder)
+            .await?
             .build()
             .map_err(|e| format!("failed to build pinned HTTP client: {e}"))
     }
+
+    /// The egress proxy user-code HTTP(S) must use, if the operator set one.
+    pub fn egress_proxy(&self) -> Option<&Url> {
+        match self {
+            Self::Restricted(rules) => rules.egress_proxy.as_ref(),
+            Self::AllowPrivateViaProxy(proxy) => Some(proxy),
+            Self::AllowPrivate | Self::PublicOnly => None,
+        }
+    }
+
+    /// Point a client at `url` safely: through the egress proxy when one is
+    /// configured, otherwise pinned to addresses validated just now, which
+    /// closes DNS-rebinding gaps.
+    pub async fn route(
+        &self,
+        url: &Url,
+        builder: reqwest::ClientBuilder,
+    ) -> Result<reqwest::ClientBuilder, String> {
+        let host = url
+            .host()
+            .ok_or_else(|| "outbound URL must include a host".to_string())?;
+        if let Some(proxy) = self.egress_proxy() {
+            // The proxy resolves names; addresses written in the URL are still
+            // checked here.
+            match host {
+                url::Host::Ipv4(ip) => self.check(None, ip.into())?,
+                url::Host::Ipv6(ip) => self.check(None, ip.into())?,
+                url::Host::Domain(_) => {}
+            }
+            let proxy = reqwest::Proxy::all(proxy.as_str())
+                .map_err(|e| format!("invalid egress proxy: {e}"))?;
+            return Ok(builder.proxy(proxy));
+        }
+        let addrs = self.resolve_url(url).await?;
+        let builder = if self.restricts_destinations() {
+            // A proxy from the environment (`HTTPS_PROXY` and the like) would
+            // resolve the name again itself, past the checks above.
+            builder.no_proxy()
+        } else {
+            builder
+        };
+        Ok(match host {
+            url::Host::Domain(domain) => builder.resolve_to_addrs(domain, &addrs),
+            // An address written in the URL is connected to as written.
+            url::Host::Ipv4(_) | url::Host::Ipv6(_) => builder,
+        })
+    }
+}
+
+/// Operator rules for user code that may reach private destinations:
+/// `network.allow-cidrs`, `network.allow-hosts`, and `network.deny-cidrs`.
+/// Each takes a list or a comma-separated string. The legacy
+/// `network.allow-private = true` allows every private address. None of them
+/// can reach the [fixed deny set](is_always_denied).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct OutboundRules {
+    allow_cidrs: Vec<IpNet>,
+    /// Exact names, or `*.example.internal` for any subdomain.
+    allow_hosts: Vec<String>,
+    /// The installation's own endpoints: database, cache, ingress, and agent.
+    deny_cidrs: Vec<IpNet>,
+    /// `network.egress-proxy`: user-code HTTP(S) goes through this proxy,
+    /// which resolves names and must enforce the deny set itself.
+    egress_proxy: Option<Url>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LegacyAllowPrivate {
+    Honor,
+    Ignore,
+}
+
+impl OutboundRules {
+    /// `None` when nothing is configured, which means public destinations only.
+    pub fn from_conf(conf: &crate::val::Val) -> Result<Option<Self>, String> {
+        Self::parse(conf, LegacyAllowPrivate::Honor)
+    }
+
+    fn parse(conf: &crate::val::Val, legacy: LegacyAllowPrivate) -> Result<Option<Self>, String> {
+        let mut allow_cidrs = conf_cidrs(conf, "network.allow-cidrs")?;
+        if legacy == LegacyAllowPrivate::Honor
+            && conf.get_bool_or_default("network.allow-private", false)
+        {
+            allow_cidrs.extend(["0.0.0.0/0", "::/0"].map(|net| net.parse::<IpNet>().unwrap()));
+        }
+        let allow_hosts = conf_list(conf, "network.allow-hosts")
+            .into_iter()
+            .map(|host| {
+                let host = host.to_ascii_lowercase();
+                let name = host.strip_prefix("*.").unwrap_or(&host);
+                if name.is_empty() || name.contains(['*', '/', ':']) {
+                    Err(format!(
+                        "network.allow-hosts entry {host:?} is not a hostname"
+                    ))
+                } else {
+                    Ok(host)
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let deny_cidrs = conf_cidrs(conf, "network.deny-cidrs")?;
+        let egress_proxy = egress_proxy_setting(conf)?;
+        let rules = Self {
+            allow_cidrs,
+            allow_hosts,
+            deny_cidrs,
+            egress_proxy,
+        };
+        Ok((rules != Self::default()).then_some(rules))
+    }
+
+    fn allows(&self, host: Option<&str>, ip: IpAddr) -> bool {
+        let ip = canonical(ip);
+        if is_always_denied(ip) || self.deny_cidrs.iter().any(|net| net.contains(&ip)) {
+            return false;
+        }
+        is_public_destination(ip)
+            || self.allow_cidrs.iter().any(|net| net.contains(&ip))
+            || host.is_some_and(|host| self.allows_host(host))
+    }
+
+    fn allows_host(&self, host: &str) -> bool {
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        self.allow_hosts
+            .iter()
+            .any(|allowed| match allowed.strip_prefix("*.") {
+                Some(domain) => host
+                    .strip_suffix(domain)
+                    .is_some_and(|sub| sub.ends_with('.') && sub.len() > 1),
+                None => *allowed == host,
+            })
+    }
+}
+
+/// `network.egress-proxy`, the proxy user-code HTTP(S) must use, if set.
+pub fn egress_proxy_setting(conf: &crate::val::Val) -> Result<Option<Url>, String> {
+    let raw = match conf.get("network.egress-proxy") {
+        Some(_) => conf.get_str("network.egress-proxy"),
+        None => return Ok(None),
+    };
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+    let url =
+        Url::parse(raw.trim()).map_err(|_| "network.egress-proxy is not a URL".to_string())?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() || url.path() != "/" {
+        return Err("network.egress-proxy must be an http:// or https:// proxy address".into());
+    }
+    Ok(Some(url))
+}
+
+/// A setting that takes a list or a comma-separated string, as trimmed,
+/// non-empty entries.
+pub fn conf_list(conf: &crate::val::Val, key: &str) -> Vec<String> {
+    let entries: Vec<String> = match conf.get(key) {
+        Some(crate::val::Val::Vec(items)) => items
+            .iter()
+            .map(|item| item.to_string().trim_matches('"').to_string())
+            .collect(),
+        Some(_) => conf.get_str(key).split(',').map(str::to_string).collect(),
+        None => Vec::new(),
+    };
+    entries
+        .into_iter()
+        .map(|entry| entry.trim().to_string())
+        .filter(|entry| !entry.is_empty())
+        .collect()
+}
+
+/// A [`conf_list`] of addresses and CIDR ranges, with IPv4 ranges written in
+/// IPv6 form read as IPv4, the way destinations are compared.
+pub fn conf_cidrs(conf: &crate::val::Val, key: &str) -> Result<Vec<IpNet>, String> {
+    conf_list(conf, key)
+        .into_iter()
+        .map(|entry| {
+            entry
+                .parse::<IpNet>()
+                .or_else(|_| entry.parse::<IpAddr>().map(IpNet::from))
+                .map(|net| canonical_net(net.trunc()))
+                .map_err(|_| format!("{key} entry {entry:?} is not an IP address or CIDR"))
+        })
+        .collect()
+}
+
+/// An IPv6 range inside one of the prefixes that [`embedded_ipv4`] reads, as
+/// the IPv4 range it carries. Wider ranges stay IPv6.
+fn canonical_net(net: IpNet) -> IpNet {
+    let IpNet::V6(v6) = net else {
+        return net;
+    };
+    let network = v6.network();
+    let embeds_ipv4 = network.to_ipv4_mapped().is_some()
+        || ipv6_in(network, [0, 0, 0, 0, 0, 0, 0, 0], 96)
+        || ipv6_in(network, [0x64, 0xff9b, 0, 0, 0, 0, 0, 0], 96);
+    if v6.prefix_len() < 96 || !embeds_ipv4 {
+        return net;
+    }
+    let low = (u128::from(network) & u128::from(u32::MAX)) as u32;
+    Ipv4Net::new(Ipv4Addr::from(low), v6.prefix_len() - 96).map_or(net, |v4| IpNet::V4(v4.trunc()))
+}
+
+/// Addresses user code never reaches, whatever the operator allows: the
+/// machine itself, link-local services including every cloud metadata
+/// endpoint, and addresses that are never a single remote host.
+pub fn is_always_denied(ip: IpAddr) -> bool {
+    match canonical(ip) {
+        IpAddr::V4(ip) => {
+            ip.is_unspecified()
+                || ip.is_loopback()
+                || ip.is_link_local() // 169.254.169.254, ECS 169.254.170.2
+                || ip.is_broadcast()
+                || ip.is_multicast()
+                || ipv4_in(ip, [0, 0, 0, 0], 8)
+                || ipv4_in(ip, [240, 0, 0, 0], 4)
+        }
+        IpAddr::V6(ip) => {
+            ip.is_unspecified()
+                || ip.is_loopback()
+                || ip.is_multicast()
+                || ipv6_in(ip, [0xfe80, 0, 0, 0, 0, 0, 0, 0], 10)
+                // Metadata over IPv6: AWS IMDS and Google Compute Engine.
+                || ip == Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254)
+                || ip == Ipv6Addr::new(0xfd20, 0xce, 0, 0, 0, 0, 0, 0x254)
+        }
+    }
+}
+
+/// Compare IPv4 destinations embedded in IPv6 addresses as IPv4.
+fn canonical(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => embedded_ipv4(v6).map_or(ip, IpAddr::V4),
+        v4 => v4,
+    }
+}
+
+/// Startup check for services that run user code. Self-hosted production
+/// installations always isolate it, and outbound rules must parse.
+pub fn validate_user_code_conf(conf: &crate::val::Val) -> Result<(), String> {
+    check_user_code_conf(conf, &crate::env::get_env())
+}
+
+fn check_user_code_conf(conf: &crate::val::Val, env: &str) -> Result<(), String> {
+    if crate::product::is_self_host(conf)
+        && env == "production"
+        && !conf.get_bool_or_default("engine.isolation", false)
+    {
+        return Err(
+            "engine.isolation must be true for self-hosted production services that run user code"
+                .into(),
+        );
+    }
+    OutboundRules::from_conf(conf).map(|_| ())
 }
 
 fn ipv4_in(ip: Ipv4Addr, network: [u8; 4], prefix: u32) -> bool {
@@ -244,6 +546,217 @@ mod tests {
         assert!(is_public_destination(
             "2001:4860:4860::8888".parse().unwrap()
         ));
+    }
+
+    fn rules(conf: crate::val::Val) -> DestinationPolicy {
+        DestinationPolicy::for_isolated(
+            &crate::val!({ "network": conf }),
+            LegacyAllowPrivate::Honor,
+        )
+    }
+
+    fn reaches(policy: &DestinationPolicy, host: Option<&str>, ip: &str) -> bool {
+        policy.check(host, ip.parse().unwrap()).is_ok()
+    }
+
+    #[test]
+    fn allowlisted_private_destinations_never_include_the_deny_set() {
+        let policy = rules(crate::val!({
+            "allow-cidrs": ["10.20.0.0/16", "0.0.0.0/0", "::/0"],
+            "deny-cidrs": "10.20.0.5, 2600:1f18::/64",
+        }));
+        assert!(reaches(&policy, None, "10.20.3.4"));
+        assert!(reaches(&policy, None, "8.8.8.8"));
+        for ip in [
+            "10.20.0.5",       // the installation's database
+            "2600:1f18::10",   // a denied public range
+            "169.254.169.254", // AWS, GCP, and Azure metadata
+            "169.254.170.2",   // ECS task metadata
+            "fd00:ec2::254",   // AWS IMDS over IPv6
+            "fd20:ce::254",    // Google metadata over IPv6
+            "127.0.0.1",
+            "::1",
+            "::ffff:169.254.169.254", // IPv4-mapped metadata
+            "::ffff:10.20.0.5",       // IPv4-mapped denied address
+            "fe80::1",
+            "0.0.0.0",
+        ] {
+            assert!(!reaches(&policy, None, ip), "{ip} must stay blocked");
+        }
+    }
+
+    #[test]
+    fn allowlists_open_only_the_listed_private_destinations() {
+        let policy = rules(crate::val!({
+            "allow-cidrs": ["192.168.5.10"],
+            "allow-hosts": ["api.corp.example", "*.svc.internal"],
+        }));
+        assert!(reaches(&policy, None, "192.168.5.10"));
+        assert!(!reaches(&policy, None, "192.168.5.11"));
+        assert!(reaches(&policy, Some("API.corp.example."), "10.1.1.1"));
+        assert!(reaches(&policy, Some("billing.svc.internal"), "10.1.1.2"));
+        assert!(!reaches(&policy, Some("svc.internal"), "10.1.1.2"));
+        assert!(!reaches(&policy, Some("evilsvc.internal"), "10.1.1.2"));
+        assert!(!reaches(&policy, Some("other.corp.example"), "10.1.1.1"));
+        // A name is never a way into the deny set.
+        assert!(!reaches(
+            &policy,
+            Some("api.corp.example"),
+            "169.254.169.254"
+        ));
+        assert!(!reaches(&policy, Some("api.corp.example"), "127.0.0.1"));
+    }
+
+    #[test]
+    fn ipv6_written_ipv4_entries_are_read_as_ipv4() {
+        let policy = rules(crate::val!({
+            "allow-cidrs": "10.20.0.0/16",
+            "deny-cidrs": ["::ffff:10.20.0.5", "64:ff9b::a14:100/120"],
+        }));
+        assert!(reaches(&policy, None, "10.20.0.6"));
+        for ip in [
+            "10.20.0.5",
+            "::ffff:10.20.0.5",
+            "10.20.1.9",
+            "64:ff9b::a14:109",
+        ] {
+            assert!(!reaches(&policy, None, ip), "{ip} must stay blocked");
+        }
+        let nets = |value: &str| conf_cidrs(&crate::val!({"k": value}), "k").unwrap();
+        assert_eq!(
+            nets("::ffff:10.68.0.0/112, ::a00:0/104, 2600:1f18::/64, ::/0"),
+            ["10.68.0.0/16", "10.0.0.0/8", "2600:1f18::/64", "::/0"]
+                .map(|net| net.parse::<IpNet>().unwrap())
+        );
+    }
+
+    #[test]
+    fn legacy_allow_private_keeps_metadata_blocked() {
+        let policy = rules(crate::val!({"allow-private": true}));
+        assert!(reaches(&policy, None, "10.0.0.1"));
+        assert!(reaches(&policy, None, "fd12::1"));
+        assert!(!reaches(&policy, None, "169.254.169.254"));
+        assert!(!reaches(&policy, None, "127.0.0.1"));
+    }
+
+    #[test]
+    fn rules_parse_strictly_and_default_to_public_only() {
+        assert_eq!(rules(crate::val!({})), DestinationPolicy::PublicOnly);
+        let invalid = crate::val!({"network": {"allow-cidrs": "10.0.0.0/33"}});
+        assert!(OutboundRules::from_conf(&invalid).is_err());
+        assert_eq!(
+            DestinationPolicy::for_isolated(&invalid, LegacyAllowPrivate::Honor),
+            DestinationPolicy::PublicOnly,
+            "invalid rules fail closed"
+        );
+        let invalid = crate::val!({"network": {"allow-hosts": ["*"]}});
+        assert!(OutboundRules::from_conf(&invalid).is_err());
+    }
+
+    #[test]
+    fn egress_proxies_must_be_http_proxy_addresses() {
+        let proxy = |value: &str| {
+            OutboundRules::from_conf(&crate::val!({"network": {"egress-proxy": value}}))
+        };
+        let rules = proxy("http://proxy.internal:3128").unwrap().unwrap();
+        let policy = DestinationPolicy::Restricted(Arc::new(rules));
+        assert_eq!(
+            policy.egress_proxy().map(Url::as_str),
+            Some("http://proxy.internal:3128/")
+        );
+        for invalid in [
+            "ftp://proxy:21",
+            "proxy.internal:3128",
+            "http://proxy/prefix",
+        ] {
+            assert!(proxy(invalid).is_err(), "{invalid}");
+        }
+        assert!(
+            proxy("").unwrap().is_none(),
+            "an empty setting means no proxy"
+        );
+        assert!(DestinationPolicy::PublicOnly.egress_proxy().is_none());
+    }
+
+    #[test]
+    fn egress_proxies_apply_without_isolation() {
+        let conf = crate::val!({"network": {"egress-proxy": "http://proxy.internal:3128"}});
+        let policy = DestinationPolicy::without_isolation(&conf);
+        assert_eq!(
+            policy.egress_proxy().map(Url::as_str),
+            Some("http://proxy.internal:3128/")
+        );
+        assert!(policy.validate_ip("10.0.0.1".parse().unwrap()).is_ok());
+        assert!(!policy.restricts_destinations());
+        let alerts = conf.merge(&crate::val!({"network": {"allow-private": true}}));
+        assert_eq!(DestinationPolicy::for_alert_delivery(&alerts), policy);
+        assert_eq!(
+            DestinationPolicy::without_isolation(&crate::val!({})),
+            DestinationPolicy::AllowPrivate
+        );
+        let invalid = crate::val!({"network": {"egress-proxy": "proxy.internal:3128"}});
+        assert_eq!(
+            DestinationPolicy::without_isolation(&invalid),
+            DestinationPolicy::PublicOnly,
+            "an invalid proxy fails closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn ipv6_literal_urls_are_checked_without_a_lookup() {
+        let url = |s: &str| Url::parse(s).unwrap();
+        let addrs = DestinationPolicy::PublicOnly
+            .resolve_url(&url("https://[2606:4700:4700::1111]/"))
+            .await
+            .unwrap();
+        assert_eq!(addrs, ["[2606:4700:4700::1111]:443".parse().unwrap()]);
+        let error = DestinationPolicy::PublicOnly
+            .resolve_url(&url("http://[::ffff:169.254.169.254]:8080/"))
+            .await
+            .unwrap_err();
+        assert!(error.contains("is blocked"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn checked_connections_ignore_proxies_from_the_environment() {
+        // reqwest adds a proxy read from HTTP(S)_PROXY to every client unless
+        // told not to; a client's Debug lists its proxies.
+        let client = |policy: DestinationPolicy| async move {
+            let builder = policy
+                .route(&Url::parse("http://8.8.8.8/").unwrap(), client_builder())
+                .await
+                .unwrap();
+            format!("{:?}", builder.build().unwrap())
+        };
+        assert!(
+            !client(DestinationPolicy::PublicOnly)
+                .await
+                .contains("proxies")
+        );
+        let restricted = rules(crate::val!({"allow-cidrs": "10.0.0.0/8"}));
+        assert!(!client(restricted).await.contains("proxies"));
+        // Trusted callers keep the environment's proxy.
+        assert!(
+            client(DestinationPolicy::AllowPrivate)
+                .await
+                .contains("proxies")
+        );
+    }
+
+    #[test]
+    fn self_hosted_production_requires_isolation() {
+        let self_host = |isolation: bool| {
+            crate::val!({
+                "product": {"experience": "self-host"},
+                "engine": {"isolation": isolation},
+            })
+        };
+        assert!(check_user_code_conf(&self_host(false), "production").is_err());
+        assert!(check_user_code_conf(&self_host(true), "production").is_ok());
+        assert!(check_user_code_conf(&self_host(false), "development").is_ok());
+        assert!(check_user_code_conf(&crate::val!({}), "production").is_ok());
+        let bad_rules = self_host(true).merge(&crate::val!({"network": {"deny-cidrs": "nope"}}));
+        assert!(check_user_code_conf(&bad_rules, "production").is_err());
     }
 
     #[test]

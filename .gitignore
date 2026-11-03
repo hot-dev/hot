@@ -45,6 +45,7 @@ cdn-output/
 **/*.tfstate.*
 **/*.tfplan
 infra/**/backend_override.tf
+!infra/github/example-operator-repo/installation/backend_override.tf
 infra/**/encryption_override.tf
 infra/.generated/
 infra/**/__pycache__/

@@ -162,6 +162,16 @@ pub async fn get_org_usage(
         )
     })?;
 
+    // Calls are deleted by the installation's retention when no plan or override
+    // sets one, which the features alone report as unlimited.
+    let call_retention_days = hot::db::subscription::call_retention_days_for_org(
+        &db,
+        &org_id,
+        &features,
+        hot::db::get_call_retention_days(&conf),
+    )
+    .await;
+
     // Build the response
     let response = OrgUsageResponse {
         org_id,
@@ -181,7 +191,7 @@ pub async fn get_org_usage(
             runs_per_month: features.runs_per_month(),
             storage_bytes: features.storage_bytes(),
             team_members: features.team_members(),
-            call_retention_days: features.call_retention_days(),
+            call_retention_days,
             call_storage_bytes: features.call_storage_bytes(),
             store_storage_bytes: features.store_storage_bytes(),
             compute_units_per_month: features.compute_units_per_month(),

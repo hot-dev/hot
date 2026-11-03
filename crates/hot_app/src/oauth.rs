@@ -3,7 +3,6 @@ use oauth2::{
     RedirectUrl, Scope, TokenResponse, TokenUrl, basic::BasicClient,
 };
 use serde::{Deserialize, Serialize};
-use std::env;
 
 /// OAuth provider configuration
 #[derive(Debug, Clone)]
@@ -28,52 +27,80 @@ pub struct GitHubConfig {
 type ConfiguredOAuthClient =
     BasicClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointSet>;
 
-/// An OAuth setting from the environment, or from `<NAME>_FILE`.
-fn setting(name: &str) -> Result<String, String> {
-    hot::environment::read_optional(name)?.ok_or_else(|| format!("{name} is not set"))
-}
-
 impl OAuthConfig {
-    /// Load OAuth configuration from environment variables
-    pub fn from_env() -> Self {
-        let google = if let (Ok(client_id), Ok(client_secret)) = (
-            setting("HOT_GOOGLE_CLIENT_ID"),
-            setting("HOT_GOOGLE_CLIENT_SECRET"),
-        ) {
-            Some(GoogleConfig {
+    /// Load OAuth configuration from environment variables. Client IDs and
+    /// secrets may be supplied as `<NAME>_FILE`; a conflicting or unreadable
+    /// setting, or a client ID without its secret or the reverse, is an error
+    /// rather than a silently disabled provider.
+    pub fn from_env() -> Result<Self, String> {
+        let google = client_credentials("HOT_GOOGLE_CLIENT_ID", "HOT_GOOGLE_CLIENT_SECRET")?.map(
+            |(client_id, client_secret)| GoogleConfig {
                 client_id,
                 client_secret,
-            })
-        } else {
-            None
-        };
-
-        let github = if let (Ok(client_id), Ok(client_secret)) = (
-            setting("HOT_GITHUB_CLIENT_ID"),
-            setting("HOT_GITHUB_CLIENT_SECRET"),
-        ) {
-            Some(GitHubConfig {
+            },
+        );
+        let github = client_credentials("HOT_GITHUB_CLIENT_ID", "HOT_GITHUB_CLIENT_SECRET")?.map(
+            |(client_id, client_secret)| GitHubConfig {
                 client_id,
                 client_secret,
-            })
-        } else {
-            None
-        };
+            },
+        );
 
-        let redirect_base_url = env::var("HOT_OAUTH_REDIRECT_BASE_URL")
-            .unwrap_or_else(|_| "http://localhost:4680".to_string());
+        let redirect_base_url = hot::environment::read_optional("HOT_OAUTH_REDIRECT_BASE_URL")?
+            .and_then(with_value)
+            .unwrap_or_else(|| "http://localhost:4680".to_string());
 
-        Self {
+        Ok(Self {
             google,
             github,
             redirect_base_url,
-        }
+        })
     }
 
     /// Check if any OAuth provider is configured
     pub fn is_any_configured(&self) -> bool {
         self.google.is_some() || self.github.is_some()
     }
+}
+
+fn client_credentials(
+    id_name: &str,
+    secret_name: &str,
+) -> Result<Option<(String, String)>, String> {
+    credential_pair(
+        (id_name, hot::environment::read_optional(id_name)?),
+        (secret_name, hot::environment::read_optional(secret_name)?),
+    )
+}
+
+/// A provider is configured when its client ID and secret both have a value, and
+/// not when neither does. One alone is a sign-in somebody meant to offer, so
+/// it's an error naming what is missing, and never a value.
+fn credential_pair(
+    (id_name, client_id): (&str, Option<String>),
+    (secret_name, client_secret): (&str, Option<String>),
+) -> Result<Option<(String, String)>, String> {
+    let missing = |missing: &str, present: &str| {
+        format!(
+            "{missing} has no value but {present} does: sign-in with this provider needs both, \
+             so set {missing} or remove {present}"
+        )
+    };
+    match (
+        client_id.and_then(with_value),
+        client_secret.and_then(with_value),
+    ) {
+        (Some(id), Some(secret)) => Ok(Some((id, secret))),
+        (None, None) => Ok(None),
+        (Some(_), None) => Err(missing(secret_name, id_name)),
+        (None, Some(_)) => Err(missing(id_name, secret_name)),
+    }
+}
+
+/// A setting that is set but blank says nothing, the same as one left unset.
+/// (An empty `<NAME>_FILE` never gets here: reading it is an error.)
+fn with_value(value: String) -> Option<String> {
+    (!value.trim().is_empty()).then_some(value)
 }
 
 /// Create a Google OAuth client
@@ -343,6 +370,44 @@ pub async fn exchange_code_for_token(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The environment, `<NAME>_FILE` and the sign-in pages' side of this are in
+    // tests/oauth_settings.rs, which owns its process's environment.
+    #[test]
+    fn a_provider_needs_both_of_its_client_settings() {
+        for (id_name, secret_name) in [
+            ("HOT_GOOGLE_CLIENT_ID", "HOT_GOOGLE_CLIENT_SECRET"),
+            ("HOT_GITHUB_CLIENT_ID", "HOT_GITHUB_CLIENT_SECRET"),
+        ] {
+            let pair = |id: Option<&str>, secret: Option<&str>| {
+                credential_pair(
+                    (id_name, id.map(String::from)),
+                    (secret_name, secret.map(String::from)),
+                )
+            };
+            assert_eq!(
+                pair(Some("client"), Some("hush")),
+                Ok(Some(("client".to_string(), "hush".to_string())))
+            );
+            // A value is used as given.
+            assert_eq!(
+                pair(Some("client"), Some(" hush ")),
+                Ok(Some(("client".to_string(), " hush ".to_string())))
+            );
+            for blank in [None, Some(""), Some("  ")] {
+                assert_eq!(pair(blank, blank), Ok(None));
+                for (error, named, other) in [
+                    (pair(Some("client"), blank), secret_name, id_name),
+                    (pair(blank, Some("hush")), id_name, secret_name),
+                ] {
+                    let error = error.unwrap_err();
+                    assert!(error.starts_with(named));
+                    assert!(error.contains(other));
+                    assert!(!error.contains("hush") && !error.contains("client "));
+                }
+            }
+        }
+    }
 
     #[test]
     fn select_github_email_prefers_primary_verified() {

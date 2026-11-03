@@ -118,6 +118,10 @@ impl ResourceBudget {
         }
     }
 
+    pub fn total_memory_mb(&self) -> u64 {
+        self.total_memory_mb
+    }
+
     pub fn available_memory_mb(&self) -> u64 {
         self.total_memory_mb
             .saturating_sub(self.allocated_memory_mb.load(Ordering::Acquire))

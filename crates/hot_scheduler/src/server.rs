@@ -11,7 +11,9 @@ use hot::lang::event::{Event, EventMessage, EventMessageBody, ExecutionContext};
 use hot::queue::{Queue, QueueType, mem::MemQueue, sqlite::SqliteQueue, streams::RedisStreamQueue};
 use hot::val;
 use hot::val::Val;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tokio::time::{Duration, interval};
 use tracing::{debug, error, info, warn};
@@ -338,8 +340,248 @@ pub async fn run(
         schedule_policy,
         singleton,
         None,
+        None,
     )
     .await
+}
+
+/// How often the heartbeat job rewrites `scheduler.heartbeat-path`.
+pub const HEARTBEAT_CRON: &str = "*/30 * * * * *";
+
+/// A job on the same scheduler as the schedules that writes the current
+/// time, in seconds since the epoch, to `path`. It writes only while the
+/// scheduler dispatches: running at all shows the schedules' tick loop is alive,
+/// and `health` shows that what they dispatch gets anywhere. So a supervisor's
+/// health check can tell a stalled scheduler from a running process.
+pub fn heartbeat_job(
+    path: PathBuf,
+    health: Arc<DispatchHealth>,
+) -> Result<Job, Box<dyn std::error::Error + Send + Sync>> {
+    Job::new_async(HEARTBEAT_CRON, move |_uuid, _lock| {
+        let path = path.clone();
+        let health = Arc::clone(&health);
+        async move {
+            match health.problem(Instant::now()) {
+                None => write_heartbeat(&path),
+                Some(problem) => {
+                    error!("hot.dev: SCHEDULER is not dispatching, so no heartbeat: {problem}");
+                }
+            }
+        }
+    })
+}
+
+/// The longest a dispatch loop may go without finishing a pass, unless three
+/// of its intervals take longer: a database that is slow for a moment is not a
+/// scheduler that stopped dispatching.
+const DISPATCH_LOOP_STALE_AFTER: Duration = Duration::from_secs(90);
+
+/// Whether the scheduler is getting work dispatched, for its heartbeat. Its
+/// dispatch loops report each pass they finish, so one that keeps failing, or
+/// has died, goes stale. Every enqueue reports through [`ObservedQueue`]: a
+/// queue that refuses writes (Valkey at its memory limit) still answers pings.
+/// In a deployment something enqueues at least every two minutes (the domain
+/// maintenance timers), so one failed enqueue doesn't outlast the next.
+#[derive(Default)]
+pub struct DispatchHealth {
+    state: Mutex<DispatchState>,
+}
+
+#[derive(Default)]
+struct DispatchState {
+    loops: Vec<DispatchLoop>,
+    enqueue_error: Option<String>,
+}
+
+struct DispatchLoop {
+    name: &'static str,
+    stale_after: Duration,
+    last_pass: Instant,
+}
+
+impl DispatchHealth {
+    fn state(&self) -> std::sync::MutexGuard<'_, DispatchState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Start expecting a pass of the loop every `interval`.
+    fn watch_loop(&self, name: &'static str, interval: Duration) {
+        self.state().loops.push(DispatchLoop {
+            name,
+            stale_after: (3 * interval).max(DISPATCH_LOOP_STALE_AFTER),
+            last_pass: Instant::now(),
+        });
+    }
+
+    fn loop_passed(&self, name: &'static str) {
+        if let Some(watched) = self.state().loops.iter_mut().find(|l| l.name == name) {
+            watched.last_pass = Instant::now();
+        }
+    }
+
+    /// Why the scheduler isn't dispatching at `now`, if so.
+    fn problem(&self, now: Instant) -> Option<String> {
+        let state = self.state();
+        if let Some(error) = &state.enqueue_error {
+            return Some(format!("its last enqueue failed: {error}"));
+        }
+        state
+            .loops
+            .iter()
+            .find(|watched| now.duration_since(watched.last_pass) >= watched.stale_after)
+            .map(|watched| {
+                format!(
+                    "its {} has not finished a pass in {:?}",
+                    watched.name, watched.stale_after
+                )
+            })
+    }
+}
+
+/// The event queue, reporting whether each enqueue worked.
+struct ObservedQueue {
+    inner: Arc<dyn Queue<Message>>,
+    health: Arc<DispatchHealth>,
+}
+
+#[async_trait::async_trait]
+impl Queue<Message> for ObservedQueue {
+    async fn enqueue(&self, item: Message) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let result = self.inner.enqueue(item).await;
+        self.health.state().enqueue_error = result.as_ref().err().map(ToString::to_string);
+        result
+    }
+
+    async fn dequeue(&self) -> Result<Option<Message>, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.dequeue().await
+    }
+
+    async fn len(&self) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.len().await
+    }
+
+    async fn move_to_dead_letter_queue(
+        &self,
+        item: Message,
+        reason: String,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.move_to_dead_letter_queue(item, reason).await
+    }
+}
+
+/// The `scheduler_state` row that records when the daily maintenance was last
+/// enqueued, so its 24 hours survive restarts.
+const DAILY_MAINTENANCE_STATE: &str = "daily-maintenance";
+const DAILY_MAINTENANCE_INTERVAL_HOURS: i64 = 24;
+/// How often the scheduler looks for a due daily maintenance. A failed enqueue
+/// is retried this soon.
+const DAILY_MAINTENANCE_CHECK_INTERVAL: Duration = Duration::from_secs(10 * 60);
+
+async fn last_daily_maintenance(
+    db: &DatabasePool,
+) -> Result<Option<chrono::DateTime<Utc>>, sqlx::Error> {
+    let row: Option<(chrono::DateTime<Utc>,)> = match db {
+        DatabasePool::Postgres(pool) => {
+            sqlx::query_as(
+                "SELECT last_successful_sync_time FROM scheduler_state WHERE scheduler_id = $1",
+            )
+            .bind(DAILY_MAINTENANCE_STATE)
+            .fetch_optional(pool)
+            .await?
+        }
+        DatabasePool::Sqlite(pool) => {
+            sqlx::query_as(
+                "SELECT last_successful_sync_time FROM scheduler_state WHERE scheduler_id = ?",
+            )
+            .bind(DAILY_MAINTENANCE_STATE)
+            .fetch_optional(pool)
+            .await?
+        }
+    };
+    Ok(row.map(|(time,)| time))
+}
+
+async fn record_daily_maintenance(
+    db: &DatabasePool,
+    at: chrono::DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    match db {
+        DatabasePool::Postgres(pool) => {
+            sqlx::query(
+                "INSERT INTO scheduler_state (scheduler_id, last_successful_sync_time, updated_at)
+                 VALUES ($1, $2, NOW())
+                 ON CONFLICT (scheduler_id)
+                 DO UPDATE SET last_successful_sync_time = $2, updated_at = NOW()",
+            )
+            .bind(DAILY_MAINTENANCE_STATE)
+            .bind(at)
+            .execute(pool)
+            .await?;
+        }
+        DatabasePool::Sqlite(pool) => {
+            sqlx::query(
+                "INSERT INTO scheduler_state (scheduler_id, last_successful_sync_time, updated_at)
+                 VALUES (?, ?, strftime('%Y-%m-%d %H:%M:%f', 'now'))
+                 ON CONFLICT (scheduler_id)
+                 DO UPDATE SET
+                     last_successful_sync_time = excluded.last_successful_sync_time,
+                     updated_at = strftime('%Y-%m-%d %H:%M:%f', 'now')",
+            )
+            .bind(DAILY_MAINTENANCE_STATE)
+            .bind(at)
+            .execute(pool)
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+/// Enqueue the daily maintenance if a day has passed since the last one,
+/// however often the scheduler restarted since: a timer that starts with the
+/// process would never fire on a scheduler recreated more than once a day, and
+/// call retention with it. Returns whether it enqueued.
+///
+/// A first start enqueues it right away, except in local development, where the
+/// worker's startup does this work and the first maintenance comes a day later.
+async fn enqueue_daily_maintenance_if_due(
+    db: &DatabasePool,
+    queue: &Arc<dyn Queue<Message>>,
+    local_dev: bool,
+    now: chrono::DateTime<Utc>,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    match last_daily_maintenance(db).await? {
+        Some(last) if now - last < chrono::Duration::hours(DAILY_MAINTENANCE_INTERVAL_HOURS) => {
+            return Ok(false);
+        }
+        None if local_dev => {
+            record_daily_maintenance(db, now).await?;
+            return Ok(false);
+        }
+        _ => {}
+    }
+    debug!("hot.dev: SCHEDULER enqueuing daily maintenance task");
+    let message = if local_dev {
+        hot::lang::event::MaintenanceMessage::daily_core_tasks()
+    } else {
+        hot::lang::event::MaintenanceMessage::all_tasks()
+    };
+    queue.enqueue(message.into()).await?;
+    record_daily_maintenance(db, now).await?;
+    Ok(true)
+}
+
+/// Writes whole: a temporary file renamed over the heartbeat file.
+pub fn write_heartbeat(path: &Path) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    let temporary = path.with_extension("tmp");
+    if let Err(error) =
+        std::fs::write(&temporary, now.to_string()).and_then(|_| std::fs::rename(&temporary, path))
+    {
+        warn!(%error, path = %path.display(), "hot.dev: SCHEDULER could not write its heartbeat");
+    }
 }
 
 /// Local development binds scheduler discovery to its selected profile.
@@ -357,6 +599,7 @@ pub async fn run_for_environment(
     schedule_policy: SchedulePolicy,
     singleton: bool,
     env_id: Option<Uuid>,
+    heartbeat_file: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     debug!("hot.dev: SCHEDULER starting");
     debug!(
@@ -398,7 +641,7 @@ pub async fn run_for_environment(
                 Arc::new(queue)
             } else {
                 debug!("hot.dev: SCHEDULER using Redis Streams standalone mode");
-                let client = redis::Client::open(redis_uri.as_str())?;
+                let client = hot::redis::client(redis_uri.as_str())?;
                 let queue = RedisStreamQueue::<Message>::new(client, "hot:event".to_string())
                     .with_serialization(serialization);
                 Arc::new(queue)
@@ -433,6 +676,12 @@ pub async fn run_for_environment(
             }
         }
     }
+
+    let dispatch_health = Arc::new(DispatchHealth::default());
+    let event_queue: Arc<dyn Queue<Message>> = Arc::new(ObservedQueue {
+        inner: event_queue,
+        health: Arc::clone(&dispatch_health),
+    });
 
     // Create a scheduler
     let mut scheduler = JobScheduler::new().await?;
@@ -498,6 +747,8 @@ pub async fn run_for_environment(
         let running_jobs_clone = Arc::clone(&running_jobs);
         let db_clone = Arc::clone(&db);
         let mut shutdown_rx = shutdown_tx.subscribe();
+        let sync_health = Arc::clone(&dispatch_health);
+        sync_health.watch_loop("database sync", Duration::from_secs(sync_interval));
 
         tokio::spawn(async move {
             let mut sync_timer = interval(Duration::from_secs(sync_interval));
@@ -505,7 +756,7 @@ pub async fn run_for_environment(
             loop {
                 tokio::select! {
                     _ = sync_timer.tick() => {
-                        if let Err(e) = sync_with_database(
+                        match sync_with_database(
                             &scheduler_clone,
                             &queue_clone,
                             &running_jobs_clone,
@@ -516,7 +767,8 @@ pub async fn run_for_environment(
                         )
                         .await
                         {
-                            error!("hot.dev: SCHEDULER database sync failed: {}", e);
+                            Ok(()) => sync_health.loop_passed("database sync"),
+                            Err(e) => error!("hot.dev: SCHEDULER database sync failed: {}", e),
                         }
                     }
                     _ = shutdown_rx.recv() => {
@@ -531,6 +783,8 @@ pub async fn run_for_environment(
         let retry_queue_clone = Arc::clone(&event_queue);
         let retry_db_clone = Arc::clone(&db);
         let mut shutdown_rx = shutdown_tx.subscribe();
+        let retry_health = Arc::clone(&dispatch_health);
+        retry_health.watch_loop("retry processor", Duration::from_secs(retry_interval));
 
         tokio::spawn(async move {
             let mut retry_timer = interval(Duration::from_secs(retry_interval));
@@ -538,8 +792,9 @@ pub async fn run_for_environment(
             loop {
                 tokio::select! {
                     _ = retry_timer.tick() => {
-                        if let Err(e) = process_pending_retries(&retry_db_clone, &retry_queue_clone, env_id).await {
-                            error!("hot.dev: SCHEDULER retry processor failed: {}", e);
+                        match process_pending_retries(&retry_db_clone, &retry_queue_clone, env_id).await {
+                            Ok(()) => retry_health.loop_passed("retry processor"),
+                            Err(e) => error!("hot.dev: SCHEDULER retry processor failed: {}", e),
                         }
                     }
                     _ = shutdown_rx.recv() => {
@@ -554,6 +809,8 @@ pub async fn run_for_environment(
         let at_queue_clone = Arc::clone(&event_queue);
         let at_db_clone = Arc::clone(&db);
         let mut shutdown_rx = shutdown_tx.subscribe();
+        let at_health = Arc::clone(&dispatch_health);
+        at_health.watch_loop("@at schedule processor", Duration::from_secs(at_interval));
 
         tokio::spawn(async move {
             let mut at_timer = interval(Duration::from_secs(at_interval));
@@ -561,8 +818,9 @@ pub async fn run_for_environment(
             loop {
                 tokio::select! {
                     _ = at_timer.tick() => {
-                        if let Err(e) = process_due_at_schedules(&at_db_clone, &at_queue_clone, env_id).await {
-                            error!("hot.dev: SCHEDULER @at schedule processor failed: {}", e);
+                        match process_due_at_schedules(&at_db_clone, &at_queue_clone, env_id).await {
+                            Ok(()) => at_health.loop_passed("@at schedule processor"),
+                            Err(e) => error!("hot.dev: SCHEDULER @at schedule processor failed: {}", e),
                         }
                     }
                     _ = shutdown_rx.recv() => {
@@ -576,25 +834,23 @@ pub async fn run_for_environment(
         // Enqueues a MaintenanceMessage to hot:event every 24 hours for the worker to process.
         // Tasks include: expired session cleanup, inactive schedule cleanup, etc.
         let maint_queue_clone = Arc::clone(&event_queue);
+        let maint_db_clone = Arc::clone(&db);
         let mut shutdown_rx = shutdown_tx.subscribe();
 
         tokio::spawn(async move {
-            // Run daily (86400 seconds = 24 hours)
-            let mut maint_timer = interval(Duration::from_secs(86400));
-            // Skip the first immediate tick — don't run on startup
-            maint_timer.tick().await;
+            let mut maint_timer = interval(DAILY_MAINTENANCE_CHECK_INTERVAL);
 
             loop {
                 tokio::select! {
                     _ = maint_timer.tick() => {
-                        debug!("hot.dev: SCHEDULER enqueuing daily maintenance task");
-                        let msg = if is_local_dev() {
-                            hot::lang::event::MaintenanceMessage::daily_core_tasks()
-                        } else {
-                            hot::lang::event::MaintenanceMessage::all_tasks()
-                        };
-                        let message: Message = msg.into();
-                        if let Err(e) = maint_queue_clone.enqueue(message).await {
+                        if let Err(e) = enqueue_daily_maintenance_if_due(
+                            &maint_db_clone,
+                            &maint_queue_clone,
+                            is_local_dev(),
+                            Utc::now(),
+                        )
+                        .await
+                        {
                             error!("hot.dev: SCHEDULER failed to enqueue maintenance task: {}", e);
                         }
                     }
@@ -775,6 +1031,12 @@ pub async fn run_for_environment(
             }
         })
     });
+
+    if let Some(path) = heartbeat_file {
+        scheduler
+            .add(heartbeat_job(path, Arc::clone(&dispatch_health))?)
+            .await?;
+    }
 
     // Start the scheduler
     scheduler.start().await?;
@@ -1937,6 +2199,217 @@ async fn process_due_at_schedules(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Timelike;
+
+    #[tokio::test]
+    async fn the_heartbeat_job_writes_the_time_whole() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("heartbeat");
+        let job = heartbeat_job(path.clone(), Arc::default()).unwrap();
+        assert!(
+            job.cron
+                .is_time_matching(&Utc::now().with_second(30).unwrap())
+                .unwrap()
+        );
+        assert!(
+            !job.cron
+                .is_time_matching(&Utc::now().with_second(31).unwrap())
+                .unwrap()
+        );
+        (job.task)(job.id, Arc::new(tokio::sync::Mutex::new(()))).await;
+        let written: u64 = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(now - written < 5, "{written} is not now ({now})");
+        assert!(!path.with_extension("tmp").exists());
+    }
+
+    /// A queue whose every enqueue succeeds or fails as `refusing` says.
+    struct SwitchableQueue {
+        refusing: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl Queue<Message> for SwitchableQueue {
+        async fn enqueue(
+            &self,
+            _: Message,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            if self.refusing.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("OOM command not allowed".into());
+            }
+            Ok(())
+        }
+
+        async fn dequeue(
+            &self,
+        ) -> Result<Option<Message>, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(None)
+        }
+
+        async fn len(&self) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(0)
+        }
+
+        async fn move_to_dead_letter_queue(
+            &self,
+            _: Message,
+            _: String,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn the_heartbeat_stops_while_enqueues_fail() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("heartbeat");
+        let health = Arc::new(DispatchHealth::default());
+        let job = heartbeat_job(path.clone(), Arc::clone(&health)).unwrap();
+        let refusing = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let queue = ObservedQueue {
+            inner: Arc::new(SwitchableQueue {
+                refusing: Arc::clone(&refusing),
+            }),
+            health: Arc::clone(&health),
+        };
+        let beat = || (job.task)(job.id, Arc::new(tokio::sync::Mutex::new(())));
+        let message = || -> Message { hot::lang::event::MaintenanceMessage::all_tasks().into() };
+
+        assert!(queue.enqueue(message()).await.is_err());
+        assert!(
+            health
+                .problem(Instant::now())
+                .unwrap()
+                .contains("OOM command not allowed")
+        );
+        beat().await;
+        assert!(!path.exists());
+
+        refusing.store(false, std::sync::atomic::Ordering::SeqCst);
+        queue.enqueue(message()).await.unwrap();
+        assert_eq!(health.problem(Instant::now()), None);
+        beat().await;
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn a_dispatch_loop_goes_stale_without_a_finished_pass() {
+        let health = DispatchHealth::default();
+        health.watch_loop("database sync", Duration::from_secs(30));
+        let now = Instant::now();
+        assert_eq!(health.problem(now), None);
+        assert_eq!(health.problem(now + Duration::from_secs(60)), None);
+        let stale = health.problem(now + DISPATCH_LOOP_STALE_AFTER).unwrap();
+        assert!(stale.contains("database sync"), "{stale}");
+
+        std::thread::sleep(Duration::from_millis(5));
+        health.loop_passed("database sync");
+        assert_eq!(health.problem(now + DISPATCH_LOOP_STALE_AFTER), None);
+
+        // A slow loop gets three of its own intervals.
+        let health = DispatchHealth::default();
+        health.watch_loop("slow loop", Duration::from_secs(120));
+        let now = Instant::now();
+        assert_eq!(health.problem(now + Duration::from_secs(300)), None);
+        assert!(health.problem(now + Duration::from_secs(360)).is_some());
+    }
+
+    #[tokio::test]
+    async fn daily_maintenance_survives_restarts_and_runs_once_a_day() {
+        let db = hot::db::test_db().await;
+        let queue: Arc<dyn Queue<Message>> =
+            Arc::new(MemQueue::new(format!("test:daily-maintenance:{}", Uuid::now_v7())).unwrap());
+        let due = |now| enqueue_daily_maintenance_if_due(&db, &queue, false, now);
+        let start = Utc::now();
+
+        assert!(due(start).await.unwrap(), "a first start runs it");
+        assert_eq!(queue.len().await.unwrap(), 1);
+
+        // A restart soon after, or any number of them, does not run it again,
+        // and the day counts from the last run rather than from the restart.
+        assert!(!due(start + chrono::Duration::hours(1)).await.unwrap());
+        assert!(!due(start + chrono::Duration::hours(23)).await.unwrap());
+        assert_eq!(queue.len().await.unwrap(), 1);
+        assert!(due(start + chrono::Duration::hours(24)).await.unwrap());
+        assert_eq!(queue.len().await.unwrap(), 2);
+        assert!(!due(start + chrono::Duration::hours(25)).await.unwrap());
+        assert_eq!(queue.len().await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_daily_maintenance_time_is_not_the_sync_time() {
+        let db = hot::db::test_db().await;
+        let synced = Utc::now() - chrono::Duration::days(3);
+        SchedulerState::update_sync_time(&db, synced).await.unwrap();
+        record_daily_maintenance(&db, Utc::now()).await.unwrap();
+        let read = SchedulerState::get_last_sync_time(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(read.timestamp(), synced.timestamp());
+    }
+
+    #[tokio::test]
+    async fn the_daily_maintenance_time_keeps_on_postgres() {
+        let Ok(uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
+            eprintln!("skipping: HOT_TEST_POSTGRES_URI not set");
+            return;
+        };
+        let conf = val!({"uri": uri, "schema": "hot", "rls": {"enforce": false}});
+        hot::db::run_migrations(&conf).await.unwrap();
+        let db =
+            hot::db::create_db_pool(&conf)
+                .await
+                .unwrap()
+                .with_scope(DatabaseScope::Maintenance {
+                    operation: MaintenanceOperation::Scheduler,
+                    org_id: None,
+                });
+        let earlier = Utc::now() - chrono::Duration::hours(2);
+        for at in [earlier - chrono::Duration::hours(1), earlier] {
+            record_daily_maintenance(&db, at).await.unwrap();
+        }
+        let read = last_daily_maintenance(&db).await.unwrap().unwrap();
+        assert_eq!(read.timestamp(), earlier.timestamp());
+    }
+
+    #[tokio::test]
+    async fn a_failed_daily_maintenance_enqueue_stays_due() {
+        let db = hot::db::test_db().await;
+        let refusing = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let queue: Arc<dyn Queue<Message>> = Arc::new(SwitchableQueue {
+            refusing: Arc::clone(&refusing),
+        });
+        let now = Utc::now();
+        assert!(
+            enqueue_daily_maintenance_if_due(&db, &queue, false, now)
+                .await
+                .is_err()
+        );
+        refusing.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            enqueue_daily_maintenance_if_due(&db, &queue, false, now)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn local_development_waits_a_day_for_its_first_maintenance() {
+        let db = hot::db::test_db().await;
+        let queue: Arc<dyn Queue<Message>> =
+            Arc::new(MemQueue::new(format!("test:daily-maintenance:{}", Uuid::now_v7())).unwrap());
+        let due = |now| enqueue_daily_maintenance_if_due(&db, &queue, true, now);
+        let start = Utc::now();
+        assert!(!due(start).await.unwrap());
+        assert!(!due(start + chrono::Duration::hours(23)).await.unwrap());
+        assert_eq!(queue.len().await.unwrap(), 0);
+        assert!(due(start + chrono::Duration::hours(24)).await.unwrap());
+        assert_eq!(queue.len().await.unwrap(), 1);
+    }
 
     #[tokio::test]
     async fn singleton_check_fails_closed() {

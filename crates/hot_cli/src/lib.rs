@@ -7,9 +7,10 @@ mod remote;
 mod update;
 
 use crate::cli::{
-    CacheAction, Cli, Command, ConfAction, DbAction, KeyAction, find_help_command,
+    AdminAction, CacheAction, Cli, Command, ConfAction, DbAction, KeyAction, find_help_command,
     print_top_level_help,
 };
+use crate::command::admin::{run_admin_bootstrap, run_admin_reset_password};
 use crate::command::ai::run_ai;
 use crate::command::api::run_api;
 use crate::command::app::run_app;
@@ -115,6 +116,41 @@ fn enforce_persistent_queue_for_standalone_service(service_name: &str, conf: &Va
         );
         std::process::exit(1);
     }
+}
+
+/// `db move-storage --manifest -` keeps stdout for the manifest, and
+/// `db migrate --status` for its JSON line, so logs can't share it. These
+/// commands report failures on stderr themselves.
+fn keep_stdout_for_command_output(conf: Val, command: &Option<Command>) -> Val {
+    let output_on_stdout = match command {
+        Some(Command::Db {
+            action:
+                DbAction::MoveStorage {
+                    manifest: Some(manifest),
+                    ..
+                },
+            ..
+        }) => manifest == "-",
+        Some(Command::Db {
+            action: DbAction::Migrate { status },
+            ..
+        }) => *status,
+        _ => false,
+    };
+    // Ask the logger: it reads an unknown target as stdout too.
+    let logs_on_stdout = matches!(
+        hot::log::get_log_target_from_conf(&conf),
+        hot::log::LogTarget::Stdout
+    );
+    if !output_on_stdout || !logs_on_stdout {
+        return conf;
+    }
+    let log_conf = conf.get("log").unwrap_or_else(Val::map_empty).set_str(
+        "target",
+        Some("none".to_string()),
+        "",
+    );
+    conf.set("log", log_conf)
 }
 
 pub(crate) const PROJECT_QUEUE_SESSION_LOCK_PATH: &str = ".hot/run/queue-session.lock";
@@ -938,6 +974,7 @@ async fn async_main(providers: CliProviders) {
     } else {
         conf
     };
+    let conf = keep_stdout_for_command_output(conf, &cli.command);
 
     // For eval, run, and repl commands, default log level to "off" for cleaner output
     // unless the user explicitly set a log level via --log.level
@@ -1002,6 +1039,13 @@ async fn async_main(providers: CliProviders) {
         }
     }
 
+    // Every Redis connection this process opens uses redis.auth and
+    // redis.ca-cert.
+    if let Err(error) = hot::redis::configure(&conf) {
+        error!("Invalid Redis configuration: {error}");
+        std::process::exit(1);
+    }
+
     // Ensure daemon has a default before reading it
     let conf = if conf.get("daemon").is_none() {
         conf.set_bool("daemon", Some(false), false)
@@ -1056,21 +1100,9 @@ async fn async_main(providers: CliProviders) {
         // On Unix platforms, fork the process to run in the background
         #[cfg(unix)]
         {
-            use std::process::Command;
-
             // Get the current executable path
             let exe = std::env::current_exe().expect("Failed to get executable path");
-
-            // Build a command with the same arguments, but without the daemon flag
-            let mut args: Vec<String> = std::env::args().collect();
-            if let Some(pos) = args.iter().position(|arg| arg == "--daemon" || arg == "-d") {
-                args.remove(pos);
-            }
-            args.remove(0); // Remove the program name
-
-            // Create a new process that will run in the background
-            let mut cmd = Command::new(exe);
-            cmd.args(&args).env(DAEMON_CHILD_ENV, "1");
+            let mut cmd = daemon_child_command(exe, std::env::args().collect());
 
             match cmd.spawn() {
                 Ok(_) => {
@@ -1337,19 +1369,62 @@ async fn async_main(providers: CliProviders) {
                     notify,
                     org,
                 } => command::db::run_db_redeploy(&conf, dry_run, notify, org).await,
+                DbAction::MoveStorage {
+                    role,
+                    to,
+                    path,
+                    bucket,
+                    prefix,
+                    region,
+                    dry_run,
+                    manifest,
+                    skip_file,
+                } => {
+                    let target = command::db::MoveStorageTarget {
+                        to,
+                        path,
+                        bucket,
+                        prefix,
+                        region,
+                    };
+                    command::db::run_db_move_storage_with_skip_file(
+                        &conf, &role, target, dry_run, manifest, skip_file,
+                    )
+                    .await
+                }
                 action => {
                     let db_cmd = match action {
                         DbAction::Status => "status",
-                        DbAction::Migrate => "migrate",
+                        DbAction::Migrate { status: false } => "migrate",
+                        DbAction::Migrate { status: true } => "migrate-status",
                         DbAction::ProvisionStoreIndexes => "provision-store-indexes",
                         DbAction::PortV1ToV2 => "port-v1-to-v2",
-                        DbAction::Redeploy { .. } => unreachable!("handled above"),
+                        DbAction::Redeploy { .. } | DbAction::MoveStorage { .. } => {
+                            unreachable!("handled above")
+                        }
                     };
                     run_db(db_cmd, &conf, &providers).await
                 }
             };
             if let Err(e) = result {
                 eprintln!("Database command failed: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Some(Command::Admin { action, .. }) => {
+            let result = match action {
+                AdminAction::Bootstrap {
+                    email,
+                    name,
+                    password_file,
+                } => run_admin_bootstrap(&email, name.as_deref(), &password_file, &conf).await,
+                AdminAction::ResetPassword {
+                    email,
+                    password_file,
+                } => run_admin_reset_password(&email, &password_file, &conf).await,
+            };
+            if let Err(e) = result {
+                error!("Admin command failed: {}", e);
                 std::process::exit(1);
             }
         }
@@ -1977,6 +2052,38 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
+/// The background process `--daemon` starts: the same arguments without the
+/// daemon flag, and `HOT_DAEMON_CHILD=1` so that neither an inherited
+/// `HOT_DAEMON=true` nor a configuration file makes it start another.
+#[cfg(unix)]
+fn daemon_child_command(exe: std::path::PathBuf, mut args: Vec<String>) -> std::process::Command {
+    if let Some(pos) = args.iter().position(|arg| arg == "--daemon" || arg == "-d") {
+        args.remove(pos);
+    }
+    args.remove(0); // Remove the program name
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(&args).env(DAEMON_CHILD_ENV, "1");
+    cmd
+}
+
+#[cfg(all(test, unix))]
+mod daemon_tests {
+    use super::*;
+
+    #[test]
+    fn the_daemon_child_never_daemonizes_again() {
+        let cmd = daemon_child_command(
+            "/usr/local/bin/hot".into(),
+            vec!["hot".into(), "--daemon".into(), "api".into()],
+        );
+        assert_eq!(cmd.get_args().collect::<Vec<_>>(), ["api"]);
+        assert!(
+            cmd.get_envs()
+                .any(|(key, value)| key == DAEMON_CHILD_ENV && value == Some("1".as_ref()))
+        );
+    }
+}
+
 #[cfg(test)]
 mod migration_failure_tests {
     use super::*;
@@ -2079,5 +2186,119 @@ mod project_selection_tests {
         // `hot check` reports an undefined project from the engine.
         assert_eq!(project_for(&["hot", "check", "-p", "review"]), None);
         assert_eq!(project_for(&["hot", "fmt"]), None);
+    }
+}
+
+#[cfg(test)]
+mod command_output_logging_tests {
+    use super::*;
+
+    fn log_after(manifest: &[&str], conf: Val) -> Val {
+        use clap::Parser;
+        let mut args = vec![
+            "hot",
+            "db",
+            "move-storage",
+            "--role",
+            "build",
+            "--to",
+            "local",
+        ];
+        args.extend_from_slice(manifest);
+        let cli = Cli::try_parse_from(args).unwrap();
+        keep_stdout_for_command_output(conf, &cli.command)
+    }
+
+    fn target_after(manifest: &[&str], target: &str) -> String {
+        log_after(manifest, hot::val!({"log": {"target": target}})).get_str("log.target")
+    }
+
+    #[test]
+    fn a_manifest_on_stdout_turns_off_logs_that_would_write_there() {
+        let on_stdout = ["--manifest", "-"];
+        assert_eq!(target_after(&on_stdout, "stdout"), "none");
+        assert_eq!(target_after(&on_stdout, "STDOUT"), "none");
+        // The logger reads an unknown target, or none at all, as stdout.
+        assert_eq!(target_after(&on_stdout, "typo"), "none");
+        assert_eq!(
+            log_after(&on_stdout, hot::val!({})).get_str("log.target"),
+            "none"
+        );
+        // The rest of the log configuration stays.
+        let conf = log_after(
+            &on_stdout,
+            hot::val!({"log": {"target": "stdout", "level": "debug"}}),
+        );
+        assert_eq!(conf.get_str("log.level"), "debug");
+    }
+
+    #[test]
+    fn the_skip_file_is_a_flag_of_db_move_storage() {
+        use clap::Parser;
+        let skip_file_of = |flags: &[&str]| {
+            let mut args = vec![
+                "hot",
+                "db",
+                "move-storage",
+                "--role",
+                "build",
+                "--to",
+                "local",
+            ];
+            args.extend_from_slice(flags);
+            match Cli::try_parse_from(args).unwrap().command {
+                Some(Command::Db {
+                    action: DbAction::MoveStorage { skip_file, .. },
+                    ..
+                }) => skip_file,
+                other => panic!("not db move-storage: {other:?}"),
+            }
+        };
+        assert_eq!(skip_file_of(&["--skip-file", "x"]).as_deref(), Some("x"));
+        assert_eq!(skip_file_of(&[]), None);
+    }
+
+    #[test]
+    fn other_log_targets_and_manifests_keep_their_logs() {
+        assert_eq!(target_after(&["--manifest", "-"], "file"), "file");
+        assert_eq!(
+            target_after(&["--manifest", "move.jsonl"], "stdout"),
+            "stdout"
+        );
+        assert_eq!(target_after(&[], "stdout"), "stdout");
+    }
+
+    fn migrate_target_after(flags: &[&str], target: &str) -> String {
+        use clap::Parser;
+        let mut args = vec!["hot", "db", "migrate"];
+        args.extend_from_slice(flags);
+        let cli = Cli::try_parse_from(args).unwrap();
+        let conf = hot::val!({"log": {"target": target}});
+        keep_stdout_for_command_output(conf, &cli.command).get_str("log.target")
+    }
+
+    #[test]
+    fn the_migration_status_turns_off_logs_that_would_write_to_stdout() {
+        assert_eq!(migrate_target_after(&["--status"], "stdout"), "none");
+        assert_eq!(migrate_target_after(&["--status"], "file"), "file");
+    }
+
+    #[test]
+    fn a_migration_keeps_its_logs() {
+        assert_eq!(migrate_target_after(&[], "stdout"), "stdout");
+    }
+
+    #[test]
+    fn the_migration_status_is_a_flag_of_db_migrate() {
+        use clap::Parser;
+        let status_of = |args: &[&str]| match Cli::try_parse_from(args).unwrap().command {
+            Some(Command::Db {
+                action: DbAction::Migrate { status },
+                ..
+            }) => status,
+            other => panic!("not db migrate: {other:?}"),
+        };
+        assert!(status_of(&["hot", "db", "migrate", "--status"]));
+        assert!(!status_of(&["hot", "db", "migrate"]));
     }
 }

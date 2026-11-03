@@ -9,7 +9,6 @@ use hot::db::{
     UserAuth,
 };
 use hot::val::Val;
-use hot_app::handlers::oauth::handle_oauth_user;
 use hot_app::test_support::{TestClient, TestResponse};
 use sqlx::{Executor, PgPool};
 use uuid::Uuid;
@@ -17,6 +16,29 @@ use uuid::Uuid;
 /// A password no other run shares.
 fn new_password() -> String {
     Uuid::new_v4().simple().to_string()
+}
+
+/// An OAuth sign-in started without an invitation: the account, and whether
+/// it is new.
+async fn oauth(
+    db: &DatabasePool,
+    conf: &Val,
+    email: &str,
+    provider: &str,
+    provider_user_id: &str,
+    name: Option<&str>,
+) -> Result<(User, bool), String> {
+    hot_app::handlers::oauth::handle_oauth_user(
+        db,
+        conf,
+        email,
+        provider,
+        provider_user_id,
+        name,
+        None,
+    )
+    .await
+    .map(|signin| (signin.user, signin.is_new_user))
 }
 
 /// One address in the three spellings the scenarios sign in with.
@@ -200,7 +222,7 @@ async fn form_sign_up_and_sign_in(client: &mut TestClient, db: &DatabasePool, ru
 /// plus suffixes and other letters still name other addresses.
 async fn oauth_sign_in(db: &DatabasePool, conf: &Val, run: &str) {
     let erin = Address::new("Erin", run);
-    let (created, is_new) = handle_oauth_user(
+    let (created, is_new) = oauth(
         db,
         conf,
         &erin.typed,
@@ -217,14 +239,13 @@ async fn oauth_sign_in(db: &DatabasePool, conf: &Val, run: &str) {
         (&erin.lower, format!("github-{run}")),
         (&erin.upper, format!("other-github-{run}")),
     ] {
-        let (user, is_new) =
-            handle_oauth_user(db, conf, spelling, "github", &provider_id, Some("Erin"))
-                .await
-                .unwrap();
+        let (user, is_new) = oauth(db, conf, spelling, "github", &provider_id, Some("Erin"))
+            .await
+            .unwrap();
         assert!(!is_new, "{spelling}");
         assert_eq!(user.user_id, created.user_id, "{spelling}");
     }
-    let (user, is_new) = handle_oauth_user(
+    let (user, is_new) = oauth(
         db,
         conf,
         &erin.upper,
@@ -258,7 +279,7 @@ async fn oauth_sign_in(db: &DatabasePool, conf: &Val, run: &str) {
     .iter()
     .enumerate()
     {
-        let (user, is_new) = handle_oauth_user(
+        let (user, is_new) = oauth(
             db,
             conf,
             email,
@@ -277,7 +298,7 @@ async fn oauth_sign_in(db: &DatabasePool, conf: &Val, run: &str) {
 /// up with it and for someone already signed in.
 async fn invitations(client: &mut TestClient, db: &DatabasePool, run: &str) {
     let admin = Address::new("Admin", run);
-    let (admin, _) = handle_oauth_user(
+    let (admin, _) = oauth(
         db,
         &hot::val!({}),
         &admin.typed,
@@ -341,7 +362,7 @@ async fn invitations(client: &mut TestClient, db: &DatabasePool, run: &str) {
     client.clear_cookies();
 
     let carol = Address::new("Carol", run);
-    let (signed_in, _) = handle_oauth_user(
+    let (signed_in, _) = oauth(
         db,
         &hot::val!({}),
         &carol.lower,

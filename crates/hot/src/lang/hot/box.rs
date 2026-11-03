@@ -54,6 +54,26 @@ fn is_image_denied(image: &str) -> bool {
         .any(|prefix| image.starts_with(prefix))
 }
 
+/// The installation pulls the image itself, from whichever registry the
+/// reference names, so that registry must be a destination the calling code
+/// may reach: user code cannot name an internal address as its registry.
+async fn check_image_registry(
+    policy: &crate::outbound::DestinationPolicy,
+    image: &str,
+) -> Result<(), String> {
+    let registry = registry_auth::image_registry(image);
+    if !policy.restricts_destinations() || registry == registry_auth::DOCKER_HUB {
+        return Ok(());
+    }
+    let url = url::Url::parse(&format!("https://{registry}/"))
+        .map_err(|_| format!("image '{image}' names an invalid registry '{registry}'"))?;
+    policy
+        .resolve_url(&url)
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("image registry '{registry}' is not reachable: {e}"))
+}
+
 // =============================================================================
 // ::hot::box/start — start a container task (async, returns TaskInfo)
 // =============================================================================
@@ -77,6 +97,25 @@ pub fn start(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) ->
         Ok(v) => v,
         Err(result) => return result,
     };
+
+    let policy = crate::outbound::DestinationPolicy::from_vm(vm);
+    let registry_check = tokio::runtime::Handle::current().block_on(async {
+        tokio::time::timeout(
+            BOX_START_IO_TIMEOUT,
+            check_image_registry(&policy, &input.image),
+        )
+        .await
+    });
+    match registry_check {
+        Ok(Ok(())) => {}
+        Ok(Err(msg)) => return HotResult::Err(Val::from(format!("::hot::box/start: {msg}"))),
+        Err(_) => {
+            return HotResult::Err(Val::from(format!(
+                "::hot::box/start: resolving the image registry timed out after {}s",
+                BOX_START_IO_TIMEOUT.as_secs()
+            )));
+        }
+    }
 
     let ctx = match vm.get_execution_context() {
         Some(ctx) => ctx.clone(),
@@ -1389,6 +1428,40 @@ mod tests {
         assert!(is_image_denied("docker:dind"));
         assert!(is_image_denied("docker:latest"));
         assert!(is_image_denied("docker:24.0"));
+    }
+
+    #[tokio::test]
+    async fn image_registries_follow_the_outbound_policy() {
+        use crate::outbound::DestinationPolicy;
+        let public = DestinationPolicy::PublicOnly;
+        for image in [
+            "10.68.4.10:5432/x:y",
+            "localhost:5000/tool",
+            "LOCALHOST/x:y",
+            "[::1]:5000/tool:1",
+            "169.254.169.254/latest:1",
+        ] {
+            let error = check_image_registry(&public, image).await.unwrap_err();
+            assert!(error.contains("is blocked"), "{image}: {error}");
+        }
+        for image in [
+            "alpine",
+            "myorg/tool:2",
+            "docker.io/library/alpine",
+            "8.8.8.8:5000/x",
+        ] {
+            assert!(
+                check_image_registry(&public, image).await.is_ok(),
+                "{image}"
+            );
+        }
+        // Without isolation, nothing is checked or resolved.
+        let open = DestinationPolicy::AllowPrivate;
+        assert!(
+            check_image_registry(&open, "localhost:5000/tool")
+                .await
+                .is_ok()
+        );
     }
 
     #[test]

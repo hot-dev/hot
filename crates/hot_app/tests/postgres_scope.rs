@@ -1,10 +1,19 @@
 //! Real-router smoke coverage under the production PostgreSQL role contract.
-//! HOT_TEST_POSTGRES_URI must identify a dedicated privileged fixture database.
+//!
+//! `privileged_fixture` says when this test skips and when it fails: without
+//! `HOT_TEST_POSTGRES_URI` it skips, and it must name a login that can create
+//! databases and roles.
+
+#[allow(dead_code, unused_macros)]
+#[path = "../../hot/tests/support/privileged_fixture.rs"]
+mod privileged_fixture;
+
 use axum::http::StatusCode;
 use hot::db::alert::{AlertChannel, AlertDestination, AlertSubscription, DestinationType};
 use hot::db::{self, DatabasePool, DatabaseScope};
 use hot_app::test_support::TestClient;
-use sqlx::{Executor, PgPool};
+use privileged_fixture::{PrivilegedDb, TestResult};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 struct Workspace {
@@ -73,65 +82,27 @@ impl Workspace {
 }
 
 #[tokio::test]
-async fn sub_org_lifecycle_and_browser_scope_use_a_restricted_runtime_login()
--> Result<(), Box<dyn std::error::Error>> {
+async fn sub_org_lifecycle_and_browser_scope_use_a_restricted_runtime_login() -> TestResult {
     let Ok(admin_uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
         eprintln!("skipping PostgreSQL app scope smoke: HOT_TEST_POSTGRES_URI not set");
         return Ok(());
     };
+    let postgres = PrivilegedDb::create(&admin_uri, "hot_app_lifecycle").await?;
+    // Clean up after a failed assertion too, then report it.
+    let outcome = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+        lifecycle_and_browser_scope(&postgres),
+    ))
+    .await;
+    let cleaned = postgres.destroy().await;
+    privileged_fixture::report(outcome, cleaned)
+}
+
+async fn lifecycle_and_browser_scope(postgres: &PrivilegedDb) -> TestResult {
+    let admin = postgres.admin.clone();
     let suffix = Uuid::new_v4().simple().to_string();
-    let database = format!("hot_app_lifecycle_{suffix}");
-    let cluster = PgPool::connect(&admin_uri).await?;
-    cluster
-        .execute(sqlx::AssertSqlSafe(format!("CREATE DATABASE {database}")))
-        .await?;
-    let mut fixture_url = url::Url::parse(&admin_uri)?;
-    fixture_url.set_path(&format!("/{database}"));
-    let admin_uri = fixture_url.to_string();
-    db::run_migrations(&hot::val!({"uri":admin_uri.clone(),"rls":{"enforce":false}})).await?;
-    let admin = PgPool::connect(&admin_uri).await?;
-    let role = format!("hot_app_rls_{suffix}");
-    let password = Uuid::new_v4().simple().to_string();
-    admin.execute(sqlx::AssertSqlSafe(format!("CREATE ROLE {role} LOGIN PASSWORD '{password}' NOSUPERUSER NOBYPASSRLS NOINHERIT NOCREATEDB NOCREATEROLE"))).await?;
-    let admin_password = fixture_url.password().unwrap_or_default().to_owned();
-    fixture_url
-        .set_password(None)
-        .map_err(|_| "invalid fixture URL")?;
-    let provision = tokio::process::Command::new("psql")
-        .args([
-            "-X",
-            "-v",
-            "ON_ERROR_STOP=1",
-            "-v",
-            &format!("runtime_role={role}"),
-            "-v",
-            "schema=hot",
-            "-f",
-        ])
-        .arg(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../resources/db/postgres/provision_runtime.sql"),
-        )
-        .arg("--dbname")
-        .arg(fixture_url.as_str())
-        .env("PGPASSWORD", admin_password)
-        .output()
-        .await?;
-    assert!(
-        provision.status.success(),
-        "{}",
-        String::from_utf8_lossy(&provision.stderr)
-    );
-    let mut runtime_url = url::Url::parse(&admin_uri)?;
-    runtime_url
-        .set_username(&role)
-        .map_err(|_| "invalid fixture URL")?;
-    runtime_url
-        .set_password(Some(&password))
-        .map_err(|_| "invalid fixture URL")?;
     // Production pool creation performs role qualification with enforcement on.
     let runtime =
-        db::create_db_pool(&hot::val!({"uri":runtime_url.to_string(),"schema":"hot"})).await?;
+        db::create_db_pool(&hot::val!({"uri":postgres.runtime_uri.clone(),"schema":"hot"})).await?;
 
     let user = Uuid::new_v4();
     let root = Uuid::new_v4();
@@ -144,7 +115,7 @@ async fn sub_org_lifecycle_and_browser_scope_use_a_restricted_runtime_login()
         .bind(Uuid::new_v4()).bind(root).bind(user).execute(&admin).await?;
     let mut client = TestClient::new_with_db(
         runtime.clone(),
-        hot::val!({"app":{"host":"localhost","port":4680},"db":{"uri":runtime_url.to_string(),"schema":"hot"},"store":{"type":"postgres"}}),
+        hot::val!({"app":{"host":"localhost","port":4680},"db":{"uri":postgres.runtime_uri.clone(),"schema":"hot"},"store":{"type":"postgres"}}),
     ).await;
     client.login_as(&user);
     let children_path = format!("/@{root_slug}/children");
@@ -644,15 +615,5 @@ async fn sub_org_lifecycle_and_browser_scope_use_a_restricted_runtime_login()
     if let DatabasePool::Postgres(pool) = &runtime {
         pool.close().await;
     }
-    admin.close().await;
-    cluster
-        .execute(sqlx::AssertSqlSafe(format!(
-            "DROP DATABASE {database} WITH (FORCE)"
-        )))
-        .await?;
-    cluster
-        .execute(sqlx::AssertSqlSafe(format!("DROP ROLE {role}")))
-        .await?;
-    cluster.close().await;
     Ok(())
 }

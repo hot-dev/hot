@@ -46,8 +46,9 @@ pub async fn signin_handler(
     Query(params): Query<AHashMap<String, String>>,
 ) -> impl IntoResponse {
     // In ordinary local development, redirect to dashboard since auto-login is enabled.
-    // Test Hot Cloud configs still need to exercise auth and billing flows.
-    if hot::env::is_local_dev() && !hot::product::billing_enabled(&conf) {
+    // Test Hot Cloud configs still need to exercise auth and billing flows. Without
+    // auto-login the dashboard sends visitors back here, so this needs the same test.
+    if crate::auth::local_dev_conveniences() && !hot::product::billing_enabled(&conf) {
         return Redirect::to("/").into_response();
     }
 
@@ -207,7 +208,7 @@ pub async fn signout_page_handler() -> impl IntoResponse {
 
 pub async fn signout_handler(cookies: CookieJar) -> (CookieJar, Redirect) {
     // In local development, just redirect to dashboard since auto-login is enabled
-    if hot::env::is_local_dev() {
+    if crate::auth::local_dev_conveniences() {
         return (cookies, Redirect::to("/"));
     }
 
@@ -234,12 +235,15 @@ pub async fn signup_handler(
 ) -> impl IntoResponse {
     // In ordinary local development, redirect to dashboard since auto-login is enabled.
     // Test Hot Cloud configs still need to exercise the billing signup flow.
-    if hot::env::is_local_dev() && !hot::product::billing_enabled(&conf) {
+    if crate::auth::local_dev_conveniences() && !hot::product::billing_enabled(&conf) {
         return Redirect::to("/").into_response();
     }
 
     // User is not authenticated (guaranteed by guest_only_middleware)
     let invite_code = params.get("invite_code").cloned().unwrap_or_default();
+    if invite_code.is_empty() && !crate::signup::open_signup_available(&conf) {
+        return Redirect::to("/signin").into_response();
+    }
     let plan = params.get("plan").cloned().unwrap_or_default();
     if hot::product::billing_enabled(&conf) && invite_code.is_empty() && plan.is_empty() {
         return Redirect::to("/signup/plans").into_response();
@@ -277,7 +281,7 @@ pub async fn signup_plans_handler(
 ) -> impl IntoResponse {
     // In ordinary local development, redirect to dashboard.
     // Test Hot Cloud configs still need to exercise the billing signup flow.
-    if hot::env::is_local_dev() && !hot::product::billing_enabled(&conf) {
+    if crate::auth::local_dev_conveniences() && !hot::product::billing_enabled(&conf) {
         return Redirect::to("/").into_response();
     }
 
@@ -336,6 +340,7 @@ pub async fn signup_post_handler(
     // Helper to render error with all fields
     let render_error_with = |msg: &str, show_signin_link: bool| {
         render_signup_with_error_full(
+            &conf,
             msg,
             &form.email,
             form.name.as_deref().unwrap_or(""),
@@ -378,13 +383,17 @@ pub async fn signup_post_handler(
         ));
     }
 
+    // One spelling of the address from here on: the gates below, the account,
+    // and the verification row must all agree on it.
+    let email = form.email.trim();
+
     // Validate form data
-    if form.email.trim().is_empty() {
+    if email.is_empty() {
         return Err(render_error("Email is required"));
     }
 
     // Validate email format
-    if !form.email.contains('@') {
+    if !email.contains('@') {
         return Err(render_error("Please enter a valid email address"));
     }
 
@@ -401,30 +410,66 @@ pub async fn signup_post_handler(
         return Err(render_error("Full name is required"));
     }
 
+    // The invitation in the link, when it is for this email address.
+    let link_invite = if invite_code.is_empty() {
+        None
+    } else {
+        hot::db::invite::Invite::get_invite_by_code(&db, &invite_code)
+            .await
+            .ok()
+            .filter(|invite| invite.email.eq_ignore_ascii_case(email))
+    };
+
+    // Without open sign-up, only an invitation that can still be applied
+    // admits a new account. Refuse everyone else before anything that
+    // reveals whether an account exists or spends the sign-up limits.
+    if !crate::signup::open_signup_available(&conf) {
+        let admitted = match &link_invite {
+            Some(invite) => crate::signup::invite_admits(&db, invite, email).await,
+            None => false,
+        };
+        if !admitted {
+            return Err(render_error(if link_invite.is_some() {
+                "This invitation has expired or can no longer be used. Ask an administrator to invite you again."
+            } else {
+                "Signing up requires an invitation sent to this email address. Ask an administrator to invite you."
+            }));
+        }
+    }
+
     // Check for an existing account FIRST. If the user is already registered,
     // the right answer is "go sign in".
-    if User::get_user_by_email(&db, &form.email).await.is_ok() {
+    if User::get_user_by_email(&db, email).await.is_ok() {
         return Err(render_error_with(
             "A user with this email already exists.",
             true,
         ));
     }
 
+    // A valid invitation link needs no verification email, below, so it goes
+    // on to create the account with the password typed here. A pending
+    // verification may have been requested by someone else, and its email
+    // may never arrive.
+    let invited = link_invite
+        .as_ref()
+        .filter(|invite| invite.is_valid().is_ok());
+    let pending = EmailVerification::get_pending_by_email(&db, email)
+        .await
+        .ok()
+        .flatten();
+
     // A user who refreshes the signup form (same email) just gets re-shown
     // the "check your email" page instead of starting over.
-    if let Ok(Some(existing)) = EmailVerification::get_pending_by_email(&db, &form.email).await
-        && existing.is_valid().is_ok()
-    {
+    if invited.is_none() && pending.as_ref().is_some_and(|row| row.is_valid().is_ok()) {
         return Ok(
-            render_check_email(&form.email, true, plan == "hot-free", &csrf_cookie_value)
-                .into_response(),
+            render_check_email(email, true, plan == "hot-free", &csrf_cookie_value).into_response(),
         );
     }
 
-    if crate::rate_limit::check_signup_email(&conf, &form.email).is_err() {
+    if crate::rate_limit::check_signup_email(&conf, email).is_err() {
         tracing::warn!(
             key_type = "email",
-            key_hash = crate::rate_limit::key_fingerprint(&form.email),
+            key_hash = crate::rate_limit::key_fingerprint(email),
             "Signup per-email rate limit hit"
         );
         return Err(render_error(
@@ -451,18 +496,24 @@ pub async fn signup_post_handler(
     // mailbox — skip the verification email and log them straight in.
     // Mismatched emails fall through to normal verification (and the
     // email-binding check in process_invite_code will reject the invite).
-    if !invite_code.is_empty()
-        && let Ok(invite) = hot::db::invite::Invite::get_invite_by_code(&db, &invite_code).await
-        && invite.is_valid().is_ok()
-        && invite.email.eq_ignore_ascii_case(form.email.trim())
-    {
-        let user_id =
-            create_user_with_password(&db, &form.email, form.name.as_deref(), &password_hash)
-                .await
-                .map_err(|e| {
-                    tracing::error!("Invite fast-path user creation failed: {}", e);
-                    render_error("Failed to create your account. Please try again.")
-                })?;
+    if invited.is_some() {
+        let user_id = create_user_with_password(&db, email, form.name.as_deref(), &password_hash)
+            .await
+            .map_err(|e| {
+                tracing::error!("Invite fast-path user creation failed: {}", e);
+                render_error("Failed to create your account. Please try again.")
+            })?;
+
+        // The account now exists, so a pending verification for it is over.
+        if let Some(row) = &pending
+            && let Err(e) = EmailVerification::mark_expired(&db, &row.verification_id).await
+        {
+            tracing::warn!(
+                "Failed to retire verification {} after invite sign-up: {:?}",
+                row.verification_id,
+                e
+            );
+        }
 
         if let Err(e) = process_invite_code(&db, &user_id, &invite_code).await {
             // User exists but didn't join the org; show the reason and let
@@ -480,9 +531,16 @@ pub async fn signup_post_handler(
 
         tracing::info!(
             "User {} signed up via matching invite (verification skipped)",
-            form.email
+            email
         );
         return Ok((final_cookies, Redirect::to("/")).into_response());
+    }
+
+    // Without open sign-up, the invite fast path above is the only way in.
+    if !crate::signup::open_signup_available(&conf) {
+        return Err(render_error(
+            "Signing up requires an invitation sent to this email address. Ask an administrator to invite you.",
+        ));
     }
 
     // Generate verification token and ID
@@ -494,7 +552,7 @@ pub async fn signup_post_handler(
     EmailVerification::insert(
         &db,
         &verification_id,
-        &form.email,
+        email,
         form.name.as_deref(),
         &password_hash,
         &verification_token,
@@ -520,7 +578,7 @@ pub async fn signup_post_handler(
     // Enqueue the verification email for sending by the worker
     let email_enqueuer = AppEmailEnqueuer::from_conf(db.clone(), &conf);
     if let Err(e) = email_enqueuer
-        .send_verification_email(&form.email, form.name.as_deref(), &verification_token)
+        .send_verification_email(email, form.name.as_deref(), &verification_token)
         .await
     {
         tracing::error!("Failed to enqueue verification email: {:?}", e);
@@ -529,10 +587,7 @@ pub async fn signup_post_handler(
     }
 
     // Show the "check your email" page
-    Ok(
-        render_check_email(&form.email, false, plan == "hot-free", &csrf_cookie_value)
-            .into_response(),
-    )
+    Ok(render_check_email(email, false, plan == "hot-free", &csrf_cookie_value).into_response())
 }
 
 /// Create a user + email_password auth row. `password_hash` is the JSON
@@ -596,16 +651,25 @@ fn render_check_email(
     is_free_plan: bool,
     form_token: &str,
 ) -> Html<String> {
-    render_check_email_full(email, already_pending, is_free_plan, false, form_token)
+    render_check_email_full(
+        email,
+        already_pending,
+        is_free_plan,
+        false,
+        false,
+        form_token,
+    )
 }
 
 /// Render the "check your email" page; `resend_capped` swaps the resend form
-/// for an explanation of the resend limit.
+/// for an explanation of the resend limit, and `invite_only` sends invited
+/// people to their invitation link.
 fn render_check_email_full(
     email: &str,
     already_pending: bool,
     is_free_plan: bool,
     resend_capped: bool,
+    invite_only: bool,
     form_token: &str,
 ) -> Html<String> {
     let template = templates::CheckEmail {
@@ -616,6 +680,7 @@ fn render_check_email_full(
         already_pending,
         is_free_plan,
         resend_capped,
+        invite_only,
     };
 
     Html(template.render().unwrap())
@@ -717,6 +782,19 @@ pub async fn confirm_email_handler(
             "This verification link is expired or has already been used. Please sign in or sign up again.",
         )
     })?;
+    // Sign-up may have closed since this verification was sent: then only an
+    // invitation it carries itself admits a new account.
+    if !crate::signup::verified_signup_open(&conf)
+        && User::get_user_by_email(&db, &verification.email)
+            .await
+            .is_err()
+        && !crate::signup::verification_admitted(&db, &verification).await
+    {
+        return Err(render_verification_error(
+            "Invitation required",
+            "Signing up requires an invitation sent to this email address. If you have one, sign up through the link in your invitation. Otherwise, ask an administrator to invite you.",
+        ));
+    }
     EmailVerification::confirm_once(&db, &verification.verification_id)
         .await
         .map_err(|_| {
@@ -767,7 +845,7 @@ pub async fn confirm_email_handler(
     // mismatch, revoked) are surfaced instead of silently dropped — the
     // account is created either way, so tell the user what happened.
     let mut invite_joined = false;
-    if let Some(invite_code) = &verification.invite_code {
+    if let Some(invite_code) = verification.invite_code.as_ref() {
         match process_invite_code(&db, &user_id, invite_code).await {
             Ok(()) => invite_joined = true,
             Err(e) => {
@@ -825,6 +903,10 @@ pub async fn resend_verification_handler(
     cookies: CookieJar,
     Form(form): Form<ResendVerificationForm>,
 ) -> axum::response::Response {
+    // Without open sign-up, every page here says where sign-up happens, so it
+    // doesn't reveal which of them this request reached.
+    let invite_only = !crate::signup::verified_signup_open(&conf);
+
     if !crate::auth::validate_csrf(&cookies, form.form_token.as_deref()) {
         tracing::warn!(
             key_type = "email",
@@ -835,7 +917,7 @@ pub async fn resend_verification_handler(
         let updated_cookies = cookies.add(crate::auth::build_csrf_cookie(fresh_token.clone()));
         return (
             updated_cookies,
-            render_check_email_full(&form.email, true, false, false, &fresh_token),
+            render_check_email_full(&form.email, true, false, false, invite_only, &fresh_token),
         )
             .into_response();
     }
@@ -854,7 +936,14 @@ pub async fn resend_verification_handler(
             "Resend rate limit hit"
         );
         let _ = retry_after;
-        return render_check_email_full(&form.email, true, false, true, &form_token)
+        return render_check_email_full(&form.email, true, false, true, invite_only, &form_token)
+            .into_response();
+    }
+
+    // Without delivery the new email would only fail, and replacing the token
+    // would kill the link already delivered. The page is the same.
+    if !crate::signup::verification_email_deliverable(&conf) {
+        return render_check_email_full(&form.email, false, false, false, invite_only, &form_token)
             .into_response();
     }
 
@@ -863,15 +952,39 @@ pub async fn resend_verification_handler(
         Ok(Some(v)) => v,
         _ => {
             // Don't reveal whether email exists
-            return render_check_email(&form.email, false, false, &form_token).into_response();
+            return render_check_email_full(
+                &form.email,
+                false,
+                false,
+                false,
+                invite_only,
+                &form_token,
+            )
+            .into_response();
         }
     };
 
-    // Check attempt limits (max 5 resends)
+    // Sign-up may have closed since this verification was sent. Confirming
+    // it would be refused, so don't keep it alive; the page is the same.
+    if invite_only && !crate::signup::verification_admitted(&db, &verification).await {
+        return render_check_email_full(&form.email, false, false, false, true, &form_token)
+            .into_response();
+    }
+
+    // Check attempt limits (max 5 resends). Without open sign-up the page
+    // stays the same, so it doesn't reveal that this address has an invitation;
+    // their invitation link needs no further email.
     if verification.attempts >= 5 {
         let is_free = verification.plan.as_deref() == Some("hot-free");
-        return render_check_email_full(&form.email, true, is_free, true, &form_token)
-            .into_response();
+        return render_check_email_full(
+            &form.email,
+            true,
+            is_free,
+            !invite_only,
+            invite_only,
+            &form_token,
+        )
+        .into_response();
     }
 
     // Increment attempts
@@ -907,7 +1020,8 @@ pub async fn resend_verification_handler(
     }
 
     let is_free = verification.plan.as_deref() == Some("hot-free");
-    render_check_email(&form.email, false, is_free, &form_token).into_response()
+    render_check_email_full(&form.email, false, is_free, false, invite_only, &form_token)
+        .into_response()
 }
 
 /// Form data for resend verification
@@ -932,6 +1046,7 @@ fn render_verification_error(title: &str, message: &str) -> Html<String> {
 // Helper function to render signup form with error
 #[allow(clippy::too_many_arguments)]
 fn render_signup_with_error_full(
+    conf: &Val,
     error_message: &str,
     email: &str,
     name: &str,
@@ -944,7 +1059,7 @@ fn render_signup_with_error_full(
     let plan_display_name = get_plan_display_name(plan);
     let template = templates::SignUp {
         title: "Sign Up",
-        page_context: templates::PublicPageContext::new("signup"),
+        page_context: templates::PublicPageContext::new_with_conf("signup", conf),
         error_message,
         email,
         name,

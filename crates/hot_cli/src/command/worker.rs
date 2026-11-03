@@ -47,12 +47,34 @@ fn resolve_task_worker_backend(
     Ok(backend)
 }
 
+/// Both services run user code: refuse to start without the isolation a
+/// self-hosted production install requires, or with outbound rules that do
+/// not parse.
+fn exit_on_unsafe_user_code_conf(conf: &Val, service: &str) {
+    if let Err(e) = hot::outbound::validate_user_code_conf(conf) {
+        error!("hot.dev: {service} configuration rejected: {e}");
+        std::process::exit(1);
+    }
+}
+
+/// Where the task worker keeps box `/data` volumes, when configured.
+pub(crate) fn data_volume_base_dir(conf: &Val) -> Option<String> {
+    conf.get("task")
+        .and_then(|t| t.get("data-volume-dir"))
+        .map(|v| match v {
+            Val::Str(s) => s.to_string(),
+            other => other.to_string().trim_matches('"').to_string(),
+        })
+        .filter(|s| !s.is_empty() && s != "null")
+}
+
 pub(crate) async fn run_task_worker(env: Env, conf: Val) {
     info!(
         "hot.dev: TASK_WORKER starting, version: {} ({})",
         build_info::VERSION,
         build_info::git_sha_short()
     );
+    exit_on_unsafe_user_code_conf(&conf, "TASK_WORKER");
 
     let queue_type = QueueType::from_str(&conf.get_str("queue.type")).unwrap_or(QueueType::Memory);
     let redis_uri_str = conf.get_str("redis.uri");
@@ -140,14 +162,7 @@ pub(crate) async fn run_task_worker(env: Env, conf: Val) {
     let worker_memory_mb = (get_task_int("worker-memory-mb", 8192) as u64).max(256);
     let worker_disk_mb = (get_task_int("worker-disk-mb", 51200) as u64).max(1024);
 
-    let data_volume_base_dir = task_conf
-        .as_ref()
-        .and_then(|t| t.get("data-volume-dir"))
-        .map(|v| match v {
-            Val::Str(s) => s.to_string(),
-            other => other.to_string().trim_matches('"').to_string(),
-        })
-        .filter(|s| !s.is_empty() && s != "null");
+    let data_volume_base_dir = data_volume_base_dir(&conf);
 
     let opt_u64 = |key: &str| -> Option<u64> {
         let v = get_task_int(key, 0);
@@ -240,6 +255,7 @@ pub(crate) async fn run_worker_with_stream_pubsub_shared_context(
         build_info::VERSION,
         build_info::git_sha_short()
     );
+    exit_on_unsafe_user_code_conf(&conf, "WORKER");
 
     // Extract configuration values from conf
     let queue_type = QueueType::from_str(&conf.get_str("queue.type")).unwrap_or(QueueType::Memory);

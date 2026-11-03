@@ -69,10 +69,16 @@ pub(super) fn parse(raw: Option<&Val>) -> Result<Option<String>, String> {
 
 /// The registry host an image reference pulls from, following Docker's
 /// reference rules: the first path component is a registry host when it
-/// contains `.` or `:` or is `localhost`; otherwise the image is on Docker Hub.
+/// contains `.` or `:`, is `localhost`, or is not all lowercase; otherwise the
+/// image is on Docker Hub.
 pub fn image_registry(image: &str) -> String {
     match image.split_once('/') {
-        Some((first, _)) if first.contains('.') || first.contains(':') || first == "localhost" => {
+        Some((first, _))
+            if first.contains('.')
+                || first.contains(':')
+                || first == "localhost"
+                || first != first.to_lowercase() =>
+        {
             normalize_registry(first)
         }
         _ => DOCKER_HUB.to_string(),
@@ -347,6 +353,14 @@ mod tests {
         assert_eq!(image_registry("GHCR.io/withleela/reglang"), "ghcr.io");
         assert_eq!(image_registry("localhost:5000/reglang:1"), "localhost:5000");
         assert_eq!(image_registry("localhost/reglang"), "localhost");
+        // Docker takes a first component with an uppercase letter as a host.
+        assert_eq!(image_registry("LOCALHOST/x:y"), "localhost");
+        assert_eq!(image_registry("Localhost/x:y"), "localhost");
+        assert_eq!(image_registry("FOO/x:y"), "foo");
+        assert_eq!(image_registry("MyOrg/tool"), "myorg");
+        // Only the first component decides, and a bare name has none.
+        assert_eq!(image_registry("withleela/TOOL:1"), "docker.io");
+        assert_eq!(image_registry("ALPINE"), "docker.io");
         assert_eq!(
             image_registry("index.docker.io/library/alpine"),
             "docker.io"
@@ -517,5 +531,22 @@ mod tests {
                 .contains("is for registry 'ghcr.io', but image 'alpine:3.21' is on 'docker.io'")
         );
         assert!(!wrong_registry.contains(TOKEN));
+    }
+
+    #[test]
+    fn a_docker_hub_secret_does_not_serve_an_uppercase_host() {
+        let hub_secret =
+            crate::val!({"registry": "docker.io", "username": "leela-bot", "token": TOKEN});
+        let err = resolve_and_seal(
+            &context_with(hub_secret),
+            "ghcr-pull",
+            "SOMEINTERNALHOST/x:y",
+            &Uuid::now_v7(),
+            None,
+            key,
+        )
+        .unwrap_err();
+        assert!(err.contains("is on 'someinternalhost'"));
+        assert!(!err.contains(TOKEN));
     }
 }

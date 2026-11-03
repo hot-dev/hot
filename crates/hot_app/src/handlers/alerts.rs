@@ -423,6 +423,9 @@ pub async fn destinations_list_handler(
                 "Maximum verification resend attempts reached. Please delete and recreate the destination."
             }
             "resend_failed" => "Failed to resend verification email.",
+            "verification_not_sent" => {
+                "Destination saved, but the verification email could not be queued. Resend it once this installation can send email."
+            }
             "not_found" => "Destination not found.",
             _ => "",
         };
@@ -695,6 +698,10 @@ pub async fn destinations_create_handler(
                         email_address,
                         e
                     );
+                    return Redirect::to(
+                        "/settings/alerts/destinations?error=verification_not_sent",
+                    )
+                    .into_response();
                 }
                 let redirect_url = if is_org_user_email {
                     "/settings/alerts/destinations?info=verification_sent_org_user"
@@ -894,6 +901,10 @@ pub async fn destinations_update_handler(
                             new_addr,
                             e
                         );
+                        return Redirect::to(
+                            "/settings/alerts/destinations?error=verification_not_sent",
+                        )
+                        .into_response();
                     }
                 }
 
@@ -1975,6 +1986,16 @@ pub async fn resend_destination_verification_handler(
         },
         Err(_) => return Redirect::to("/settings/alerts/destinations?error=invalid_config"),
     };
+
+    // Mail that won't be queued must not cost the link already delivered.
+    if let Err(reason) = hot::email::email_render_status(&conf) {
+        tracing::error!(
+            "Not resending destination verification email to {}: {}",
+            email_address,
+            reason
+        );
+        return Redirect::to("/settings/alerts/destinations?error=resend_failed");
+    }
 
     // Generate new token and refresh expiry
     let new_token = AlertDestination::generate_verification_token();

@@ -11,7 +11,8 @@ use uuid::Uuid;
 /// Tells the UI why call data may or may not be present for a run:
 /// - `available`    — call data exists and is returned normally
 /// - `collecting`   — run is still in progress, calls may still arrive
-/// - `expired`      — run is older than the org's call retention window
+/// - `expired`      — run is older than the call retention that applies to the
+///   org: its plan or override, else the installation's `db.retention.call.days`
 /// - `not_included` — org's plan does not include call data (retention = 0)
 /// - `disabled`     — the run recorded no calls because its org turned call
 ///   tracing off (`call_tracing: false` in the run's info)
@@ -29,6 +30,7 @@ pub async fn get_hierarchy_handler(
     Path(run_id): Path<Uuid>,
     State(db): State<Arc<DatabasePool>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
+    axum::extract::Extension(conf): axum::extract::Extension<hot::val::Val>,
 ) -> impl IntoResponse {
     // Runtime reads stay in the explicitly selected environment, including on
     // SQLite where PostgreSQL RLS cannot provide the final enforcement layer.
@@ -76,13 +78,21 @@ pub async fn get_hierarchy_handler(
         }
     };
 
-    // Resolve the org's call retention policy
-    let features = if let Some(ref org) = session.current_org {
-        Features::resolve_for_org(&db, &org.org_id).await
+    // Resolve the org's call retention policy. Calls are deleted by the
+    // installation's retention when no plan or override sets one, which the
+    // features alone report as unlimited.
+    let call_retention_days = if let Some(ref org) = session.current_org {
+        let features = Features::resolve_for_org(&db, &org.org_id).await;
+        hot::db::subscription::call_retention_days_for_org(
+            &db,
+            &org.org_id,
+            &features,
+            hot::db::get_call_retention_days(&conf),
+        )
+        .await
     } else {
-        Features::unlimited()
+        Features::unlimited().call_retention_days()
     };
-    let call_retention_days = features.call_retention_days();
 
     // Early exit: plan does not include call data at all
     if call_retention_days == 0 {
