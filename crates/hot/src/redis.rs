@@ -28,16 +28,22 @@ struct RedisAuth {
 /// process opens. `redis.auth` is `password` (the credentials in
 /// `redis.uri`, the default) or `gcp-iam`, which authenticates as the VM's
 /// service account with short-lived access tokens, as Memorystore for
-/// Valkey's IAM authentication requires. Both settings apply to standalone
-/// servers only. The first call wins.
+/// Valkey's IAM authentication requires; those tokens travel over TLS
+/// (`rediss://`) only. Both settings apply to standalone servers only. The
+/// first call wins.
 pub fn configure(conf: &Val) -> Result<(), String> {
     let _ = AUTH.set(redis_auth(conf)?);
     Ok(())
 }
 
+/// Why `redis.auth = gcp-iam` refuses a plaintext server: each token is the
+/// VM's cloud-platform access token, good for every Google API it may call.
+const GCP_IAM_NEEDS_TLS: &str = "redis.auth = gcp-iam needs a rediss:// URI: its access tokens must not cross the network in the clear";
+
 fn redis_auth(conf: &Val) -> Result<RedisAuth, String> {
     let auth = conf.get_str_or_default("redis.auth", "password");
     let ca_cert = conf.get_str_or_default("redis.ca-cert", "");
+    let uri = conf.get_str_or_default("redis.uri", "");
     let credentials = match auth.trim() {
         "" | "password" => None,
         "gcp-iam" => Some(Arc::new(GcpIamCredentials::new(GCP_METADATA_TOKEN_URL))),
@@ -47,12 +53,14 @@ fn redis_auth(conf: &Val) -> Result<RedisAuth, String> {
             ));
         }
     };
-    let cluster = conf.get_bool_or_default("redis.cluster", false)
-        || is_cluster_uri(&conf.get_str_or_default("redis.uri", ""));
+    let cluster = conf.get_bool_or_default("redis.cluster", false) || is_cluster_uri(&uri);
     if cluster && (credentials.is_some() || !ca_cert.trim().is_empty()) {
         return Err(
             "redis.auth = gcp-iam and redis.ca-cert support standalone servers only".into(),
         );
+    }
+    if credentials.is_some() && !uri.is_empty() && uri != "null" && !uri.starts_with("rediss://") {
+        return Err(GCP_IAM_NEEDS_TLS.into());
     }
     if !ca_cert.trim().is_empty() && !ca_cert.contains("-----BEGIN CERTIFICATE-----") {
         return Err("redis.ca-cert must hold PEM certificates".into());
@@ -64,8 +72,19 @@ fn redis_auth(conf: &Val) -> Result<RedisAuth, String> {
 }
 
 /// A standalone client for `uri`, trusting `redis.ca-cert` when it is set.
+/// Under `redis.auth = gcp-iam`, a `uri` without TLS is refused.
 pub fn client(uri: &str) -> ::redis::RedisResult<::redis::Client> {
-    client_trusting(uri, AUTH.get().and_then(|auth| auth.ca_cert.clone()))
+    client_for(uri, AUTH.get())
+}
+
+fn client_for(uri: &str, auth: Option<&RedisAuth>) -> ::redis::RedisResult<::redis::Client> {
+    if auth.is_some_and(|auth| auth.credentials.is_some()) && !uri.starts_with("rediss://") {
+        return Err(::redis::RedisError::from((
+            ::redis::ErrorKind::InvalidClientConfig,
+            GCP_IAM_NEEDS_TLS,
+        )));
+    }
+    client_trusting(uri, auth.and_then(|auth| auth.ca_cert.clone()))
 }
 
 fn client_trusting(uri: &str, ca_cert: Option<Vec<u8>>) -> ::redis::RedisResult<::redis::Client> {
@@ -386,6 +405,26 @@ mod tests {
                 .unwrap()
                 .contains("standalone servers only")
         );
+        // Access tokens never go to a server without TLS.
+        let plaintext = val!({"redis": {"uri": "redis://10.0.0.5:6379", "auth": "gcp-iam"}});
+        assert!(redis_auth(&plaintext).err().unwrap().contains("rediss://"));
+        let plaintext_password = val!({"redis": {"uri": "redis://10.0.0.5:6379"}});
+        assert!(redis_auth(&plaintext_password).is_ok());
+    }
+
+    #[test]
+    fn gcp_iam_clients_refuse_servers_without_tls() {
+        let iam =
+            redis_auth(&val!({"redis": {"uri": "rediss://10.0.0.5:6379", "auth": "gcp-iam"}}))
+                .unwrap();
+        let refused = client_for("redis://10.0.0.5:6379", Some(&iam))
+            .err()
+            .unwrap();
+        assert_eq!(refused.kind(), ::redis::ErrorKind::InvalidClientConfig);
+        assert!(client_for("rediss://10.0.0.5:6379", Some(&iam)).is_ok());
+        let password = RedisAuth::default();
+        assert!(client_for("redis://10.0.0.5:6379", Some(&password)).is_ok());
+        assert!(client_for("redis://10.0.0.5:6379", None).is_ok());
     }
 
     /// Against a live TLS server whose password is the "token", with a CA

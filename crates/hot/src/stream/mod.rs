@@ -383,8 +383,12 @@ pub trait StreamSubscriber: Send {
     /// is still healthy, and `Closed` when the subscription cannot continue.
     ///
     /// Cancel-safe: dropping the future (e.g. in `tokio::select!`) loses no
-    /// event. A subscription delivers every event published after
-    /// `subscribe` returns, from any process.
+    /// event. A subscription delivers the events published after
+    /// `subscribe` returns, from any process, while it keeps up: a channel
+    /// holds only its newest events (about 1,000 on Redis, 256 in memory),
+    /// so a subscriber further behind than that, or reconnecting after that
+    /// many more were published, skips the oldest of them. Callers that
+    /// need every event keep a fallback, such as polling.
     async fn next(&mut self) -> StreamNext;
 }
 
