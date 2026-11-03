@@ -8,6 +8,9 @@ locals {
   provisioned_buckets = { for name, roles in {
     for s in [local.config.storage.build, local.config.storage.file] : s.bucket => s... if s.backend == "s3" && s.provision
   } : name => roles[0] }
+  # A bucket name has no slash, and Hot and the hosts' grant read a prefix the
+  # same with or without a trailing one, so each location has one spelling.
+  storage_locations = { for role, s in local.config.storage : role => "${s.backend}://${s.bucket}/${trim(s.prefix, "/")}" }
 }
 resource "aws_s3_bucket" "storage" {
   for_each      = local.provisioned_buckets
@@ -81,4 +84,26 @@ resource "aws_s3_bucket_policy" "storage" {
     Condition = { Bool = { "aws:SecureTransport" = "false" } }
   }] })
   depends_on = [aws_s3_bucket_public_access_block.storage]
+}
+# A scalable installation does not move storage, and no host can refuse a move:
+# its new launch template replaces every host with one that has no earlier release
+# to compare with, so each would report deployed on the new location, with the
+# records still on the old one and the hosts' grant there gone. So the plan refuses
+# a change of backend, bucket or prefix, against those kept here from the first
+# apply. An installation from before this record has nothing to compare with, so
+# its next plan is not refused and its next apply records where storage is then.
+# One that has stored nothing can start again with
+# -replace=terraform_data.storage_locations, and the refusal says so, because a
+# location here may never have worked: the record does not wait for the buckets, so
+# a first apply that fails keeps it, and preflight only warns on a mistyped existing
+# bucket. A new name for a bucket this stack created still stops on prevent_destroy.
+resource "terraform_data" "storage_locations" {
+  input = local.storage_locations
+  lifecycle {
+    ignore_changes = [input]
+    postcondition {
+      condition     = alltrue([for role, location in self.input : local.storage_locations[role] == location])
+      error_message = "A scalable installation does not move storage, and Hot would start on the new location with its records still on the old one. Put storage back on the bucket and prefix it started on: ${join(", ", [for role, location in self.input : "storage.${role} was ${location} and is now ${local.storage_locations[role]}" if local.storage_locations[role] != location])}. An installation that has stored nothing, such as one whose first apply failed or named the wrong existing bucket, can start again with tofu apply -replace=terraform_data.storage_locations. Renaming a bucket this stack already created still stops on its prevent_destroy."
+    }
+  }
 }

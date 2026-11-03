@@ -651,3 +651,212 @@ run "public_subnets_must_cover_the_hosts_zones" {
   }
   expect_failures = [aws_lb.web]
 }
+
+# No run has applied anything yet, so this is the state of an installation from
+# before the record, with storage somewhere other than the runs below expect.
+run "a_state_with_no_location_record_is_not_refused" {
+  command = plan
+  variables {
+    installation = {
+      "schema_version" : 1,
+      "preset" : "scalable",
+      "name" : "hot-example",
+      "cloud" : "aws",
+      "region" : "us-east-1",
+      "zone" : "us-east-1a",
+      "size" : "small",
+      "host_image" : "ami-0123456789abcdef0",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "app_exposure" : "public",
+      "network" : { "client_cidrs" : ["10.10.0.0/16"] },
+      "data" : { "postgres" : { "mode" : "managed", "high_availability" : true }, "valkey" : { "mode" : "managed", "high_availability" : true } },
+      "storage" : {
+        "build" : { "backend" : "s3", "bucket" : "acme-other", "region" : "us-east-1", "prefix" : "other-builds", "provision" : true },
+        "file" : { "backend" : "s3", "bucket" : "acme-other", "region" : "us-east-1", "prefix" : "other-files", "provision" : true }
+      },
+      "scaling" : { "task_worker" : { "min" : 1, "max" : 3 } }
+    }
+  }
+  assert {
+    condition     = terraform_data.storage_locations.input.build == "s3://acme-other/other-builds" && terraform_data.storage_locations.input.file == "s3://acme-other/other-files"
+    error_message = "With nothing recorded to compare with, the first plan goes ahead and records where storage is then."
+  }
+}
+
+# The refusals need a state, so these last runs apply the record alone. Nothing
+# with prevent_destroy joins it, so the test can still clean up.
+run "the_first_apply_records_each_storage_location" {
+  command = apply
+  plan_options {
+    target = [terraform_data.storage_locations]
+  }
+  assert {
+    condition     = terraform_data.storage_locations.input.build == "s3://acme-hot/builds" && terraform_data.storage_locations.input.file == "s3://acme-hot/files"
+    error_message = "The record keeps the backend, bucket and prefix of each storage role."
+  }
+}
+
+run "an_unchanged_plan_goes_ahead" {
+  command = plan
+  assert {
+    condition     = terraform_data.storage_locations.input.file == "s3://acme-hot/files" && length(aws_autoscaling_group.role) == 5
+    error_message = "With storage where it started, the whole plan goes ahead."
+  }
+}
+
+# Records name their bucket, and the hosts keep access only to the new location.
+# An existing bucket, here, has no prevent_destroy to stop the change otherwise.
+run "refuses_another_bucket" {
+  command = plan
+  variables {
+    installation = {
+      "schema_version" : 1,
+      "preset" : "scalable",
+      "name" : "hot-example",
+      "cloud" : "aws",
+      "region" : "us-east-1",
+      "zone" : "us-east-1a",
+      "size" : "small",
+      "host_image" : "ami-0123456789abcdef0",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "app_exposure" : "public",
+      "network" : { "client_cidrs" : ["10.10.0.0/16"] },
+      "data" : { "postgres" : { "mode" : "managed", "high_availability" : true }, "valkey" : { "mode" : "managed", "high_availability" : true } },
+      "storage" : {
+        "build" : { "backend" : "s3", "bucket" : "acme-hot", "region" : "us-east-1", "prefix" : "builds", "provision" : true },
+        "file" : { "backend" : "s3", "bucket" : "acme-files", "region" : "us-east-1", "prefix" : "files" }
+      },
+      "scaling" : { "task_worker" : { "min" : 1, "max" : 3 } }
+    }
+  }
+  expect_failures = [terraform_data.storage_locations]
+}
+
+run "refuses_another_prefix_of_the_same_bucket" {
+  command = plan
+  variables {
+    installation = {
+      "schema_version" : 1,
+      "preset" : "scalable",
+      "name" : "hot-example",
+      "cloud" : "aws",
+      "region" : "us-east-1",
+      "zone" : "us-east-1a",
+      "size" : "small",
+      "host_image" : "ami-0123456789abcdef0",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "app_exposure" : "public",
+      "network" : { "client_cidrs" : ["10.10.0.0/16"] },
+      "data" : { "postgres" : { "mode" : "managed", "high_availability" : true }, "valkey" : { "mode" : "managed", "high_availability" : true } },
+      "storage" : {
+        "build" : { "backend" : "s3", "bucket" : "acme-hot", "region" : "us-east-1", "prefix" : "builds", "provision" : true },
+        "file" : { "backend" : "s3", "bucket" : "acme-hot", "region" : "us-east-1", "prefix" : "uploads", "provision" : true }
+      },
+      "scaling" : { "task_worker" : { "min" : 1, "max" : 3 } }
+    }
+  }
+  expect_failures = [terraform_data.storage_locations]
+}
+
+run "refuses_both_roles_moving_together" {
+  command = plan
+  variables {
+    installation = {
+      "schema_version" : 1,
+      "preset" : "scalable",
+      "name" : "hot-example",
+      "cloud" : "aws",
+      "region" : "us-east-1",
+      "zone" : "us-east-1a",
+      "size" : "small",
+      "host_image" : "ami-0123456789abcdef0",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "app_exposure" : "public",
+      "network" : { "client_cidrs" : ["10.10.0.0/16"] },
+      "data" : { "postgres" : { "mode" : "managed", "high_availability" : true }, "valkey" : { "mode" : "managed", "high_availability" : true } },
+      "storage" : {
+        "build" : { "backend" : "s3", "bucket" : "acme-other", "region" : "us-east-1", "prefix" : "builds", "provision" : true },
+        "file" : { "backend" : "s3", "bucket" : "acme-other", "region" : "us-east-1", "prefix" : "files", "provision" : true }
+      },
+      "scaling" : { "task_worker" : { "min" : 1, "max" : 3 } }
+    }
+  }
+  expect_failures = [terraform_data.storage_locations]
+}
+
+run "the_same_location_is_not_a_move" {
+  command = plan
+  variables {
+    installation = {
+      "schema_version" : 1,
+      "preset" : "scalable",
+      "name" : "hot-example",
+      "cloud" : "aws",
+      "region" : "us-east-1",
+      "zone" : "us-east-1a",
+      "size" : "small",
+      "host_image" : "ami-0123456789abcdef0",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "app_exposure" : "public",
+      "network" : { "client_cidrs" : ["10.10.0.0/16"] },
+      "data" : { "postgres" : { "mode" : "managed", "high_availability" : true }, "valkey" : { "mode" : "managed", "high_availability" : true } },
+      "storage" : {
+        "build" : { "backend" : "s3", "bucket" : "acme-hot", "region" : "us-east-1", "prefix" : "builds/" },
+        "file" : { "backend" : "s3", "bucket" : "acme-hot", "region" : "us-east-1", "prefix" : "files/" }
+      },
+      "scaling" : { "task_worker" : { "min" : 1, "max" : 3 } }
+    }
+  }
+  assert {
+    condition     = terraform_data.storage_locations.input.file == "s3://acme-hot/files" && local.config.storage.file.prefix == "files/" && !local.config.storage.file.provision
+    error_message = "A trailing slash on a prefix, or a change of whether the stack provisions the bucket, leaves storage where it is."
+  }
+}
+
+run "the_record_outlasts_a_refused_change" {
+  command = plan
+  assert {
+    condition     = terraform_data.storage_locations.input.build == "s3://acme-hot/builds" && terraform_data.storage_locations.input.file == "s3://acme-hot/files"
+    error_message = "With the locations put back the plan goes ahead, and the record still has where the installation started."
+  }
+}
+
+# The record alone is also what a first apply that failed on its bucket leaves, so
+# this is the way past the refusal for a name S3 would not give.
+run "an_installation_that_stored_nothing_can_start_again" {
+  command = plan
+  plan_options {
+    replace = [terraform_data.storage_locations]
+  }
+  variables {
+    installation = {
+      "schema_version" : 1,
+      "preset" : "scalable",
+      "name" : "hot-example",
+      "cloud" : "aws",
+      "region" : "us-east-1",
+      "zone" : "us-east-1a",
+      "size" : "small",
+      "host_image" : "ami-0123456789abcdef0",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "app_exposure" : "public",
+      "network" : { "client_cidrs" : ["10.10.0.0/16"] },
+      "data" : { "postgres" : { "mode" : "managed", "high_availability" : true }, "valkey" : { "mode" : "managed", "high_availability" : true } },
+      "storage" : {
+        "build" : { "backend" : "s3", "bucket" : "acme-other", "region" : "us-east-1", "prefix" : "other-builds", "provision" : true },
+        "file" : { "backend" : "s3", "bucket" : "acme-other", "region" : "us-east-1", "prefix" : "other-files", "provision" : true }
+      },
+      "scaling" : { "task_worker" : { "min" : 1, "max" : 3 } }
+    }
+  }
+  assert {
+    condition     = terraform_data.storage_locations.input.build == "s3://acme-other/other-builds" && terraform_data.storage_locations.input.file == "s3://acme-other/other-files"
+    error_message = "Replacing the record is the deliberate way past the refusal."
+  }
+}

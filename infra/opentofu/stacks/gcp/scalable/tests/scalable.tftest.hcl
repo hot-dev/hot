@@ -710,8 +710,21 @@ run "compute_waits_for_its_api" {
   }
 }
 
-# The refusal needs a state, so these last runs apply the record alone. Nothing
-# with prevent_destroy joins it, so the test can still clean up.
+# expect_failures does not see a refusal's message, so this reads the configuration
+# too. The last runs below show that this flag does get past both refusals.
+run "each_storage_refusal_names_the_way_past" {
+  command = plan
+  assert {
+    condition = alltrue([for record in ["storage_backends", "storage_locations"] :
+      strcontains(regex("(?s)resource \"terraform_data\" \"${record}\" \\{.*?\\n\\}", file("${path.module}/storage.tf")), "tofu apply -replace=terraform_data.storage_backends.")
+    ])
+    error_message = "A first bucket that was wrong can never be put back, so each refusal must say how an installation that has stored nothing starts again."
+  }
+}
+
+# The refusals need a state, so these last runs apply the records alone. Nothing
+# with prevent_destroy joins them, so the test can still clean up. This first
+# apply leaves the state of an installation from before the location record.
 run "the_first_apply_records_each_storage_backend" {
   command = apply
   plan_options {
@@ -720,6 +733,52 @@ run "the_first_apply_records_each_storage_backend" {
   assert {
     condition     = terraform_data.storage_backends.input.build == "gcs" && terraform_data.storage_backends.input.file == "gcs"
     error_message = "The record keeps the backend each storage role started on."
+  }
+}
+
+run "a_state_with_no_location_record_is_not_refused" {
+  command = plan
+  variables {
+    installation = {
+      "schema_version" : 1,
+      "preset" : "scalable",
+      "name" : "hot-example",
+      "cloud" : "gcp",
+      "region" : "us-central1",
+      "zone" : "us-central1-a",
+      "size" : "small",
+      "host_image" : "projects/example-project/global/images/hot-host-amd64",
+      "project" : "example-project",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "api_exposure" : "public",
+      "network" : { "client_cidrs" : ["10.10.0.0/16"] },
+      "data" : { "postgres" : { "mode" : "managed", "high_availability" : true }, "valkey" : { "mode" : "managed", "high_availability" : true } },
+      "storage" : {
+        "build" : { "backend" : "gcs", "bucket" : "acme-other", "prefix" : "builds", "provision" : true },
+        "file" : { "backend" : "gcs", "bucket" : "acme-other", "prefix" : "files", "provision" : true }
+      },
+      "scaling" : { "worker" : { "min" : 2, "max" : 4 }, "task_worker" : { "min" : 1, "max" : 3 } }
+    }
+  }
+  assert {
+    condition     = terraform_data.storage_locations.input.build == "acme-other/builds" && terraform_data.storage_locations.input.file == "acme-other/files"
+    error_message = "With nothing recorded to compare with, the first plan goes ahead and records where storage is then."
+  }
+  assert {
+    condition     = terraform_data.storage_backends.input.build == "gcs" && terraform_data.storage_backends.input.file == "gcs"
+    error_message = "Adding the location record leaves the backends as they were recorded."
+  }
+}
+
+run "the_next_apply_records_each_storage_location" {
+  command = apply
+  plan_options {
+    target = [terraform_data.storage_locations]
+  }
+  assert {
+    condition     = terraform_data.storage_locations.input.build == "acme-hot/builds" && terraform_data.storage_locations.input.file == "acme-hot/files"
+    error_message = "The record keeps the bucket and prefix of each storage role."
   }
 }
 
@@ -785,10 +844,14 @@ run "the_record_outlasts_a_refused_change" {
     condition     = terraform_data.storage_backends.input.build == "gcs" && terraform_data.storage_backends.input.file == "gcs"
     error_message = "With the backends put back the plan goes ahead, and the record still has what the installation started on."
   }
+  assert {
+    condition     = terraform_data.storage_locations.input.build == "acme-hot/builds" && terraform_data.storage_locations.input.file == "acme-hot/files"
+    error_message = "With the locations put back the plan goes ahead, and the record still has where the installation started."
+  }
 }
 
-# The agent leaves this alone too; only a change of backend is refused here.
-run "another_bucket_of_the_same_backend_is_not_a_backend_change" {
+# Records name their bucket, and the hosts keep access only to the new location.
+run "refuses_another_bucket_of_the_same_backend" {
   command = plan
   variables {
     installation = {
@@ -813,9 +876,65 @@ run "another_bucket_of_the_same_backend_is_not_a_backend_change" {
       "scaling" : { "worker" : { "min" : 2, "max" : 4 }, "task_worker" : { "min" : 1, "max" : 3 } }
     }
   }
+  expect_failures = [terraform_data.storage_locations]
+}
+
+run "refuses_another_prefix_of_the_same_bucket" {
+  command = plan
+  variables {
+    installation = {
+      "schema_version" : 1,
+      "preset" : "scalable",
+      "name" : "hot-example",
+      "cloud" : "gcp",
+      "region" : "us-central1",
+      "zone" : "us-central1-a",
+      "size" : "small",
+      "host_image" : "projects/example-project/global/images/hot-host-amd64",
+      "project" : "example-project",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "api_exposure" : "public",
+      "network" : { "client_cidrs" : ["10.10.0.0/16"] },
+      "data" : { "postgres" : { "mode" : "managed", "high_availability" : true }, "valkey" : { "mode" : "managed", "high_availability" : true } },
+      "storage" : {
+        "build" : { "backend" : "gcs", "bucket" : "acme-hot", "prefix" : "builds", "provision" : true },
+        "file" : { "backend" : "gcs", "bucket" : "acme-hot", "prefix" : "uploads", "provision" : true }
+      },
+      "scaling" : { "worker" : { "min" : 2, "max" : 4 }, "task_worker" : { "min" : 1, "max" : 3 } }
+    }
+  }
+  expect_failures = [terraform_data.storage_locations]
+}
+
+run "the_same_location_is_not_a_move" {
+  command = plan
+  variables {
+    installation = {
+      "schema_version" : 1,
+      "preset" : "scalable",
+      "name" : "hot-example",
+      "cloud" : "gcp",
+      "region" : "us-central1",
+      "zone" : "us-central1-a",
+      "size" : "small",
+      "host_image" : "projects/example-project/global/images/hot-host-amd64",
+      "project" : "example-project",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "api_exposure" : "public",
+      "network" : { "client_cidrs" : ["10.10.0.0/16"] },
+      "data" : { "postgres" : { "mode" : "managed", "high_availability" : true }, "valkey" : { "mode" : "managed", "high_availability" : true } },
+      "storage" : {
+        "build" : { "backend" : "gcs", "bucket" : "acme-hot", "prefix" : "builds/" },
+        "file" : { "backend" : "gcs", "bucket" : "acme-hot", "prefix" : "files/" }
+      },
+      "scaling" : { "worker" : { "min" : 2, "max" : 4 }, "task_worker" : { "min" : 1, "max" : 3 } }
+    }
+  }
   assert {
-    condition     = terraform_data.storage_backends.input.file == "gcs" && local.config.storage.file.bucket == "acme-other"
-    error_message = "A change within one backend plans as before."
+    condition     = terraform_data.storage_locations.input.file == "acme-hot/files" && local.config.storage.file.prefix == "files/" && !local.config.storage.file.provision
+    error_message = "A trailing slash on a prefix, or a change of whether the stack provisions the bucket, leaves storage where it is."
   }
 }
 
@@ -850,5 +969,39 @@ run "an_installation_that_stored_nothing_can_start_again" {
   assert {
     condition     = terraform_data.storage_backends.input.build == "s3" && terraform_data.storage_backends.input.file == "s3"
     error_message = "Replacing the record is the deliberate way past the refusal."
+  }
+}
+
+run "the_same_replace_is_the_way_past_another_bucket" {
+  command = plan
+  plan_options {
+    replace = [terraform_data.storage_backends]
+  }
+  variables {
+    installation = {
+      "schema_version" : 1,
+      "preset" : "scalable",
+      "name" : "hot-example",
+      "cloud" : "gcp",
+      "region" : "us-central1",
+      "zone" : "us-central1-a",
+      "size" : "small",
+      "host_image" : "projects/example-project/global/images/hot-host-amd64",
+      "project" : "example-project",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "api_exposure" : "public",
+      "network" : { "client_cidrs" : ["10.10.0.0/16"] },
+      "data" : { "postgres" : { "mode" : "managed", "high_availability" : true }, "valkey" : { "mode" : "managed", "high_availability" : true } },
+      "storage" : {
+        "build" : { "backend" : "gcs", "bucket" : "acme-other", "prefix" : "builds", "provision" : true },
+        "file" : { "backend" : "gcs", "bucket" : "acme-other", "prefix" : "files", "provision" : true }
+      },
+      "scaling" : { "worker" : { "min" : 2, "max" : 4 }, "task_worker" : { "min" : 1, "max" : 3 } }
+    }
+  }
+  assert {
+    condition     = terraform_data.storage_locations.input.build == "acme-other/builds" && terraform_data.storage_locations.input.file == "acme-other/files"
+    error_message = "Replacing the backend record replaces the location record too, so one flag is the deliberate way past both refusals."
   }
 }

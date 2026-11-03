@@ -119,7 +119,33 @@ resource "terraform_data" "storage_backends" {
     ignore_changes = [input]
     postcondition {
       condition     = alltrue([for role, backend in self.input : local.config.storage[role].backend == backend])
-      error_message = "A scalable installation does not move storage, and Hot would start on the new backend with its records still on the old one. Put storage back on the backend it started on: ${join(", ", [for role, backend in self.input : "storage.${role} was ${backend} and is now ${local.config.storage[role].backend}" if local.config.storage[role].backend != backend])}."
+      error_message = "A scalable installation does not move storage, and Hot would start on the new backend with its records still on the old one. Put storage back on the backend it started on: ${join(", ", [for role, backend in self.input : "storage.${role} was ${backend} and is now ${local.config.storage[role].backend}" if local.config.storage[role].backend != backend])}. An installation that has stored nothing, such as one whose first apply failed or named the wrong existing bucket, can start again with tofu apply -replace=terraform_data.storage_backends. Moving off a bucket this stack already created still stops on its prevent_destroy."
+    }
+  }
+}
+# Another bucket or prefix of the same backend strands the records the same way,
+# and no host can refuse that either, so the plan refuses it too. It has a record
+# of its own because the one above never takes a new shape: its input is kept
+# from the first apply. An installation from before this record has nothing to
+# compare with, so its next plan is not refused and its next apply records where
+# storage is then. Replacing the backends replaces this as well, which keeps one
+# way past the refusal. Each refusal says so, because a location here may never
+# have worked: neither record waits for the buckets, so a first apply that fails
+# keeps them, and preflight does not look at an existing S3 bucket at all. A new
+# name for a bucket this stack created still stops on prevent_destroy.
+locals {
+  # A bucket name has no slash, and Hot reads a prefix the same with or without
+  # a trailing one, so each location has one spelling.
+  storage_locations = { for role, s in local.config.storage : role => "${s.bucket}/${trim(s.prefix, "/")}" }
+}
+resource "terraform_data" "storage_locations" {
+  input            = local.storage_locations
+  triggers_replace = terraform_data.storage_backends.id
+  lifecycle {
+    ignore_changes = [input]
+    postcondition {
+      condition     = alltrue([for role, location in self.input : local.storage_locations[role] == location])
+      error_message = "A scalable installation does not move storage, and Hot would start on the new location with its records still on the old one. Put storage back on the bucket and prefix it started on: ${join(", ", [for role, location in self.input : "storage.${role} was ${location} and is now ${local.storage_locations[role]}" if local.storage_locations[role] != location])}. An installation that has stored nothing, such as one whose first apply failed or named the wrong existing bucket, can start again with tofu apply -replace=terraform_data.storage_backends. Renaming a bucket this stack already created still stops on its prevent_destroy."
     }
   }
 }
