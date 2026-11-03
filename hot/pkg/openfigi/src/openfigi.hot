@@ -1,0 +1,472 @@
+::openfigi ns
+meta {
+    ctx: {
+        "openfigi.api-key": {required: false},
+        "openfigi.base-url": {required: false, secret: false}
+    },
+    doc: """
+    OpenFIGI (`https://api.openfigi.com/v3`), Bloomberg's free and open
+    symbology API: map ISINs, CUSIPs, SEDOLs, tickers and other
+    identifiers to FIGIs, search and filter FIGIs by keyword and
+    attributes, and list the values each mapping field accepts.
+
+    OpenFIGI returns identifiers and descriptive fields only (`figi`,
+    `name`, `ticker`, `exchCode`, `securityType`, `securityType2`,
+    `marketSector`, `compositeFIGI`, `shareClassFIGI`,
+    `securityDescription`). It has no prices or reference data.
+
+    Request fields keep OpenFIGI's own names (`idType`, `idValue`,
+    `exchCode`, `micCode`, `currency`, `marketSecDes`, `securityType`,
+    `securityType2`, `includeUnlistedEquities`, `optionType`, `strike`,
+    `contractSize`, `coupon`, `expiration`, `maturity`, `stateCode`), so
+    the OpenFIGI documentation applies as written. Every function takes
+    an optional trailing `opts` Map: `api-key`, `base-url`, and where it
+    applies `filters` (extra request fields) and `start` (a page token).
+    """
+}
+
+::api ::openfigi::api
+::re ::hot::regex
+
+VALUE_KEYS ["idType", "exchCode", "micCode", "currency", "marketSecDes", "securityType", "securityType2"]
+
+// ---------------------------------------------------------------------------
+// Mapping
+// ---------------------------------------------------------------------------
+
+job
+meta {
+    doc: """
+    One mapping job (pure): `{idType, idValue}` plus any `extra` request
+    fields, with null values dropped.
+
+    **Example**
+
+    ```hot
+    ::openfigi/job("TICKER", "IBM", {exchCode: "US"})
+    // {idType: "TICKER", idValue: "IBM", exchCode: "US"}
+    ```
+    """
+}
+fn
+(id-type: Str, id-value: Any): Map {
+  job(id-type, id-value, {})
+},
+(id-type: Str, id-value: Any, extra: Map?): Map {
+  filter-vals({idType: id-type, idValue: id-value, ...or(extra, {})}, is-some)
+}
+
+map-jobs
+meta {
+    doc: """
+    One `POST /mapping` call. Returns OpenFIGI's results in job order,
+    one per job: `{data: [figi, ...]}`, `{warning: "No identifier
+    found."}` or `{error: "..."}` (an invalid job, e.g. `"Invalid idValue
+    format."`). An Err before any request when `jobs` holds more than the
+    per-request limit (10 without a key, 100 with one); use `map-all` for
+    longer lists.
+
+    **Example**
+
+    ```hot
+    ::openfigi/map-jobs([
+      {idType: "ID_ISIN", idValue: "US0378331005", exchCode: "US"},
+      {idType: "TICKER", idValue: "IBM", exchCode: "US"}
+    ])
+    ```
+    """
+}
+fn
+(jobs: Vec): Vec<Map> {
+  map-jobs(jobs, {})
+},
+(jobs: Vec, opts: Map): Vec<Map> {
+  cfg ::api/resolve(opts)
+  cond {
+    is-err(cfg) => { cfg }
+    is-empty(jobs) => { [] }
+    gt(length(jobs), cfg.limits.jobs-per-request) => {
+      err(`openfigi: ${length(jobs)} jobs in one request; the limit is ${cfg.limits.jobs-per-request}${if(is-some(cfg.api-key), "", " without an API key")}. Use map-all to split them.`)
+    }
+    => { ::api/request(cfg, "POST", "/mapping", jobs) }
+  }
+}
+
+mapping-results
+meta {
+    doc: """
+    Pair jobs with their raw results (pure): `[{job, figis, warning,
+    error}]`, where `figis` is `[]` unless the job matched. A missing
+    result (a short response) counts as an error.
+    """
+}
+fn (jobs: Vec, results: Vec): Vec<Map> {
+  map-indexed(jobs, (i, j) {
+    r if(lt(i, length(results)), results[i], {error: "openfigi: no result for this job"})
+    {
+      job: j,
+      figis: or(get(r, "data"), []),
+      warning: get(r, "warning"),
+      error: get(r, "error")
+    }
+  })
+}
+
+map-all-chunks fn (chunks: Vec, opts: Map, acc: Vec): Vec<Map> {
+  cond {
+    is-empty(chunks) => { acc }
+    => {
+      chunk first(chunks)
+      out map-jobs(chunk, opts)
+      cond {
+        is-err(out) => { out }
+        => { map-all-chunks(rest(chunks), opts, concat(acc, mapping-results(chunk, out))) }
+      }
+    }
+  }
+}
+
+map-all
+meta {
+    doc: """
+    Map any number of jobs, split into requests of the per-request limit,
+    one after another. Returns `[{job, figis, warning, error}]` in job
+    order (see `mapping-results`). The first failed request (often a 429)
+    ends the call with its Err; nothing retries inside a run.
+
+    Without a key that is 10 jobs per request and 25 requests a minute,
+    so about 250 jobs a minute; with a key, 100 jobs and 250 requests.
+
+    **Example**
+
+    ```hot
+    isins ["US0378331005", "US4592001014", "US5949181045"]
+    out ::openfigi/map-all(map(isins, (i) { ::openfigi/job("ID_ISIN", i, {exchCode: "US"}) }))
+    map(out, (r) { [r.job.idValue, get(first(r.figis), "figi")] })
+    ```
+    """
+}
+fn
+(jobs: Vec): Vec<Map> {
+  map-all(jobs, {})
+},
+(jobs: Vec, opts: Map): Vec<Map> {
+  cfg ::api/resolve(opts)
+  cond {
+    is-err(cfg) => { cfg }
+    => { map-all-chunks(partition(jobs, cfg.limits.jobs-per-request), opts, []) }
+  }
+}
+
+map-id
+meta {
+    doc: """
+    Map one identifier and return its FIGIs, or `[]` when OpenFIGI finds
+    none. An Err when OpenFIGI rejects the job (`"Invalid idValue
+    format."`, `"securityType2 required with BASE_TICKER(idType)."`).
+    `opts.filters` adds request fields such as `exchCode` or `currency`.
+
+    **Example**
+
+    ```hot
+    ::openfigi/map-id("ID_CUSIP", "037833100", {filters: {exchCode: "US"}})
+    ```
+    """
+}
+fn
+(id-type: Str, id-value: Any): Vec<Map> {
+  map-id(id-type, id-value, {})
+},
+(id-type: Str, id-value: Any, opts: Map): Vec<Map> {
+  out map-jobs([job(id-type, id-value, get(opts, "filters"))], opts)
+  cond {
+    is-err(out) => { out }
+    => {
+      r first(mapping-results([null], out))
+      if(is-some(r.error), err(`openfigi: ${r.error}`), r.figis)
+    }
+  }
+}
+
+by-isin
+meta {
+    doc: """FIGIs for an ISIN (`ID_ISIN`). One ISIN usually maps to a FIGI per listing; add `{filters: {exchCode: "US"}}` to narrow it."""
+}
+fn
+(isin: Str): Vec<Map> {
+  by-isin(isin, {})
+},
+(isin: Str, opts: Map): Vec<Map> {
+  map-id("ID_ISIN", uppercase(trim(isin)), opts)
+}
+
+by-cusip
+meta {
+    doc: """FIGIs for a nine-character CUSIP (`ID_CUSIP`)."""
+}
+fn
+(cusip: Str): Vec<Map> {
+  by-cusip(cusip, {})
+},
+(cusip: Str, opts: Map): Vec<Map> {
+  map-id("ID_CUSIP", uppercase(trim(cusip)), opts)
+}
+
+by-sedol
+meta {
+    doc: """FIGIs for a SEDOL (`ID_SEDOL`)."""
+}
+fn
+(sedol: Str): Vec<Map> {
+  by-sedol(sedol, {})
+},
+(sedol: Str, opts: Map): Vec<Map> {
+  map-id("ID_SEDOL", uppercase(trim(sedol)), opts)
+}
+
+by-ticker
+meta {
+    doc: """
+    FIGIs for a ticker on one exchange (`TICKER` with `exchCode`, e.g.
+    `"US"` for the US composite, `"LN"` for London). Pass `null` as
+    `exch-code` to match every exchange.
+
+    **Example**
+
+    ```hot
+    first(::openfigi/by-ticker("IBM", "US")).figi   // "BBG000BLNNH6"
+    ```
+    """
+}
+fn
+(ticker: Str, exch-code: Str?): Vec<Map> {
+  by-ticker(ticker, exch-code, {})
+},
+(ticker: Str, exch-code: Str?, opts: Map): Vec<Map> {
+  map-id("TICKER", trim(ticker), {...opts, filters: {exchCode: exch-code, ...or(get(opts, "filters"), {})}})
+}
+
+by-figi
+meta {
+    doc: """The record for a FIGI (`ID_BB_GLOBAL`), or null when OpenFIGI has none."""
+}
+fn
+(figi: Str): Map? {
+  by-figi(figi, {})
+},
+(figi: Str, opts: Map): Map? {
+  out map-id("ID_BB_GLOBAL", uppercase(trim(figi)), opts)
+  cond {
+    is-err(out) => { out }
+    is-empty(out) => { null }
+    => { first(out) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Search and filter
+// ---------------------------------------------------------------------------
+
+search-body
+meta {
+    doc: """The request body for `/search` or `/filter` (pure): `query`, `opts.filters` and `opts.start`, with null and blank values dropped."""
+}
+fn (query: Str?, opts: Map): Map {
+  filter-vals({query: query, ...or(get(opts, "filters"), {}), start: get(opts, "start")}, ::api/given)
+}
+
+page-request fn (path: Str, query: Str?, opts: Map): Map {
+  cfg ::api/resolve(opts)
+  body search-body(query, opts)
+  cond {
+    is-err(cfg) => { cfg }
+    is-empty(body) => { err(`openfigi: ${path} needs a query or at least one filter`) }
+    => {
+      out ::api/request(cfg, "POST", path, body)
+      cond {
+        is-err(out) => { out }
+        is-some(get(out, "error")) => { err(`openfigi: ${get(out, "error")}`) }
+        => { out }
+      }
+    }
+  }
+}
+
+search
+meta {
+    doc: """
+    One page (up to 100) of FIGIs matching keywords and filters (`POST
+    /search`). Returns `{data, next}`; `next` is present when more pages
+    exist and goes back as `opts.start`. OpenFIGI allows 5 searches a
+    minute without a key and 20 with one.
+
+    **Example**
+
+    ```hot
+    page ::openfigi/search("apple", {filters: {exchCode: "US", securityType: "Common Stock"}})
+    first(page.data).ticker   // "AAPL"
+    ```
+    """
+}
+fn
+(query: Str): Map {
+  search(query, {})
+},
+(query: Str, opts: Map): Map {
+  page-request("/search", query, opts)
+}
+
+filter-figis
+meta {
+    doc: """
+    One page of FIGIs matching filters and optional keywords (`POST
+    /filter`), sorted by FIGI. Returns `{data, next, total}`, where
+    `total` counts every match. Shares the search rate limit.
+
+    **Example**
+
+    ```hot
+    ::openfigi/filter-figis({filters: {exchCode: "US", securityType2: "Common Stock"}}).total
+    ```
+    """
+}
+fn
+(opts: Map): Map {
+  page-request("/filter", null, opts)
+},
+(query: Str?, opts: Map): Map {
+  page-request("/filter", query, opts)
+}
+
+collect-pages fn (fetch: Fn, start: Str?, limit: Int, acc: Vec): Vec {
+  page fetch(start)
+  cond {
+    is-err(page) => { page }
+    => {
+      items or(get(page, "data"), [])
+      combined concat(acc, items)
+      next get(page, "next")
+      cond {
+        gte(length(combined), limit) => { slice(combined, 0, limit) }
+        is-empty(items) => { combined }
+        not(::api/given(next)) => { combined }
+        => { collect-pages(fetch, next, limit, combined) }
+      }
+    }
+  }
+}
+
+collect
+meta {
+    doc: """
+    Follow `next` tokens until `limit` items or the last page. `fetch`
+    takes `opts` (with `start` set after the first page) and returns one
+    page. Mind the search rate limit: each page is one request.
+
+    **Example**
+
+    ```hot
+    ::openfigi/collect((o) { ::openfigi/search("ibm", o) }, {filters: {exchCode: "US"}}, 300)
+    ```
+    """
+}
+fn (fetch: Fn, opts: Map, limit: Int): Vec {
+  collect-pages((start) { fetch(if(is-some(start), {...opts, start: start}, opts)) }, null, limit, [])
+}
+
+// ---------------------------------------------------------------------------
+// Field values
+// ---------------------------------------------------------------------------
+
+values
+meta {
+    doc: """
+    The values a mapping field accepts (`GET /mapping/values/{key}`):
+    `key` is one of `idType`, `exchCode`, `micCode`, `currency`,
+    `marketSecDes`, `securityType`, `securityType2`. Counts against the
+    mapping rate limit; the lists change rarely, so cache them.
+
+    **Example**
+
+    ```hot
+    ::openfigi/values("marketSecDes")   // ["Comdty", "Corp", "Curncy", ...]
+    ```
+    """
+}
+fn
+(key: Str): Vec<Str> {
+  values(key, {})
+},
+(key: Str, opts: Map): Vec<Str> {
+  cfg ::api/resolve(opts)
+  cond {
+    is-err(cfg) => { cfg }
+    not(in(key, VALUE_KEYS)) => { err(`openfigi: no values list for ${key}; use one of ${join(VALUE_KEYS, ", ")}`) }
+    => {
+      out ::api/request(cfg, "GET", `/mapping/values/${::api/path-segment(key)}`, null)
+      if(is-err(out), out, or(get(out, "values"), []))
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// FIGI syntax
+// ---------------------------------------------------------------------------
+
+CHAR_VALUES {
+  "0": 0, "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8, "9": 9,
+  A: 10, B: 11, C: 12, D: 13, E: 14, F: 15, G: 16, H: 17, I: 18, J: 19, K: 20, L: 21, M: 22,
+  N: 23, O: 24, P: 25, Q: 26, R: 27, S: 28, T: 29, U: 30, V: 31, W: 32, X: 33, Y: 34, Z: 35
+}
+
+// Prefixes the FIGI standard reserves because they clash with ISIN country codes.
+RESERVED_PREFIXES ["BS", "BM", "GG", "GB", "GH", "KY", "VG"]
+
+digits fn (s: Str): Vec<Str> {
+  filter(::re/split(s, ""), (c) { not(is-empty(c)) })
+}
+
+digit-sum fn (n: Int): Int {
+  reduce(map(digits(Str(n)), Int), add, 0)
+}
+
+check-digit
+meta {
+    doc: """
+    The FIGI check digit for the first 11 characters (pure): letters
+    count A=10 … Z=35, every second character's value is doubled, the
+    digits of all values are summed, and the check digit is
+    `(10 - sum mod 10) mod 10`.
+    """
+}
+fn (s: Str): Int {
+  total reduce(map-indexed(digits(slice(uppercase(s), 0, 11)), (i, c) {
+    v or(get(CHAR_VALUES, c), 0)
+    digit-sum(if(eq(mod(i, 2), 1), mul(v, 2), v))
+  }), add, 0)
+  mod(sub(10, mod(total, 10)), 10)
+}
+
+is-figi
+meta {
+    doc: """
+    True for a syntactically valid FIGI (pure): 12 characters, two
+    consonants (not a reserved ISIN country prefix), `G`, eight
+    consonants or digits, and a valid check digit.
+
+    **Example**
+
+    ```hot
+    ::openfigi/is-figi("BBG000B9XRY4")   // true
+    ::openfigi/is-figi("BBG000B9XRY5")   // false: bad check digit
+    ```
+    """
+}
+fn (figi: Any): Bool {
+  s if(is-str(figi), uppercase(trim(figi)), "")
+  cond {
+    not(::re/is-match(s, "^[B-DF-HJ-NP-TV-Z]{2}G[B-DF-HJ-NP-TV-Z0-9]{8}[0-9]$")) => { false }
+    in(slice(s, 0, 2), RESERVED_PREFIXES) => { false }
+    => { eq(check-digit(s), Int(slice(s, 11, 12))) }
+  }
+}
