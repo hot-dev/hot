@@ -393,6 +393,9 @@ impl DatabaseEventPublisher {
             ctx,
             &event,
         ))?;
+        // What's still inline takes the writer longer the larger it is.
+        let timeout =
+            crate::blob::timeout_for_size(timeout, crate::blob::estimate_val_size(&event_data));
         let event = Event {
             event_data,
             ..event

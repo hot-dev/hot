@@ -203,6 +203,15 @@ pub fn val_bytes_outside_large_leaves(val: &Val, threshold: usize) -> usize {
     }
 }
 
+/// How long a write of `size` bytes inline may take: `base`, and longer the more
+/// there is for the database to take in, whose work grows with the value however
+/// fast the host is. A small value gets `base` exactly.
+pub fn timeout_for_size(base: std::time::Duration, size: usize) -> std::time::Duration {
+    const MAX: std::time::Duration = std::time::Duration::from_secs(300);
+    let extra = std::time::Duration::from_secs((size / (1024 * 1024)) as u64);
+    (base + extra).min(MAX).max(base)
+}
+
 /// How many leaves of `val` are large enough to spill alone.
 pub fn count_large_leaves(val: &Val, threshold: usize) -> usize {
     if is_blob_ref_val(val) {
@@ -1245,6 +1254,24 @@ mod tests {
             run_id: None,
         };
         (store, scope, temp_dir)
+    }
+
+    #[test]
+    fn a_write_gets_longer_the_larger_it_is_up_to_a_limit() {
+        use std::time::Duration;
+        let base = Duration::from_secs(5);
+        assert_eq!(timeout_for_size(base, 0), base);
+        assert_eq!(timeout_for_size(base, 512 * 1024), base);
+        assert_eq!(
+            timeout_for_size(base, 48 * 1024 * 1024),
+            Duration::from_secs(53)
+        );
+        assert_eq!(
+            timeout_for_size(base, usize::MAX / 2),
+            Duration::from_secs(300)
+        );
+        let long = Duration::from_secs(600);
+        assert_eq!(timeout_for_size(long, usize::MAX / 2), long);
     }
 
     #[tokio::test]

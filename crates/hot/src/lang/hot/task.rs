@@ -30,6 +30,20 @@ fn initial_await_lookup_budget(
     }
 }
 
+/// The ceiling for writing `size` bytes inline. A large value takes the database
+/// longer, but cancellation must still regain control before the worker's hard
+/// timeout, so it's never past the run's deadline, or below the usual ceiling.
+fn inline_write_timeout(
+    context: &crate::lang::event::ExecutionContext,
+    size: usize,
+) -> std::time::Duration {
+    let wanted = crate::blob::timeout_for_size(TASK_NATIVE_IO_TIMEOUT, size);
+    context
+        .cap_wait_to_deadline(wanted, PARENT_COMPLETION_RESERVE)
+        .unwrap_or(TASK_NATIVE_IO_TIMEOUT)
+        .max(TASK_NATIVE_IO_TIMEOUT)
+}
+
 fn err_val(msg: String) -> Val {
     Val::err(Val::from(msg))
 }
@@ -282,13 +296,19 @@ pub fn start(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
             None => args_json,
         };
         request.args = args_json.clone();
+        let inline_size = if crate::store::spill::is_spilled(&args_json) {
+            0
+        } else {
+            crate::blob::estimate_val_size(&task_args)
+        };
+        let write_timeout = inline_write_timeout(&ctx, inline_size);
         let args_json_opt = if args_json.is_null() {
             None
         } else {
             Some(&args_json)
         };
         match tokio::time::timeout(
-            TASK_NATIVE_IO_TIMEOUT,
+            write_timeout,
             crate::db::Task::insert(
                 &db,
                 &task_id,
@@ -333,12 +353,12 @@ pub fn start(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
             Err(_) => {
                 return Err(err_val(format!(
                     "::hot::task/start: task insert timed out after {}s",
-                    TASK_NATIVE_IO_TIMEOUT.as_secs()
+                    write_timeout.as_secs()
                 )));
             }
         }
 
-        match tokio::time::timeout(TASK_NATIVE_IO_TIMEOUT, queue.enqueue(request)).await {
+        match tokio::time::timeout(write_timeout, queue.enqueue(request)).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(e)) => {
                 let failure = serde_json::json!({
@@ -373,7 +393,7 @@ pub fn start(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
                 .await;
                 Err(err_val(format!(
                     "::hot::task/start: queue write timed out after {}s",
-                    TASK_NATIVE_IO_TIMEOUT.as_secs()
+                    write_timeout.as_secs()
                 )))
             }
         }

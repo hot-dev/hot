@@ -363,6 +363,32 @@ async fn a_task_result_past_the_limit_only_fits_in_blob_storage() {
     assert_eq!(awaited.get("result"), Some(rows));
 }
 
+/// A large value inline takes the database longer to take in, however fast the
+/// host is. That must not read as a failure, or as anything but its real cause.
+#[tokio::test(flavor = "multi_thread")]
+async fn large_task_arguments_get_longer_to_insert() {
+    let _turn = ONE_AT_A_TIME.lock().await;
+    let Some(database) = database().await else {
+        return;
+    };
+    for statement in [
+        "CREATE FUNCTION hot.slow_tasks() RETURNS trigger LANGUAGE plpgsql AS \
+         $$ BEGIN PERFORM pg_sleep(7); RETURN NEW; END $$",
+        "CREATE TRIGGER slow_tasks BEFORE INSERT ON hot.task \
+         FOR EACH ROW EXECUTE FUNCTION hot.slow_tasks()",
+    ] {
+        sqlx::query(statement)
+            .execute(&database.raw)
+            .await
+            .expect("slow task inserts down");
+    }
+
+    let args = Val::vec(vec![Val::Int(0); 2_000_000]);
+    let started = start_task(&database, None, args).await;
+
+    assert!(matches!(started, HotResult::Ok(_)), "{started:.200?}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn task_arguments_of_a_task_that_cant_be_inserted_are_released() {
     let _turn = ONE_AT_A_TIME.lock().await;

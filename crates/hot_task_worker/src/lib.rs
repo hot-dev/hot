@@ -6137,6 +6137,7 @@ async fn complete_task_with_event(
     // durable. Retry briefly, then leave the row non-terminal; process_task's
     // postcondition will withhold the queue ACK and release heartbeat ownership
     // so the zombie reaper can reconcile it.
+    let result_size = result.map_or(0, |result| result.to_string().len());
     let persisted = persist_terminal_task(
         db,
         task_id,
@@ -6144,21 +6145,18 @@ async fn complete_task_with_event(
         result,
         duration_ms_override,
         fence_worker,
-        TASK_COMPLETION_DB_TIMEOUT,
+        hot::blob::timeout_for_size(TASK_COMPLETION_DB_TIMEOUT, result_size),
         TASK_COMPLETION_ATTEMPTS,
     )
     .await;
     // Retrying can't store a value the database refuses, and the reaper would
     // report the task as interrupted. Store a failure that says why instead.
-    let oversized_failure = (!persisted)
-        .then(|| result.map(|result| result.to_string().len()))
-        .flatten()
-        .filter(|size| *size > hot::blob::MAX_INLINE_HARD_LIMIT_BYTES)
-        .map(|size| {
+    let oversized_failure = (!persisted && result_size > hot::blob::MAX_INLINE_HARD_LIMIT_BYTES)
+        .then(|| {
             task_failure_json(
                 &format!(
-                    "Task finished, but its result of {size} bytes as JSON is too large to \
-                     store without blob storage (blob.mode)"
+                    "Task finished, but its result of {result_size} bytes as JSON is too large \
+                     to store without blob storage (blob.mode)"
                 ),
                 None,
             )
@@ -9427,27 +9425,26 @@ mod tests {
         assert_eq!(row.result, None);
     }
 
-    /// A value the database refuses must end the task with a failure that says
-    /// so, not leave it for the reaper to report as a crash. Needs
-    /// `HOT_TEST_POSTGRES_URI`.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_result_too_large_to_store_fails_the_task_and_says_why() {
+    /// A running task in its own database, with a connection that bypasses
+    /// scopes. `None` without `HOT_TEST_POSTGRES_URI`.
+    async fn postgres_task(prefix: &str) -> Option<(DatabasePool, sqlx::PgPool, Task)> {
         let Ok(admin_uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
             eprintln!("skipping: HOT_TEST_POSTGRES_URI not set");
-            return;
+            return None;
         };
         let admin = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
             .connect(&admin_uri)
             .await
             .unwrap();
-        let name = format!("hot_task_oversized_{}", Uuid::now_v7().simple());
+        let name = format!("{prefix}_{}", Uuid::now_v7().simple());
         sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
             .execute(&admin)
             .await
             .unwrap();
         let (server, _) = admin_uri.rsplit_once('/').unwrap();
-        let conf = hot::val!({"uri": format!("{server}/{name}"), "rls": {"enforce": false}});
+        let uri = format!("{server}/{name}");
+        let conf = hot::val!({"uri": uri.clone(), "rls": {"enforce": false}});
         hot::db::run_migrations(&conf).await.unwrap();
         let db = hot::db::create_db_pool(&conf).await.unwrap();
         let data = hot::db::insert_test_data(&db).await.unwrap();
@@ -9461,6 +9458,63 @@ mod tests {
         task.build_id = data.build_id;
         insert_test_task(&db, &task).await;
         Task::mark_running(&db, &task.task_id).await.unwrap();
+        let raw = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&uri)
+            .await
+            .unwrap();
+        Some((db, raw, task))
+    }
+
+    /// A large result takes the database longer to take in, however fast the
+    /// host is, which must not leave the task for the reaper. Needs
+    /// `HOT_TEST_POSTGRES_URI`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_large_result_gets_longer_to_store() {
+        let Some((db, raw, task)) = postgres_task("hot_task_slow_result").await else {
+            return;
+        };
+        for statement in [
+            "CREATE FUNCTION hot.slow_tasks() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN PERFORM pg_sleep(7); RETURN NEW; END $$",
+            "CREATE TRIGGER slow_tasks BEFORE UPDATE ON hot.task \
+             FOR EACH ROW EXECUTE FUNCTION hot.slow_tasks()",
+        ] {
+            sqlx::query(statement).execute(&raw).await.unwrap();
+        }
+        let publisher =
+            StreamPubSub::new(hot::stream::StreamPubSubType::Memory, None, false).unwrap();
+        let result = serde_json::Value::Array(vec![serde_json::json!(0); 3_000_000]);
+
+        assert!(
+            complete_task_with_event(
+                &db,
+                &publisher,
+                &task.task_id,
+                task.env_id,
+                task.stream_id,
+                &task.function_name,
+                "code",
+                TaskStatus::Completed,
+                Some(&result),
+                None,
+                None,
+            )
+            .await
+        );
+
+        let task = Task::get(&db, &task.task_id).await.unwrap();
+        assert_eq!(task.task_status_id, TaskStatus::Completed.as_id());
+    }
+
+    /// A value the database refuses must end the task with a failure that says
+    /// so, not leave it for the reaper to report as a crash. Needs
+    /// `HOT_TEST_POSTGRES_URI`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_result_too_large_to_store_fails_the_task_and_says_why() {
+        let Some((db, _raw, task)) = postgres_task("hot_task_oversized").await else {
+            return;
+        };
         let publisher =
             StreamPubSub::new(hot::stream::StreamPubSubType::Memory, None, false).unwrap();
         // Past what `jsonb` can hold: about six times the space of its text.
