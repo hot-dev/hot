@@ -527,11 +527,61 @@ impl Compiler {
     /// Returns a new NsRef with the namespace path resolved through aliases
     fn resolve_ns_ref_alias(&self, ns_ref: &crate::lang::ast::NsRef) -> crate::lang::ast::NsRef {
         let resolved_ns = self.resolve_namespace_alias(&ns_ref.ns);
+        let (ns, function_name) = match &ns_ref.function_name {
+            Some(name) => {
+                let (ns, name) = self.follow_reexports(resolved_ns, name);
+                (ns, Some(name))
+            }
+            None => (resolved_ns, None),
+        };
         crate::lang::ast::NsRef {
-            ns: resolved_ns,
+            ns,
             src: ns_ref.src.clone(),
-            function_name: ns_ref.function_name.clone(),
+            function_name,
         }
+    }
+
+    /// The namespace and name that `name` in `ns` comes from: a namespace that
+    /// imports a type or function offers it to callers under its own name.
+    fn follow_reexports(
+        &self,
+        mut ns: crate::lang::ast::NsPath,
+        name: &str,
+    ) -> (crate::lang::ast::NsPath, String) {
+        // The cap only bounds imports that form a cycle.
+        const MAX_REEXPORTS: usize = 16;
+        let mut name = name.to_string();
+        for _ in 0..MAX_REEXPORTS {
+            let ns_path = ns.to_string();
+            let (base, variant) = match name.split_once('.') {
+                Some((base, variant)) => (base, Some(variant)),
+                None => (name.as_str(), None),
+            };
+            let Some(info) = self.program.namespaces.namespaces.get(&ns_path) else {
+                break;
+            };
+            if info.variables.contains_key(&format!("{ns_path}/{base}")) {
+                break;
+            }
+            let Some((target_ns, target)) = info
+                .variables
+                .get(base)
+                .filter(|var| var.name.starts_with("::"))
+                .and_then(|var| var.name.rsplit_once('/'))
+            else {
+                break;
+            };
+            if target_ns == ns_path && target == base {
+                break;
+            }
+            let followed = match variant {
+                Some(variant) => format!("{target}.{variant}"),
+                None => target.to_string(),
+            };
+            ns = crate::lang::ast::NsPath::from_string(target_ns);
+            name = followed;
+        }
+        (ns, name)
     }
 
     /// Resolve a type name to its full path, returning whether it was found

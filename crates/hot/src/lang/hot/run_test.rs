@@ -2945,6 +2945,77 @@ run()"#;
         }
     }
 
+    /// A namespace offers what it imports under its own name: its type's
+    /// constructor, a variant, a function, and a function reference, through an
+    /// alias or another re-export too. Its own definition of a name still wins.
+    #[test]
+    fn calls_reach_types_and_functions_through_a_reexport() {
+        let src = r#"::b::api ns
+E1 type { from: Str }
+Kind enum { Plain, Wrapped(E1) }
+describe fn (e: E1): Any { `described ${e.from}` }
+own fn (): Any { "api" }
+
+::reexport ns
+E1 ::b::api/E1
+Kind ::b::api/Kind
+describe ::b::api/describe
+
+::again ns
+::up ::reexport
+E1 ::up/E1
+Kind ::up/Kind
+describe ::up/describe
+
+::shadowing ns
+own fn (): Any { "shadowing" }
+
+::t ns
+::alias ::again
+E1 ::again/E1
+take fn (x: ::reexport/E1): Any { x.from }
+run fn (): Vec {
+    direct ::reexport/E1({from: "direct"})
+    named E1(from: "named")
+    chained ::again/E1(from: "chained")
+    aliased ::alias/E1({from: "aliased"})
+    [
+        direct.from, named.from, chained.from, aliased.from,
+        is-type(direct, ::b::api/E1),
+        eq(::reexport/Kind.Plain, ::b::api/Kind.Plain),
+        ::alias/Kind.Wrapped({from: "wrapped"}).from,
+        ::reexport/describe(direct), ::alias/describe(chained),
+        first(map([{from: "mapped"}], ::reexport/E1)).from,
+        first(map([direct], ::alias/describe)),
+        take(chained),
+        ::shadowing/own()
+    ]
+}
+run()
+run()
+run()"#;
+        let expected = Val::vec(vec![
+            Val::from("direct"),
+            Val::from("named"),
+            Val::from("chained"),
+            Val::from("aliased"),
+            Val::Bool(true),
+            Val::Bool(true),
+            Val::from("wrapped"),
+            Val::from("described direct"),
+            Val::from("described chained"),
+            Val::from("mapped"),
+            Val::from("described direct"),
+            Val::from("chained"),
+            Val::from("shadowing"),
+        ]);
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            let out = compile_and_run_project_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("run failed: {e}"));
+            assert_eq!(out, expected);
+        }
+    }
+
     /// An overload set routes a tagged argument to the overload it has an arrow
     /// to, built-in parameter types included, whichever overload is declared
     /// last. Overloads that take the argument as it is still win, and an
