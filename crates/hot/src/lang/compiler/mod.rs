@@ -174,6 +174,9 @@ pub struct Compiler {
     /// Maps unqualified core function names to their qualified names (for lazy param resolution)
     /// e.g. "is-err" -> "::hot::type/is-err"
     core_lazy_function_names: IndexMap<String, String>,
+    /// `namespace/name` of each namespace-level value, such as a lambda or a
+    /// record: a call by that name reaches the value, not a function.
+    namespace_values: AHashSet<String>,
     /// Pre-extracted set of all known function names (populated before bytecode compilation)
     /// Used to distinguish function references from type/variable references at compile time
     known_functions: AHashSet<String>,
@@ -244,6 +247,9 @@ pub struct CompilerSeed {
     namespace_to_file: AHashMap<String, std::path::PathBuf>,
     lazy_params_registry: IndexMap<String, (Vec<bool>, bool)>,
     core_lazy_function_names: IndexMap<String, String>,
+    /// `namespace/name` of each namespace-level value, such as a lambda or a
+    /// record: a call by that name reaches the value, not a function.
+    namespace_values: AHashSet<String>,
     known_functions: AHashSet<String>,
     unit_variants: AHashSet<String>,
     plain_payload_variants: AHashSet<String>,
@@ -363,6 +369,7 @@ impl Compiler {
             emitting_function_body: false,
             lazy_params_registry: IndexMap::new(),
             core_lazy_function_names: IndexMap::new(),
+            namespace_values: AHashSet::new(),
             known_functions: AHashSet::new(),
             unit_variants: AHashSet::new(),
             plain_payload_variants: AHashSet::new(),
@@ -397,6 +404,7 @@ impl Compiler {
             namespace_to_file: self.namespace_to_file.clone(),
             lazy_params_registry: self.lazy_params_registry.clone(),
             core_lazy_function_names: self.core_lazy_function_names.clone(),
+            namespace_values: self.namespace_values.clone(),
             known_functions: self.known_functions.clone(),
             unit_variants: self.unit_variants.clone(),
             plain_payload_variants: self.plain_payload_variants.clone(),
@@ -420,6 +428,7 @@ impl Compiler {
         compiler.namespace_to_file = seed.namespace_to_file;
         compiler.lazy_params_registry = seed.lazy_params_registry;
         compiler.core_lazy_function_names = seed.core_lazy_function_names;
+        compiler.namespace_values = seed.namespace_values;
         compiler.known_functions = seed.known_functions;
         compiler.unit_variants = seed.unit_variants;
         compiler.plain_payload_variants = seed.plain_payload_variants;
@@ -771,6 +780,11 @@ impl Compiler {
             let namespace_str = ns_path.to_string();
 
             for (var, value) in &namespace.scope.vars {
+                // A `Ref` is an import, which still names its target.
+                if !matches!(value, Value::Fn(_) | Value::Ref(_)) {
+                    self.namespace_values
+                        .insert(format!("{}/{}", namespace_str, var.sym.name()));
+                }
                 // Check if this is a function definition
                 if let Value::Fn(fn_defs) = value {
                     let func_name = var.sym.name();
@@ -3394,10 +3408,33 @@ impl Compiler {
         })
     }
 
+    /// Whether a call by name reaches a value rather than a function, so no
+    /// function's lazy parameters apply: a field of a variable (`source.list(x)`),
+    /// a local that shadows the name, or this namespace's own value of that
+    /// name. A function defined in the body keeps its own lazy parameters.
+    fn calls_a_value(&self, fn_call: &FnCall) -> bool {
+        let Value::Ref(Ref::Var(var_ref)) = fn_call.function.as_ref() else {
+            return false;
+        };
+        let name = var_ref.var.sym.name();
+        if var_ref.var.deep_path.is_some() {
+            return true;
+        }
+        if self.is_local_name(name) {
+            return !self.local_function_names.iter().any(|f| f == name);
+        }
+        let qualified = format!("{}/{}", self.current_namespace, name);
+        self.namespace_values.contains(&qualified)
+            && !self.function_mapping.contains_key(&qualified)
+    }
+
     /// The lazy parameters a call defers arguments for, and whether a
     /// variadic rest parameter is lazy: those of the overload its argument
     /// types select, else of the function its name finds.
     fn call_lazy_params(&self, fn_call: &FnCall) -> (Vec<bool>, bool) {
+        if self.calls_a_value(fn_call) {
+            return (vec![], false);
+        }
         let typed = self
             .typed_overload(fn_call)
             .and_then(|(_, function_id)| self.program.functions.get(function_id as usize));
@@ -3416,6 +3453,9 @@ impl Compiler {
     /// If the function is variadic and the last (variadic) param is lazy,
     /// all overflow arguments should be wrapped as lazy thunks.
     fn get_function_lazy_params(&self, fn_call: &FnCall) -> (Vec<bool>, bool) {
+        if self.calls_a_value(fn_call) {
+            return (vec![], false);
+        }
         // Try to determine the target function name
         let function_name = match fn_call.function.as_ref() {
             Value::Ref(Ref::Var(var_ref)) => {
@@ -3423,11 +3463,13 @@ impl Compiler {
 
                 // Check if this is an alias to another function
                 // Look up the variable in the current namespace to see if it's an alias
+                // This namespace's own function comes before a core function of
+                // the same name, as the call itself resolves.
                 let mut candidates = vec![
-                    name.to_string(),
                     format!("{}/{}", self.current_namespace, name),
-                    format!("{}/{}", name, fn_call.args.len()), // arity-based
                     format!("{}/{}/{}", self.current_namespace, name, fn_call.args.len()),
+                    name.to_string(),
+                    format!("{}/{}", name, fn_call.args.len()), // arity-based
                 ];
 
                 // Check symbol table for function aliases
@@ -3547,6 +3589,7 @@ impl Compiler {
         if !(fn_call.args.len() == 2 || fn_call.args.len() == 3)
             || fn_call.result_path.is_some()
             || fn_call.args.iter().any(|a| a.spread || a.lazy)
+            || self.calls_a_value(fn_call)
         {
             return Ok(None);
         }
@@ -3719,6 +3762,7 @@ impl Compiler {
         if fn_call.args.len() < 2
             || fn_call.result_path.is_some()
             || fn_call.args.iter().any(|a| a.spread || a.lazy)
+            || self.calls_a_value(fn_call)
         {
             return Ok(None);
         }

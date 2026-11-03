@@ -1715,6 +1715,94 @@ via-any("warm")
         );
     }
 
+    /// A call by a name that reaches a value passes its arguments as values,
+    /// even when a function of that name has lazy parameters: a parameter or
+    /// local, a field of either, a piped call, and the namespace's own value.
+    #[test]
+    fn a_value_named_like_a_lazy_function_gets_values_with_and_without_jit() {
+        let src = r#"::t ns
+deferred fn (lazy x: Any): Any { "deferred" }
+param-source fn (source): Any { source(null) }
+param-assert fn (assert): Any { assert(null) }
+param-assert-eq fn (assert-eq): Any { assert-eq(null, null) }
+param-and fn (and): Any { and(null, null) }
+param-or fn (or): Any { or(null, null) }
+param-if fn (if): Any { if(null, null) }
+param-deferred fn (deferred): Any { deferred(null) }
+local-source fn (): Any {
+    source (x: Str?) { "hit" }
+    source(null)
+}
+field-of-param fn (source): Any { source.list(null) }
+field-of-local fn (): Any {
+    source {list: (x: Str?) { "hit" }}
+    source.list(null)
+}
+piped fn (source): Any { null |> source() }
+eager fn (source): Any {
+    seen source(sub(1, 1))
+    [seen]
+}
+one (x: Str?) { "hit" }
+two (a: Str?, b: Str?) { "hit" }
+int-arg (n: Int) { n }
+[
+    param-source(one), param-assert(one), param-assert-eq(two), param-and(two), param-or(two),
+    param-if(two), param-deferred(one), local-source(), field-of-param({list: one}), field-of-local(),
+    piped(one), eager(int-arg)
+]"#;
+        let mut expected = vec![Val::from("hit"); 11];
+        expected.push(Val::vec(vec![Val::Int(0)]));
+        assert_same_with_and_without_jit(src, &Val::vec(expected));
+    }
+
+    /// A namespace's own value or function of a lazy core function's name
+    /// takes its arguments as values too.
+    #[test]
+    fn a_namespace_binding_named_like_a_lazy_core_function_gets_values() {
+        let src = r#"::t ns
+source (x: Str?) { "value" }
+assert {check: (x: Str?) { "field" }}
+assert-eq fn (a: Str?, b: Str?): Any { "function" }
+[source(null), assert.check(null), assert-eq(null, null)]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &Val::vec(vec![
+                Val::from("value"),
+                Val::from("field"),
+                Val::from("function"),
+            ]),
+        );
+    }
+
+    /// Functions with lazy parameters still defer: the core ones, a
+    /// namespace's own, an import, and one defined in the body, which a local
+    /// binding of the name doesn't hide.
+    #[test]
+    fn functions_with_lazy_parameters_still_defer_with_and_without_jit() {
+        let src = r#"::t ns
+deferred fn (lazy x: Any): Any { "deferred" }
+imported ::t/deferred
+in-body fn (): Any {
+    local-lazy fn (lazy x: Any): Any { "local" }
+    local-lazy(fail("never runs"))
+}
+[
+    deferred(fail("never runs")), imported(fail("never runs")), in-body(),
+    or("first", fail("never runs")), and(false, fail("never runs"))
+]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &Val::vec(vec![
+                Val::from("deferred"),
+                Val::from("deferred"),
+                Val::from("local"),
+                Val::from("first"),
+                Val::Bool(false),
+            ]),
+        );
+    }
+
     /// A primitive parameter rejects a value of another type at the call, in
     /// both tiers, whether or not the JIT has seen a good value first.
     #[test]
