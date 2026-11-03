@@ -121,6 +121,11 @@ class Recorder:
         # A runtime image with no hotbox at the path the agent copies.
         self.no_hotbox = False
         self.hotbox_image = ""
+        # Kata's box pool runs, as kata-devpool-activate started it held, and
+        # its table shows it so. A test of a pool that is not set up in
+        # device-mapper yet says so, and the room it finds on the disk.
+        self.pool_active = True
+        self.pool_table = "0 83886080 thin-pool 7:1 7:0 128 32768 1 no_discard_passdown\n"
 
     def __call__(self, command, **kwargs):
         self.commands.append(command)
@@ -162,6 +167,10 @@ class Recorder:
             return subprocess.CompletedProcess(command, 0, stdout=(
                 "Queue Status:\n  Backend: Redis (redis://hot:***@valkey:6379)\n\nSummary:\n"
                 f"  Total pending:    {pending}\n  Total processing: {processing}\n  Total deadletter: {deadletter}\n"))
+        if command[0] == "dmsetup" and not self.pool_active:
+            raise subprocess.CalledProcessError(1, command, stderr="Device does not exist.")
+        if command[:2] == ["dmsetup", "table"]:
+            return subprocess.CompletedProcess(command, 0, stdout=self.pool_table, stderr="")
         if command[-1] == render.TASK_STATUS:
             if self.task_status is None:
                 raise subprocess.CalledProcessError(1, command)
@@ -183,6 +192,12 @@ def undelivered_secrets(tmp):
     compose = json.loads(next(Path(tmp, "releases").glob("*/bundle/compose.json")).read_text())
     assert compose["secrets"]
     return sorted(secret["file"] for secret in compose["secrets"].values() if not Path(secret["file"]).is_file())
+
+
+def free_space(megabytes):
+    """The data disk as having `megabytes` free to a non-root writer."""
+    return mock.patch.object(agent_module.os, "statvfs", lambda path: mock.Mock(
+        f_bavail=megabytes * 256, f_frsize=4096, f_blocks=1 << 30, f_files=1 << 20, f_favail=1 << 20))
 
 
 class AgentHarness(unittest.TestCase):
@@ -385,7 +400,7 @@ class DataDisk(AgentHarness):
                          [["systemctl", "restart", "hot-guest-firewall.service"],
                           ["systemctl", "start", "kata-containerd.service"]])
         etc = Path(self.tmp.name) / "etc"
-        self.assertEqual((etc / "host.env").read_text(), "HOT_BOX_POOL_GB=40\n")
+        self.assertEqual((etc / "host.env").read_text(), "HOT_BOX_POOL_GB=40\nHOT_BOX_POOL_PREALLOCATE=1\n")
         self.assertIn("HOT_GUEST_DENY_CIDRS=", (etc / "guest-network.env").read_text())
         # A failure is retried next cycle, though the disk is mounted by then.
         self.run.commands.clear()
@@ -427,7 +442,7 @@ class DataDisk(AgentHarness):
             self.assertEqual([c for c in self.run.commands if c[0] != "ip"],
                              [["systemctl", "restart", "hot-guest-firewall.service"],
                               ["systemctl", "start", "kata-containerd.service"]])
-            self.assertEqual((etc / "host.env").read_text(), "HOT_BOX_POOL_GB=40\n")
+            self.assertEqual((etc / "host.env").read_text(), "HOT_BOX_POOL_GB=40\nHOT_BOX_POOL_PREALLOCATE=1\n")
             self.assertIn("HOT_GUEST_DENY_CIDRS=", (etc / "guest-network.env").read_text())
             self.run.commands.clear()
             self.new_agent().mount_data()
@@ -465,6 +480,278 @@ class DataDisk(AgentHarness):
         self.config["data_disk"] = "scratch"
         self.agent.mount_data()
         self.assertEqual(self.run.commands, [])
+
+
+class BoxPool(AgentHarness):
+    """Kata's box pool holds its data file's space where a local database
+    shares the data disk (kata-devpool-activate reads the flag). It takes that
+    up only when it starts; a pool that started held keeps holding through
+    hot-box-pool-hold.timer, and one that started sparse waits for a restart."""
+
+    SPARSE_TABLE = "0 83886080 thin-pool 7:1 7:0 128 32768\n"
+
+    MANAGED = {"postgres": {"mode": "managed", "runtime_role": "hot_runtime", "endpoint": {
+                   "host": "db.example", "port": 5432, "admin_user": "hot_admin", "admin_secret": "admin"}},
+               "valkey": {"mode": "managed", "endpoint": {"host": "cache.example", "port": 6379, "auth_secret": "token"}}}
+
+    def setUp(self):
+        super().setUp()
+        self.agent.resolve = lambda hosts: []
+        self.pool = Path(self.tmp.name) / "kata/devmapper/data"
+
+    def host_env(self):
+        return (Path(self.tmp.name) / "etc/host.env").read_text()
+
+    def sparse_pool(self):
+        self.pool.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.pool, "wb") as pool:
+            pool.truncate(64 << 20)
+        if os.stat(self.pool).st_blocks * 512 >= 64 << 20:
+            self.skipTest("this filesystem does not keep sparse files")
+
+    def held_pool(self):
+        self.pool.parent.mkdir(parents=True, exist_ok=True)
+        self.pool.write_bytes(b"\1" * (1 << 20))
+
+    def test_the_pool_holds_its_space_only_where_a_local_database_shares_the_disk(self):
+        self.agent.configure_host()
+        self.assertEqual(self.host_env(), "HOT_BOX_POOL_GB=40\nHOT_BOX_POOL_PREALLOCATE=1\n")
+        # Valkey alone on the disk is enough: a box filling it stops Valkey.
+        self.config["data"] = {"postgres": self.MANAGED["postgres"], "valkey": {"mode": "local"}}
+        self.agent.configure_host()
+        self.assertIn("HOT_BOX_POOL_PREALLOCATE=1\n", self.host_env())
+        self.config.update(data=self.MANAGED, size="medium")
+        self.agent.configure_host()
+        self.assertEqual(self.host_env(), "HOT_BOX_POOL_GB=100\nHOT_BOX_POOL_PREALLOCATE=0\n")
+        # A scalable task host's disk holds no database; other roles run no boxes.
+        self.config.update(preset="scalable", roles=["task-worker"])
+        self.agent.configure_host()
+        self.assertIn("HOT_BOX_POOL_PREALLOCATE=0\n", self.host_env())
+        self.config.update(preset="single-machine", roles=["app"], data={})
+        self.assertFalse(self.agent.holds_box_pool())
+
+    def test_a_pool_that_started_sparse_under_a_local_database_is_a_deploy_warning(self):
+        # As on a host an earlier release deployed: the pool runs, sparse and
+        # passing discards down, and activation holds it only when it next
+        # starts.
+        self.sparse_pool()
+        self.run.pool_active = True
+        self.run.pool_table = self.SPARSE_TABLE
+        with self.free(4096):
+            status = self.agent.reconcile()
+        self.assertEqual(status["state"], "deployed")
+        self.assertIn("Kata's box pool started sparse, before it was to hold its space", status["warning"])
+        self.assertIn("64 MB of its data file is not held now", status["warning"])
+        self.assertIn("reboot the VM", status["warning"])
+        self.assertIn(["dmsetup", "table", "hot-devpool"], self.run.commands)
+        # A disk without room for the rest says a reboot would stop box
+        # tasks, and to grow the disk first.
+        with self.free(512):
+            warning = self.agent.box_pool_warning()
+        self.assertIn("The disk has 512 MB free, too little for that and 1,024 MB to spare", warning)
+        self.assertIn("after a reboot, or on a replaced VM, no box task would run on this host, though code tasks "
+                      "would", warning)
+        self.assertNotIn("task worker stopped", warning)
+        # The size change stops and starts the VM, which ends the sparse
+        # pool, so no second reboot is asked for.
+        self.assertIn("Grow the disk with a larger size and apply, which stops and starts the VM, then run "
+                      "deploy-now: the pool holds its space as it starts once the disk has room for it", warning)
+        self.assertNotIn("reboot the VM", warning)
+        # Fully written, it still punches holes as boxes discard, and says so.
+        self.held_pool()
+        with self.free(0):
+            self.assertIn("reboot the VM, which stops Hot", self.agent.box_pool_warning())
+            self.assertNotIn("not held now", self.agent.box_pool_warning())
+        # Once it started held (after that reboot), nothing to say.
+        self.run.pool_table = "0 83886080 thin-pool 7:1 7:0 128 32768 1 no_discard_passdown\n"
+        self.assertEqual(self.agent.box_pool_warning(), "")
+        # A pool that is not active where the disk has room for it did not
+        # start for another reason, which is no talk of holding.
+        self.run.pool_active = False
+        self.run.pool_table = self.SPARSE_TABLE
+        with self.free(4096):
+            warning = self.agent.box_pool_warning()
+        self.assertTrue(warning.startswith("Kata's box pool is not active, so neither is its containerd, so box "
+                                           "tasks do not run on this host"), warning)
+        self.assertIn("Run deploy-now, which starts it again and says why it does not start", warning)
+        self.assertNotIn("started sparse", warning)
+        self.assertNotIn("Grow the disk", warning)
+
+    def test_a_warning_counts_the_margin_activation_leaves(self):
+        # A pool that started sparse has no "held" file, since its sparse
+        # start removed it, and activation would leave 1 GB; the agent counts
+        # the same, and would count 64 MB for a data file that held its space.
+        self.sparse_pool()
+        self.run.pool_table = self.SPARSE_TABLE
+        held = self.pool.with_name("held")
+        with self.free(512):
+            self.assertIn("too little for that and 1,024 MB to spare", self.agent.box_pool_warning())
+            held.touch()
+            self.assertIn("The pool holds it when it next starts", self.agent.box_pool_warning())
+        with self.free(100):
+            self.assertIn("The disk has 100 MB free, too little for that and 64 MB to spare",
+                          self.agent.box_pool_warning())
+
+    def test_a_pool_that_started_held_is_no_warning_for_the_holes_boxes_punch(self):
+        # Block zeroing punches holes between hot-box-pool-hold.timer's runs,
+        # which fills them again; a reboot would not keep them away.
+        self.sparse_pool()
+        self.run.pool_active = True
+        self.assertEqual(self.agent.box_pool_warning(), "")
+        status = self.agent.reconcile()
+        self.assertEqual(status["state"], "deployed")
+        self.assertNotIn("box pool", status.get("warning", ""))
+        # dmsetup missing reads as no pool.
+        recorder = self.agent.run_command
+
+        def no_dmsetup(command, **kwargs):
+            if command[0] == "dmsetup":
+                raise FileNotFoundError(command[0])
+            return recorder(command, **kwargs)
+        self.agent.run_command = no_dmsetup
+        self.run.pool_table = self.SPARSE_TABLE
+        self.assertEqual(self.agent.box_pool_warning(), "")
+
+    def test_a_data_move_changes_the_flag_and_the_warning_in_both_directions(self):
+        # Valkey moving onto the disk sets the flag, and the running pool,
+        # started sparse, is reported until a reboot holds it.
+        self.config["data"] = self.MANAGED
+        self.sparse_pool()
+        self.run.pool_active = True
+        self.run.pool_table = self.SPARSE_TABLE
+        self.agent.configure_host()
+        self.assertIn("HOT_BOX_POOL_PREALLOCATE=0\n", self.host_env())
+        self.assertEqual(self.agent.box_pool_warning(), "", "a sparse pool is right with no database on the disk")
+        self.config["data"] = {"postgres": self.MANAGED["postgres"], "valkey": {"mode": "local"}}
+        self.agent.configure_host()
+        self.assertIn("HOT_BOX_POOL_PREALLOCATE=1\n", self.host_env())
+        self.assertIn("started sparse", self.agent.box_pool_warning())
+        # Moving the databases off clears the flag; a held pool keeps its
+        # space, which is only unused room, and nothing is reported.
+        self.held_pool()
+        self.run.pool_table = "0 83886080 thin-pool 7:1 7:0 128 32768 1 no_discard_passdown\n"
+        self.config["data"] = self.MANAGED
+        self.agent.configure_host()
+        self.assertIn("HOT_BOX_POOL_PREALLOCATE=0\n", self.host_env())
+        self.assertEqual(self.agent.box_pool_warning(), "")
+
+    def test_a_database_the_installed_release_runs_on_still_holds_the_pool(self):
+        # During a move off the disk, and after one that failed before the
+        # data moved, the local database is still there.
+        self.agent.save_state({"release": "3.0.1", "data_modes": {"postgres": "local", "valkey": "managed"}})
+        self.config["data"] = self.MANAGED
+        self.agent.configure_host()
+        self.assertIn("HOT_BOX_POOL_PREALLOCATE=1\n", self.host_env())
+        self.agent.save_state({"release": "3.0.1", "data_modes": {"postgres": "managed", "valkey": "managed"}})
+        self.agent.configure_host()
+        self.assertIn("HOT_BOX_POOL_PREALLOCATE=0\n", self.host_env())
+        # And the other way, the configuration's local database counts first.
+        self.config["data"] = {"postgres": self.MANAGED["postgres"], "valkey": {"mode": "local"}}
+        self.assertTrue(self.agent.holds_box_pool())
+
+    def refuse_containerd(self):
+        recorder = self.run
+
+        def refused(command, **kwargs):
+            if "kata-containerd.service" in command:
+                raise subprocess.CalledProcessError(1, command)
+            return recorder(command, **kwargs)
+        self.agent.run_command = refused
+
+    def free(self, megabytes):
+        return free_space(megabytes)
+
+    def test_a_disk_without_room_for_the_pool_says_so_when_containerd_does_not_start(self):
+        # A replaced VM, or a reboot, on a disk the database has filled since.
+        self.sparse_pool()
+        self.run.pool_active = False
+        self.refuse_containerd()
+        with self.free(512), self.assertRaisesRegex(
+                agent_module.AgentError, "Kata's containerd did not start: its box pool holds its space on this "
+                "data disk, which a local database shares, and needs 64 MB more and 1,024 MB to spare, where 512 "
+                "MB is free. Box tasks do not run on this host: they wait in the queue, and none fail, until it "
+                "fits. Code tasks still run, and Hot's other services, the scheduler too.* Grow the "
+                "disk with a larger size"):
+            self.agent.configure_host()
+        self.assertFalse((Path(self.tmp.name) / "etc/host-configured").exists(), "tried again next cycle")
+        # Support sees it in diagnostics, and a deploy or a resume in its
+        # warning (box_pool_warning), since the task worker runs.
+        with self.free(512):
+            self.assertIn("Kata's containerd did not start: its box pool holds its space",
+                          self.agent.diagnostics(None)["box_pool"])
+            self.assertIn("they wait in the queue, and none fail, until it fits.", self.agent.box_pool_warning())
+        # With room, the refusal is something else, and still said.
+        with self.free(2048):
+            pool = self.agent.diagnostics(None)["box_pool"]
+        self.assertTrue(pool.startswith("Kata's containerd is not running (not active), so box tasks do not run"),
+                        pool)
+        self.assertNotIn("Grow the disk", pool)
+        # With room, the failure is something else, and says what it said.
+        with self.free(2048), self.assertRaises(subprocess.CalledProcessError):
+            self.agent.configure_host()
+        # A pool with no data file yet needs all of its size.
+        self.pool.unlink()
+        with self.free(2048), self.assertRaisesRegex(
+                agent_module.AgentError, "needs 40960 MB more and 1,024 MB to spare, where 2048 MB is free"):
+            self.agent.configure_host()
+        with self.free(42 * 1024), self.assertRaises(subprocess.CalledProcessError):
+            self.agent.configure_host()
+        # A pool that does not hold its space was not refused for room.
+        self.config["data"] = self.MANAGED
+        with self.free(0), self.assertRaises(subprocess.CalledProcessError):
+            self.agent.configure_host()
+
+    def test_a_data_file_that_held_its_space_before_needs_only_a_small_margin(self):
+        # Activation marks a data file that took its full size ("held"),
+        # until the pool starts sparse: its holes are only what boxes punched,
+        # and it leaves 64 MB beside them, not 1 GB.
+        self.sparse_pool()
+        self.run.pool_active = False
+        self.refuse_containerd()
+        held = self.pool.with_name("held")
+        held.touch()
+        self.assertEqual(self.agent.box_pool_margin(), 64 << 20)
+        with self.free(512), self.assertRaises(subprocess.CalledProcessError):
+            self.agent.configure_host()
+        with self.free(100), self.assertRaisesRegex(
+                agent_module.AgentError, "needs 64 MB more and 64 MB to spare, where 100 MB is free"):
+            self.agent.configure_host()
+        # Without the mark, the same disk is refused with the full margin.
+        held.unlink()
+        self.assertEqual(self.agent.box_pool_margin(), 1 << 30)
+        with self.free(512), self.assertRaisesRegex(agent_module.AgentError, "needs 64 MB more and 1,024 MB to spare"):
+            self.agent.configure_host()
+        # A mark with no data file is a new pool's, which needs 1 GB too.
+        held.touch()
+        self.pool.unlink()
+        self.assertEqual(self.agent.box_pool_margin(), 1 << 30)
+        with self.free(2048), self.assertRaisesRegex(
+                agent_module.AgentError, "needs 40960 MB more and 1,024 MB to spare"):
+            self.agent.configure_host()
+
+    def test_an_active_pool_is_not_blamed_when_containerd_does_not_start(self):
+        # A host an earlier release deployed, not rebooted since: its pool
+        # runs sparse, and activation, which finds it active, checks no room.
+        self.sparse_pool()
+        self.run.pool_active = True
+        self.refuse_containerd()
+        with self.free(512), self.assertRaises(subprocess.CalledProcessError) as raised:
+            self.agent.configure_host()
+        self.assertEqual(raised.exception.cmd, ["systemctl", "start", "kata-containerd.service"])
+        self.assertIn(["dmsetup", "info", "hot-devpool"], self.run.commands)
+        # One that is not active is blamed, and dmsetup missing counts as not active.
+        self.run.pool_active = False
+        with self.free(512), self.assertRaisesRegex(agent_module.AgentError, "needs 64 MB more"):
+            self.agent.configure_host()
+        recorder = self.agent.run_command
+
+        def no_dmsetup(command, **kwargs):
+            if command[0] == "dmsetup":
+                raise FileNotFoundError(command[0])
+            return recorder(command, **kwargs)
+        self.agent.run_command = no_dmsetup
+        with self.free(512), self.assertRaisesRegex(agent_module.AgentError, "needs 64 MB more"):
+            self.agent.configure_host()
 
 
 class OlderDatabaseLayout(AgentHarness):
@@ -1925,6 +2212,47 @@ class ServicesStayUp(UpgradeHarness):
                     with self.assertRaisesRegex(agent_module.AgentError, f"did not stay running: {service} .{state}."):
                         self.agent.start_services(Path(self.tmp.name) / "releases/3.0.1/bundle")
                     self.agent.run_command = run
+
+    def test_a_box_pool_that_does_not_fit_is_a_warning_while_all_of_hot_runs(self):
+        # A reboot or a replaced VM whose disk has too little room for the
+        # pool to hold its space: Kata's containerd refuses to start, and the
+        # task worker runs code tasks and leaves box tasks queued. The resume
+        # finishes, and its warning says why box tasks do not run.
+        self.run.pool_active = False
+        shutil.rmtree(Path(self.tmp.name) / "secrets")
+        self.run.commands.clear()
+        with free_space(512):
+            report = self.agent.resume()
+        self.assertEqual(report["state"], "resumed", report)
+        self.assertIn("Kata's containerd did not start: its box pool holds its space", report["warning"])
+        self.assertIn("Box tasks do not run on this host: they wait in the queue, and none fail, until it fits",
+                      report["warning"])
+        self.assertIn("Code tasks still run", report["warning"])
+        self.assertIn("up -d scheduler", self.run.compose_calls())
+        self.assertNotIn("resume_failed", self.agent.state())
+        # A deploy goes on too, where its own start of containerd is refused.
+        self.release("3.0.2")
+        self.failing = "kata-containerd.service"
+        with free_space(512):
+            status = self.agent.reconcile()
+        self.assertEqual(status["state"], "deployed", status)
+        self.assertIn("Kata's containerd did not start: its box pool holds its space", status["warning"])
+        self.assertEqual(self.agent.state()["release"], "3.0.2")
+        self.assertFalse((Path(self.tmp.name) / "etc/host-configured").exists(), "mount_data tries it again")
+        # With room, containerd that does not start is still said; once it
+        # runs, nothing is.
+        with free_space(64 * 1024):
+            self.assertIn("Kata's containerd is not running", self.agent.box_pool_warning())
+        self.failing = None
+        self.run.pool_active = True
+        with free_space(64 * 1024):
+            self.assertEqual(self.agent.box_pool_warning(), "")
+        # A task worker that does not stay up fails the start, pool or not:
+        # it no longer needs containerd to run.
+        self.states(**{"task-worker": "restarting"})
+        with free_space(512), self.assertRaisesRegex(agent_module.AgentError,
+                                                     r"did not stay running: task-worker \(restarting\)"):
+            self.agent.start_services(Path(self.tmp.name) / "releases/3.0.2/bundle")
 
     def test_a_start_that_failed_is_not_followed_by_the_scheduler(self):
         self.states(worker="restarting")
@@ -4367,6 +4695,67 @@ class DataMoves(UpgradeHarness):
         report = self.agent.command("deploy-now", request_id="d3")
         self.assertEqual(report["state"], "deployed", report)
         self.assertEqual(self.agent.state()["data_modes"]["postgres"], "managed")
+
+    def test_the_box_pool_holds_its_space_until_the_databases_moved_off_the_disk(self):
+        # host.env is written before the move: a move that fails before the
+        # data moved keeps Hot on the local database, so the pool goes on
+        # holding (hot-box-pool-hold reads the flag) and holds after a reboot.
+        host_env = Path(self.tmp.name) / "etc/host.env"
+        self.failing = "restore-postgres"
+        status = self.move(valkey=True)
+        self.assertEqual(status["state"], "failed", status)
+        self.assertEqual(self.agent.state()["data_modes"]["postgres"], "local")
+        self.assertIn("HOT_BOX_POOL_PREALLOCATE=1\n", host_env.read_text())
+        self.agent.configure_host()
+        self.assertIn("HOT_BOX_POOL_PREALLOCATE=1\n", host_env.read_text())
+        # Once the move finished, nothing on the disk needs it held.
+        self.failing = None
+        status = self.agent.command("deploy-now", request_id="d1")
+        self.assertEqual(status["state"], "deployed", status)
+        self.assertEqual(self.agent.state()["data_modes"], {"postgres": "managed", "valkey": "managed"})
+        self.assertIn("HOT_BOX_POOL_PREALLOCATE=0\n", host_env.read_text())
+
+    def test_a_reboot_whose_box_pool_does_not_start_is_a_warning_with_the_data_off_the_disk(self):
+        # A sparse pool, with no database on the disk: nothing is held, and
+        # a refusal is never for room, but box tasks still wait.
+        status = self.move(postgres=True, valkey=True)
+        self.assertEqual(status["state"], "deployed", status)
+        self.assertFalse(self.agent.holds_box_pool())
+        self.run.pool_active = False  # dm-thin refused the pool, say
+        shutil.rmtree(Path(self.tmp.name) / "secrets")
+        self.run.commands.clear()
+        report = self.agent.resume()
+        self.assertEqual(report["state"], "resumed", report)
+        self.assertIn("Kata's box pool is not active, so neither is its containerd, so box tasks do not run on "
+                      "this host: they wait in the queue, and none fail, until it starts. Code tasks still run",
+                      report["warning"])
+        self.assertIn("Run deploy-now", report["warning"])
+        self.assertIn("Kata's box pool is not active", self.agent.diagnostics(None)["box_pool"])
+        # Kata's containerd down with the pool up (hot-guest-firewall not
+        # active, say) is said with what systemd says of it.
+        self.run.pool_active = True
+        run = self.agent.run_command
+
+        def restarting(command, **kwargs):
+            if command == ["systemctl", "is-active", "kata-containerd.service"]:
+                raise subprocess.CalledProcessError(3, command, output="activating\n")
+            return run(command, **kwargs)
+        self.agent.run_command = restarting
+        self.assertTrue(self.agent.box_pool_warning().startswith(
+            "Kata's containerd is not running (activating), so box tasks do not run on this host"))
+        self.assertNotIn("another task host", self.agent.box_pool_warning())
+        # A scalable task host's box tasks may run on another task host.
+        before = {key: self.config.get(key) for key in ("preset", "roles")}
+        self.config.update(preset="scalable", roles=["task-worker"])
+        self.assertIn("they wait in the queue, and none fail, until it starts, or another task host runs them. "
+                      "Code tasks still run", self.agent.box_pool_warning())
+        self.config.update(before)
+        # Both running, nothing; nor on a host that runs no task worker.
+        self.agent.run_command = run
+        self.assertEqual(self.agent.box_pool_warning(), "")
+        self.agent.run_command = restarting
+        self.config.update(preset="scalable", roles=["app"])
+        self.assertEqual(self.agent.box_pool_warning(), "")
 
     def test_a_local_database_moves_to_the_managed_one(self):
         owners = []
@@ -7307,7 +7696,7 @@ class RollBack(UpgradeHarness):
         status = self.agent.reconcile()
         self.assertEqual((status["state"], status["release"]), ("deployed", "3.0.2"), status)
         self.assertEqual(self.run.compose_calls()[-1], "up -d scheduler")
-        self.assertIn("releases/3.0.2/bundle", " ".join(self.run.commands[-1]))
+        self.assertIn("releases/3.0.2/bundle", " ".join([c for c in self.run.commands if "compose" in c][-1]))
         # Past that deploy, restarts are as before.
         self.assertEqual(self.agent.answer("restart-service", "scheduler", request_id="r2")["state"], "restarted")
 

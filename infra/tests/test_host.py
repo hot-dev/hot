@@ -148,6 +148,58 @@ def data_disk(*flags, signatures="", wipefs_exit=0, probe_exit=2, label=""):
         return result, "mkfs.ext4" in log, "enable --now var-lib-hot.mount" in log
 
 
+GB = 2**30
+
+
+def pool_activate(env="", data=None, avail=100 * GB, fallocate_exit=0, args=(), table=None, held=False):
+    """Run kata-devpool-activate with args against stub disk tools, with
+    /etc/hot/host.env holding env. data is the (size, allocated bytes) of a
+    pool data file left from before, held whether it carries the marker of a
+    file that held its space before, avail is what df reports free, and
+    fallocate exits with fallocate_exit, keeping the file it was asked to fill,
+    as fallocate does when it runs out of space. table is the running pool's
+    device-mapper table, or None when no pool is set up. Returns the finished
+    process, every tool call, and the files left in the pool's directory."""
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = Path(tmp)
+        pool, state, calls = directory / "devmapper", directory / "state", directory / "calls"
+        state.mkdir()
+        calls.touch()
+        (directory / "host.env").write_text(env)
+        if data:
+            pool.mkdir()
+            (pool / "data").touch()
+            (state / "data").write_text(f"{data[0]} {data[1]}")
+            if held:
+                (pool / "held").touch()
+        record = f'echo "$(basename "$0") $*" >> {calls}'
+        stubs = {
+            "mountpoint": "exit 0",
+            "dmsetup": f'[ "$1" = info ] && exit {0 if table else 1}\n'
+                       f'[ "$1 $2" = "table hot-devpool" ] && {{ {f"echo {table!r}" if table else "exit 1"}; exit; }}\n'
+                       f'{record}',
+            "losetup": f'{record}\n[ "$1" = -d ] || echo /dev/loop9',
+            "blockdev": "echo 1073741824",
+            # GNU stat -c, for the two formats the script asks for.
+            "stat": f'read size held < {state}/$(basename "$3")\n'
+                    f'case "$2" in %s) echo "$size";; "%b * %B") echo "$(( held / 512 )) * 512";; *) exit 9;; esac',
+            "df": f'[ "$*" = "-B1 --output=avail /var/lib/kata" ] || exit 9\necho Avail\necho " {avail}"',
+            "fallocate": f'{record}\ntouch "$3"\nexit {fallocate_exit}',
+            "truncate": f'{record}\ntouch "$3"',
+            "install": f'{record}\nmkdir -p "$4"',
+        }
+        for name, body in stubs.items():
+            stub = directory / name
+            stub.write_text(f"#!/bin/bash\n{body}\n")
+            stub.chmod(0o755)
+        script = heredoc('"$LIBEXEC/kata-devpool-activate"').replace("/var/lib/kata/devmapper", str(pool)) \
+                                                              .replace("/etc/hot/host.env", str(directory / "host.env"))
+        result = subprocess.run(["bash", "-c", script, "kata-devpool-activate", *args], capture_output=True, text=True,
+                                env={**os.environ, "PATH": f"{directory}:{os.environ['PATH']}"})
+        left = sorted(path.name for path in pool.iterdir()) if pool.exists() else []
+        return result, calls.read_text().splitlines(), left
+
+
 class HostImage(unittest.TestCase):
     def test_every_download_is_pinned_and_verified(self):
         downloads = re.findall(r'^fetch "(\S+)"', SETUP, re.M)
@@ -392,6 +444,203 @@ class HostImage(unittest.TestCase):
         for attach in attaches[:2]:
             self.assertIn("--nooverlap --find --show", attach)
         self.assertIn('losetup -d "$meta" "$data"', pool)
+
+    def test_the_box_pool_stays_sparse_without_the_flag(self):
+        # A scalable task host's disk holds no database.
+        result, calls, left = pool_activate("HOT_BOX_POOL_GB=40\n", avail=0)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("fallocate", " ".join(calls))
+        self.assertTrue(any(call.startswith("truncate -s 40G ") and call.endswith("/data") for call in calls), calls)
+        self.assertEqual(left, ["data", "meta"])
+        self.assertIn("dmsetup create hot-devpool --table 0 2097152 thin-pool /dev/loop9 /dev/loop9 128 32768",
+                      calls)
+
+    def test_a_held_box_pool_takes_its_whole_size_and_keeps_it(self):
+        result, calls, left = pool_activate("HOT_BOX_POOL_GB=40\nHOT_BOX_POOL_PREALLOCATE=1\n", avail=42 * GB)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(any(call.startswith(f"fallocate -l {40 * GB} ") and call.endswith("/data") for call in calls),
+                        calls)
+        # Only the data file is held; the metadata file stays sparse.
+        self.assertTrue(any(call.startswith("truncate -s 5G ") and call.endswith("/meta") for call in calls), calls)
+        self.assertFalse(any(call.startswith("truncate") and call.endswith("/data") for call in calls), calls)
+        # Marked as held, so a later start counts the hold's margin.
+        self.assertEqual(left, ["data", "held", "meta"])
+        # A discard passed down would punch holes in the file and hand its space back.
+        self.assertIn("dmsetup create hot-devpool --table "
+                      "0 2097152 thin-pool /dev/loop9 /dev/loop9 128 32768 1 no_discard_passdown", calls)
+
+    def test_a_held_box_pool_is_refused_on_a_disk_without_room_and_leaves_nothing(self):
+        # 40 GB and the 1 GB left over do not fit in 41 GB less a byte.
+        result, calls, left = pool_activate("HOT_BOX_POOL_PREALLOCATE=1\n", avail=41 * GB - 1)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("needs 40960 MB more of the data disk and 1024 MB to spare, and only 41983 MB is free; "
+                      "box tasks do not run on this host, though code tasks do, until the disk is enlarged "
+                      "(a larger size, apply, then deploy-now)", result.stderr)
+        # At err priority, so the agent's host journal (warning and above) ships it.
+        self.assertTrue(result.stderr.startswith("<3>The box storage pool needs"), result.stderr)
+        self.assertEqual(unit_lines('/etc/systemd/system/kata-containerd.service', "SyslogLevelPrefix"), [])
+        # Nothing is written, attached or created, so the retry every few seconds costs nothing.
+        self.assertEqual((calls, left), ([], []))
+
+    def test_a_sparse_pool_from_before_is_filled_counting_only_its_holes(self):
+        env = "HOT_BOX_POOL_GB=100\nHOT_BOX_POOL_PREALLOCATE=1\n"
+        # The pool keeps its first size although HOT_BOX_POOL_GB changed, and
+        # 30 GB of its 40 GB is still to be taken.
+        result, calls, left = pool_activate(env, data=(40 * GB, 10 * GB), avail=31 * GB)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(any(call.startswith(f"fallocate -l {40 * GB} ") for call in calls), calls)
+        self.assertIn("1 no_discard_passdown", calls[-1])
+        self.assertEqual(left, ["data", "held", "meta"])
+        # It never held its space, so it leaves activation's 1 GB, not the hold's 64 MB.
+        result, calls, left = pool_activate(env, data=(40 * GB, 10 * GB), avail=31 * GB - 1)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("needs 30720 MB more of the data disk and 1024 MB to spare", result.stderr)
+        self.assertEqual((calls, left), ([], ["data"]))
+
+    def test_a_pool_already_held_needs_no_free_space(self):
+        result, calls, left = pool_activate("HOT_BOX_POOL_PREALLOCATE=1\n", data=(40 * GB, 40 * GB + 4096), avail=0)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("fallocate", " ".join(calls))
+        self.assertIn("1 no_discard_passdown", calls[-1])
+        self.assertEqual(left, ["data", "held", "meta"])
+
+    def test_a_pool_that_held_its_space_starts_again_with_the_holds_margin(self):
+        # After a reboot or on a replaced VM, a pool the hold was keeping on a
+        # nearly full disk starts again, as the hold would have filled it: only
+        # its holes to take back, and 64 MB to spare.
+        env = "HOT_BOX_POOL_PREALLOCATE=1\n"
+        result, calls, left = pool_activate(env, data=(40 * GB, 39 * GB), avail=GB + 64 * 1024 * 1024, held=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(any(call.startswith(f"fallocate -l {40 * GB} ") for call in calls), calls)
+        self.assertIn("1 no_discard_passdown", calls[-1])
+        self.assertEqual(left, ["data", "held", "meta"])
+        result, calls, left = pool_activate(env, data=(40 * GB, 39 * GB), avail=GB + 64 * 1024 * 1024 - 1, held=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("needs 1024 MB more of the data disk and 64 MB to spare", result.stderr)
+        self.assertEqual((calls, left), ([], ["data", "held"]))
+        # The same file unmarked never held its space, and leaves 1 GB.
+        result, calls, left = pool_activate(env, data=(40 * GB, 39 * GB), avail=2 * GB - 1)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("needs 1024 MB more of the data disk and 1024 MB to spare", result.stderr)
+        self.assertEqual((calls, left), ([], ["data"]))
+
+    def test_a_pool_that_starts_sparse_no_longer_counts_as_held(self):
+        # Its discards punch holes again, so a later held start leaves 1 GB.
+        result, calls, left = pool_activate("HOT_BOX_POOL_PREALLOCATE=0\n", data=(40 * GB, 40 * GB), held=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("no_discard_passdown", calls[-1])
+        self.assertEqual(left, ["data", "meta"])
+
+    def test_a_failed_allocation_removes_only_a_file_it_created(self):
+        result, calls, left = pool_activate("HOT_BOX_POOL_PREALLOCATE=1\n", fallocate_exit=1)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("<3>Could not allocate the box storage pool", result.stderr)
+        self.assertEqual(left, [])
+        self.assertFalse(any(call.startswith(("losetup", "dmsetup")) for call in calls), calls)
+        # A pool from before holds boxes' data, so it is kept.
+        result, calls, left = pool_activate("HOT_BOX_POOL_PREALLOCATE=1\n", data=(40 * GB, 0), fallocate_exit=1)
+        self.assertEqual((result.returncode, left), (1, ["data"]))
+
+    def test_a_held_pool_does_not_claim_to_keep_its_space(self):
+        # dm-thin zeroes a block a box first writes in part with a write-zeroes
+        # request, and the loop device punches that out of the data file.
+        comment = SETUP[:SETUP.index('cat > "$LIBEXEC/kata-devpool-activate"')].rsplit("\n\n", 1)[1]
+        self.assertIn("does not keep all of it", comment)
+        self.assertIn("hot-box-pool-hold.timer", comment)
+        self.assertNotIn("only write into blocks", SETUP)
+        # Turning zeroing off would keep the space, but a box could then read
+        # a block another box freed, since discards no longer reach the file.
+        self.assertNotIn("skip_block_zeroing", SETUP)
+
+    def test_the_hold_runs_every_minute_while_the_disk_is_mounted(self):
+        self.assertEqual(unit_lines("/etc/systemd/system/hot-box-pool-hold.service", "ExecStart"),
+                         ["/usr/local/libexec/hot/kata-devpool-activate --hold"])
+        self.assertEqual(unit_lines("/etc/systemd/system/hot-box-pool-hold.service", "ConditionPathIsMountPoint"),
+                         ["/var/lib/kata"])
+        self.assertEqual(unit_lines("/etc/systemd/system/hot-box-pool-hold.timer", "OnUnitActiveSec"), ["1min"])
+        self.assertEqual(unit_lines("/etc/systemd/system/hot-box-pool-hold.timer", "WantedBy"), ["timers.target"])
+        enabled = re.findall(r"^systemctl enable (.*)$", SETUP.replace("\\\n", " "), re.M)
+        self.assertIn("hot-box-pool-hold.timer", " ".join(enabled).split())
+
+    HELD = "0 83886080 thin-pool 7:1 7:0 128 32768 1 no_discard_passdown"
+
+    def test_the_hold_fills_the_holes_zeroing_punched_in_a_running_pool(self):
+        env = "HOT_BOX_POOL_GB=100\nHOT_BOX_POOL_PREALLOCATE=1\n"
+        # 1 GB of the pool's 40 GB has gone back to the disk, and it keeps its first size.
+        result, calls, left = pool_activate(env, data=(40 * GB, 39 * GB), avail=2 * GB, args=["--hold"],
+                                            table=self.HELD, held=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = [call for call in calls if not call.startswith("install")]
+        self.assertEqual(len(calls), 1, calls)
+        self.assertTrue(calls[0].startswith(f"fallocate -l {40 * GB} ") and calls[0].endswith("/data"), calls)
+        # Nothing is attached or created again, and no metadata file appears.
+        self.assertEqual(left, ["data", "held"])
+
+    def test_the_hold_does_nothing_on_a_pool_with_no_holes(self):
+        result, calls, _ = pool_activate("HOT_BOX_POOL_PREALLOCATE=1\n", data=(40 * GB, 40 * GB + 4096), avail=0,
+                                         args=["--hold"], table=self.HELD, held=True)
+        self.assertEqual((result.returncode, calls), (0, []), result.stderr)
+
+    def test_the_hold_takes_back_holes_on_a_nearly_full_disk(self):
+        # Filling 1 GB of holes leaves the disk with the 1 GB less one byte it
+        # had free before boxes punched them; activation's 1 GB margin does not
+        # apply, or the pool's space would go just when the disk is nearly full.
+        for avail in (2 * GB - 1, GB + 64 * 1024 * 1024):
+            with self.subTest(avail=avail):
+                result, calls, left = pool_activate("HOT_BOX_POOL_PREALLOCATE=1\n", data=(40 * GB, 39 * GB),
+                                                    avail=avail, args=["--hold"], table=self.HELD, held=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls = [call for call in calls if not call.startswith("install")]
+                self.assertEqual(len(calls), 1, calls)
+                self.assertTrue(calls[0].startswith(f"fallocate -l {40 * GB} "), calls)
+                self.assertEqual(left, ["data", "held"])
+
+    def test_the_hold_reports_holes_a_full_disk_cannot_take_back(self):
+        # Other data has taken part of the holes' space, and a partial fill
+        # would leave the disk with nothing free.
+        for avail in (GB - 1, GB + 64 * 1024 * 1024 - 1):
+            with self.subTest(avail=avail):
+                result, calls, left = pool_activate("HOT_BOX_POOL_PREALLOCATE=1\n", data=(40 * GB, 39 * GB),
+                                                    avail=avail, args=["--hold"], table=self.HELD, held=True)
+                self.assertEqual(result.returncode, 1)
+                self.assertTrue(result.stderr.startswith("<3>The box storage pool has 1024 MB of its data file no "
+                                                         f"longer held, and only {avail // 1024 // 1024} MB"),
+                                result.stderr)
+                self.assertEqual((calls, left), ([], ["data", "held"]))
+        # A failed allocation keeps the running pool's file.
+        result, calls, left = pool_activate("HOT_BOX_POOL_PREALLOCATE=1\n", data=(40 * GB, 39 * GB),
+                                            args=["--hold"], table=self.HELD, fallocate_exit=1, held=True)
+        self.assertEqual((result.returncode, left), (1, ["data", "held"]))
+        self.assertFalse(any(call.startswith(("losetup", "dmsetup", "truncate")) for call in calls), calls)
+
+    def test_the_hold_leaves_alone_a_pool_that_does_not_hold_its_space(self):
+        cases = {
+            # Started sparse, so its discards still punch holes; the agent warns of it.
+            "started sparse": ("HOT_BOX_POOL_PREALLOCATE=1\n", "0 83886080 thin-pool 7:1 7:0 128 32768"),
+            "not running": ("HOT_BOX_POOL_PREALLOCATE=1\n", None),
+            "no database on the disk": ("HOT_BOX_POOL_PREALLOCATE=0\n", self.HELD),
+        }
+        for name, (env, table) in cases.items():
+            with self.subTest(name):
+                result, calls, left = pool_activate(env, data=(40 * GB, 0), avail=100 * GB, args=["--hold"],
+                                                    table=table)
+                self.assertEqual((result.returncode, calls, left), (0, [], ["data"]), result.stderr)
+        # Nor does it make a pool's files before activation has.
+        result, calls, left = pool_activate("HOT_BOX_POOL_PREALLOCATE=1\n", args=["--hold"], table=self.HELD)
+        self.assertEqual((result.returncode, calls, left), (0, [], []), result.stderr)
+
+    def test_activation_leaves_a_running_pool_alone(self):
+        result, calls, left = pool_activate("HOT_BOX_POOL_PREALLOCATE=1\n", data=(40 * GB, 0), table=self.HELD)
+        self.assertEqual((result.returncode, calls, left), (0, [], ["data"]), result.stderr)
+        result, *_ = pool_activate(args=["--keep"])
+        self.assertEqual(result.returncode, 2)
+
+    def test_the_pool_flag_must_be_0_or_1(self):
+        for value in ("yes", "", "2"):
+            with self.subTest(value):
+                result, calls, left = pool_activate(f"HOT_BOX_POOL_PREALLOCATE={value}\n")
+                self.assertEqual((result.returncode, calls, left), (1, [], []))
+                self.assertIn("HOT_BOX_POOL_PREALLOCATE must be 0 or 1", result.stderr)
 
     def test_loop_devices_exist_before_docker_starts_a_container(self):
         # The task worker's /dev is the host's, so a device added later reaches it

@@ -96,6 +96,12 @@ GENERATED_SECRET_TOKEN = "hot-generated-secrets-first-version-0001"
 DETAIL_KEYS = ("diagnostics", "logs")
 # Box storage per size label; the data disk is sized to hold it.
 BOX_POOL_GB = {"small": 40, "medium": 100, "large": 200}
+# What kata-devpool-activate leaves free on the data disk when it holds the
+# box pool's space: 1 GB, or 64 MB for a data file that held its space before
+# (its "held" file marks it, until the pool starts sparse), whose holes only
+# take back what boxes punched (Agent.box_pool_margin).
+BOX_POOL_MARGIN = 1 << 30
+BOX_POOL_HOLD_MARGIN = 64 << 20
 # Container users that read their secret files.
 SECRET_OWNERS = {"postgres": 999, "valkey": 999}
 # The user Hot's services and the bundle's one-off jobs run as (see the
@@ -213,6 +219,11 @@ class UnreadableLevel(AgentError):
 
 # How reading a database's level with a migration status job can fail.
 LEVEL_READ_FAILURES = (subprocess.CalledProcessError, subprocess.TimeoutExpired, UnreadableLevel)
+
+
+class BoxPoolShort(AgentError):
+    """Kata's containerd refused to start because the box pool, which holds
+    its space, does not fit on the data disk (Agent.box_pool_shortfall)."""
 
 
 class NoSkipFileFlag(AgentError):
@@ -1461,24 +1472,194 @@ class Agent:
             box_data = data / render.BOX_DATA_DIRECTORY
             box_data.mkdir(mode=0o700, parents=True, exist_ok=True)
             self.chown(box_data, 0, 0)
-        self.configure_host()
+        try:
+            self.configure_host()
+        except BoxPoolShort as error:
+            # Only box tasks need the pool: the deploy goes on, the task
+            # worker starts and leaves box tasks waiting in the queue, the
+            # deploy's warning says why (box_pool_warning), and with no marker
+            # written mount_data tries containerd again.
+            print(json.dumps({"box_pool_short": str(error)}), file=sys.stderr, flush=True)
 
     def configure_host(self):
         """Write the host settings, then start what reads them: the box
-        pool's size, the box guests' network baseline (see
-        guest_network_env), and Kata's containerd, which waits for the data
-        disk."""
+        pool's size and whether it holds its space (see holds_box_pool), the
+        box guests' network baseline (see guest_network_env), and Kata's
+        containerd, which waits for the data disk."""
         operator = self.operator_secrets()
         guest = self.guest_network(operator)
         self.etc.mkdir(parents=True, exist_ok=True)
         marker = self.etc / "host-configured"
         marker.unlink(missing_ok=True)
-        write_atomic(self.etc / "host.env", f"HOT_BOX_POOL_GB={BOX_POOL_GB[self.config.get('size', 'small')]}\n",
-                     mode=0o644)
+        self.write_host_env()
         write_atomic(self.etc / "guest-network.env", guest, mode=0o644)
         self.run_command(["systemctl", "restart", "hot-guest-firewall.service"])
-        self.run_command(["systemctl", "start", "kata-containerd.service"])
+        try:
+            self.run_command(["systemctl", "start", "kata-containerd.service"])
+        except subprocess.CalledProcessError as error:
+            short = self.box_pool_shortfall()
+            if short:
+                raise BoxPoolShort(f"Kata's containerd did not start: {short}") from error
+            raise
         marker.write_text(utc_now())
+
+    def write_host_env(self):
+        """/etc/hot/host.env: the box pool's size and whether it holds its
+        space, which kata-devpool-activate and hot-box-pool-hold read."""
+        write_atomic(self.etc / "host.env",
+                     f"HOT_BOX_POOL_GB={BOX_POOL_GB[self.config.get('size', 'small')]}\n"
+                     f"HOT_BOX_POOL_PREALLOCATE={int(self.holds_box_pool())}\n", mode=0o644)
+
+    def holds_box_pool(self):
+        """Whether Kata's box pool holds its data file's space on the data
+        disk, rather than taking it as boxes write: where a local PostgreSQL or
+        Valkey shares the disk with the task worker, so a box cannot fill the
+        disk under the database. A scalable task host's disk holds no database,
+        and its pool stays sparse. The pool takes this up only when it starts
+        (kata-devpool-activate): one that started held goes on holding, as
+        hot-box-pool-hold.timer fills the holes block zeroing punches, and one
+        that started sparse stays so until it starts again (box_pool_warning).
+        A database counts where the configuration puts it and where the
+        installed release runs on it, which differ during a data move and
+        after one that failed before the data moved: a local database stays
+        on the disk until a move off it finishes."""
+        if "task-worker" not in self.roles():
+            return False
+        modes = (self.configured_modes(), self.installed_modes(self.state()))
+        return any(mode[service] == "local" for mode in modes for service in ("postgres", "valkey"))
+
+    def box_pool_unheld(self):
+        """The bytes of the box pool's data file that hold no space on the
+        disk yet, or None before the pool has one."""
+        try:
+            info = os.stat(self.data_root / "kata/devmapper/data")
+        except FileNotFoundError:
+            return None
+        return max(info.st_size - info.st_blocks * 512, 0)
+
+    def box_pool_margin(self):
+        """The room kata-devpool-activate leaves on the disk beside what the
+        pool's data file still needs: BOX_POOL_HOLD_MARGIN for a data file
+        that held its space before, which its "held" file marks, and
+        BOX_POOL_MARGIN for a new one, or one that never held it or started
+        sparse since."""
+        pool = self.data_root / "kata/devmapper"
+        if (pool / "data").exists() and (pool / "held").exists():
+            return BOX_POOL_HOLD_MARGIN
+        return BOX_POOL_MARGIN
+
+    def box_pool_shortfall(self):
+        """Why Kata's containerd may have refused to start: a pool that holds
+        its space, on a disk without room for the rest of it and the margin
+        kata-devpool-activate leaves (box_pool_margin), counted as a non-root
+        writer sees it. Empty otherwise, and then the failure is something
+        else: also where the pool is already active, since activation then
+        checks no room. A pool with no data file yet needs all of its size."""
+        if not self.holds_box_pool() or self.box_pool_active():
+            return ""
+        unheld = self.box_pool_unheld()
+        if unheld is None:
+            unheld = BOX_POOL_GB[self.config.get("size", "small")] << 30
+        if not unheld:
+            return ""
+        usage = os.statvfs(self.data_root)
+        free = usage.f_bavail * usage.f_frsize
+        margin = self.box_pool_margin()
+        if unheld + margin <= free:
+            return ""
+        return (f"its box pool holds its space on this data disk, which a local database shares, and needs "
+                f"{unheld >> 20} MB more and {margin >> 20:,} MB to spare, where {free >> 20} MB is free. "
+                f"Box tasks do not run on this host: {self.box_tasks_wait('it fits')}. Code tasks still run, and "
+                "Hot's other services, the scheduler too. Nothing on the disk changed. Grow the disk with a larger "
+                "size and apply, then run deploy-now")
+
+    def box_tasks_wait(self, until):
+        """What becomes of box tasks while this host's Kata containerd is not
+        running: the task worker leaves them queued, spending no retry, and
+        runs them once it answers, or another task host of a scalable
+        installation does."""
+        elsewhere = ", or another task host runs them" if render.scalable(self.config) else ""
+        return f"they wait in the queue, and none fail, until {until}{elsewhere}"
+
+    def box_pool_active(self):
+        """Whether Kata's box pool is already set up in device-mapper, as
+        kata-devpool-activate finds it before it looks at the disk."""
+        try:
+            self.run_command(["dmsetup", "info", "hot-devpool"])
+        except (subprocess.CalledProcessError, OSError):
+            return False
+        return True
+
+    def kata_containerd_down(self):
+        """Why Kata's containerd is not running, with what systemd says of it
+        ("activating" while it fails and restarts, "failed", "inactive"), or
+        "" where it runs, or this is no host to ask."""
+        try:
+            self.run_command(["systemctl", "is-active", "kata-containerd.service"])
+        except subprocess.CalledProcessError as error:
+            return f"Kata's containerd is not running ({(error.stdout or '').strip() or 'not active'})"
+        except OSError:
+            return ""
+        return ""
+
+    def box_pool_warning(self):
+        """A deploy's, a resume's or diagnostics' warning about why box tasks
+        do not run on a task host, or may fill its disk. The task worker runs
+        without Kata's containerd, running code tasks and leaving box tasks
+        waiting in the queue, and nothing else reports that, so a containerd
+        that is not running, or a box pool that is not active, is reported
+        whether or not the pool holds its space: as box_pool_shortfall's
+        reason where it gives one, and otherwise as a start that failed, whose
+        error deploy-now shows (configure_host). Then, for a pool that should
+        hold its space: one that started sparse, before it was to, on a host
+        an earlier release deployed or one whose Valkey moved onto the disk
+        since, still passes discards down to its data file, which punch holes
+        in it again, so hot-box-pool-hold.timer leaves it alone, and it holds
+        only once it starts again; its device-mapper table lacks
+        no_discard_passdown. A pool
+        that started held has holes between the timer's runs too, which is
+        normal, and the timer logs it when the disk has no room to fill them.
+        Where the disk has no room for the pool to hold its space now, a
+        reboot or a replaced VM would leave the pool stopped, and box tasks
+        with it (box_pool_shortfall), so it says to grow the disk first."""
+        if "task-worker" not in self.roles():
+            return ""
+        down = self.kata_containerd_down()
+        table = None
+        if not down:
+            try:
+                table = self.run_command(["dmsetup", "table", "hot-devpool"]).stdout
+            except subprocess.CalledProcessError:
+                down = "Kata's box pool is not active, so neither is its containerd"
+            except OSError:  # no dmsetup to ask
+                pass
+        if down:
+            short = self.box_pool_shortfall()
+            if short:
+                return f"Kata's containerd did not start: {short}"
+            return (f"{down}, so box tasks do not run on this host: {self.box_tasks_wait('it starts')}. Code "
+                    "tasks still run, and Hot's other services, the scheduler too. Run deploy-now, "
+                    "which starts it again and says why it does not start; the host's log has "
+                    "kata-containerd.service's failed starts")
+        if not self.holds_box_pool() or table is None:
+            return ""
+        if "no_discard_passdown" in table.split():
+            return ""
+        unheld = self.box_pool_unheld()
+        warning = (f"Kata's box pool started sparse, before it was to hold its space on the data disk, which a local "
+                   f"database shares, so box tasks can still fill the disk"
+                   f"{f'; {unheld >> 20} MB of its data file is not held now' if unheld else ''}. ")
+        usage = os.statvfs(self.data_root)
+        free = usage.f_bavail * usage.f_frsize
+        margin = self.box_pool_margin()
+        if unheld and unheld + margin > free:
+            return warning + (f"The disk has {free >> 20} MB free, too little for that and {margin >> 20:,} MB to "
+                              "spare, so the pool would not start again: after a reboot, or on a replaced VM, no box "
+                              "task would run on this host, though code tasks would. Grow the disk with a larger "
+                              "size and apply, which stops and starts the VM, then run deploy-now: the pool holds its "
+                              "space as it starts once the disk has room for it")
+        return warning + ("The pool holds it when it next starts: reboot the VM, which stops Hot until it is back. "
+                          "If the disk has too little room for it then, box tasks do not run until it has")
 
     def guest_network(self, operator):
         """/etc/hot/guest-network.env as it should be now. An egress proxy whose
@@ -2171,7 +2352,7 @@ class Agent:
         step("ready")
         record["finished"] = utc_now()
         warnings = [self.storage_warning(record) if self.abandoned_storage(record) else "",
-                    self.left_behind_warning(record)]
+                    self.left_behind_warning(record), self.box_pool_warning()]
         if any(warnings):
             record["warning"] = " ".join(filter(None, warnings))
         migrated = {k: v for k, v in self.state().items() if k == "migrated_release"}
@@ -2182,6 +2363,10 @@ class Agent:
                          "data_modes": self.configured_modes(), "configuration": self.configuration_digest(),
                          "host_addresses": record["host_addresses"], "data_addresses": record["data_addresses"],
                          **migrated})
+        if moves:
+            # prepare_host wrote host.env while the old modes still counted.
+            with contextlib.suppress(OSError):
+                self.write_host_env()
         self.settle_boot()
         shutil.rmtree(self.kept_secrets(), ignore_errors=True)
         # A kill leaves these, and a move put back never comes to remove them.
@@ -4352,8 +4537,10 @@ class Agent:
             local_data = [s for s in ("postgres", "valkey") if modes.get(s) == "local"]
             if local_data:
                 self.compose(bundle, "up", "-d", "--wait", *local_data)
+            pool = ""
             if not interrupted:
                 self.start_services(bundle, scheduler=not held)
+                pool = self.box_pool_warning()
         except Exception as error:  # any failure is reported, and tried again
             explained = self.explain(error)
             with contextlib.suppress(OSError):
@@ -4369,6 +4556,8 @@ class Agent:
         if interrupted:
             return self.report(state="resumed", release=release, request_id=request_id, started="data services",
                                interrupted=interrupted.get("release"))
+        if pool:
+            notes["warning"] = " ".join(filter(None, (notes.get("warning"), pool)))
         return self.report(state="resumed", release=release, request_id=request_id, **held, **notes)
 
     def boot_settled(self):
@@ -4436,7 +4625,9 @@ class Agent:
         """Start this host's services, the task worker with its release's hotbox,
         the ingress after what it proxies to, and the scheduler last. It raises if
         the app and API do not become ready or any service does not stay up, so a
-        deploy or a resume that left one failing says so."""
+        deploy or a resume that left one failing says so. A task worker whose
+        box backend is down still runs code tasks, so a box pool that does not
+        fit fails nothing here (box_pool_warning reports it)."""
         roles = self.roles()
         services = [r for r in roles if r != "scheduler"]
         if services:
@@ -4705,6 +4896,13 @@ class Agent:
             result["health_error"] = self.explain(error)
         else:
             result["health"] = {name: value for name, (value, _) in metrics.items()}
+        # Why box tasks may not run: no shell reads dmsetup.
+        try:
+            pool = self.box_pool_warning()
+        except OSError as error:
+            pool = f"not checked: {describe(error)}"
+        if pool:
+            result["box_pool"] = pool
         # Past what the failed record names: the operator has no shell to read
         # the manifest with, and leaving these behind takes their ids.
         failed = state.get("failed") or {}

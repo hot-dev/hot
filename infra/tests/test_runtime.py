@@ -593,16 +593,38 @@ class RuntimeContract(unittest.TestCase):
         # than the disk budget: the task worker's disk less a recovery reserve. A
         # box counts its /data, a quarter more, and image and snapshot overhead.
         # /data is on the data disk beside the pool, so both have to fit there.
+        # Where a local PostgreSQL or Valkey shares that disk, the pool's data file
+        # is allocated in full (setup-host.sh), so the pool, the budget, and the
+        # pool's sparse metadata at its full size (a tenth of the pool, plus 1 GB)
+        # stay under the disk alarm and leave the database room. A scalable task
+        # host's disk holds no database, and its pool stays sparse.
         contract = (ROOT / "opentofu/modules/single-machine-contract/main.tf").read_text()
+        alarms = [re.findall(r'"(?:DataDiskUsedPercent|data_disk_used_percent)".*threshold = (\d+)',
+                             (ROOT / f"opentofu/stacks/{stack}/single-machine/monitoring.tf").read_text())
+                  for stack in ("aws", "gcp")]
+        # One alarm per stack, and both the same, so a pattern that stops matching fails.
+        self.assertTrue(all(len(found) == 1 for found in alarms), alarms)
+        self.assertEqual(alarms[0], alarms[1])
+        alarm = int(alarms[0][0])
+        # The agent reports 1 - f_bavail / f_blocks. setup-host.sh runs mkfs.ext4
+        # with its defaults, so ext4 reserves 5% of the disk, which counts as used,
+        # and f_blocks leaves out the inode tables (256 bytes per 16 KiB) and the
+        # journal (at most 1 GiB). Files can fill this much before the alarm fires.
+        self.assertIn('mkfs.ext4 -q -L hot-data "$real"', (ROOT / "images/host/setup-host.sh").read_text())
+        def alarm_mb(data_gb):
+            total = data_gb * 1024
+            return (total - total * 256 // 16384 - 1024) * alarm // 100 - total * 5 // 100
         source = ROOT.parent / "crates/hot_task_worker/src"
         data = int(re.search(r"DEFAULT_DISK_SIZE_MB: u64 = ([\d_]+);", (source / "box_limits.rs").read_text())[1].replace("_", ""))
         overhead = int(re.search(r"OVERHEAD_MB: u64 = ([\d_]+);", (source / "resource_budget.rs").read_text())[1].replace("_", ""))
         template = (ROOT.parent / "resources/init/hot.hot.task-worker.template").read_text()
         reserve = int(re.search(r'"HOT_TASK_CONTAINER_RESERVED_DISK_MB", "(\d+)"', template)[1])
         pools = json.loads(re.search(r"^BOX_POOL_GB = (\{.*\})$", (ROOT / "agent/hot_agent.py").read_text(), re.M)[1])
-        task_host, _ = self.scalable(["task-worker"])
+        single, task_host = renderer.validate(example()), self.scalable(["task-worker"])[0]
+        self.assertTrue(all(renderer.data_mode(single, service) == "local" for service in ("postgres", "valkey")))
+        self.assertTrue(all(renderer.data_mode(task_host, service) != "local" for service in ("postgres", "valkey")))
         for size, pool_gb in pools.items():
-            for config in (renderer.validate(example()), task_host):
+            for config in (single, task_host):
                 with self.subTest(size=size, preset=config.get("preset", "single-machine")):
                     bundle = renderer.render(dict(config, size=size), manifest(), "/data", "/run/hot/secrets")
                     env = bundle["services"]["task-worker"]["environment"]
@@ -612,6 +634,9 @@ class RuntimeContract(unittest.TestCase):
                     self.assertLessEqual(disk, pool_gb * 1024)
                     data_gb = int(re.search(rf"{size}\s*=\s*\{{[^}}]*data_gb = (\d+)", contract)[1])
                     self.assertLessEqual(disk + pool_gb * 1024, data_gb * 1024)
+                    if config is single:
+                        meta_gb = pool_gb // 10 + 1
+                        self.assertLess(disk + (pool_gb + meta_gb) * 1024, alarm_mb(data_gb))
 
     def test_box_data_is_on_the_data_disk_where_kata_can_see_it(self):
         # The data root the agent renders with.

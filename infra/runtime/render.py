@@ -52,9 +52,14 @@ BOX_HOST_MB = BOX_MEMORY_MB + KATA_GUEST_BASE_MB + KATA_HOST_OVERHEAD_MB
 # that moves Hot's count and no memory: the reserve is only a number to Hot, and a
 # share of 0 still runs one code VM, as 256 MB does.
 # Its disk_mb sets the disk budget, what it leaves after 10 GB: 8448 MB for each
-# container slot's default box, within the box pool (40, 100, and 200 GB). A box's
-# /data is a file beside the pool on the data disk (BOX_DATA_DIRECTORY), and the
-# budget counts it, so the budget and the pool together fit that disk.
+# container slot's default box, within the box pool (40, 100, and 200 GB) that
+# holds the boxes' images and writable rootfs. A box's /data is a file beside the
+# pool on the data disk (BOX_DATA_DIRECTORY), allocated when the box starts, and
+# the budget counts it. Where a local PostgreSQL or Valkey shares that disk, the
+# pool's data file is allocated in full so box writes cannot take the database's
+# space (setup-host.sh); its metadata file stays sparse. Boxes then use at most
+# the pool, the budget, and the metadata, which stay under the disk alarm with
+# room for everything else on the disk.
 # Not measured: the small worker with a local embedding model. A worker loads the
 # model into its own process the first time a ::hot::store map embeds, and past
 # Hot's 512 MB reserve and one 256 MB VM its cap leaves 256 MB, against about 440 MB
@@ -86,7 +91,8 @@ HOST_RESERVE_MB = 1024
 # the load that scales its group out. A worker host runs one worker loop per
 # vCPU, within its PostgreSQL pool, since one loop would top out near one
 # core. A task-worker host runs tasks in proportion to its vCPUs, within the
-# box pool (40, 100, 200 GB).
+# box pool (40, 100, 200 GB). Its data disk holds no database, so the pool's
+# files stay sparse there, and the budget and the pool together fit that disk.
 # On medium and large, the task worker's cap, BOX_HOST_MB for each container slot,
 # and HOST_RESERVE_MB add up to the VM. A small task host can reach 512 MB past
 # that plan in the worst case, 5120 + 2 x 1280 against 7168, and then keeps 512 MB

@@ -353,24 +353,121 @@ install -d -m 0755 /var/lib/hot/kata
 DISK
 
 # Size the box storage pool from /etc/hot/host.env (written by the agent from
-# the installation's size). That caps what box tasks can store, but the pool's
-# files are sparse and take their space from the data disk as boxes write, so on
-# a disk already holding other data a box can still fill it.
+# the installation's size). That caps what box tasks can store. By default the
+# pool's data file is sparse and takes its space from the data disk as boxes
+# write, so on a disk already holding other data a box can still fill it. Where
+# local PostgreSQL or Valkey shares the disk, the agent sets
+# HOT_BOX_POOL_PREALLOCATE=1, and the data file takes its full size when the
+# pool starts. It does not keep all of it: when a box first writes part of a
+# pool block, dm-thin zeroes the block with a write-zeroes request, and the
+# loop device turns that into a hole in the file, handing that space back to
+# the disk until a later write takes it again. So hot-box-pool-hold.timer runs
+# this with --hold every minute and fills the holes again, as long as the disk
+# still has room for them. That leaves the disk exposed to what boxes punch
+# within a minute, and, once other data has taken part of the holes' space, to
+# all of them, which it then reports. The metadata file stays sparse; the pool uses little
+# of it.
 cat > "$LIBEXEC/kata-devpool-activate" <<'POOL'
 #!/usr/bin/env bash
+# kata-devpool-activate [--hold]
 set -euo pipefail
 pool="hot-devpool"
 dir="/var/lib/kata/devmapper"
+mode="${1:-}"
+[[ -z "$mode" || "$mode" == --hold ]] || { echo "usage: kata-devpool-activate [--hold]" >&2; exit 2; }
 mountpoint -q /var/lib/kata || { echo "/var/lib/kata is not mounted" >&2; exit 1; }
-dmsetup info "$pool" >/dev/null 2>&1 && exit 0
+if [[ "$mode" == --hold ]]; then
+    # Only a running pool that started held: one that started sparse still
+    # passes discards down, which punch holes again (the agent warns of it).
+    table=$(dmsetup table "$pool" 2>/dev/null) || exit 0
+    [[ " $table " == *" no_discard_passdown "* ]] || exit 0
+else
+    dmsetup info "$pool" >/dev/null 2>&1 && exit 0
+fi
 HOT_BOX_POOL_GB=40
+HOT_BOX_POOL_PREALLOCATE=0
 # shellcheck source=/dev/null
 [[ -f /etc/hot/host.env ]] && . /etc/hot/host.env
 [[ "$HOT_BOX_POOL_GB" =~ ^[0-9]+$ && "$HOT_BOX_POOL_GB" -ge 10 ]] ||
     { echo "HOT_BOX_POOL_GB must be at least 10" >&2; exit 1; }
-install -d -m 0700 "$dir"
-# Sparse files: the pool can never use more than its configured size.
-[[ -f "$dir/data" ]] || truncate -s "${HOT_BOX_POOL_GB}G" "$dir/data"
+[[ "$HOT_BOX_POOL_PREALLOCATE" == 0 || "$HOT_BOX_POOL_PREALLOCATE" == 1 ]] ||
+    { echo "HOT_BOX_POOL_PREALLOCATE must be 0 or 1" >&2; exit 1; }
+if [[ "$mode" == --hold ]]; then
+    [[ "$HOT_BOX_POOL_PREALLOCATE" == 1 && -f "$dir/data" ]] || exit 0
+fi
+features=""
+if [[ "$HOT_BOX_POOL_PREALLOCATE" == 1 ]]; then
+    # A pool from before keeps its size, and only its holes still need space.
+    if [[ -f "$dir/data" ]]; then
+        created=0
+        size=$(stat -c %s "$dir/data")
+        held=$(( $(stat -c '%b * %B' "$dir/data") ))
+    else
+        created=1
+        size=$(( HOT_BOX_POOL_GB * 1024 * 1024 * 1024 ))
+        held=0
+    fi
+    needed=$(( size > held ? size - held : 0 ))
+    if (( needed > 0 )); then
+        # What a non-root writer such as PostgreSQL can still use must cover
+        # what the data file still needs and a margin. fallocate that runs out
+        # of space fails but keeps what it took, which can leave the disk with
+        # nothing free, so a disk without room is refused here, before the data
+        # file is written. A new data file, or one that never held its space,
+        # leaves 1 GB. One that held it before ("held" marks it, from its first
+        # full allocation until it starts sparse) has only the holes boxes
+        # punched in it to take back, which leaves the disk with what it had
+        # free before them, so the hold, and activation after a reboot or on a
+        # replaced VM, leave only 64 MB for the extent blocks fallocate may add:
+        # a larger margin would give up the pool's space in just the near-full
+        # case where holding it matters, and box tasks with it.
+        # kata-containerd retries this every few seconds, and a refusal only
+        # reads. "<3>" logs a refusal at err priority (systemd's
+        # SyslogLevelPrefix), so the agent's host journal, which ships warning
+        # and above, carries why box tasks do not run, or why the running
+        # pool's space is not held.
+        margin=$(( 1024 * 1024 * 1024 ))
+        if [[ "$mode" == --hold || ( "$created" == 0 && -f "$dir/held" ) ]]; then
+            margin=$(( 64 * 1024 * 1024 ))
+        fi
+        avail=$(df -B1 --output=avail /var/lib/kata | tail -n 1)
+        [[ "$avail" =~ ^\ *[0-9]+$ ]] || { echo "Cannot read the data disk's free space" >&2; exit 1; }
+        if (( needed + margin > avail )); then
+            if [[ "$mode" == --hold ]]; then
+                echo "<3>The box storage pool has $(( needed / 1024 / 1024 )) MB of its data file no longer held," \
+                     "and only $(( avail / 1024 / 1024 )) MB of the data disk is free; box tasks can fill the disk" \
+                     "under the local database until space is freed or the disk enlarged" >&2
+            else
+                echo "<3>The box storage pool needs $(( needed / 1024 / 1024 )) MB more of the data disk and" \
+                     "$(( margin / 1024 / 1024 )) MB to spare, and only $(( avail / 1024 / 1024 )) MB is free; box" \
+                     "tasks do not run on this host, though code tasks do, until the disk is enlarged" \
+                     "(a larger size, apply, then deploy-now)" >&2
+            fi
+            exit 1
+        fi
+        install -d -m 0700 "$dir"
+        # Over a running pool's file this only turns holes into unwritten
+        # extents, which read as zeros, as the holes did, so no data changes.
+        if ! fallocate -l "$size" "$dir/data"; then
+            if (( created )); then rm -f "$dir/data"; fi
+            echo "<3>Could not allocate the box storage pool" >&2
+            exit 1
+        fi
+    fi
+    [[ -f "$dir/held" ]] || : > "$dir/held"
+    [[ "$mode" == --hold ]] && exit 0
+    # Discards still free the pool's blocks for reuse, but no longer punch
+    # holes in the data file. Block zeroing stays on: without it a box could
+    # read a block another box freed.
+    features=" 1 no_discard_passdown"
+else
+    install -d -m 0700 "$dir"
+    # Sparse: the pool can never use more than its configured size. Its
+    # discards punch holes in the data file again, so it no longer counts as
+    # held.
+    rm -f "$dir/held"
+    [[ -f "$dir/data" ]] || truncate -s "${HOT_BOX_POOL_GB}G" "$dir/data"
+fi
 [[ -f "$dir/meta" ]] || truncate -s "$(( HOT_BOX_POOL_GB / 10 + 1 ))G" "$dir/meta"
 # kata-containerd retries this every few seconds while the pool fails to
 # activate, so reuse the loop devices already on these files and release them
@@ -378,7 +475,7 @@ install -d -m 0700 "$dir"
 data=$(losetup --nooverlap --find --show "$dir/data")
 meta=$(losetup --nooverlap --find --show "$dir/meta")
 sectors=$(( $(blockdev --getsize64 "$data") / 512 ))
-dmsetup create "$pool" --table "0 $sectors thin-pool $meta $data 128 32768" ||
+dmsetup create "$pool" --table "0 $sectors thin-pool $meta $data 128 32768$features" ||
     { losetup -d "$meta" "$data" || true; exit 1; }
 POOL
 
@@ -605,6 +702,32 @@ LimitCORE=infinity
 WantedBy=multi-user.target
 UNIT
 
+# Fills the holes block zeroing punches in a held pool's data file (see
+# kata-devpool-activate). A pool that does not hold its space is left alone.
+cat > /etc/systemd/system/hot-box-pool-hold.service <<'UNIT'
+[Unit]
+Description=Hold the box storage pool's space on the data disk
+ConditionPathIsMountPoint=/var/lib/kata
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/hot/kata-devpool-activate --hold
+Nice=10
+UNIT
+
+cat > /etc/systemd/system/hot-box-pool-hold.timer <<'UNIT'
+[Unit]
+Description=Hold the box storage pool's space every minute
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target
+UNIT
+
 # Enabled at boot by the installation's bootstrap, which first writes
 # /etc/hot/installation.json. Docker is Wants=, not Requires=: Docker waits
 # for the data disk, and the agent must still run, and report, when the disk
@@ -626,7 +749,8 @@ WantedBy=multi-user.target
 UNIT
 
 systemctl daemon-reload
-systemctl enable hot-loop-devices.service hot-guest-firewall.service kata-containerd.service
+systemctl enable hot-loop-devices.service hot-guest-firewall.service kata-containerd.service \
+    hot-box-pool-hold.timer
 
 # The task worker bind-mounts these, and Docker does not create a missing
 # bind source. /run is tmpfs and /tmp is emptied at boot, so they are made on
