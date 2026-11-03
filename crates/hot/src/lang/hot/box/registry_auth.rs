@@ -546,7 +546,7 @@ mod tests {
             key,
         )
         .unwrap_err();
-        assert!(err.contains("is on 'someinternalhost'"), "{err}");
+        assert!(err.contains("is on 'someinternalhost'"));
         assert!(!err.contains(TOKEN));
     }
 }

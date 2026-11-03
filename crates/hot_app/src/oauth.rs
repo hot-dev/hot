@@ -401,12 +401,9 @@ mod tests {
                     (pair(blank, Some("hush")), id_name, secret_name),
                 ] {
                     let error = error.unwrap_err();
-                    assert!(error.starts_with(named), "{error}");
-                    assert!(error.contains(other), "{error}");
-                    assert!(
-                        !error.contains("hush") && !error.contains("client "),
-                        "{error}"
-                    );
+                    assert!(error.starts_with(named));
+                    assert!(error.contains(other));
+                    assert!(!error.contains("hush") && !error.contains("client "));
                 }
             }
         }

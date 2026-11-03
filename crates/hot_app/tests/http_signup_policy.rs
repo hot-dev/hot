@@ -71,8 +71,13 @@ async fn sql(db: &DatabasePool, statement: &'static str, org_id: &Uuid) {
         .expect(statement);
 }
 
+/// A password for one test, so none is written in the source.
+fn new_password() -> String {
+    Uuid::new_v4().simple().to_string()
+}
+
 async fn sign_up(client: &mut TestClient, email: &str, invite_code: &str) -> TestResponse {
-    sign_up_with_password(client, email, invite_code, "supersecret123").await
+    sign_up_with_password(client, email, invite_code, &new_password()).await
 }
 
 async fn sign_up_with_password(
@@ -336,12 +341,14 @@ async fn verifications_sent_while_signup_was_open_lapse_under_invite_only() {
 #[tokio::test]
 async fn a_verification_from_the_open_period_cannot_create_the_invited_persons_account() {
     let email = "invited@example.com";
+    let earlier_password = new_password();
+    let owners_password = new_password();
     let mut open = TestClient::new_with_conf(self_host_with_email(val!({}))).await;
     let db = open.db().as_ref().clone();
 
     // Someone else asked to verify this address while sign-up was open, with
     // a password of their own.
-    sign_up_with_password(&mut open, email, "", "someone-elses-password")
+    sign_up_with_password(&mut open, email, "", &earlier_password)
         .await
         .assert_status(axum::http::StatusCode::OK);
     let stale = pending_verification(&db, email).await;
@@ -424,16 +431,15 @@ async fn a_verification_from_the_open_period_cannot_create_the_invited_persons_a
 
     // The invitation link gives them an account with their own password, and
     // ends the earlier verification.
-    let resp =
-        sign_up_with_password(&mut client, email, "invited-code", "the-owners-password").await;
+    let resp = sign_up_with_password(&mut client, email, "invited-code", &owners_password).await;
     assert!(resp.status.is_redirection(), "{}", snippet(&resp));
     assert!(joined(&db, email, &org_id).await);
     let auth = UserAuth::get_user_auth(&db, "email_password", email)
         .await
         .unwrap();
     let stored = serde_json::to_string(&auth.auth_data.unwrap()).unwrap();
-    assert!(hot::auth::verify_password("the-owners-password", &stored).unwrap());
-    assert!(!hot::auth::verify_password("someone-elses-password", &stored).unwrap());
+    assert!(hot::auth::verify_password(&owners_password, &stored).unwrap());
+    assert!(!hot::auth::verify_password(&earlier_password, &stored).unwrap());
     client.clear_cookies();
     let resp = confirm(&mut client, &stale.verification_token).await;
     assert!(
@@ -460,7 +466,7 @@ async fn verification_on_plan(
         &Uuid::now_v7(),
         email,
         Some("Example Person"),
-        &hot::auth::hash_password_with_random_salt("supersecret123").unwrap(),
+        &hot::auth::hash_password_with_random_salt(&new_password()).unwrap(),
         &token,
         Some(invite_code),
         plan,
@@ -795,11 +801,13 @@ async fn an_invitation_link_takes_over_from_a_pending_verification() {
         ("no-email", val!({"product": {"experience": "self-host"}})),
     ] {
         let email = format!("takeover-{label}@example.com");
+        let earlier_password = new_password();
+        let invitees_password = new_password();
         let mut open = TestClient::new_with_conf(self_host_with_email(val!({}))).await;
         let db = open.db().as_ref().clone();
 
         // Someone asked for this address while sign-up was open.
-        let resp = sign_up_with_password(&mut open, &email, "", "someone-elses-password").await;
+        let resp = sign_up_with_password(&mut open, &email, "", &earlier_password).await;
         resp.assert_status(axum::http::StatusCode::OK);
         let stale = pending_verification(&db, &email).await;
         let org_id = invite(
@@ -814,13 +822,8 @@ async fn an_invitation_link_takes_over_from_a_pending_verification() {
         // The invitee signs up through the link, and is not sent to an email
         // that may never come.
         let mut client = TestClient::new_with_db(db.clone(), conf).await;
-        let resp = sign_up_with_password(
-            &mut client,
-            &email,
-            "takeover-code",
-            "the-invitees-password",
-        )
-        .await;
+        let resp =
+            sign_up_with_password(&mut client, &email, "takeover-code", &invitees_password).await;
         assert!(resp.status.is_redirection(), "{label}: {}", snippet(&resp));
         assert!(joined(&db, &email, &org_id).await, "{label}");
 
@@ -829,8 +832,8 @@ async fn an_invitation_link_takes_over_from_a_pending_verification() {
             .await
             .unwrap();
         let stored = serde_json::to_string(&auth.auth_data.unwrap()).unwrap();
-        assert!(hot::auth::verify_password("the-invitees-password", &stored).unwrap());
-        assert!(!hot::auth::verify_password("someone-elses-password", &stored).unwrap());
+        assert!(hot::auth::verify_password(&invitees_password, &stored).unwrap());
+        assert!(!hot::auth::verify_password(&earlier_password, &stored).unwrap());
 
         // The earlier verification is over, and can't be resent.
         assert!(
