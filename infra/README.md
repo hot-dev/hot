@@ -2506,10 +2506,14 @@ past its 1,280. `medium` is the way to more room.
   still lacks, plus 1 GB to spare (64 MB for a data file that held its space before),
   free for non-root writers, and nothing on the disk changes. Box tasks then wait in the
   queue, and none fail; code tasks, Hot's other services, and the scheduler run. The task
-  worker logs `Hot Box is unavailable on this task worker: Kata's containerd is not
-  running on this host` at startup, then a warning ending `; deferring queue message`
-  for each box task it leaves queued. It tries containerd again every 15 seconds,
-  kata-containerd retries the pool every 5 seconds, and box tasks run once it starts. A
+  worker logs `Hot Box is unavailable on this task worker: Kata's backend did not start
+  on this host (containerd, or its guest network or DNS setup)` at startup. It tries
+  containerd again every 15 seconds, and on an attempt that fails logs a warning ending
+  `; box tasks wait in the queue` when a box task came back and had to wait since the
+  attempt before. kata-containerd retries the pool every 5 seconds. Once containerd
+  starts, the task worker reaches it within 15 seconds, recovers its containers, and
+  runs box tasks within about 2 minutes more: a box task that has waited longer comes
+  back less often. A
   deploy, and the start after a boot (`resumed`), finish with a `warning` that includes
   `Kata's containerd did not start: its box pool holds its space on this data disk`, which
   names what is missing, and `diagnostics` carries the same text under `box_pool`. The

@@ -413,10 +413,17 @@ pub enum BoxExecutor {
     Kata(kata::KataExecutor),
 }
 
+/// How long a Docker daemon has to answer when the worker connects to it.
+const DOCKER_ANSWER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 #[cfg(all(target_os = "linux", feature = "kata"))]
 const DEFAULT_CONTAINERD_SOCKET: &str = "/run/kata-containerd/containerd.sock";
 
 impl BoxExecutor {
+    /// Connect to the backend, which must answer: Docker's daemon its version,
+    /// Kata's containerd its devmapper snapshots. A backend that does not
+    /// answer yet is an error, so the worker leaves box tasks queued and tries
+    /// again later, rather than taking them on a client that cannot run them.
     pub async fn new(
         backend: Backend,
         max_concurrent: usize,
@@ -426,9 +433,8 @@ impl BoxExecutor {
     ) -> ExecutorResult<Self> {
         match backend {
             Backend::Docker => {
-                let executor = docker::DockerExecutor::new(max_concurrent, slot_timeout_secs)?
-                    .negotiate_api_version()
-                    .await;
+                let executor =
+                    docker::DockerExecutor::connect(max_concurrent, slot_timeout_secs).await?;
                 Ok(Self::Docker(executor))
             }
             #[cfg(all(target_os = "linux", feature = "kata"))]
@@ -444,6 +450,14 @@ impl BoxExecutor {
                 Ok(Self::Kata(executor))
             }
         }
+    }
+
+    /// A Docker executor that has not asked its daemon anything, for tests
+    /// that need a connected one and run no box. bollard still refuses a socket
+    /// path that does not exist.
+    #[cfg(test)]
+    pub fn docker_unanswered() -> ExecutorResult<Self> {
+        Ok(Self::Docker(docker::DockerExecutor::new(1, 5)?))
     }
 
     /// `timings` is caller-owned (rather than constructed here) so that
@@ -691,10 +705,55 @@ mod docker {
             })
         }
 
-        /// See [`hot::lang::hot::r#box::negotiate_docker_api_version`].
-        pub async fn negotiate_api_version(mut self) -> Self {
-            self.docker = hot::lang::hot::r#box::negotiate_docker_api_version(self.docker).await;
-            self
+        /// Connect to the local Docker daemon once it answers. Its socket can
+        /// be there while the daemon does not answer: while Docker Desktop
+        /// starts, or after the daemon stopped. The client speaks the daemon's
+        /// API version when it is older than bollard's default, so older Docker
+        /// Engines keep working: bollard puts its version in every request
+        /// path, and a daemon rejects versions newer than it supports.
+        pub async fn connect(
+            max_concurrent: usize,
+            slot_timeout_secs: u64,
+        ) -> ExecutorResult<Self> {
+            Self::new(max_concurrent, slot_timeout_secs)?
+                .answered(DOCKER_ANSWER_TIMEOUT)
+                .await
+        }
+
+        /// This executor once its daemon has answered `/version`, with the
+        /// client set to the version negotiated.
+        pub(super) async fn answered(
+            mut self,
+            timeout: std::time::Duration,
+        ) -> ExecutorResult<Self> {
+            self.docker = match tokio::time::timeout(
+                timeout,
+                self.docker.clone().negotiate_version(),
+            )
+            .await
+            {
+                Ok(Ok(docker)) => docker,
+                Ok(Err(e)) => {
+                    return Err(ExecutorError::Connection(format!(
+                        "the Docker daemon did not answer: {e}"
+                    )));
+                }
+                Err(_) => {
+                    return Err(ExecutorError::Connection(format!(
+                        "the Docker daemon did not answer within {timeout:?}"
+                    )));
+                }
+            };
+            Ok(self)
+        }
+
+        #[cfg(all(test, unix))]
+        pub(super) fn with_client(docker: Docker) -> Self {
+            Self {
+                docker,
+                semaphore: Arc::new(Semaphore::new(1)),
+                slot_timeout_secs: 5,
+            }
         }
 
         #[allow(clippy::too_many_arguments)]
@@ -3198,6 +3257,67 @@ mod kata {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Docker socket that is there is not enough: the worker counts Docker
+    /// as connected only once the daemon behind it answers, and then speaks
+    /// the daemon's API version.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn docker_counts_as_connected_only_once_its_daemon_answers() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // A socket path has to be short: macOS's temporary directory is too
+        // deep for one.
+        let directory = std::path::PathBuf::from("/tmp").join(format!(
+            "hot-docker-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("docker.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let daemon = tokio::spawn(async move {
+            // Takes the connection and says nothing, as Docker Desktop's
+            // socket can while its engine starts.
+            let (_silent, _) = listener.accept().await.unwrap();
+            // Hangs up.
+            drop(listener.accept().await.unwrap());
+            // Answers as an Engine whose newest API is older than bollard's.
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0u8; 4096];
+            let _ = stream.read(&mut request).await.unwrap();
+            let body = r#"{"ApiVersion":"1.47","Version":"27.5.1"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            let _ = stream.read(&mut request).await;
+        });
+        let executor = || {
+            let client = bollard::Docker::connect_with_socket(
+                socket.to_str().unwrap(),
+                120,
+                bollard::API_DEFAULT_VERSION,
+            )
+            .unwrap();
+            docker::DockerExecutor::with_client(client)
+        };
+        let timeout = std::time::Duration::from_millis(200);
+
+        let silent = executor().answered(timeout).await.err().unwrap();
+        assert!(
+            silent.to_string().contains("did not answer within"),
+            "{silent}"
+        );
+        let hung_up = executor().answered(timeout).await.err().unwrap();
+        assert!(hung_up.to_string().contains("did not answer"), "{hung_up}");
+
+        let answered = executor().answered(timeout).await.unwrap();
+        let version = answered.docker.client_version();
+        assert_eq!((version.major_version, version.minor_version), (1, 47));
+
+        daemon.abort();
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
 
     #[test]
     fn test_image_denylist_allows_common_images() {

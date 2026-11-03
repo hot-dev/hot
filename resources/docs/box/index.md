@@ -71,17 +71,21 @@ further quarter of `/data` against the disk budget. A box that could never fit
 fails at once with `Requested resources exceed worker capacity`. One that only has
 to wait for others to finish stays queued.
 
-A task worker whose box backend has not been reached since the worker started (the
-Docker socket was missing, or the Kata backend could not start: containerd and its
-devmapper snapshotter did not answer, or the guest network or DNS setup failed)
-still runs code tasks. Its box tasks wait in the queue and do not fail, and the
-worker logs `Hot Box is unavailable on this task worker: ...` at startup, with the
-reason in the same log line, and again for each box task it defers. It tries the
-backend every 15 seconds and runs the waiting box tasks once it answers, or another
-task worker with a backend takes them. There is no time limit on the wait, and a box
-too large for the worker fails only once the backend answers.
-A Docker daemon that hangs behind a socket that is there does not count as missing:
-its box tasks are taken and fail or retry. On Hot's self-hosted stacks, on a host
+A task worker whose box backend has not answered since the worker started still
+runs code tasks. Docker has not answered when the worker could not get its version
+within 5 seconds: the socket is missing, or the daemon behind it is stopped or still
+starting. Kata has not answered when containerd and its devmapper snapshotter did not
+answer, or the guest network or DNS setup failed. Box tasks wait in the queue and do
+not fail. The worker logs `Hot Box is unavailable on this task worker: ...` at
+startup, with the reason in the same log line. It tries the backend every 15
+seconds, and logs the message again as a warning on an attempt that fails when a box
+task came back and had to wait since the attempt before. It runs the waiting box
+tasks once the backend answers, or another task worker with a backend takes them. A box task that waits comes back to the worker less often the
+longer it has waited, from every 15 seconds up to every 2 minutes, so it can start
+up to 2 minutes after the backend answers. There is no time limit on the wait, and
+a box too large for the worker fails only once the backend answers.
+A backend that stops answering after the worker reached it does not count: its box
+tasks are taken and fail or retry. On Hot's self-hosted stacks, on a host
 whose local PostgreSQL or Valkey shares the data disk, Kata's containerd stays down
 while the box pool cannot take its space there; see
 [the self-hosting guide](https://github.com/hot-dev/hot/blob/main/infra/README.md).
@@ -299,7 +303,7 @@ task ::box/start(BoxConf({
 
 ## Local Development
 
-Running `::hot::box/start` locally requires **Docker** (Docker Desktop or Docker Engine). The `hot dev` command starts a task worker that uses Docker to run containers. If the Docker socket is missing, as when Docker is not installed or Docker Desktop is stopped, the task worker still runs code tasks and logs `Hot Box is unavailable on this task worker: ...` at startup and for each box task it defers. Box tasks wait in the queue, with no time limit, and run once Docker answers: the worker tries every 15 seconds. A Docker that is stopped while its socket file is still there, or on Windows, where Docker listens on a named pipe, fails box tasks instead. See [What a Worker Admits](/docs/box#what-a-worker-admits).
+Running `::hot::box/start` locally requires **Docker** (Docker Desktop or Docker Engine). The `hot dev` command starts a task worker that uses Docker to run containers. If Docker does not answer when the task worker starts, as when Docker is not installed, or Docker Desktop is stopped or still starting, the task worker still runs code tasks and logs `Hot Box is unavailable on this task worker: ...` at startup. Box tasks wait in the queue, with no time limit, and run once Docker answers. The worker tries Docker every 15 seconds, and logs the message again as a warning, at most once an attempt, when a box task came back and had to wait. A box task that has waited a while can take up to 2 minutes more to start after Docker answers. If Docker stops after the task worker reached it, box tasks fail until Docker is back. See [What a Worker Admits](/docs/box#what-a-worker-admits).
 
 ```bash
 # Ensure Docker is running, then:

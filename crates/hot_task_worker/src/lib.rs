@@ -54,7 +54,7 @@ use hot::stream::{
 use hot::val::Val;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::{Mutex, Semaphore, mpsc};
 use tokio::task::JoinSet;
 use uuid::Uuid;
@@ -1615,6 +1615,11 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
 
                 match result {
                     Ok(Some(())) | Ok(None) => {}
+                    // Expected while the backend is down, and explained in
+                    // the backend's own warnings.
+                    Err(e) if is_box_task_deferral(e.as_ref(), &boxes_c) => {
+                        tracing::debug!("Box task deferred: {}", e);
+                    }
                     Err(e) => {
                         tracing::error!("Task processing error: {}", e);
                     }
@@ -2328,14 +2333,13 @@ async fn process_task(
     queue_timing: QueueLeaseTiming,
     worker_id: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let _running = TASK_ACTIVITY.start();
     let ownership = TaskOwnership::default();
     let recovery = PanicRecovery {
         request: request.clone(),
         db: Arc::clone(&db),
         stream_publisher: Arc::clone(&stream_publisher),
         coordinator: Arc::clone(&coordinator),
-        container_executor: boxes.executor(),
+        boxes: Arc::clone(&boxes),
         worker_id: worker_id.clone(),
     };
     let processing = process_task_inner(
@@ -2386,7 +2390,10 @@ struct PanicRecovery {
     db: Arc<DatabasePool>,
     stream_publisher: Arc<StreamPubSub>,
     coordinator: Arc<shutdown::TaskShutdownCoordinator>,
-    container_executor: Option<Arc<executor::BoxExecutor>>,
+    /// Read when recovering rather than when processing starts: the backend
+    /// can connect in between, and the executor it installs, which never
+    /// changes after, is the one that started any box to reap.
+    boxes: Arc<BoxRuntime>,
     worker_id: String,
 }
 
@@ -2436,7 +2443,7 @@ where
     let _lease = ownership.lease.lock().take();
 
     if request.task_type == "container"
-        && let Some(executor) = &recovery.container_executor
+        && let Some(executor) = recovery.boxes.executor()
     {
         let reap = async {
             executor.cleanup_task_containers(&request.task_id).await;
@@ -2539,13 +2546,6 @@ async fn process_task_inner(
         .get_int_or_default("queue.infra-retry-backoff-ms", 1_000)
         .max(0) as u64;
 
-    tracing::info!(
-        task_id = %task_id,
-        function = %request.function_name,
-        task_type = %request.task_type,
-        "Processing task"
-    );
-
     let task = match load_task_for_execution(&db, &task_id, infra_retry_backoff_ms).await {
         Ok(Some(task)) => task,
         Ok(None) => {
@@ -2594,6 +2594,31 @@ async fn process_task_inner(
         );
         return Ok(());
     }
+
+    // A box task waits in the queue while the box backend has not answered.
+    // Decide that from the row alone, before the writes, the lease and the
+    // slot below: the task comes back for as long as the backend is down,
+    // perhaps hours, and so do all the box tasks queued behind it.
+    if task.task_type == "container" {
+        let image = task
+            .args
+            .as_ref()
+            .and_then(|args| args.get("image"))
+            .and_then(|image| image.as_str())
+            .unwrap_or_default();
+        if let ContainerTaskAdmission::Defer(reason) =
+            admit_container_task(&task.function_name, &worker_conf, image, &boxes)
+        {
+            return Err(defer_box_task(&db, &task, &boxes, &worker_conf, reason).await);
+        }
+    }
+
+    tracing::info!(
+        task_id = %task_id,
+        function = %request.function_name,
+        task_type = %request.task_type,
+        "Processing task"
+    );
 
     // Queue fields are claims, never runtime authority. Rebuild the complete
     // request from durable task/build/project ownership before side effects.
@@ -2765,6 +2790,10 @@ async fn process_task_inner(
     let lease_lost_notify = lease_guard.lost_notify();
     *ownership.lease.lock() = Some(lease_guard);
     ownership.leased.store(true, Ordering::Release);
+    // Counted from here, as this delivery owns its task and runs it: one
+    // dropped as a duplicate or deferred above is not work, and counting it
+    // would keep an idle task host from retiring (see slot_status).
+    let _running = TASK_ACTIVITY.start();
 
     let terminal_state_db = Arc::clone(&db);
     let execute_task = async {
@@ -3095,6 +3124,114 @@ fn container_task_refusal(function_name: &str, worker_conf: &Val, image: &str) -
 /// not answer at startup.
 const BOX_BACKEND_RETRY: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// The longest a box task waits in the queue between deliveries while the box
+/// backend has not answered, and so the longest one can wait after it does.
+const BOX_DEFER_MAX: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// How long a box task waits in the queue before its next delivery while the
+/// backend has not answered: half as long as the task has waited so far,
+/// from [`BOX_BACKEND_RETRY`] up to [`BOX_DEFER_MAX`]. A deferral spends no
+/// retry, so no queue counts it; the task's age grows the wait instead, on
+/// every queue backend and across worker restarts.
+fn box_deferral_backoff(
+    waited: chrono::Duration,
+    infra_retry_backoff_ms: u64,
+) -> std::time::Duration {
+    let half = waited.to_std().unwrap_or_default() / 2;
+    half.clamp(BOX_BACKEND_RETRY, BOX_DEFER_MAX)
+        .max(std::time::Duration::from_millis(infra_retry_backoff_ms))
+}
+
+/// When the queued-task reconciler may next take up a deferred box task,
+/// or `None` while the hold-off already on the row covers this deferral.
+///
+/// The message stays in the queue all the time the backend is down, which
+/// can be hours while the box pool does not fit, and the reconciler would
+/// otherwise add another copy of the task each time the hold-off lapsed.
+/// Every delivery leaves the row held past the message's next delivery and a
+/// reconcile interval on top, so the message comes back before the hold-off
+/// lapses even when the worker restarts, or code tasks keep the queue busy,
+/// in between. A write holds it for three backoffs and an interval, which
+/// still covers the next delivery's own backoff while the backoff grows, so
+/// about every other deferral writes the row. If the message is lost, the
+/// reconciler takes the task up again once the hold-off lapses.
+fn box_deferral_reconcile_hold_off(
+    now: chrono::DateTime<chrono::Utc>,
+    held_until: Option<chrono::DateTime<chrono::Utc>>,
+    backoff: std::time::Duration,
+    reconcile_interval: chrono::Duration,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    let backoff = chrono::Duration::from_std(backoff).unwrap_or(chrono::Duration::zero());
+    if held_until.is_some_and(|until| until >= now + backoff + reconcile_interval) {
+        return None;
+    }
+    Some(now + backoff * 3 + reconcile_interval)
+}
+
+/// Leave a queued box task in the queue, unclaimed and with no retry spent,
+/// while the box backend has not answered: for this worker once it does, or
+/// another worker with a backend. Returns the error that requeues it.
+async fn defer_box_task(
+    db: &DatabasePool,
+    task: &Task,
+    boxes: &BoxRuntime,
+    worker_conf: &Val,
+    reason: String,
+) -> Box<dyn std::error::Error + Send + Sync> {
+    let infra_retry_backoff_ms = worker_conf
+        .get_int_or_default("queue.infra-retry-backoff-ms", 1_000)
+        .max(0) as u64;
+    let now = chrono::Utc::now();
+    let backoff = box_deferral_backoff(now - task.created_at, infra_retry_backoff_ms);
+    boxes.deferred.fetch_add(1, Ordering::Relaxed);
+    tracing::debug!(
+        task_id = %task.task_id,
+        backend = %boxes.backend,
+        backoff_ms = backoff.as_millis() as u64,
+        "{reason}; deferring queue message"
+    );
+    let reconcile_interval_secs = worker_conf
+        .get_int_or_default("task.reconcile-interval-seconds", 30)
+        .max(1);
+    if let Some(next_check_at) = box_deferral_reconcile_hold_off(
+        now,
+        task.next_retry_at,
+        backoff,
+        chrono::Duration::seconds(reconcile_interval_secs),
+    ) {
+        match tokio::time::timeout(
+            DB_CALL_TIMEOUT,
+            Task::defer_queued_reconcile(db, &task.task_id, next_check_at),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::warn!(task_id = %task.task_id, "Failed to defer queued-task reconcile: {}", e);
+            }
+            Err(_) => {
+                tracing::warn!(task_id = %task.task_id, "Timed out deferring queued-task reconcile");
+            }
+        }
+    }
+    Box::new(QueueInfrastructureError::new(reason, backoff))
+}
+
+/// Whether a delivery's error is a box task [`defer_box_task`] left queued.
+fn is_box_task_deferral(
+    error: &(dyn std::error::Error + Send + Sync + 'static),
+    boxes: &BoxRuntime,
+) -> bool {
+    let infra = match error.downcast_ref::<hot::queue::QueueProcessingError>() {
+        Some(hot::queue::QueueProcessingError::QueueError(inner)) => {
+            inner.downcast_ref::<QueueInfrastructureError>()
+        }
+        Some(_) => None,
+        None => error.downcast_ref::<QueueInfrastructureError>(),
+    };
+    infra.is_some_and(|infra| infra.to_string() == boxes.unavailable())
+}
+
 /// This worker's box executor, which it starts without when the backend does
 /// not answer: Kata's executor needs the host's containerd and its devmapper
 /// snapshotter, which do not run while the box pool does not fit on the data
@@ -3106,6 +3243,9 @@ const BOX_BACKEND_RETRY: std::time::Duration = std::time::Duration::from_secs(15
 struct BoxRuntime {
     backend: executor::Backend,
     executor: std::sync::OnceLock<Arc<executor::BoxExecutor>>,
+    /// Box task deliveries deferred since the last attempt to reach the
+    /// backend, for that attempt's warning.
+    deferred: AtomicU64,
 }
 
 impl BoxRuntime {
@@ -3119,6 +3259,7 @@ impl BoxRuntime {
         Self {
             backend,
             executor: std::sync::OnceLock::new(),
+            deferred: AtomicU64::new(0),
         }
     }
 
@@ -3129,7 +3270,7 @@ impl BoxRuntime {
     /// Why a box task waits while the backend has not answered.
     fn unavailable(&self) -> String {
         let reason = match self.backend {
-            executor::Backend::Docker => "the Docker daemon is not reachable on this host",
+            executor::Backend::Docker => "the Docker daemon does not answer on this host",
             #[cfg(all(target_os = "linux", feature = "kata"))]
             executor::Backend::Kata => {
                 "Kata's backend did not start on this host (containerd, or its guest network or DNS setup)"
@@ -3180,9 +3321,24 @@ async fn connect_box_backend<C, F, R, RF>(
                 }
                 return;
             }
-            Err(error) => {
-                tracing::debug!(backend = %boxes.backend, attempts, %error, "Box backend still unavailable");
-            }
+            // One warning an attempt while box tasks wait, which says why:
+            // each deferral logs only at debug.
+            Err(error) => match boxes.deferred.swap(0, Ordering::Relaxed) {
+                0 => {
+                    tracing::debug!(backend = %boxes.backend, attempts, %error, "Box backend still unavailable");
+                }
+                deferred => {
+                    tracing::warn!(
+                        backend = %boxes.backend,
+                        attempts,
+                        %error,
+                        deferred,
+                        retry_secs = retry.as_secs(),
+                        "{}; box tasks wait in the queue",
+                        boxes.unavailable()
+                    );
+                }
+            },
         }
     }
 }
@@ -3303,45 +3459,13 @@ async fn process_container_task(
 
     let executor = match admit_container_task(&function_name, &worker_conf, &image, &boxes) {
         ContainerTaskAdmission::Run(executor) => executor,
+        // `process_task_inner` defers a box task before its lease while the
+        // backend has not answered, and a backend once installed stays.
         ContainerTaskAdmission::Defer(reason) => {
-            // Unclaimed and back in the queue with no retry spent, for this
-            // worker once its backend answers or another worker with one.
-            let backoff_ms = worker_conf
-                .get_int_or_default("queue.infra-retry-backoff-ms", 1_000)
-                .max(0) as u64;
-            let backoff = std::time::Duration::from_millis(backoff_ms.max(5_000));
-            tracing::warn!(
-                task_id = %task_id,
-                backend = %boxes.backend,
-                backoff_ms = backoff.as_millis() as u64,
-                "{reason}; deferring queue message"
-            );
-            // The backend can stay down for hours while the box pool does not
-            // fit. This message stays in the queue all that time, so hold off
-            // the queued-task reconciler, which would otherwise add another
-            // copy of the task every interval. If the message is lost, the
-            // reconciler takes the task up again once this lapses.
-            let reconcile_interval_secs = worker_conf
-                .get_int_or_default("task.reconcile-interval-seconds", 30)
-                .max(1);
-            let next_check_at = chrono::Utc::now()
-                + chrono::Duration::from_std(backoff).unwrap_or(chrono::Duration::zero())
-                + chrono::Duration::seconds(reconcile_interval_secs);
-            match tokio::time::timeout(
-                DB_CALL_TIMEOUT,
-                Task::defer_queued_reconcile(&db, &task_id, next_check_at),
-            )
-            .await
-            {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    tracing::warn!(task_id = %task_id, "Failed to defer queued-task reconcile: {}", e);
-                }
-                Err(_) => {
-                    tracing::warn!(task_id = %task_id, "Timed out deferring queued-task reconcile");
-                }
-            }
-            return Err(Box::new(QueueInfrastructureError::new(reason, backoff)));
+            return Err(Box::new(QueueInfrastructureError::new(
+                reason,
+                BOX_BACKEND_RETRY,
+            )));
         }
         ContainerTaskAdmission::Refuse(refusal) => {
             let error = task_failure_json(&refusal, None);
@@ -8732,7 +8856,7 @@ mod tests {
                 StreamPubSub::new(hot::stream::StreamPubSubType::Memory, None, false).unwrap(),
             ),
             coordinator: Arc::clone(coordinator),
-            container_executor: None,
+            boxes: Arc::new(BoxRuntime::pending(executor::Backend::Docker)),
             worker_id: "worker-test".to_string(),
         }
     }
@@ -11701,18 +11825,264 @@ mod tests {
         ));
     }
 
-    /// A Docker box executor for the tests that need a ready one. Building it
-    /// contacts no daemon, but bollard refuses a socket path that does not
-    /// exist, so on a host without a Docker socket this says so and the
-    /// caller skips the rest of its test.
+    /// A Docker box executor for the tests that need a ready one and run no
+    /// box. Building it contacts no daemon, but bollard refuses a socket path
+    /// that does not exist, so on a host without a Docker socket this says so
+    /// and the caller skips the rest of its test.
     async fn docker_executor_or_skip(what: &str) -> Option<executor::BoxExecutor> {
-        match executor::BoxExecutor::new(executor::Backend::Docker, 1, 5, None, None).await {
+        match executor::BoxExecutor::docker_unanswered() {
             Ok(executor) => Some(executor),
             Err(error) => {
                 eprintln!("skipping \"{what}\": no Docker socket on this host ({error})");
                 None
             }
         }
+    }
+
+    #[test]
+    fn a_waiting_box_task_comes_back_less_often_the_longer_it_waits() {
+        let backoff = |secs| box_deferral_backoff(chrono::Duration::seconds(secs), 1_000);
+        assert_eq!(backoff(0), BOX_BACKEND_RETRY);
+        assert_eq!(backoff(20), BOX_BACKEND_RETRY, "never sooner than a retry");
+        assert_eq!(backoff(90), std::time::Duration::from_secs(45));
+        assert_eq!(backoff(3_600), BOX_DEFER_MAX);
+        assert_eq!(
+            box_deferral_backoff(chrono::Duration::seconds(-5), 1_000),
+            BOX_BACKEND_RETRY,
+            "a clock behind the row's is no age"
+        );
+        assert_eq!(
+            box_deferral_backoff(chrono::Duration::zero(), 30_000),
+            std::time::Duration::from_secs(30),
+            "a longer configured infrastructure backoff holds"
+        );
+    }
+
+    #[test]
+    fn the_reconciler_holds_off_a_deferred_box_task_past_its_next_delivery() {
+        let interval = chrono::Duration::seconds(30);
+        let from_std = |backoff: std::time::Duration| chrono::Duration::from_std(backoff).unwrap();
+        // The next delivery comes a backoff and a little later than the
+        // deferral, with a backoff at least as long: longer while the task's
+        // age grows it, the same at the cap.
+        let slack = chrono::Duration::milliseconds(5);
+        for age in [60, 3_600] {
+            let now = chrono::Utc::now();
+            let created_at = now - chrono::Duration::seconds(age);
+            let backoff_at =
+                |at: chrono::DateTime<chrono::Utc>| box_deferral_backoff(at - created_at, 1_000);
+
+            let backoff = backoff_at(now);
+            let held = box_deferral_reconcile_hold_off(now, None, backoff, interval).unwrap();
+            assert_eq!(held, now + from_std(backoff) * 3 + interval);
+
+            // That delivery finds the row held past its own next delivery,
+            // and writes nothing.
+            let next = now + from_std(backoff) + slack;
+            let next_backoff = backoff_at(next);
+            assert!(next_backoff >= backoff, "age {age}");
+            assert_eq!(
+                box_deferral_reconcile_hold_off(next, Some(held), next_backoff, interval),
+                None,
+                "age {age}"
+            );
+
+            // The one after that moves the hold-off on.
+            let after = next + from_std(next_backoff) + slack;
+            let after_backoff = backoff_at(after);
+            assert_eq!(
+                box_deferral_reconcile_hold_off(after, Some(held), after_backoff, interval),
+                Some(after + from_std(after_backoff) * 3 + interval),
+                "age {age}"
+            );
+        }
+    }
+
+    /// A box task delivered while the box backend has not answered goes back
+    /// to the queue as it was, and a code task on the same worker runs.
+    #[tokio::test]
+    async fn a_box_task_waits_in_the_queue_while_a_code_task_runs() {
+        let db = Arc::new(hot::db::test_db().await);
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let directory = std::env::temp_dir().join(format!("hot-box-wait-{}", Uuid::now_v7()));
+        let source = directory.join("src");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(
+            source.join("boxwait.hot"),
+            "::boxwait ns\nanswer fn (input) {1}\n",
+        )
+        .unwrap();
+        let conf = val!({
+            "box": {"enabled": true},
+            "set": {"profile": "selected"},
+            "profile": {"selected": {
+                "user": {"email": "local@hot.dev"}, "org": {"slug": "local"},
+                "env": {"name": "development"}
+            }},
+            "project": {"test-project": {"src": {"paths": [source.to_string_lossy().to_string()]}}}
+        });
+        let queue_directory = directory.join("queue");
+        let queue = Arc::new(ProcessingQueue::Sqlite(
+            hot::queue::sqlite::SqliteQueue::<TaskRequest>::new_at(
+                "{hot:task}-box-wait".to_string(),
+                queue_directory.clone(),
+            )
+            .unwrap()
+            .with_serialization(Serialization::Json),
+        ));
+        let boxes = Arc::new(BoxRuntime::pending(executor::Backend::Docker));
+        let coordinator = Arc::new(shutdown::TaskShutdownCoordinator::new());
+        let publisher = Arc::new(
+            StreamPubSub::new(hot::stream::StreamPubSubType::Memory, None, false).unwrap(),
+        );
+        let cache = Arc::new(BytecodeCache::new(directory.join("cache")));
+        let usage_cache: UsageStatsCache = Arc::new(Mutex::new(HashMap::new()));
+        let queued = |function: &str, args: serde_json::Value, task_type: &str| {
+            let db = Arc::clone(&db);
+            let function = function.to_string();
+            let task_type = task_type.to_string();
+            async move {
+                let task_id = Uuid::now_v7();
+                Task::insert(
+                    &db,
+                    &task_id,
+                    &data.env_id,
+                    &data.stream_id,
+                    &data.build_id,
+                    None,
+                    &function,
+                    Some(&args),
+                    None,
+                    &task_type,
+                    60_000,
+                    None,
+                )
+                .await
+                .unwrap();
+                let mut request =
+                    synthesize_task_request_from_row(&Task::get(&db, &task_id).await.unwrap());
+                request.org_id = Some(data.org_id.to_string());
+                (task_id, request)
+            }
+        };
+        let (box_task, box_request) = queued(
+            hot::lang::hot::r#box::START_FUNCTION,
+            serde_json::json!({"image": "alpine:3.21", "script": "true"}),
+            "container",
+        )
+        .await;
+        let (code_task, code_request) =
+            queued("::boxwait/answer", serde_json::json!([]), "code").await;
+        queue.enqueue(box_request).await.unwrap();
+        queue.enqueue(code_request).await.unwrap();
+
+        let deliver = || async {
+            let lease = queue.claim_blocking().await.unwrap().unwrap();
+            let timing = lease.timing();
+            lease
+                .process(|request: TaskRequest| {
+                    process_task(
+                        request,
+                        Arc::clone(&db),
+                        Arc::clone(&queue),
+                        Arc::clone(&publisher),
+                        Arc::clone(&cache),
+                        Arc::new(Semaphore::new(1)),
+                        Arc::new(Semaphore::new(1)),
+                        Arc::new(Semaphore::new(1)),
+                        resource_budget::ResourceBudget::new(1_024, 10_240),
+                        conf.clone(),
+                        None,
+                        Arc::clone(&boxes),
+                        Arc::new(directory.join("volumes")),
+                        Arc::new(box_limits::BoxDefaults::default()),
+                        Arc::clone(&usage_cache),
+                        Arc::clone(&coordinator),
+                        Arc::new(task_lease::NoopTaskLease),
+                        timing,
+                        "worker-test".to_string(),
+                    )
+                })
+                .await
+        };
+
+        let activity_before = TASK_ACTIVITY.last_task_at();
+        let deferred_at = chrono::Utc::now();
+        let error = deliver().await.unwrap_err();
+        // The processor loop logs this at debug, not as an error.
+        assert!(is_box_task_deferral(error.as_ref(), &boxes), "{error}");
+        let Some(hot::queue::QueueProcessingError::QueueError(inner)) =
+            error.downcast_ref::<hot::queue::QueueProcessingError>()
+        else {
+            panic!("a deferral requeues the message: {error}");
+        };
+        let backoff = inner
+            .downcast_ref::<QueueInfrastructureError>()
+            .unwrap()
+            .backoff();
+        assert!(backoff >= BOX_BACKEND_RETRY, "{backoff:?}");
+        assert_eq!(
+            TASK_ACTIVITY.last_task_at(),
+            activity_before,
+            "a deferred delivery is no work on this host"
+        );
+        assert_eq!(boxes.deferred.load(Ordering::Relaxed), 1);
+
+        // The row is untouched but for the reconciler's hold-off, which lasts
+        // past the message's next delivery.
+        let row = Task::get(&db, &box_task).await.unwrap();
+        assert_eq!(row.task_status_id, TaskStatus::Queued.as_id());
+        assert_eq!(row.worker_id, None);
+        assert_eq!((row.retry_attempt, row.infra_retry_count), (0, 0));
+        assert_eq!(row.timing, None, "nothing written before the deferral");
+        let held_until = row.next_retry_at.unwrap();
+        assert!(
+            held_until
+                >= deferred_at
+                    + chrono::Duration::from_std(backoff).unwrap()
+                    + chrono::Duration::seconds(30)
+        );
+
+        // The message is back in the queue, not acknowledged, with no retry
+        // spent, and not due again before the backoff.
+        let queue_file = std::fs::read_dir(&queue_directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "sqlite3"))
+            .unwrap();
+        let queue_db = sqlx::SqlitePool::connect(&format!("sqlite://{}", queue_file.display()))
+            .await
+            .unwrap();
+        let (state, retry_count, available_at_ms): (i64, i64, i64) = sqlx::query_as(
+            "SELECT state, retry_count, available_at_ms FROM queue_message \
+             WHERE CAST(payload AS TEXT) LIKE ?",
+        )
+        .bind(format!("%{box_task}%"))
+        .fetch_one(&queue_db)
+        .await
+        .unwrap();
+        assert_eq!((state, retry_count), (0, 0), "ready, with no retry spent");
+        assert!(
+            available_at_ms
+                >= deferred_at.timestamp_millis() + BOX_BACKEND_RETRY.as_millis() as i64
+        );
+        queue_db.close().await;
+
+        // The code task, queued behind it, runs now.
+        deliver().await.unwrap();
+        let row = Task::get(&db, &code_task).await.unwrap();
+        assert_eq!(
+            row.task_status_id,
+            TaskStatus::Completed.as_id(),
+            "{:?}",
+            row.result
+        );
+        assert!(TASK_ACTIVITY.last_task_at() >= deferred_at.timestamp() as u64);
+        assert_eq!(
+            Task::get(&db, &box_task).await.unwrap().task_status_id,
+            TaskStatus::Queued.as_id()
+        );
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[tokio::test]
@@ -11722,7 +12092,7 @@ mod tests {
         assert!(boxes.executor().is_none());
         assert_eq!(
             boxes.unavailable(),
-            "Hot Box is unavailable on this task worker: the Docker daemon is not reachable on this host"
+            "Hot Box is unavailable on this task worker: the Docker daemon does not answer on this host"
         );
 
         // It keeps trying, and once the backend answers it runs the container
