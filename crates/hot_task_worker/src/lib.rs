@@ -2944,6 +2944,8 @@ async fn process_task_inner(
                 env_id,
                 build_id,
                 timeout_ms,
+                task.retry_attempt,
+                RetryConfig::from_meta(task.options.as_ref()),
                 db,
                 task_queue,
                 stream_publisher,
@@ -5529,6 +5531,8 @@ async fn process_code_task(
     env_id: Uuid,
     build_id: Uuid,
     timeout_ms: u64,
+    retry_attempt: i16,
+    retry_config: RetryConfig,
     db: Arc<DatabasePool>,
     task_queue: Arc<ProcessingQueue<TaskRequest>>,
     stream_publisher: Arc<StreamPubSub>,
@@ -5790,7 +5794,7 @@ async fn process_code_task(
             .origin_run_id
             .as_deref()
             .and_then(|s| Uuid::parse_str(s).ok()),
-        retry_attempt: 0,
+        retry_attempt,
         max_retries: 0,
         retry_delay_ms: 0,
         secret_keys: Default::default(),
@@ -5806,7 +5810,8 @@ async fn process_code_task(
         .map(|duration| chrono::Utc::now() + duration),
         // Set below from the org's `call_tracing` feature.
         trace_calls: true,
-    };
+    }
+    .with_retry_config(&retry_config);
     let execution_context = match org_id {
         Some(org_id) => execution_context.with_trace_calls(
             hot::db::features::Features::call_tracing_for_org_cached(&db, &org_id).await,
@@ -10508,6 +10513,189 @@ mod tests {
             .expect("a fresh zombie with budget must enqueue its retry")
             .unwrap()
             .expect("memory queue claim should yield the enqueued retry");
+    }
+
+    /// Each attempt of a real task reads the attempt it is and the retry
+    /// policy of its `retry` option through `info()`. The task always fails,
+    /// so the worker's own retry decision produces every attempt, and each
+    /// failure keeps what that attempt read.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn task_run_info_counts_attempts_and_names_the_retry_option() {
+        let db = Arc::new(hot::db::test_db().await);
+        let fixture = hot::db::insert_test_data(&db).await.unwrap();
+        let build_id = Uuid::now_v7();
+        Build::insert_build(
+            &db,
+            &build_id,
+            &fixture.project_id,
+            "task-retry-info",
+            0,
+            Build::BUILD_TYPE_BUNDLE,
+            &fixture.user_id,
+        )
+        .await
+        .unwrap();
+        let directory = std::env::temp_dir().join(format!("hot-task-retry-info-{build_id}"));
+        let source = directory.join("src");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(
+            source.join("task_retry_info.hot"),
+            r#"::task-retry-info ns
+
+flaky fn (args: Any): Map {
+    run info().run
+    fail("again", {attempt: run.retry-attempt, max: run.max-retries, delay: run.retry-delay})
+}
+"#,
+        )
+        .unwrap();
+        let bundle = hot::bundle::create_bundle(
+            "test-project",
+            &[source.to_string_lossy().to_string()],
+            &[],
+            &[],
+            false,
+            &[],
+        )
+        .unwrap();
+        let zip = hot::bundle::write_bundle_zip(&bundle, &directory).unwrap();
+        let extract_dir = bundle_extract_dir(&build_id);
+        hot::bundle::extract_bundle_to_dir(&zip, &extract_dir).unwrap();
+
+        let queue = Arc::new(
+            ProcessingQueue::<TaskRequest>::new(
+                QueueType::Memory,
+                format!("{{hot:task}}-retry-info-{build_id}"),
+                None,
+                Serialization::Json,
+            )
+            .unwrap(),
+        );
+        let publisher = Arc::new(
+            StreamPubSub::new(hot::stream::StreamPubSubType::Memory, None, false).unwrap(),
+        );
+        let cache = Arc::new(BytecodeCache::new(directory.join("cache")));
+        let boxes = Arc::new(BoxRuntime::pending(executor::Backend::Docker));
+
+        // One delivery of the task, as the worker's queue loop makes it.
+        let deliver = |task: Task| {
+            let (db, queue, publisher, cache, boxes) = (
+                Arc::clone(&db),
+                Arc::clone(&queue),
+                Arc::clone(&publisher),
+                Arc::clone(&cache),
+                Arc::clone(&boxes),
+            );
+            let volumes = Arc::new(directory.join("volumes"));
+            async move {
+                process_task(
+                    synthesize_task_request_from_row(&task),
+                    db,
+                    queue,
+                    publisher,
+                    cache,
+                    Arc::new(Semaphore::new(1)),
+                    Arc::new(Semaphore::new(1)),
+                    Arc::new(Semaphore::new(1)),
+                    resource_budget::ResourceBudget::new(1024, 1024),
+                    val!({}),
+                    None,
+                    boxes,
+                    volumes,
+                    Arc::new(box_limits::BoxDefaults::default()),
+                    Arc::new(Mutex::new(HashMap::new())),
+                    Arc::new(shutdown::TaskShutdownCoordinator::new()),
+                    Arc::new(task_lease::NoopTaskLease),
+                    QueueLeaseTiming {
+                        claimed_at: chrono::Utc::now(),
+                        enqueued_at: None,
+                        queue_wait: std::time::Duration::ZERO,
+                        redelivered: false,
+                    },
+                    "worker-a".to_string(),
+                )
+                .await
+                .unwrap();
+            }
+        };
+
+        // Run a task and each retry the worker creates for it. Retries are
+        // delivered from their rows, without waiting out the delayed enqueue.
+        let attempts = |options: Option<serde_json::Value>| {
+            let db = Arc::clone(&db);
+            let deliver = &deliver;
+            let fixture = &fixture;
+            async move {
+                let stream_id = Uuid::now_v7();
+                let task_id = Uuid::now_v7();
+                Task::insert(
+                    &db,
+                    &task_id,
+                    &fixture.env_id,
+                    &stream_id,
+                    &build_id,
+                    None,
+                    "::task-retry-info/flaky",
+                    None,
+                    options.as_ref(),
+                    "code",
+                    60_000,
+                    Some(&fixture.user_id),
+                )
+                .await
+                .unwrap();
+                let mut readings = Vec::new();
+                let mut next = Some(Task::get(&db, &task_id).await.unwrap());
+                while let Some(task) = next {
+                    let attempt = task.task_id;
+                    deliver(task).await;
+                    let ran = Task::get(&db, &attempt).await.unwrap();
+                    assert_eq!(ran.status, "failed", "{:?}", ran.result);
+                    readings.push(ran.result.unwrap()["$val"]["err"].clone());
+                    next = Task::get_by_stream(&db, &stream_id, &fixture.env_id, None)
+                        .await
+                        .unwrap()
+                        .into_iter()
+                        .find(|task| task.parent_task_id == Some(attempt));
+                }
+                readings
+            }
+        };
+
+        let reading = |attempt: i64, max: i64, delay: i64| serde_json::json!({"attempt": attempt, "max": max, "delay": delay});
+        assert_eq!(
+            attempts(Some(serde_json::json!({"retry": 2}))).await,
+            [
+                reading(0, 2, 1000),
+                reading(1, 2, 1000),
+                reading(2, 2, 1000)
+            ],
+            "the simple form, with its default delay"
+        );
+        assert_eq!(
+            attempts(Some(
+                serde_json::json!({"retry": {"attempts": 1, "delay": 5000}})
+            ))
+            .await,
+            [reading(0, 1, 5000), reading(1, 1, 5000)],
+            "the full form"
+        );
+        assert_eq!(
+            attempts(None).await,
+            [reading(0, 0, 0)],
+            "a task with no `retry`"
+        );
+        assert_eq!(
+            attempts(Some(
+                serde_json::json!({"retry": {"attempts": 0, "delay": 5000}})
+            ))
+            .await,
+            [reading(0, 0, 0)],
+            "a `retry` that makes no retries has no delay"
+        );
+
+        std::fs::remove_dir_all(extract_dir).unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[tokio::test]

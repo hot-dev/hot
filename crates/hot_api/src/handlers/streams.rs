@@ -16,7 +16,7 @@ use futures::stream::Stream;
 use hot::db::{
     DatabasePool,
     api_key::ApiKey,
-    run::Run,
+    run::{Run, RunType},
     stream::{Stream as DbStream, StreamError, StreamSummary},
     task::Task,
 };
@@ -504,12 +504,16 @@ impl StreamSubscription {
     /// raised `retry_attempt` is what tells it apart from a final failure,
     /// which keeps the attempt number it ran with: 0, or its origin's when it
     /// is itself a retry (retries share their origin's run type; runs of
-    /// events another run sent need not).
+    /// events another run sent need not). A task retries through new task
+    /// rows instead, so a task's run only ever keeps the attempt it ran as.
     async fn scheduled_retry(&self, run: &Run) -> Option<Option<Uuid>> {
         if run.status == "pending_retry" {
             return Some(None);
         }
-        if run.status != "failed" || run.retry_attempt == 0 {
+        if run.status != "failed"
+            || run.retry_attempt == 0
+            || run.run_type_id == RunType::Task.as_id()
+        {
             return None;
         }
         let recorded = run
