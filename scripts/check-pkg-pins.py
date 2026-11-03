@@ -51,9 +51,12 @@ ALLOWED_PINS = {
 
 # The message `hot` gives when a pkg.hot.dev download fails for a reason
 # other than a missing version (see download_cdn_package in
-# crates/hot/src/lang/project.rs). A 404 means the pin names a version that
-# was never published, which is a broken pin.
-FETCH_ERROR = re.compile(r"from CDN: (Network error fetching|HTTP error \d+ fetching|Failed to read package data)")
+# crates/hot/src/lang/project.rs). A 404, or the 403 pkg.hot.dev gives for
+# a file that doesn't exist, means the pin names a version that was never
+# published, which is a broken pin.
+FETCH_ERROR = re.compile(
+    r"from CDN: (Network error fetching|HTTP error (?!40[34] )\d+ fetching|Failed to read package data)"
+)
 
 
 class Package:
