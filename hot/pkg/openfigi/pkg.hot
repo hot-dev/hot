@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.openfigi {
+  name: "hot.dev/openfigi",
+  version: "0.1.0",
+  hot-min-version: "3.0.2",
+  description: "OpenFIGI for Hot: map ISINs, CUSIPs, SEDOLs, tickers and other identifiers to Bloomberg FIGIs in batches, search and filter FIGIs by keyword and attributes with page tokens, list the values each mapping field accepts, and validate FIGI check digits. Free, with an optional API key for higher limits.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["fintech", "market-data", "openfigi", "figi", "bloomberg", "symbology"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

@@ -2,127 +2,75 @@
 //! The privileged fixture creates only the database, roles and initial account;
 //! child provisioning, credentials and every HTTP operation use the runtime role.
 use super::*;
+use crate::cross_instance_tests::privileged_fixture::PrivilegedDb;
 use axum::body::{Body, to_bytes};
 use hot::db::org_api_key::CreateOrgApiKey;
 use hot::db::{self, DatabasePool};
 use hot::queue::Queue;
 use hot::stream::{StreamPubSub, StreamPubSubType};
 use serde_json::{Value, json};
-use sqlx::{Executor, PgPool};
-use std::{path::Path, sync::Arc};
+use sqlx::PgPool;
+use std::sync::Arc;
 use tower::ServiceExt;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 struct Fixture {
-    cluster: PgPool,
-    admin: PgPool,
+    postgres: PrivilegedDb,
     runtime: Arc<DatabasePool>,
-    database: String,
-    role: String,
     user: Uuid,
     deployer: Uuid,
     root: Uuid,
 }
 
+/// The rehearsal's accounts, and the runtime pool that acts on them.
+async fn seed(postgres: &PrivilegedDb) -> TestResult<(Arc<DatabasePool>, Uuid, Uuid, Uuid)> {
+    let suffix = Uuid::new_v4().simple().to_string();
+    let admin = &postgres.admin;
+    let runtime =
+        Arc::new(db::create_db_pool(&hot::val!({"uri":postgres.runtime_uri.as_str()})).await?);
+    let user = Uuid::new_v4();
+    let deployer = Uuid::new_v4();
+    let root = Uuid::new_v4();
+    sqlx::query("INSERT INTO hot.\"user\"(user_id,email,created_by_user_id) VALUES($1,$2,$1)")
+        .bind(user)
+        .bind(format!("{suffix}@lifecycle.example.test"))
+        .execute(admin)
+        .await?;
+    sqlx::query("INSERT INTO hot.org(org_id,name,slug,org_type,created_by_user_id) VALUES($1,'Lifecycle account',$2,'organization',$3)")
+        .bind(root).bind(format!("account-{suffix}")).bind(user).execute(admin).await?;
+    sqlx::query("INSERT INTO hot.org_user(org_user_id,org_id,user_id,org_user_role_id,created_by_user_id) VALUES($1,$2,$3,2,$3)")
+        .bind(Uuid::new_v4()).bind(root).bind(user).execute(admin).await?;
+    sqlx::query("INSERT INTO hot.\"user\"(user_id,email,created_by_user_id) VALUES($1,$2,$1)")
+        .bind(deployer)
+        .bind(format!("deployer-{suffix}@lifecycle.example.test"))
+        .execute(admin)
+        .await?;
+    sqlx::query("INSERT INTO hot.org_user(org_user_id,org_id,user_id,org_user_role_id,created_by_user_id) VALUES($1,$2,$3,1,$4)")
+        .bind(Uuid::new_v4()).bind(root).bind(deployer).bind(user).execute(admin).await?;
+    Ok((runtime, user, deployer, root))
+}
+
 impl Fixture {
     async fn new(admin_uri: &str) -> TestResult<Self> {
-        let suffix = Uuid::new_v4().simple().to_string();
-        let database = format!("hot_lifecycle_{suffix}");
-        let role = format!("hot_lifecycle_runtime_{suffix}");
-        let password = Uuid::new_v4().simple().to_string();
-        let cluster = PgPool::connect(admin_uri).await?;
-        cluster
-            .execute(sqlx::AssertSqlSafe(format!("CREATE DATABASE {database}")))
-            .await?;
-        cluster.execute(sqlx::AssertSqlSafe(format!("CREATE ROLE {role} LOGIN PASSWORD '{password}' NOSUPERUSER NOBYPASSRLS NOINHERIT NOCREATEDB NOCREATEROLE NOREPLICATION"))).await?;
-        let mut url = url::Url::parse(admin_uri)?;
-        url.set_path(&format!("/{database}"));
-        db::run_migrations(&hot::val!({"uri":url.to_string(),"migration-uri":url.to_string()}))
-            .await?;
-        let admin = PgPool::connect(url.as_str()).await?;
-        let provisioning_password = url.password().map(str::to_owned);
-        url.set_password(None)
-            .map_err(|_| "invalid fixture password")?;
-        let mut command = tokio::process::Command::new("psql");
-        command
-            .args([
-                "-X",
-                "--dbname",
-                url.as_str(),
-                "-v",
-                "ON_ERROR_STOP=1",
-                "-v",
-                &format!("runtime_role={role}"),
-                "-v",
-                "schema=hot",
-                "-f",
-            ])
-            .arg(
-                Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../resources/db/postgres/provision_runtime.sql"),
-            );
-        if let Some(password) = provisioning_password {
-            command.env("PGPASSWORD", password);
+        let postgres = PrivilegedDb::create(admin_uri, "hot_lifecycle").await?;
+        match seed(&postgres).await {
+            Ok((runtime, user, deployer, root)) => Ok(Self {
+                postgres,
+                runtime,
+                user,
+                deployer,
+                root,
+            }),
+            Err(error) => postgres.abandon(error).await,
         }
-        let output = command.output().await?;
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        url.set_username(&role)
-            .map_err(|_| "invalid fixture role")?;
-        url.set_password(Some(&password))
-            .map_err(|_| "invalid fixture password")?;
-        let runtime = Arc::new(db::create_db_pool(&hot::val!({"uri":url.to_string()})).await?);
-        let user = Uuid::new_v4();
-        let deployer = Uuid::new_v4();
-        let root = Uuid::new_v4();
-        sqlx::query("INSERT INTO hot.\"user\"(user_id,email,created_by_user_id) VALUES($1,$2,$1)")
-            .bind(user)
-            .bind(format!("{suffix}@lifecycle.example.test"))
-            .execute(&admin)
-            .await?;
-        sqlx::query("INSERT INTO hot.org(org_id,name,slug,org_type,created_by_user_id) VALUES($1,'Lifecycle account',$2,'organization',$3)")
-            .bind(root).bind(format!("account-{suffix}")).bind(user).execute(&admin).await?;
-        sqlx::query("INSERT INTO hot.org_user(org_user_id,org_id,user_id,org_user_role_id,created_by_user_id) VALUES($1,$2,$3,2,$3)")
-            .bind(Uuid::new_v4()).bind(root).bind(user).execute(&admin).await?;
-        sqlx::query("INSERT INTO hot.\"user\"(user_id,email,created_by_user_id) VALUES($1,$2,$1)")
-            .bind(deployer)
-            .bind(format!("deployer-{suffix}@lifecycle.example.test"))
-            .execute(&admin)
-            .await?;
-        sqlx::query("INSERT INTO hot.org_user(org_user_id,org_id,user_id,org_user_role_id,created_by_user_id) VALUES($1,$2,$3,1,$4)")
-            .bind(Uuid::new_v4()).bind(root).bind(deployer).bind(user).execute(&admin).await?;
-        Ok(Self {
-            cluster,
-            admin,
-            runtime,
-            database,
-            role,
-            user,
-            deployer,
-            root,
-        })
     }
 
     async fn cleanup(self) -> TestResult {
         if let DatabasePool::Postgres(pool) = self.runtime.as_ref() {
             pool.close().await;
         }
-        self.admin.close().await;
-        self.cluster
-            .execute(sqlx::AssertSqlSafe(format!(
-                "DROP DATABASE {} WITH (FORCE)",
-                self.database
-            )))
-            .await?;
-        self.cluster
-            .execute(sqlx::AssertSqlSafe(format!("DROP ROLE {}", self.role)))
-            .await?;
-        self.cluster.close().await;
-        Ok(())
+        self.postgres.destroy().await
     }
 }
 
@@ -325,7 +273,7 @@ async fn restricted_runtime_sub_org_lifecycle_through_production_router() -> Tes
         return Ok(());
     }
     let fixture = Fixture::new(&admin_uri).await?;
-    let result: TestResult = async {
+    let body = async {
         let (manager, manager_token) = OrgApiKey::create_for_user(
             &fixture.runtime,
             fixture.root,
@@ -400,7 +348,7 @@ async fn restricted_runtime_sub_org_lifecycle_through_production_router() -> Tes
         assert_eq!(
             sqlx::query_scalar::<_, i64>("SELECT count(*) FROM hot.org_user WHERE org_id=ANY($1)")
                 .bind(vec![a.org, b.org])
-                .fetch_one(&fixture.admin)
+                .fetch_one(&fixture.postgres.admin)
                 .await?,
             0,
             "child operations must work without copied root memberships"
@@ -557,7 +505,7 @@ async fn restricted_runtime_sub_org_lifecycle_through_production_router() -> Tes
         )
         .bind(a.env)
         .bind(a.service_id)
-        .fetch_one(&fixture.admin)
+        .fetch_one(&fixture.postgres.admin)
         .await?;
         assert!(
             access_count >= 2,
@@ -637,7 +585,7 @@ async fn restricted_runtime_sub_org_lifecycle_through_production_router() -> Tes
             StatusCode::OK,
         )
         .await;
-        let work_before = event_work_snapshot(&fixture.admin, &event_queue).await?;
+        let work_before = event_work_snapshot(&fixture.postgres.admin, &event_queue).await?;
         let (status, body) = request(&app, "POST", &public_webhook, None, Some(json!({}))).await;
         assert_eq!(
             status,
@@ -645,7 +593,7 @@ async fn restricted_runtime_sub_org_lifecycle_through_production_router() -> Tes
             "suspended public webhook: {body}"
         );
         assert_eq!(
-            event_work_snapshot(&fixture.admin, &event_queue).await?,
+            event_work_snapshot(&fixture.postgres.admin, &event_queue).await?,
             work_before,
             "suspended webhook must not persist or queue an event"
         );
@@ -699,7 +647,7 @@ async fn restricted_runtime_sub_org_lifecycle_through_production_router() -> Tes
             StatusCode::OK,
         )
         .await;
-        let work_before = event_work_snapshot(&fixture.admin, &event_queue).await?;
+        let work_before = event_work_snapshot(&fixture.postgres.admin, &event_queue).await?;
         let (status, body) = request(&app, "POST", &public_webhook, None, Some(json!({}))).await;
         assert_eq!(
             status,
@@ -707,7 +655,7 @@ async fn restricted_runtime_sub_org_lifecycle_through_production_router() -> Tes
             "archived public webhook: {body}"
         );
         assert_eq!(
-            event_work_snapshot(&fixture.admin, &event_queue).await?,
+            event_work_snapshot(&fixture.postgres.admin, &event_queue).await?,
             work_before,
             "archived webhook must not persist or queue an event"
         );
@@ -816,12 +764,13 @@ async fn restricted_runtime_sub_org_lifecycle_through_production_router() -> Tes
             "SELECT count(*) FROM hot.org_note WHERE org_id=$1 AND note_type='org-api.request'",
         )
         .bind(fixture.root)
-        .fetch_one(&fixture.admin)
+        .fetch_one(&fixture.postgres.admin)
         .await?;
         assert!(notes > 10);
-        Ok(())
-    }
-    .await;
-    fixture.cleanup().await?;
-    result
+        TestResult::Ok(())
+    };
+    // Clean up after a failed assertion too, then report it.
+    let outcome = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(body)).await;
+    let cleaned = fixture.cleanup().await;
+    crate::cross_instance_tests::privileged_fixture::report(outcome, cleaned)
 }

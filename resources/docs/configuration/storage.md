@@ -279,11 +279,140 @@ keys contain organization and environment IDs and appear only at debug level.
 Changing `storage.type` does **not** move data. Existing file records, blob
 objects, in-flight uploads, and builds keep pointing at the backend that wrote
 them, and Hot refuses to read, overwrite, or clean them up through a different
-backend instead of guessing. Switching an existing installation requires a
-separate migration that copies the bytes and rewrites persisted references
-(`file.storage_backend`/`storage_path`, `blob_object.storage_backend`, and
-`build.storage_backend`/`storage_path`). Abandon or finish pending multipart
-uploads before switching.
+backend instead of guessing. To switch an existing installation, stop Hot and
+move the data with `hot db move-storage`, then change the configuration:
+
+```bash
+hot db move-storage --role file --to s3 --bucket acme-hot --prefix files --region us-east-1 \
+  --manifest file-move.jsonl
+hot db move-storage --role build --to gcs --bucket acme-hot --prefix builds \
+  --manifest build-move.jsonl
+```
+
+It runs with the installation's current configuration, which names the
+source, and moves one role at a time: `build`, or `file` together with
+internal blobs. The target must be another backend: the command refuses `--to`
+the backend the role already uses, so it cannot move objects to another bucket
+or prefix of that backend. For a local target, `--path` names the directory, and
+a relative path is made absolute.
+
+On PostgreSQL, a real move refuses to start while a Hot scheduler is running, and
+a scheduler started during the move dispatches nothing. It checks only the
+scheduler, so stop the other services too. `--dry-run` can run at any time.
+
+For each object it does three things:
+- copies the bytes under the same key below the organization and environment
+  (so a file version keeps its unique name);
+- reads the copy back and checks it against the source (SHA-256, or the blob's
+  BLAKE3 hash), and that a file's size matches its record;
+- then rewrites that one record.
+
+Files and blobs stream through in 64 MiB parts, so their size is not bound by
+memory. On S3 anything larger than one part is a multipart upload, which needs
+`s3:PutObject` and `s3:AbortMultipartUpload`. On GCS, parts are staged under
+`.uploads/` and composed. Builds move whole, one at a time. A file whose bytes
+do not match its record's MD5 ETag still moves, with a warning, since an ETag is
+not always an MD5. On a local target, a name over 255 bytes is shortened, and the
+record keeps the result.
+
+### Reports
+
+`--manifest FILE` appends one JSON line per object as it finishes, so a re-run
+adds to the same file. A re-run skips what already moved, so that file stays the
+only full record: use one per role. `--manifest -` writes the lines to standard
+output instead, and turns off logging that would go there. Each line names the
+object's `kind`, `id`, `org_id`, `env_id`, `from`, `to`, `bytes`, and `digest`, a
+`status` of `moved`, `planned`, `skipped`, or `failed`, and an `error` or
+`warning` when it has one.
+
+`--dry-run` copies nothing. Each object is `planned`, so the summary counts what
+would move, and `--manifest` lists it. The summary goes to standard error, with
+counts of `moved`, `planned`, `skipped`, `failed`, and `warnings`, the `bytes`
+moved, and `retired_left`.
+
+### After a move
+
+The command exits non-zero if any object fails. An interrupted or partly failed
+move can run again: moved records are skipped. To leave behind an object that can
+never move, because its bytes are gone, say, list its id from the manifest in the
+`HOT_MOVE_STORAGE_SKIP` environment variable, a comma-separated list of file,
+blob object, or build ids. A longer list can go in a file named by
+`--skip-file <FILE>` or `HOT_MOVE_STORAGE_SKIP_FILE`, with one id per line. The file
+adds to `HOT_MOVE_STORAGE_SKIP`, and the flag wins over the variable. Blank lines and
+surrounding whitespace are ignored, an empty file skips nothing, and an empty variable
+names no file. An unreadable file, or a line that is not an id, refuses the move
+before it connects to the database. `--dry-run` reads the list too, and shows those
+objects as `skipped`.
+
+Hot can't read what stays behind: a file left there can only be deleted, and a build
+must be deployed again. A skipped blob returns to use when the same content is stored
+again.
+
+After a successful real move, the command prints the exact settings to set. They
+must match, including an empty prefix, because Hot finds internal blobs and
+builds through these settings, not through their records. Running the same
+command after the switch names any bucket, prefix, or path that differs, and
+exits non-zero either way.
+
+The source keeps every moved object, and no worker deletes it on either
+configuration. Each manifest line's `from` names the source object, for removing
+copies by hand once the move is confirmed. Objects retired before the move stay
+on the source too, counted in the summary's `retired_left`.
+Abandoned multipart uploads on the source are marked aborted by the worker's
+upload cleanup once the new backend is configured.
+
+To go back after a partial move, point the configuration at the target and run
+the move in reverse, for example `--to local --path <old path>`. Records still on
+the source are not listed, and each moved record is copied back.
+
+On Hot's self-hosted AWS and Google Cloud stacks, a single machine's host agent
+runs this move when a role's storage changes from the host's disk to a bucket, or
+from S3 to Cloud Storage. The apply starts it, in a redeploy of the release already
+running: see
+[Moving builds and files to a bucket](https://github.com/hot-dev/hot/blob/main/infra/README.md#moving-builds-and-files-to-a-bucket).
+Any other change is refused before anything stops: back onto the host, to another
+bucket or prefix of one backend, or out of Cloud Storage, since the apply that changes
+the setting also removes the host's access to an existing bucket. While a move has
+finished and the deploy it belongs to has not, a change to another role is refused
+before anything runs. Put that setting back, apply, and run
+`deploy-now` to finish the deploy, then move the other role in a deploy of its own.
+
+When such a move fails, what to leave behind goes in the installation's `settings`.
+A setting alone does not retry the move: it takes an apply, then `deploy-now`.
+
+- **A few objects.** List their ids in `settings.HOT_MOVE_STORAGE_SKIP`, separated by
+  commas.
+- **Everything the last report counted.** Set `settings.HOT_MOVE_STORAGE_SKIP_FAILED`
+  to the count in that report, `failed.storage_failed.count`, however many that is.
+  An outage or bad credentials can fail every object, so check the cause first. Any
+  other count is refused and leaves nothing behind, and so is one with no report
+  behind it. A value that is not a whole number of 1 or more is refused at plan and
+  stops any deploy.
+
+Objects `HOT_MOVE_STORAGE_SKIP_FAILED` left behind in earlier attempts stay behind for
+as long as it's set, and taking it out tries them all again. The deploy that finishes
+the move warns how many objects stayed behind, and the move's manifest lists them as
+`skipped`. Remove the setting once the move has finished, because the next storage
+move refuses it until it's gone. Removing it redeploys the same release, as a change
+to `settings` does.
+
+`settings` can't name a skip file: `HOT_MOVE_STORAGE_SKIP_FILE` is refused, like any
+`_FILE` name, and `--skip-file` is for running the command by hand.
+
+A scalable installation does not move storage, so keep its builds and files on
+the backend, bucket, and prefix they started on: Hot refuses to read records
+through another backend, finds builds and internal blobs through these settings,
+and existing records name their bucket. A change of storage also replaces every
+host, so on AWS and Google Cloud alike the scalable stack's plan refuses another
+bucket or prefix, comparing against what it recorded at its first apply. On Google
+Cloud it refuses a change of backend too; a scalable AWS installation stays on S3.
+Put the setting back. A trailing slash on a prefix does not count as a change. An
+installation that has stored nothing, such as one whose first apply failed, can
+start again with `tofu apply -replace=terraform_data.storage_locations` on AWS or
+`tofu apply -replace=terraform_data.storage_backends` on Google Cloud, which
+replaces its location record as well. The plan workflow cannot pass `-replace`, so run it
+yourself: see
+[Scalable installations](https://github.com/hot-dev/hot/blob/main/infra/README.md#scalable-installations).
 
 Internal blobs are content-addressed, so storing a blob whose content was
 already stored by the previous backend writes it to the new backend and moves
@@ -320,3 +449,9 @@ for temporary credentials.
 |---------|----------------------|---------|
 | `hot.file.storage.path` | `HOT_FILE_STORAGE_PATH` | `./.hot/file`, or `$HOT_HOME/file` when `HOT_HOME` is set |
 | `hot.build.storage.path` | `HOT_BUILD_STORAGE_PATH` | `.hot/build` |
+
+One file directory can serve several services. A process running as root, as the
+self-hosted bundle's task worker does, gives what it writes under the directory to
+the directory's owner, so services running as other users can still use it. A
+symlink anywhere under such a directory then fails the write, with `could not give
+it to the storage directory's owner`.

@@ -46,8 +46,9 @@ pub fn spawn_notification_worker(
             .expect("Failed to create HTTP client for notification worker");
 
         // Create email senders
-        let alert_email_sender = EmailSender::alerts_from_conf(&conf);
-        let app_email_sender = EmailSender::from_conf(&conf);
+        // Kept for the worker's life: an SMTP sender owns a connection pool.
+        let alert_email_sender = Arc::new(EmailSender::alerts_from_conf(&conf));
+        let app_email_sender = Arc::new(EmailSender::from_conf(&conf));
 
         let alert_email_available = alert_email_sender.is_available();
         let app_email_available = app_email_sender.is_available();
@@ -86,7 +87,6 @@ pub fn spawn_notification_worker(
                 result = run_one_email(
                     &email_queue,
                     &email_db,
-                    &conf,
                     &app_email_sender,
                     app_email_available,
                 ) => {
@@ -115,7 +115,7 @@ async fn run_one_alert(
     db: &DatabasePool,
     conf: &hot::val::Val,
     http_client: &reqwest::Client,
-    _alert_email_sender: &EmailSender,
+    alert_email_sender: &Arc<EmailSender>,
     email_available: bool,
 ) -> ProcessResult {
     let result = queue
@@ -123,6 +123,7 @@ async fn run_one_alert(
             let db = db.clone();
             let conf = conf.clone();
             let http_client = http_client.clone();
+            let alert_email_sender = Arc::clone(alert_email_sender);
             async move {
                 let alert_msg: AlertDeliveryMessage = message.try_into().map_err(|e: String| {
                     Box::new(std::io::Error::other(e)) as Box<dyn std::error::Error + Send + Sync>
@@ -135,11 +136,10 @@ async fn run_one_alert(
                     alert_msg.body.destination_type
                 );
 
-                let alert_email_sender = EmailSender::alerts_from_conf(&conf);
                 let alert_email_config = hot::email::EmailConfig::alerts_from_conf(&conf);
                 let email_sender_ref: Option<&dyn hot::db::alert::AlertEmailSender> =
                     if email_available {
-                        Some(&alert_email_sender)
+                        Some(alert_email_sender.as_ref())
                     } else {
                         None
                     };
@@ -193,14 +193,13 @@ async fn run_one_alert(
 async fn run_one_email(
     queue: &ProcessingQueue<Message>,
     db: &DatabasePool,
-    conf: &hot::val::Val,
-    _app_email_sender: &EmailSender,
+    app_email_sender: &Arc<EmailSender>,
     email_available: bool,
 ) -> ProcessResult {
     let result = queue
         .process_blocking(|message| {
             let db = db.clone();
-            let conf = conf.clone();
+            let sender = Arc::clone(app_email_sender);
             async move {
                 let email_msg: EmailMessage = message.try_into().map_err(|e: String| {
                     Box::new(std::io::Error::other(e)) as Box<dyn std::error::Error + Send + Sync>
@@ -220,14 +219,12 @@ async fn run_one_email(
                     let _ = hot::db::email_queue::EmailQueueEntry::mark_failed(
                         &db,
                         &email_msg.body.email_queue_id,
-                        "Email sender not configured",
+                        sender.unavailable_reason(),
                     )
                     .await;
                     return Ok(());
                 }
 
-                // Create email sender for this async block
-                let sender = EmailSender::from_conf(&conf);
                 let email = hot::email::Email {
                     to: email_msg.body.to_address.clone(),
                     subject: email_msg.body.subject.clone(),
@@ -279,5 +276,66 @@ async fn run_one_email(
         Ok(Some(_)) => ProcessResult::Processed,
         Ok(None) => ProcessResult::Empty,
         Err(e) => ProcessResult::Error(e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hot::db::email_queue::{EmailQueueEntry, EmailQueueStatus};
+    use hot::lang::event::queue::EmailMessageBody;
+    use hot::queue::{Queue, mem::MemQueue};
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn an_app_email_this_worker_cannot_send_records_why() {
+        let sender = Arc::new(EmailSender::from_conf(&hot::val!({
+            "email": {"provider": "mystery", "from": "hot@example.test"}
+        })));
+        let db = hot::db::test_db().await;
+        let (to_address, from_address) = ("ops@example.test", "Hot <hot@example.test>");
+        let email_queue_id = EmailQueueEntry::enqueue(
+            &db,
+            to_address,
+            "Hello",
+            None,
+            Some("undelivered"),
+            from_address,
+        )
+        .await
+        .unwrap();
+        let queue = ProcessingQueue::Memory(
+            MemQueue::new(format!("test:app-email:{}", Uuid::now_v7())).unwrap(),
+        );
+        queue
+            .enqueue(
+                EmailMessage {
+                    id: Uuid::now_v7(),
+                    head: ahash::AHashMap::new(),
+                    body: EmailMessageBody {
+                        email_queue_id,
+                        to_address: to_address.to_string(),
+                        subject: "Hello".to_string(),
+                        html_body: None,
+                        text_body: Some("undelivered".to_string()),
+                        from_address: from_address.to_string(),
+                    },
+                }
+                .into(),
+            )
+            .await
+            .unwrap();
+
+        let result = run_one_email(&queue, &db, &sender, sender.is_available()).await;
+        assert!(matches!(result, ProcessResult::Processed));
+
+        let entry = EmailQueueEntry::get_by_id(&db, &email_queue_id)
+            .await
+            .unwrap();
+        assert_eq!(entry.status_id, EmailQueueStatus::Failed as i16);
+        assert_eq!(
+            entry.error_message.as_deref(),
+            Some("email provider 'mystery' is not registered")
+        );
     }
 }

@@ -128,9 +128,12 @@ fn parse_trusted_proxies(value: Option<Val>) -> Result<Vec<IpNet>, String> {
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
         .map(|value| {
-            value.parse::<IpNet>().map_err(|e| {
-                format!("invalid network.client-ip.trusted-proxies entry '{value}': {e}")
-            })
+            value
+                .parse::<IpNet>()
+                .or_else(|e| value.parse::<IpAddr>().map(IpNet::from).map_err(|_| e))
+                .map_err(|e| {
+                    format!("invalid network.client-ip.trusted-proxies entry '{value}': {e}")
+                })
         })
         .collect()
 }
@@ -248,6 +251,48 @@ mod tests {
         .unwrap_err();
 
         assert!(error.contains("requires at least one"));
+    }
+
+    #[test]
+    fn enabled_policy_reads_a_bare_address_as_a_single_host() {
+        let policy = ClientIpPolicy::from_conf(&hot::val!({
+            "network": {
+                "client-ip": {
+                    "trusted-proxy": true,
+                    "trusted-proxies": "127.0.0.1, 2001:db8::1",
+                },
+            },
+        }))
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            "198.51.100.7, 2001:db8::2, 2001:db8::1".parse().unwrap(),
+        );
+
+        assert_eq!(
+            policy.resolve(&headers, peer("127.0.0.1")),
+            Some(ClientIp("2001:db8::2".to_string()))
+        );
+        assert_eq!(
+            policy.resolve(&headers, peer("127.0.0.2")),
+            Some(ClientIp("127.0.0.2".to_string()))
+        );
+    }
+
+    #[test]
+    fn enabled_policy_refuses_a_proxy_entry_that_is_no_address() {
+        let error = ClientIpPolicy::from_conf(&hot::val!({
+            "network": {
+                "client-ip": {
+                    "trusted-proxy": true,
+                    "trusted-proxies": ["proxy.internal"],
+                },
+            },
+        }))
+        .unwrap_err();
+
+        assert!(error.contains("'proxy.internal'"), "{error}");
     }
 
     #[test]

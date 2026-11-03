@@ -40,12 +40,18 @@ pub struct OAuthCallbackQuery {
     pub state: String,
 }
 
+/// Log a configuration failure; the browser only learns sign-in is unavailable.
+fn oauth_config_error(error: String) -> Html<String> {
+    tracing::error!("hot.dev: APP OAuth configuration failed: {error}");
+    Html("Sign-in with this provider is unavailable. Please contact support.".to_string())
+}
+
 /// Google OAuth initiation handler
 pub async fn google_auth_handler(
     Query(params): Query<OAuthInitQuery>,
     cookies: CookieJar,
 ) -> Result<(CookieJar, Redirect), Html<String>> {
-    let config = OAuthConfig::from_env();
+    let config = OAuthConfig::from_env().map_err(oauth_config_error)?;
 
     let google_config = match config.google {
         Some(cfg) => cfg,
@@ -140,7 +146,7 @@ pub async fn google_callback_handler(
         )));
     }
 
-    let config = OAuthConfig::from_env();
+    let config = OAuthConfig::from_env().map_err(oauth_config_error)?;
     let google_config = config
         .google
         .ok_or_else(|| Html("Google OAuth is not configured".to_string()))?;
@@ -172,18 +178,27 @@ pub async fn google_callback_handler(
     }
 
     // Handle user creation or login
-    let (user, is_new_user) = handle_oauth_user(
+    let signin = handle_oauth_user(
         &db,
         &conf,
         &user_info.email,
         "google",
         &user_info.id,
         user_info.name.as_deref(),
+        invite_cookie(&cookies).as_deref(),
     )
     .await
     .map_err(|e| Html(format!("Authentication failed: {}", e)))?;
 
-    complete_oauth_signin(&db, &conf, cookies, user, is_new_user).await
+    complete_oauth_signin(&db, &conf, cookies, signin).await
+}
+
+/// The invite code carried from the OAuth initiation, if any.
+fn invite_cookie(cookies: &CookieJar) -> Option<String> {
+    cookies
+        .get(OAUTH_INVITE_COOKIE_NAME)
+        .map(|c| c.value().to_string())
+        .filter(|code| !code.is_empty())
 }
 
 /// Finish an OAuth sign-in once a user record has been resolved: process the
@@ -194,13 +209,15 @@ async fn complete_oauth_signin(
     db: &DatabasePool,
     conf: &Val,
     cookies: CookieJar,
-    user: User,
-    is_new_user: bool,
+    signin: OAuthSignin,
 ) -> Result<(CookieJar, Redirect), Html<String>> {
-    // Get invite code from cookie if present
-    let invite_code = cookies
-        .get(OAUTH_INVITE_COOKIE_NAME)
-        .map(|c| c.value().to_string());
+    let OAuthSignin {
+        user,
+        is_new_user,
+        admitted_by,
+    } = signin;
+    // The invitation that admitted a new account, else the invite cookie's.
+    let invite_code = admitted_by.or_else(|| invite_cookie(&cookies));
 
     // Process invite code if provided. On failure, complete the sign-in but
     // land on the invite page, which explains why it could not be applied.
@@ -271,7 +288,7 @@ pub async fn github_auth_handler(
     Query(params): Query<OAuthInitQuery>,
     cookies: CookieJar,
 ) -> Result<(CookieJar, Redirect), Html<String>> {
-    let config = OAuthConfig::from_env();
+    let config = OAuthConfig::from_env().map_err(oauth_config_error)?;
 
     let github_config = match config.github {
         Some(cfg) => cfg,
@@ -366,7 +383,7 @@ pub async fn github_callback_handler(
         )));
     }
 
-    let config = OAuthConfig::from_env();
+    let config = OAuthConfig::from_env().map_err(oauth_config_error)?;
     let github_config = config
         .github
         .ok_or_else(|| Html("GitHub OAuth is not configured".to_string()))?;
@@ -452,18 +469,19 @@ pub async fn github_callback_handler(
     };
 
     // Handle user creation or login
-    let (user, is_new_user) = handle_oauth_user(
+    let signin = handle_oauth_user(
         &db,
         &conf,
         &email,
         "github",
         &user_info.id.to_string(),
         user_info.name.as_deref(),
+        invite_cookie(&cookies).as_deref(),
     )
     .await
     .map_err(|e| Html(format!("Authentication failed: {}", e)))?;
 
-    complete_oauth_signin(&db, &conf, cookies, user, is_new_user).await
+    complete_oauth_signin(&db, &conf, cookies, signin).await
 }
 
 /// If an invite is in play and its email is among the user's verified
@@ -558,22 +576,31 @@ pub async fn github_select_email_post_handler(
         .cloned()
         .ok_or_else(|| Html("Please choose one of your verified GitHub emails.".to_string()))?;
 
-    let (user, is_new_user) = handle_oauth_user(
+    let signin = handle_oauth_user(
         &db,
         &conf,
         &email,
         &pending.provider,
         &pending.provider_user_id,
         pending.name.as_deref(),
+        invite_cookie(&cookies).as_deref(),
     )
     .await
     .map_err(|e| Html(format!("Authentication failed: {}", e)))?;
 
-    complete_oauth_signin(&db, &conf, cookies, user, is_new_user).await
+    complete_oauth_signin(&db, &conf, cookies, signin).await
 }
 
-/// Handle OAuth user creation or login
-/// Returns (User, is_new_user)
+/// The account an OAuth sign-in resolved to.
+pub struct OAuthSignin {
+    pub user: User,
+    pub is_new_user: bool,
+    /// Under invite-only sign-up, the invitation that admitted a new account.
+    pub admitted_by: Option<String>,
+}
+
+/// Handle OAuth user creation or login. `invite_code` is the invitation the
+/// sign-in started from, if any.
 pub async fn handle_oauth_user(
     db: &DatabasePool,
     conf: &Val,
@@ -581,7 +608,13 @@ pub async fn handle_oauth_user(
     provider: &str, // "google" or "github"
     provider_user_id: &str,
     name: Option<&str>,
-) -> Result<(User, bool), String> {
+    invite_code: Option<&str>,
+) -> Result<OAuthSignin, String> {
+    let existing = |user: User| OAuthSignin {
+        user,
+        is_new_user: false,
+        admitted_by: None,
+    };
     // Resolution order:
     //   1. provider_user_id — the stable key. Survives the user changing
     //      their email at the provider and changes to our email-resolution
@@ -598,7 +631,7 @@ pub async fn handle_oauth_user(
             user.email,
             provider
         );
-        return Ok((user, false));
+        return Ok(existing(user));
     }
 
     // Check if user already exists with this email
@@ -609,7 +642,7 @@ pub async fn handle_oauth_user(
                 Ok(_) => {
                     // OAuth already linked, just log them in
                     tracing::debug!("User {} logged in with {}", email, provider);
-                    Ok((user, false))
+                    Ok(existing(user))
                 }
                 Err(_) => {
                     // User exists but doesn't have this OAuth provider linked
@@ -632,12 +665,27 @@ pub async fn handle_oauth_user(
                     .map_err(|e| format!("Failed to link OAuth provider: {}", e))?;
 
                     tracing::debug!("Linked {} OAuth to existing user {}", provider, email);
-                    Ok((user, false))
+                    Ok(existing(user))
                 }
             }
         }
         Err(_) => {
-            // User doesn't exist, create new user with OAuth
+            // User doesn't exist, create new user with OAuth. Under
+            // invite-only sign-up, an invitation that can be applied admits
+            // the account, and is applied once it exists.
+            let admitted_by = if crate::signup::verified_signup_open(conf) {
+                None
+            } else {
+                match crate::signup::admitting_invite(db, email, invite_code).await? {
+                    Some(invite) => Some(invite.invite_code),
+                    None => {
+                        return Err(
+                            "Signing up requires an invitation sent to this email address. Ask an administrator to invite you."
+                                .to_string(),
+                        );
+                    }
+                }
+            };
             if let Err(retry_after) =
                 crate::rate_limit::check_oauth_new_identity(conf, provider, provider_user_id, email)
             {
@@ -685,7 +733,11 @@ pub async fn handle_oauth_user(
                 .map_err(|e| format!("Failed to get created user: {}", e))?;
 
             tracing::debug!("Created new user {} via {} OAuth", email, provider);
-            Ok((user, true))
+            Ok(OAuthSignin {
+                user,
+                is_new_user: true,
+                admitted_by,
+            })
         }
     }
 }
@@ -786,6 +838,163 @@ fn compute_oauth_redirect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An organization `slug` with an administrator, and an invitation to it.
+    async fn invited_org(db: &DatabasePool, slug: &str, email: &str, code: &str) -> Uuid {
+        let admin_id = Uuid::now_v7();
+        User::insert_user(
+            db,
+            &admin_id,
+            &format!("admin@{slug}.example.com"),
+            Some("Admin"),
+            Some(&admin_id),
+        )
+        .await
+        .unwrap();
+        let org_id = crate::handlers::create_org(db, &admin_id, slug, slug, "organization")
+            .await
+            .unwrap();
+        hot::db::Invite::insert_invite(
+            db,
+            &Uuid::now_v7(),
+            code,
+            email,
+            &org_id,
+            1,
+            &admin_id,
+            chrono::Utc::now() + chrono::Duration::days(7),
+        )
+        .await
+        .unwrap();
+        org_id
+    }
+
+    #[tokio::test]
+    async fn invite_only_oauth_admits_invited_addresses_in_any_case() {
+        let db = hot::db::test_db().await;
+        let conf = hot::val!({"app": {"signup": "invite"}});
+
+        // Google reports addresses in lowercase; the invitation link names Bob.
+        let acme = invited_org(&db, "acme", "Bob@Corp.com", "bob-code").await;
+        let signin = handle_oauth_user(
+            &db,
+            &conf,
+            "bob@corp.com",
+            "google",
+            "google-bob",
+            Some("Bob"),
+            Some("bob-code"),
+        )
+        .await
+        .unwrap();
+        assert!(signin.is_new_user);
+        assert_eq!(signin.admitted_by.as_deref(), Some("bob-code"));
+        process_invite_code(&db, &signin.user.user_id, "bob-code")
+            .await
+            .unwrap();
+        let orgs = hot::db::org::Org::get_orgs_by_user(&db, &signin.user.user_id)
+            .await
+            .unwrap();
+        assert!(orgs.iter().any(|org| org.org_id == acme));
+
+        // Without the link, a pending invitation for the address admits it.
+        invited_org(&db, "bcme", "carol@corp.com", "carol-code").await;
+        let signin = handle_oauth_user(
+            &db,
+            &conf,
+            "Carol@Corp.com",
+            "github",
+            "github-carol",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(signin.admitted_by.as_deref(), Some("carol-code"));
+
+        // The address need not match the invitation's capitals either, with
+        // no link to name the invitation. Another spelling then reaches the
+        // same account, which needs no invitation.
+        invited_org(&db, "ccme", "Dana@Corp.com", "dana-code").await;
+        let dana = handle_oauth_user(
+            &db,
+            &conf,
+            "DANA@CORP.COM",
+            "google",
+            "google-dana-upper",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(dana.is_new_user);
+        assert_eq!(dana.admitted_by.as_deref(), Some("dana-code"));
+        let again = handle_oauth_user(
+            &db,
+            &conf,
+            "dana@corp.com",
+            "google",
+            "google-dana-lower",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!again.is_new_user);
+        assert_eq!(again.user.user_id, dana.user.user_id);
+        assert_eq!(again.admitted_by, None);
+
+        // Someone else's invitation admits nobody.
+        assert!(
+            handle_oauth_user(
+                &db,
+                &conf,
+                "mallory@corp.com",
+                "google",
+                "google-mallory",
+                None,
+                Some("carol-code"),
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            User::get_user_by_email(&db, "mallory@corp.com")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn invite_only_oauth_refuses_invitations_that_cannot_apply() {
+        let db = hot::db::test_db().await;
+        let conf = hot::val!({"app": {"signup": "invite"}});
+        let org_id = invited_org(&db, "acme", "eve@corp.com", "eve-code").await;
+        let DatabasePool::Sqlite(pool) = &db else {
+            panic!("test_db is SQLite");
+        };
+        sqlx::query("UPDATE org SET lifecycle_state = 'suspended' WHERE org_id = ?")
+            .bind(org_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        for invite_code in [Some("eve-code"), None] {
+            assert!(
+                handle_oauth_user(
+                    &db,
+                    &conf,
+                    "eve@corp.com",
+                    "google",
+                    "google-eve",
+                    Some("Eve"),
+                    invite_code,
+                )
+                .await
+                .is_err()
+            );
+        }
+        assert!(User::get_user_by_email(&db, "eve@corp.com").await.is_err());
+    }
 
     #[test]
     fn invite_email_matches_verified_case_insensitive() {

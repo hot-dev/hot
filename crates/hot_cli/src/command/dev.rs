@@ -703,7 +703,7 @@ pub(crate) async fn run_dev(
             _ => {
                 warn!(
                     "hot.dev: Docker not found or not running — \
-                     ::hot::box/start tasks will fail. \
+                     ::hot::box/start tasks wait in the queue until Docker answers. \
                      Install and start Docker to enable container tasks, \
                      or set hot.box.enabled to false."
                 );

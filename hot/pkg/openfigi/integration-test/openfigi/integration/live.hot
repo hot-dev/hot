@@ -1,0 +1,61 @@
+::openfigi::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration smoke tests (live, read-only)
+// =============================================================================
+// OPENFIGI_LIVE=1, optionally OPENFIGI_API_KEY. Without a key OpenFIGI
+// allows 5 searches a minute, and this suite makes 2. Without
+// OPENFIGI_LIVE each test records a skip and passes.
+// Run with: hot test -p pkg-integration-openfigi
+
+::ctx ::openfigi::integration::ctx
+::figi ::openfigi
+
+test-map-identifiers
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("OPENFIGI_LIVE is not 1") }
+        => {
+            out ::figi/map-all([
+              ::figi/job("ID_ISIN", "US0378331005", {exchCode: "US"}),
+              ::figi/job("TICKER", "IBM", {exchCode: "US"}),
+              ::figi/job("TICKER", "ZZQXQZ", {exchCode: "US"}),
+              ::figi/job("BASE_TICKER", "IBM")
+            ])
+            assert-eq("BBG000B9XRY4", first(out[0].figis).figi, "Apple by ISIN")
+            assert-eq("BBG000BLNNH6", first(out[1].figis).figi, "IBM by ticker")
+            assert-eq("No identifier found.", out[2].warning, "unknown ticker")
+            assert(is-some(out[3].error), "BASE_TICKER without securityType2 is rejected per job")
+            apple ::figi/by-figi("BBG000B9XRY4")
+            assert-eq("AAPL", apple.ticker)
+            assert(::figi/is-figi(apple.shareClassFIGI), "share class FIGI passes the checksum")
+            assert(is-err(::figi/by-isin("XX0000000000")), "an invalid ISIN is an Err")
+        }
+    }
+}
+
+test-search-and-filter
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("OPENFIGI_LIVE is not 1") }
+        => {
+            page ::figi/search("apple", {filters: {exchCode: "US", securityType: "Common Stock"}})
+            assert(in("AAPL", map(page.data, (f) { f.ticker })), "search finds AAPL")
+            filtered ::figi/filter-figis("IBM", {filters: {exchCode: "US"}})
+            assert(gt(filtered.total, 100), "filter reports a total")
+            assert(is-some(filtered.next), "and a next token")
+        }
+    }
+}
+
+test-values
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("OPENFIGI_LIVE is not 1") }
+        => {
+            assert(in("ID_ISIN", ::figi/values("idType")), "idType values")
+            assert(in("US", ::figi/values("exchCode")), "exchCode values")
+        }
+    }
+}

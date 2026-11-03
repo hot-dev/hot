@@ -450,6 +450,39 @@ pub fn get_local_call_retention_days(conf: &Val) -> i32 {
     conf.get_int_or_default("db.local.retention.call.days", 7) as i32
 }
 
+/// Call data retention in days for organizations without a plan, as on a
+/// self-hosted installation. Reads `db.retention.call.days`, overridable via
+/// `HOT_DB_RETENTION_CALL_DAYS`. The default keeps calls forever (-1), and so
+/// does anything [`call_retention_setting`] refuses: zero would delete every
+/// call, and a misread setting must not delete anything.
+pub fn get_call_retention_days(conf: &Val) -> i32 {
+    call_retention_setting(conf).unwrap_or(-1)
+}
+
+/// [`get_call_retention_days`], or what is wrong with the setting, for the
+/// worker to log: refusing it turns retention off, which no one would
+/// otherwise see until the data disk fills.
+pub fn call_retention_setting(conf: &Val) -> Result<i32, String> {
+    let refuse = |value: &dyn std::fmt::Display| {
+        format!(
+            "db.retention.call.days must be a whole number of days from 1 to 36500, or -1 to \
+             keep calls forever; keeping calls forever instead of using {value}"
+        )
+    };
+    let days: i64 = match conf.get("db.retention.call.days") {
+        None | Some(Val::Null) => return Ok(-1),
+        Some(Val::Int(days)) => days,
+        Some(Val::Str(text)) if text.trim().is_empty() => return Ok(-1),
+        Some(Val::Str(text)) => text.trim().parse().map_err(|_| refuse(&text))?,
+        Some(other) => return Err(refuse(&other)),
+    };
+    match days {
+        -1 => Ok(-1),
+        1..=36500 => Ok(days as i32),
+        _ => Err(refuse(&days)),
+    }
+}
+
 /// Get database URI from configuration
 pub fn get_db_uri_from_conf(conf: &Val) -> String {
     // First try to get from the full config path (db.uri)
@@ -799,6 +832,33 @@ fn no_ledger_yet(
     }
 }
 
+/// A PostgreSQL ledger, or none when no migration ran. `search_path` skips a
+/// schema the login has no USAGE on without saying so, and the ledger in it then
+/// reads as missing, so a migrated database would look empty. That is an error.
+async fn read_postgres_ledger(
+    db: &sqlx::PgPool,
+    schema: &str,
+) -> Result<Vec<(i64, Vec<u8>)>, DatabaseError> {
+    let ledger = no_ledger_yet(sqlx::query_as(LEDGER_QUERY).fetch_all(db).await)?;
+    if !ledger.is_empty() {
+        return Ok(ledger);
+    }
+    let usable: Option<bool> = sqlx::query_scalar(
+        "SELECT has_schema_privilege(current_user, oid, 'USAGE') FROM pg_namespace WHERE nspname = $1",
+    )
+    .bind(schema)
+    .fetch_optional(db)
+    .await?;
+    if usable == Some(false) {
+        return Err(DatabaseError::Migration(format!(
+            "the db.migration-uri login has no USAGE on schema '{schema}', so it can't read the \
+             migration ledger there. This says nothing about the database: don't restore it. \
+             Use the schema owner's login"
+        )));
+    }
+    Ok(ledger)
+}
+
 /// A SQLite database's migration state, read without changing the file.
 pub async fn sqlite_migration_state(uri: &str) -> Result<MigrationState, DatabaseError> {
     use sqlx::ConnectOptions;
@@ -826,10 +886,13 @@ pub async fn migration_state(conf: &Val) -> Result<Option<MigrationState>, Datab
             if migration_uri.is_empty() {
                 return Ok(None);
             }
+            // Another database's ledger would report that database's level.
+            check_migration_target(&uri, &migration_uri)?;
             let schema = conf.get_str_or_default(
                 "db.schema",
                 &conf.get_str_or_default("schema", DEFAULT_DB_SCHEMA),
             );
+            let ledger_schema = schema.clone();
             let migrator = sqlx::migrate::Migrator::new(DatabaseType::Postgres.migration_dir()?)
                 .await
                 .map_err(|e| DatabaseError::Migration(e.to_string()))?;
@@ -849,7 +912,7 @@ pub async fn migration_state(conf: &Val) -> Result<Option<MigrationState>, Datab
                 .connect(&migration_uri)
                 .await
                 .map_err(DatabaseError::Connection)?;
-            let ledger = no_ledger_yet(sqlx::query_as(LEDGER_QUERY).fetch_all(&pool).await);
+            let ledger = read_postgres_ledger(&pool, &ledger_schema).await;
             pool.close().await;
             Ok(Some(MigrationState::compare(&migrator, &ledger?)))
         }
@@ -1651,6 +1714,76 @@ mod tests {
         assert!(check_migration_target(runtime, "postgres://hot_owner@db:5432/hot").is_ok());
         assert!(check_migration_target(runtime, "postgres://hot_owner@db:5432/staging").is_err());
         assert!(check_migration_target(runtime, "sqlite:.hot/db/hot.sqlite.db").is_err());
+    }
+
+    #[tokio::test]
+    async fn migration_state_refuses_a_migration_uri_naming_another_database() {
+        // This fails before connecting, so nothing here reaches a server.
+        let conf = crate::val!({"db": {
+            "uri": "postgres://hot_runtime@127.0.0.1:1/hot",
+            "migration-uri": "postgres://hot_owner@127.0.0.1:1/staging"
+        }});
+        let error = migration_state(&conf).await.err().unwrap().to_string();
+        assert!(error.contains("same database"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn migration_state_refuses_a_login_that_cannot_read_the_ledger() {
+        let Ok(uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
+            eprintln!("skipping: HOT_TEST_POSTGRES_URI not set");
+            return;
+        };
+        // Its own schema and login: tests of the real schema share this server.
+        let name = format!("ledger_{}", Uuid::new_v4().simple());
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&uri)
+            .await
+            .unwrap();
+        let run = async |statement: String| {
+            admin.execute(sqlx::AssertSqlSafe(statement)).await.unwrap();
+        };
+        run(format!("CREATE SCHEMA {name}")).await;
+        run(format!(
+            "CREATE TABLE {name}._sqlx_migrations AS \
+             SELECT 1::bigint AS version, ''::bytea AS checksum, true AS success"
+        ))
+        .await;
+        run(format!("CREATE ROLE {name} LOGIN PASSWORD 'ledger'")).await;
+
+        let mut login = Url::parse(&uri).unwrap();
+        login.set_username(&name).unwrap();
+        login.set_password(Some("ledger")).unwrap();
+        let login = login.to_string();
+        let conf = |schema: String| crate::val!({"db": {"uri": login.clone(), "migration-uri": login.clone(), "schema": schema}});
+
+        let no_usage = migration_state(&conf(name.clone())).await;
+        // Nothing hides this one: it doesn't exist, so no migration ran there.
+        let no_schema = migration_state(&conf(format!("{name}_missing"))).await;
+        run(format!("GRANT USAGE ON SCHEMA {name} TO {name}")).await;
+        let no_select = migration_state(&conf(name.clone())).await;
+        run(format!("GRANT SELECT ON {name}._sqlx_migrations TO {name}")).await;
+        let readable = migration_state(&conf(name.clone())).await;
+        run(format!("DROP SCHEMA {name} CASCADE")).await;
+        run(format!("DROP ROLE {name}")).await;
+
+        let error = no_usage
+            .expect_err("no USAGE must not read as no ledger")
+            .to_string();
+        assert!(
+            error.contains(&format!("no USAGE on schema '{name}'")),
+            "{error}"
+        );
+        let nothing = no_schema.unwrap().unwrap();
+        assert!(
+            nothing.applied.is_empty() && nothing.modified.is_empty(),
+            "{nothing:?}"
+        );
+        assert!(!nothing.pending.is_empty(), "{nothing:?}");
+        let error = no_select.expect_err("no SELECT must not read as no ledger");
+        assert!(error.to_string().contains("permission denied"), "{error}");
+        // The row's checksum isn't this release's, which still counts as read.
+        assert_eq!(readable.unwrap().unwrap().modified, vec![1]);
     }
 
     #[tokio::test]

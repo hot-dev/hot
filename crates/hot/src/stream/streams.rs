@@ -41,7 +41,7 @@ const XREAD_BLOCK_MS: u64 = 30_000;
 /// Entries one subscriber XREAD may return.
 const XREAD_COUNT: usize = 100;
 /// Entries a subscriber's reader buffers ahead of it. A full buffer pauses
-/// reading; the entries wait in Redis.
+/// reading; the entries wait in Redis until `STREAM_MAXLEN` trims them.
 const READER_BUFFER: usize = 256;
 /// Reconnect pacing for a subscriber whose connection failed: the first
 /// retry waits the minimum, each further failure doubles it up to the cap,
@@ -330,8 +330,25 @@ enum SubscriberConnection {
 }
 
 impl SubscriberConnection {
+    /// A blocking read (`XREAD BLOCK`), given time to reach its server-side
+    /// timeout.
+    async fn blocking_cmd(&mut self, cmd: &redis::Cmd) -> Result<redis::Value, StreamPubSubError> {
+        self.cmd_within(cmd, REDIS_SUBSCRIBER_COMMAND_TIMEOUT, "blocking command")
+            .await
+    }
+
+    /// A command that answers at once, bounded like the pool's.
     async fn cmd(&mut self, cmd: &redis::Cmd) -> Result<redis::Value, StreamPubSubError> {
-        tokio::time::timeout(REDIS_SUBSCRIBER_COMMAND_TIMEOUT, async {
+        self.cmd_within(cmd, REDIS_COMMAND_TIMEOUT, "command").await
+    }
+
+    async fn cmd_within(
+        &mut self,
+        cmd: &redis::Cmd,
+        timeout: Duration,
+        kind: &str,
+    ) -> Result<redis::Value, StreamPubSubError> {
+        tokio::time::timeout(timeout, async {
             match self {
                 SubscriberConnection::Standalone(conn) => {
                     let result = cmd
@@ -351,7 +368,7 @@ impl SubscriberConnection {
         })
         .await
         .map_err(|_| {
-            StreamPubSubError::SubscribeError("Redis blocking command timed out after 35s".into())
+            StreamPubSubError::SubscribeError(format!("Redis {kind} timed out after {timeout:?}"))
         })?
     }
 }
@@ -536,7 +553,9 @@ enum ReaderItem {
 /// the connection, and the reply it later receives is discarded, so the
 /// entries it carried are lost. A channel receive is cancel-safe. The task
 /// also owns the read position, so after a connection failure it reconnects
-/// and resumes after the last entry it read instead of going silent.
+/// and resumes after the last entry it read instead of going silent. It
+/// resumes at the oldest entry still kept, so entries trimmed meanwhile
+/// (beyond the newest `STREAM_MAXLEN`) are skipped.
 struct StreamReader {
     entries: mpsc::Receiver<ReaderItem>,
     task: tokio::task::JoinHandle<()>,
@@ -659,7 +678,7 @@ async fn read_stream(
             .arg(&stream_key)
             .arg(&last_id);
         let result = tokio::select! {
-            result = reader.cmd(&xread) => result,
+            result = reader.blocking_cmd(&xread) => result,
             _ = tx.closed() => return,
         };
         let reply = result.and_then(|value| {
@@ -842,12 +861,68 @@ mod tests {
     /// `HOT_REDIS_URI`) picks the server and logical database.
     async fn try_client() -> Option<redis::Client> {
         let uri = std::env::var("REDIS_URL")
-            .or_else(|_| std::env::var("HOT_REDIS_URI"))
-            .unwrap_or_else(|_| "redis://127.0.0.1/".to_string());
+            .ok()
+            .or_else(|| {
+                crate::environment::read_optional("HOT_REDIS_URI")
+                    .ok()
+                    .flatten()
+            })
+            .unwrap_or_else(|| "redis://127.0.0.1/".to_string());
         let client = redis::Client::open(uri.as_str()).ok()?;
         // Fail fast if Redis isn't actually running.
         client.get_multiplexed_async_connection().await.ok()?;
         Some(client)
+    }
+
+    /// A server that answers each command with OK until one names
+    /// `stall_on`, then never answers again.
+    async fn stalling_server(stall_on: &'static str) -> std::net::SocketAddr {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0; 4096];
+            while let Ok(read) = socket.read(&mut buffer).await {
+                let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+                if read == 0 || request.contains(stall_on) {
+                    break;
+                }
+                let commands = request.split("\r\n").filter(|line| line.starts_with('*'));
+                let replies = "+OK\r\n".repeat(commands.count());
+                if socket.write_all(replies.as_bytes()).await.is_err() {
+                    break;
+                }
+            }
+            // Hold the connection open, silent.
+            std::future::pending::<()>().await;
+        });
+        address
+    }
+
+    #[tokio::test]
+    async fn subscribing_bounds_its_first_read_like_a_short_command() {
+        let address = stalling_server("XREVRANGE").await;
+        let client = redis::Client::open(format!("redis://{address}/")).unwrap();
+        let pool = RedisConnectionPool::new_standalone(client);
+        let mut conn = pool.create_subscriber_connection().await.unwrap();
+        // While the server is silent, the paused clock jumps to the next
+        // deadline.
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        let error = newest_entry_id(&mut conn, "stream:stalled")
+            .await
+            .unwrap_err()
+            .to_string();
+        let waited = started.elapsed();
+        assert!(
+            waited >= REDIS_COMMAND_TIMEOUT && waited < REDIS_SUBSCRIBER_COMMAND_TIMEOUT,
+            "{waited:?}"
+        );
+        assert!(
+            error.contains("Redis command timed out after 10s"),
+            "{error}"
+        );
     }
 
     fn standalone_slot(

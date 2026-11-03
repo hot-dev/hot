@@ -12,6 +12,16 @@ pub enum UserError {
     NotFound,
 }
 
+impl UserError {
+    /// Lookups report a missing row either way, depending on the query.
+    pub fn is_not_found(&self) -> bool {
+        matches!(
+            self,
+            Self::NotFound | Self::Database(sqlx::Error::RowNotFound)
+        )
+    }
+}
+
 /// User settings structure stored as JSON
 /// {
 ///   "display": {
@@ -528,6 +538,41 @@ impl UserAuth {
                     .execute(sqlite_pool)
                     .await?;
             }
+        }
+        Ok(())
+    }
+
+    /// Replace an auth row's stored credential, such as a password hash.
+    pub async fn update_auth_data(
+        db: &crate::db::DatabasePool,
+        user_auth_id: &Uuid,
+        auth_data: &JsonValue,
+        updated_by_user_id: &Uuid,
+    ) -> Result<(), UserError> {
+        let updated = match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                sqlx::query("UPDATE user_auth SET auth_data = $1, updated_at = NOW(), updated_by_user_id = $2 WHERE user_auth_id = $3")
+                    .bind(auth_data)
+                    .bind(updated_by_user_id)
+                    .bind(user_auth_id)
+                    .execute(pg_pool)
+                    .await?
+                    .rows_affected()
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                let auth_data = serde_json::to_string(auth_data)
+                    .map_err(|e| UserError::Database(sqlx::Error::Encode(Box::new(e))))?;
+                sqlx::query("UPDATE user_auth SET auth_data = ?, updated_at = CURRENT_TIMESTAMP, updated_by_user_id = ? WHERE user_auth_id = ?")
+                    .bind(auth_data)
+                    .bind(updated_by_user_id)
+                    .bind(user_auth_id)
+                    .execute(sqlite_pool)
+                    .await?
+                    .rows_affected()
+            }
+        };
+        if updated == 0 {
+            return Err(UserError::NotFound);
         }
         Ok(())
     }

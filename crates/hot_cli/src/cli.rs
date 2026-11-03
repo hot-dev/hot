@@ -756,6 +756,17 @@ pub(crate) enum Command {
         action: KeyAction,
     },
 
+    /// Create the first administrator or reset a password (self-hosted installs)
+    #[command(display_order = 47)]
+    Admin {
+        #[command(flatten)]
+        global: GlobalOptions,
+        #[command(flatten)]
+        show_conf: ShowConfOptions,
+        #[command(subcommand)]
+        action: AdminAction,
+    },
+
     // ==================== Database & Infrastructure (50-59) ====================
     /// Manage database
     #[command(display_order = 50, hide = true)]
@@ -881,7 +892,11 @@ pub(crate) enum QueueAction {
     /// Clear all event queues
     Clear,
     /// Show queue status and lengths
-    Status,
+    Status {
+        /// Print the status as one JSON object, for monitoring
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 // CacheAction enum removed - will be reimplemented with  bytecode caching
@@ -902,11 +917,45 @@ pub(crate) enum KeyAction {
 }
 
 #[derive(Subcommand, Debug)]
+pub(crate) enum AdminAction {
+    /// Let an email address sign in with a password, creating the user if needed.
+    ///
+    /// Use it for a self-hosted installation's first administrator, who then
+    /// signs in, creates an organization, and invites everyone else. Running
+    /// it again changes nothing, even with another password. Writes directly
+    /// to the database configured by hot.db.uri; run migrations first.
+    Bootstrap {
+        /// Email address the user signs in with
+        #[arg(long)]
+        email: String,
+        /// Display name for a newly created user
+        #[arg(long)]
+        name: Option<String>,
+        /// File holding the password; one trailing newline is ignored
+        #[arg(long)]
+        password_file: std::path::PathBuf,
+    },
+    /// Replace the password of a user who signs in with a password
+    ResetPassword {
+        /// Email address the user signs in with
+        #[arg(long)]
+        email: String,
+        /// File holding the new password; one trailing newline is ignored
+        #[arg(long)]
+        password_file: std::path::PathBuf,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 pub(crate) enum DbAction {
     /// Show database status
     Status,
     /// Run database migrations
-    Migrate,
+    Migrate {
+        /// Print how far the database has migrated as one JSON line, and change nothing
+        #[arg(long)]
+        status: bool,
+    },
     /// Provision PostgreSQL vector indexes with separate migration credentials
     ProvisionStoreIndexes,
     /// Port a local Hot 1.x development database to the Hot 2.0 schema
@@ -923,6 +972,36 @@ pub(crate) enum DbAction {
         /// Only the deployments of this organization and its sub-organizations
         #[arg(long, value_name = "SLUG")]
         org: Option<String>,
+    },
+    /// Move builds, or files and internal blobs, to another storage backend while Hot is stopped
+    MoveStorage {
+        /// What to move: build, or file (files include internal blobs)
+        #[arg(long, value_parser = ["build", "file"])]
+        role: String,
+        /// The backend to move to: local, s3, or gcs
+        #[arg(long, value_parser = ["local", "s3", "gcs"])]
+        to: String,
+        /// Directory, for a local target
+        #[arg(long, default_value = "")]
+        path: String,
+        /// Bucket, for an S3 or GCS target
+        #[arg(long, default_value = "")]
+        bucket: String,
+        /// Key prefix in the bucket
+        #[arg(long, default_value = "")]
+        prefix: String,
+        /// Region, for an S3 target
+        #[arg(long, default_value = "")]
+        region: String,
+        /// List what would move without reading or writing anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Append one JSON line per object to this file ("-" for standard output, with logging off)
+        #[arg(long, value_name = "FILE")]
+        manifest: Option<String>,
+        /// Leave behind the objects this file lists, one id per line, in addition to HOT_MOVE_STORAGE_SKIP (default: HOT_MOVE_STORAGE_SKIP_FILE)
+        #[arg(long, value_name = "FILE")]
+        skip_file: Option<String>,
     },
 }
 

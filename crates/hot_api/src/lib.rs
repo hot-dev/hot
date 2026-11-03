@@ -9,6 +9,9 @@ pub mod openapi;
 pub mod rate_limit;
 pub mod server;
 
+#[cfg(test)]
+mod cross_instance_tests;
+
 use hot::db::DatabasePool;
 use hot::storage::BuildStorage;
 use hot::stream::StreamPubSub;

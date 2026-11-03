@@ -71,7 +71,8 @@ meta {
 
     - `image` — Docker/OCI image to run (required). A name without a tag or
       digest, like `"alpine"`, means `"alpine:latest"`.
-    - `size` — Container size preset (default: `"small"`). See `BoxSize` for available sizes.
+    - `size` — Container size preset. Without one, the task worker's box defaults
+      apply: see /docs/box#without-a-size. See `BoxSize` for available sizes.
     - `cmd` — Command and arguments as a Vec (optional, mutually exclusive with `script`)
     - `script` — Shell script to execute (optional, mutually exclusive with `cmd`).
       Written to `/tmp/hot-run.sh` and run with `set -e`: each line runs as a
@@ -100,7 +101,8 @@ meta {
       goes in source. See `BoxRegistryAuth`.
 
     Individual resource fields override the values from the size preset.
-    If no `size` is specified, defaults to `"small"`.
+    If no `size` is specified, the box gets the task worker's box defaults for
+    each field it doesn't set, and with the stock defaults it counts as `medium`.
 
     Only one of `cmd` or `script` may be specified. A `script`, or a `cmd`
     of the form `["sh", "-c", "..."]`, stops at its first failing command.
