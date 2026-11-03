@@ -622,6 +622,8 @@ impl TryFrom<Message> for EventMessage {
             event_id: event_id_opt,
             origin_run_id: origin_run_id_opt,
             retry_attempt: ctx_val.get_int_or_default("retry_attempt", 0) as i16,
+            max_retries: 0,
+            retry_delay_ms: 0,
             secret_keys: AHashSet::new(),
             secret_value_hashes: match msg.body.get("secret_value_hashes") {
                 Some(Val::Vec(hashes)) => hashes

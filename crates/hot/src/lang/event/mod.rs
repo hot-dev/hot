@@ -91,9 +91,16 @@ pub struct ExecutionContext {
     pub project_name: Option<String>,
     pub event_id: Option<Uuid>,
     pub origin_run_id: Option<Uuid>,
-    // Retry state (config is read from handler/schedule meta when needed)
+    // Retry state. Hot's retry decision reads handler/schedule meta itself;
+    // the worker copies the policy here for the run to read through `info()`.
     #[serde(default)]
     pub retry_attempt: i16,
+    /// Retries Hot makes if this run fails (0 = no retries)
+    #[serde(default)]
+    pub max_retries: i16,
+    /// Base delay between those retries in milliseconds (0 = no retries)
+    #[serde(default)]
+    pub retry_delay_ms: i32,
     /// Context keys that are secrets (should be masked in call return values)
     #[serde(default)]
     pub secret_keys: AHashSet<String>,
@@ -162,6 +169,8 @@ impl ExecutionContext {
             event_id: None,
             origin_run_id: None,
             retry_attempt: 0,
+            max_retries: 0,
+            retry_delay_ms: 0,
             secret_keys: AHashSet::new(),
             secret_value_hashes: AHashSet::new(),
             secret_values: Default::default(),
@@ -201,6 +210,8 @@ impl ExecutionContext {
             event_id,
             origin_run_id,
             retry_attempt: 0,
+            max_retries: 0,
+            retry_delay_ms: 0,
             secret_keys: AHashSet::new(),
             secret_value_hashes: AHashSet::new(),
             secret_values: Default::default(),
@@ -244,6 +255,8 @@ impl ExecutionContext {
             event_id,
             origin_run_id,
             retry_attempt: 0,
+            max_retries: 0,
+            retry_delay_ms: 0,
             secret_keys: AHashSet::new(),
             secret_value_hashes: AHashSet::new(),
             secret_values: Default::default(),
@@ -272,6 +285,8 @@ impl ExecutionContext {
             event_id: None,
             origin_run_id: None,
             retry_attempt: 0,
+            max_retries: 0,
+            retry_delay_ms: 0,
             secret_keys: AHashSet::new(),
             secret_value_hashes: AHashSet::new(),
             secret_values: Default::default(),
@@ -317,6 +332,18 @@ impl ExecutionContext {
     /// Helper to set retry attempt after construction (for retries)
     pub fn with_retry_attempt(mut self, retry_attempt: i16) -> Self {
         self.retry_attempt = retry_attempt;
+        self
+    }
+
+    /// Helper to set the retry policy Hot applies if this run fails. A policy
+    /// that makes no retries has no delay, whatever its meta says.
+    pub fn with_retry_config(mut self, retry: &crate::env::retry::RetryConfig) -> Self {
+        self.max_retries = retry.max_retries;
+        self.retry_delay_ms = if retry.is_enabled() {
+            retry.delay_ms
+        } else {
+            0
+        };
         self
     }
 

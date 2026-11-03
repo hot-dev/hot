@@ -4042,6 +4042,27 @@ async fn resolve_agent_type_for_execution(
     None
 }
 
+/// The retry policy Hot applies if this run fails, which the run reads through
+/// `info()`: the `retry` meta of its handler, or of its schedule, since a
+/// schedule runs through hot-std's generic handler. Hot doesn't retry a call.
+async fn run_retry_config(
+    db: &DatabasePool,
+    build_id: &Uuid,
+    run_type_id: i16,
+    event_handler: &EventHandler,
+    event_data: &Val,
+) -> hot::env::retry::RetryConfig {
+    if run_type_id == hot::db::run::RunType::Event.as_id() {
+        hot::env::retry::RetryConfig::from_meta(event_handler.meta.as_ref())
+    } else if run_type_id == hot::db::run::RunType::Schedule.as_id()
+        && let Some(target) = extract_target_function_from_event(event_data)
+    {
+        Schedule::get_retry_config_by_build_fn(db, build_id, &target).await
+    } else {
+        hot::env::retry::RetryConfig::default()
+    }
+}
+
 /// Check if an event handler has the `once: true` metadata flag
 fn handler_has_once_flag(handler: &EventHandler) -> bool {
     if let Some(ref meta) = handler.meta
@@ -4890,6 +4911,15 @@ async fn execute_single_event_handler_inner(
         event_message.body.execution_context.retry_attempt
     };
 
+    let retry_config = run_retry_config(
+        db,
+        &build.build_id,
+        run_type_id,
+        event_handler,
+        &event_message.body.event.event_data,
+    )
+    .await;
+
     // Until the run's program loads and names its function's own budget, it
     // has the default one.
     let default_budget = RunBudget::new(
@@ -4912,6 +4942,7 @@ async fn execute_single_event_handler_inner(
     .with_build_hash(Some(build.hash.clone()))
     .with_project(Some(build.project_id), Some(project.name.clone()))
     .with_retry_attempt(retry_attempt)
+    .with_retry_config(&retry_config)
     .with_env_name(env_name)
     .with_org_slug(org_slug)
     .with_agent_type(
@@ -12111,6 +12142,326 @@ fn (url: Str, wait: Int): Int {
         );
         assert!(elapsed >= secs(1.0) && elapsed < secs(10.0), "{elapsed:?}");
         assert_eq!(lose_claim.await.unwrap(), Some(ClaimLoss::Lost));
+
+        if let DatabasePool::Sqlite(pool) = &db {
+            pool.close().await;
+        }
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_info_names_the_retries_of_its_handler_or_schedule() {
+        #[derive(Default)]
+        struct Collect(std::sync::Mutex<Vec<hot::lang::emitter::EngineEvent>>);
+        impl EngineEventEmitter for Collect {
+            fn emit(&self, event: hot::lang::emitter::EngineEvent) {
+                self.0.lock().unwrap().push(event);
+            }
+        }
+
+        let (db, db_path) = migrated_sqlite_file_db().await;
+        let test_data = hot::db::insert_test_data(&db).await.unwrap();
+
+        // A deployed bundle whose functions answer with what `info()` reads.
+        let workspace = tempfile::tempdir().unwrap();
+        let src_dir = workspace.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(
+            src_dir.join("retry_info_test.hot"),
+            r#"::retry-info-test ns
+
+retries fn (): Map {
+    run info().run
+    {attempt: run.retry-attempt, max: run.max-retries, delay: run.retry-delay}
+}
+
+simple meta {on-event: "retry-info:simple", retry: 3}
+fn (event) { retries() }
+
+full meta {on-event: "retry-info:full", retry: {attempts: 5, delay: 10000}}
+fn (event) { retries() }
+
+bare meta {on-event: "retry-info:bare"}
+fn (event) { retries() }
+
+off meta {on-event: "retry-info:off", retry: {attempts: 0, delay: 10000}}
+fn (event) { retries() }
+
+background fn (): Int { 1 }
+
+starter meta {on-event: "retry-info:starter", retry: 3}
+fn (event) {
+    run ::hot::task/start(background).origin-run
+    {attempt: run.retry-attempt, max: run.max-retries, delay: run.retry-delay}
+}
+
+nightly meta {schedule: "0 2 * * *", retry: 2}
+fn (event) { retries() }
+
+hourly meta {schedule: "0 * * * *", retry: {attempts: 4, delay: 30000}}
+fn (event) { retries() }
+
+weekly meta {schedule: "0 3 * * 1"}
+fn (event) { retries() }
+
+called meta {retry: 3}
+fn (): Map { retries() }
+"#,
+        )
+        .unwrap();
+        let src_paths = [src_dir.to_string_lossy().to_string()];
+        let bundle =
+            hot::bundle::create_bundle("retry-info-test", &src_paths, &[], &[], true, &[]).unwrap();
+        let zip_path =
+            hot::bundle::write_bundle_zip(&bundle, &workspace.path().join("build")).unwrap();
+        let build_id = Uuid::now_v7();
+        Build::insert_build(
+            &db,
+            &build_id,
+            &test_data.project_id,
+            "retry-info-test",
+            0,
+            Build::BUILD_TYPE_BUNDLE,
+            &test_data.user_id,
+        )
+        .await
+        .unwrap();
+        let build = Build::get_build(&db, &build_id).await.unwrap();
+        // As a deploy does, store the meta the compiler extracts.
+        let extracted = hot::lang::engine::Engine::extract_handlers_and_scheduled_functions(
+            &src_paths, None, None, false,
+        )
+        .unwrap();
+        EventHandler::insert_event_handlers_for_build(
+            &db,
+            &build_id,
+            &extracted.event_handlers,
+            &extracted.send_targets,
+        )
+        .await
+        .unwrap();
+        Schedule::insert_schedules_for_build(
+            &db,
+            &build_id,
+            &extracted.scheduled_functions,
+            &extracted.send_targets,
+        )
+        .await
+        .unwrap();
+        let prepared = extract_and_precompile_event_bundle(
+            std::fs::read(&zip_path).unwrap(),
+            workspace.path().join("extracted"),
+            build_id,
+            "retry-info-test".to_string(),
+            true,
+        )
+        .unwrap();
+        let build_path_cache = Arc::new(BuildPathCache::new());
+        build_path_cache.insert(build_id, prepared.extract_dir);
+        let execution_services =
+            Arc::new(WorkerExecutionServices::new(Arc::new(db.clone()), &val!({})).await);
+        let cache = Arc::new(hot::lang::cache::bytecode_cache::BytecodeCache::new(
+            workspace.path().join("cache"),
+        ));
+        let task_queue = Arc::new(
+            ProcessingQueue::<TaskRequest>::new(
+                QueueType::Memory,
+                format!("worker-retry-info-test-{}", Uuid::new_v4()),
+                None,
+                Serialization::Json,
+            )
+            .unwrap(),
+        );
+
+        // Run one event through the worker and return what its run reported.
+        let run = |event_type: String, handler: EventHandler, event_data: Val, attempt: i16| {
+            let event_id = Uuid::now_v7();
+            let stream_id = Uuid::now_v7();
+            let event_message = EventMessage {
+                id: event_id,
+                head: AHashMap::new(),
+                body: hot::lang::event::queue::EventMessageBody {
+                    event: hot::lang::event::Event {
+                        event_id,
+                        env_id: test_data.env_id,
+                        stream_id,
+                        event_type,
+                        event_data,
+                        event_time: chrono::Utc::now(),
+                        target_project_id: None,
+                        target_project_name: None,
+                    },
+                    execution_context: ExecutionContext::new(
+                        Uuid::now_v7(),
+                        stream_id,
+                        hot::db::run::RunType::Event.as_id(),
+                        Some(test_data.env_id),
+                        Some(test_data.user_id),
+                        Some(test_data.org_id),
+                        None,
+                    )
+                    .with_retry_attempt(attempt),
+                },
+            };
+            let (db, build, cache, build_path_cache, task_queue, execution_services) = (
+                db.clone(),
+                build.clone(),
+                Arc::clone(&cache),
+                Arc::clone(&build_path_cache),
+                Arc::clone(&task_queue),
+                Arc::clone(&execution_services),
+            );
+            let env_id = test_data.env_id;
+            async move {
+                let events = Arc::new(Collect::default());
+                let shutdown_coordinator = Arc::new(ShutdownCoordinator::new(1));
+                let run_id = Uuid::now_v7();
+                shutdown_coordinator.register_run(run_id);
+                execute_single_event_handler(
+                    &db,
+                    &build,
+                    &env_id,
+                    &val!({}),
+                    &handler,
+                    &event_message,
+                    Some(events.clone()),
+                    None,
+                    None,
+                    cache,
+                    shutdown_coordinator,
+                    run_id,
+                    build_path_cache,
+                    None,
+                    None,
+                    task_queue,
+                    execution_services,
+                    Arc::new(Semaphore::new(4)),
+                    None,
+                )
+                .await
+                .unwrap();
+                let events = events.0.lock().unwrap();
+                let stop = events.iter().find(|e| e.event_type == "run:stop");
+                stop.and_then(|e| e.event_data.get("result"))
+                    .unwrap_or_else(|| panic!("no run:stop result in {events:?}"))
+            }
+        };
+        // The handler a deploy stored for an event.
+        let stored = |event_type: &'static str| {
+            let db = db.clone();
+            async move {
+                EventHandler::get_event_handlers_by_build_and_event_type(
+                    &db, &build_id, event_type, None, None,
+                )
+                .await
+                .unwrap()
+                .remove(0)
+            }
+        };
+        let on_event = |event_type: &'static str, event_data: Val, attempt: i16| {
+            let stored = stored(event_type);
+            let run = &run;
+            async move { run(event_type.to_string(), stored.await, event_data, attempt).await }
+        };
+        // Calls and schedules run through hot-std's generic handlers, whose
+        // own meta has no `retry`.
+        let generic = |event_type: &str, var: &str| EventHandler {
+            event_handler_id: Uuid::now_v7(),
+            build_id,
+            event_type: event_type.to_string(),
+            ns: "::hot::lang".to_string(),
+            var: var.to_string(),
+            meta: Some(serde_json::json!({"on-event": event_type, "once": true})),
+            value: None,
+            file: None,
+            line: None,
+            column: None,
+            position: None,
+        };
+        let on_schedule = |var: &'static str, attempt: i16| {
+            let event_data = val!({
+                "fn": format!("::retry-info-test/{var}"),
+                "args": [{"type": "hot:schedule"}],
+            });
+            run(
+                "hot:schedule".to_string(),
+                generic("hot:schedule", "schedule-event-handler"),
+                event_data,
+                attempt,
+            )
+        };
+        let report = |attempt: i64, max: i64, delay: i64| val!({"attempt": attempt, "max": max, "delay": delay});
+
+        // `retry: 3` takes the default delay, on the first try and on a retry.
+        assert_eq!(
+            on_event("retry-info:simple", val!({}), 0).await,
+            report(0, 3, 1_000)
+        );
+        assert_eq!(
+            on_event("retry-info:simple", val!({}), 2).await,
+            report(2, 3, 1_000)
+        );
+        // A retry started from the app carries its attempt in the event.
+        let manual_retry = val!({"retry": {
+            "origin-run-id": test_data.run_id.to_string(),
+            "attempt": 1,
+        }});
+        assert_eq!(
+            on_event("retry-info:simple", manual_retry, 0).await,
+            report(1, 3, 1_000)
+        );
+
+        // The full form names its own delay.
+        assert_eq!(
+            on_event("retry-info:full", val!({}), 0).await,
+            report(0, 5, 10_000)
+        );
+        assert_eq!(
+            on_event("retry-info:full", val!({}), 4).await,
+            report(4, 5, 10_000)
+        );
+
+        // A task's `origin-run` is the same run.
+        assert_eq!(
+            on_event("retry-info:starter", val!({}), 1).await,
+            report(1, 3, 1_000)
+        );
+
+        // No `retry`, or none to make: 0 for both, never null or the default
+        // delay of retries that won't happen.
+        assert_eq!(
+            on_event("retry-info:bare", val!({}), 0).await,
+            report(0, 0, 0)
+        );
+        assert_eq!(
+            on_event("retry-info:off", val!({}), 0).await,
+            report(0, 0, 0)
+        );
+
+        // A schedule's `retry` is on its own meta, in either form.
+        assert_eq!(on_schedule("nightly", 0).await, report(0, 2, 1_000));
+        assert_eq!(on_schedule("nightly", 1).await, report(1, 2, 1_000));
+        assert_eq!(on_schedule("hourly", 0).await, report(0, 4, 30_000));
+        assert_eq!(on_schedule("hourly", 3).await, report(3, 4, 30_000));
+        assert_eq!(on_schedule("weekly", 0).await, report(0, 0, 0));
+
+        // A redeploy deactivates the schedule, but its retries still run.
+        Schedule::deactivate_schedules_by_build(&db, &build_id)
+            .await
+            .unwrap();
+        assert_eq!(on_schedule("hourly", 2).await, report(2, 4, 30_000));
+
+        // Hot doesn't retry a call, whatever its function's meta says.
+        assert_eq!(
+            run(
+                "hot:call".to_string(),
+                generic("hot:call", "call-event-handler"),
+                val!({"fn": "::retry-info-test/called", "args": []}),
+                0,
+            )
+            .await,
+            report(0, 0, 0)
+        );
 
         if let DatabasePool::Sqlite(pool) = &db {
             pool.close().await;

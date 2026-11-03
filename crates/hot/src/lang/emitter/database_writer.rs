@@ -2528,42 +2528,7 @@ WHERE hot.call.run_id = EXCLUDED.run_id
             return RetryConfig::default();
         };
 
-        // Parse ns/var from function name (format: "namespace/variable")
-        let parts: Vec<&str> = fn_name.rsplitn(2, '/').collect();
-        if parts.len() != 2 {
-            return RetryConfig::default();
-        }
-        let (var, ns) = (parts[0], parts[1]);
-
-        // Look up schedule by build_id, ns, and var
-        let meta: Option<serde_json::Value> = match pool {
-            DatabasePool::Postgres(pg_pool) => {
-                sqlx::query_scalar(
-                    "SELECT meta FROM hot.schedule WHERE build_id = $1 AND ns = $2 AND var = $3 LIMIT 1"
-                )
-                .bind(build_id)
-                .bind(ns)
-                .bind(var)
-                .fetch_optional(pg_pool)
-                .await
-                .ok()
-                .flatten()
-            }
-            DatabasePool::Sqlite(sqlite_pool) => {
-                sqlx::query_scalar(
-                    "SELECT meta FROM schedule WHERE build_id = ? AND ns = ? AND var = ? LIMIT 1"
-                )
-                .bind(build_id)
-                .bind(ns)
-                .bind(var)
-                .fetch_optional(sqlite_pool)
-                .await
-                .ok()
-                .flatten()
-            }
-        };
-
-        RetryConfig::from_meta(meta.as_ref())
+        crate::db::Schedule::get_retry_config_by_build_fn(pool, &build_id, &fn_name).await
     }
 
     /// Write a run:cancel record
@@ -2921,6 +2886,81 @@ mod tests {
                 .unwrap(),
             56
         );
+    }
+
+    #[tokio::test]
+    async fn schedule_run_failures_retry_up_to_the_schedule_retry_meta() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        let event_id = Uuid::now_v7();
+        crate::db::Event::insert_event(
+            &db,
+            &event_id,
+            &data.env_id,
+            &data.stream_id,
+            "hot:schedule",
+            &serde_json::json!({"fn": "::app::jobs/nightly", "args": []}),
+            chrono::Utc::now(),
+            &data.user_id,
+            None,
+        )
+        .await
+        .unwrap();
+        crate::db::Schedule::insert_dynamic_schedule(
+            &db,
+            &Uuid::now_v7(),
+            &data.build_id,
+            &crate::db::ScheduleType::Cron("0 * * * * *".to_string()),
+            Some(&data.org_id),
+            crate::db::SchedulePolicy::self_hosted_default(),
+            "::app::jobs",
+            "nightly",
+            Some(&serde_json::json!({"retry": {"attempts": 2, "delay": 5000}})),
+            None,
+        )
+        .await
+        .unwrap();
+        // A redeploy deactivates the schedule, but its retries still run.
+        crate::db::Schedule::deactivate_schedules_by_build(&db, &data.build_id)
+            .await
+            .unwrap();
+        let writer = DatabaseWriter::new(Arc::new(RwLock::new(Some(db.clone()))));
+        let fail_at_attempt = |attempt: i16| {
+            let writer = &writer;
+            async move {
+                sqlx::query(
+                    "UPDATE run SET run_type_id=3, event_id=?, status_id=1, retry_attempt=? WHERE run_id=?",
+                )
+                .bind(event_id)
+                .bind(attempt)
+                .bind(data.run_id)
+                .execute(pool)
+                .await
+                .unwrap();
+                writer.write(DatabaseWrite::RunFail {
+                    run_id: data.run_id,
+                    event_time: chrono::Utc::now(),
+                    failure: Val::from("failed"),
+                });
+                writer.flush_run(data.run_id).await.unwrap();
+                sqlx::query_as::<_, (i16, i16)>(
+                    "SELECT status_id, retry_attempt FROM run WHERE run_id=?",
+                )
+                .bind(data.run_id)
+                .fetch_one(pool)
+                .await
+                .unwrap()
+            }
+        };
+        let pending_retry = crate::db::RunStatus::PendingRetry.as_id();
+        let failed = crate::db::RunStatus::Failed.as_id();
+
+        assert_eq!(fail_at_attempt(0).await, (pending_retry, 1));
+        assert_eq!(fail_at_attempt(1).await, (pending_retry, 2));
+        assert_eq!(fail_at_attempt(2).await, (failed, 2));
     }
 
     #[tokio::test]
