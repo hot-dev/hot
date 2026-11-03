@@ -75,8 +75,10 @@ RUN --mount=type=cache,id=hot-runtime-registry,target=/root/.cargo/registry \
 FROM --platform=linux/amd64 ${DEBIAN_IMAGE}
 
 # iproute2 and iptables: the task worker manages box network namespaces.
+# e2fsprogs: the task worker formats each box's /data volume with mkfs.ext4.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
+        e2fsprogs \
         iproute2 \
         iptables \
     && rm -rf /var/lib/apt/lists/* \

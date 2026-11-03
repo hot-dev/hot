@@ -4,9 +4,11 @@
 #
 # No SSH: both builders use `communicator = "none"`. The build VM runs the
 # setup from its own boot data. On AWS it powers itself off when the bake
-# succeeds and Packer waits for that; on Google Cloud Packer waits for the
-# startup script to report completion. A failed bake never completes, so the
-# build times out instead of publishing an image.
+# succeeds and Packer waits for that; a failed bake never powers off, so Packer
+# gives up when aws_polling runs out. On Google Cloud Packer's startup-script
+# wrapper reports the script's exit status, and a failed bake ends the build.
+# Neither publishes an image. Packer waits for that status without a limit, so
+# build-host.sh bounds the whole build in time.
 
 packer {
   required_plugins {
@@ -23,7 +25,7 @@ packer {
 
 variable "hot_release" {
   type        = string
-  description = "Hot release whose runtime image supplies hotbox, such as 3.0.1."
+  description = "Hot release whose runtime image supplies the deploy agent, its renderer, and the fallback hotbox, such as 3.0.1."
 
   validation {
     condition     = can(regex("^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?$", var.hot_release))
@@ -57,7 +59,7 @@ variable "aws_subnet_id" {
 variable "aws_kms_key_id" {
   type        = string
   default     = ""
-  description = "Customer-managed KMS key for the image snapshot. Empty uses the account's default EBS key."
+  description = "Customer-managed KMS key for the image snapshot. Empty uses the account's default EBS key. Instances launch from the image only if the key policy lets the identity that applies the stack use the key, and for the scalable preset also the AWSServiceRoleForAutoScaling service-linked role; otherwise every launch fails."
 }
 
 variable "gcp_project" {
@@ -74,6 +76,12 @@ variable "gcp_subnetwork" {
   type        = string
   default     = ""
   description = "Subnetwork for the build VM; it needs outbound internet access, such as Cloud NAT."
+}
+
+variable "gcp_service_account_email" {
+  type        = string
+  default     = ""
+  description = "Service account for the build VM. Packer's startup-script wrapper reports the bake's status with it, so it needs compute.instances.get and compute.instances.setMetadata on the build VM, and iam.serviceAccounts.actAs on itself (such as roles/iam.serviceAccountUser on itself), which Compute Engine requires to set metadata on a VM that runs as a service account. Without them the status never arrives and the build waits for its time limit. Packer's own identity also needs iam.serviceAccounts.actAs on it. Empty uses the project's default compute service account, which needs the same permissions."
 }
 
 variable "gcp_kms_key" {
@@ -143,11 +151,20 @@ source "googlecompute" "hot-host" {
   zone                    = var.gcp_zone
   subnetwork              = var.gcp_subnetwork != "" ? var.gcp_subnetwork : null
   omit_external_ip        = var.gcp_subnetwork != ""
+  use_internal_ip         = var.gcp_subnetwork != "" # required with omit_external_ip; unused without a communicator
   source_image_family     = "ubuntu-2404-lts-amd64"
   source_image_project_id = ["ubuntu-os-cloud"]
   machine_type            = "n2-standard-2"
   disk_size               = 30
   disk_type               = "pd-balanced"
+
+  # The wrapper only calls Compute Engine, to set its status. Packer's default
+  # scopes also grant full Cloud Storage access.
+  service_account_email = var.gcp_service_account_email != "" ? var.gcp_service_account_email : null
+  scopes = [
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/compute",
+  ]
 
   communicator        = "none"
   startup_script_file = var.gcp_startup_script_file

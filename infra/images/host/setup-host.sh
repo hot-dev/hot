@@ -8,7 +8,8 @@
 #
 #   setup-host.sh --runtime-image REF@sha256:DIGEST [--poweroff]
 #
-# --runtime-image supplies `hotbox`, which is baked into the Kata guest image.
+# --runtime-image supplies the deploy agent, its renderer, and the `hotbox` baked
+# as a fallback. Each deploy installs the running release's own `hotbox`.
 # --poweroff stops the VM when the bake succeeds, which is how the AWS build
 # signals completion. A failed bake never powers off, so its build times out
 # instead of producing an image.
@@ -55,11 +56,24 @@ fetch() {
 
 log "Installing packages"
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -q
-apt-get install -y -q --no-install-recommends \
+# A fresh cloud image may start apt's own timers at first boot. Pause them for
+# the bake (they stay enabled in the image), let a run already under way
+# finish, and wait for dpkg's lock rather than failing on it. An upgrade keeps
+# the image's configuration files instead of prompting on a closed stdin.
+systemctl stop apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+for _ in $(seq 1 120); do
+    [[ "$(systemctl show -p ActiveState --value apt-daily.service apt-daily-upgrade.service)" == *activating* ]] || break
+    sleep 5
+done
+apt_get() {
+    apt-get -q -o DPkg::Lock::Timeout=600 \
+        -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "$@"
+}
+apt_get update
+apt_get install -y --no-install-recommends \
     ca-certificates curl jq python3 zstd e2fsprogs dmsetup thin-provisioning-tools \
     iproute2 iptables docker.io docker-compose-v2
-apt-get upgrade -y -q
+apt_get upgrade -y
 
 # ------------------------------------------------------------------
 # No SSH, on either cloud. Operators reach the host through the agent's
@@ -71,14 +85,26 @@ systemctl mask ssh.socket ssh.service
 rm -f /etc/ssh/ssh_host_*
 
 log "Configuring Docker"
+# Hot's containers use only the bundle's network, on the fixed runtime subnet
+# that preflight checks. No default bridge (docker0 would take 172.17.0.0/16
+# and shadow any installation range there), and no other range Docker could
+# pick on its own.
 install -d -m 0755 /etc/docker
 cat > /etc/docker/daemon.json <<'JSON'
 {
   "log-driver": "local",
-  "log-opts": {"max-size": "10m", "max-file": "3"}
+  "log-opts": {"max-size": "10m", "max-file": "3"},
+  "bridge": "none",
+  "default-address-pools": [{"base": "172.30.0.0/24", "size": 24}]
 }
 JSON
 systemctl enable docker
+# The task worker's bind of each box's /data is rshared, so Docker has to stay in
+# the host's mount namespace, where /var/lib/hot is a shared mount. Docker refuses
+# that bind otherwise, so stop here on a package whose unit changes it.
+if grep -Eq '^(MountFlags|PrivateMounts)=' <<<"$(systemctl cat docker.service)"; then
+    fail "docker.service must not set MountFlags or PrivateMounts"
+fi
 
 # ------------------------------------------------------------------
 # Kata Containers (QEMU only), its own containerd, CNI plugins, cosign
@@ -113,10 +139,11 @@ fetch "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/co
 install -m 0755 "$work/cosign" /usr/local/bin/cosign
 
 # ------------------------------------------------------------------
-# Guest image: Kata's Ubuntu rootfs with this release's hotbox
+# Guest image: Kata's Ubuntu rootfs, and a fallback hotbox
 # ------------------------------------------------------------------
-log "Building the guest image with hotbox from ${RUNTIME_IMAGE}"
-systemctl start docker
+log "Building the guest image and the fallback hotbox from ${RUNTIME_IMAGE}"
+# Restart, so the bake fails here if Docker rejects the configuration above.
+systemctl restart docker
 docker pull -q "$RUNTIME_IMAGE"
 container=$(docker create "$RUNTIME_IMAGE")
 docker cp "$container:/usr/share/hot/bin/hotbox-linux-x86_64" "$work/hotbox"
@@ -124,7 +151,9 @@ docker cp "$container:/usr/share/hot/bin/hotbox-linux-x86_64" "$work/hotbox"
 docker cp "$container:/usr/share/hot/selfhost/." "$work/selfhost"
 docker rm "$container" >/dev/null
 docker image rm "$RUNTIME_IMAGE" >/dev/null
-# Kata's shim bind-mounts hotbox from this host path into each guest.
+# Only a fallback: each deploy installs the running release's hotbox at
+# /var/lib/hot/kata/hotbox, and the task worker has Kata's shim bind-mount that
+# into each guest. It mounts this copy only when that file is absent.
 install -m 0755 "$work/hotbox" /usr/local/bin/hotbox
 
 install -d -m 0755 "$HOST_DIR/kata"
@@ -135,6 +164,8 @@ mnt="$work/rootfs"
 mkdir -p "$mnt"
 udevadm settle
 if [[ -b "${loop}p1" ]]; then mount "${loop}p1" "$mnt"; else mount "$loop" "$mnt"; fi
+# Boxes never run this copy: a box's container has its own root, and the
+# bind-mounted hotbox.
 install -D -m 0755 "$work/hotbox" "$mnt/usr/local/bin/hotbox"
 umount "$mnt"
 losetup -d "$loop"
@@ -166,7 +197,11 @@ enable_annotations = ["enable_iommu", "kernel_params", "default_vcpus", "default
 default_vcpus = 1
 default_maxvcpus = 0
 default_memory = 512
-default_maxmemory = 2048
+# Static sizing adds each box's memory limit to default_memory, so this must
+# hold the largest box (SYSTEM_MAX_MEMORY_MB, 8192, in the task worker's
+# box_limits.rs) on top of it. Kata lowers it to the host's RAM, and the task
+# worker's budget keeps boxes within that.
+default_maxmemory = 9216
 memory_slots = 10
 use_vsock = true
 disable_seccomp = false
@@ -217,25 +252,22 @@ cat > /etc/kata-containerd/config.toml <<CONTAINERD
 version = 2
 root = "/var/lib/kata/containerd"
 state = "/run/kata-containerd"
+# The task worker uses containerd's own API and names the Kata runtime for
+# each box. The Kubernetes CRI plugin would only add a streaming server and
+# CNI polling behind the task worker's socket.
+disabled_plugins = ["io.containerd.grpc.v1.cri"]
 
 [grpc]
   address = "/run/kata-containerd/containerd.sock"
   gid = ${KATA_CONTAINERD_GID}
 
 [plugins]
-  [plugins."io.containerd.grpc.v1.cri"]
-    disable = true
-
   [plugins."io.containerd.snapshotter.v1.devmapper"]
     root_path = "/var/lib/kata/devmapper"
     pool_name = "hot-devpool"
     base_image_size = "30GB"
     discard_blocks = true
     fs_type = "ext4"
-
-  [plugins."io.containerd.runtime.v2.task"]
-    [plugins."io.containerd.runtime.v2.task"."io.containerd.kata.v2"]
-      runtime_type = "io.containerd.kata.v2"
 CONTAINERD
 
 log "Persisting kernel modules and sysctls"
@@ -244,6 +276,7 @@ vhost_vsock
 vmw_vsock_virtio_transport
 vsock_loopback
 br_netfilter
+loop
 MODULES
 # Bridged guest traffic must pass through iptables, or per-task policy is
 # bypassed for guest-to-guest frames.
@@ -278,7 +311,12 @@ if [[ "$root_source" == "$real"* ]]; then
     echo "Refusing to use the boot disk $real as the data disk" >&2
     exit 1
 fi
-if ! blkid -p "$real" >/dev/null 2>&1; then
+# Only a disk with nothing on it is blank. blkid -p alone cannot say: it also
+# finds nothing on a disk whose signatures conflict, such as a filesystem with a
+# stale signature from earlier use, and formatting that destroys the filesystem.
+# The separate assignment lets set -e stop on a disk wipefs cannot probe.
+signatures=$(wipefs --noheadings "$real")
+if [[ -z "$signatures" ]] && ! blkid -p "$real" >/dev/null 2>&1; then
     if [[ "$allow_format" != "--allow-format" ]]; then
         echo "Data disk $real has no filesystem; refusing to initialize it without --allow-format" >&2
         exit 1
@@ -310,11 +348,14 @@ systemctl enable --now var-lib-hot.mount
 # A disk enlarged for a bigger size grows its filesystem, online; an
 # unchanged one is left as it is.
 resize2fs "$real"
+# Kata's state, and the running release's hotbox, which the agent installs here.
 install -d -m 0755 /var/lib/hot/kata
 DISK
 
 # Size the box storage pool from /etc/hot/host.env (written by the agent from
-# the installation's size) so box tasks cannot fill the data disk.
+# the installation's size). That caps what box tasks can store, but the pool's
+# files are sparse and take their space from the data disk as boxes write, so on
+# a disk already holding other data a box can still fill it.
 cat > "$LIBEXEC/kata-devpool-activate" <<'POOL'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -331,10 +372,14 @@ install -d -m 0700 "$dir"
 # Sparse files: the pool can never use more than its configured size.
 [[ -f "$dir/data" ]] || truncate -s "${HOT_BOX_POOL_GB}G" "$dir/data"
 [[ -f "$dir/meta" ]] || truncate -s "$(( HOT_BOX_POOL_GB / 10 + 1 ))G" "$dir/meta"
-data=$(losetup --find --show "$dir/data")
-meta=$(losetup --find --show "$dir/meta")
+# kata-containerd retries this every few seconds while the pool fails to
+# activate, so reuse the loop devices already on these files and release them
+# on failure rather than attaching new ones each time.
+data=$(losetup --nooverlap --find --show "$dir/data")
+meta=$(losetup --nooverlap --find --show "$dir/meta")
 sectors=$(( $(blockdev --getsize64 "$data") / 512 ))
-dmsetup create "$pool" --table "0 $sectors thin-pool $meta $data 128 32768"
+dmsetup create "$pool" --table "0 $sectors thin-pool $meta $data 128 32768" ||
+    { losetup -d "$meta" "$data" || true; exit 1; }
 POOL
 
 cat > "$LIBEXEC/kata-containerd-socket-permissions" <<SOCKET
@@ -352,10 +397,44 @@ echo "Kata containerd socket was not created" >&2
 exit 1
 SOCKET
 
+# Each box's /data is a loop mount made inside the task worker's container. The
+# renderer binds the host's /dev there, so a device the kernel adds on demand
+# works too, and this is a margin rather than what makes the mount possible.
+# Ubuntu's generic kernel builds the driver in with 8 devices, which a modprobe
+# option cannot change, and the image's snaps use some of them, so without this a
+# busy host's boxes would depend on the kernel adding a device as they start. Here
+# the devices are there first, and the bake stops on a kernel that refuses them.
+# This asks the driver itself, which works whether it is built in or a module, and
+# hot-loop-devices.service runs it before Docker. 32 holds the pool's 2, the 8 box
+# slots of the largest size, and the snaps.
+cat > "$LIBEXEC/hot-loop-devices" <<'LOOPS'
+#!/usr/bin/python3 -I
+import errno
+import fcntl
+import os
+import stat
+
+COUNT = 32
+LOOP_CTL_ADD = 0x4C80  # linux/loop.h
+
+control = os.open("/dev/loop-control", os.O_RDWR | os.O_CLOEXEC)
+for number in range(COUNT):
+    try:
+        fcntl.ioctl(control, LOOP_CTL_ADD, number)
+    except OSError as error:
+        if error.errno != errno.EEXIST:
+            raise
+os.close(control)
+for number in range(COUNT):
+    if not stat.S_ISBLK(os.stat(f"/dev/loop{number}").st_mode):
+        raise SystemExit(f"/dev/loop{number} is not a block device")
+LOOPS
+
 # Host baseline for box guests, in the mangle table so it applies before the
 # task worker's per-task filter rules and nothing they insert can bypass it.
 # /etc/hot/guest-network.env (written by the agent) may set
-# HOT_GUEST_ALLOW_CIDRS, HOT_GUEST_DENY_CIDRS, and HOT_GUEST_DNS.
+# HOT_GUEST_ALLOW_CIDRS, HOT_GUEST_DENY_CIDRS, HOT_GUEST_DNS, and
+# HOT_GUEST_PROXY (the egress proxy, as comma-separated IPv4:port).
 cat > "$LIBEXEC/hot-guest-firewall" <<'FIREWALL'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -364,32 +443,76 @@ chain="HOT-GUEST-BASELINE"
 HOT_GUEST_ALLOW_CIDRS=""
 HOT_GUEST_DENY_CIDRS=""
 HOT_GUEST_DNS="1.1.1.1,8.8.8.8"
+HOT_GUEST_PROXY=""
 # shellcheck source=/dev/null
 [[ -f /etc/hot/guest-network.env ]] && . /etc/hot/guest-network.env
-split() { tr ',' '\n' <<<"$1" | tr -d ' ' | grep -v '^$' | grep -v ':' || true; }
+entries() { tr ',' '\n' <<<"$1" | tr -d ' ' | grep -v '^$' || true; }
+split() { entries "$1" | grep -v ':' || true; }
 
-iptables -t mangle -N "$chain" 2>/dev/null || true
-iptables -t mangle -F "$chain"
-for resolver in $(split "$HOT_GUEST_DNS"); do
-    for protocol in udp tcp; do
-        iptables -t mangle -A "$chain" -d "$resolver" -p "$protocol" --dport 53 -j RETURN
+rule() { echo "-A $chain $*"; }
+valid_proxy() {
+    local octet='(0|[1-9][0-9]{0,2})'
+    [[ "$1" =~ ^$octet\.$octet\.$octet\.$octet:([1-9][0-9]{0,4})$ ]] &&
+        ((BASH_REMATCH[1] <= 255 && BASH_REMATCH[2] <= 255 && BASH_REMATCH[3] <= 255 &&
+            BASH_REMATCH[4] <= 255 && BASH_REMATCH[5] <= 65535))
+}
+
+for proxy in $(entries "$HOT_GUEST_PROXY"); do
+    if ! valid_proxy "$proxy"; then
+        echo "HOT_GUEST_PROXY entry $proxy is not IPv4:port" >&2
+        exit 1
+    fi
+done
+
+# Everything in the mangle table is one transaction: a value iptables rejects
+# changes nothing, and running boxes never see the chain empty or half built,
+# or the jump to it missing. Naming the chain empties it, in the same commit.
+# The first attempt on a host commits nothing if it fails, so the check in
+# kata-containerd.service keeps containerd down. FORWARD is read up front:
+# iptables-legacy-restore holds the xtables lock while it reads its input, so
+# an iptables call feeding it would wait forever.
+forward=$(iptables -t mangle -S FORWARD)
+transaction() {
+    echo '*mangle'
+    echo ":$chain - [0:0]"
+    # Never reachable: the host, every metadata service, other guests. These
+    # come first, so no resolver or other setting below can open them.
+    for destination in 0.0.0.0/8 127.0.0.0/8 169.254.0.0/16 10.88.0.0/16 224.0.0.0/4 240.0.0.0/4; do
+        rule -d "$destination" -j DROP
     done
-done
-# Never reachable: the host, every metadata service, other guests, the
-# installation's own networks.
-for destination in 0.0.0.0/8 127.0.0.0/8 169.254.0.0/16 10.88.0.0/16 224.0.0.0/4 240.0.0.0/4 \
-        $(split "$HOT_GUEST_DENY_CIDRS"); do
-    iptables -t mangle -A "$chain" -d "$destination" -j DROP
-done
-for destination in $(split "$HOT_GUEST_ALLOW_CIDRS"); do
-    iptables -t mangle -A "$chain" -d "$destination" -j RETURN
-done
-for destination in 10.0.0.0/8 100.64.0.0/10 172.16.0.0/12 192.168.0.0/16; do
-    iptables -t mangle -A "$chain" -d "$destination" -j DROP
-done
-iptables -t mangle -A "$chain" -j RETURN
-while iptables -t mangle -D FORWARD -i "$bridge" -j "$chain" 2>/dev/null; do :; done
-iptables -t mangle -I FORWARD 1 -i "$bridge" -j "$chain"
+    # A private resolver is reachable on port 53 only, even inside the deny list.
+    for resolver in $(split "$HOT_GUEST_DNS"); do
+        for protocol in udp tcp; do
+            rule -d "$resolver" -p "$protocol" --dport 53 -j RETURN
+        done
+    done
+    if [[ -n "$HOT_GUEST_PROXY" ]]; then
+        # Guests reach the internet only through the operator's proxy, which may
+        # be on a private address. The per-task rules say the same.
+        for proxy in $(entries "$HOT_GUEST_PROXY"); do
+            rule -d "${proxy%:*}" -p tcp --dport "${proxy##*:}" -j RETURN
+        done
+        rule -j DROP
+    else
+        # The installation's own networks, the operator's allowlist, and then
+        # whatever else is private.
+        for destination in $(split "$HOT_GUEST_DENY_CIDRS"); do
+            rule -d "$destination" -j DROP
+        done
+        for destination in $(split "$HOT_GUEST_ALLOW_CIDRS"); do
+            rule -d "$destination" -j RETURN
+        done
+        for destination in 10.0.0.0/8 100.64.0.0/10 172.16.0.0/12 192.168.0.0/16; do
+            rule -d "$destination" -j DROP
+        done
+        rule -j RETURN
+    fi
+    # The jump goes first in FORWARD, wherever an earlier run left it.
+    sed -n "s/^-A \(FORWARD -i $bridge -j $chain\)\$/-D \1/p" <<<"$forward"
+    echo "-I FORWARD 1 -i $bridge -j $chain"
+    echo COMMIT
+}
+transaction | iptables-restore --noflush
 
 # Guests never address the host, and guests have no IPv6.
 iptables -C INPUT -i "$bridge" -j DROP 2>/dev/null || iptables -I INPUT 1 -i "$bridge" -j DROP
@@ -399,6 +522,8 @@ for direction in "FORWARD -i" "FORWARD -o" "INPUT -i"; do
 done
 FIREWALL
 chmod 0755 "$LIBEXEC"/*
+# Once now, so the bake fails here if this kernel refuses.
+"$LIBEXEC/hot-loop-devices"
 
 # ------------------------------------------------------------------
 # systemd units
@@ -415,6 +540,22 @@ What=/var/lib/hot/kata
 Where=/var/lib/kata
 Type=none
 Options=bind
+UNIT
+
+# WantedBy, so if this fails Docker and everything else still start, and a box
+# past the kernel's own devices relies on the kernel adding one.
+cat > /etc/systemd/system/hot-loop-devices.service <<'UNIT'
+[Unit]
+Description=Loop devices for box data volumes
+Before=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/libexec/hot/hot-loop-devices
+
+[Install]
+WantedBy=docker.service
 UNIT
 
 cat > /etc/systemd/system/hot-guest-firewall.service <<'UNIT'
@@ -434,14 +575,21 @@ UNIT
 
 # Starts only once the data disk is mounted; the agent starts it after
 # mounting on first boot, and it starts on its own on later boots.
+# The firewall is Wants=, not Requires=: the agent restarts it before each
+# deploy to apply new settings, and Requires= would restart containerd with
+# it, which ends every running box. The first two ExecStartPre lines still
+# keep containerd down until the guest baseline is in place.
 cat > /etc/systemd/system/kata-containerd.service <<'UNIT'
 [Unit]
 Description=containerd for Kata Containers
 ConditionPathIsMountPoint=/var/lib/hot
-Requires=var-lib-kata.mount hot-guest-firewall.service
+Requires=var-lib-kata.mount
+Wants=hot-guest-firewall.service
 After=var-lib-kata.mount hot-guest-firewall.service network.target
 
 [Service]
+ExecStartPre=/usr/bin/systemctl is-active --quiet hot-guest-firewall.service
+ExecStartPre=/usr/sbin/iptables -t mangle -C FORWARD -i kata-br0 -j HOT-GUEST-BASELINE
 ExecStartPre=/usr/local/libexec/hot/kata-devpool-activate
 ExecStart=/usr/local/bin/kata-containerd --config /etc/kata-containerd/config.toml
 ExecStartPost=/usr/local/libexec/hot/kata-containerd-socket-permissions
@@ -458,13 +606,14 @@ WantedBy=multi-user.target
 UNIT
 
 # Enabled at boot by the installation's bootstrap, which first writes
-# /etc/hot/installation.json.
+# /etc/hot/installation.json. Docker is Wants=, not Requires=: Docker waits
+# for the data disk, and the agent must still run, and report, when the disk
+# fails to mount or Docker restarts.
 cat > /etc/systemd/system/hot-agent.service <<'UNIT'
 [Unit]
 Description=Hot deploy agent
 After=docker.service network-online.target
-Wants=network-online.target
-Requires=docker.service
+Wants=docker.service network-online.target
 ConditionPathExists=/etc/hot/installation.json
 
 [Service]
@@ -477,12 +626,24 @@ WantedBy=multi-user.target
 UNIT
 
 systemctl daemon-reload
-systemctl enable hot-guest-firewall.service kata-containerd.service
-mkdir -p /run/vc /tmp/hot-box-io /var/run/netns /var/lib/cni/networks
+systemctl enable hot-loop-devices.service hot-guest-firewall.service kata-containerd.service
+
+# The task worker bind-mounts these, and Docker does not create a missing
+# bind source. /run is tmpfs and /tmp is emptied at boot, so they are made on
+# every boot, before Docker starts and restarts the task worker.
+cat > /etc/tmpfiles.d/hot-host.conf <<'TMPFILES'
+d /run/kata-containerd 0711 root root -
+d /run/vc 0750 root root -
+d /run/netns 0755 root root -
+d /tmp/hot-box-io 0700 root root -
+d /var/lib/cni/networks 0755 root root -
+TMPFILES
+systemd-tmpfiles --create /etc/tmpfiles.d/hot-host.conf
 
 # ------------------------------------------------------------------
 # Record what was baked, then reset per-instance state
 # ------------------------------------------------------------------
+# hotbox_from is where the fallback came from, not the hotbox a deploy installs.
 cat > "$HOST_DIR/versions.json" <<JSON
 {
   "kata": "${KATA_VERSION}",
@@ -495,11 +656,18 @@ cat > "$HOST_DIR/versions.json" <<JSON
 JSON
 
 log "Cleaning per-instance state"
-apt-get clean
+apt_get clean
 rm -rf /var/lib/apt/lists/*
 cloud-init clean --logs --machine-id 2>/dev/null || truncate -s 0 /etc/machine-id
 journalctl --rotate >/dev/null 2>&1 || true
 journalctl --vacuum-time=1s >/dev/null 2>&1 || true
+# On Google Cloud, Packer's startup-script wrapper runs gcloud as root after
+# this script ends, to report the bake's status. Keep the configuration and
+# access token it writes in memory, so the image never holds them.
+gcloud_config="${CLOUDSDK_CONFIG:-${HOME:-/root}/.config/gcloud}"
+rm -rf "$gcloud_config"
+install -d -m 0700 "$gcloud_config"
+mount -t tmpfs -o mode=0700,size=16m tmpfs "$gcloud_config"
 
 log "Host image baked"
 if [[ "$POWEROFF" == "true" ]]; then

@@ -10,6 +10,9 @@
 #       -var aws_region=us-east-2 -var aws_subnet_id=subnet-0123
 #   infra/images/build-host.sh gcp 3.0.1 ghcr.io/hot-dev/hot-runtime@sha256:... \
 #       -var gcp_project=my-project -var gcp_subnetwork=hot-build
+#
+# The build stops, and Packer deletes the build VM, after
+# HOT_IMAGE_BUILD_TIMEOUT (default 120m, in timeout(1)'s format).
 set -euo pipefail
 
 cloud="${1:?usage: build-host.sh aws|gcp RELEASE RUNTIME_IMAGE [packer args...]}"
@@ -18,18 +21,22 @@ runtime_image="${3:?missing RUNTIME_IMAGE}"
 shift 3
 [[ "$cloud" == "aws" || "$cloud" == "gcp" ]] || { echo "cloud must be aws or gcp" >&2; exit 2; }
 [[ "$runtime_image" =~ @sha256:[0-9a-f]{64}$ ]] || { echo "RUNTIME_IMAGE must be pinned by digest" >&2; exit 2; }
+# On Google Cloud, Packer waits for the startup script's status with no limit.
+time_limit=$(command -v timeout || command -v gtimeout) ||
+    { echo "build-host.sh needs timeout from GNU coreutils (on macOS: brew install coreutils)" >&2; exit 2; }
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 # The build VM receives the setup script inline: nothing is fetched at boot.
+# It goes to tmpfs, so the image does not keep a copy.
 boot_script() {
     printf '#!/bin/bash\nset -euo pipefail\n'
-    printf "cat > /root/setup-host.sh <<'HOT_SETUP_EOF'\n"
+    printf "cat > /run/hot-setup-host.sh <<'HOT_SETUP_EOF'\n"
     cat "$here/host/setup-host.sh"
     printf 'HOT_SETUP_EOF\n'
-    printf 'bash /root/setup-host.sh --runtime-image %q %s\n' "$runtime_image" "$1"
+    printf 'bash /run/hot-setup-host.sh --runtime-image %q %s\n' "$runtime_image" "$1"
 }
 
 if [[ "$cloud" == "aws" ]]; then
@@ -44,4 +51,8 @@ fi
 [[ "$cloud" == "gcp" ]] && only="googlecompute.hot-host"
 
 packer init "$here/packer"
-packer build -only="$only" -var "hot_release=$release" "${vars[@]}" "$@" "$here/packer"
+# TERM is the signal Packer's wrapper process forwards to the build, which then
+# cancels and deletes the build VM before exiting; the wrapper ignores INT.
+# --foreground lets Ctrl-C in a terminal still reach the whole process group.
+"$time_limit" --foreground --signal=TERM --kill-after=15m "${HOT_IMAGE_BUILD_TIMEOUT:-120m}" \
+    packer build -only="$only" -var "hot_release=$release" "${vars[@]}" "$@" "$here/packer"
