@@ -496,8 +496,14 @@ if either side is a declared type: a `Triangle` passed to `s: Shape` goes throug
 `Temperature -> Str`. An arrow between two built-in types doesn't apply
 implicitly. `Int -> Str` backs `Str(5)`, so `f(5)` for `x: Str` is a type error,
 and a `5` that reaches `x` through an `Any` value fails at the call. Null is
-never converted at a call. Functions called by `map` and other higher-order
-functions, and lambdas, don't apply arrows.
+never converted at a call. Named functions get arrows however they're called,
+by `map` and other higher-order functions or through a variable. Lambdas don't
+apply arrows.
+
+Overloads take arrows into account. A `Temperature` passed to overloads
+`(x: Str)` and `(x: Vec)` reaches `(x: Str)` through `Temperature -> Str`. An
+overload that takes the value as it is comes first, and if arrows reach two
+overloads that are equally good, neither is chosen for it.
 
 ### Parameter Checks
 

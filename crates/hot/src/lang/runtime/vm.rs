@@ -8059,7 +8059,8 @@ impl VirtualMachine {
     ///
     /// Implicit `Source -> Target` coercion is **not** applied here. The
     /// per-call coercion happens in `coerce_call_args`, called by the
-    /// `CallUserFunction` opcode handler and the JIT's call into the VM, so
+    /// `CallUserFunction` opcode handler and the JIT's call into the VM, and
+    /// for calls through a function value, so
     /// that compiler-resolved static dispatch (where
     /// `function_id` may have been picked from the arity-only key)
     /// gets the same treatment without touching this dynamic path —
