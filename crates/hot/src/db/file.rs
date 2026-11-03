@@ -28,8 +28,8 @@ pub struct FileRecord {
 /// Metadata is the commit point for a file upload. On a limited account,
 /// every size-increasing write holds the billing root row lock across the
 /// account total and metadata update; an unlimited account takes neither the
-/// lock nor the total. Staged object bytes are never counted as committed
-/// storage.
+/// lock nor the total. On SQLite every write holds the database's writer lock
+/// from the start. Staged object bytes are never counted as committed storage.
 enum StorageWriteTransaction {
     Postgres(sqlx::Transaction<'static, sqlx::Postgres>),
     Sqlite(sqlx::Transaction<'static, sqlx::Sqlite>),
@@ -126,33 +126,27 @@ async fn begin_storage_write(
             Ok(StorageWriteTransaction::Postgres(tx))
         }
         DatabasePool::Sqlite(pool) => {
-            let mut tx = pool.begin().await.map_err(fwe)?;
-            let read_limits = async |tx: &mut sqlx::Transaction<'static, sqlx::Sqlite>| {
-                let overrides: Option<String> =
-                    sqlx::query_scalar("SELECT features FROM org WHERE org_id=?")
-                        .bind(root_id)
-                        .fetch_one(&mut **tx)
-                        .await
-                        .map_err(fwe)?;
-                let plan: Option<String> = sqlx::query_scalar(
-                    "SELECT COALESCE(p.features,'{}') FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=?"
-                ).bind(root_id).fetch_optional(&mut **tx).await.map_err(fwe)?.flatten();
-                let parse = |raw: Option<String>| {
-                    raw.map(|s| serde_json::from_str::<serde_json::Value>(&s))
-                        .transpose()
-                        .map_err(fwe)
-                };
-                Ok::<_, FileWriteError>((parse(plan)?, parse(overrides)?))
-            };
-            let (plan, overrides) = read_limits(&mut tx).await?;
-            if storage_limit(plan.as_ref(), overrides.as_ref()) >= 0 {
-                // Take the write lock, then read the limits again under it.
-                sqlx::query("UPDATE org SET updated_at=updated_at WHERE org_id=?")
+            // A deferred transaction that reads first can't wait for the
+            // writer lock later: SQLite fails its first write at once with
+            // SQLITE_BUSY, or SQLITE_BUSY_SNAPSHOT if another writer committed
+            // since the read. Taking the lock up front waits on busy_timeout.
+            let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.map_err(fwe)?;
+            let overrides: Option<String> =
+                sqlx::query_scalar("SELECT features FROM org WHERE org_id=?")
                     .bind(root_id)
-                    .execute(&mut *tx)
+                    .fetch_one(&mut *tx)
                     .await
                     .map_err(fwe)?;
-                let (plan, overrides) = read_limits(&mut tx).await?;
+            let plan: Option<String> = sqlx::query_scalar(
+                "SELECT COALESCE(p.features,'{}') FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=?"
+            ).bind(root_id).fetch_optional(&mut *tx).await.map_err(fwe)?.flatten();
+            let parse = |raw: Option<String>| {
+                raw.map(|s| serde_json::from_str::<serde_json::Value>(&s))
+                    .transpose()
+                    .map_err(fwe)
+            };
+            let (plan, overrides) = (parse(plan)?, parse(overrides)?);
+            if storage_limit(plan.as_ref(), overrides.as_ref()) >= 0 {
                 // The account's active file bytes, kept per environment and
                 // organization by triggers on `file` (migration 016).
                 let counted: i64 = sqlx::query_scalar(
@@ -2808,6 +2802,57 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn sqlite_file_writes_wait_for_another_writer_instead_of_failing() {
+        let dir = tempfile::tempdir().unwrap();
+        let conf =
+            crate::val!({"uri": format!("sqlite:{}", dir.path().join("files.db").display())});
+        crate::db::run_migrations(&conf).await.unwrap();
+        let db = crate::db::create_db_pool(&conf).await.unwrap();
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let (org, env, user) = (data.org_id, Some(data.env_id), data.user_id);
+        // Another connection holds the writer lock for 300 ms.
+        let hold_writer_lock = async || {
+            let mut holder = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+            sqlx::query("UPDATE env SET name=name WHERE env_id=?")
+                .bind(data.env_id)
+                .execute(&mut *holder)
+                .await
+                .unwrap();
+            holder
+        };
+        let release_later = |holder: sqlx::Transaction<'static, sqlx::Sqlite>| {
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                holder.commit().await.unwrap();
+            })
+        };
+        // A deferred transaction that has already read can't wait for the
+        // lock: SQLite answers its first write with SQLITE_BUSY at once.
+        let release = release_later(hold_writer_lock().await);
+        let record =
+            insert_file_record(&db, "a", 1, None, None, "local", "a", org, env, user, None)
+                .await
+                .unwrap();
+        release.await.unwrap();
+        let release = release_later(hold_writer_lock().await);
+        update_file_record(&db, record.file_id, 2, None, None, "b", user, None)
+            .await
+            .unwrap();
+        release.await.unwrap();
+        let release = release_later(hold_writer_lock().await);
+        assert!(
+            update_file_record_if_active(&db, record.file_id, 3, None, None, "c", user, None)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        release.await.unwrap();
     }
 
     /// SQLite DB with FK enforcement on and a `run` table, mirroring the
