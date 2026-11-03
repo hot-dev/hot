@@ -1,0 +1,23 @@
+::uk::sanctions::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration smoke tests (live, read-only)
+// =============================================================================
+// UK_SANCTIONS_LIVE=1 sends one HEAD request. The full file is about 22 MB,
+// so it is not downloaded here. Nothing is written to the store.
+// Run with: UK_SANCTIONS_LIVE=1 hot test -p pkg-integration-uk-sanctions
+
+::ctx ::uk::sanctions::integration::ctx
+
+test-uk-list-head
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("UK_SANCTIONS_LIVE is not 1") }
+        => {
+            info ::name-screening::http/head(::uk::sanctions/URL)
+            assert(is-some(or(info.etag, info.last-modified)), "a version to compare")
+            assert-eq("bytes", lowercase(or(info.accept-ranges, "")), "the Range download depends on this")
+        }
+    }
+}

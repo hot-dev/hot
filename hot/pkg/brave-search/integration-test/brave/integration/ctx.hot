@@ -1,0 +1,28 @@
+::brave::integration::ctx ns
+
+::env ::hot::env
+
+// Credentials for the brave integration suite. Unset environment
+// variables are skipped entirely, so absent credentials behave exactly as
+// if never configured, and every test then skips (passes with a "skipped"
+// note) instead of calling Brave.
+::hot::ctx/set(filter-vals({
+    "brave.api.key": ::env/get("BRAVE_API_KEY", ""),
+}, (v) { not(is-empty(v)) }))
+
+configured
+meta {doc: """True when a Brave API key is configured."""}
+fn (): Bool {
+    not(is-empty(or(::hot::ctx/get("brave.api.key"), "")))
+}
+
+skip
+meta {
+    doc: """Record a skipped test: prints why and passes one assertion so the runner reports it cleanly."""
+}
+fn (reason: Str): Bool {
+    println(`skipped: ${reason}`)
+    assert(true, reason)
+}
+
+UNCONFIGURED "set BRAVE_API_KEY"

@@ -1,0 +1,94 @@
+::uk::sanctions::test::parsers ns
+meta ["test"]
+
+::fx ::uk::sanctions::test::fixtures
+::uk ::uk::sanctions
+::index ::name-screening::index
+::screen ::name-screening::screen
+::cache ::name-screening::cache
+
+by-id fn (entries: Vec, id: Str): Map {
+  untype(find-first(entries, (e) { eq(e.id, id) }))
+}
+
+// ============================================================================
+// UK
+// ============================================================================
+
+test-uk-individual
+meta ["test"]
+fn () {
+    es ::uk/parse(::fx/UK_XML)
+    assert-eq(3, length(es))
+    a by-id(es, "AFG0007")
+    assert-eq("Abdul Kabir MOHAMMAD JAN", a.name)
+    assert-eq("individual", a.kind)
+    assert-eq(["KABIR MUHAMMAD JAN ABDUL", "A Kabir", "عبد الکبیر محمد جان"], a.aliases)
+    assert-eq(["1963", "1972-01-30"], a.dobs, "dd/mm/1963 is a year; duplicates dropped")
+    assert-eq(["AF"], a.nationalities)
+    assert-eq(["Afghanistan"], a.addresses)
+    assert-eq(["The Afghanistan (Sanctions) (EU Exit) Regulations 2020"], a.programs)
+    assert-eq("Active in terrorist operations in Eastern Afghanistan.", a.remarks)
+}
+
+test-uk-ship-and-entity-with-ampersand
+meta ["test"]
+fn () {
+    es ::uk/parse(::fx/UK_XML)
+    ship by-id(es, "DPR0075")
+    assert-eq("vessel", ship.kind)
+    assert-eq("Petrel 8", ship.name)
+    assert-eq(["Jal Vahini", "Tian Tai 36"], ship.aliases)
+    org by-id(es, "AQD0011")
+    assert-eq("entity", org.kind)
+    assert-eq("AL-HARAMAIN & AL MASJED AL-AQSA CHARITY FOUNDATION", org.name, "&amp; is decoded")
+    assert-eq(["Hamdije Cemerlica 41, Sarajevo, Bosnia and Herzegovina"], org.addresses)
+}
+
+// ============================================================================
+// With hot.dev/name-screening
+// ============================================================================
+
+test-lists-register-with-the-cache
+meta ["test"]
+fn () {
+    ls ::uk::sanctions/lists()
+    assert-eq(::uk::sanctions/SOURCES, map(ls, (l) { l.source }))
+    for-each(ls, (l) {
+      assert-eq(l, ::cache/check-list(l))
+      assert(is-fn(l.fetch), "lists carry their fetch")
+    })
+}
+
+test-screens-the-parsed-list-from-memory
+meta ["test"]
+fn () {
+    idx ::index/build(::uk::sanctions/parse(::fx/UK_XML))
+    r untype(::screen/screen-index({uk: idx}, "Petrel 8", {kind: ["vessel", "aircraft"]}))
+    assert-eq("possible-match", r.status)
+    assert-eq(true, r.review-required)
+    assert-eq("DPR0075", first(r.matches).entry.id)
+    assert(gt(length(first(r.matches).explanation), 0), "every match is explained")
+}
+
+test-screens-the-parsed-list-from-the-cache
+meta ["test"]
+fn () {
+    store `uk-test-${Uuid()}`
+    row ::cache/refresh-source({source: "uk", list: "UK Sanctions List", entries: ::uk::sanctions/parse(::fx/UK_XML)}, {store: store})
+    assert-eq("updated", row.status)
+    r untype(::name-screening/screen("Petrel 8", {...{kind: ["vessel", "aircraft"]}, store: store, sources: ["uk"]}))
+    assert-eq("possible-match", r.status)
+    assert-eq("DPR0075", first(r.matches).entry.id)
+    clean untype(::name-screening/screen("Jane Q. Example", {store: store, sources: ["uk"]}))
+    assert-eq("no-match", clean.status)
+    assert-eq(["uk"], map(clean.sources, (s) { s.source }))
+    assert(contains(clean.notice, "Searched: UK Sanctions List."), clean.notice)
+}
+
+test-a-list-never-refreshed-is-not-a-no-match
+meta ["test"]
+fn () {
+    out ::name-screening/screen("Jane Q. Example", {store: `uk-test-${Uuid()}`, sources: ::uk::sanctions/SOURCES})
+    assert(is-err(out), "an empty cache is not a no-match")
+}

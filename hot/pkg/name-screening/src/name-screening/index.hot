@@ -1,0 +1,161 @@
+::name-screening::index ns
+meta {
+    doc: """
+    The compact screening index (pure). For one list it holds:
+
+    - **records**: `e:<id>` → `{entry, toks, countries}`, the `Entry`
+      plus each name's normalized tokens (primary name first, then the
+      aliases) and the ISO country codes of its nationalities and
+      addresses;
+    - **buckets**: `b:<hh>` → `{blocking key → [entry ids]}`, the
+      postings for every blocking key (see
+      `::name-screening::text/blocking-keys`), spread over 256 buckets by the
+      first two hex digits of the key's SHA-256.
+
+    A screening call reads one bucket per distinct query bucket and the
+    records of the best candidates only, so its cost does not grow with
+    the list size. A list of about 19,500 entries gives about 19,500
+    records and 256 buckets.
+
+    Everything here is built with native collection functions in a few
+    passes: Hot copies a Map or Vec on every call that takes it, so
+    per-item lookups into a large Map would be quadratic.
+    """
+}
+
+::text ::name-screening::text
+::country ::name-screening::country
+
+Entry ::name-screening::entry/Entry
+
+BUCKET_DIGITS 2
+
+bucket-of
+meta {
+    doc: """The bucket key for a blocking key: `b:` plus the first two hex digits of its SHA-256."""
+}
+fn (key: Str): Str {
+  `b:${slice(::hot::hash/sha256(key), 0, BUCKET_DIGITS)}`
+}
+
+record-key
+meta {
+    doc: """The store key of an entry's record: `e:<id>`."""
+}
+fn (id: Str): Str {
+  `e:${id}`
+}
+
+entry-countries
+meta {
+    doc: """The ISO codes an entry is tied to: its nationalities plus the country at the end of each address, distinct."""
+}
+fn (e: Map): Vec<Str> {
+  from-addresses map(or(e.addresses, []), (a) { ::country/code(trim(last(split(a, ",")))) })
+  from-nationalities map(or(e.nationalities, []), (n) { ::country/key(n) })
+  distinct(filter(concat(from-nationalities, from-addresses), (c) { and(is-some(c), not(is-empty(c))) }))
+}
+
+record
+meta {
+    doc: """
+    The stored screening record for one entry: `{entry, toks,
+    countries}`. `toks[0]` holds the primary name's tokens and
+    `toks[i]` alias `i - 1`'s; entity, vessel and aircraft names have
+    corporate suffixes stripped, individual names honorifics.
+    """
+}
+fn (entry: Entry): Map {
+  e untype(entry)
+  strip ::text/strips-suffixes(e.kind)
+  names concat([e.name], e.aliases)
+  {entry: e, toks: map(names, (n) { ::text/tokens(n, strip) }), countries: entry-countries(e)}
+}
+
+record-tokens
+meta {
+    doc: """The distinct tokens of a record's names that get blocking keys (see `::name-screening::text/key-tokens`)."""
+}
+fn (rec: Map): Vec<Str> {
+  distinct(mapcat(rec.toks, ::text/key-tokens))
+}
+
+build
+meta {
+    doc: """
+    Build the index for a list of entries: `{records, buckets, pairs,
+    entry-count, key-count}`. `records` and `buckets` are Maps;
+    `pairs` holds the same as `[store-key, value]` pairs for batched
+    writes.
+
+    **Example**
+
+    ```hot
+    idx ::name-screening::index/build(entries)
+    idx.records["e:2676"].toks   // [["al", "zawahiri", "ayman"], ...]
+    ```
+    """
+}
+fn (entries: Vec<Entry>): Map {
+  recs map(entries, record)
+  // Keys are computed once per distinct token, not once per occurrence.
+  token-pairs mapcat(recs, (r) {
+    id r.entry.id
+    map(record-tokens(r), (t) { [t, id] })
+  })
+  key-pairs mapcat(vals(group-by(token-pairs, first)), (ps) {
+    ids map(ps, last)
+    map(::text/token-keys(first(first(ps))), (k) { [k, ids] })
+  })
+  postings map(vals(group-by(key-pairs, first)), (ks) { [first(first(ks)), distinct(flatten(map(ks, last)))] })
+  by-bucket group-by(postings, (p) { bucket-of(first(p)) })
+  // Pairs are built straight from each item: a lambda that indexed into
+  // a captured Vec would copy it on every call.
+  record-pairs map(recs, (r) { [record-key(r.entry.id), r] })
+  bucket-pairs map(vals(by-bucket), (ps) { [bucket-of(first(first(ps))), zipmap(map(ps, first), map(ps, last))] })
+  {
+    records: zipmap(map(record-pairs, first), map(record-pairs, last)),
+    buckets: zipmap(map(bucket-pairs, first), map(bucket-pairs, last)),
+    pairs: concat(record-pairs, bucket-pairs),
+    entry-count: length(recs),
+    key-count: length(postings)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Candidate selection
+// ---------------------------------------------------------------------------
+
+// A posting list longer than this is skipped when the query has rarer keys.
+COMMON_POSTING 2000
+
+key-weight
+meta {
+    doc: """A blocking key's weight from its posting length: rare keys count close to 1, common ones little (`1 / (1 + n / 10)`)."""
+}
+fn (posting-length: Int): Dec {
+  div(1.0, add(1.0, div(posting-length, 10)))
+}
+
+rank-candidates
+meta {
+    doc: """
+    Rank candidate ids from `postings`, a Vec of `[key, ids]` for the
+    query's keys: each id scores the sum of the weights of the keys it
+    shares with the query. Keys with more than 2000 ids are ignored
+    when any rarer key matched. Returns up to `limit` ids, best first,
+    ties broken by id so the order is deterministic.
+    """
+}
+fn (postings: Vec, limit: Int): Vec<Str> {
+  found filter(postings, (p) { not(is-empty(last(p))) })
+  rare filter(found, (p) { lte(length(last(p)), COMMON_POSTING) })
+  use if(is-empty(rare), found, rare)
+  weighted mapcat(use, (p) {
+    w key-weight(length(last(p)))
+    map(last(p), (id) { [id, w] })
+  })
+  scored map(vals(group-by(weighted, first)), (ws) { [first(first(ws)), reduce(ws, (acc, x) { add(acc, last(x)) }, 0.0)] })
+  ordered sort-by(sort-by(scored, first), (s) { sub(0, last(s)) })
+  map(slice(ordered, 0, min(limit, length(ordered))), first)
+}

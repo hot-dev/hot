@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.name-screening {
+  name: "hot.dev/name-screening",
+  version: "0.1.0",
+  hot-min-version: "3.0.2",
+  description: "Name screening for Hot over lists you choose: a normalized Entry record, transliteration, token-set and Jaro-Winkler similarity, date-of-birth and country adjustments, a compact name index and a ::hot::store cache with a scheduled refresh. Returns explained possible-match or no-match results for human review, naming the lists searched. It holds no list itself: install hot.dev/ofac, hot.dev/uk-sanctions, hot.dev/eu-sanctions or hot.dev/un-sanctions, or pass your own.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["screening", "sanctions", "compliance", "kyc", "aml"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

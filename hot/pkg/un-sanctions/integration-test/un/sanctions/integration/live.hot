@@ -1,0 +1,50 @@
+::un::sanctions::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration smoke tests (live, read-only)
+// =============================================================================
+// UN_SANCTIONS_LIVE=1 downloads and parses the UN list (about 2 MB), then
+// runs the whole path through a throwaway cache store.
+// Run with: UN_SANCTIONS_LIVE=1 hot test -p pkg-integration-un-sanctions
+
+::ctx ::un::sanctions::integration::ctx
+::cache ::name-screening::cache
+::store ::hot::store
+
+test-un-list-downloads-and-parses
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("UN_SANCTIONS_LIVE is not 1") }
+        => {
+            out ::un::sanctions/fetch(null)
+            assert(not(out.unchanged), "a null known version always parses")
+            assert(gt(length(out.entries), 500), "the UN list has about 1,000 records")
+            assert-eq(16, length(out.version))
+            sample first(out.entries)
+            assert(not(is-empty(sample.name)), "entries have names")
+            assert(some(out.entries, (e) { eq(e.kind, "entity") }), "entities are present")
+            again ::un::sanctions/fetch(out.version)
+            assert(again.unchanged, "the same body is recognized as unchanged")
+        }
+    }
+}
+
+test-un-list-refreshes-and-screens
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("UN_SANCTIONS_LIVE is not 1") }
+        => {
+            store `un-sanctions-integration-${Uuid()}`
+            opts {store: store}
+            row first(::un::sanctions/refresh(opts))
+            assert-eq("updated", row.status)
+            assert-eq("unchanged", first(::un::sanctions/refresh(opts)).status)
+            r untype(::name-screening/screen("Jane Q. Example", {...opts, sources: ::un::sanctions/SOURCES}))
+            assert-eq("no-match", r.status)
+            assert-eq(["un"], map(r.sources, (s) { s.source }))
+            ::store/destroy(::store/Map({name: ::cache/meta-of("un", opts).store}))
+            ::store/destroy(::store/Map({name: store}))
+        }
+    }
+}

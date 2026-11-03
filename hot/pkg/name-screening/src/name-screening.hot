@@ -1,0 +1,109 @@
+::name-screening ns
+meta {
+    doc: """
+    Name screening over lists you choose: normalization and
+    transliteration, similarity, country handling, a compact name index,
+    a `::hot::store` cache, and scored, explained results. It knows no
+    list. Install a list package (`hot.dev/ofac`,
+    `hot.dev/uk-sanctions`, `hot.dev/eu-sanctions`,
+    `hot.dev/un-sanctions`), or pass your own list in.
+
+    **Never an automatic decision.** `screen` returns
+    `"possible-match"` or `"no-match"` with scored, explained matches.
+    A person must review every possible match before acting on it.
+
+    **Only the lists named in a result were searched.** A list that is
+    not installed or not refreshed was not searched. Name the lists you
+    need in `sources`: a named list with no cached data is an Err.
+
+    **Setup**: each list is downloaded, parsed and indexed into
+    `::hot::store` by `::name-screening::cache/refresh-lists`, which
+    should run from a daily schedule. Screening reads only that cache.
+
+    - `::name-screening::cache` refreshes and inspects the cache
+    - `::name-screening::screen` holds the scoring and the result types
+    - `::name-screening::entry` is the `Entry` record lists parse into
+    - `::name-screening::text` and `::name-screening::similarity`
+      normalize names and compare them
+    - `::name-screening::http` and `::name-screening::xml` are helpers
+      for list packages
+
+    **Quick start**
+
+    ```hot
+    lists concat(::ofac/lists(), ::un::sanctions/lists())
+
+    // Once, and then daily from a schedule.
+    ::name-screening::cache/refresh-lists(lists)
+
+    result ::name-screening/screen("Ayman al-Zawahiri", {
+      dob: "1951",
+      kind: "individual",
+      sources: map(lists, (l) { l.source })
+    })
+    result.status            // "possible-match"
+    result.matches[0].score  // e.g. 0.98
+    result.matches[0].explanation
+    result.sources           // the lists searched
+    ```
+    """
+}
+
+::screen ::name-screening::screen
+::cache ::name-screening::cache
+::store ::hot::store
+
+ScreenResult ::name-screening::screen/ScreenResult
+
+screen
+meta {
+    doc: """
+    Screen one name against the cached lists.
+
+    **Options**
+    - `sources` — the lists that must be searched: a source key or a Vec
+      of them. Default: every list a refresh has been tried for, with a
+      warning that any other list was not searched
+    - `dob` — date of birth or year (`"1951-06-19"`, `"1951"`), individuals
+    - `country` — nationality or country, as an ISO code or a name
+    - `kind` — `"individual"`, `"entity"`, `"vessel"`, `"aircraft"`, or a
+      Vec of them; other kinds are skipped
+    - `threshold` — minimum score, default 0.85
+    - `limit` — most matches returned, default 10
+    - `max-candidates` — candidates scored per list, default 50
+    - `allow-missing` — true to skip lists that have no cached data
+      instead of failing
+    - `store` — the cache store name (default from `name-screening.store`)
+
+    Returns a `::name-screening::screen/ScreenResult`. Its `sources` name
+    the lists searched. It fails when a required list has no cached data,
+    and always when no list can be searched, so an empty cache can't
+    pass as `"no-match"`.
+
+    **Example**
+
+    ```hot
+    r ::name-screening/screen("Banco Nacional de Cuba", {kind: "entity", sources: ["ofac-sdn"]})
+    r.status
+    ```
+    """
+}
+fn
+(name: Str): ScreenResult {
+  screen(name, {})
+},
+(name: Str, opts: Map): ScreenResult {
+  opened ::cache/open-sources(opts)
+  cond {
+    is-err(opened) => { opened }
+    => {
+      query ::screen/query-of(name, opts)
+      max-c or(get(opts, "max-candidates"), ::screen/DEFAULT_MAX_CANDIDATES)
+      records mapcat(opened.lists, (l) {
+        data ::store/Map({name: l.store})
+        ::screen/candidates-for(query, (b) { ::store/get(data, b) }, (k) { ::store/get(data, k) }, max-c)
+      })
+      ::screen/result(query, records, opts, opened.sources, opened.warnings, opened.not-searched)
+    }
+  }
+}

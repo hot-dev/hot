@@ -1,0 +1,42 @@
+::name-screening::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration tests
+// =============================================================================
+// The store round trip runs without a network. NAME_SCREENING_LIVE=1 also
+// reads one public web page with the download helpers. Each list package
+// has its own live tests against its list.
+// Run with: NAME_SCREENING_LIVE=1 hot test -p pkg-integration-name-screening
+
+::ctx ::name-screening::integration::ctx
+::cache ::name-screening::cache
+::entry ::name-screening::entry
+::http ::name-screening::http
+::store ::hot::store
+
+test-refresh-and-screen-through-the-store
+meta ["test"] fn () {
+    store `name-screening-integration-${Uuid()}`
+    entries [::entry/make({source: "custom", list: "My Own List", id: "1", kind: "entity", name: "Acme Trading Ltd"})]
+    row ::cache/refresh-source({source: "custom", list: "My Own List", entries: entries}, {store: store})
+    assert-eq("updated", row.status)
+    r untype(::name-screening/screen("Acme Trading", {store: store, sources: ["custom"]}))
+    assert-eq("possible-match", r.status)
+    assert-eq("My Own List", first(r.sources).list)
+    ::store/destroy(::store/Map({name: ::cache/meta-of("custom", {store: store}).store}))
+    ::store/destroy(::store/Map({name: store}))
+}
+
+test-download-helpers
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("NAME_SCREENING_LIVE is not 1") }
+        => {
+            out ::http/get-text("https://hot.dev/")
+            assert(gt(length(out.text), 0), "a body came back")
+            info ::http/head("https://hot.dev/")
+            assert(is-map(info), "HEAD gives the change-detection headers")
+        }
+    }
+}

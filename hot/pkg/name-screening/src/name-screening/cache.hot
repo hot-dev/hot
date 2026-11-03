@@ -1,0 +1,433 @@
+::name-screening::cache ns
+meta {
+    doc: """
+    The list cache in `::hot::store`. It knows no list: a list package,
+    or your own code, passes each list in as a Map.
+
+    **A list** is `{source, list, fetch}` or `{source, list, entries,
+    version}`:
+
+    - `source`: the key the list is cached and screened under, such as
+      `"un"`. Letters, digits, `.`, `_` and `-`.
+    - `list`: the human-readable list name.
+    - `fetch`: a Fn taking the cached version (a Str, or null) and
+      returning `{version, entries, unchanged, published}`. With
+      `unchanged: true` nothing is re-indexed. An Err keeps the previous
+      version.
+    - `entries`: `Entry` records, for data you already hold. `version`
+      is optional and defaults to a hash of the entries.
+
+    **Layout**: one metadata store (named by `name-screening.store`,
+    default `"name-screening"`) with a `meta:<source>` record per list,
+    and one data store per list version,
+    `<store>:<source>:<version hash>`, holding the index from
+    `::name-screening::index/build`: `e:<id>` records and `b:<hh>`
+    buckets. A refresh writes the new version's store completely, then
+    switches `meta:<source>` to it, then destroys the previous version's
+    store, so readers never see a half-written list.
+
+    **Refreshing**: `refresh-lists` is meant to run from a schedule
+    (daily). Screening never downloads anything.
+
+    **Coverage**: a list that was never refreshed holds nothing, so
+    `open-sources` fails rather than let it pass as a `"no-match"`. A
+    list whose first refresh failed keeps a `meta:<source>` record
+    without a `store`, so it still counts as a list that should have
+    been searched.
+    """
+}
+
+::store ::hot::store
+::cfg ::name-screening::config
+::index ::name-screening::index
+::entry ::name-screening::entry
+::time ::hot::time
+
+WRITE_BATCH 500
+META_PREFIX "meta:"
+
+is-source
+meta {
+    doc: """True for a usable source key: letters, digits, `.`, `_` and `-`, starting with a letter or digit."""
+}
+fn (source: Any): Bool {
+  and(is-str(source), ::hot::regex/is-match(source, "^[A-Za-z0-9][A-Za-z0-9._-]*$"))
+}
+
+check-sources
+meta {
+    doc: """
+    The source keys a caller named, as a Vec. Null when none were named
+    (null or empty), which means every list cached. An Err naming a
+    value that is not a source key.
+    """
+}
+fn (sources: Any): Vec<Str>? {
+  wanted cond {
+    is-null(sources) => { null }
+    is-str(sources) => { [sources] }
+    is-empty(sources) => { null }
+    => { sources }
+  }
+
+  bad if(is-null(wanted), [], filter(wanted, (s) { not(is-source(s)) }))
+  cond {
+    is-empty(bad) => { wanted }
+    => { err(`name-screening: not a source key: ${join(map(bad, Str), ", ")}`) }
+  }
+}
+
+check-list
+meta {
+    doc: """The list Map unchanged, or an Err saying what it lacks: a `source` key, a `list` name, and a `fetch` Fn or `entries`."""
+}
+fn (list: Map): Map {
+  fetcher get(list, "fetch")
+  cond {
+    not(is-source(get(list, "source"))) => { err(`name-screening: a list needs a source key, got ${Str(get(list, "source"))}`) }
+    not(::entry/present(get(list, "list"))) => { err(`name-screening: list ${list.source} needs a list name`) }
+    and(is-some(fetcher), not(is-fn(fetcher))) => { err(`name-screening: list ${list.source} has a fetch that is not a Fn`) }
+    and(is-null(fetcher), not(is-vec(get(list, "entries")))) => { err(`name-screening: list ${list.source} needs a fetch Fn or entries`) }
+    => { list }
+  }
+}
+
+meta-store fn (cfg: Map): Map {
+  ::store/Map({name: cfg.store})
+}
+
+meta-key fn (source: Str): Str {
+  `${META_PREFIX}${source}`
+}
+
+is-cached
+meta {
+    doc: """True for a metadata record that points at a data store. False for null, and for the record a failed first refresh leaves."""
+}
+fn (m: Any): Bool {
+  and(is-some(m), is-some(get(m, "store")))
+}
+
+known-sources fn (ms: Map): Vec<Str> {
+  sort(map(::store/keys(ms, {prefix: META_PREFIX}), (k) { slice(k, length(META_PREFIX), length(k)) }))
+}
+
+data-store-name
+meta {
+    doc: """The data store name for one version of a list: `<store>:<source>:<first 12 hex digits of SHA-256(version)>`."""
+}
+fn (store: Str, source: Str, version: Str): Str {
+  `${store}:${source}:${slice(::hot::hash/sha256(version), 0, 12)}`
+}
+
+now-ms fn (): Int {
+  ::time/epoch-millis(::time/now())
+}
+
+meta-of
+meta {
+    doc: """The cached metadata for one list (`{source, list, version, store, entries, keys, fetched-at, fetched-at-ms, checked-at}`), or null when no refresh was ever tried. After a failed first refresh it is `{source, list, failed-at, failed-at-ms}`."""
+}
+fn
+(source: Str): Map? {
+  meta-of(source, {})
+},
+(source: Str, opts: Map): Map? {
+  ::store/get(meta-store(::cfg/resolve(opts)), meta-key(source))
+}
+
+status
+meta {
+    doc: """
+    The cache status of every list a refresh has been tried for, or of
+    `opts.sources`: a Vec of metadata records with `cached: true`, or
+    `{source, cached: false}` for a list with no data. A list package
+    that is installed but was never refreshed appears only when you name
+    it in `opts.sources`.
+
+    **Example**
+
+    ```hot
+    ::name-screening::cache/status({sources: ["ofac-sdn", "un"]})
+    ```
+    """
+}
+fn
+(): Vec<Map> {
+  status({})
+},
+(opts: Map): Vec<Map> {
+  ms meta-store(::cfg/resolve(opts))
+  wanted check-sources(get(opts, "sources"))
+  cond {
+    is-err(wanted) => { wanted }
+    => {
+      map(or(wanted, known-sources(ms)), (s) {
+        m ::store/get(ms, meta-key(s))
+        if(is-cached(m), {...m, cached: true}, {...or(m, {}), source: s, cached: false})
+      })
+    }
+  }
+}
+
+fetch-list
+meta {
+    doc: """Get one list's data: `{version, entries, unchanged, published}`, from its `fetch` Fn, or from the `entries` it carries."""
+}
+fn (list: Map, known-version: Str?): Map {
+  fetcher get(list, "fetch")
+  cond {
+    is-some(fetcher) => { fetcher(known-version) }
+    => {
+      version or(get(list, "version"), slice(::hot::hash/sha256(to-json(list.entries)), 0, 16))
+      same eq(version, known-version)
+      {version: version, entries: if(same, null, list.entries), unchanged: same, published: get(list, "published")}
+    }
+  }
+}
+
+write-pairs fn (store: Map, pairs: Vec): Int {
+  batches partition(pairs, WRITE_BATCH)
+  reduce(batches, (n, batch) {
+    add(n, ::store/put-many(store, zipmap(map(batch, first), map(batch, last))))
+  }, 0)
+}
+
+refresh-source
+meta {
+    doc: """
+    Refresh one list: check whether it changed, and if so index and
+    store the new version, then drop the old one. `opts.force: true`
+    re-indexes an unchanged list. Returns `{source, status, version,
+    entries, ms}` where `status` is `"updated"` or `"unchanged"`.
+
+    A failure is returned as an Err and leaves the cached version in
+    place. So does a list that comes back with no entries, since an
+    empty cache would make every name a `"no-match"`.
+    """
+}
+fn
+(list: Map): Map {
+  refresh-source(list, {})
+},
+(list: Map, opts: Map): Map {
+  checked check-list(list)
+  cond {
+    is-err(checked) => { checked }
+    => { refresh-with(list, opts, ::cfg/resolve(opts)) }
+  }
+}
+
+// A failed first refresh is remembered, so screening treats the list as
+// one that should have been searched instead of not knowing about it.
+note-failure fn (ms: Map, list: Map, current: Any): Bool {
+  cond {
+    is-some(current) => { false }
+    => {
+      ::store/put(ms, meta-key(list.source), {source: list.source, list: list.list, failed-at: Str(::time/now()), failed-at-ms: now-ms()})
+      true
+    }
+  }
+}
+
+refresh-with fn (list: Map, opts: Map, cfg: Map): Map {
+  ms meta-store(cfg)
+  source list.source
+  current ::store/get(ms, meta-key(source))
+  cached is-cached(current)
+  known if(cached, current.version, null)
+  force eq(get(opts, "force"), true)
+  started now-ms()
+  fetched fetch-list(list, if(force, null, known))
+  cond {
+    is-err(fetched) => {
+      note-failure(ms, list, current)
+      fetched
+    }
+
+    eq(get(fetched, "unchanged"), true) => {
+      cond {
+        cached => {
+          ::store/put(ms, meta-key(source), {...current, checked-at: Str(::time/now()), checked-at-ms: now-ms()})
+          {source: source, status: "unchanged", version: fetched.version, entries: current.entries, ms: sub(now-ms(), started)}
+        }
+
+        => {
+          note-failure(ms, list, current)
+          err(`name-screening: ${list.list} reported no change, but nothing is cached for it`)
+        }
+      }
+    }
+
+    or(not(is-vec(get(fetched, "entries"))), is-empty(or(get(fetched, "entries"), []))) => {
+      note-failure(ms, list, current)
+      err(`name-screening: ${list.list} returned no entries; any cached version is kept`)
+    }
+
+    => {
+      idx ::index/build(fetched.entries)
+      name data-store-name(cfg.store, source, fetched.version)
+      data ::store/Map({name: name})
+      ::store/clear(data)
+      write-pairs(data, idx.pairs)
+      stamp Str(::time/now())
+      ::store/put(ms, meta-key(source), filter-vals({
+        source: source,
+        list: list.list,
+        version: fetched.version,
+        published: get(fetched, "published"),
+        store: name,
+        entries: idx.entry-count,
+        keys: idx.key-count,
+        fetched-at: stamp,
+        fetched-at-ms: now-ms(),
+        checked-at: stamp,
+        checked-at-ms: now-ms()
+      }, is-some))
+      old if(cached, current.store, null)
+      if(and(is-some(old), ne(old, name)), ::store/destroy(::store/Map({name: old})), false)
+      {source: source, status: "updated", version: fetched.version, entries: idx.entry-count, ms: sub(now-ms(), started)}
+    }
+  }
+}
+
+select-lists
+meta {
+    doc: """The lists to refresh: all of them, or those named in `sources`. An Err naming a source that no list has."""
+}
+fn (lists: Vec<Map>, sources: Any): Vec<Map> {
+  wanted check-sources(sources)
+  cond {
+    is-err(wanted) => { wanted }
+    is-null(wanted) => { lists }
+    => {
+      have map(lists, (l) { get(l, "source") })
+      unknown filter(wanted, (s) { not(in(s, have)) })
+      cond {
+        is-empty(unknown) => { filter(lists, (l) { in(get(l, "source"), wanted) }) }
+        => { err(`name-screening: unknown source ${join(unknown, ", ")}; use ${join(map(have, Str), ", ")}`) }
+      }
+    }
+  }
+}
+
+refresh-lists
+meta {
+    doc: """
+    Refresh `lists` (or those named in `opts.sources`), one after
+    another. Each row is `{source, status, version, entries, ms}`. A
+    list that fails does not stop the others: its row has
+    `status: "error"` and an `error` message, and its previous version
+    stays cached. `opts.force: true` re-indexes even unchanged lists. A
+    failure that halts the run (a store write error, for example) still
+    stops it; the schedule's `retry` policy covers those.
+
+    Meant for a daily schedule; see the README.
+
+    **Example**
+
+    ```hot
+    lists concat(::ofac/lists(), ::un::sanctions/lists())
+    ::name-screening::cache/refresh-lists(lists)
+    ::name-screening::cache/refresh-lists(lists, {sources: ["un"]})
+    ```
+    """
+}
+fn
+(lists: Vec<Map>): Vec<Map> {
+  refresh-lists(lists, {})
+},
+(lists: Vec<Map>, opts: Map): Vec<Map> {
+  chosen select-lists(lists, get(opts, "sources"))
+  cond {
+    is-err(chosen) => { chosen }
+    => {
+      results map(chosen, (l) { refresh-source(l, opts) }, OnErr.Preserve)
+      map(range(0, length(chosen)), (i) { summarize(get(get(chosen, i), "source"), get(results, i)) }, OnErr.Preserve)
+    }
+  }
+}
+
+summarize fn (source: Any, r: Result): Map {
+  cond {
+    is-err(r) => { {source: source, status: "error", error: err-message(r)} }
+    => { r }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Readers
+// ---------------------------------------------------------------------------
+
+stale-warning fn (m: Map, max-age-days: Int): Str? {
+  age-ms sub(now-ms(), or(get(m, "checked-at-ms"), 0))
+  limit mul(max-age-days, 86400000)
+  if(gt(age-ms, limit), `${m.list} was last refreshed ${or(get(m, "checked-at"), "never")}, more than ${max-age-days} days ago`, null)
+}
+
+coverage-warning fn (present: Vec, store: Str): Str {
+  names join(map(present, (m) { m.meta.list }), ", ")
+  `sources was not given, so only the lists cached in store ${store} were searched: ${names}. A list that is not installed or was never refreshed was not searched. Pass sources to require the lists you need.`
+}
+
+open-sources
+meta {
+    doc: """
+    The cached lists to screen: `{lists, sources, warnings,
+    not-searched}` where each list is `{source, store}`.
+
+    `opts.sources` names the lists that must be searched. Without it,
+    every list a refresh has been tried for is required, and a warning
+    says that any other list was not searched.
+
+    An Err when a required list has no cached data (screening it would
+    silently find nothing), unless `opts.allow-missing` is true, which
+    skips it and names it in `warnings` and `not-searched`. Always an
+    Err when no list at all can be searched, since that result could
+    only ever be a `"no-match"`.
+    """
+}
+fn (opts: Map): Map {
+  cfg ::cfg/resolve(opts)
+  wanted check-sources(get(opts, "sources"))
+  cond {
+    is-err(wanted) => { wanted }
+    => { open-lists(meta-store(cfg), cfg, wanted, opts) }
+  }
+}
+
+open-lists fn (ms: Map, cfg: Map, wanted: Any, opts: Map): Map {
+  named is-some(wanted)
+  metas map(or(wanted, known-sources(ms)), (s) { {source: s, meta: ::store/get(ms, meta-key(s))} })
+  present filter(metas, (m) { is-cached(m.meta) })
+  absent filter(metas, (m) { not(is-cached(m.meta)) })
+  missing map(absent, (m) { m.source })
+  cond {
+    is-empty(metas) => {
+      err("name-screening: no list is cached, so nothing can be searched; refresh a list first")
+    }
+
+    and(not(is-empty(missing)), ne(get(opts, "allow-missing"), true)) => {
+      err(`name-screening: no cached data for ${join(missing, ", ")}; refresh these lists first`)
+    }
+
+    is-empty(present) => {
+      err(`name-screening: no cached data for ${join(missing, ", ")}, so nothing can be searched; refresh a list first`)
+    }
+
+    => {
+      {
+        lists: map(present, (m) { {source: m.source, store: m.meta.store} }),
+        sources: map(present, (m) {
+          filter-vals({source: m.source, list: m.meta.list, version: m.meta.version, entries: m.meta.entries, fetched-at: m.meta.fetched-at, checked-at: get(m.meta, "checked-at")}, is-some)
+        }),
+        warnings: concat(
+          filter(map(present, (m) { stale-warning(m.meta, cfg.max-age-days) }), is-some),
+          map(absent, (m) { `${or(get(or(m.meta, {}), "list"), m.source)} is not cached and was not searched` }),
+          if(named, [], [coverage-warning(present, cfg.store)])
+        ),
+        not-searched: missing
+      }
+    }
+  }
+}

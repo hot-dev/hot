@@ -1,0 +1,17 @@
+::hot::pkg ns
+
+hot.pkg.uk-sanctions {
+  name: "hot.dev/uk-sanctions",
+  version: "0.1.0",
+  hot-min-version: "3.0.2",
+  description: "The UK Sanctions List (FCDO) for hot.dev/name-screening: downloads the free XML file in Range chunks, parses it into normalized Entry records and refreshes it into the screening cache, skipping an unchanged file by ETag.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["sanctions", "uk", "compliance", "kyc", "aml", "screening"],
+  deps: {
+    "hot.dev/name-screening": "0.1.0"
+  },
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

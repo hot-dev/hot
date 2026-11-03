@@ -1,0 +1,146 @@
+::opensanctions::test::opensanctions ns
+meta ["test"]
+
+::cfg ::opensanctions::config
+::os ::opensanctions
+
+// ============================================================================
+// Settings resolver
+// ============================================================================
+
+test-config-defaults
+meta ["test"]
+fn () {
+    cfg ::cfg/resolve({})
+    assert-eq("https://api.opensanctions.org", cfg.base-url)
+    assert-eq("default", cfg.dataset)
+    assert-eq(null, cfg.api-key)
+}
+
+test-config-opts-override
+meta ["test"]
+fn () {
+    cfg ::cfg/resolve({api-key: "k-test", base-url: "https://yente.example.com/", dataset: "sanctions"})
+    assert-eq("k-test", cfg.api-key)
+    assert-eq("https://yente.example.com", cfg.base-url, "trailing slash removed")
+    assert-eq("sanctions", cfg.dataset)
+    assert-eq(null, ::hot::ctx/get("opensanctions.api-key"), "per-call keys are never written to ctx")
+}
+
+test-config-blank-api-key-is-an-err-naming-the-key
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"opensanctions.api-key": "ctx-key"})
+    for-each(["", "  ", null], (v) {
+      out ::cfg/resolve({api-key: v})
+      assert(is-err(out), "a blank key never falls back to context")
+      assert(contains(err-message(out), "api-key"), "names the key")
+    })
+    assert-eq("ctx-key", ::cfg/resolve({}).api-key)
+    ::hot::ctx/set({"opensanctions.api-key": null})
+}
+
+test-config-blank-api-key-reaches-every-caller-as-an-err
+meta ["test"]
+fn () {
+    assert(is-err(::opensanctions/screen("x", {api-key: ""})), "blank")
+    assert(is-err(::opensanctions/screen("x", {api-key: null})), "null")
+}
+
+test-config-context-key-never-goes-to-a-per-call-url
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"opensanctions.api-key": "ctx-key"})
+    yente ::cfg/resolve({base-url: "https://yente.internal"})
+    assert-eq(null, yente.api-key, "the context key is not used")
+    assert-eq(null, ::cfg/require-api-key(yente), "a self-hosted yente may need no key")
+    assert(not(in("Authorization", keys(::opensanctions/match-headers(null)))), "no key, no header")
+    assert-eq("ApiKey k", ::opensanctions/match-headers("k").Authorization)
+    assert-eq("t", ::cfg/resolve({base-url: "https://yente.internal", api-key: "t"}).api-key)
+    hosted ::cfg/resolve({base-url: "https://api.opensanctions.org"})
+    assert(is-err(::cfg/require-api-key(hosted)), "the hosted API named per call still needs a per-call key")
+    ::hot::ctx/set({"opensanctions.api-key": null})
+}
+
+test-config-marks-and-returns-the-key-unchanged
+meta ["test"]
+fn () {
+    assert-eq("marked-opensanctions-key", ::cfg/resolve({api-key: "marked-opensanctions-key"}).api-key)
+}
+
+test-config-missing-key-error
+meta ["test"]
+fn () {
+    out ::cfg/require-api-key(::cfg/resolve({}))
+    assert(is-err(out), "missing key")
+    assert(::hot::str/contains(err-message(out), "opensanctions.api-key"), "names the ctx key")
+}
+
+// ============================================================================
+// OpenSanctions
+// ============================================================================
+
+test-opensanctions-body-person
+meta ["test"]
+fn () {
+    body ::os/match-body("John Doe", {dob: "1975-04-21", country: "United States", kind: "individual"})
+    assert-eq({queries: {q: {schema: "Person", properties: {name: ["John Doe"], birthDate: ["1975-04-21"], nationality: ["us"]}}}}, body)
+}
+
+test-opensanctions-body-omits-unset
+meta ["test"]
+fn () {
+    assert-eq({queries: {q: {schema: "LegalEntity", properties: {name: ["Acme"]}}}}, ::os/match-body("Acme", {}))
+    assert-eq({queries: {q: {schema: "Organization", properties: {name: ["Acme"], country: ["ir"]}}}}, ::os/match-body("Acme", {kind: "entity", country: "IR", dob: "1990"}))
+}
+
+test-opensanctions-url
+meta ["test"]
+fn () {
+    assert-eq("https://api.opensanctions.org/match/default", ::os/match-url("https://api.opensanctions.org", "default", {}))
+    assert-eq(
+      "https://api.opensanctions.org/match/sanctions?threshold=0.8&limit=5&topics=sanction&include_dataset=us_ofac_sdn",
+      ::os/match-url("https://api.opensanctions.org", "sanctions", {threshold: 0.8, limit: 5, topics: ["sanction"], include-datasets: ["us_ofac_sdn"]})
+    )
+}
+
+test-opensanctions-parse-response
+meta ["test"]
+fn () {
+    body {
+      responses: {q: {status: 200, results: [
+        {id: "NK-abc", caption: "John Doe", schema: "Person", score: 0.91, match: true, datasets: ["us_ofac_sdn"],
+         properties: {name: ["John Doe", "Johnny Doe"], birthDate: ["1975-04-21"], nationality: ["us"]},
+         explanations: {name_literal_match: {score: 1.0, explanation: "exact"}}},
+        {id: "NK-low", caption: "Jon Do", schema: "Person", score: 0.3, match: false, properties: {}}
+      ], total: {value: 2}}},
+      limit: 5
+    }
+
+    r untype(::os/parse-response(body, "John Doe", {}, "https://api.opensanctions.org"))
+    assert-eq("possible-match", r.status)
+    assert-eq(1, length(r.matches), "below the 0.7 default threshold is dropped")
+    m first(r.matches)
+    assert-eq("opensanctions", m.entry.source)
+    assert-eq("individual", m.entry.kind)
+    assert-eq(["Johnny Doe"], m.entry.aliases)
+    assert-eq(["us_ofac_sdn"], m.entry.programs)
+    assert-eq(0.91, m.score)
+    assert-eq("https://www.opensanctions.org/entities/NK-abc/", m.entry.url)
+    assert(some(m.explanation, (l) { ::hot::str/contains(l, "name_literal_match: 1.0 (exact)") }), "explanations are kept")
+    clean untype(::os/parse-response({responses: {q: {results: []}}}, "x", {dataset: "sanctions"}, "u"))
+    assert-eq("no-match", clean.status)
+    assert-eq(false, clean.review-required)
+    assert-eq([{source: "opensanctions", list: "OpenSanctions (sanctions)", dataset: "sanctions"}], clean.sources, "a no-match names what was searched")
+    assert(contains(clean.notice, "reviewed by a person"), clean.notice)
+    assert(contains(clean.notice, "Searched: OpenSanctions (sanctions)."), clean.notice)
+    assert-eq("possible-match", first(r.matches).status)
+    assert-eq(true, r.review-required)
+}
+
+test-opensanctions-requires-key
+meta ["test"]
+fn () {
+    out ::os/screen("John Doe", {})
+    assert(is-err(out), "no key")
+}

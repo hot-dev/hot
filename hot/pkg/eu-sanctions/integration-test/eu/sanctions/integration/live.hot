@@ -1,0 +1,23 @@
+::eu::sanctions::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration smoke tests (live, read-only)
+// =============================================================================
+// EU_SANCTIONS_LIVE=1 sends one HEAD request. The full file is about 26 MB
+// and needs http.max-response-bytes raised, so it is not downloaded here.
+// Nothing is written to the store.
+// Run with: EU_SANCTIONS_LIVE=1 hot test -p pkg-integration-eu-sanctions
+
+::ctx ::eu::sanctions::integration::ctx
+
+test-eu-list-head
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("EU_SANCTIONS_LIVE is not 1") }
+        => {
+            info ::name-screening::http/head(::eu::sanctions/URL)
+            assert(is-some(or(info.last-modified, info.etag)), "a version to compare")
+        }
+    }
+}

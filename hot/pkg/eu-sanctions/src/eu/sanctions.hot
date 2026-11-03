@@ -1,0 +1,189 @@
+::eu::sanctions ns
+meta {
+    doc: """
+    **Screening never decides.** Refreshing this list only fills the
+    cache `::name-screening/screen` reads. A result is `"possible-match"`
+    or `"no-match"`, and a person must review every possible match.
+
+    The EU Consolidated Financial Sanctions List (`eu`), published by
+    the European Commission's Financial Sanctions Files (FSF) service.
+    About 6,300 persons and entities.
+
+    **Format used**: the XML 1.1 file. FSF serves it from a public URL
+    whose `token` query parameter is a fixed public token
+    (`dG9rZW4tMjAxNw`, base64 for `token-2017`), not a credential; no
+    account is needed. The file is about 26 MB and the server ignores
+    Range requests, so **raise `http.max-response-bytes` to at least
+    33554432 (32 MiB)** for the run that refreshes this list. Change
+    detection uses Last-Modified from a HEAD request.
+
+    **Example**
+
+    ```hot
+    ::eu::sanctions/refresh()
+    ::name-screening/screen("Asbat al-Ansar", {kind: "entity", sources: ::eu::sanctions/SOURCES})
+    ```
+    """
+}
+
+::sx ::name-screening::xml
+::entry ::name-screening::entry
+::http ::name-screening::http
+::cache ::name-screening::cache
+
+Entry ::name-screening::entry/Entry
+
+SOURCES ["eu"]
+
+URL "https://webgate.ec.europa.eu/fsd/fsf/public/files/xmlFullSanctionsList_1_1/content?token=dG9rZW4tMjAxNw"
+PAGE_URL "https://data.europa.eu/data/datasets/consolidated-list-of-persons-groups-and-entities-subject-to-eu-financial-sanctions"
+LIST_NAME "EU Consolidated Financial Sanctions List"
+
+// The file is about 26 MB and its server ignores Range requests.
+NEEDED_RESPONSE_BYTES 33554432
+
+country-of fn (node: Str): Str? {
+  iso ::sx/attr(node, "countryIso2Code")
+  desc ::sx/attr(node, "countryDescription")
+  cond {
+    and(is-some(iso), ne(iso, "00")) => { iso }
+    and(is-some(desc), ne(lowercase(desc), "unknown")) => { or(::name-screening::country/code(desc), desc) }
+    => { null }
+  }
+}
+
+dob-of fn (node: Str): Str? {
+  full ::sx/attr(node, "birthdate")
+  year ::sx/attr(node, "year")
+  cond {
+    is-some(full) => { ::entry/iso-date(full) }
+    is-some(year) => { ::entry/iso-date(year) }
+    => { null }
+  }
+}
+
+address-line fn (node: Str): Str {
+  parts map(["street", "poBox", "city", "zipCode", "region", "place"], (a) { ::sx/attr(node, a) })
+  country ::sx/attr(node, "countryDescription")
+  shown if(and(is-some(country), ne(lowercase(country), "unknown")), country, null)
+  join(filter(concat(parts, [shown]), is-some), ", ")
+}
+
+kind fn (code: Str?): Str {
+  if(eq(code, "person"), "individual", "entity")
+}
+
+parse-entity
+meta {
+    doc: """Turn one `<sanctionEntity>` record string into an `Entry`. The primary name is the first English (`nameLanguage=""`) alias; the others are aliases. Exposed for testing."""
+}
+fn (record: Str): Entry {
+  aliases filter(map(::sx/start-tags(record, "nameAlias"), (a) {
+    {name: ::sx/attr(a, "wholeName"), lang: or(::sx/attr(a, "nameLanguage"), "")}
+  }), (a) { is-some(a.name) })
+  primary or(find-first(aliases, (a) { eq(a.lang, "") }), first(aliases))
+  pname or(get(or(primary, {}), "name"), "")
+  head first(::sx/start-tags(record, "sanctionEntity"))
+  ref ::sx/attr(head, "euReferenceNumber")
+  remarks join(filter(concat([if(is-some(ref), `EU reference ${ref}`, null)], ::sx/texts(record, "remark")), is-some), "; ")
+  ::entry/make({
+    source: "eu",
+    list: LIST_NAME,
+    id: ::sx/attr(head, "logicalId"),
+    kind: kind(::sx/attr(first(::sx/start-tags(record, "subjectType")), "code")),
+    name: pname,
+    aliases: map(filter(aliases, (a) { ne(a.name, pname) }), (a) { a.name }),
+    dobs: filter(map(::sx/start-tags(record, "birthdate"), dob-of), is-some),
+    nationalities: filter(map(::sx/start-tags(record, "citizenship"), country-of), is-some),
+    programs: filter(map(::sx/start-tags(record, "regulation"), (r) { ::sx/attr(r, "programme") }), is-some),
+    addresses: filter(map(::sx/start-tags(record, "address"), address-line), (s) { not(is-empty(s)) }),
+    remarks: remarks,
+    url: PAGE_URL
+  })
+}
+
+parse
+meta {
+    doc: """Parse the whole EU FSF XML 1.1 document into `Entry` records (pure)."""
+}
+fn (doc: Str): Vec<Entry> {
+  entries map(::sx/records(doc, "sanctionEntity"), parse-entity)
+  filter(entries, (e) { and(not(is-empty(e.id)), not(is-empty(e.name))) })
+}
+
+fetch
+meta {
+    doc: """
+    Download and parse the EU list. Returns `{source, version, entries,
+    unchanged}`. When the HEAD Last-Modified equals `known-version`,
+    nothing is downloaded and `entries` is null. A file over
+    `http.max-response-bytes` is an Err saying how far to raise it.
+    """
+}
+fn (known-version: Str?): Map {
+  info ::http/head(URL)
+  ver if(is-err(info), null, or(info.last-modified, info.etag))
+  cond {
+    and(is-some(ver), eq(ver, known-version)) => { {source: "eu", version: ver, entries: null, unchanged: true} }
+    => {
+      out ::http/get-text(URL, ::http/DEFAULT_CHUNK_BYTES, NEEDED_RESPONSE_BYTES)
+      cond {
+        is-err(out) => { out }
+        => {
+          {
+            source: "eu",
+            version: or(ver, slice(::hot::hash/sha256(out.text), 0, 16)),
+            entries: parse(out.text),
+            unchanged: false
+          }
+        }
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Cache
+// ---------------------------------------------------------------------------
+
+lists
+meta {
+    doc: """
+    The EU Consolidated Financial Sanctions List in the form `::name-screening::cache` takes: one
+    `{source, list, fetch}` Map in a Vec, so it concats with other list
+    packages.
+
+    **Example**
+
+    ```hot
+    ::name-screening::cache/refresh-lists(concat(::ofac/lists(), ::eu::sanctions/lists()))
+    ```
+    """
+}
+fn (): Vec<Map> {
+  [{source: "eu", list: LIST_NAME, fetch: (known) { fetch(known) }}]
+}
+
+refresh
+meta {
+    doc: """
+    Refresh this list into the cache. Returns one row (see
+    `::name-screening::cache/refresh-lists`). A failure has
+    `status: "error"` and keeps the previous version. Meant for a daily
+    schedule, whose run needs `http.max-response-bytes` of at least
+    33554432 (32 MiB).
+
+    **Example**
+
+    ```hot
+    ::eu::sanctions/refresh()
+    ```
+    """
+}
+fn
+(): Vec<Map> {
+  refresh({})
+},
+(opts: Map): Vec<Map> {
+  ::cache/refresh-lists(lists(), opts)
+}

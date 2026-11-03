@@ -1,0 +1,19 @@
+::eu::sanctions::integration::ctx ns
+
+::env ::hot::env
+
+// Live smoke tests send one HEAD request for the public list file, so they only run when
+// EU_SANCTIONS_LIVE=1.
+
+live
+meta {doc: """True when EU_SANCTIONS_LIVE=1: the live tests may run."""}
+fn (): Bool {
+    eq(::env/get("EU_SANCTIONS_LIVE", ""), "1")
+}
+
+skip
+meta {doc: """Record a skip and pass."""}
+fn (why: Str): Bool {
+    println(`eu-sanctions integration: ${why} - skipping`)
+    assert(true, `skipped: ${why}`)
+}

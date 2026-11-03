@@ -1,0 +1,27 @@
+::sec::edgar::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration smoke tests (live, read-only)
+// =============================================================================
+// SEC_USER_AGENT, e.g. "Acme Corp ops@acme.com". The test only reads; without
+// the setting it records a skip and passes.
+// Run with: hot test -p pkg-integration-sec-edgar
+
+::ctx ::sec::edgar::integration::ctx
+
+test-tickers-and-submissions
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip("SEC_USER_AGENT is not set") }
+        => {
+            tickers ::sec::edgar/company-tickers()
+            aapl ::sec::edgar/find-ticker(tickers, "AAPL")
+            assert-eq("0000320193", aapl.cik)
+            subs ::sec::edgar/submissions(aapl.cik)
+            assert-eq("Apple Inc.", subs.name)
+            filings ::sec::edgar/recent-filings(subs, 5, {})
+            assert(gt(length(filings), 0), "recent filings")
+        }
+    }
+}

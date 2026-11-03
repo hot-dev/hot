@@ -1,0 +1,334 @@
+::name-screening::test::cache ns
+meta ["test"]
+
+// Each test uses its own store, so none sees another's lists.
+
+::fx ::name-screening::test::fixtures
+::cache ::name-screening::cache
+::store ::hot::store
+
+KNOWN "Ayman al-Zawahiri"
+UNKNOWN "Jane Q. Example"
+
+fresh fn (): Map {
+  {store: `name-screening-test-${Uuid()}`}
+}
+
+list-a fn (): Map {
+  {source: "list-a", list: "Sample List A", entries: ::fx/list-a()}
+}
+
+list-b fn (): Map {
+  {source: "list-b", list: "Sample List B", entries: ::fx/list-b()}
+}
+
+failing fn (source: Str): Map {
+  {source: source, list: `Failing ${source}`, fetch: (known) { err("the download failed") }}
+}
+
+screen fn (name: Str, opts: Map): Map {
+  untype(::name-screening/screen(name, opts))
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+test-check-sources
+meta ["test"]
+fn () {
+    assert-eq(null, ::cache/check-sources(null), "none named")
+    assert-eq(null, ::cache/check-sources([]), "none named")
+    assert-eq(["un"], ::cache/check-sources("un"))
+    assert-eq(["uk", "eu"], ::cache/check-sources(["uk", "eu"]))
+    assert(is-err(::cache/check-sources(["bad key", "un"])), "not a key")
+    assert(is-err(::cache/check-sources("")), "blank")
+    assert(is-err(::cache/check-sources([1])), "not a Str")
+}
+
+test-check-list
+meta ["test"]
+fn () {
+    ok {source: "un", list: "UN", entries: []}
+    assert-eq("un", ::cache/check-list(ok).source)
+    assert(is-err(::cache/check-list({list: "UN", entries: []})), "no source")
+    assert(is-err(::cache/check-list({source: "a:b", list: "UN", entries: []})), "a colon would break the store names")
+    assert(is-err(::cache/check-list({source: "un", entries: []})), "no list name")
+    assert(is-err(::cache/check-list({source: "un", list: "UN"})), "no data")
+    assert(is-err(::cache/check-list({source: "un", list: "UN", fetch: "x"})), "fetch is not a Fn")
+}
+
+test-data-store-name
+meta ["test"]
+fn () {
+    n ::cache/data-store-name("name-screening", "un", "abc")
+    assert(::hot::str/starts-with(n, "name-screening:un:"), n)
+    assert-eq(30, length(n))
+    assert(ne(n, ::cache/data-store-name("name-screening", "un", "abd")), "versions get different stores")
+}
+
+// ============================================================================
+// Refreshing
+// ============================================================================
+
+test-refresh-from-entries
+meta ["test"]
+fn () {
+    opts fresh()
+    row ::cache/refresh-source(list-a(), opts)
+    assert-eq("updated", row.status)
+    assert-eq(5, row.entries)
+    again ::cache/refresh-source(list-a(), opts)
+    assert-eq("unchanged", again.status, "the same data hashes to the same version")
+    r screen(KNOWN, {...opts, sources: ["list-a"]})
+    assert-eq("possible-match", r.status)
+    assert-eq(true, r.review-required)
+    assert-eq("2676", first(r.matches).entry.id)
+    assert-eq("Sample List A", first(r.sources).list)
+    assert-eq([], r.warnings, "a named, fresh list needs no warning")
+}
+
+test-refresh-from-a-fetch-fn
+meta ["test"]
+fn () {
+    opts fresh()
+    list {source: "list-a", list: "Sample List A", fetch: (known) {
+      cond {
+        eq(known, "v1") => { {version: "v1", entries: null, unchanged: true} }
+        => { {version: "v1", entries: ::fx/list-a(), unchanged: false, published: "2026-11-01"} }
+      }
+    }}
+
+    assert-eq("updated", ::cache/refresh-source(list, opts).status)
+    assert-eq("2026-11-01", ::cache/meta-of("list-a", opts).published)
+    row ::cache/refresh-source(list, opts)
+    assert-eq("unchanged", row.status)
+    assert-eq(5, row.entries)
+    assert-eq("updated", ::cache/refresh-source(list, {...opts, force: true}).status, "force passes no known version")
+}
+
+test-a-new-version-gets-its-own-store-and-drops-the-old-one
+meta ["test"]
+fn () {
+    opts fresh()
+    ::cache/refresh-source({...list-a(), version: "v1"}, opts)
+    old ::cache/meta-of("list-a", opts).store
+    assert(::hot::str/starts-with(old, `${opts.store}:list-a:`), old)
+    assert(gt(::store/length(::store/Map({name: old})), 0), "written")
+    ::cache/refresh-source({...list-a(), version: "v2"}, opts)
+    new ::cache/meta-of("list-a", opts).store
+    assert(ne(old, new), "each version has its own data store")
+    assert-eq(0, ::store/length(::store/Map({name: old})), "the old version is gone")
+    assert(gt(::store/length(::store/Map({name: new})), 0), "the new version is there")
+}
+
+test-a-failed-refresh-keeps-the-previous-version
+meta ["test"]
+fn () {
+    opts fresh()
+    ::cache/refresh-source({...list-a(), version: "v1"}, opts)
+    before ::cache/meta-of("list-a", opts)
+    out ::cache/refresh-source({...failing("list-a"), list: "Sample List A"}, opts)
+    assert(is-err(out), "the failure is returned")
+    assert-eq("the download failed", err-message(out))
+    assert-eq(before, ::cache/meta-of("list-a", opts), "the metadata is untouched")
+    assert-eq("possible-match", screen(KNOWN, {...opts, sources: ["list-a"]}).status, "the old data still screens")
+}
+
+test-an-empty-refresh-keeps-the-previous-version
+meta ["test"]
+fn () {
+    opts fresh()
+    ::cache/refresh-source({...list-a(), version: "v1"}, opts)
+    before ::cache/meta-of("list-a", opts)
+    out ::cache/refresh-source({source: "list-a", list: "Sample List A", version: "v2", entries: []}, opts)
+    assert(is-err(out), "an empty list is a failure: a changed file format can parse to nothing")
+    assert(contains(err-message(out), "no entries"), err-message(out))
+    assert-eq(before, ::cache/meta-of("list-a", opts), "the metadata is untouched")
+    assert-eq("possible-match", screen(KNOWN, {...opts, sources: ["list-a"]}).status, "the old data still screens")
+}
+
+test-unchanged-with-nothing-cached-is-an-err
+meta ["test"]
+fn () {
+    opts fresh()
+    out ::cache/refresh-source({source: "list-a", list: "Sample List A", fetch: (known) { {version: "v1", entries: null, unchanged: true} }}, opts)
+    assert(is-err(out), "nothing was stored")
+    assert(is-err(::name-screening/screen(UNKNOWN, opts)), "and nothing can be searched")
+}
+
+test-refresh-lists-keeps-going-after-a-failure
+meta ["test"]
+fn () {
+    opts fresh()
+    rows ::cache/refresh-lists([failing("list-x"), list-a()], opts)
+    assert-eq(["list-x", "list-a"], map(rows, (r) { r.source }))
+    assert-eq("error", first(rows).status)
+    assert-eq("the download failed", first(rows).error)
+    assert-eq("updated", last(rows).status)
+}
+
+test-a-transport-failure-is-an-error-row
+meta ["test"]
+fn () {
+    opts fresh()
+    // Nothing listens on port 1, so the connection is refused.
+    unreachable {source: "list-x", list: "Unreachable", fetch: (known) { ::name-screening::http/get-text("http://127.0.0.1:1/list.xml") }}
+    rows ::cache/refresh-lists([unreachable, list-a()], opts)
+    assert-eq("error", first(rows).status)
+    assert-eq("updated", last(rows).status, "the next list still refreshes")
+}
+
+test-refresh-lists-sources
+meta ["test"]
+fn () {
+    opts fresh()
+    rows ::cache/refresh-lists([list-a(), list-b()], {...opts, sources: ["list-b"]})
+    assert-eq(["list-b"], map(rows, (r) { r.source }))
+    assert(is-err(::cache/refresh-lists([list-a()], {...opts, sources: ["list-z"]})), "an unknown source")
+}
+
+test-status
+meta ["test"]
+fn () {
+    opts fresh()
+    assert-eq([], ::cache/status(opts))
+    ::cache/refresh-source(list-a(), opts)
+    ::cache/refresh-source(failing("list-x"), opts)
+    rows ::cache/status(opts)
+    assert-eq([["list-a", true], ["list-x", false]], map(rows, (r) { [r.source, r.cached] }))
+    named ::cache/status({...opts, sources: ["list-a", "list-z"]})
+    assert-eq([["list-a", true], ["list-z", false]], map(named, (r) { [r.source, r.cached] }))
+}
+
+// ============================================================================
+// No list cached: never a clean no-match
+// ============================================================================
+
+test-no-list-cached-is-an-err
+meta ["test"]
+fn () {
+    opts fresh()
+    out ::name-screening/screen(UNKNOWN, opts)
+    assert(is-err(out), "an empty cache is not a no-match")
+    assert(contains(err-message(out), "no list is cached"), err-message(out))
+}
+
+test-no-list-cached-is-an-err-even-with-allow-missing
+meta ["test"]
+fn () {
+    opts fresh()
+    assert(is-err(::name-screening/screen(UNKNOWN, {...opts, allow-missing: true})), "nothing named")
+    out ::name-screening/screen(UNKNOWN, {...opts, allow-missing: true, sources: ["list-a", "list-b"]})
+    assert(is-err(out), "every named list missing")
+    assert(contains(err-message(out), "list-a, list-b"), err-message(out))
+}
+
+test-a-named-list-never-refreshed-is-an-err
+meta ["test"]
+fn () {
+    opts fresh()
+    out ::name-screening/screen(UNKNOWN, {...opts, sources: ["list-a"]})
+    assert(is-err(out), "the list has no data")
+    assert(contains(err-message(out), "list-a"), err-message(out))
+}
+
+// ============================================================================
+// Some lists cached
+// ============================================================================
+
+test-a-named-list-missing-beside-a-cached-one-is-an-err
+meta ["test"]
+fn () {
+    opts fresh()
+    ::cache/refresh-source(list-a(), opts)
+    out ::name-screening/screen(UNKNOWN, {...opts, sources: ["list-a", "list-b"]})
+    assert(is-err(out), "a list the caller needs was not searched")
+    assert(contains(err-message(out), "list-b"), "names the list")
+    assert(not(contains(err-message(out), "list-a")), "names only the missing list")
+}
+
+test-allow-missing-says-what-was-not-searched
+meta ["test"]
+fn () {
+    opts fresh()
+    ::cache/refresh-source(list-a(), opts)
+    r screen(UNKNOWN, {...opts, sources: ["list-a", "list-b"], allow-missing: true})
+    assert-eq("no-match", r.status)
+    assert-eq(["list-a"], map(r.sources, (s) { s.source }), "only what was searched")
+    assert-eq(["list-b"], r.not-searched)
+    assert(some(r.warnings, (w) { contains(w, "list-b is not cached and was not searched") }), "warned")
+    assert(contains(r.notice, "Searched: Sample List A."), r.notice)
+}
+
+test-without-sources-a-warning-names-the-lists-searched
+meta ["test"]
+fn () {
+    opts fresh()
+    ::cache/refresh-source(list-a(), opts)
+    ::cache/refresh-source(list-b(), opts)
+    r screen(UNKNOWN, opts)
+    assert-eq("no-match", r.status)
+    assert-eq(["list-a", "list-b"], map(r.sources, (s) { s.source }), "every cached list")
+    assert-eq(1, length(r.warnings))
+    w first(r.warnings)
+    assert(contains(w, "Sample List A, Sample List B"), w)
+    assert(contains(w, "not installed or was never refreshed was not searched"), w)
+    assert(contains(r.notice, "Searched: Sample List A, Sample List B."), r.notice)
+}
+
+test-a-failed-first-refresh-still-counts-as-a-required-list
+meta ["test"]
+fn () {
+    opts fresh()
+    ::cache/refresh-source(list-a(), opts)
+    assert(is-err(::cache/refresh-source(failing("list-x"), opts)), "the first refresh fails")
+    assert(is-some(::cache/meta-of("list-x", opts).failed-at), "it is remembered")
+    out ::name-screening/screen(UNKNOWN, opts)
+    assert(is-err(out), "even without sources, as the old default of every list did")
+    assert(contains(err-message(out), "list-x"), err-message(out))
+    r screen(UNKNOWN, {...opts, allow-missing: true})
+    assert-eq(["list-x"], r.not-searched)
+    assert(some(r.warnings, (w) { contains(w, "Failing list-x is not cached and was not searched") }), "warned by name")
+}
+
+test-a-later-success-clears-a-failed-first-refresh
+meta ["test"]
+fn () {
+    opts fresh()
+    ::cache/refresh-source({...failing("list-a"), list: "Sample List A"}, opts)
+    assert-eq("updated", ::cache/refresh-source(list-a(), opts).status)
+    assert-eq("possible-match", screen(KNOWN, opts).status)
+}
+
+// ============================================================================
+// Staleness
+// ============================================================================
+
+test-a-stale-list-warns
+meta ["test"]
+fn () {
+    opts fresh()
+    ::cache/refresh-source(list-a(), opts)
+    named {...opts, sources: ["list-a"]}
+    assert-eq([], screen(UNKNOWN, named).warnings, "fresh")
+    m ::cache/meta-of("list-a", opts)
+    ::store/put(::store/Map({name: opts.store}), "meta:list-a", {...m, checked-at: "2020-01-01", checked-at-ms: 1577836800000})
+    warnings screen(UNKNOWN, named).warnings
+    assert-eq(1, length(warnings), "the stale list is warned about")
+    assert(contains(first(warnings), "Sample List A was last refreshed 2020-01-01, more than 7 days ago"), first(warnings))
+    assert-eq("no-match", screen(UNKNOWN, named).status, "a warning, not a failure: a stale list is still searched")
+}
+
+test-max-age-days-sets-the-limit
+meta ["test"]
+fn () {
+    opts fresh()
+    ::cache/refresh-source(list-a(), opts)
+    m ::cache/meta-of("list-a", opts)
+    three-days-ago sub(::hot::time/epoch-millis(::hot::time/now()), mul(3, 86400000))
+    ::store/put(::store/Map({name: opts.store}), "meta:list-a", {...m, checked-at-ms: three-days-ago})
+    named {...opts, sources: ["list-a"]}
+    assert-eq([], screen(UNKNOWN, named).warnings, "inside the default 7 days")
+    assert-eq(1, length(screen(UNKNOWN, {...named, max-age-days: 2}).warnings), "outside 2 days")
+}

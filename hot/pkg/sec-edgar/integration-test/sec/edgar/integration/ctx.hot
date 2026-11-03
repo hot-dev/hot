@@ -1,0 +1,23 @@
+::sec::edgar::integration::ctx ns
+
+::env ::hot::env
+
+// Placeholder settings for the sec-edgar integration suite. An unset
+// environment variable is skipped entirely, so an absent User-Agent behaves
+// exactly as if never configured.
+::hot::ctx/set(filter-vals({
+    "sec.edgar.user-agent": ::env/get("SEC_USER_AGENT", ""),
+}, (v) { not(is-empty(v)) }))
+
+configured
+meta {doc: """True when SEC_USER_AGENT is set."""}
+fn (): Bool {
+    is-some(::hot::ctx/get("sec.edgar.user-agent"))
+}
+
+skip
+meta {doc: """Record a skip and pass."""}
+fn (why: Str): Bool {
+    println(`sec-edgar integration: ${why} - skipping`)
+    assert(true, `skipped: ${why}`)
+}

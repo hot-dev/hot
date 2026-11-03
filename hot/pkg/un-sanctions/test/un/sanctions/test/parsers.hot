@@ -1,0 +1,110 @@
+::un::sanctions::test::parsers ns
+meta ["test"]
+
+::fx ::un::sanctions::test::fixtures
+::un ::un::sanctions
+::index ::name-screening::index
+::screen ::name-screening::screen
+::cache ::name-screening::cache
+
+by-id fn (entries: Vec, id: Str): Map {
+  untype(find-first(entries, (e) { eq(e.id, id) }))
+}
+
+// ============================================================================
+// UN
+// ============================================================================
+
+test-un-individuals-and-entity
+meta ["test"]
+fn () {
+    es ::un/parse(::fx/UN_XML)
+    assert-eq(3, length(es))
+    a by-id(es, "IQi.004")
+    assert-eq("ABID HAMID MAHMUD AL-TIKRITI", a.name)
+    assert-eq(["Abid Hamid Bid Hamid Mahmud", "Abed Mahmoud Hammud", "عابد حامد محمود التكريتي"], a.aliases)
+    assert-eq(["1957"], a.dobs)
+    assert-eq(["IQ"], a.nationalities)
+    assert-eq(["Iraq"], a.programs)
+    assert-eq(null, a.remarks)
+    l by-id(es, "CDi.047")
+    assert-eq("MUHAMMED LUMISA", l.name, "trailing spaces trimmed")
+    assert-eq(["1959/1965"], l.dobs)
+    assert-eq(["UG"], l.nationalities)
+    assert-eq("Gender: Male. Commander of the Allied Democratic Forces & logistics.", l.remarks)
+    f by-id(es, "CDe.005")
+    assert-eq("entity", f.kind)
+    assert-eq(["FDLR", "Combatant Force for the Liberation of Rwanda"], f.aliases)
+    assert-eq(["North Kivu, Democratic Republic of the Congo"], f.addresses)
+}
+
+// ============================================================================
+// With hot.dev/name-screening
+// ============================================================================
+
+test-lists-register-with-the-cache
+meta ["test"]
+fn () {
+    ls ::un::sanctions/lists()
+    assert-eq(::un::sanctions/SOURCES, map(ls, (l) { l.source }))
+    for-each(ls, (l) {
+      assert-eq(l, ::cache/check-list(l))
+      assert(is-fn(l.fetch), "lists carry their fetch")
+    })
+}
+
+test-screens-the-parsed-list-from-memory
+meta ["test"]
+fn () {
+    idx ::index/build(::un::sanctions/parse(::fx/UN_XML))
+    r untype(::screen/screen-index({un: idx}, "Abid Hamid Mahmud al-Tikriti", {dob: "1957", country: "IQ"}))
+    assert-eq("possible-match", r.status)
+    assert-eq(true, r.review-required)
+    assert-eq("IQi.004", first(r.matches).entry.id)
+    assert(gt(length(first(r.matches).explanation), 0), "every match is explained")
+}
+
+test-screens-the-parsed-list-from-the-cache
+meta ["test"]
+fn () {
+    store `un-test-${Uuid()}`
+    row ::cache/refresh-source({source: "un", list: "UN Security Council Consolidated List", entries: ::un::sanctions/parse(::fx/UN_XML)}, {store: store})
+    assert-eq("updated", row.status)
+    r untype(::name-screening/screen("Abid Hamid Mahmud al-Tikriti", {...{dob: "1957", country: "IQ"}, store: store, sources: ["un"]}))
+    assert-eq("possible-match", r.status)
+    assert-eq("IQi.004", first(r.matches).entry.id)
+    clean untype(::name-screening/screen("Jane Q. Example", {store: store, sources: ["un"]}))
+    assert-eq("no-match", clean.status)
+    assert-eq(["un"], map(clean.sources, (s) { s.source }))
+    assert(contains(clean.notice, "Searched: UN Security Council Consolidated List."), clean.notice)
+}
+
+test-a-list-never-refreshed-is-not-a-no-match
+meta ["test"]
+fn () {
+    out ::name-screening/screen("Jane Q. Example", {store: `un-test-${Uuid()}`, sources: ::un::sanctions/SOURCES})
+    assert(is-err(out), "an empty cache is not a no-match")
+}
+
+test-index-build-shape
+meta ["test"]
+fn () {
+    idx ::index/build(::un/parse(::fx/UN_XML))
+    assert-eq(3, idx.entry-count)
+    rec get(idx.records, "e:IQi.004")
+    assert-eq(["abid", "hamid", "mahmud", "al", "tikriti"], first(rec.toks))
+    assert-eq(["IQ"], rec.countries)
+    key "s:tkrt"
+    bucket get(idx.buckets, ::index/bucket-of(key))
+    assert-eq(["IQi.004"], get(bucket, key))
+    assert-eq(add(length(keys(idx.records)), length(keys(idx.buckets))), length(idx.pairs))
+}
+
+test-screen-dob-range-overlaps
+meta ["test"]
+fn () {
+    idx ::index/build(::un/parse(::fx/UN_XML))
+    m first(untype(::screen/screen-index({un: idx}, "Muhamad Lumisa", {dob: "1962", country: "Uganda"})).matches)
+    assert-eq("CDi.047", m.entry.id)
+    assert-eq(["alias", "dob", "country"], m.matched-fields)
+}

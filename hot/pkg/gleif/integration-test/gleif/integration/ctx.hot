@@ -1,0 +1,19 @@
+::gleif::integration::ctx ns
+
+::env ::hot::env
+
+// GLEIF needs no key but only runs with GLEIF_LIVE=1, so CI without network
+// stays hermetic.
+
+live
+meta {doc: """True when GLEIF_LIVE=1."""}
+fn (): Bool {
+    eq(::env/get("GLEIF_LIVE", ""), "1")
+}
+
+skip
+meta {doc: """Record a skip and pass."""}
+fn (why: Str): Bool {
+    println(`gleif integration: ${why} - skipping`)
+    assert(true, `skipped: ${why}`)
+}

@@ -65,7 +65,6 @@ linear
 
 # CRM
 attio
-crm
 hubspot
 intercom
 salesforce
@@ -77,7 +76,9 @@ firecrawl
 notion
 pinecone
 qdrant
-web-search
+tavily
+brave-search
+exa
 
 # Voice AI
 deepgram
@@ -126,15 +127,21 @@ microsoft-onedrive
 microsoft-sharepoint
 dropbox
 box
-documents
 
 # KYC, KYB & Compliance
 persona
 middesk
 sumsub
 cipherowl
-sanctions
-company-registry
+name-screening
+ofac
+uk-sanctions
+eu-sanctions
+un-sanctions
+opensanctions
+gleif
+sec-edgar
+companies-house
 
 # Banking & Accounting
 increase

@@ -1,0 +1,17 @@
+::hot::pkg ns
+
+hot.pkg.ofac {
+  name: "hot.dev/ofac",
+  version: "0.1.0",
+  hot-min-version: "3.0.2",
+  description: "The US Treasury OFAC SDN and Consolidated (non-SDN) lists for hot.dev/name-screening: downloads the free Sanctions List Service files, parses them into normalized Entry records and refreshes them into the screening cache, skipping unchanged files by SHA-256.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["sanctions", "ofac", "compliance", "kyc", "aml", "screening"],
+  deps: {
+    "hot.dev/name-screening": "0.1.0"
+  },
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

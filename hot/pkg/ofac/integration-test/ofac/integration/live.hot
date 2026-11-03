@@ -1,0 +1,22 @@
+::ofac::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration smoke tests (live, read-only)
+// =============================================================================
+// OFAC_LIVE=1 reads the OFAC SLS file listing. Nothing is written to the store.
+// Run with: OFAC_LIVE=1 hot test -p pkg-integration-ofac
+
+::ctx ::ofac::integration::ctx
+
+test-ofac-manifest
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("OFAC_LIVE is not 1") }
+        => {
+            files ::ofac/manifest("ofac-sdn")
+            assert(is-some(get(files, "SDN.CSV")), "SDN.CSV is listed")
+            assert-eq(16, length(::ofac/version("ofac-sdn", files)))
+        }
+    }
+}

@@ -1,0 +1,98 @@
+::eu::sanctions::test::parsers ns
+meta ["test"]
+
+::fx ::eu::sanctions::test::fixtures
+::eu ::eu::sanctions
+::index ::name-screening::index
+::screen ::name-screening::screen
+::cache ::name-screening::cache
+
+by-id fn (entries: Vec, id: Str): Map {
+  untype(find-first(entries, (e) { eq(e.id, id) }))
+}
+
+// ============================================================================
+// EU
+// ============================================================================
+
+test-eu-person
+meta ["test"]
+fn () {
+    es ::eu/parse(::fx/EU_XML)
+    assert-eq(3, length(es))
+    s by-id(es, "13")
+    assert-eq("Saddam Hussein Al-Tikriti", s.name)
+    assert-eq("individual", s.kind)
+    assert-eq(["Abu Ali", "Abou Ali"], s.aliases)
+    assert-eq(["1937-04-28"], s.dobs)
+    assert-eq(["IQ"], s.nationalities)
+    assert-eq(["IRQ"], s.programs)
+    assert-eq("EU reference EU.27.28; UNSC RESOLUTION 1483", s.remarks)
+}
+
+test-eu-enterprise-and-quoted-attribute
+meta ["test"]
+fn () {
+    es ::eu/parse(::fx/EU_XML)
+    e by-id(es, "382")
+    assert-eq("entity", e.kind)
+    assert-eq("Asbat al-Ansar", e.name)
+    assert-eq(["Ein el-Hilweh camp, LEBANON"], e.addresses)
+    assert-eq("Umar Muhammad \"Abdallah Ba\" Amar", by-id(es, "9001").name)
+}
+
+// ============================================================================
+// With hot.dev/name-screening
+// ============================================================================
+
+test-lists-register-with-the-cache
+meta ["test"]
+fn () {
+    ls ::eu::sanctions/lists()
+    assert-eq(::eu::sanctions/SOURCES, map(ls, (l) { l.source }))
+    for-each(ls, (l) {
+      assert-eq(l, ::cache/check-list(l))
+      assert(is-fn(l.fetch), "lists carry their fetch")
+    })
+}
+
+test-screens-the-parsed-list-from-memory
+meta ["test"]
+fn () {
+    idx ::index/build(::eu::sanctions/parse(::fx/EU_XML))
+    r untype(::screen/screen-index({eu: idx}, "Asbat al-Ansar", {kind: "entity"}))
+    assert-eq("possible-match", r.status)
+    assert-eq(true, r.review-required)
+    assert-eq("382", first(r.matches).entry.id)
+    assert(gt(length(first(r.matches).explanation), 0), "every match is explained")
+}
+
+test-screens-the-parsed-list-from-the-cache
+meta ["test"]
+fn () {
+    store `eu-test-${Uuid()}`
+    row ::cache/refresh-source({source: "eu", list: "EU Consolidated Financial Sanctions List", entries: ::eu::sanctions/parse(::fx/EU_XML)}, {store: store})
+    assert-eq("updated", row.status)
+    r untype(::name-screening/screen("Asbat al-Ansar", {...{kind: "entity"}, store: store, sources: ["eu"]}))
+    assert-eq("possible-match", r.status)
+    assert-eq("382", first(r.matches).entry.id)
+    clean untype(::name-screening/screen("Jane Q. Example", {store: store, sources: ["eu"]}))
+    assert-eq("no-match", clean.status)
+    assert-eq(["eu"], map(clean.sources, (s) { s.source }))
+    assert(contains(clean.notice, "Searched: EU Consolidated Financial Sanctions List."), clean.notice)
+}
+
+test-a-list-never-refreshed-is-not-a-no-match
+meta ["test"]
+fn () {
+    out ::name-screening/screen("Jane Q. Example", {store: `eu-test-${Uuid()}`, sources: ::eu::sanctions/SOURCES})
+    assert(is-err(out), "an empty cache is not a no-match")
+}
+
+test-needed-response-bytes-is-the-documented-32-mib
+meta ["test"]
+fn () {
+    assert-eq(33554432, ::eu::sanctions/NEEDED_RESPONSE_BYTES)
+    told ::name-screening::http/too-large-message(::eu::sanctions/URL, ::eu::sanctions/NEEDED_RESPONSE_BYTES)
+    assert(contains(told, "raise http.max-response-bytes to at least 33554432 (32 MiB)"), told)
+}
