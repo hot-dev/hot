@@ -129,9 +129,42 @@ jobs:
         fi
         echo "The hot workflow passed for ${GITHUB_SHA}"
 
+  # Compile each published package with the versions it pins before anything
+  # publishes. CI runs this only when packages change, but removing a hot-std
+  # function can break an old pin without touching hot/pkg.
+  package-pins:
+    name: Package Pins
+    needs: validate-release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+    - name: Setup toolchain, cache, sccache, tailwind
+      uses: ./.github/actions/rust-setup
+      with:
+        rust-toolchain: 1.99.1
+        tailwind-version: ${{ env.TAILWIND_VERSION }}
+        save-cache: "false"
+
+    - name: Package pins match the repo versions
+      run: python3 scripts/check-pkg-pins.py
+
+    # Exit 2 means only pkg.hot.dev downloads failed.
+    - name: Packages compile with their real pins
+      run: |
+        status=0
+        python3 scripts/check-pkg-pins.py smoke || status=$?
+        if [[ $status -eq 2 ]]; then
+          echo "::error::Downloads from pkg.hot.dev failed, so some pins weren't checked. This is not a code failure; rerun the job."
+        fi
+        exit "$status"
+
   package-cdn:
     name: Generate Package CDN
-    needs: validate-release
+    needs: [validate-release, package-pins]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -1032,7 +1065,7 @@ jobs:
 
   # Create GitHub Release with all packages
   create-release:
-    needs: [validate-release, release-checks, package-linux, package-macos, package-homebrew, package-windows, determine-release-channel]
+    needs: [validate-release, release-checks, package-pins, package-linux, package-macos, package-homebrew, package-windows, determine-release-channel]
     if: ${{ needs.validate-release.outputs.is_package_only != 'true' }}
     runs-on: ubuntu-latest
     permissions:
