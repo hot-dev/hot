@@ -10,21 +10,9 @@ hot.pkg.crm {
   license: "Apache-2.0",
   tags: ["crm", "agents", "hubspot", "salesforce", "attio"],
   deps: {
-    "hot.dev/hubspot": {
-      local: "../hubspot",
-      git: "https://github.com/hot-dev/hot",
-      path: "hot/pkg/hubspot"
-    },
-    "hot.dev/salesforce": {
-      local: "../salesforce",
-      git: "https://github.com/hot-dev/hot",
-      path: "hot/pkg/salesforce"
-    },
-    "hot.dev/attio": {
-      local: "../attio",
-      git: "https://github.com/hot-dev/hot",
-      path: "hot/pkg/attio"
-    }
+    "hot.dev/hubspot": "0.1.0",
+    "hot.dev/salesforce": "0.1.0",
+    "hot.dev/attio": "0.2.0"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]

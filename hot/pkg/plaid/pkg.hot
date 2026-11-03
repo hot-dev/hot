@@ -10,11 +10,7 @@ hot.pkg.plaid {
   license: "Apache-2.0",
   tags: ["fintech", "plaid", "banking", "open-banking"],
   deps: {
-    "hot.dev/jwt": {
-      local: "../jwt",
-      git: "https://github.com/hot-dev/hot",
-      path: "hot/pkg/jwt"
-    }
+    "hot.dev/jwt": "0.2.0"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]

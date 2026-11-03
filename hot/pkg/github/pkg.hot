@@ -10,11 +10,7 @@ hot.pkg.github {
   license: "Apache-2.0",
   tags: ["github", "developer-tools"],
   deps: {
-    "hot.dev/jwt": {
-      local: "../jwt",
-      git: "https://github.com/hot-dev/hot",
-      path: "hot/pkg/jwt"
-    }
+    "hot.dev/jwt": "0.2.0"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]
