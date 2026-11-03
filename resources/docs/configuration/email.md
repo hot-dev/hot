@@ -93,9 +93,14 @@ emails, and `email.alerts.from` or `email.from` for alerts. Hot refuses one on
 you set `HOT_EMAIL_FROM`. An alerts sender on that domain falls back to
 `email.from`.
 
-Set `email.from` on the app for verification and invitation emails, because each
-queued message keeps the sender the app wrote. The worker needs a sender of its
-own only for alerts, and `hot db redeploy` needs one for its own emails.
+Set `HOT_EMAIL_FROM` on both the app and the worker. The app needs it for
+verification and invitation emails, because each queued message keeps the sender
+the app wrote. The worker needs it for alerts unless `email.alerts.from` is set,
+and `hot db redeploy` needs one for its own emails. With it only on the app, the
+app reports email as working and its emails go out, but the worker logs `SMTP
+email is misconfigured` when it starts and sends no alert emails. On Hot's
+self-hosted stacks, `settings` reaches every service, so setting it there covers
+both.
 
 Links in these emails use `email.app-url`, which defaults to the app URL
 (`HOT_APP_URL`). Set it to the address users reach the app at, on the worker as

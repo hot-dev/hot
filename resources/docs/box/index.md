@@ -82,9 +82,13 @@ on all of them.
 | `large` | `xlarge` | `2xlarge` |
 
 A single machine's sizes set memory aside for one default box in each container
-slot. A larger `task.box-default-memory-mb`, or a box that asks for more memory and
-less `/tmp` than the default, can still run the VM out of memory, and the host then
-kills whichever process it picks.
+slot. A larger `task.box-default-memory-mb`, a box that asks for more memory and
+less `/tmp` than the default, or a new box that starts beside one the task worker
+adopted after a restart can still run the VM out of memory, and the host then
+kills whichever process it picks. On `small`, which admits a box up to `medium`,
+the second can take up to 512 MB more than the plan and the third about 1280 MB;
+`medium` has more room. A scalable task host plans the same way, but on `small` its
+worst case leaves the host 512 MB rather than 1 GB.
 
 ## Network Access
 

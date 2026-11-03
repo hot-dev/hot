@@ -157,6 +157,12 @@ is refused. To change the model, recreate the map: call `::store/destroy` on a
 model is refused too. That deletes the map and its entries. The next use creates
 the map with the new model, and its entries have to be written again.
 
+On a self-hosted single machine's `small` size, the memory the default model needs
+has not been measured against the worker's 1024 MB cap or the app's 768 MB cap. If
+the worker is killed on a store write there, or the app on a store search, set
+`HOT_STORE_EMBEDDING_MODEL` to `bge-small-en-v1.5` in the installation's `settings`
+before a map embeds, or move to a larger size.
+
 ## Project Naming
 
 Project names:

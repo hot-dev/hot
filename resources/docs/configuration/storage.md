@@ -372,7 +372,10 @@ running: see
 [Moving builds and files to a bucket](https://github.com/hot-dev/hot/blob/main/infra/README.md#moving-builds-and-files-to-a-bucket).
 Any other change is refused before anything stops: back onto the host, to another
 bucket or prefix of one backend, or out of Cloud Storage, since the apply that changes
-the setting also removes the host's access to an existing bucket.
+the setting also removes the host's access to an existing bucket. While a move has
+finished and the deploy it belongs to has not, a change to another role is refused
+before anything runs. Put that setting back, apply, and run
+`deploy-now` to finish the deploy, then move the other role in a deploy of its own.
 
 When such a move fails, what to leave behind goes in the installation's `settings`.
 A setting alone does not retry the move: it takes an apply, then `deploy-now`.
@@ -397,10 +400,19 @@ to `settings` does.
 `_FILE` name, and `--skip-file` is for running the command by hand.
 
 A scalable installation does not move storage, so keep its builds and files on
-the backend they started on: Hot refuses to read records through another backend.
-On Google Cloud, the stack's plan refuses a change of backend. Nothing refuses
-another bucket or prefix of the same backend, so keep those as they are too: Hot
-finds builds and internal blobs through these settings.
+the backend, bucket, and prefix they started on: Hot refuses to read records
+through another backend, finds builds and internal blobs through these settings,
+and existing records name their bucket. A change of storage also replaces every
+host, so on AWS and Google Cloud alike the scalable stack's plan refuses another
+bucket or prefix, comparing against what it recorded at its first apply. On Google
+Cloud it refuses a change of backend too; a scalable AWS installation stays on S3.
+Put the setting back. A trailing slash on a prefix does not count as a change. An
+installation that has stored nothing, such as one whose first apply failed, can
+start again with `tofu apply -replace=terraform_data.storage_locations` on AWS or
+`tofu apply -replace=terraform_data.storage_backends` on Google Cloud, which
+replaces its location record as well. The plan workflow cannot pass `-replace`, so run it
+yourself: see
+[Scalable installations](https://github.com/hot-dev/hot/blob/main/infra/README.md#scalable-installations).
 
 Internal blobs are content-addressed, so storing a blob whose content was
 already stored by the previous backend writes it to the new backend and moves

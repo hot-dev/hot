@@ -272,7 +272,12 @@ itself runs in the installation's container runtime, not in your code. It does
 not use `network.egress-proxy`, it resolves the name again, and it follows the
 registry's redirects, which nothing checks against the deny list. A registry your
 code names can therefore steer the pull's requests to other addresses, including
-private ones.
+private ones. A Docker Hub image can do the same without a redirect: its manifest
+can give a layer other addresses, in the `urls` of that layer's descriptor, and
+containerd tries those before the registry. Whether Docker Hub accepts such an
+image has not been checked. Either way the pull's timing can tell the image's
+author something about what answered, and so can the failure message, which for
+a Docker Hub image still tells a refusal apart from a dropped connection.
 
 So that a failed pull says nothing about what answered there, every pull failure
 from a registry other than Docker Hub reads the same, on every installation,

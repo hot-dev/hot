@@ -482,8 +482,11 @@ host's guest firewall is the boundary for box tasks.
   directly.
 - **Box image pulls.** The installation's containerd pulls box images from the
   registry the code names. That registry is checked against the policy, except
-  Docker Hub, but its redirects are not checked against the deny list. This gap is
-  accepted. Any failed pull from a registry other than Docker Hub gives one message,
+  Docker Hub, but its redirects are not checked against the deny list. A Docker Hub
+  image can also point a layer at another address through its descriptor's `urls`,
+  which containerd tries first; whether Docker Hub accepts such an image is unverified,
+  and a Docker Hub image's failure message still tells a refusal apart from a dropped
+  connection. This gap is accepted. Any failed pull from a registry other than Docker Hub gives one message,
   with the reason only in the worker log, though the task result still reports how
   long the pull took.
 - **Stable egress addresses.** New networks attach an Elastic IP to the NAT
@@ -1156,7 +1159,10 @@ Changes for self-hosting:
       container's memory and CPU caps, Valkey's `maxmemory`, and the task
       limits per size, within the VM and leaving room for the OS: each size's
       caps, a default box for each container slot (1,280 MB on the host), and 1 GB
-      for the host add up to the VM. Starting values to replace with benchmarks.
+      for the host add up to the VM on a single machine. A scalable task-worker host
+      fits the same way on medium and large; a small one can reach 512 MB past that
+      plan in the worst case, keeping 512 MB rather than 1 GB, which is accepted.
+      Starting values to replace with benchmarks.
 - [ ] Port the isolation validation into public qualification checks, run
       against the built image as well as the scripts, and extend it to GCP.
       Static checks are in [`test_host.py`](../../infra/tests/test_host.py);
@@ -1508,7 +1514,9 @@ IAM, generation preconditions, or real composition behavior.
       cloud and preserve externally owned buckets.
       Storage is chosen per role with no default, local storage stays allowed
       on one VM, existing buckets are never managed, and a scalable
-      installation refuses local storage. Missing: GCS from AWS compute, and a
+      installation refuses local storage. A scalable installation does not move
+      storage: its plan refuses a role's change of backend, bucket, or prefix
+      after the first apply. Missing: GCS from AWS compute, and a
       connection budget for a single machine on managed PostgreSQL; only the
       scalable contract checks one.
 - [x] Implement local-to-managed migration instructions/tools: pause admissions,

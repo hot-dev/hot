@@ -108,7 +108,8 @@ Implemented:
   `172.30.0.0/24`, `10.88.0.0/16`, a stack-created network, the data services and
   their networks (`data.<service>.endpoint.deny_cidrs`), and the host.
   `172.17.0.0/16` is an ordinary range, which an allowlist can open.
-  `HOT_EMAIL_*` other than credentials and `HOT_APP_SIGNUP` belong here. Values
+  `HOT_EMAIL_*` other than credentials and `HOT_APP_SIGNUP` belong here, so
+  `HOT_EMAIL_FROM` reaches the app and the worker alike. Values
   reach containers literally: `$` is not interpolated.
 - Existing networks: set `network.mode` to `existing`, with `network_id` and
   `subnet_id`. On AWS, a public endpoint also needs `public_subnet_ids` in two
@@ -635,8 +636,8 @@ still queues on GitHub, one run per installation.
 | `diagnostics` | Versions (release, migrations, host image, Kata, the `hotbox` in use), effective configuration, each service's state, health, and image digest, the Hot services' environment, data-service modes and reachability, the current health metrics, and up to 500 objects a storage move could not move. With Docker or the operator secret not answering, it says so (`services_error`, `health_error`, `dependencies_error`) and reports the rest |
 | `logs SERVICE` | The newest 200 lines (at most 48,000 characters) of a Hot service, the ingress, or a local data service, within 2 minutes |
 | `backup` | An on-demand `pg_dump` of a local database to the data disk, refused unless the disk has room for another like the newest dump, plus 256 MB. A failed one leaves nothing behind. A finished one stays on the disk: no command deletes it, so it counts toward `disk-pressure` from then on. On a stopped installation it starts only the data services |
-| `restart-service SERVICE` | Delivers secrets again and recreates one service; the scheduler stops before it starts, and `app` or `api` also recreates the ingress, a brief interruption. Refused when the operator secret added or removed an entry for that service (run `deploy-now`); when an entry that service mounts is empty (for `app` or `api`, also an ingress entry), or holds a `HOT_NETWORK_EGRESS_PROXY` Hot refuses, since the service would exit on it and the running one keeps its value; for `app`, when a sign-in pair is half set or blank; after a partly failed storage move (fix the cause and run `deploy-now`, or put the storage setting back, apply, and run `deploy-now`); after a deploy that upgraded and moved the data failed or was cut short, when the installed bundle still describes the old copy (run `deploy-now`); while a roll-back is unfinished; and, for `scheduler`, while a failed or interrupted deploy's possibly partly applied migrations hold it. The refusal says what clears it |
-| `drain-and-stop` | On a single machine only: on either cloud the helper refuses it on a scalable installation, sends nothing, and names the group resize ([below](#stopping-a-scalable-installation)). Stops the scheduler, then workers (2-minute grace), then the app, API, and ingress. Hot stays stopped, across reboots too, until the next deploy or `deploy-now`. An address change alone does not start it; `deploy-now` redeploys with the new address |
+| `restart-service SERVICE` | Delivers secrets again and recreates one service; the scheduler stops before it starts, and `app` or `api` also recreates the ingress, a brief interruption. Refused when the operator secret added or removed an entry for that service (run `deploy-now`); when an entry that service mounts is empty (for `app` or `api`, also an ingress entry), or holds a `HOT_NETWORK_EGRESS_PROXY` Hot refuses, since the service would exit on it and the running one keeps its value; for `app`, when a sign-in pair is half set or blank; after a partly failed storage move (fix the cause and run `deploy-now`, or put the storage setting back, apply, and run `deploy-now`); after a deploy that upgraded and moved the data failed or was cut short, when the installed bundle still describes the old copy (run `deploy-now`); while a roll-back is unfinished; while a `drain-and-stop` cut short or failed is unfinished (the next cycle stops the rest of Hot: run `restart-service` once it has, or `deploy-now` to start all of Hot); and, for `scheduler`, while a failed or interrupted deploy's possibly partly applied migrations hold it. The refusal says what clears it. Until the service is up again, the state and `status` carry `restarting`, `{SERVICE: request ID}`. A restart cut short, or one that failed after it began, is done again each cycle (about every 30 seconds) until it works, and answered `restarted` with the original request ID; `deploy-now`, a reboot's start, a roll-back, and a finished deploy start it too. A failed one's report has a `recovery` field. On a stopped installation, or when that field says nothing will start the service, run `restart-service` again or `deploy-now` |
+| `drain-and-stop` | On a single machine only: on either cloud the helper refuses it on a scalable installation, sends nothing, and names the group resize ([below](#stopping-a-scalable-installation)). Stops the scheduler, then workers (2-minute grace), then the app, API, and ingress. Hot stays stopped, across reboots too, until the next deploy or `deploy-now`. An address change alone does not start it; `deploy-now` redeploys with the new address. Hot counts as stopped from the moment the stop begins. Until it finishes, the state and `status` carry `stopping` with the request ID. If the agent dies mid-stop or Compose fails, some of Hot may still run: the loop's next cycles stop the rest and answer `stopped` again with that request ID. A failed one's report has a `recovery` field. `deploy-now` starts it all instead |
 | `deploy-now` | Deploys the release pointer now (the `release` action sets the pointer first), and retries a failed deploy or migration. After `drain-and-stop`, or a start after a boot that failed, it starts the installed release again if neither the pointer nor the configuration changed. It also renders the same release again when the operator secret gained or lost an entry. One sent before a deploy of that release failed answers with that failure and retries nothing: send it again after fixing the cause |
 | `roll-back` | After a failed upgrade: restores a local database from the pre-upgrade dump if the migrations started, then restarts the installed release. See [Recovery](#recovery) |
 | `test-alert` | Fires the `alert-test` alert, which resolves by itself: checks that alerts reach `monitoring.alert_emails` |
@@ -878,7 +879,8 @@ Upgrades follow these rules, and the deploy agent enforces them:
   - The refusal goes by the database's own ledger, which the installed bundle's
     `migration-status` job reads (`hot db migrate --status`), so a restored database
     can take the earlier release. After an upgrade that succeeded on a single machine,
-    run `drain-and-stop`, restore the managed or existing database to before it, then
+    run `drain-and-stop`, wait for `stopped` and check that `status` shows no `stopping`,
+    restore the managed or existing database to before it, then
     `release` the earlier version. On a local database `roll-back` refuses after a success,
     with `Nothing to roll back`, and no command restores the `pre-<release>` dump. The way
     back is the data disk: restore a snapshot from before the upgrade, which loses what was
@@ -905,7 +907,11 @@ Upgrades follow these rules, and the deploy agent enforces them:
     whole installed release restarts (step `previous-release-restarted`). If that
     fails too, that start is tried again every 5 minutes. Run `roll-back` to start it
     at once, or `deploy-now` to retry the release. A later failed deploy then says the
-    installed release has not started again, not that it keeps running.
+    installed release has not started again, not that it keeps running. A service that a
+    `restart-service` cut short left down starts again first (step
+    `previous-SERVICE-restarted`), and only then does the report say the installed
+    release keeps running. A deploy that fails before the loop's first cycle after a boot
+    says the installed release has yet to start after this boot, which that cycle does.
   - If it failed during or after migrating, which only a release that adds
     migrations can, a forward fix or a restore is needed. Until a roll-back or a
     successful deploy, a reboot starts the installed release without its
@@ -963,7 +969,7 @@ durable-resource guard fails one that replaces another durable resource.
 | --- | --- |
 | `name`, `cloud`, `region` | A new installation, then move data with backups |
 | `zone` (single machine) | Restore a snapshot into a new installation in that zone |
-| Bucket name or location | Keep the bucket. A provisioned bucket's change stops at plan, and a single machine's agent refuses another existing bucket. `hot db move-storage` moves between backends only and refuses another bucket of one backend, and records name their objects by paths that include the bucket, so copying the objects does not move them. No procedure has been exercised |
+| Bucket name or location | Keep the bucket. A provisioned bucket's change stops at plan, a single machine's agent refuses another existing bucket, and a scalable installation's plan refuses another bucket or prefix ([Scalable installations](#scalable-installations)). `hot db move-storage` moves between backends only and refuses another bucket of one backend, and records name their objects by paths that include the bucket, so copying the objects does not move them. No procedure has been exercised |
 | Local to managed data | Changing the mode replaces nothing: the apply starts a data move ([Moving data off the host](#moving-data-off-the-host)) |
 
 ## Upgrading
@@ -1230,14 +1236,31 @@ and agent as a single machine, with its own role:
 
 - **Data and storage.** A scalable installation needs managed or existing
   PostgreSQL and Valkey, and S3 or GCS for builds and files; the contract
-  refuses local ones. It does not move storage, so keep each role on the backend it
-  started on: Hot refuses to read records through another. On GCP, where a role can
-  be on S3 or GCS, the plan refuses a change of backend, comparing against what the
-  stack recorded at its first apply (`terraform_data.storage_backends`): put the
-  setting back. An installation that has stored nothing can record the new backend
-  with `tofu apply -replace=terraform_data.storage_backends`. The apply that first
-  makes that record cannot refuse a change made with it. Nothing refuses another bucket
-  or prefix of the same backend, so keep those as they are too.
+  refuses local ones. It does not move storage, so keep each role on the backend,
+  bucket, and prefix it started on: Hot refuses to read records through another
+  backend, and existing records name their bucket. A change of storage also replaces
+  every host, and a new host has no earlier release to compare with, so the plan
+  refuses it, comparing against what the stack recorded at its first apply: put the
+  setting back. On AWS the record is `terraform_data.storage_locations`, with each
+  role's bucket and prefix; the contract keeps a scalable AWS installation on S3. On
+  GCP, where a role can be on S3 or GCS, `terraform_data.storage_backends` records the
+  backends and `terraform_data.storage_locations` the buckets and prefixes. A backend
+  change reports only the backend refusal; a bucket or prefix changed with it is
+  refused once the backend is put back. Only the backend, bucket, and prefix count: a
+  trailing slash on a prefix, `region`, `noncurrent_days`, and `provision` do not,
+  though turning `provision` off still stops on the bucket's `prevent_destroy`.
+  An installation that has stored nothing, such as one whose first apply failed or
+  named the wrong existing bucket, can start again with
+  `tofu apply -replace=terraform_data.storage_locations` on AWS, or
+  `tofu apply -replace=terraform_data.storage_backends` on GCP, which replaces both
+  records. Run it yourself against the state backend: the plan workflow cannot pass
+  `-replace`. A new name for a bucket the stack created still stops on its
+  `prevent_destroy`. The apply that first makes a record cannot refuse a change made
+  with it: an installation from before the location record has nothing to compare
+  with, so its next plan is not refused, and its next apply records where storage is
+  then. A host whose installed bundle names another bucket or prefix also refuses it
+  and keeps running the old configuration, but a replaced host has nothing to compare
+  with, so the plan's refusal is what protects those.
 - **Database connections.** Each instance's PostgreSQL pool is limited to 20
   connections. The contract refuses scaling maximums whose total connections,
   plus administration, would exceed the database's limit for the size (400,
@@ -1247,7 +1270,11 @@ and agent as a single machine, with its own role:
   room for its box guests. A worker host runs as many
   runs at once as the size has vCPUs (small 2, medium 4, large 8). A task-worker
   host runs up to 2, 4, or 8 code tasks at once, held to its vCPUs although the bundle
-  asks for twice that, and 2, 4, or 8 container tasks.
+  asks for twice that, and 2, 4, or 8 container tasks. On medium and large a task-worker
+  host's container cap, 1,280 MB for a default box in each container slot, and 1 GB
+  for the host add up to the VM. A small one can reach 512 MB past that in the worst
+  case, its task worker at its 5,120 MB cap beside two default boxes (7,680 of
+  8,192 MB), and then keeps 512 MB rather than 1 GB free. This is accepted.
 - **Endpoints.**
   - The app and API each get a passthrough TCP load balancer: internal by
     default, external when that endpoint's exposure is public.
@@ -1388,7 +1415,8 @@ pointer. A separate state would need every shared resource removed from
 the old state and adopted with `import` blocks in `installation/imports.tf`.
 
 1. Run `status` and `diagnostics`, then `maintenance start`.
-2. Run `drain-and-stop`. Queued work stays in Valkey for the new workers.
+2. Run `drain-and-stop`, wait for `stopped`, and check that `status` shows
+   no `stopping`. Queued work stays in Valkey for the new workers.
    Work cut off after the workers' 2 minutes is taken again later and runs
    again.
 3. From a terminal with the installation's backend and state passphrase,
@@ -1556,9 +1584,13 @@ role, the count, the first 8 IDs that did not move, and the move's manifest, and
 - **Go back.** Put the storage setting back, apply, then run `deploy-now`, the one way
   to start Hot on the old storage. Its report carries a `warning`: records already
   moved stay in the bucket, unreadable until the move finishes. Only an apply takes
-  the setting to the host, which reads it within about 30 seconds. A `deploy-now`
-  that gets there first, as while the apply waits for reviewers, still sees the bucket
-  and retries the move, which rewrites more records to it. Setting the storage again,
+  the setting to the host. A command reads it again before it acts, on AWS once it
+  holds the agent's lock and on GCP as the loop takes each command, so a `deploy-now`
+  sent after the apply has finished acts on it. One sent before, as while the apply
+  waits for reviewers, still sees the bucket and retries the move, which rewrites
+  more records to it. If that read fails, the command is answered on the
+  configuration already on the host, and the host journal shows
+  `configuration_not_refreshed`. Setting the storage again,
   applying, and running `deploy-now` resumes where it stopped. Once a move has
   finished, putting the setting back is refused and Hot stays stopped: the records
   point at the bucket, so set that storage again, apply, and run `deploy-now`.
@@ -1579,8 +1611,12 @@ These cases are refused before anything stops:
   removes the host's grant on an existing bucket, so the move could not read it. Hot
   cannot read those objects until the setting is put back and applied, which restores
   the grant, so check before applying. A provisioned bucket's plan fails instead;
-- on a scalable installation, a change of a role's backend, since it does not move
-  storage: put `storage.ROLE` back ([Scalable installations](#scalable-installations)).
+- on a scalable installation, a change of a role's backend, bucket, or prefix, since it
+  does not move storage: put `storage.ROLE` back. The plan refuses it first
+  ([Scalable installations](#scalable-installations));
+- another storage role while a finished storage move's deploy has not finished
+  (`Another storage role must wait`): put that setting back, apply, run `deploy-now` to
+  finish the deploy, then move the role in a deploy of its own.
 
 `hot db move-storage` run by hand prints the settings to apply when it finishes.
 
@@ -1678,7 +1714,8 @@ installation, see [Upgrading](#upgrading)):
     a fixed release is deployed, with the storage setting put back if the move is
     partway, or with that storage kept if it finished.
 - **A managed or existing database.** `roll-back` refuses and names the restore
-  time. Run `drain-and-stop`, and restore the database to that time with the
+  time. Run `drain-and-stop`, wait for `stopped` and check that `status` shows no
+  `stopping`, and restore the database to that time with the
   provider's point-in-time recovery (see **A managed database** below) or the
   operator's own backups. Then `release` the installed version: it points back
   and, since Hot is stopped, runs that release's migrate and provision on the
@@ -1773,7 +1810,8 @@ The agent's own points: daily snapshots pause nothing; the pre-upgrade
 point is taken with the scheduler stopped and the other services running;
 only a data move's dump is taken with Hot drained and stopped. To take a
 quiesced point on a single machine, run `drain-and-stop` (queued work stays
-queued), then `backup`, a disk snapshot
+queued), wait for `stopped` and check that `status` shows no `stopping`, then
+`backup`, a disk snapshot
 (`aws ec2 create-snapshot --volume-id VOLUME`,
 `gcloud compute snapshots create NAME --source-disk DISK --source-disk-zone ZONE`),
 or note the time for a managed database, then `deploy-now` to start Hot
@@ -1933,8 +1971,9 @@ in the operator secret, and a connection grant of your own, since the stack's
    single machine's release, which starts a stopped Hot again, and replaces a scalable
    installation's instances. RDS still keeps a final snapshot. To keep the database
    instead, take it out of state (**Hand off a managed database** above).
-2. Run `drain-and-stop` on a single machine, once any deploy from step 1 has finished.
-   A scalable installation refuses it, and its hosts go with the destroy.
+2. Run `drain-and-stop` on a single machine, once any deploy from step 1 has finished,
+   wait for `stopped` and check that `status` shows no `stopping`. A scalable
+   installation refuses it, and its hosts go with the destroy.
 3. Take out of state what has `prevent_destroy`, whether you want to keep it or not:
    `tofu destroy` stops with an error while any of it is there. Run `tofu state rm` on
    those your installation has, and delete by hand whichever you do not keep:
@@ -1985,7 +2024,12 @@ Purging is always a manual, separate step.
     from the registry the code names. That registry is checked against the same
     policy, except Docker Hub, but containerd follows registry redirects and
     resolves names again, so a registry can steer the pull's requests to other
-    addresses: redirects are not checked against the deny list. This gap is accepted.
+    addresses: redirects are not checked against the deny list. A Docker Hub image can
+    also point a layer at another address through its descriptor's `urls`, which
+    containerd tries first. Whether Docker Hub accepts such an image has not been
+    checked. Either way, how long a pull takes can tell the image's author something
+    about that address, and so can the failure message, which for a Docker Hub image
+    still tells a refusal apart from a dropped connection. This gap is accepted.
     To say less about what answered, any failed pull from a registry other than Docker
     Hub gives one message, `Could not pull image`, with the reason only in the worker
     log. Timing is not collapsed: the task result still reports `image-pull-ms`, so
@@ -2385,8 +2429,10 @@ CPUs (1, 2, and 4).
 A size is not an availability or throughput promise. The single machine is
 one failure domain.
 
-**Memory, in MB.** Each service has a cap. The caps, room on the host for a default box
-in each container slot, and the host's own 1,024 add up to the VM on every size:
+**Memory, in MB.** Each service on a single machine has a cap. The caps, room on the
+host for a default box in each container slot, and the host's own 1,024 add up to the VM
+on every size (a scalable installation's hosts are under
+[Scalable installations](#scalable-installations)):
 
 | Size | PostgreSQL | Valkey | Ingress | App | API | Scheduler | Worker | Task worker | Box guests | Host |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -2399,7 +2445,12 @@ for QEMU, virtiofsd, and the shim, an allowance that has not been measured. Its 
 `/tmp` is a tmpfs inside that memory. Hot's budget for boxes counts memory plus `/tmp`
 and comes to 1,024, 2,048, or 4,096 by size, and Hot fails a box that counts for more at
 once. So `small` runs a box of the default size, or a named size up to `medium`, and
-refuses `large`.
+refuses `large`. To fit that, `small` gives Hot's task worker no recovery reserve and no
+code share, which costs room in two cases. After a task-worker restart, a new box can
+start beside one the task worker adopted from before it, about 1,280 past the plan. And
+Hot's count adds a box's memory and `/tmp`, but `/tmp` takes nothing more on the host,
+so a box that asks for more memory and less `/tmp` than the default can take up to 512
+past its 1,280. `medium` is the way to more room.
 
 **At capacity.**
 - Tasks beyond the concurrent limit wait in the queue, and the work queue
@@ -2417,8 +2468,11 @@ refuses `large`.
   files are sparse, and box writes draw on the same free space as PostgreSQL and any
   local builds and files, so `disk-pressure` remains the warning.
 - Services have memory limits: one that exceeds its limit is restarted
-  without taking the others down. Box VMs run outside those limits. Each size's caps,
-  one default box for each container slot, and 1 GB for the host fit the VM. A box that
+  without taking the others down. Box VMs run outside those limits. On a single machine,
+  each size's caps, one default box for each container slot, and 1 GB for the host fit
+  the VM. On a scalable installation, medium and large task-worker hosts fit the same
+  way, and a small one can reach 512 MB past that plan in the worst case, keeping 512 MB
+  rather than 1 GB, which is accepted. A box that
   asks for more memory than the default, or a new box starting beside one the task
   worker adopted after a restart, can still exceed the VM's memory, and the host then
   kills whichever process it picks.
@@ -2426,8 +2480,8 @@ refuses `large`.
   ([Real-account qualification](#real-account-qualification)), and `hot-ai` memory uses
   them by default. If the worker restarts on a store write, you can set
   `HOT_STORE_EMBEDDING_MODEL` to `bge-small-en-v1.5` in `settings`, give the map an
-  `Embedding` with its own provider, or move to a larger size. A map that already has
-  embeddings must be reindexed or recreated before its model changes.
+  `Embedding` with its own provider, or move to a larger size. Set the model before a
+  map embeds: a map already created refuses a changed model until it is recreated.
 - `disk-pressure` alerts at 85% of the data disk. Extracted bundles for every
   deployed build are on the data disk and count toward it. A worker removes a
   build's extraction within about 5 minutes once no deployment needs it and nothing
@@ -2565,14 +2619,18 @@ says:
   - On a scalable installation, the stop by resizing, then **Going back**: that hosts
     stay away while the stop holds, that a restored database stays at its level, and
     that the release ends `deployed`.
-  - On `small`, the worker's peak memory when it loads the default embedding model.
-    Deploy a bundle whose `::hot::store` map uses `EmbeddingOptions.Default`, write one
-    entry, then read the worker container's cgroup `memory.peak` and `docker inspect`'s
+  - On a single machine's `small`, the worker's peak memory when it loads the default
+    embedding model, under its 1,024 MB cap. Deploy a bundle whose `::hot::store` map
+    uses `EmbeddingOptions.Default`, or that uses `hot-ai` memory, write one entry, then
+    read the worker container's cgroup `memory.peak` and `docker inspect`'s
     `.State.OOMKilled` and `.RestartCount`. Do the same for a store search in the app.
-    The worker's cap is 1,024 MB, and past its 512 MB reserve and one 256 MB VM that
-    leaves 256 MB, against about 440 MB for the model plus ONNX Runtime's overhead; the
-    app's cap is 768 MB. A kill means `small`'s memory plan must change, and `small` is
-    exactly full at 8,192 MB.
+    Past the worker's 512 MB reserve and one 256 MB VM, its cap leaves 256 MB, against
+    about 440 MB for the model plus ONNX Runtime's overhead; the app's cap is 768 MB. A
+    kill means `small`'s memory plan must change, and `small` is exactly full at
+    8,192 MB: the plan then is to move memory from PostgreSQL (1,280 to 1,024 MB) to the
+    worker. Until then the way out is `HOT_STORE_EMBEDDING_MODEL=bge-small-en-v1.5` in
+    `settings`, set before a map embeds, because a map already created refuses a
+    changed model.
   - A real Google sign-in on an installation, as a new invited address and as the first
     administrator: no test reaches the token exchange, and no installation has run it.
     The same goes for GitHub's sign-in, which shares that exchange.
