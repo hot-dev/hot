@@ -10,11 +10,7 @@ hot.pkg.dropbox {
   license: "Apache-2.0",
   tags: ["dropbox", "documents", "files", "storage", "oauth"],
   deps: {
-    "hot.dev/oauth2": {
-      local: "../oauth2",
-      git: "https://github.com/hot-dev/hot",
-      path: "hot/pkg/oauth2"
-    }
+    "hot.dev/oauth2": "0.2.0"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]

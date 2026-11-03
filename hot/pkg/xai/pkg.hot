@@ -10,7 +10,7 @@ hot.pkg.xai {
   license: "Apache-2.0",
   tags: ["ai"],
   deps: {
-    "hot.dev/hot-ai": "1.4.0"
+    "hot.dev/hot-ai": "1.9.0"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]

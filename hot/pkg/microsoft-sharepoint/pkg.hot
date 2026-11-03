@@ -10,16 +10,8 @@ hot.pkg.microsoft-sharepoint {
   license: "Apache-2.0",
   tags: ["microsoft", "sharepoint", "microsoft-graph", "microsoft-365", "documents", "lists"],
   deps: {
-    "hot.dev/microsoft-graph": {
-      local: "../microsoft-graph",
-      git: "https://github.com/hot-dev/hot",
-      path: "hot/pkg/microsoft-graph"
-    },
-    "hot.dev/microsoft-onedrive": {
-      local: "../microsoft-onedrive",
-      git: "https://github.com/hot-dev/hot",
-      path: "hot/pkg/microsoft-onedrive"
-    }
+    "hot.dev/microsoft-graph": "0.1.0",
+    "hot.dev/microsoft-onedrive": "0.1.0"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]

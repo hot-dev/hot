@@ -10,11 +10,7 @@ hot.pkg.google-calendar {
   license: "Apache-2.0",
   tags: ["google", "google-calendar", "calendar", "scheduling"],
   deps: {
-    "hot.dev/google-core": {
-      local: "../google-core",
-      git: "https://github.com/hot-dev/hot",
-      path: "hot/pkg/google-core"
-    }
+    "hot.dev/google-core": "0.1.0"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]

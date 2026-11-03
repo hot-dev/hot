@@ -10,31 +10,11 @@ hot.pkg.documents {
   license: "Apache-2.0",
   tags: ["documents", "files", "storage", "rag", "google-drive", "onedrive", "sharepoint", "dropbox", "box", "s3"],
   deps: {
-    "hot.dev/google-drive": {
-      local: "../google-drive",
-      git: "https://github.com/hot-dev/hot",
-      path: "hot/pkg/google-drive"
-    },
-    "hot.dev/microsoft-onedrive": {
-      local: "../microsoft-onedrive",
-      git: "https://github.com/hot-dev/hot",
-      path: "hot/pkg/microsoft-onedrive"
-    },
-    "hot.dev/dropbox": {
-      local: "../dropbox",
-      git: "https://github.com/hot-dev/hot",
-      path: "hot/pkg/dropbox"
-    },
-    "hot.dev/box": {
-      local: "../box",
-      git: "https://github.com/hot-dev/hot",
-      path: "hot/pkg/box"
-    },
-    "hot.dev/aws-core": {
-      local: "../aws-core",
-      git: "https://github.com/hot-dev/hot",
-      path: "hot/pkg/aws-core"
-    }
+    "hot.dev/google-drive": "0.1.0",
+    "hot.dev/microsoft-onedrive": "0.1.0",
+    "hot.dev/dropbox": "0.1.0",
+    "hot.dev/box": "0.1.0",
+    "hot.dev/aws-core": "1.3.0"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]

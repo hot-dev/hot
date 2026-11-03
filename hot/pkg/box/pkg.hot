@@ -10,16 +10,8 @@ hot.pkg.box {
   license: "Apache-2.0",
   tags: ["box", "documents", "files", "storage", "content"],
   deps: {
-    "hot.dev/jwt": {
-      local: "../jwt",
-      git: "https://github.com/hot-dev/hot",
-      path: "hot/pkg/jwt"
-    },
-    "hot.dev/oauth2": {
-      local: "../oauth2",
-      git: "https://github.com/hot-dev/hot",
-      path: "hot/pkg/oauth2"
-    }
+    "hot.dev/jwt": "0.2.0",
+    "hot.dev/oauth2": "0.2.0"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]
