@@ -527,8 +527,9 @@ class CommandWorkflow(unittest.TestCase):
             with self.subTest(workflow=name):
                 self.assertNotRegex(workflow, r"(?m)^\s*concurrency:")
         agent = (REPO / "infra/agent/hot_agent.py").read_text()
-        # The agent's lock is what keeps them apart on the host.
-        self.assertIn("with locked():\n            agent = new_agent()\n            with agent.heartbeat():\n", agent)
+        # The agent's lock is what keeps them apart on the host: the command
+        # runs, heartbeat and all, inside the same locked block.
+        self.assertRegex(agent, r"with locked\(\):\n {12}agent = new_agent\(\)\n(?: {12,}.*\n)*? {12}with agent\.heartbeat\(\):\n")
         # A deploy-now that waited behind a failed attempt answers with that
         # failure, not a second attempt.
         self.assertIn("settled = self.failure_since(state, sent, request_id)", agent)
