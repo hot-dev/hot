@@ -110,15 +110,18 @@ collect-pages fn cond (session: ::types/Session, method: Str, key: Str, cursor: 
 // Tool Calling
 // ============================================================================
 
-tool-result fn (result: Map): ::types/ToolResult {
-  ::types/ToolResult({
-    content: map(get(result, "content", []), ::types/ToolContent(%)),
-    is-error: get(result, "isError", false),
-    structured-content: get(result, "structuredContent", null),
-    result-type: get(result, "resultType", "complete"),
-    input-requests: get(result, "inputRequests", null),
-    request-state: get(result, "requestState", null)
-  })
+tool-result fn cond (result: Result): ::types/ToolResult {
+  is-err(result) => { result }
+  => {
+    ::types/ToolResult({
+      content: map(get(result, "content", []), ::types/ToolContent(%)),
+      is-error: get(result, "isError", false),
+      structured-content: get(result, "structuredContent", null),
+      result-type: get(result, "resultType", "complete"),
+      input-requests: get(result, "inputRequests", null),
+      request-state: get(result, "requestState", null)
+    })
+  }
 }
 
 find-tool fn (session: ::types/Session, name: Str): ::types/Tool {
@@ -137,6 +140,8 @@ Call a previously listed Tool definition.
 
 Prefer this form when retaining the Tool is convenient: modern Streamable HTTP
 uses its `input-schema` to mirror any `x-mcp-header` parameters.
+
+Returns err() when the server answers with a JSON-RPC error.
 """
 }
 fn (session: ::types/Session, tool: ::types/Tool, arguments: Map?): ::types/ToolResult {
@@ -154,7 +159,10 @@ meta {
 Call a tool on the MCP server and wait for the result.
 
 Returns a ToolResult with `content` (Vec of ToolContent), `is-error` (Bool),
-and optional `structured-content`. Non-existent tools return err().
+and optional `structured-content`. Returns err() when the server answers with
+a JSON-RPC error, such as for a tool it doesn't have; `err-message` gives the
+server's message. On a modern connection, a tool that `tools/list` doesn't
+return is also an err().
 
 **Example**
 
@@ -166,13 +174,18 @@ first(result.content).text // => "Sunny, 72°F"
 
 // Call with empty arguments
 result ::tools/call(session, "list_files", {})
+
+// A JSON-RPC error is an Err the caller can test
+result ::tools/call(session, "place_order", {id: "A-1"})
+if(is-err(result), err-message(result), result) // => "the order system is down"
 ```
 """
 }
 fn (session: ::types/Session, name: Str, arguments: Map?): ::types/ToolResult {
   cond {
     eq(or(session.era, "legacy"), "modern") => {
-      call-tool(session, find-tool(session, name), arguments)
+      tool find-tool(session, name)
+      if(is-err(tool), tool, call-tool(session, tool, arguments))
     }
     => {
       result ::client/session-request(session, "tools/call", {
@@ -186,7 +199,11 @@ fn (session: ::types/Session, name: Str, arguments: Map?): ::types/ToolResult {
 
 call-tool-with-input
 meta {
-    doc: """Call a Tool and fulfill modern Multi Round-Trip input requests with `handler`."""
+    doc: """
+Call a Tool and fulfill modern Multi Round-Trip input requests with `handler`.
+
+Returns err() when the server answers with a JSON-RPC error.
+"""
 }
 fn (session: ::types/Session, tool: ::types/Tool, arguments: Map?, handler: Fn, max-rounds: Int): ::types/ToolResult {
   result ::client/session-request-with-tool-input(
@@ -202,11 +219,16 @@ fn (session: ::types/Session, tool: ::types/Tool, arguments: Map?, handler: Fn, 
 
 call-with-input
 meta {
-    doc: """Call a named tool and fulfill modern Multi Round-Trip input requests with `handler`."""
+    doc: """
+Call a named tool and fulfill modern Multi Round-Trip input requests with `handler`.
+
+Returns err() when the server answers with a JSON-RPC error or `tools/list`
+doesn't return the tool.
+"""
 }
 fn (session: ::types/Session, name: Str, arguments: Map?, handler: Fn, max-rounds: Int): ::types/ToolResult {
   tool find-tool(session, name)
-  call-tool-with-input(session, tool, arguments, handler, max-rounds)
+  if(is-err(tool), tool, call-tool-with-input(session, tool, arguments, handler, max-rounds))
 }
 
 // Call a tool with SSE streaming. Returns an iterator of StreamEvent values.
