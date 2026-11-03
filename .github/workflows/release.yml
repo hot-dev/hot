@@ -1221,9 +1221,10 @@ jobs:
 
   # Self-host runtime image and its signed release manifest. Off the
   # create-release critical path: a failure here never blocks a Hot release,
-  # and selfhost-release-assets attaches the manifest afterwards. Beta builds
-  # are signed from a branch, so installations' tag-only signer check rejects
-  # their manifests.
+  # and selfhost-release-assets attaches the manifest afterwards. The
+  # signature names the run's ref, and installations accept only a vX.Y.Z tag
+  # push (render.py's RELEASE_SIGNER), so beta, preview (workflow_dispatch),
+  # and prerelease-tag builds publish no manifest.
   selfhost-image:
     name: Self-host runtime image
     needs: validate-release
@@ -1239,7 +1240,7 @@ jobs:
       IMAGE_TAG: ${{ needs.validate-release.outputs.is_beta == 'true' && format('{0}-beta.{1}', needs.validate-release.outputs.version, github.run_number) || needs.validate-release.outputs.version }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     - uses: ./.github/actions/free-disk-space
 
@@ -1303,7 +1304,7 @@ jobs:
         } >> "$GITHUB_STEP_SUMMARY"
 
     - name: Upload the release manifest
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
       with:
         name: selfhost-manifest
         path: |
@@ -1621,7 +1622,10 @@ jobs:
         echo "✅ Homebrew formula updated successfully!"
         echo "Users can now install with: brew install hot-dev/hot/hot"
 
-  # Attach the self-host manifest to the GitHub release created above.
+  # Attach the self-host manifest to the GitHub release created above, only
+  # when installations accept its signature: it is verified with the host
+  # agent's own check. A preview or prerelease gets none, so installations
+  # cannot deploy it; a vX.Y.Z tag whose manifest does not verify fails this job.
   selfhost-release-assets:
     name: Attach self-host manifest
     needs: [validate-release, create-release, selfhost-image]
@@ -1630,12 +1634,64 @@ jobs:
     permissions:
       contents: write
     steps:
+    - name: Checkout the signature check
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      with:
+        sparse-checkout: infra/runtime
+        path: hot
+
+    - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      with:
+        cosign-release: v3.1.4
+
     - name: Download the release manifest
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
       with:
         name: selfhost-manifest
 
+    - name: Check that installations accept the manifest
+      id: verify
+      env:
+        TAG_NAME: ${{ needs.validate-release.outputs.tag_name }}
+      run: |
+        set -euo pipefail
+        if python3 -c 'import sys; sys.path.insert(0, "hot/infra/runtime"); import render
+        render.verify_manifest_signature("hot-selfhost-manifest.json", "hot-selfhost-manifest.sigstore.json")'; then
+          echo "attach=true" >> "$GITHUB_OUTPUT"
+        elif [[ "$GITHUB_REF" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "::error::Installations reject the manifest signed for $GITHUB_REF; $TAG_NAME has no self-host manifest"
+          exit 1
+        else
+          echo "::warning::$TAG_NAME was released from $GITHUB_REF, not a vX.Y.Z tag. Installations accept only a tag's manifest, so none is attached and they cannot deploy this version. A later tag for it would be refused: increment resources/version.txt for a release they can deploy."
+        fi
+
+    # Hosts pull this image without signing in, unless they use a mirror, and a
+    # new GitHub package starts private. A signed manifest would still verify,
+    # and every host would then fail at its pull, so nothing is attached until
+    # an anonymous client can read the image. It stops here on the first release
+    # for the one manual step, which no API offers: making the package public.
+    - name: Check that hosts can pull the runtime image
+      if: steps.verify.outputs.attach == 'true'
+      env:
+        TAG_NAME: ${{ needs.validate-release.outputs.tag_name }}
+      run: |
+        set -euo pipefail
+        image="$(jq -r .images.hot hot-selfhost-manifest.json)"
+        repository="${image#ghcr.io/}"
+        repository="${repository%@*}"
+        digest="${image##*@}"
+        # The image is an index: the build attaches provenance and an SBOM.
+        accept='application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json'
+        if token="$(curl -fsS --retry 3 --max-time 30 "https://ghcr.io/token?service=ghcr.io&scope=repository:${repository}:pull" | jq -er .token)" &&
+           curl -fsSI --retry 3 --max-time 30 -o /dev/null -H "Authorization: Bearer $token" -H "Accept: $accept" "https://ghcr.io/v2/${repository}/manifests/${digest}"; then
+          echo "An anonymous client can read $image"
+        else
+          echo "::error::Hosts pull $image without signing in, and an anonymous client could not read it, so $TAG_NAME has no self-host manifest yet. If ghcr.io answered 401, 403, or 404, the package is most likely still private, as every new package is: make it public at https://github.com/orgs/${repository%%/*}/packages/container/${repository#*/}/settings (GitHub cannot undo this), then re-run this job."
+          exit 1
+        fi
+
     - name: Upload to the GitHub release
+      if: steps.verify.outputs.attach == 'true'
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         TAG_NAME: ${{ needs.validate-release.outputs.tag_name }}

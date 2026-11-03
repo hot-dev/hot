@@ -1,15 +1,18 @@
 name: selfhost
 
 # Checks for the cloud self-hosting infrastructure under infra/: OpenTofu
-# formatting, validation, and mock-provider tests; the runtime-bundle and
-# release-manifest tests; and a build of the runtime image when its recipe
-# changes. None of it touches a cloud account.
+# formatting, validation, and mock-provider tests; the runtime-bundle,
+# release-manifest, and workflow tests; and a build of the runtime image when
+# its recipe changes. None of it touches a cloud account.
 on:
   pull_request:
     paths:
       - 'infra/**'
       - 'resources/db/**'
       - '.github/workflows/selfhost*.yml'
+      - '.github/workflows/release.yml'
+      - '.github/workflows/hot.yml'
+      - 'resources/version.txt'
   workflow_dispatch:
 
 permissions:
@@ -23,16 +26,38 @@ jobs:
   infra:
     name: Infrastructure checks
     runs-on: ubuntu-24.04
+    services:
+      # A real server for the database jobs' connection service files. The
+      # tests run psql in this same image and reach the server through the
+      # Docker host. A test keeps the image equal to hot.yml's.
+      postgres:
+        image: pgvector/pgvector:0.8.7-pg18-trixie@sha256:9d9c930220cb9bf2f956d10a8f909cf9973d9672ca0278aef2c1e6facccad2e0
+        env:
+          POSTGRES_USER: hot
+          POSTGRES_PASSWORD: hot
+          POSTGRES_DB: hot
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U hot -d hot"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      HOT_INFRA_TEST_POSTGRES_IMAGE: pgvector/pgvector:0.8.7-pg18-trixie@sha256:9d9c930220cb9bf2f956d10a8f909cf9973d9672ca0278aef2c1e6facccad2e0
+      HOT_INFRA_TEST_POSTGRES_URI: postgres://hot:hot@host.docker.internal:5432/hot
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
         with:
           tofu_version: 1.13.1
           tofu_wrapper: false
 
-      - name: Runtime bundle and release manifest tests
-        run: python3 -m unittest discover -s infra/tests -v
+      - name: Runtime bundle, release manifest, and workflow tests
+        run: |
+          python3 -m unittest discover -s infra/tests -v
+          python3 -m unittest discover -s infra/github/tests -v
 
       - name: Shell scripts
         run: |
@@ -71,7 +96,7 @@ jobs:
     name: Runtime image build
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           fetch-depth: 0
 
@@ -107,4 +132,5 @@ jobs:
             'test -f /usr/share/hot/db/postgres/provision_runtime.sql &&
              test -d /usr/share/hot/pkg/hot-std &&
              test -x /usr/share/hot/bin/hotbox-linux-x86_64 &&
-             test -x /usr/local/bin/ctr && id -u | grep -qx 10001'
+             test -x /usr/local/bin/ctr &&
+             command -v mkfs.ext4 >/dev/null && id -u | grep -qx 10001'

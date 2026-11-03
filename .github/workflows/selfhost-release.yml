@@ -1,13 +1,17 @@
 name: selfhost-release
 
 # Reusable: deploy a Hot release to a self-host installation. It verifies the
-# release manifest's signature, writes the installation's release pointer,
-# asks the host agent to deploy now, and waits for the agent's report. It uses
-# only cloud control-plane APIs: no SSH, shell, or network access to the host.
-# The pointer, command, and wait are infra/operator/selfhost.py, which
-# operators can also run by hand.
+# release manifest's signature with the host agent's own check (render.py's
+# RELEASE_SIGNER: Hot's release workflow on a vX.Y.Z tag; a fork that
+# publishes its own releases changes it there, and also changes repository:
+# and the default manifest URL in its copies of the reusable workflows, as
+# infra/README.md lists), writes the installation's release pointer, asks the
+# host agent to deploy now, and waits for the agent's report. It uses only
+# cloud control-plane APIs: no SSH, shell, or network access to the host. The
+# pointer, command, and wait are infra/operator/selfhost.py, which operators
+# can also run by hand.
 #
-#   uses: hot-dev/hot/.github/workflows/selfhost-release.yml@v3.0.1
+#   uses: hot-dev/hot/.github/workflows/selfhost-release.yml@vX.Y.Z
 on:
   workflow_call:
     inputs:
@@ -30,22 +34,19 @@ on:
         type: string
         default: ''
       manifest_base_url:
-        description: Where manifests are published; empty means Hot's GitHub releases
+        description: Where manifests are published, with {release} for the version; empty means Hot's GitHub releases
         type: string
         default: ''
-      signer_identity:
-        description: Manifest signer identity regex; change only for a fork's releases
-        type: string
-        default: '^https://github\.com/hot-dev/hot/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$'
       timeout_minutes:
+        description: Limit for the whole release; 0 means 30, or 60 for a scalable installation, which migrates and then rolls five roles in turn. On AWS it can be at most 240, and more than 60 needs a release role whose maximum session duration allows it, as the state bootstrap's does
         type: number
-        default: 30
+        default: 0
       preset:
         description: single-machine or scalable
         type: string
         default: single-machine
       gcp_zone:
-        description: The installation's zone; scalable GCP installations run their scheduler there
+        description: The installation's zone, required for a scalable GCP release; its scheduler runs there and its other roles in the zone's region
         type: string
         default: ''
       aws_region:
@@ -72,7 +73,7 @@ jobs:
     name: Deploy ${{ inputs.release }} to ${{ inputs.installation }}
     runs-on: ubuntu-24.04
     environment: ${{ inputs.environment }}
-    timeout-minutes: ${{ inputs.timeout_minutes }}
+    timeout-minutes: ${{ inputs.timeout_minutes || (inputs.preset == 'scalable' && 60 || 30) }}
     concurrency:
       group: selfhost-release-${{ github.repository }}-${{ inputs.installation }}
       cancel-in-progress: false
@@ -82,43 +83,82 @@ jobs:
     env:
       RELEASE: ${{ inputs.release }}
       NAME: ${{ inputs.installation }}
-      REQUEST_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Check inputs
+        id: check
         env:
           CLOUD: ${{ inputs.cloud }}
+          BASE: ${{ inputs.manifest_base_url }}
+          PRESET: ${{ inputs.preset }}
+          ZONE: ${{ inputs.gcp_zone }}
+          REGION: ${{ inputs.aws_region }}
+          ROLE: ${{ inputs.aws_release_role }}
+          PROJECT: ${{ inputs.gcp_project }}
+          PROVIDER: ${{ inputs.gcp_workload_identity_provider }}
+          SERVICE_ACCOUNT: ${{ inputs.gcp_release_service_account }}
+          TIMEOUT: ${{ inputs.timeout_minutes || (inputs.preset == 'scalable' && 60 || 30) }}
         run: |
           [[ "$RELEASE" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::release must be a version"; exit 1; }
           [[ "$NAME" =~ ^[a-z][a-z0-9-]{2,23}$ ]] || { echo "::error::invalid installation name"; exit 1; }
           [[ "$CLOUD" =~ ^(aws|gcp)$ ]] || { echo "::error::cloud must be aws or gcp"; exit 1; }
+          # The helper takes anything but scalable for a single machine.
+          [[ "$PRESET" =~ ^(single-machine|scalable)$ ]] || { echo "::error::preset must be single-machine or scalable"; exit 1; }
+          [[ -z "$BASE" || "$BASE" == https://* ]] || { echo "::error::manifest_base_url must use https"; exit 1; }
+          [[ "$CLOUD" != gcp || "$PRESET" != scalable || "$ZONE" =~ ^[a-z0-9]+-[a-z0-9]+-[a-z0-9]+$ ]] ||
+            { echo "::error::a scalable Google Cloud release needs gcp_zone, the installation's zone, such as us-central1-a"; exit 1; }
+          [[ "$CLOUD" != aws || ( -n "$REGION" && -n "$ROLE" ) ]] ||
+            { echo "::error::an AWS installation needs aws_region and aws_release_role"; exit 1; }
+          [[ "$CLOUD" != gcp || ( -n "$PROJECT" && -n "$PROVIDER" && -n "$SERVICE_ACCOUNT" ) ]] ||
+            { echo "::error::a Google Cloud installation needs gcp_project, gcp_workload_identity_provider, and gcp_release_service_account"; exit 1; }
+          [[ "$TIMEOUT" =~ ^[0-9]+$ ]] || { echo "::error::timeout_minutes must be a whole number"; exit 1; }
+          # AWS refuses a session longer than the role allows, and the state
+          # bootstrap's role allows four hours.
+          [[ "$CLOUD" != aws || "$TIMEOUT" -le 240 ]] ||
+            { echo "::error::on AWS timeout_minutes can be at most 240, the longest session the state bootstrap's release role allows"; exit 1; }
+          # Credentials last their session, whatever the job's limit. They are
+          # issued after the job starts, so this outlasts the job. It stays at
+          # AWS's default until the limit needs more, because a role allows an
+          # hour unless it says otherwise, and AWS refuses to issue any longer.
+          echo "aws_session_seconds=$(( TIMEOUT > 60 ? TIMEOUT * 60 : 3600 ))" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the operator helper and the manifest check
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          repository: hot-dev/hot
+          ref: ${{ inputs.hot_version || format('v{0}', inputs.release) }}
+          path: hot
+          sparse-checkout: |
+            infra/operator
+            infra/runtime
 
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
           cosign-release: v3.1.4
 
+      # The same check the host agent makes before it deploys a release, so a
+      # manifest that passes here is one the installation accepts.
       - name: Verify the release manifest
         env:
           BASE: ${{ inputs.manifest_base_url }}
-          SIGNER: ${{ inputs.signer_identity }}
         run: |
           set -euo pipefail
-          base="${BASE:-https://github.com/hot-dev/hot/releases/download/v{release}}"
+          default="https://github.com/hot-dev/hot/releases/download/v{release}"
+          base="${BASE:-$default}"
           base="${base//\{release\}/$RELEASE}"
           curl -fsSL -o manifest.json "$base/hot-selfhost-manifest.json"
           curl -fsSL -o manifest.sigstore.json "$base/hot-selfhost-manifest.sigstore.json"
-          cosign verify-blob --bundle manifest.sigstore.json \
-            --certificate-identity-regexp "$SIGNER" \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com manifest.json
+          python3 - <<'EOF'
+          import sys
+          sys.path.insert(0, "hot/infra/runtime")
+          import render
+          try:
+              render.verify_manifest_signature("manifest.json", "manifest.sigstore.json")
+          except ValueError as error:
+              print(f"::error::{error}")
+              sys.exit(1)
+          EOF
           [[ "$(jq -r .release manifest.json)" == "$RELEASE" ]] || { echo "::error::manifest names another release"; exit 1; }
           jq . manifest.json >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Check out the operator helper
-        uses: actions/checkout@v5
-        with:
-          repository: hot-dev/hot
-          ref: ${{ inputs.hot_version || format('v{0}', inputs.release) }}
-          path: hot
-          sparse-checkout: infra/operator
 
       - name: Authenticate to AWS
         if: inputs.cloud == 'aws'
@@ -126,6 +166,7 @@ jobs:
         with:
           role-to-assume: ${{ inputs.aws_release_role }}
           aws-region: ${{ inputs.aws_region }}
+          role-duration-seconds: ${{ steps.check.outputs.aws_session_seconds }}
 
       - name: Authenticate to Google Cloud
         if: inputs.cloud == 'gcp'
@@ -141,9 +182,12 @@ jobs:
           PROJECT: ${{ inputs.gcp_project }}
           ZONE: ${{ inputs.gcp_zone }}
           PRESET: ${{ inputs.preset }}
-          TIMEOUT: ${{ inputs.timeout_minutes }}
+          TIMEOUT: ${{ inputs.timeout_minutes || (inputs.preset == 'scalable' && 60 || 30) }}
         run: |
           set -euo pipefail
+          # Unique per call: every call in a caller's run shares its run ID.
+          request_id="gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(openssl rand -hex 4)"
+          echo "Request ID: $request_id"
           jq -n '{installation: {name: env.NAME, cloud: env.CLOUD, region: env.REGION, project: env.PROJECT, zone: env.ZONE, preset: env.PRESET}}' > installation.json
-          python3 hot/infra/operator/selfhost.py installation.json --request-id "$REQUEST_ID" \
+          python3 hot/infra/operator/selfhost.py installation.json --request-id "$request_id" \
             --timeout $(( TIMEOUT * 54 )) --summary "$GITHUB_STEP_SUMMARY" release "$RELEASE"

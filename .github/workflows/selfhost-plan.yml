@@ -3,12 +3,14 @@ name: selfhost-plan
 # Reusable: plan (and optionally apply) a Hot self-host installation from an
 # operator's repository. Call it from that repository, pinned to a Hot tag:
 #
-#   uses: hot-dev/hot/.github/workflows/selfhost-plan.yml@v3.0.1
+#   uses: hot-dev/hot/.github/workflows/selfhost-plan.yml@vX.Y.Z
 #
 # See infra/github/example-operator-repo. The plan job needs only read access
 # and the state lock. With `apply: true`, a second job applies exactly the
 # saved plan after the GitHub Environment's reviewers approve; OpenTofu
-# refuses the plan if state changed since it was made.
+# refuses the plan if state changed since it was made. The installation
+# directory must hold a backend_override.tf: plans never use the runner's
+# local state.
 #
 # Every plan fails if it would delete or replace a durable resource (data
 # disk, database, cache, secrets, logs) unless `allow_data_deletion` is set.
@@ -60,6 +62,10 @@ on:
         description: IAM role for applying
         type: string
         default: ''
+      aws_apply_session_seconds:
+        description: How long the apply job's AWS credentials last. The apply role's maximum session duration must allow it, as the state bootstrap's does; a role allows only an hour unless it says otherwise
+        type: number
+        default: 14400
       gcp_workload_identity_provider:
         type: string
         default: ''
@@ -77,6 +83,14 @@ on:
 permissions:
   contents: read
 
+# A call that can apply holds its installation from plan to apply, so its plan
+# starts from the state an earlier apply left, and a newer waiting call (a
+# later commit, with the same changes and more) replaces an older one. Other
+# plans run at once and wait only for the state lock.
+concurrency:
+  group: ${{ inputs.apply && !inputs.drift_check && format('selfhost-{0}-{1}', github.repository, inputs.installation_dir) || format('selfhost-plan-{0}-{1}', github.run_id, inputs.installation_dir) }}
+  cancel-in-progress: false
+
 env:
   TOFU_VERSION: 1.13.1
 
@@ -90,25 +104,32 @@ jobs:
       pull-requests: write
     outputs:
       changes: ${{ steps.plan.outputs.changes }}
+      artifact: ${{ steps.check.outputs.artifact }}
     env:
       STACK: hot/infra/opentofu/stacks/${{ inputs.cloud }}/${{ inputs.preset }}
       TF_VAR_state_encryption_passphrase: ${{ secrets.state_encryption_passphrase }}
     steps:
       - name: Check inputs
+        id: check
         env:
           CLOUD: ${{ inputs.cloud }}
           PRESET: ${{ inputs.preset }}
+          DIR: ${{ inputs.installation_dir }}
         run: |
           [[ "$CLOUD" =~ ^(aws|gcp)$ ]] || { echo "::error::cloud must be aws or gcp"; exit 1; }
           [[ "$PRESET" =~ ^[a-z-]+$ ]] || { echo "::error::invalid preset"; exit 1; }
+          # Artifact names are unique within a run, which may plan several
+          # installations.
+          name="$(printf %s "$DIR" | tr -c 'A-Za-z0-9._-' '-')-$(printf %s "$DIR" | sha256sum | cut -c1-8)"
+          echo "artifact=selfhost-plan-$name" >> "$GITHUB_OUTPUT"
 
       - name: Check out the installation
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           path: operator
 
       - name: Check out Hot ${{ inputs.hot_version }}
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           repository: hot-dev/hot
           ref: ${{ inputs.hot_version }}
@@ -148,6 +169,8 @@ jobs:
         env:
           SOURCE: operator/${{ inputs.installation_dir }}
         run: |
+          [[ -f "$SOURCE/backend_override.tf" ]] ||
+            { echo "::error::$SOURCE/backend_override.tf is missing; it names the installation's remote state backend"; exit 1; }
           cp "$SOURCE/installation.tfvars.json" "$STACK/terraform.tfvars.json"
           for file in backend_override.tf encryption_override.tf imports.tf; do
             if [[ -f "$SOURCE/$file" ]]; then cp "$SOURCE/$file" "$STACK/$file"; fi
@@ -161,23 +184,32 @@ jobs:
           ALLOW_DATA_DELETION: ${{ inputs.allow_data_deletion }}
           CLOUD: ${{ inputs.cloud }}
           PRESET: ${{ inputs.preset }}
+          DIR: ${{ inputs.installation_dir }}
           # Resources whose deletion loses data or access to it.
           DURABLE: '^(aws_ebs_volume|aws_db_instance|aws_elasticache_replication_group|aws_secretsmanager_secret|aws_cloudwatch_log_group|aws_s3_bucket|google_compute_disk|google_sql_database_instance|google_memorystore_instance|google_secret_manager_secret|google_storage_bucket)\.'
         run: |
           set -euo pipefail
           tofu -chdir="$STACK" init -input=false -lockfile=readonly
+          # Planning from the runner's local state would create everything again.
+          jq -e '(.backend.type // "local") != "local"' "$STACK/.terraform/terraform.tfstate" > /dev/null 2>&1 ||
+            { echo "::error::backend_override.tf must configure a remote state backend"; exit 1; }
+          # The S3 backend takes no lock unless told to, and concurrent applies
+          # would overwrite each other's state.
+          jq -e '.backend.type != "s3" or .backend.config.use_lockfile == true or (.backend.config.dynamodb_table // "") != ""' "$STACK/.terraform/terraform.tfstate" > /dev/null 2>&1 ||
+            { echo "::error::backend_override.tf must lock state: set use_lockfile = true in its s3 backend"; exit 1; }
           tofu -chdir="$STACK" validate
-          tofu -chdir="$STACK" plan -input=false -lock-timeout=5m -out=hot.tfplan
+          # Exit code 2 means changes, including imports, moves, and outputs.
+          # The lock timeout outlasts an apply that creates managed data.
+          status=0
+          tofu -chdir="$STACK" plan -input=false -lock-timeout=30m -detailed-exitcode -out=hot.tfplan || status=$?
+          if [[ "$status" != 0 && "$status" != 2 ]]; then exit "$status"; fi
           # Summarize actions only: plans can contain sensitive values.
           tofu -chdir="$STACK" show -json hot.tfplan > plan.json
-          jq -r '[.resource_changes[] | select(.change.actions != ["no-op"])
-                  | "\(.change.actions | join("/")) \(.address)"] | join("\n")' plan.json > summary.txt
-          jq -r --arg durable "$DURABLE" '[.resource_changes[] | select(.change.actions | index("delete"))
-                  | select(.address | test($durable)) | "\(.change.actions | join("/")) \(.address)"]
-                  | join("\n")' plan.json > durable.txt
+          python3 hot/infra/github/plan_summary.py plan.json summary.txt durable.txt --durable "$DURABLE"
           rm plan.json
+          if [[ "$status" == 2 && ! -s summary.txt ]]; then echo "(changes not listed here; see the plan in the job log)" > summary.txt; fi
           {
-            echo "### OpenTofu plan for $CLOUD/$PRESET"
+            echo "### OpenTofu plan for $CLOUD/$PRESET in $DIR"
             echo '```'
             if [[ -s summary.txt ]]; then cat summary.txt; else echo "No changes."; fi
             echo '```'
@@ -188,12 +220,12 @@ jobs:
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
-          if [[ -s summary.txt ]]; then echo "changes=true" >> "$GITHUB_OUTPUT"; fi
+          if [[ "$status" == 2 ]]; then echo "changes=true" >> "$GITHUB_OUTPUT"; fi
           if [[ -s durable.txt && "$ALLOW_DATA_DELETION" != "true" ]]; then
             echo "::error::The plan deletes or replaces durable resources; see the summary. Set allow_data_deletion only for a reviewed purge."
             exit 1
           fi
-          if [[ -s summary.txt && "$DRIFT_CHECK" == "true" ]]; then
+          if [[ "$status" == 2 && "$DRIFT_CHECK" == "true" ]]; then
             echo "::error::Drift: the installation no longer matches its configuration; see the summary."
             exit 1
           fi
@@ -206,10 +238,11 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           CLOUD: ${{ inputs.cloud }}
           PRESET: ${{ inputs.preset }}
+          DIR: ${{ inputs.installation_dir }}
           HOT_VERSION: ${{ inputs.hot_version }}
         run: |
           {
-            echo "OpenTofu plan for \`$CLOUD/$PRESET\` with Hot $HOT_VERSION:"
+            echo "OpenTofu plan for \`$CLOUD/$PRESET\` in \`$DIR\` with Hot $HOT_VERSION:"
             echo '```'
             if [[ -s summary.txt ]]; then cat summary.txt; else echo "No changes."; fi
             echo '```'
@@ -222,13 +255,16 @@ jobs:
           } > comment.md
           gh pr comment "$PR" --repo "$REPOSITORY" --body-file comment.md
 
+      # Kept long enough for reviewers to approve the apply after a weekend;
+      # a re-run of this job replaces it.
       - name: Keep the encrypted plan for apply
         if: inputs.apply && steps.plan.outputs.changes == 'true'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
-          name: selfhost-plan
+          name: ${{ steps.check.outputs.artifact }}
           path: ${{ env.STACK }}/hot.tfplan
-          retention-days: 1
+          retention-days: 7
+          overwrite: true
 
   apply:
     name: Apply
@@ -247,11 +283,11 @@ jobs:
       STACK: hot/infra/opentofu/stacks/${{ inputs.cloud }}/${{ inputs.preset }}
       TF_VAR_state_encryption_passphrase: ${{ secrets.state_encryption_passphrase }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           path: operator
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           repository: hot-dev/hot
           ref: ${{ inputs.hot_version }}
@@ -266,11 +302,25 @@ jobs:
           tofu_wrapper: false
 
       - name: Authenticate to AWS
+        id: aws
         if: inputs.cloud == 'aws'
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ inputs.aws_apply_role }}
           aws-region: ${{ inputs.aws_region }}
+          # An apply that outlasts its credentials cannot finish or save state,
+          # and AWS's default of an hour is close for one that creates managed
+          # data.
+          role-duration-seconds: ${{ inputs.aws_apply_session_seconds }}
+
+      # AWS's refusal names neither the input nor the fix, comes only after the
+      # reviewers approve, and fails the same way on a re-run.
+      - name: Explain a refused session
+        if: failure() && steps.aws.outcome == 'failure'
+        env:
+          SESSION: ${{ inputs.aws_apply_session_seconds }}
+        run: |
+          echo "::error::Nothing was applied. If AWS said DurationSeconds exceeds MaxSessionDuration, the apply role's maximum session duration must allow aws_apply_session_seconds ($SESSION): raise it to 4 hours, as the state bootstrap's role does, or set the input to what the role allows."
 
       - name: Authenticate to Google Cloud
         if: inputs.cloud == 'gcp'
@@ -283,18 +333,49 @@ jobs:
         env:
           SOURCE: operator/${{ inputs.installation_dir }}
         run: |
+          [[ -f "$SOURCE/backend_override.tf" ]] ||
+            { echo "::error::$SOURCE/backend_override.tf is missing; it names the installation's remote state backend"; exit 1; }
           cp "$SOURCE/installation.tfvars.json" "$STACK/terraform.tfvars.json"
           for file in backend_override.tf encryption_override.tf imports.tf; do
             if [[ -f "$SOURCE/$file" ]]; then cp "$SOURCE/$file" "$STACK/$file"; fi
           done
           if [[ -f "$SOURCE/.terraform.lock.hcl" ]]; then cp "$SOURCE/.terraform.lock.hcl" "$STACK/"; fi
 
-      - uses: actions/download-artifact@v7
+      - id: download
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          name: selfhost-plan
+          name: ${{ needs.plan.outputs.artifact }}
           path: ${{ env.STACK }}
+
+      - name: Explain a missing plan
+        if: failure() && steps.download.outcome == 'failure'
+        run: echo "::error::The saved plan is kept for 7 days. Re-run all jobs to plan again, and review the new plan."
 
       - name: Apply the reviewed plan
         run: |
           tofu -chdir="$STACK" init -input=false -lockfile=readonly
           tofu -chdir="$STACK" apply -input=false -lock-timeout=5m hot.tfplan
+
+      # What an apply creates is known only to the state it could not save, in
+      # this file on a runner that is about to go away. State holds secrets, so
+      # only an encrypted copy is kept. `tofu state push`, which OpenTofu's
+      # message suggests, cannot read an encrypted file, but this is the form
+      # the backend stores.
+      - name: Check for state the apply could not save
+        id: errored
+        if: always() && hashFiles(format('{0}/errored.tfstate', env.STACK)) != ''
+        run: |
+          if jq -e 'has("encrypted_data")' "$STACK/errored.tfstate" > /dev/null 2>&1; then
+            echo "encrypted=true" >> "$GITHUB_OUTPUT"
+            echo "::error::OpenTofu could not save state, and what this apply created is not in the backend. Apply nothing until the errored-state artifact is copied over the state object; see \"State, drift, and teardown\" in infra/README.md."
+          else
+            echo "::error::OpenTofu could not save state, and errored.tfstate is not encrypted, so this run did not keep it. Compare the installation with the state before applying again."
+          fi
+
+      - name: Keep the encrypted state for recovery
+        if: always() && steps.errored.outputs.encrypted == 'true'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: ${{ needs.plan.outputs.artifact }}-errored-state-${{ github.run_attempt }}
+          path: ${{ env.STACK }}/errored.tfstate
+          retention-days: 30

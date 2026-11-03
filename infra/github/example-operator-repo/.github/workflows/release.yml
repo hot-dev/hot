@@ -19,5 +19,15 @@ jobs:
       installation: hot-example
       cloud: aws
       environment: production
+      # The installation's preset, as in the infrastructure workflow: scalable
+      # for a scalable installation.
+      preset: single-machine
       aws_region: us-east-1
       aws_release_role: arn:aws:iam::123456789012:role/hot-example-release
+      # On Google Cloud, in place of `cloud: aws` and the aws_ lines, with values
+      # from the state bootstrap's outputs. Scalable installations also need
+      # `preset: scalable`, above, and gcp_zone, the installation's zone:
+      #   cloud: gcp
+      #   gcp_project: example-project
+      #   gcp_workload_identity_provider: projects/123456789012/locations/global/workloadIdentityPools/hot-github/providers/github
+      #   gcp_release_service_account: hot-github-release@example-project.iam.gserviceaccount.com
