@@ -451,6 +451,20 @@ Circle ::geo/Shape.Circle                // variant alias: the constructor
 Form enum { Round(::geo/Circle), Flat }  // qualified payload type
 ```
 
+### Variants as Parameter Types
+
+A parameter type can name one variant, in full if it's from another namespace. A sibling overload that declares the enum takes the other variants:
+
+```hot
+area fn
+(s: Shape.Circle): Dec { mul(s.radius, s.radius) },
+(s: Shape): Dec { 0.0 }
+
+radius fn (s: ::geo/Shape.Circle): Dec { s.radius }
+```
+
+Like other user types, it isn't checked at the call: a lone `(s: Shape.Circle)` still receives another variant as it is.
+
 ### Open Enums
 
 Add the `open` modifier to make an enum extensible — any module may register

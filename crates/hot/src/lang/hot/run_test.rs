@@ -2945,6 +2945,107 @@ run()"#;
         }
     }
 
+    /// A parameter type can name one variant, as `Kind.Plain` or `::a/Kind.Plain`,
+    /// through an alias or a re-export too. Overloads dispatch on it, a sibling
+    /// declaring the enum takes the other variants, and an arrow to the variant
+    /// runs. Same-named enums in two namespaces stay apart.
+    #[test]
+    fn parameter_types_can_name_an_enum_variant() {
+        let src = r#"::a ns
+Inner type { text: Str }
+Kind enum open { Plain, Other, Wrapped(Inner) }
+Source type { text: Str }
+Source -> Kind.Sourced fn (s: Source): Kind { Kind.Wrapped({text: `from ${s.text}`}) }
+short fn
+(x: Kind.Plain): Any { "plain" },
+(x: Kind.Wrapped): Any { `wrapped ${x.text}` },
+(x: Kind): Any { "kind" }
+returns fn (): Kind.Plain { Kind.Plain }
+Holder type { kind: Kind.Plain }
+
+::b ns
+Kind enum { Plain, Other }
+
+::reexport ns
+Kind ::a/Kind
+
+::c ns
+::alias ::a
+::other ::b
+qualified fn
+(x: ::a/Kind.Plain): Any { "a plain" },
+(x: ::b/Kind.Plain): Any { "b plain" },
+(x: ::alias/Kind.Wrapped): Any { `a wrapped ${x.text}` },
+(x: ::reexport/Kind.Other): Any { "a other" },
+(x: ::other/Kind.Other): Any { "b other" }
+variant-first fn
+(x: ::a/Kind.Plain): Any { "plain" },
+(x: ::a/Kind): Any { "kind" }
+enum-first fn
+(x: ::alias/Kind): Any { "kind" },
+(x: ::alias/Kind.Plain): Any { "plain" }
+nullable fn (x: ::a/Kind.Plain?): Any { if(is-null(x), "none", "plain") }
+either fn (x: ::a/Kind.Plain | ::a/Kind.Other): Any { "either" }
+lone fn (x: ::a/Kind.Plain): Any { "lone" }
+arrow-target fn (x: ::a/Kind.Sourced): Any { `sourced ${x.text}` }
+hold fn (x: Any): Any { x }
+
+::t ns
+run fn (): Vec {
+    plain ::c/hold(::a/Kind.Plain)
+    wrapped ::c/hold(::a/Kind.Wrapped({text: "w"}))
+    other ::c/hold(::a/Kind.Other)
+    [
+        ::a/short(plain), ::a/short(wrapped), ::a/short(other),
+        ::c/qualified(plain), ::c/qualified(::c/hold(::b/Kind.Plain)),
+        ::c/qualified(wrapped), ::c/qualified(other),
+        ::c/qualified(::c/hold(::b/Kind.Other)),
+        ::c/qualified(::a/Kind.Plain), ::c/qualified(::b/Kind.Other), ::a/short(::a/Kind.Other),
+        ::c/variant-first(plain), ::c/variant-first(other),
+        ::c/enum-first(plain), ::c/enum-first(other),
+        ::c/nullable(plain), ::c/nullable(null), ::c/either(other), ::c/lone(plain),
+        ::c/arrow-target(::c/hold(::a/Source({text: "s"}))),
+        first(map([wrapped], ::a/short)), first(map([plain], ::c/qualified)),
+        is-type(::a/returns(), ::a/Kind),
+        is-type(::a/Holder(kind: ::a/Kind.Plain).kind, ::a/Kind)
+    ]
+}
+run()
+run()
+run()"#;
+        let expected = Val::vec(vec![
+            Val::from("plain"),
+            Val::from("wrapped w"),
+            Val::from("kind"),
+            Val::from("a plain"),
+            Val::from("b plain"),
+            Val::from("a wrapped w"),
+            Val::from("a other"),
+            Val::from("b other"),
+            Val::from("a plain"),
+            Val::from("b other"),
+            Val::from("kind"),
+            Val::from("plain"),
+            Val::from("kind"),
+            Val::from("plain"),
+            Val::from("kind"),
+            Val::from("plain"),
+            Val::from("none"),
+            Val::from("either"),
+            Val::from("lone"),
+            Val::from("sourced from s"),
+            Val::from("wrapped w"),
+            Val::from("a plain"),
+            Val::Bool(true),
+            Val::Bool(true),
+        ]);
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            let out = compile_and_run_project_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("run failed: {e}"));
+            assert_eq!(out, expected);
+        }
+    }
+
     /// A namespace offers what it imports under its own name: its type's
     /// constructor, a variant, a function, and a function reference, through an
     /// alias or another re-export too. Its own definition of a name still wins.

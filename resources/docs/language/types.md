@@ -396,6 +396,20 @@ rate fn match (s: Severity): Int {
 }
 ```
 
+### Variants as Parameter Types
+
+A parameter type can name one variant, in full if it's from another namespace. A sibling overload that declares the enum takes the other variants:
+
+```hot
+area fn
+(s: Shape.Circle): Dec { mul(s.radius, s.radius) },
+(s: Shape): Dec { 0.0 }
+
+radius fn (s: ::geo/Shape.Circle): Dec { s.radius }
+```
+
+Like other user types, it isn't checked at the call: a lone `(s: Shape.Circle)` still receives another variant as it is.
+
 ### Open Enums
 
 Add the `open` modifier to declare an extensible enum. Other modules add

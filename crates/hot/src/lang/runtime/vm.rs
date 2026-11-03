@@ -573,6 +573,9 @@ struct OverloadFit {
     /// A tagged argument is at a custom type that isn't its own and has no
     /// arrow to it, so it fits only if that type turns out to be an alias.
     unknown: bool,
+    /// Every parameter declares its argument's own type, which beats an enum
+    /// declared for a variant of it.
+    own_types: bool,
 }
 
 impl OverloadCandidate {
@@ -599,6 +602,7 @@ impl OverloadCandidate {
             rank: 0,
             arrow: false,
             unknown: false,
+            own_types: true,
         };
         for (i, name) in names.iter().enumerate() {
             let param = if variadic { i.min(rest) } else { i };
@@ -606,8 +610,10 @@ impl OverloadCandidate {
             if self.lazy_params.get(param).copied().unwrap_or(false) {
                 // Lazy arguments arrive as thunks, so their type is unknown.
                 fit.rank += OVERLOAD_RANK_ANY;
+                fit.own_types = false;
                 continue;
             }
+            fit.own_types &= declared.as_str() == name.as_ref();
             let rank = overload_param_rank(declared, name, maps.get(i).copied().unwrap_or(false));
             let arrow = coerces
                 && matches!(rank, None | Some(OVERLOAD_RANK_UNKNOWN))
@@ -7720,7 +7726,9 @@ impl VirtualMachine {
         let fit_of = |id: FunctionId| fits.iter().find(|fit| fit.function_id == id);
         let mut best = fit_of(function_id);
         for fit in &fits {
-            if best.is_none_or(|best| fit.rank < best.rank) {
+            if best.is_none_or(|best| {
+                fit.rank < best.rank || (fit.rank == best.rank && fit.own_types && !best.own_types)
+            }) {
                 best = Some(fit);
             }
         }
