@@ -247,6 +247,7 @@ pub fn is_pure_native(name: &str) -> bool {
         "::hot::hash",
         "::hot::hex",
         "::hot::hmac",
+        "::hot::html",
         "::hot::iter",
         "::hot::json",
         "::hot::map",
@@ -1458,6 +1459,24 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         );
 
         // XML functions
+        map.insert(
+            "::hot::html/from-html".to_string(),
+            HotLibFn::LibFn(html::from_html),
+        );
+        map.insert(
+            "::hot::html/select".to_string(),
+            HotLibFn::LibFn(html::select),
+        );
+        map.insert(
+            "::hot::html/select-first".to_string(),
+            HotLibFn::LibFn(html::select_first),
+        );
+        map.insert("::hot::html/text".to_string(), HotLibFn::LibFn(html::text));
+        map.insert(
+            "::hot::html/raw-text".to_string(),
+            HotLibFn::LibFn(html::raw_text),
+        );
+        map.insert("::hot::html/attr".to_string(), HotLibFn::LibFn(html::attr));
         map.insert(
             "::hot::xml/from-xml".to_string(),
             HotLibFn::LibFn(xml::from_xml),

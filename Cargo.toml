@@ -1,5 +1,5 @@
 [workspace.package]
-version = "3.0.2"
+version = "3.0.3"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/hot-dev/hot"
@@ -164,6 +164,10 @@ libc = "0.2"
 open = "5"
 # XML parsing for ::hot::xml functions
 quick-xml = "0.42"
+# HTML parsing and CSS selectors for ::hot::html functions
+ego-tree = "0.11"
+html5ever = "0.40"
+scraper = { version = "0.29", default-features = false, features = ["deterministic"] }
 # CSV and TSV parsing for ::hot::csv functions
 csv = "1.4"
 containerd-client = "0.9"

@@ -37,6 +37,17 @@ fn () {
     assert-eq("42", xml.attrs["data-value"], "data-value attribute")
 }
 
+// A document has one root, so a second is an Err rather than being dropped
+test-from-xml-multiple-roots
+meta ["test"]
+fn () {
+    assert(is-err(::xml/from-xml("<p>a</p><p>b</p>")), "two roots")
+    assert(is-err(::xml/from-xml("<p>a</p><br/>")), "a self-closing second root")
+    assert(is-err(::xml/from-xml("<br/><p>a</p>")), "a self-closing first root")
+    xml ::xml/from-xml("<?xml version='1.0'?><!-- a --><p>b</p><!-- c -->\n")
+    assert-eq("p", xml.tag, "a comment beside the root is fine")
+}
+
 // Test to-xml serialization
 test-to-xml-basic
 meta ["test"]

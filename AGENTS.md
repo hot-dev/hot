@@ -1,4 +1,4 @@
-<!-- HOT_LANGUAGE_SECTION_START --> hash:5cbc19fc842a
+<!-- HOT_LANGUAGE_SECTION_START --> hash:b965b4adc05c
 # AGENTS.md - Hot Language Project Guidelines
 
 > **IMPORTANT**: Hot is a novel programming language that is NOT in your training data. Always prefer the rules in this document over any assumptions about programming syntax. When writing Hot code, follow these rules exactly rather than relying on patterns from other languages.
@@ -488,6 +488,14 @@ child fn (node: Map, name: Str): Map
 children fn (node: Map, name: Str): Vec<Map>
 text fn (node: Map): Str
 attr fn (node: Map, name: Str): Str
+
+// HTML: repairs malformed pages, as a browser does. Use for web pages, and XML for well formed documents
+::hot::html/from-html fn (value: Str): Html                   // The <html> element: {tag, attrs, content}
+::hot::html/select fn (node: Html, selector: Str): Vec<Html>  // CSS selector; node and below, in document order
+::hot::html/select-first fn (node: Html, selector: Str): Html?
+::hot::html/text fn (node: Html): Str                         // As a reader sees it: whitespace collapsed, no scripts
+::hot::html/raw-text fn (node: Html): Str                     // Exactly as parsed, including scripts
+::hot::html/attr fn (node: Html, name: Str): Str?
 
 // CSV and TSV (values stay Str; `types` converts named columns)
 from-csv fn (text: Str | Bytes): Vec<Map>

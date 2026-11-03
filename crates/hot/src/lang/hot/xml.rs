@@ -243,6 +243,14 @@ fn parse_xml(xml_str: &str) -> Result<Val, String> {
         pending.clear();
     }
 
+    fn set_root(root: &mut Option<Val>, element: Val) -> Result<(), String> {
+        if root.is_some() {
+            return Err("XML document has more than one root element".to_string());
+        }
+        *root = Some(element);
+        Ok(())
+    }
+
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) => {
@@ -260,7 +268,7 @@ fn parse_xml(xml_str: &str) -> Result<Val, String> {
                 if let Some((_, _, content)) = stack.last_mut() {
                     content.push(element);
                 } else {
-                    root = Some(element);
+                    set_root(&mut root, element)?;
                 }
             }
             Ok(Event::End(_)) => {
@@ -271,7 +279,7 @@ fn parse_xml(xml_str: &str) -> Result<Val, String> {
                     if let Some((_, _, parent_content)) = stack.last_mut() {
                         parent_content.push(element);
                     } else {
-                        root = Some(element);
+                        set_root(&mut root, element)?;
                     }
                 }
             }

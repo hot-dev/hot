@@ -96,6 +96,10 @@ flate2 = { workspace = true }
 tar = { workspace = true }
 # XML parsing for ::hot::xml functions
 quick-xml = { workspace = true }
+# HTML parsing and CSS selectors for ::hot::html functions
+ego-tree = { workspace = true }
+html5ever = { workspace = true }
+scraper = { workspace = true }
 # CSV and TSV parsing for ::hot::csv functions
 csv = { workspace = true }
 # DNS resolution for custom domain verification
