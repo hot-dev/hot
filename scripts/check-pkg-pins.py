@@ -47,8 +47,6 @@ CI_CTX = PROJECT_ROOT / "hot" / "ci.ctx.hot"
 ALLOWED_PINS = {
     # The one exception when this check was added.
     ("slack-admin", "hot.dev/slack", "1.1.0"),
-    # TEMPORARY: shows the smoke test failing on a stale pin. Reverted next.
-    ("mcp", "hot.dev/hot-ai", "1.4.0"),
 }
 
 # The message `hot` gives when a pkg.hot.dev download fails for a reason
