@@ -356,8 +356,12 @@ async fn remove_policy_chain(chain: &str) {
             break;
         }
     }
-    let _ = run_iptables(&["-F", &chain]).await;
-    let _ = run_iptables(&["-X", &chain]).await;
+    // Every setup clears the chain before creating it, so a missing chain is
+    // the normal case; flushing it would only log "No chain" warnings.
+    if iptables_rule_exists(&["-S", chain]).await {
+        let _ = run_iptables(&["-F", chain]).await;
+        let _ = run_iptables(&["-X", chain]).await;
+    }
 }
 
 async fn iptables_rule_exists(args: &[&str]) -> bool {
