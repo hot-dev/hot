@@ -15,6 +15,11 @@ resource "aws_lb" "web" {
       condition     = local.exposure[each.key] != "public" || length(local.public_subnet_ids) >= 2
       error_message = "A public endpoint on an existing network needs public_subnet_ids in two or more zones."
     }
+    # A load balancer sends nothing to targets in a zone it is not in.
+    precondition {
+      condition     = local.exposure[each.key] != "public" || length(setsubtract(local.private_zones, local.public_zones)) == 0
+      error_message = "network.public_subnet_ids must cover every zone of private_subnet_ids, or hosts there get no traffic."
+    }
   }
 }
 resource "aws_lb_target_group" "web" {

@@ -184,6 +184,13 @@ resource "google_monitoring_alert_policy" "hot" {
       }
     }
   }
+  # An incident on one host's series cannot resolve once scale-in, a rolling
+  # update, or a replacement removes that host, so it closes after half an
+  # hour without data instead of the default week. A host that stays
+  # breaching keeps reporting and keeps its incident.
+  alert_strategy {
+    auto_close = "1800s"
+  }
 }
 # An optional monthly cost budget over the installation's project, on the
 # billing account that pays for it. Creating one needs a billing role on that
@@ -226,8 +233,11 @@ locals {
 resource "google_monitoring_dashboard" "hot" {
   dashboard_json = jsonencode({
     displayName = "hot-${local.config.name}"
-    mosaicLayout = { columns = 12, tiles = [for index, panel in module.contract.dashboard : {
-      xPos = (index % 2) * 6, yPos = floor(index / 2) * 4, width = 6, height = 4
+    # A position of 0 is left out, which means the same: the API omits zero
+    # values from the dashboard it returns, and the provider shows a key it sent
+    # and did not get back as a change in every plan.
+    mosaicLayout = { columns = 12, tiles = [for index, panel in module.contract.dashboard : merge({ for axis, position in { xPos = (index % 2) * 6, yPos = floor(index / 2) * 4 } : axis => position if position != 0 }, {
+      width = 6, height = 4
       widget = { title = panel.title, xyChart = { dataSets = [for metric in panel.metrics : {
         plotType       = "LINE"
         legendTemplate = metric.gcp
@@ -240,7 +250,7 @@ resource "google_monitoring_dashboard" "hot" {
           }
         } }
       }] } }
-    }] }
+    })] }
   })
 }
 

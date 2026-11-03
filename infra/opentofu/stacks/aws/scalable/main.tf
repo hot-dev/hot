@@ -33,6 +33,11 @@ locals {
   second_zone        = try([for zone in data.aws_availability_zones.available[0].names : zone if zone != local.config.zone][0], null)
   private_subnet_ids = local.new_network ? aws_subnet.private[*].id : local.config.network.private_subnet_ids
   public_subnet_ids  = local.new_network ? aws_subnet.public[*].id : local.config.network.public_subnet_ids
+  # The hosts' subnets, where the internal load balancers' nodes, and so
+  # their health checks, are too.
+  private_subnet_cidrs = local.new_network ? aws_subnet.private[*].cidr_block : [for s in data.aws_subnet.private : s.cidr_block]
+  private_zones        = local.new_network ? local.zones : distinct([for s in data.aws_subnet.private : s.availability_zone])
+  public_zones         = local.new_network ? local.zones : distinct([for s in data.aws_subnet.public : s.availability_zone])
   host_config = { for role in keys(local.roles) : role => merge(local.config, {
     roles             = [role]
     migrations        = role == "scheduler"
@@ -60,21 +65,26 @@ locals {
     Resource = "arn:aws:ecr:${module.contract.mirror.region}:${module.contract.mirror.account}:repository/${module.contract.mirror.repositories}" },
   ]
 }
-check "scalable_preset" {
-  assert {
-    condition     = local.config.preset == "scalable" && local.config.cloud == "aws"
-    error_message = "This stack needs installation.preset = scalable and installation.cloud = aws."
-  }
-}
 
 # -- Network: private hosts in two zones, a NAT gateway per zone ---------------
 
+# Standard zones only, in every state: an opted-in Local Zone, or a zone that
+# is impaired today, must not move the second zone and replace its subnets.
 data "aws_availability_zones" "available" {
   count = local.new_network ? 1 : 0
-  state = "available"
+  filter {
+    name   = "zone-type"
+    values = ["availability-zone"]
+  }
 }
-data "aws_vpc" "hot" {
-  id = local.vpc_id
+# An existing network's subnets, for their zones and ranges.
+data "aws_subnet" "private" {
+  for_each = local.new_network ? toset([]) : toset(local.config.network.private_subnet_ids)
+  id       = each.value
+}
+data "aws_subnet" "public" {
+  for_each = local.new_network || !contains(values(local.exposure), "public") ? toset([]) : toset(local.config.network.public_subnet_ids)
+  id       = each.value
 }
 resource "aws_vpc" "hot" {
   count                = local.new_network ? 1 : 0
@@ -155,9 +165,10 @@ resource "aws_security_group" "host" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 }
-# App and API hosts: HTTPS from the load balancer's health checks (inside the
-# VPC) and from clients, whose addresses the passthrough load balancer keeps:
-# the client ranges for a private endpoint, anyone for a public one.
+# App and API hosts: HTTPS from the load balancer's health checks (from the
+# hosts' subnets) and from clients, whose addresses the passthrough load
+# balancer keeps: the client ranges for a private endpoint, anyone for a
+# public one.
 resource "aws_security_group" "web" {
   for_each    = local.web_roles
   name_prefix = "hot-${local.config.name}-${each.key}-"
@@ -167,7 +178,7 @@ resource "aws_security_group" "web" {
     from_port   = 443
     to_port     = 443
     protocol    = "tcp"
-    cidr_blocks = local.exposure[each.key] == "public" ? ["0.0.0.0/0"] : distinct(concat([data.aws_vpc.hot.cidr_block], local.config.network.client_cidrs))
+    cidr_blocks = local.exposure[each.key] == "public" ? ["0.0.0.0/0"] : distinct(concat(local.private_subnet_cidrs, local.config.network.client_cidrs))
   }
 }
 
@@ -197,6 +208,11 @@ resource "aws_secretsmanager_secret" "operator" {
   name                    = "hot/${local.config.name}/operator"
   recovery_window_in_days = 30
 }
+# How Hot's workflows run anything on the hosts: a fixed set of agent commands,
+# with every parameter constrained. No drain-and-stop: the app and API groups
+# replace a host that fails the load balancer's health check, as a stopped one
+# does, and the new host deploys and serves. Stopping Hot here means resizing
+# its groups.
 resource "aws_ssm_document" "command" {
   name            = "hot-${local.config.name}-command"
   document_type   = "Command"
@@ -205,14 +221,19 @@ resource "aws_ssm_document" "command" {
     schemaVersion = "2.2"
     description   = "Run one Hot agent command on an installation host."
     parameters = {
-      operation = { type = "String", allowedValues = ["deploy-now", "status", "diagnostics", "logs", "restart-service", "drain-and-stop", "test-alert"] }
+      operation = { type = "String", allowedValues = ["deploy-now", "status", "diagnostics", "logs", "restart-service", "test-alert"] }
       service   = { type = "String", default = "none", allowedValues = ["none", "app", "api", "worker", "task-worker", "scheduler", "ingress"] }
       requestId = { type = "String", allowedPattern = "^[A-Za-z0-9-]{1,64}$" }
+      # When the helper stops waiting, in seconds since the epoch: past it the
+      # agent reports `expired` instead of running the command. 0 is no expiry.
+      expires = { type = "String", default = "0", allowedPattern = "^[0-9]{1,12}$" }
     }
     mainSteps = [{
       action = "aws:runShellScript"
       name   = "hotAgent"
-      inputs = { runCommand = ["/usr/local/bin/hot-agent command {{ operation }} --service {{ service }} --request-id {{ requestId }}"] }
+      # The most Systems Manager allows (48 hours), not its 1-hour default:
+      # a deploy is never stopped partway.
+      inputs = { runCommand = ["/usr/local/bin/hot-agent command {{ operation }} --service {{ service }} --request-id {{ requestId }} --expires {{ expires }}"], timeoutSeconds = "172800" }
     }]
   })
 }
@@ -243,42 +264,62 @@ resource "aws_iam_role_policy" "runtime" {
     { Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = concat(
       [aws_secretsmanager_secret.generated.arn, aws_secretsmanager_secret.operator.arn], aws_secretsmanager_secret.valkey[*].arn,
     each.key == "scheduler" ? aws_db_instance.postgres[*].master_user_secret[0].secret_arn : []) },
-    { Effect = "Allow", Action = ["secretsmanager:PutSecretValue"], Resource = aws_secretsmanager_secret.generated.arn },
-    { Effect = "Allow", Action = ["ssm:GetParameter"], Resource = concat([aws_ssm_parameter.pointer[each.key].arn],
-    each.key == "scheduler" ? [aws_ssm_parameter.pointer["migrate"].arn] : []) },
+    { Effect = "Allow", Action = ["ssm:GetParameter"], Resource = local.role_parameters[each.key] },
     { Effect = "Allow", Action = ["ssm:PutParameter"], Resource = aws_ssm_parameter.status.arn },
     { Effect = "Allow", Action = ["logs:CreateLogStream", "logs:PutLogEvents"], Resource = "${aws_cloudwatch_log_group.host.arn}:*" },
     { Effect = "Allow", Action = ["cloudwatch:PutMetricData"], Resource = "*", Condition = { StringEquals = { "cloudwatch:namespace" = "Hot/SelfHost" } } },
-    ], local.mirror_statements, each.key == "task-worker" && local.retire_task_hosts ? local.retire_statements : [], [for s in local.s3_roles : {
-      Effect = "Allow", Action = ["s3:GetBucketLocation"], Resource = "arn:aws:s3:::${s.bucket}"
-      }], [for s in local.s3_roles : {
+    # AmazonSSMManagedInstanceCore, which lets the SSM agent take commands and
+    # carry port forwarding's data channels, also allows reading every
+    # parameter. Each host reads only its own pointers. A host cannot tell a
+    # shell from port forwarding on those channels, so who may start a session
+    # is governed by ssm:StartSession on operator principals, limited to
+    # AWS-StartPortForwardingSession.
+    { Effect = "Deny", Action = ["ssm:GetParameter*"], NotResource = local.role_parameters[each.key] },
+    ], each.key == "scheduler" ? [
+    # The scheduler's host migrates first, so it creates the generated
+    # secret; the other roles only read it.
+    { Effect = "Allow", Action = ["secretsmanager:PutSecretValue"], Resource = aws_secretsmanager_secret.generated.arn },
+    ] : [], local.mirror_statements, each.key == "task-worker" && local.retire_task_hosts ? local.retire_statements : [], [for s in local.s3_roles : {
+      # Hot never lists a bucket, but S3 answers a read of a missing key with 403
+      # rather than 404 to a caller without ListBucket. Whether this grant, limited
+      # by prefix, counts for that is on the qualification list.
       Effect    = "Allow", Action = ["s3:ListBucket"], Resource = "arn:aws:s3:::${s.bucket}",
       Condition = { StringLike = { "s3:prefix" = [trim(s.prefix, "/"), "${trim(s.prefix, "/")}/*"] } }
       }], [for s in local.s3_roles : {
-      Effect = "Allow", Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"], Resource = "arn:aws:s3:::${s.bucket}/${trim(s.prefix, "/")}/*"
+      Effect = "Allow", Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload"], Resource = "arn:aws:s3:::${s.bucket}/${trim(s.prefix, "/")}/*"
   }]) })
+}
+locals {
+  # The pointers each role's hosts read: their own, and the scheduler's the
+  # migration pointer too.
+  role_parameters = { for role in keys(local.roles) : role => concat([aws_ssm_parameter.pointer[role].arn],
+  role == "scheduler" ? [aws_ssm_parameter.pointer["migrate"].arn] : []) }
 }
 resource "aws_iam_instance_profile" "role" {
   for_each = aws_iam_role.role
   name     = each.value.name
   role     = each.value.name
 }
-# The release and command workflows may write and read the pointers, read
-# status, send the Hot command to this installation's hosts, read the agents'
-# reports, and list each role's instances.
+# The release and command workflows may write and read the pointers, send the
+# Hot command to this installation's hosts, read the agents' reports, silence
+# this installation's alarms, and list each role's instances.
 resource "aws_iam_role_policy" "release" {
   count = var.release_principal == "" ? 0 : 1
   name  = "hot-${local.config.name}-release"
   role  = element(split("/", var.release_principal), length(split("/", var.release_principal)) - 1)
   policy = jsonencode({ Version = "2012-10-17", Statement = [
     { Effect = "Allow", Action = ["ssm:PutParameter", "ssm:GetParameter"], Resource = [for p in aws_ssm_parameter.pointer : p.arn] },
-    { Effect = "Allow", Action = ["ssm:GetParameter"], Resource = aws_ssm_parameter.status.arn },
+    # selfhost.py sends by tag, and IAM authorizes that against instance/* and
+    # the instance's tag, not against each instance's own ARN.
     { Effect = "Allow", Action = ["ssm:SendCommand"], Resource = aws_ssm_document.command.arn },
     { Effect = "Allow", Action = ["ssm:SendCommand"], Resource = "arn:aws:ec2:${local.config.region}:*:instance/*",
     Condition = { StringEquals = { "ssm:resourceTag/HotInstallation" = local.config.name } } },
     { Effect = "Allow", Action = ["logs:FilterLogEvents"], Resource = [aws_cloudwatch_log_group.host.arn, "${aws_cloudwatch_log_group.host.arn}:*"] },
     # selfhost.py maintenance: silence and restore this installation's alarms.
-    { Effect = "Allow", Action = ["cloudwatch:DescribeAlarms", "cloudwatch:DisableAlarmActions", "cloudwatch:EnableAlarmActions"], Resource = "arn:aws:cloudwatch:${local.config.region}:*:alarm:hot-${local.config.name}-*" },
+    # IAM authorizes a listing by name prefix against alarm:*, not against each
+    # alarm; only the changes can be limited to this installation's names.
+    { Effect = "Allow", Action = ["cloudwatch:DescribeAlarms"], Resource = "arn:aws:cloudwatch:${local.config.region}:*:alarm:*" },
+    { Effect = "Allow", Action = ["cloudwatch:DisableAlarmActions", "cloudwatch:EnableAlarmActions"], Resource = "arn:aws:cloudwatch:${local.config.region}:*:alarm:hot-${local.config.name}-*" },
     # Instance listings cannot be scoped by resource.
     { Effect = "Allow", Action = ["autoscaling:DescribeAutoScalingGroups"], Resource = "*" },
   ] })
@@ -341,7 +382,8 @@ resource "aws_launch_template" "role" {
       tags          = { Name = "hot-${local.config.name}-${each.key}", HotRole = each.key, HotInstallation = local.config.name }
     }
   }
-  depends_on = [aws_route_table_association.private, aws_iam_role_policy.runtime, aws_iam_role_policy_attachment.ssm]
+  # New hosts boot with this configuration: what it names exists first.
+  depends_on = [aws_route_table_association.private, aws_iam_role_policy.runtime, aws_iam_role_policy_attachment.ssm, aws_s3_bucket_policy.storage, aws_secretsmanager_secret_version.valkey]
 }
 resource "aws_autoscaling_group" "role" {
   for_each            = local.roles
@@ -354,21 +396,26 @@ resource "aws_autoscaling_group" "role" {
   # Hosts pull their release on boot; give them time before health counts.
   health_check_grace_period = 600
   target_group_arns         = contains(local.web_roles, each.key) ? [aws_lb_target_group.web[each.key].arn] : []
-  # Task-workers are protected from scale-in while their tasks run.
-  protect_from_scale_in = each.key == "task-worker"
+  # Autoscaled task-workers are protected from scale-in while their tasks run,
+  # and idle ones leave on their own. A fixed count has no scale-in to guard
+  # against and its hosts never retire, so a lower count needs the group to
+  # remove them: for protected hosts it only lowers the desired capacity.
+  protect_from_scale_in = each.key == "task-worker" && each.value.max > each.value.min
   launch_template {
     id      = aws_launch_template.role[each.key].id
     version = aws_launch_template.role[each.key].latest_version
   }
   # A new host image or instance type replaces instances; releases roll in
   # place through the pointers. The scheduler is replaced stop-before-start,
-  # so two schedulers never run.
+  # so two schedulers never run. Task-workers are replaced too, despite any
+  # scale-in protection; a task cut off goes back to the queue.
   instance_refresh {
     strategy = "Rolling"
     preferences {
-      min_healthy_percentage = each.key == "scheduler" ? 0 : 100
-      max_healthy_percentage = each.key == "scheduler" ? 100 : 200
-      instance_warmup        = 600
+      min_healthy_percentage       = each.key == "scheduler" ? 0 : 100
+      max_healthy_percentage       = each.key == "scheduler" ? 100 : 200
+      instance_warmup              = 600
+      scale_in_protected_instances = "Refresh"
     }
   }
   tag {
@@ -381,7 +428,9 @@ resource "aws_autoscaling_group" "role" {
   lifecycle { ignore_changes = [desired_capacity] }
 }
 # App and API follow CPU. Workers and task-workers keep fixed counts unless a
-# maximum above the minimum is set; task-workers then only scale out.
+# maximum above the minimum is set; they then only scale out, because no
+# drain stops a host's new claims and lets its work finish before the group
+# removes it.
 resource "aws_autoscaling_policy" "cpu" {
   for_each               = { for role, group in local.roles : role => group if role != "scheduler" && (contains(local.web_roles, role) || group.max > group.min) }
   name                   = "hot-${local.config.name}-${each.key}-cpu"
@@ -389,7 +438,7 @@ resource "aws_autoscaling_policy" "cpu" {
   policy_type            = "TargetTrackingScaling"
   target_tracking_configuration {
     target_value     = 60
-    disable_scale_in = each.key == "task-worker"
+    disable_scale_in = !contains(local.web_roles, each.key)
     predefined_metric_specification {
       predefined_metric_type = "ASGAverageCPUUtilization"
     }
@@ -403,7 +452,8 @@ resource "aws_autoscaling_policy" "jobs" {
   autoscaling_group_name = aws_autoscaling_group.role["worker"].name
   policy_type            = "TargetTrackingScaling"
   target_tracking_configuration {
-    target_value = local.config.scaling.worker.waiting_per_host
+    target_value     = local.config.scaling.worker.waiting_per_host
+    disable_scale_in = true
     customized_metric_specification {
       metrics {
         id          = "waiting"

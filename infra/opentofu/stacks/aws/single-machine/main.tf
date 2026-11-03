@@ -30,9 +30,14 @@ locals {
     Resource = "arn:aws:ecr:${module.contract.mirror.region}:${module.contract.mirror.account}:repository/${module.contract.mirror.repositories}" },
   ]
 }
+# Standard zones only, in every state: an opted-in Local Zone, or a zone that
+# is impaired today, must not move the second zone and replace its subnets.
 data "aws_availability_zones" "available" {
   count = local.new_network && (local.public || local.managed_data) ? 1 : 0
-  state = "available"
+  filter {
+    name   = "zone-type"
+    values = ["availability-zone"]
+  }
 }
 resource "aws_vpc" "hot" {
   count                = local.new_network ? 1 : 0
@@ -103,23 +108,32 @@ resource "aws_vpc_endpoint" "s3" {
 }
 resource "aws_security_group" "host" {
   name_prefix = "hot-${local.config.name}-"
-  description = "Private HTTPS only; no SSH or database/cache ingress"
+  # A new description replaces the group, which is how an installation from
+  # v3.0.1 loses its inline 443 rule. Removing the block alone leaves that rule
+  # in AWS and in state: it keeps old ranges open, unseen by any plan, and the
+  # identical separate rule fails as a duplicate.
+  description = "Hot host: HTTPS by separate rules; no SSH, database, or cache ingress"
   vpc_id      = local.vpc_id
-  dynamic "ingress" {
-    for_each = length(local.config.network.client_cidrs) > 0 ? [true] : []
-    content {
-      from_port   = 443
-      to_port     = 443
-      protocol    = "tcp"
-      cidr_blocks = local.config.network.client_cidrs
-    }
-  }
+  # Ingress is only separate rules: a group with an inline rule owns every
+  # ingress rule, and would remove the load balancer's on the next apply.
   egress {
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
+  # AWS refuses to delete a group that an interface or another group's rule
+  # still names, so those move to the new group first.
+  lifecycle { create_before_destroy = true }
+}
+resource "aws_vpc_security_group_ingress_rule" "clients" {
+  for_each          = toset(local.config.network.client_cidrs)
+  security_group_id = aws_security_group.host.id
+  cidr_ipv4         = each.value
+  from_port         = 443
+  to_port           = 443
+  ip_protocol       = "tcp"
+  description       = "Client range to the private endpoints of the host"
 }
 # The release process owns the pointer's value; OpenTofu only creates it.
 resource "aws_ssm_parameter" "release" {
@@ -136,6 +150,9 @@ resource "aws_ssm_parameter" "installation" {
   type  = "String"
   tier  = "Intelligent-Tiering"
   value = jsonencode(local.host_config)
+  # The running agent acts on a new value within a cycle, so it is written
+  # only once what it names exists and the host may use it.
+  depends_on = [aws_iam_role_policy.runtime, aws_s3_bucket_policy.storage, aws_s3_bucket_lifecycle_configuration.storage, aws_secretsmanager_secret_version.valkey]
 }
 resource "aws_ssm_parameter" "status" {
   name  = "/hot/${local.config.name}/status"
@@ -156,8 +173,11 @@ resource "aws_secretsmanager_secret" "operator" {
   name                    = "hot/${local.config.name}/operator"
   recovery_window_in_days = 30
 }
-# The only way to run anything on the host: a fixed set of agent commands,
-# with every parameter constrained. There is no shell or SSH.
+# How Hot's workflows run anything on the host: a fixed set of agent commands,
+# with every parameter constrained. There is no SSH. Session Manager is for port
+# forwarding to the HTTPS ingress: who may start a session is governed by
+# ssm:StartSession on operator principals, limited to
+# AWS-StartPortForwardingSession.
 resource "aws_ssm_document" "command" {
   name            = "hot-${local.config.name}-command"
   document_type   = "Command"
@@ -169,15 +189,25 @@ resource "aws_ssm_document" "command" {
       operation = { type = "String", allowedValues = ["deploy-now", "status", "diagnostics", "logs", "backup", "restart-service", "drain-and-stop", "test-alert", "roll-back"] }
       service   = { type = "String", default = "none", allowedValues = ["none", "app", "api", "worker", "task-worker", "scheduler", "ingress", "postgres", "valkey"] }
       requestId = { type = "String", allowedPattern = "^[A-Za-z0-9-]{1,64}$" }
+      # When the helper stops waiting, in seconds since the epoch: past it the
+      # agent reports `expired` instead of running the command. 0 is no expiry.
+      expires = { type = "String", default = "0", allowedPattern = "^[0-9]{1,12}$" }
     }
     mainSteps = [{
       action = "aws:runShellScript"
       name   = "hotAgent"
-      inputs = { runCommand = ["/usr/local/bin/hot-agent command {{ operation }} --service {{ service }} --request-id {{ requestId }}"] }
+      # The most Systems Manager allows (48 hours), not its 1-hour default:
+      # a deploy's dump or data move, a backup, or a roll-back is never
+      # stopped partway.
+      inputs = { runCommand = ["/usr/local/bin/hot-agent command {{ operation }} --service {{ service }} --request-id {{ requestId }} --expires {{ expires }}"], timeoutSeconds = "172800" }
     }]
   })
 }
 locals {
+  # Built from the release pointer's ARN, so the policy that reads the
+  # installation parameter does not wait for it: the parameter waits for
+  # the policy.
+  installation_parameter_arn = "${trimsuffix(aws_ssm_parameter.release.arn, "/release")}/installation"
   host_config = merge(local.config, {
     data_volume_id  = aws_ebs_volume.data.id
     release_pointer = aws_ssm_parameter.release.arn
@@ -186,7 +216,10 @@ locals {
     status_reference       = aws_ssm_parameter.status.arn
     secret_references      = { generated = aws_secretsmanager_secret.generated.arn, operator = aws_secretsmanager_secret.operator.arn }
     data                   = local.host_data
-  })
+  }, local.load_balancer_sources)
+  # Where a public load balancer's requests come from, which the ingress
+  # trusts for client addresses: its own subnets, on either kind of network.
+  load_balancer_sources = { for key, value in { load_balancer_cidrs = local.public_subnet_cidrs } : key => value if local.public }
 }
 resource "aws_iam_role" "host" {
   name = "hot-${local.config.name}-host"
@@ -208,19 +241,27 @@ resource "aws_iam_role_policy" "runtime" {
   policy = jsonencode({ Version = "2012-10-17", Statement = concat([
     { Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = concat([aws_secretsmanager_secret.generated.arn, aws_secretsmanager_secret.operator.arn], aws_db_instance.postgres[*].master_user_secret[0].secret_arn, aws_secretsmanager_secret.valkey[*].arn) },
     { Effect = "Allow", Action = ["secretsmanager:PutSecretValue"], Resource = aws_secretsmanager_secret.generated.arn },
-    { Effect = "Allow", Action = ["ssm:GetParameter"], Resource = [aws_ssm_parameter.release.arn, aws_ssm_parameter.installation.arn] },
+    { Effect = "Allow", Action = ["ssm:GetParameter"], Resource = [aws_ssm_parameter.release.arn, local.installation_parameter_arn] },
     { Effect = "Allow", Action = ["ssm:PutParameter"], Resource = aws_ssm_parameter.status.arn },
     { Effect = "Allow", Action = ["logs:CreateLogStream", "logs:PutLogEvents"], Resource = "${aws_cloudwatch_log_group.host.arn}:*" },
     { Effect = "Allow", Action = ["cloudwatch:PutMetricData"], Resource = "*", Condition = { StringEquals = { "cloudwatch:namespace" = "Hot/SelfHost" } } },
     # Backup age for monitoring; snapshots cannot be scoped by resource.
-    { Effect = "Allow", Action = ["ec2:DescribeSnapshots"], Resource = "*" }
+    { Effect = "Allow", Action = ["ec2:DescribeSnapshots"], Resource = "*" },
+    # AmazonSSMManagedInstanceCore, which lets the SSM agent take commands and
+    # carry port forwarding's data channels, also allows reading every
+    # parameter. The host reads only its own. A host cannot tell a shell from
+    # port forwarding on those channels, so who may start a session is governed
+    # by ssm:StartSession on operator principals, limited to
+    # AWS-StartPortForwardingSession.
+    { Effect = "Deny", Action = ["ssm:GetParameter*"], NotResource = [aws_ssm_parameter.release.arn, local.installation_parameter_arn] },
     ], local.mirror_statements, [for s in local.s3_roles : {
-      Effect = "Allow", Action = ["s3:GetBucketLocation"], Resource = "arn:aws:s3:::${s.bucket}"
-      }], [for s in local.s3_roles : {
+      # Hot never lists a bucket, but S3 answers a read of a missing key with 403
+      # rather than 404 to a caller without ListBucket. Whether this grant, limited
+      # by prefix, counts for that is on the qualification list.
       Effect    = "Allow", Action = ["s3:ListBucket"], Resource = "arn:aws:s3:::${s.bucket}",
       Condition = { StringLike = { "s3:prefix" = [trim(s.prefix, "/"), "${trim(s.prefix, "/")}/*"] } }
       }], [for s in local.s3_roles : {
-      Effect = "Allow", Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"], Resource = "arn:aws:s3:::${s.bucket}/${trim(s.prefix, "/")}/*"
+      Effect = "Allow", Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload"], Resource = "arn:aws:s3:::${s.bucket}/${trim(s.prefix, "/")}/*"
   }]) })
 }
 resource "aws_iam_instance_profile" "host" {
@@ -282,28 +323,47 @@ resource "aws_instance" "host" {
       error_message = "The AWS root requires installation.cloud = aws."
     }
   }
-  depends_on = [aws_route_table_association.private, aws_iam_role_policy.runtime, aws_iam_role_policy_attachment.ssm, aws_s3_bucket_policy.storage]
+  depends_on = [aws_route_table_association.private, aws_iam_role_policy.runtime, aws_iam_role_policy_attachment.ssm, aws_s3_bucket_policy.storage, aws_secretsmanager_secret_version.valkey]
 }
-# The release and command workflows may write the pointer, read status, send
-# the Hot command to this installation's host, and read the agent's reports
-# from the installation's log, and nothing else.
+# The release and command workflows may write the pointer, send the Hot command
+# to this installation's host, read the agent's reports from the installation's
+# log, and silence this installation's alarms.
 resource "aws_iam_role_policy" "release" {
   count = var.release_principal == "" ? 0 : 1
   name  = "hot-${local.config.name}-release"
   role  = element(split("/", var.release_principal), length(split("/", var.release_principal)) - 1)
   policy = jsonencode({ Version = "2012-10-17", Statement = [
     { Effect = "Allow", Action = ["ssm:PutParameter"], Resource = aws_ssm_parameter.release.arn },
-    { Effect = "Allow", Action = ["ssm:GetParameter"], Resource = aws_ssm_parameter.status.arn },
-    { Effect = "Allow", Action = ["ssm:SendCommand"], Resource = [aws_ssm_document.command.arn, aws_instance.host.arn] },
+    # selfhost.py sends by tag, and IAM authorizes that against instance/* and
+    # the instance's tag, not against the instance's own ARN.
+    { Effect = "Allow", Action = ["ssm:SendCommand"], Resource = aws_ssm_document.command.arn },
+    { Effect = "Allow", Action = ["ssm:SendCommand"], Resource = "arn:aws:ec2:${local.config.region}:*:instance/*",
+    Condition = { StringEquals = { "ssm:resourceTag/HotInstallation" = local.config.name } } },
     { Effect = "Allow", Action = ["logs:FilterLogEvents"], Resource = [aws_cloudwatch_log_group.host.arn, "${aws_cloudwatch_log_group.host.arn}:*"] },
     # selfhost.py maintenance: silence and restore this installation's alarms.
-    { Effect = "Allow", Action = ["cloudwatch:DescribeAlarms", "cloudwatch:DisableAlarmActions", "cloudwatch:EnableAlarmActions"], Resource = "arn:aws:cloudwatch:${local.config.region}:*:alarm:hot-${local.config.name}-*" },
+    # IAM authorizes a listing by name prefix against alarm:*, not against each
+    # alarm; only the changes can be limited to this installation's names.
+    { Effect = "Allow", Action = ["cloudwatch:DescribeAlarms"], Resource = "arn:aws:cloudwatch:${local.config.region}:*:alarm:*" },
+    { Effect = "Allow", Action = ["cloudwatch:DisableAlarmActions", "cloudwatch:EnableAlarmActions"], Resource = "arn:aws:cloudwatch:${local.config.region}:*:alarm:hot-${local.config.name}-*" },
   ] })
 }
-resource "aws_volume_attachment" "data" {
-  device_name = "/dev/sdf"
-  volume_id   = aws_ebs_volume.data.id
-  instance_id = aws_instance.host.id
+# Replacing the instance (a new host image, or -replace) detaches the disk
+# first; the VM is stopped before that, so PostgreSQL and Valkey shut down
+# and the disk is never pulled from under them.
+resource "aws_volume_attachment" "data_disk" {
+  device_name                    = "/dev/sdf"
+  volume_id                      = aws_ebs_volume.data.id
+  instance_id                    = aws_instance.host.id
+  stop_instance_before_detaching = true
+}
+# That flag is read from state when an attachment is destroyed, and the one
+# v3.0.1 made has none, while the upgrade from it replaces the instance. So the
+# old attachment is only forgotten: terminating the VM shuts it down and releases
+# the disk, and the attachment above takes the disk to the new VM. Where the VM
+# stays, that attachment adopts the one already there.
+removed {
+  from = aws_volume_attachment.data
+  lifecycle { destroy = false }
 }
 output "private_ip" { value = aws_network_interface.host.private_ip }
 output "instance_id" { value = aws_instance.host.id }

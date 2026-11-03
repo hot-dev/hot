@@ -59,6 +59,12 @@ locals {
       period      = 300, periods = 1, missing = "notBreaching",
       description = "Jobs failed every attempt and were dead-lettered; the worker's logs say why."
     }
+    # One data point per check, so a period can be empty. With enough real
+    # points in range CloudWatch compares the newest ones, whatever `missing`
+    # says, so two failed checks in a row fire across an empty period. It
+    # applies only when points are few, such as a first check after a quiet
+    # spell: "missing" would fire on that one failure, and would sit in
+    # INSUFFICIENT_DATA where no synthetic event is set.
     synthetic-failed = {
       metric      = "SyntheticOk", statistic = "Minimum", comparison = "LessThanThreshold", threshold = 1,
       period      = 300, periods = 2, missing = "notBreaching",
@@ -86,6 +92,10 @@ locals {
     }
   }
 }
+# Every alarm leaves actions_enabled to `selfhost.py maintenance`, so an apply
+# during planned work, such as a resize, keeps the silence. The drift check
+# therefore cannot see a forgotten `maintenance end`; `selfhost.py status` and
+# `diagnostics` warn about it instead.
 resource "aws_cloudwatch_metric_alarm" "hot" {
   for_each            = local.alarms
   alarm_name          = "hot-${local.config.name}-${each.key}"
@@ -101,6 +111,7 @@ resource "aws_cloudwatch_metric_alarm" "hot" {
   treat_missing_data  = each.value.missing
   alarm_actions       = [aws_sns_topic.alerts.arn]
   ok_actions          = [aws_sns_topic.alerts.arn]
+  lifecycle { ignore_changes = [actions_enabled] }
 }
 # An optional monthly cost budget over everything tagged with this
 # installation. AWS counts the tag only once HotInstallation is activated as a
@@ -156,4 +167,5 @@ resource "aws_cloudwatch_metric_alarm" "database_connections" {
   treat_missing_data  = "notBreaching"
   alarm_actions       = [aws_sns_topic.alerts.arn]
   ok_actions          = [aws_sns_topic.alerts.arn]
+  lifecycle { ignore_changes = [actions_enabled] }
 }

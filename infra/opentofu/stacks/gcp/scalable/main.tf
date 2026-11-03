@@ -31,12 +31,14 @@ locals {
   # Service account IDs are at most 30 characters.
   role_codes = { app = "app", api = "api", worker = "wrk", scheduler = "sch", task-worker = "tsk" }
   exposure   = { app = local.config.app_exposure, api = local.config.api_exposure }
+  # A name too long for the whole tag in an account ID keeps a hash of
+  # itself, so installations whose names share a prefix never share one.
+  account_prefix = length(local.tag) <= 26 ? local.tag : "${substr(local.tag, 0, 20)}-${substr(sha1(local.config.name), 0, 5)}"
   host_config = { for role in keys(local.roles) : role => merge(local.config, {
     roles                = [role]
     migrations           = role == "scheduler"
     data_disk            = "scratch"
     db_pool              = module.contract.roles.db_pool
-    instance_group       = "${local.tag}-${role}"
     release_pointer      = google_secret_manager_secret.pointer[role].id
     migration_pointer    = role == "scheduler" ? google_secret_manager_secret.pointer["migrate"].id : ""
     status_reference     = "${local.tag}-status"
@@ -44,12 +46,6 @@ locals {
     secret_references    = { generated = google_secret_manager_secret.generated.id, operator = google_secret_manager_secret.operator.id }
     data                 = local.host_data
   }) }
-}
-check "scalable_preset" {
-  assert {
-    condition     = local.config.preset == "scalable" && local.config.cloud == "gcp"
-    error_message = "This stack needs installation.preset = scalable and installation.cloud = gcp."
-  }
 }
 resource "google_project_service" "required" {
   for_each = toset(concat(["compute.googleapis.com", "secretmanager.googleapis.com", "logging.googleapis.com", "monitoring.googleapis.com", "pubsub.googleapis.com"],
@@ -80,9 +76,10 @@ resource "google_compute_router" "egress" {
   region  = local.config.region
 }
 resource "google_compute_address" "egress" {
-  count  = local.new_network ? 1 : 0
-  name   = "${local.tag}-egress"
-  region = local.config.region
+  count      = local.new_network ? 1 : 0
+  name       = "${local.tag}-egress"
+  region     = local.config.region
+  depends_on = [google_project_service.required]
 }
 resource "google_compute_router_nat" "egress" {
   count                              = local.new_network ? 1 : 0
@@ -92,6 +89,14 @@ resource "google_compute_router_nat" "egress" {
   nat_ip_allocate_option             = "MANUAL_ONLY"
   nat_ips                            = [google_compute_address.egress[0].self_link]
   source_subnetwork_ip_ranges_to_nat = "LIST_OF_SUBNETWORKS"
+  # A host's ports limit its connections to any one destination address and
+  # port; the default 64 would drop busy outbound calls. Each host starts
+  # with 256 and grows on demand: the most hosts the connection budget
+  # allows, with rollout surge, fit in the address's 64,512.
+  enable_dynamic_port_allocation      = true
+  enable_endpoint_independent_mapping = false
+  min_ports_per_vm                    = 256
+  max_ports_per_vm                    = 8192
   subnetwork {
     name                    = google_compute_subnetwork.hot[0].id
     source_ip_ranges_to_nat = ["ALL_IP_RANGES"]
@@ -107,7 +112,7 @@ resource "google_compute_router_nat" "egress" {
 # One service account per role.
 resource "google_service_account" "role" {
   for_each     = local.roles
-  account_id   = "${substr(local.tag, 0, 24)}-${local.role_codes[each.key]}"
+  account_id   = "${local.account_prefix}-${local.role_codes[each.key]}"
   display_name = "Hot ${local.config.name} ${each.key}"
   depends_on   = [google_project_service.required]
 }
@@ -144,8 +149,7 @@ resource "google_secret_manager_secret" "operator" {
 }
 locals {
   # Each role reads its own pointer and the shared secrets; the scheduler also
-  # reads the migration pointer. The generated secret is created by whichever
-  # host starts first.
+  # reads the migration pointer.
   secret_reads = merge(
     { for role in keys(local.roles) : "${role} pointer" => { role = role, secret = google_secret_manager_secret.pointer[role].id } },
     { for role in keys(local.roles) : "${role} generated" => { role = role, secret = google_secret_manager_secret.generated.id } },
@@ -160,12 +164,14 @@ resource "google_secret_manager_secret_iam_member" "read" {
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.role[each.value.role].email}"
 }
+# The scheduler's host migrates first, so it creates the generated secret; the
+# other roles only read it, and a compromised host cannot replace it.
 resource "google_secret_manager_secret_iam_member" "store_generated" {
-  for_each  = google_service_account.role
+  for_each  = { scheduler = google_service_account.role["scheduler"].email }
   project   = local.config.project
   secret_id = google_secret_manager_secret.generated.id
   role      = "roles/secretmanager.secretVersionAdder"
-  member    = "serviceAccount:${each.value.email}"
+  member    = "serviceAccount:${each.value}"
 }
 # Agent commands: one subscription, so a command reaches one instance.
 resource "google_pubsub_topic" "commands" {
@@ -188,11 +194,12 @@ resource "google_pubsub_subscription_iam_member" "agent" {
   role         = "roles/pubsub.subscriber"
   member       = "serviceAccount:${each.value.email}"
 }
-# The release workflow may add pointer versions, publish commands, read the
-# agents' status logs, and list each role's instances.
+# The release workflow may add pointer versions, read when each pointer was
+# written, publish commands, read the agents' status logs, and list each
+# role's instances.
 resource "google_secret_manager_secret_iam_member" "release" {
   for_each = var.release_principal == "" ? {} : {
-    for pair in setproduct(keys(google_secret_manager_secret.pointer), ["roles/secretmanager.secretVersionAdder", "roles/secretmanager.secretAccessor"]) :
+    for pair in setproduct(keys(google_secret_manager_secret.pointer), ["roles/secretmanager.secretVersionAdder", "roles/secretmanager.secretAccessor", "roles/secretmanager.viewer"]) :
     "${pair[0]} ${pair[1]}" => { pointer = pair[0], role = pair[1] }
   }
   project   = local.config.project
@@ -206,11 +213,25 @@ resource "google_pubsub_topic_iam_member" "release" {
   role   = "roles/pubsub.publisher"
   member = "serviceAccount:${var.release_principal}"
 }
+# As on the single machine, at the same address and with the same
+# condition, which always holds: it makes each binding this installation's
+# own, so destroying one installation leaves the others on a shared release
+# account theirs.
 resource "google_project_iam_member" "release" {
   for_each = var.release_principal == "" ? toset([]) : toset(["roles/logging.viewer", "roles/compute.viewer", "roles/monitoring.alertPolicyViewer", "roles/monitoring.snoozeEditor"])
   project  = local.config.project
   role     = each.value
   member   = "serviceAccount:${var.release_principal}"
+  condition {
+    title       = "${local.tag}-release"
+    description = "Hot ${local.config.name}'s own grant to its release account."
+    expression  = "request.time >= timestamp(\"2020-01-01T00:00:00Z\")"
+  }
+}
+# A single machine's state from before the bindings shared an address.
+moved {
+  from = google_project_iam_member.release_logs
+  to   = google_project_iam_member.release
 }
 
 # -- Instances ----------------------------------------------------------------
@@ -299,6 +320,8 @@ resource "google_compute_region_instance_group_manager" "role" {
     minimal_action        = "REPLACE"
     max_surge_fixed       = 3
     max_unavailable_fixed = 0
+    # No instance_redistribution_type: each of these groups has an autoscaler,
+    # and Google allows that setting only on groups without one.
   }
   # Autoscaled roles set their own size.
   lifecycle { ignore_changes = [target_size] }
@@ -324,11 +347,19 @@ resource "google_compute_instance_group_manager" "scheduler" {
 # App and API follow CPU. Workers and task-workers keep fixed counts unless a
 # maximum above the minimum is set. Workers then also follow the jobs waiting
 # per host (measured once for the installation by the scheduler's host), and
-# task-workers the share of their slots in use. Task-workers only scale out,
-# since a managed instance group cannot protect an instance that is running
-# tasks; idle task hosts leave the group on their own. A fixed count is an
-# autoscaler with equal bounds too: the groups leave their size to it, so a
-# new count takes effect.
+# task-workers the share of their slots in use. Autoscaled workers and
+# task-workers only scale out, since a managed instance group cannot protect
+# an instance that is running work, and no drain stops a host's new claims and
+# lets its work finish before the group removes it, so these groups stay at
+# their peak size until an operator shrinks them. A fixed count is an autoscaler
+# with equal bounds too: the groups leave their size to it, and it may scale in,
+# so any new count takes effect.
+# Idle task hosts do not leave their groups as they do on AWS, so
+# retire_idle_minutes has no effect here and the agent does not try. A host
+# would need to read and shrink its own group, and IAM cannot limit that to one
+# group: resource conditions do not recognize instance group managers, so a
+# condition on the group's name never matches, and without one a task host,
+# which runs untrusted boxes, could change every group in the project.
 resource "google_compute_region_autoscaler" "role" {
   for_each = { for role, group in local.roles : role => group if role != "scheduler" }
   name     = "${local.tag}-${each.key}"
@@ -338,7 +369,7 @@ resource "google_compute_region_autoscaler" "role" {
     min_replicas    = each.value.min
     max_replicas    = each.value.max
     cooldown_period = 300
-    mode            = each.key == "task-worker" ? "ONLY_SCALE_OUT" : "ON"
+    mode            = !contains(local.web_roles, each.key) && each.value.max > each.value.min ? "ONLY_SCALE_OUT" : "ON"
     cpu_utilization {
       target = 0.6
     }
@@ -358,25 +389,6 @@ resource "google_compute_region_autoscaler" "role" {
         type   = "GAUGE"
       }
     }
-  }
-}
-# An idle task host leaves its group (see the agent's retire_if_idle): it
-# reads the group's size and deletes itself from it. Custom role IDs stay
-# reserved for a week after deletion.
-resource "google_project_iam_custom_role" "retire" {
-  count       = local.roles["task-worker"].max > local.roles["task-worker"].min && local.config.scaling.task_worker.retire_idle_minutes > 0 ? 1 : 0
-  role_id     = "hot_${replace(local.config.name, "-", "_")}_retire"
-  title       = "Hot ${local.config.name} task host retirement"
-  permissions = ["compute.instanceGroupManagers.get", "compute.instanceGroupManagers.update"]
-}
-resource "google_project_iam_member" "retire" {
-  count   = length(google_project_iam_custom_role.retire)
-  project = local.config.project
-  role    = google_project_iam_custom_role.retire[0].id
-  member  = "serviceAccount:${google_service_account.role["task-worker"].email}"
-  condition {
-    title      = "${local.tag}-task-worker"
-    expression = "resource.name == \"projects/${local.config.project}/regions/${local.config.region}/instanceGroupManagers/${local.tag}-task-worker\""
   }
 }
 

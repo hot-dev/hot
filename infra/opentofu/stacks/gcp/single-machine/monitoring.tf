@@ -29,12 +29,20 @@ resource "google_compute_disk_resource_policy_attachment" "snapshots" {
   disk = google_compute_disk.data.name
   zone = local.config.zone
 }
-# The agent reads snapshot times to report backup age. Custom role IDs stay
-# reserved for a week after deletion.
+# Custom role IDs are never reused: IAM holds a deleted role's ID for up to
+# 44 days and can undelete it only for the first 7, so a role recreated in
+# between could not be. Each installation's roles carry a suffix of their
+# own, which a reinstall under the same name replaces.
+resource "random_id" "roles" {
+  byte_length = 3
+}
+# The agent reads snapshot times to report backup age.
 resource "google_project_iam_custom_role" "snapshots" {
-  role_id     = "hot_${replace(local.config.name, "-", "_")}_snapshots"
+  role_id     = "hot_${replace(local.config.name, "-", "_")}_snapshots_${random_id.roles.hex}"
   title       = "Hot ${local.config.name} snapshot reader"
   permissions = ["compute.snapshots.list"]
+  # A custom role cannot list a permission of a service whose API is off.
+  depends_on = [google_project_service.required]
 }
 resource "google_project_iam_member" "snapshots" {
   project = local.config.project
@@ -158,14 +166,18 @@ resource "google_monitoring_alert_policy" "host_down" {
     content   = "The host agent stopped reporting: the VM, Docker, or the agent is down."
     mime_type = "text/markdown"
   }
+  # Conditions here reduce across instances: a replaced VM reports under a
+  # new instance ID, and the old one's series must not read as a host that
+  # stopped or an incident that never resolves.
   conditions {
     display_name = "No agent heartbeat for 5 minutes"
     condition_absent {
       filter   = "resource.type = \"gce_instance\" AND metric.type = \"${google_monitoring_metric_descriptor.hot["agent_heartbeat"].type}\""
       duration = "300s"
       aggregations {
-        alignment_period   = "60s"
-        per_series_aligner = "ALIGN_MAX"
+        alignment_period     = "60s"
+        per_series_aligner   = "ALIGN_MAX"
+        cross_series_reducer = "REDUCE_COUNT"
       }
     }
   }
@@ -190,6 +202,8 @@ resource "google_monitoring_alert_policy" "hot" {
       aggregations {
         alignment_period   = "300s"
         per_series_aligner = each.value.aligner
+        # The worst value across instances, as for host_down.
+        cross_series_reducer = each.value.comparison == "COMPARISON_GT" ? "REDUCE_MAX" : "REDUCE_MIN"
       }
     }
   }
@@ -201,8 +215,9 @@ resource "google_monitoring_alert_policy" "hot" {
         filter   = "resource.type = \"${contains(local.project_metrics, each.value.metric) ? "global" : "gce_instance"}\" AND metric.type = \"${google_monitoring_metric_descriptor.hot[each.value.metric].type}\""
         duration = each.value.duration
         aggregations {
-          alignment_period   = "300s"
-          per_series_aligner = "ALIGN_MAX"
+          alignment_period     = "300s"
+          per_series_aligner   = "ALIGN_MAX"
+          cross_series_reducer = "REDUCE_COUNT"
         }
       }
     }
@@ -249,8 +264,11 @@ locals {
 resource "google_monitoring_dashboard" "hot" {
   dashboard_json = jsonencode({
     displayName = "hot-${local.config.name}"
-    mosaicLayout = { columns = 12, tiles = [for index, panel in module.contract.dashboard : {
-      xPos = (index % 2) * 6, yPos = floor(index / 2) * 4, width = 6, height = 4
+    # A position of 0 is left out, which means the same: the API omits zero
+    # values from the dashboard it returns, and the provider shows a key it sent
+    # and did not get back as a change in every plan.
+    mosaicLayout = { columns = 12, tiles = [for index, panel in module.contract.dashboard : merge({ for axis, position in { xPos = (index % 2) * 6, yPos = floor(index / 2) * 4 } : axis => position if position != 0 }, {
+      width = 6, height = 4
       widget = { title = panel.title, xyChart = { dataSets = [for metric in panel.metrics : {
         plotType       = "LINE"
         legendTemplate = metric.gcp
@@ -263,7 +281,7 @@ resource "google_monitoring_dashboard" "hot" {
           }
         } }
       }] } }
-    }] }
+    })] }
   })
 }
 

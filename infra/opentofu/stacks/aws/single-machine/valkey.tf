@@ -55,7 +55,7 @@ resource "aws_elasticache_replication_group" "valkey" {
   num_cache_clusters          = local.valkey.high_availability ? 2 : 1
   automatic_failover_enabled  = local.valkey.high_availability
   multi_az_enabled            = local.valkey.high_availability
-  preferred_cache_cluster_azs = local.valkey.high_availability ? [local.config.zone, local.second_zone] : [local.config.zone]
+  preferred_cache_cluster_azs = local.valkey.high_availability ? [local.data_zone, local.data_replica_zone] : [local.data_zone]
   port                        = 6379
   subnet_group_name           = aws_elasticache_subnet_group.valkey[0].name
   security_group_ids          = [aws_security_group.valkey[0].id]
@@ -67,6 +67,15 @@ resource "aws_elasticache_replication_group" "valkey" {
   auth_token_wo_version       = local.valkey.auth_token_version
   snapshot_retention_limit    = 1
   apply_immediately           = false
+  # The token's secret exists before the cache does, so a secret that
+  # cannot be created stops the apply before the cache has a token.
+  depends_on = [aws_secretsmanager_secret.valkey]
+  lifecycle {
+    precondition {
+      condition     = !local.valkey.high_availability || local.data_replica_zone != null
+      error_message = "High-availability Valkey needs data subnets in two zones."
+    }
+  }
 }
 resource "aws_secretsmanager_secret" "valkey" {
   count                   = local.managed_valkey ? 1 : 0
@@ -79,7 +88,10 @@ resource "aws_secretsmanager_secret_version" "valkey" {
   secret_string_wo         = jsonencode({ password = ephemeral.random_password.valkey[0].result })
   secret_string_wo_version = local.valkey.auth_token_version
   # Stored only after the cache has the token, so a failed create never
-  # leaves a stored token the cache does not have.
+  # leaves a stored token the cache does not have. The token exists only
+  # during the apply that creates the cache: if this write fails after
+  # that, a re-run stores a different token and the cache keeps its own, so
+  # raise data.valkey.auth_token_version to give both a new one.
   depends_on = [aws_elasticache_replication_group.valkey]
 }
 output "valkey_endpoint" { value = local.managed_valkey ? aws_elasticache_replication_group.valkey[0].primary_endpoint_address : null }

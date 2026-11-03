@@ -50,9 +50,10 @@ resource "google_compute_router" "egress" {
   region  = local.config.region
 }
 resource "google_compute_address" "egress" {
-  count  = local.new_network ? 1 : 0
-  name   = "${local.tag}-egress"
-  region = local.config.region
+  count      = local.new_network ? 1 : 0
+  name       = "${local.tag}-egress"
+  region     = local.config.region
+  depends_on = [google_project_service.required]
 }
 resource "google_compute_router_nat" "egress" {
   count                              = local.new_network ? 1 : 0
@@ -62,6 +63,13 @@ resource "google_compute_router_nat" "egress" {
   nat_ip_allocate_option             = "MANUAL_ONLY"
   nat_ips                            = [google_compute_address.egress[0].self_link]
   source_subnetwork_ip_ranges_to_nat = "LIST_OF_SUBNETWORKS"
+  # Every worker and box shares the one host's ports, which limit its
+  # connections to any one destination address and port. The default 64
+  # would drop busy outbound calls; the host may take the address's ports.
+  enable_dynamic_port_allocation      = true
+  enable_endpoint_independent_mapping = false
+  min_ports_per_vm                    = 4096
+  max_ports_per_vm                    = 65536
   subnetwork {
     name                    = google_compute_subnetwork.hot[0].id
     source_ip_ranges_to_nat = ["ALL_IP_RANGES"]
@@ -144,11 +152,12 @@ resource "google_pubsub_subscription_iam_member" "agent" {
   role         = "roles/pubsub.subscriber"
   member       = "serviceAccount:${google_service_account.host.email}"
 }
-# GCS buckets, existing or provisioned: the host may use objects under its
-# prefix only. The bucket must use uniform bucket-level access for the
-# condition to apply.
-resource "google_storage_bucket_iam_member" "storage" {
-  for_each = { for role, s in local.config.storage : role => s if s.backend == "gcs" }
+# Existing GCS buckets: the host may use objects under its prefix only, and the
+# rest of the bucket's policy stays the operator's. The bucket must use uniform
+# bucket-level access for the condition to apply. A provisioned bucket's whole
+# policy is in storage.tf.
+resource "google_storage_bucket_iam_member" "existing" {
+  for_each = { for role, s in local.config.storage : role => s if s.backend == "gcs" && !s.provision }
   bucket   = each.value.bucket
   role     = "roles/storage.objectUser"
   member   = "serviceAccount:${google_service_account.host.email}"
@@ -156,7 +165,14 @@ resource "google_storage_bucket_iam_member" "storage" {
     title      = "hot-${local.config.name}-${each.key}"
     expression = "resource.type == \"storage.googleapis.com/Bucket\" || resource.name.startsWith(\"projects/_/buckets/${each.value.bucket}/objects/${trim(each.value.prefix, "/")}/\")"
   }
-  depends_on = [google_storage_bucket.storage]
+}
+# The bindings earlier versions made, on both kinds of bucket, are only
+# forgotten, so the host never loses access: destroying one would remove it from
+# a provisioned bucket's new policy, or for a moment from an existing bucket,
+# where the binding above adopts the one already there.
+removed {
+  from = google_storage_bucket_iam_member.storage
+  lifecycle { destroy = false }
 }
 # The release workflow may add pointer versions, publish commands, and read
 # the agent's status logs.
@@ -174,12 +190,24 @@ resource "google_pubsub_topic_iam_member" "release" {
   member = "serviceAccount:${var.release_principal}"
 }
 # Reading the agent's reports, and (selfhost.py maintenance) listing and
-# snoozing the alert policies.
-resource "google_project_iam_member" "release_logs" {
+# snoozing the alert policies. The scalable root grants the same at the same
+# address, so moving to it keeps them. Installations in one project may share
+# a release account: the condition, which always holds, makes each binding
+# this installation's own, so destroying one installation leaves the others'.
+resource "google_project_iam_member" "release" {
   for_each = var.release_principal == "" ? toset([]) : toset(["roles/logging.viewer", "roles/monitoring.alertPolicyViewer", "roles/monitoring.snoozeEditor"])
   project  = local.config.project
   role     = each.value
   member   = "serviceAccount:${var.release_principal}"
+  condition {
+    title       = "${local.tag}-release"
+    description = "Hot ${local.config.name}'s own grant to its release account."
+    expression  = "request.time >= timestamp(\"2020-01-01T00:00:00Z\")"
+  }
+}
+moved {
+  from = google_project_iam_member.release_logs
+  to   = google_project_iam_member.release
 }
 locals {
   host_config = merge(local.config, {
@@ -189,6 +217,9 @@ locals {
     command_subscription = google_pubsub_subscription.commands.id
     secret_references    = { generated = google_secret_manager_secret.generated.id, operator = google_secret_manager_secret.operator.id }
     data                 = local.host_data
+    # The global load balancer appends its own address to X-Forwarded-For,
+    # after the client's: the ingress trusts it, to reach the client's.
+    load_balancer_addresses = local.public ? [google_compute_global_address.public[0].address] : []
   })
 }
 resource "google_compute_firewall" "https" {
@@ -221,7 +252,11 @@ resource "google_compute_disk" "data" {
   depends_on = [google_project_service.required]
 }
 # The host's address outlives the VM (a new host image replaces it), so a
-# private hostname pointed at it keeps working.
+# private hostname pointed at it keeps working. An installation from before
+# this address has none, so its next apply replaces the VM to take one: lift
+# the deletion protection first, or lift it after the refused delete and apply
+# again. The private IP changes that once, so repoint a private hostname at
+# the private_ip output.
 resource "google_compute_address" "host" {
   name         = "${local.tag}-host"
   region       = local.config.region
@@ -283,12 +318,19 @@ resource "google_compute_instance" "host" {
     hot-installation = base64encode(jsonencode(local.host_config))
   }
   lifecycle {
+    # A VM cannot change its network_ip in place. A new address is unknown when
+    # planning, so without this the plan shows an update, and the apply fails
+    # once the address exists ("Provider produced inconsistent final plan").
+    replace_triggered_by = [google_compute_address.host.address]
     precondition {
       condition     = local.config.cloud == "gcp"
       error_message = "The GCP root requires installation.cloud = gcp."
     }
   }
-  depends_on = [google_compute_router_nat.egress, google_project_iam_member.telemetry, google_secret_manager_secret_iam_member.read, google_pubsub_subscription_iam_member.agent, google_secret_manager_secret_iam_member.postgres_admin, google_secret_manager_secret_version.postgres_admin, google_project_iam_member.valkey]
+  # The running agent acts on new metadata within a cycle, so the VM changes only
+  # once what its configuration names exists and the host may use it: an apply
+  # that sets storage starts a move, and one that sets a mirror pulls from it.
+  depends_on = [google_compute_router_nat.egress, google_project_iam_member.telemetry, google_project_iam_member.snapshots, google_secret_manager_secret_iam_member.read, google_secret_manager_secret_iam_member.store_generated, google_pubsub_subscription_iam_member.agent, google_secret_manager_secret_iam_member.postgres_admin, google_secret_manager_secret_version.postgres_admin, google_project_iam_member.valkey, google_storage_bucket_iam_policy.storage, google_storage_bucket_iam_member.existing, google_artifact_registry_repository_iam_member.mirror]
 }
 output "private_ip" { value = google_compute_address.host.address }
 output "instance_id" { value = google_compute_instance.host.id }

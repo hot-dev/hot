@@ -6,7 +6,14 @@ locals {
   public_hosts = [for role in ["app", "api"] : local.config["${role}_hostname"] if local.config["${role}_exposure"] == "public"]
   public       = length(local.public_hosts) > 0
   # The ALB needs subnets in two zones.
-  public_subnet_ids = local.new_network ? concat(aws_subnet.public[*].id, aws_subnet.public_second[*].id) : local.config.network.public_subnet_ids
+  public_subnet_ids   = local.new_network ? concat(aws_subnet.public[*].id, aws_subnet.public_second[*].id) : local.config.network.public_subnet_ids
+  public_subnet_cidrs = local.new_network ? concat(aws_subnet.public[*].cidr_block, aws_subnet.public_second[*].cidr_block) : [for s in data.aws_subnet.public : s.cidr_block]
+  public_zones        = local.new_network ? [local.config.zone, local.second_zone] : distinct([for s in data.aws_subnet.public : s.availability_zone])
+}
+# An existing network's load balancer subnets, for their zones and ranges.
+data "aws_subnet" "public" {
+  for_each = local.public && !local.new_network ? toset(local.config.network.public_subnet_ids) : toset([])
+  id       = each.value
 }
 resource "aws_subnet" "public_second" {
   count                   = local.public && local.new_network ? 1 : 0
@@ -31,11 +38,13 @@ resource "aws_security_group" "load_balancer" {
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
+  # To the host's group, not a range: network.cidr does not describe an
+  # existing network.
   egress {
-    from_port   = 9443
-    to_port     = 9443
-    protocol    = "tcp"
-    cidr_blocks = [local.config.network.cidr]
+    from_port       = 9443
+    to_port         = 9443
+    protocol        = "tcp"
+    security_groups = [aws_security_group.host.id]
   }
 }
 resource "aws_vpc_security_group_ingress_rule" "from_load_balancer" {
@@ -45,7 +54,7 @@ resource "aws_vpc_security_group_ingress_rule" "from_load_balancer" {
   from_port                    = 9443
   to_port                      = 9443
   ip_protocol                  = "tcp"
-  description                  = "Load balancer to the host's public-endpoint port"
+  description                  = "Load balancer to the public-endpoint port of the host"
 }
 resource "aws_lb" "public" {
   count                      = local.public ? 1 : 0
@@ -59,6 +68,11 @@ resource "aws_lb" "public" {
     precondition {
       condition     = var.public_certificate_arn != ""
       error_message = "A public endpoint needs public_certificate_arn."
+    }
+    # A load balancer sends nothing to a target in a zone it is not in.
+    precondition {
+      condition     = contains(local.public_zones, local.config.zone)
+      error_message = "network.public_subnet_ids must include a subnet in the host's zone, or the load balancer never reaches the host."
     }
   }
 }

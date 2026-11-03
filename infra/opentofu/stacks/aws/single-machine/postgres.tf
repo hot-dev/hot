@@ -64,7 +64,7 @@ resource "aws_db_instance" "postgres" {
   publicly_accessible         = false
   ca_cert_identifier          = "rds-ca-rsa2048-g1"
   multi_az                    = local.postgres.high_availability
-  availability_zone           = local.postgres.high_availability ? null : local.config.zone
+  availability_zone           = local.postgres.high_availability ? null : local.data_zone
   backup_retention_period     = local.postgres.backup_retention_days
   copy_tags_to_snapshot       = true
   delete_automated_backups    = false
@@ -75,5 +75,8 @@ resource "aws_db_instance" "postgres" {
   skip_final_snapshot       = false
   final_snapshot_identifier = "hot-${local.config.name}-final"
   apply_immediately         = false
+  # The zone matters only when the database is created: RDS may have placed
+  # or failed the primary over elsewhere, and a new zone would replace it.
+  lifecycle { ignore_changes = [availability_zone] }
 }
 output "postgres_endpoint" { value = local.managed_postgres ? aws_db_instance.postgres[0].address : null }

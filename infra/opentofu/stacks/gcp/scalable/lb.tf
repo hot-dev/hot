@@ -18,6 +18,7 @@ resource "google_compute_region_health_check" "web" {
     port         = 443
     request_path = "/hot-lb-health"
   }
+  depends_on = [google_project_service.required]
 }
 resource "google_compute_region_backend_service" "web" {
   for_each              = local.web_roles

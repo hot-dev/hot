@@ -2,7 +2,6 @@
 # access prevented, versioned so an overwritten or deleted object can be
 # recovered for noncurrent_days, with abandoned multipart uploads removed after
 # a week. Google encrypts objects at rest. Existing buckets are never managed.
-# The host's access is granted in main.tf, limited to each role's prefix.
 locals {
   # Both roles may share one bucket; the contract makes their settings agree.
   provisioned_buckets = { for name, roles in {
@@ -50,11 +49,12 @@ resource "google_storage_bucket" "storage" {
   }
   lifecycle { prevent_destroy = true }
 }
-# Every role reads and writes objects under each role's prefix only.
-resource "google_storage_bucket_iam_member" "storage" {
+# Existing buckets: every role reads and writes objects under each role's prefix
+# only, and the rest of the bucket's policy stays the operator's.
+resource "google_storage_bucket_iam_member" "existing" {
   for_each = { for pair in setproduct(keys(local.roles), ["build", "file"]) : "${pair[0]}-${pair[1]}" => {
     account = google_service_account.role[pair[0]].email, storage = local.config.storage[pair[1]], role = pair[1]
-  } if local.config.storage[pair[1]].backend == "gcs" }
+  } if local.config.storage[pair[1]].backend == "gcs" && !local.config.storage[pair[1]].provision }
   bucket = each.value.storage.bucket
   role   = "roles/storage.objectUser"
   member = "serviceAccount:${each.value.account}"
@@ -62,5 +62,64 @@ resource "google_storage_bucket_iam_member" "storage" {
     title      = "hot-${local.config.name}-${each.key}"
     expression = "resource.type == \"storage.googleapis.com/Bucket\" || resource.name.startsWith(\"projects/_/buckets/${each.value.storage.bucket}/objects/${trim(each.value.storage.prefix, "/")}/\")"
   }
-  depends_on = [google_storage_bucket.storage]
+}
+# The bindings earlier versions made, on both kinds of bucket, are only
+# forgotten, so the hosts never lose access: destroying one would remove it from
+# a provisioned bucket's new policy, or for a moment from an existing bucket,
+# where the binding above adopts the one already there.
+removed {
+  from = google_storage_bucket_iam_member.storage
+  lifecycle { destroy = false }
+}
+# A provisioned bucket's whole IAM policy, as on the single machine: no
+# project-viewer bindings, which would let a pull request's plan read every
+# object. Any other grant on the bucket, such as another installation's, is
+# removed by the next apply.
+data "google_iam_policy" "storage" {
+  for_each = local.provisioned_buckets
+  dynamic "binding" {
+    for_each = ["roles/storage.legacyBucketOwner", "roles/storage.legacyObjectOwner"]
+    content {
+      role    = binding.value
+      members = ["projectOwner:${local.config.project}", "projectEditor:${local.config.project}"]
+    }
+  }
+  dynamic "binding" {
+    for_each = { for role, s in local.config.storage : role => s if s.backend == "gcs" && s.bucket == each.key }
+    content {
+      role    = "roles/storage.objectUser"
+      members = [for account in google_service_account.role : "serviceAccount:${account.email}"]
+      condition {
+        title      = "hot-${local.config.name}-${binding.key}"
+        expression = "resource.type == \"storage.googleapis.com/Bucket\" || resource.name.startsWith(\"projects/_/buckets/${binding.value.bucket}/objects/${trim(binding.value.prefix, "/")}/\")"
+      }
+    }
+  }
+}
+resource "google_storage_bucket_iam_policy" "storage" {
+  for_each    = local.provisioned_buckets
+  bucket      = google_storage_bucket.storage[each.key].name
+  policy_data = data.google_iam_policy.storage[each.key].policy_data
+  # Destroying this resource empties the bucket's policy, even of its owners.
+  lifecycle { prevent_destroy = true }
+  # An existing bucket that becomes provisioned loses its binding first, which
+  # afterwards would take the access out of this policy.
+  depends_on = [google_storage_bucket_iam_member.existing]
+}
+# A scalable installation does not move storage, and no host can refuse a change
+# of backend: its new instance template replaces every host with one that has no
+# earlier release to compare with, so each would report deployed on the new
+# backend, with the records still on the old one, where Hot refuses to read them.
+# So the plan refuses it, against the backends kept here from the first apply.
+# An installation that has stored nothing can start again with
+# -replace=terraform_data.storage_backends.
+resource "terraform_data" "storage_backends" {
+  input = { for role, s in local.config.storage : role => s.backend }
+  lifecycle {
+    ignore_changes = [input]
+    postcondition {
+      condition     = alltrue([for role, backend in self.input : local.config.storage[role].backend == backend])
+      error_message = "A scalable installation does not move storage, and Hot would start on the new backend with its records still on the old one. Put storage back on the backend it started on: ${join(", ", [for role, backend in self.input : "storage.${role} was ${backend} and is now ${local.config.storage[role].backend}" if local.config.storage[role].backend != backend])}."
+    }
+  }
 }

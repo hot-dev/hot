@@ -7,9 +7,17 @@
 locals {
   managed_postgres = local.config.data.postgres.mode == "managed"
   postgres         = local.config.data.postgres
+  # Cloud SQL takes its addresses from the network's private services range,
+  # which is peered in rather than part of the network's own. User code is denied
+  # all of it, along with the address the host resolved. The stack knows only the
+  # range it reserves: on an existing network, list that network's range in
+  # data.postgres.endpoint.deny_cidrs. It isn't required, as a failover keeps
+  # the instance's address, but without it user code an allowlist covers can
+  # reach the rest of the range.
+  postgres_deny_cidrs = sort(distinct(concat(local.postgres.endpoint.deny_cidrs, [for reserved in google_compute_global_address.services : "${reserved.address}/${reserved.prefix_length}"])))
   host_data = merge(local.config.data, {
     postgres = merge(local.postgres, {
-      endpoint = !local.managed_postgres ? null : {
+      endpoint = !local.managed_postgres && length(local.postgres_deny_cidrs) == 0 ? null : merge({ deny_cidrs = local.postgres_deny_cidrs }, !local.managed_postgres ? null : {
         host         = google_sql_database_instance.postgres[0].private_ip_address
         port         = 5432
         admin_user   = "postgres"
@@ -17,7 +25,7 @@ locals {
         # The instance's own CA, which signs this instance's certificates only.
         # The provider marks it sensitive, but a CA certificate is public.
         ca_certificate = nonsensitive(google_sql_database_instance.postgres[0].server_ca_cert[0].cert)
-      }
+      })
     })
     valkey = merge(local.valkey, { endpoint = local.valkey_endpoint })
   })
@@ -69,6 +77,13 @@ resource "google_sql_database_instance" "postgres" {
     disk_autoresize             = true
     deletion_protection_enabled = local.postgres.deletion_protection
     user_labels                 = { hot-installation = local.config.name, managed-by = "opentofu" }
+    # The connections the contract plans for this size, and which the scaling
+    # maximums must fit; Cloud SQL's memory-based default (500 for 16 GB, 600
+    # for 32 GB) would refuse them.
+    database_flags {
+      name  = "max_connections"
+      value = tostring(module.contract.database_connections)
+    }
     location_preference {
       zone = local.config.zone
     }
@@ -88,6 +103,10 @@ resource "google_sql_database_instance" "postgres" {
       }
     }
   }
+  # disk_size is the starting size, which Cloud SQL grows as the disk fills.
+  # Once it has, the configured size reads as a shrink, which would replace
+  # the instance and its backups.
+  lifecycle { ignore_changes = [settings[0].disk_size] }
   depends_on = [google_service_networking_connection.services, google_project_service.postgres]
 }
 # The administrator login for the agent. Raise

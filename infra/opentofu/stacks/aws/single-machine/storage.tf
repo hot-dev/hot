@@ -65,6 +65,10 @@ resource "aws_s3_bucket_lifecycle_configuration" "storage" {
     noncurrent_version_expiration {
       noncurrent_days = local.provisioned_buckets[each.key].noncurrent_days
     }
+    # A deleted object's marker, once its old versions are gone.
+    expiration {
+      expired_object_delete_marker = true
+    }
   }
   depends_on = [aws_s3_bucket_versioning.storage]
 }

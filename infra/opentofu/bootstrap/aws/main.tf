@@ -40,8 +40,26 @@ variable "github_repository" {
     error_message = "github_repository must be OWNER/REPO."
   }
 }
+variable "github_repository_id" {
+  description = "The repository's numeric ID, from `gh api repos/OWNER/REPO --jq .id`. Required with github_repository: names can be registered again after a rename or deletion, IDs cannot."
+  type        = string
+  default     = ""
+  validation {
+    condition     = can(regex("^[0-9]*$", var.github_repository_id))
+    error_message = "github_repository_id must be the repository's numeric ID."
+  }
+}
+variable "github_repository_owner_id" {
+  description = "The repository owner's numeric ID, from `gh api repos/OWNER/REPO --jq .owner.id`. Required with github_repository."
+  type        = string
+  default     = ""
+  validation {
+    condition     = can(regex("^[0-9]*$", var.github_repository_owner_id))
+    error_message = "github_repository_owner_id must be the owner's numeric ID."
+  }
+}
 variable "github_environment" {
-  description = "GitHub Environment whose jobs may apply and release."
+  description = "GitHub Environment whose jobs may apply and release, from main only."
   type        = string
   default     = "production"
 }
@@ -60,7 +78,7 @@ variable "name_prefix" {
   default = "hot"
 }
 variable "operators" {
-  description = "IAM roles, users, or accounts that may assume a deploy role to run OpenTofu or the operator helper themselves, by role: plan, apply, release. For example { apply = [\"arn:aws:iam::123456789012:role/platform-admins\"] }."
+  description = "IAM roles or users that may assume a deploy role to run OpenTofu or the operator helper themselves, by role: plan, apply, release. Users must sign in with MFA. For example { apply = [\"arn:aws:iam::123456789012:role/platform-admins\"] }."
   type = object({
     plan    = optional(list(string), [])
     apply   = optional(list(string), [])
@@ -68,9 +86,11 @@ variable "operators" {
   })
   default = {}
   validation {
+    # An account root would delegate the role to every principal in that
+    # account allowed sts:AssumeRole, such as PowerUserAccess holders.
     condition = alltrue([for principal in flatten([var.operators.plan, var.operators.apply, var.operators.release]) :
-    can(regex("^arn:aws[a-z-]*:iam::[0-9]{12}:(root|role/.+|user/.+)$", principal))])
-    error_message = "operators entries must be IAM role, user, or account root ARNs."
+    can(regex("^arn:aws[a-z-]*:iam::[0-9]{12}:(role|user)/.+$", principal))])
+    error_message = "operators entries must be IAM role or user ARNs, not account roots."
   }
 }
 variable "names" {
@@ -146,44 +166,80 @@ resource "aws_s3_bucket_lifecycle_configuration" "state" {
   }
 }
 
-# GitHub OIDC: each workflow gets its own role, limited by the token's subject.
+# GitHub OIDC: each workflow gets its own role, limited by the token's
+# subject and pinned to the repository's immutable IDs.
+#
+# The account has one GitHub OIDC provider, which other repositories' roles
+# may share, so this root never destroys it. To stop managing it, run
+# `tofu state rm 'aws_iam_openid_connect_provider.github[0]'` first.
 resource "aws_iam_openid_connect_provider" "github" {
   count          = local.github && var.create_github_oidc_provider ? 1 : 0
   url            = "https://${local.oidc}"
   client_id_list = ["sts.amazonaws.com"]
+  lifecycle { prevent_destroy = true }
 }
 data "aws_caller_identity" "current" {}
 locals {
   oidc_arn = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:oidc-provider/${local.oidc}"
-  subjects = {
+  # The subject names the repository as OWNER/REPO or, for repositories
+  # created or opted in since July 2026, as OWNER@ID/REPO@ID.
+  subject_repositories = local.github ? [
+    "repo:${var.github_repository}",
+    "repo:${split("/", var.github_repository)[0]}@${var.github_repository_owner_id}/${split("/", var.github_repository)[1]}@${var.github_repository_id}",
+  ] : []
+  contexts = {
     # Plans run on pull requests and on the merge before apply.
-    plan    = ["repo:${var.github_repository}:pull_request", "repo:${var.github_repository}:ref:refs/heads/main"]
-    apply   = ["repo:${var.github_repository}:environment:${var.github_environment}"]
-    release = ["repo:${var.github_repository}:environment:${var.github_environment}"]
+    plan    = ["pull_request", "ref:refs/heads/main"]
+    apply   = ["environment:${var.github_environment}"]
+    release = ["environment:${var.github_environment}"]
   }
+  subjects       = { for role, contexts in local.contexts : role => [for pair in setproduct(local.subject_repositories, contexts) : join(":", pair)] }
+  operator_users = { for role in ["plan", "apply", "release"] : role => [for p in var.operators[role] : p if strcontains(p, ":user/")] }
+  operator_roles = { for role in ["plan", "apply", "release"] : role => [for p in var.operators[role] : p if !strcontains(p, ":user/")] }
 }
 # Operators assume a role with their own credentials, for example through an
 # AWS CLI profile with role_arn; see infra/README.md.
 resource "aws_iam_role" "github" {
   for_each = local.roles
   name     = lookup(var.names, each.key, "${var.name_prefix}-github-${each.key}")
+  # An apply, release, or command can outlive the default hour, and a workflow
+  # can ask for no longer than this. Plans are short and run for every pull
+  # request, so they keep the hour.
+  max_session_duration = each.key == "plan" ? 3600 : 14400
   assume_role_policy = jsonencode({ Version = "2012-10-17", Statement = concat(local.github ? [{
     Effect    = "Allow"
     Principal = { Federated = local.oidc_arn }
     Action    = "sts:AssumeRoleWithWebIdentity"
     Condition = {
-      StringEquals = { "${local.oidc}:aud" = "sts.amazonaws.com" }
-      StringLike   = { "${local.oidc}:sub" = local.subjects[each.key] }
+      StringEquals = merge({
+        "${local.oidc}:aud"                 = "sts.amazonaws.com"
+        "${local.oidc}:sub"                 = local.subjects[each.key]
+        "${local.oidc}:repository_id"       = var.github_repository_id
+        "${local.oidc}:repository_owner_id" = var.github_repository_owner_id
+        }, each.key == "plan" ? {} : {
+        # Apply and release run only from main: an unmerged branch's
+        # workflow never reaches them, even with the environment's approval.
+        "${local.oidc}:ref" = "refs/heads/main"
+      })
     }
-    }] : [], length(var.operators[each.key]) > 0 ? [{
+    }] : [], length(local.operator_roles[each.key]) > 0 ? [{
     Effect    = "Allow"
-    Principal = { AWS = var.operators[each.key] }
+    Principal = { AWS = local.operator_roles[each.key] }
     Action    = ["sts:AssumeRole", "sts:SetSourceIdentity"]
+    }] : [], length(local.operator_users[each.key]) > 0 ? [{
+    Effect    = "Allow"
+    Principal = { AWS = local.operator_users[each.key] }
+    Action    = ["sts:AssumeRole", "sts:SetSourceIdentity"]
+    Condition = { Bool = { "aws:MultiFactorAuthPresent" = "true" } }
   }] : []) })
   lifecycle {
     precondition {
       condition     = each.key != "apply" || length(var.apply_policy_arns) > 0
       error_message = "Choose apply_policy_arns for the apply role."
+    }
+    precondition {
+      condition     = !local.github || (var.github_repository_id != "" && var.github_repository_owner_id != "")
+      error_message = "Set github_repository_id and github_repository_owner_id: gh api repos/OWNER/REPO --jq '.id, .owner.id'."
     }
   }
   depends_on = [aws_iam_openid_connect_provider.github]
@@ -193,24 +249,58 @@ resource "aws_iam_role_policy_attachment" "plan_read" {
   role       = aws_iam_role.github["plan"].name
   policy_arn = "arn:aws:iam::aws:policy/ReadOnlyAccess"
 }
+# ReadOnlyAccess also reads data: objects, logs, and command output. Plans
+# run for every pull request and need none of it, only resource settings and
+# the state objects.
+resource "aws_iam_role_policy" "plan_no_data" {
+  count = contains(local.roles, "plan") ? 1 : 0
+  name  = "no-data-reads"
+  role  = aws_iam_role.github["plan"].id
+  policy = jsonencode({ Version = "2012-10-17", Statement = [
+    { Effect = "Deny", Action = ["s3:GetObject", "s3:GetObjectVersion"], NotResource = "${aws_s3_bucket.state.arn}/*" },
+    { Effect = "Deny", Resource = "*", Action = [
+      "logs:GetLogEvents", "logs:GetLogRecord", "logs:FilterLogEvents", "logs:StartQuery", "logs:GetQueryResults",
+      "logs:StartLiveTail", "logs:Unmask", "ssm:GetCommandInvocation", "ssm:ListCommandInvocations",
+      "rds:DownloadDBLogFilePortion", "rds:DownloadCompleteDBLogFile", "ec2:GetConsoleOutput", "ec2:GetConsoleScreenshot",
+    ] },
+  ] })
+}
 resource "aws_iam_role_policy_attachment" "apply" {
   for_each   = contains(local.roles, "apply") ? toset(var.apply_policy_arns) : toset([])
   role       = aws_iam_role.github["apply"].name
   policy_arn = each.value
 }
-# Plan and apply read and lock state. The release role gets its permissions
-# from each installation stack (release_principal), scoped to that installation.
+# Plan and apply read state and take its lock, a KEY.tflock object beside
+# each state object (the backend's use_lockfile; see backend_override). Only
+# apply writes state. The release role gets its permissions from each
+# installation stack (release_principal), scoped to that installation.
 resource "aws_iam_role_policy" "state" {
   for_each = setintersection(local.roles, ["plan", "apply"])
   role     = aws_iam_role.github[each.key].id
   policy = jsonencode({ Version = "2012-10-17", Statement = concat([
     { Effect = "Allow", Action = ["s3:ListBucket"], Resource = aws_s3_bucket.state.arn },
-    { Effect = "Allow", Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"], Resource = "${aws_s3_bucket.state.arn}/*" },
+    { Effect = "Allow", Action = ["s3:GetObject"], Resource = "${aws_s3_bucket.state.arn}/*" },
+    { Effect = "Allow", Action = ["s3:PutObject", "s3:DeleteObject"], Resource = each.key == "apply" ? "${aws_s3_bucket.state.arn}/*" : "${aws_s3_bucket.state.arn}/*.tflock" },
     ], var.kms_key_arn == "" ? [] : [
     { Effect = "Allow", Action = ["kms:Decrypt", "kms:GenerateDataKey"], Resource = var.kms_key_arn },
   ]) })
 }
 
 output "state_bucket" { value = aws_s3_bucket.state.id }
+output "backend_override" {
+  description = "An installation's backend_override.tf, with NAME to replace. Without use_lockfile the S3 backend takes no lock, and concurrent applies overwrite each other's state."
+  value       = <<-EOT
+    terraform {
+      backend "s3" {
+        bucket       = "${aws_s3_bucket.state.id}"
+        key          = "NAME/terraform.tfstate"
+        region       = "${var.region}"
+        encrypt      = true%{if var.kms_key_arn != ""}
+        kms_key_id   = "${var.kms_key_arn}"%{endif}
+        use_lockfile = true
+      }
+    }
+  EOT
+}
 output "github_roles" { value = { for k, r in aws_iam_role.github : k => r.arn } }
 output "roles" { value = { for k, r in aws_iam_role.github : k => r.arn } }
