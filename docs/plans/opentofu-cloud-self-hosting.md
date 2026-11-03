@@ -30,6 +30,10 @@ presets, including private deployments, state storage, and backups.
 | `managed-data` | The same five services on one VM | RDS and ElastiCache Valkey, or Cloud SQL and Memorystore for Valkey | S3 or GCS by default; retained local disk optional | Managed data recovery; application VM remains a single failure domain |
 | `scalable` | Separate app/API services, queue workers, singleton scheduler, and task-worker pool | Managed PostgreSQL and Valkey | Shared S3 or GCS | Independently configured service/data availability; scheduler remains a single failure point |
 
+As built, the `preset` input takes `single-machine` or `scalable`. The `managed-data`
+row is a shape, not a value: `preset: single-machine` with `data.postgres.mode` and
+`data.valkey.mode` set to `managed`.
+
 All presets use the public runtime and the same service configuration contract.
 Use PostgreSQL and Valkey even on the single machine to keep behavior aligned
 with the distributed presets. Run the five production service commands
@@ -62,7 +66,7 @@ and blocks nothing that selects Local or S3:
 - Select compute provider, application-storage backends, and bucket ownership
   independently. Existing buckets remain externally managed; provisioning a
   bucket requires explicit selection of its provider and ownership.
-- Workloads use private addresses without public VM or ECS task IPs. Public
+- Workloads use private addresses without public VM IPs. Public
   app/API access, when selected, terminates at ingress with private backends.
   Provisioned PostgreSQL, Valkey, workers, and scheduler remain private.
 - Explicitly configure supported encryption controls and validate effective
@@ -161,9 +165,9 @@ instance can then acquire the lock alongside it. Required changes, in all preset
 - Never route the scheduler's lock connection through a transaction-mode or
   statement-mode pooler (PgBouncer transaction mode, RDS Proxy pinning
   exceptions, or similar). Validate this for existing PostgreSQL endpoints.
-- On ECS, deploy the scheduler with `minimumHealthyPercent=0` and
-  `maximumPercent=100`. On Compute Engine and single VMs, stop the old scheduler
-  before starting the new one.
+- In an Auto Scaling group, refresh the scheduler with
+  `min_healthy_percentage = 0` and `max_healthy_percentage = 100`. On Compute
+  Engine and single VMs, stop the old scheduler before starting the new one.
 - Qualify lock loss during database failover, connection kill
   (`pg_terminate_backend`), network partition, and deployment overlap. Each
   case must result in at most one sender, as measured by event publication.
@@ -225,7 +229,9 @@ small set of tested combinations with advanced overrides:
   network/subnets, authorized private clients, DNS/TLS, and outbound connectivity.
 - Encryption policy and optional per-resource customer-managed key references,
   including separately bootstrapped state encryption and restore access.
-- Preset: `single-machine`, `managed-data`, or `scalable`.
+- Preset: `single-machine` or `scalable`. The managed-data shape is
+  `preset: single-machine` with `data.postgres.mode` and `data.valkey.mode` set to
+  `managed`.
 - Size: `small`, `medium`, or `large`, mapped to provider-specific resources.
   Benchmark CPU, memory, disk/IOPS, and task concurrency before publishing
   minimum requirements. Permit explicit VM, database, cache, and disk overrides.
@@ -254,7 +260,8 @@ them on the host before admitting tasks. Never silently downgrade Kata isolation
 
 Derive task memory/concurrency from remaining capacity after reserving CPU,
 memory, and disk for the OS, PostgreSQL, Valkey, ingress, and app/API/worker.
-Give task scratch storage its own limits so a job cannot fill the database disk.
+Give task scratch storage its own limits, so a job cannot take more than its share
+of a disk it shares with the database.
 The current standalone task-worker sizing defaults are not single-VM defaults.
 
 Record the resolved installation configuration and release manifest so an
@@ -369,10 +376,10 @@ Do not open public ingress as a fallback when the operator cannot connect.
 
 | Concern | AWS | GCP |
 | --- | --- | --- |
-| Workloads | Private subnets; no EC2/ECS public IP assignment | VPC subnets; no external VM addresses |
-| Private web ingress | Private VM ingress for one host; internal ALB when load balancing is needed | Private VM ingress for one host; internal Application Load Balancer for groups |
-| Optional public web ingress | Internet-facing HTTPS ALB targeting private workloads | External HTTPS Application Load Balancer targeting private workloads |
-| Operator access | Session Manager port forwarding to HTTPS ingress and Hot SSM command documents, with scoped IAM and required service connectivity; no SSH or interactive shell | IAP TCP forwarding to HTTPS ingress and the agent's Pub/Sub command topic, with scoped IAM and firewall rules; no SSH |
+| Workloads | Private subnets; no EC2 public IP assignment | VPC subnets; no external VM addresses |
+| Private web ingress | Private VM ingress for one host; an internal Network Load Balancer per endpoint for groups | Private VM ingress for one host; an internal passthrough load balancer per endpoint for groups |
+| Optional public web ingress | Internet-facing HTTPS ALB targeting the private host; an internet-facing Network Load Balancer per endpoint for groups | External HTTPS Application Load Balancer targeting the private host; an external passthrough load balancer per endpoint for groups |
+| Operator access | Session Manager port forwarding to HTTPS ingress and Hot SSM command documents, with scoped IAM on operator principals and required service connectivity; no SSH, and no interactive shell in any documented workflow | IAP TCP forwarding to HTTPS ingress and the agent's Pub/Sub command topic, with scoped IAM and firewall rules; no SSH |
 
 Only selected app/API routes may be published on public listeners. Keep
 dashboard and API routing separable even when both run on one VM; a shared
@@ -435,8 +442,8 @@ public access removes public reachability without replacing durable data.
 
 ### Outbound access for user code
 
-The worker and task-worker need internet access for user code: `::hot::http`
-and `::hot::tcp` calls, and box tasks. That code is untrusted and runs inside the
+The worker and task-worker need internet access for user code: `::hot::http`,
+`::hot::tcp`, and `::hot::ws` calls, and box tasks. That code is untrusted and runs inside the
 installation's private network. On one VM, the worker process shares the host
 with PostgreSQL, Valkey, and the cloud metadata endpoint, and it legitimately
 needs all three. Network rules cannot separate them from the worker process,
@@ -459,8 +466,26 @@ host's guest firewall is the boundary for box tasks.
 - **Optional egress proxy.** Operators can route user-code traffic only
   through an HTTP(S) proxy for domain allowlisting or audit. Hot's own storage,
   database, Valkey, and secret-store connections bypass it. When a proxy is
-  used, the proxy resolves and connects, so it must enforce the deny set
-  itself. Qualify address pinning and redirect handling through the proxy.
+  used, the proxy resolves and connects, and Hot does not check hostnames, so the
+  proxy itself must refuse the always-blocked list, the whole deny list (including
+  the data services and what the bundle adds), and private ranges. Qualify address
+  pinning and redirect handling through the proxy.
+  Environment proxies (`HTTP_PROXY` and the like) are ignored for checked
+  connections, and `::hot::tcp` and `::hot::ws` are refused while a proxy is set.
+  Box guests are firewalled to the proxy and their resolvers, and get no proxy
+  settings from Hot: they use it only if the task sets `HTTP_PROXY` and `HTTPS_PROXY`
+  in its env, and other traffic is dropped, so a guest sees a timeout. Guests' DNS
+  does not pass through the proxy, so public resolvers stay reachable, with a warning
+  when the task worker starts, unless `box.guest-dns` is set. The host baseline looks
+  the proxy's name up again every 5 minutes. A task worker on the Docker backend with
+  Hot Box on refuses to start with a proxy set, because its guests would connect
+  directly.
+- **Box image pulls.** The installation's containerd pulls box images from the
+  registry the code names. That registry is checked against the policy, except
+  Docker Hub, but its redirects are not checked against the deny list. This gap is
+  accepted. Any failed pull from a registry other than Docker Hub gives one message,
+  with the reason only in the worker log, though the task result still reports how
+  long the pull took.
 - **Stable egress addresses.** New networks attach an Elastic IP to the NAT
   gateway (AWS) or reserve Cloud NAT addresses (GCP). Installation outputs
   publish them so customers can allowlist them at third-party APIs.
@@ -589,8 +614,8 @@ and `scheduler` services and the `db` administration commands
   `iproute2`, `iptables`).
 - Every service and one-shot job runs the same image digest with a different
   command: app, API, worker, scheduler, task-worker, migrations, and
-  onboarding. ECS task definitions and Compute Engine instance templates in
-  the scalable preset reference the same digest.
+  onboarding. Every host in the scalable preset runs the same digest, from the
+  release's manifest.
 - The release manifest pins the one Hot image digest plus upstream PostgreSQL,
   Valkey, and ingress proxy images by digest. Choose the ingress proxy in
   Phase 0.
@@ -636,13 +661,12 @@ not from plaintext environment values.
 | Platform | Delivery |
 | --- | --- |
 | Single VM and managed-data VM (AWS and GCP) | The host deploy agent fetches secrets with the VM identity at service start, writes one file per value to tmpfs under `/run/hot/secrets/<service>/` (mode `0400`, owned by the service user), and mounts each service's files read-only through Compose `secrets`. The service environment contains only `HOT_<NAME>_FILE` paths, so values do not appear in `docker inspect` or `/proc/<pid>/environ`. Files are removed when the service stops. |
-| Compute Engine groups (GCP scalable) | Same agent pattern on each instance. |
-| ECS (AWS scalable) | ECS task-definition `secrets` with `valueFrom` (Secrets Manager ARN or SSM parameter), fetched with a per-service execution role. These arrive as environment variables because ECS cannot mount secrets as files; document this exception. |
+| Auto Scaling groups (AWS scalable) and Compute Engine groups (GCP scalable) | Same agent pattern on each instance. |
 
-- Store secrets as one JSON bundle per service role, keyed by `HOT_*` names,
-  plus shared secrets such as the encryption master key. The agent expands each
-  key into a file. This keeps the secret count small, at roughly $0.40 per
-  secret per month on AWS.
+- Store secrets as JSON bundles keyed by name, not one secret per value: for each
+  installation, one the operator fills and one of generated values, such as the
+  encryption master key. The agent expands each key into a file. This keeps the
+  secret count small, at roughly $0.40 per secret per month on AWS.
 - Each service receives only its own files. Migration credentials go only to
   the migration job; the session secret only to the app.
 - The agent's identity can read every installation secret on its VM. That is a
@@ -694,8 +718,9 @@ On a pointer change it:
 8. On failure, rolls back automatically only when the migration class permits
    it. Otherwise it stops and reports the required forward fix or restore.
 
-The agent writes redacted status to a per-installation status parameter, which
-the workflow and operators read. Its identity can read the pointer and the
+The agent writes redacted reports to the installation's log, which the workflow
+reads, and on AWS a summary of the latest to a per-installation status parameter.
+Its identity can read the pointer and the
 installation's secrets, consume its command channel, and write status and
 diagnostics only. Missed triggers
 converge on the next poll.
@@ -707,36 +732,51 @@ No supported workflow, CI job, or helper uses SSH, on either cloud.
 - Host images disable `sshd`. EC2 instances have no key pair. GCP instances
   set `block-project-ssh-keys` and do not enable OS Login. Firewall rules and
   security groups open no port 22, including from the IAP range.
-- IAP TCP forwarding (GCP) and Session Manager port forwarding (AWS) connect
-  only to the HTTPS ingress port, for private app/API access and initial
-  bootstrap. They never connect to SSH.
+- IAP TCP forwarding (GCP) and Session Manager port forwarding (AWS) are
+  documented only for the HTTPS ingress port, for private app/API access and
+  initial bootstrap. On GCP the firewall holds them to it: a single machine's
+  admits IAP's range to 443 alone, and a scalable installation's has no rule for
+  IAP. On AWS IAM limits the document, not the port, so a principal allowed the
+  port-forwarding document can reach any port listening on the host. Little does:
+  SSH is masked, and the bundle publishes only the ingress's ports. They never
+  connect to SSH.
 - Session Manager interactive shells and the GCP serial console are not part
-  of any documented workflow or CI role, and are disabled by default.
-  Enabling either is an operator break-glass decision outside supported
-  operation.
+  of any documented workflow or CI role. The GCP serial console is off by default.
+  On AWS a host cannot tell a shell from port forwarding on Session Manager's data
+  channels, so it accepts them, and the limit is IAM on the operator's principal:
+  `ssm:StartSession` limited to `AWS-StartPortForwardingSession`. The stacks and the
+  bootstrap add `ssm:StartSession` to no role themselves, and a broad apply policy
+  can include it; see
+  [Reaching a private installation](../../infra/README.md#reaching-a-private-installation).
+  Allowing a shell or the serial console is an operator break-glass decision outside
+  supported operation.
 
 ### Agent command channel
 
 Operators and workflows reach the host only through the agent's command
 channel. It accepts a fixed allowlist of operations: `deploy-now`, `status`,
-`diagnostics`, `backup`, `restart-service`, and `drain-and-stop`. It never
-accepts arbitrary shell commands.
+`diagnostics`, `logs`, `backup`, `restart-service`, `drain-and-stop`, `roll-back`,
+and `test-alert`. It never accepts arbitrary shell commands.
 
 | | AWS | GCP |
 | --- | --- | --- |
 | Request | SSM Run Command using Hot-defined command documents (never `AWS-RunShellScript`), targeted by installation tag | Message on a per-installation Pub/Sub topic; the agent consumes a pull subscription, so no inbound connectivity is needed |
-| Result | Status parameter; diagnostic bundles in the installation's operations bucket prefix | Same |
+| Result | A report with the request ID in the installation's log, the `hot-agent-status` stream of `/hot/<installation>` in CloudWatch Logs, and a summary of the latest in the `/hot/<installation>/status` parameter | The same report in the `hot-<installation>-status` log in Cloud Logging |
 
 Every request carries a request ID for idempotency and is authorized by cloud
-IAM on the channel. The agent validates its schema and rejects unknown
+IAM on the channel, and an `expires` time, past which the agent reports `expired`
+instead of running it. The agent validates its schema and rejects unknown
 operations. Results are redacted before they leave the host. The same request
-schema is used on both clouds, so helper commands and workflows behave
-identically.
+schema is used on both clouds. On a scalable installation a command reaches every
+host on AWS and one on GCP, where the helper sends only what any host can answer.
+`backup`, `drain-and-stop`, and `roll-back` are for single-machine installations, and
+the helper refuses them on a scalable one, which stops by resizing its groups; see
+[Operating an installation](../../infra/README.md#operating-an-installation).
 
-For scalable presets, the release supplies the manifest version as an OpenTofu
-input. The reviewed apply updates ECS task definitions and Compute Engine
-instance templates, and the same drain and stop-before-start rules apply. See
-[Release and deployment](#release-and-deployment).
+For scalable presets, a release moves per-role pointers rather than OpenTofu
+inputs, so it needs no plan, and the same drain and stop-before-start rules
+apply. See [Scalable installations](../../infra/README.md#scalable-installations)
+and [Release and deployment](#release-and-deployment).
 
 ### GitHub Actions workflows
 
@@ -747,25 +787,32 @@ That repository holds non-secret `tfvars`, the provider lockfile, and a pinned
 
 | Workflow | Trigger | Does | Cloud role |
 | --- | --- | --- | --- |
-| `selfhost-plan` | Pull request | `tofu fmt`/`validate`, configuration and reference-configuration classification, cloud preflight, `tofu plan`. Posts a redacted plan summary. | Plan: read-only, plus state read and lock |
+| `selfhost-plan` | Pull request | `tofu fmt`/`validate`, configuration and reference-configuration classification, cloud preflight, `tofu plan`. Posts a redacted plan summary. | Plan: read-only, plus state read and lock. On GCP, also creating a missing state object: the `gcs` backend writes an empty state the first time it opens one |
 | `selfhost-plan` with `apply: true` | Merge or manual, gated by a GitHub Environment | A second job applies exactly the saved plan from the first; OpenTofu refuses it if state changed since the plan | Apply: provisioning |
-| `selfhost-release` | Manual (`workflow_dispatch` with release version) or release promotion | Verifies the manifest, writes the pointer, sends `deploy-now`, waits for status, fails on timeout or failed checks | Release: write pointer, read status, send Hot command documents to tagged instances (AWS) or publish to the installation's command topic (GCP); no SSH or shell access |
+| `selfhost-release` | Manual (`workflow_dispatch` with release version) or release promotion | Verifies the manifest, writes the pointer, sends `deploy-now`, waits for the agent's report, fails on timeout or failed checks | Release: write pointer, read the agent's reports from the installation's log, send Hot command documents to tagged instances (AWS) or publish to the installation's command topic (GCP); no SSH or shell access |
+| `selfhost-command` | Manual (`workflow_dispatch` with an operation) | Runs one agent command through `selfhost.py` and writes its redacted report to the job summary | Release, as above |
 
 Requirements:
 
 - Authenticate with GitHub OIDC only: an AWS IAM role through
   `aws-actions/configure-aws-credentials`, or GCP Workload Identity Federation
   through `google-github-actions/auth`. Store no long-lived cloud keys in GitHub
-  secrets. Trust policies restrict the repository, ref, and GitHub Environment
-  through the token's `sub` claim. Each workflow gets its own role, matching
-  the IAM matrix in section 4.
+  secrets. Trust policies restrict the repository, by its immutable IDs, and the
+  ref and GitHub Environment, through the token's claims: apply and release run
+  only from `main`. Each workflow gets its own role, matching the IAM matrix in
+  section 4. Apply and release trust the same subject, so the separation between
+  them rests on the review of `main`.
 - Use GitHub Environments with required reviewers for production apply and
   release. Promote releases staging → production through environments.
-- Serialize each installation and environment with a `concurrency` group
-  (`cancel-in-progress: false`), in addition to the OpenTofu state lock.
+- Serialize plan, apply, and release for each installation and environment with a
+  `concurrency` group (`cancel-in-progress: false`), in addition to the OpenTofu state
+  lock. Host commands take no group: GitHub would keep one pending job and could send
+  it after a later stop. Each goes out when its job starts, after any approval, and
+  the agent's lock takes them one at a time.
 - Saved plans can contain sensitive values. Encrypt them with the stack's
-  OpenTofu encryption configuration, keep artifact retention short, and never
-  print them unredacted in logs or summaries.
+  OpenTofu encryption configuration, keep artifact retention short (7 days, long
+  enough to approve after a weekend), and never print them unredacted in logs or
+  summaries.
 - Set minimal `permissions:` (`id-token: write`, `contents: read`, plus
   `pull-requests: write` for plan comments). Pin third-party actions by commit
   SHA.
@@ -787,9 +834,11 @@ build, sign, and publish self-host images and manifests. Cloud qualification
 runs in GitHub Actions against isolated test accounts and projects, using the
 same reusable workflows and OIDC.
 
-## Planned repository layout
+## Repository layout
 
-Paths below are proposed additions, not existing installer commands.
+The layout as built. There is no separate `managed-data` root: managed data is
+`data.postgres.mode` and `data.valkey.mode` on the single-machine and scalable
+stacks.
 
 ```text
 infra/
@@ -798,44 +847,35 @@ infra/
     bootstrap/
       aws/
       gcp/
-    storage/
-      aws/
-      gcp/
     modules/
-      aws/
-      gcp/
+      single-machine-contract/
     stacks/
       aws/
         single-machine/
-        managed-data/
         scalable/
       gcp/
         single-machine/
-        managed-data/
         scalable/
-    examples/
-      aws/
-      gcp/
   runtime/
-    compose/
-    config/
-    ingress/
-    systemd/
   images/
     containers/
     packer/
     host/
   agent/
-  scripts/
+  operator/
+  preflight/
+  release/
+  examples/
   tests/
   github/
-    actions/
     example-operator-repo/
+    plan_summary.py
+    tests/
 .github/workflows/
+  selfhost.yml
   selfhost-plan.yml
-  selfhost-apply.yml
   selfhost-release.yml
-resources/docs/self-hosting/
+  selfhost-command.yml
 ```
 
 Share runtime manifests, configuration rendering, image contents, smoke tests,
@@ -866,6 +906,17 @@ remove the only copy of its own state.
       `setup-host.sh`. Missing: a published host image. Operators bake it with
       `build-host.sh` from the newest Ubuntu 24.04 base, which is not pinned,
       and the manifest does not name it.
+      First release: the first `selfhost-image` run creates
+      `ghcr.io/hot-dev/hot-runtime` as a private package, and any earlier release
+      or preview run also creates it. A maintainer must set it public once at
+      <https://github.com/orgs/hot-dev/packages/container/hot-runtime/settings>;
+      GitHub cannot undo this and offers no API for it. Until then
+      `selfhost-release-assets` fails at "Check that hosts can pull the runtime
+      image" and attaches no manifest. After setting it public, re-run that job.
+      Previews: a preview release from a branch uses up its `vX.Y.Z` for self-hosting,
+      because it takes that version's tag and GitHub release, gets no manifest, and a
+      later tag for it is refused. Installations can never deploy that version, so
+      increment `resources/version.txt` before the real release.
 - [x] Implement `HOT_<NAME>_FILE` support, provenance-based redaction, and
       routing of every secret through resolved configuration, as described in
       [Secrets delivery](#secrets-delivery).
@@ -882,7 +933,8 @@ remove the only copy of its own state.
       `network.allow-cidrs`, `allow-hosts`, and `deny-cidrs` sit behind a
       fixed deny set; the runtime bundle denies its own networks; and
       `network.egress-proxy` sends user-code HTTP(S) through the operator's
-      proxy (raw TCP is refused then).
+      proxy, whether or not isolation is on (`::hot::tcp` and `::hot::ws` are
+      refused then). Environment proxies are ignored for checked connections.
 - [ ] Create shared Compose and systemd supervision for app, API, worker,
       scheduler, task-worker, PostgreSQL, Valkey, and HTTPS ingress.
       Configure orderly startup and shutdown, local liveness, and separate
@@ -908,7 +960,9 @@ remove the only copy of its own state.
       invitations, alert delivery, and optional OAuth callbacks.
       SMTP delivery, `hot admin bootstrap`/`reset-password`, and `app.signup`
       are in; without email, the sign-up form admits only invited users and
-      admins share invitation links. The agent generates the first admin's
+      admins share invitation links. Under invite-only, only an invitation's link or a
+      verification tied to an invitation creates an account, so an older pending
+      sign-up has to use the invitation. The agent generates the first admin's
       password once and runs `hot admin bootstrap` on every deploy.
 - [x] Run extension installation, public migrations, grants, and onboarding as
       distinct administrative steps before starting runtime services. Respect
@@ -994,7 +1048,7 @@ in addition to the functional, network, encryption, and recovery checks below:
 | Area | Required evidence before release |
 | --- | --- |
 | Installation preflight | Validate permissions, quotas, regional capacity prerequisites, network/DNS/TLS, existing dependencies, and box requirements before provisioning. Report actionable failures without leaving avoidable partial resources. |
-| Upgrade compatibility | Publish the supported version matrix, upgrade sequence, migration rules, and rollback boundary. The first release has no earlier qualified release, so exercise an upgrade from a representative fixture (a pre-release build with populated data) and its supported recovery path. Later releases upgrade from earlier qualified releases. |
+| Upgrade compatibility | Publish the supported version matrix, upgrade sequence, migration rules, and rollback boundary. The first release has no earlier qualified release, so exercise an upgrade from a representative fixture (a pre-release build of these stacks with populated data) and its supported recovery path. A hand-run v3.0.1 data disk cannot be that fixture: the agent refuses its layout, and it needs a new installation with the data dumped and restored by hand. Stock v3.0.1 VMs have no agent and a blank disk. Later releases upgrade from earlier qualified releases. |
 | Release delivery | Deploy a release and a rollback to each reference configuration through the GitHub Actions workflows with OIDC-only credentials, and through the manual commands. Show that a release does not replace the instance and that concurrent runs are serialized. |
 | Recovery targets | Publish numerical data-loss and recovery-time targets, backup frequency/retention, and measured full-restore evidence for the qualified configuration on each cloud. |
 | Trust and IAM | Publish the code-author trust model and identity/permission matrix. Verify normal Hot executions and box tasks cannot obtain cloud credentials or reach protected infrastructure outside their declared capabilities. |
@@ -1059,13 +1113,26 @@ Changes for self-hosting:
 - [ ] Run the task-worker from the single runtime image with the same
       privileges and mounts. Qualify its Compose networking on one VM.
       The renderer runs it from the Hot image as `0:2000`, privileged, in the
-      host PID namespace, with the `hot-cloud` mounts. Qualification on a VM
-      remains.
+      host PID namespace, with the `hot-cloud` mounts, plus the host's `/dev`,
+      because a box's `/data` loop mount needs the node for whichever loop device
+      the kernel hands out, including one created after the container started.
+      Qualification on a VM remains.
+- [ ] Give each box its release's own `hotbox`. Each start of a task worker first
+      copies it from the digest-pinned runtime image to
+      `/var/lib/hot/kata/hotbox` on the data disk, and the task worker has Kata's
+      shim bind-mount that file. The copy baked into the host image is only a
+      fallback when no file is there, and boxes never run the one in the guest
+      rootfs, so a release that changes `hotbox` needs no host image rebuild. No
+      test has run this bind mount through Kata's shim.
 - [x] Put the devmapper pool on its own volume, or give it a hard size limit
       derived from the size label, so box storage cannot fill the PostgreSQL
       disk.
       Sparse pool files sized by `HOT_BOX_POOL_GB` in `/etc/hot/host.env`;
-      the agent writes it from the size label.
+      the agent writes it from the size label. That bounds box storage and does not
+      set it apart: the pool's files and each box's `/data` take their space from the
+      data disk that PostgreSQL uses, so on a disk already holding other data a box
+      can still fill it. Admission refuses a box when the disk has too little free for
+      non-root writers, and `disk-pressure` remains the warning.
 - [ ] On one VM, containers use the instance identity, so AWS needs IMDS hop
       limit 2. The guest chain and the `PublicOnly` policy remain the
       metadata boundaries for box and normal execution. Qualify both.
@@ -1077,13 +1144,19 @@ Changes for self-hosting:
       make the guest DNS resolver configurable.
       The task worker's per-task chains read `network.allow-cidrs`,
       `network.deny-cidrs`, and `box.guest-dns`; the host's baseline runs in
-      the mangle table so per-task rules cannot bypass it.
+      the mangle table so per-task rules cannot bypass it. The agent writes the
+      baseline's lists to `/etc/hot/guest-network.env`, and refreshes them before
+      every deploy and every 5 minutes. With a proxy set, guests reach only the
+      proxy and their resolvers, and `network.allow-cidrs` opens nothing for them.
+      A resolver in the fixed deny set stops the task worker at startup, which
+      rules out link-local cloud resolvers.
 - [x] Derive task concurrency, memory, and disk settings from the VM size
       instead of the standalone task-worker defaults.
       `SIZES` in [`render.py`](../../infra/runtime/render.py) sets every
       container's memory and CPU caps, Valkey's `maxmemory`, and the task
-      limits per size, within the VM and leaving room for the OS. Starting
-      values to replace with benchmarks.
+      limits per size, within the VM and leaving room for the OS: each size's
+      caps, a default box for each container slot (1,280 MB on the host), and 1 GB
+      for the host add up to the VM. Starting values to replace with benchmarks.
 - [ ] Port the isolation validation into public qualification checks, run
       against the built image as well as the scripts, and extend it to GCP.
       Static checks are in [`test_host.py`](../../infra/tests/test_host.py);
@@ -1156,13 +1229,15 @@ Changes for self-hosting:
       access and outbound networking continue to work.
       The host's mangle-table baseline drops the host, metadata, other guests,
       and private ranges outside the allowlist, and `test_host.py` checks it
-      statically. Verification on a running host remains.
+      statically. It applies as one commit, so a value `iptables` rejects leaves
+      the previous baseline in force. Verification on a running host remains.
 - [x] Provide health/status, logs, backup, restore, upgrade, and shutdown
       helpers. Keep dependency outages from triggering endless liveness restarts.
       `selfhost.py` runs the agent's `status`, `diagnostics`, `logs`,
       `backup`, `roll-back`, `deploy-now`, `restart-service`, and
       `drain-and-stop` commands, and snapshot restores use
-      `backup.restore_snapshot`. Health checks never restart a container, so
+      `backup.restore_snapshot`. `backup`, `roll-back`, and `drain-and-stop` are for
+      single-machine installations. Health checks never restart a container, so
       an outage only reports.
 - [ ] Define shutdown/drain deadlines and queue recovery behavior; replacement
       starts only after storage ownership and scheduler ownership are safe.
@@ -1180,8 +1255,11 @@ Changes for self-hosting:
       versions.
       [`bootstrap/aws`](../../infra/opentofu/bootstrap/aws) creates a versioned,
       TLS-only, never-public state bucket and, optionally, GitHub OIDC roles
-      for plan, apply, and release. Stacks grant the release role only their
-      own pointer, status, and command (`release_principal`).
+      for plan, apply, and release. Stacks grant the release role their own
+      pointer and command, the agent's reports, and silencing their alerts
+      (`release_principal`); on GCP the log, alert-policy, and snooze roles are
+      project-wide, as
+      [Trust and identities](../../infra/README.md#trust-and-identities) says.
 - [ ] Provision VPC/subnets or validated existing networking, firewall rules,
       EC2 identity, stable endpoint, retained EBS data volume, and the host image.
       Include private routing, required egress, Session Manager connectivity,
@@ -1206,9 +1284,10 @@ Changes for self-hosting:
       HTTPS. Store secrets in Secrets Manager, with a KMS key per the
       encryption policy and VPC endpoint access from private subnets.
       Secrets are in Secrets Manager under the AWS-managed key, reached
-      through NAT. Missing: a customer-managed key option, Secrets Manager and
-      SSM interface endpoints, and documentation of Session Manager port
-      forwarding to 443, which the host role allows.
+      through NAT. Session Manager port forwarding to 443, which the host role
+      allows, is documented with an example operator policy, not yet run on a real
+      account. Missing: a customer-managed key option, and Secrets Manager and
+      SSM interface endpoints.
 - [ ] Add optional S3 build/file buckets with runtime IAM and explicit
       retention/deletion behavior; local disk remains the initial default.
       Honor existing-bucket selections and the independent storage contract,
@@ -1256,8 +1335,10 @@ Changes for self-hosting:
       secrets in Secret Manager, retrieved by the agent with the attached
       service account through Private Google Access.
       The agent reads Secret Manager with the VM's service account through
-      Private Google Access, and the firewall admits IAP to 443. Missing:
-      documentation of IAP TCP forwarding for operators, and the IAM it needs.
+      Private Google Access, and a single machine's firewall admits IAP to 443.
+      IAP TCP forwarding and the IAM it needs are documented, not yet run on a real
+      project. A scalable installation's firewall has no rule for IAP, so its private
+      endpoints need a routed network.
 - [ ] Run the full stack with local build/file storage without AWS credentials.
       Also qualify existing S3 with explicit AWS identity and no GCS application
       storage provisioning. Connect optional GCS buckets when Phase 2 passes.
@@ -1350,8 +1431,9 @@ using retained local storage.
       and retryable failures.
       The GCP stack provisions buckets on request: uniform access, public
       access prevention, and versioning with noncurrent retention. Existing
-      buckets are only granted to, never managed, and preflight checks only
-      that they exist. `GcsError` separates the failure kinds. A lifecycle
+      buckets are only granted to, never managed, and preflight checks that
+      they exist, have uniform access, and are not another installation's.
+      `GcsError` separates the failure kinds. A lifecycle
       rule deletes week-old objects under each prefix's `.uploads/`, where Hot
       stages multipart parts. There is no CMEK option yet.
 - [ ] Honor bucket-default encryption and optional CMEK for files, builds,
@@ -1387,7 +1469,10 @@ IAM, generation preconditions, or real composition behavior.
       independently. Managed Valkey is done on AWS (ElastiCache, TLS-only,
       with an AUTH token written only to write-only attributes, and
       `noeviction`). On GCP it is Memorystore for Valkey, with cluster mode
-      disabled, TLS, and IAM authentication. Hot gained `redis.auth = gcp-iam`
+      disabled, TLS, and IAM authentication. It is multi-zone with or without a
+      replica, since that cannot change after creation, so without
+      `high_availability` the primary may be in a different zone from the host, and
+      turning that on later adds a replica in another zone. Hot gained `redis.auth = gcp-iam`
       (metadata-server tokens through redis-rs's streaming credentials,
       re-authenticating connections when the token changes) and
       `redis.ca-cert` for the instance's private CA. Both were checked against
@@ -1451,9 +1536,16 @@ IAM, generation preconditions, or real composition behavior.
         stay unique;
       - each copy is read back and checked (SHA-256, or the blob's BLAKE3
         hash), then that record alone is rewritten, with the file's backend
-        and path in one update. The update retires the source object under
-        the source backend, so the target's cleanup never deletes it;
-      - a JSON-lines manifest is written, and reruns are resumable.
+        and path in one update. The same transaction takes the source object
+        out of collection, so no worker deletes it on either configuration;
+      - a JSON-lines manifest is written as objects finish, and reruns are
+        resumable;
+      - an object that can never move can be left behind: `HOT_MOVE_STORAGE_SKIP` lists
+        a few ids, and `--skip-file` any number. On a single machine,
+        `settings.HOT_MOVE_STORAGE_SKIP_FAILED=<count>` leaves behind everything the
+        last report counted, and is refused unless the count matches it. Hot cannot read
+        what stays behind.
+      The move refuses to run while a scheduler is running.
       On a single machine, a storage change triggers the move during a deploy
       of the same release. The agent also redeploys whenever the
       configuration changes; before this, `settings` and data-mode changes
@@ -1483,12 +1575,12 @@ yet proven anywhere; see [Cross-instance readiness](#cross-instance-readiness).
 
 | Role | AWS target | GCP target |
 | --- | --- | --- |
-| App | ECS Fargate service, Nginx sidecar, at least 2 tasks across 2 AZs | Regional managed instance group, at least 2 instances across 2 zones |
-| API | Separate ECS Fargate service, same pattern | Separate regional managed instance group |
-| Queue worker | ECS Fargate service, at least 2 tasks | Regional managed instance group, at least 2 instances |
-| Scheduler | One ECS Fargate task, `minimumHealthyPercent=0`, `maximumPercent=100` | One-instance managed instance group with stop-before-start replacement |
-| Task-worker | EC2 Auto Scaling group of `m8i` hosts with the [Box task host](#box-task-host) setup, scale-in protection while tasks run | Regional managed instance group on a qualified nested-virtualization family |
-| Migrations | One-off ECS `RunTask` with the migration role | Ephemeral Compute Engine instance with the migration service account, deleted after reporting |
+| App | Auto Scaling group of the host image, Nginx ingress on each host, 2 hosts by default across 2 AZs | Regional managed instance group, 2 instances by default across 2 zones |
+| API | Separate Auto Scaling group, same pattern | Separate regional managed instance group |
+| Queue worker | Auto Scaling group, 2 hosts by default | Regional managed instance group, 2 instances by default |
+| Scheduler | One-host Auto Scaling group, refreshed with `min_healthy_percentage = 0` and `max_healthy_percentage = 100` | One-instance managed instance group with stop-before-start replacement |
+| Task-worker | EC2 Auto Scaling group of `m8i` hosts with the [Box task host](#box-task-host) setup; autoscaled task-workers (`max` above `min`) are protected from the group's scale-in, and a fixed count is not, so lowering it removes hosts | Regional managed instance group on a qualified nested-virtualization family |
+| Migrations | The scheduler's host, from the migration pointer, before any role rolls | The scheduler's host, from the migration pointer, before any role rolls |
 | PostgreSQL | RDS PostgreSQL, Multi-AZ | Cloud SQL for PostgreSQL, regional high availability |
 | Valkey | ElastiCache for Valkey replication group, Multi-AZ automatic failover, TLS | Memorystore for Valkey with replicas, TLS |
 | Storage | S3 (or qualified GCS) | GCS (or S3) |
@@ -1511,33 +1603,29 @@ backup copies are an optional setting.
 ### Topology and ingress
 
 ```text
-clients ── HTTPS ──> load balancer (internal, or internet-facing when selected)
-                       ├─ host = app endpoint ─> app target group  ─> [nginx sidecar ─> hot app]
-                       └─ host = api endpoint ─> api target group  ─> [nginx sidecar ─> hot api]
+clients ── TLS ──> app load balancer (internal, or internet-facing when selected) ─> app hosts [nginx ingress ─> hot app]
+clients ── TLS ──> api load balancer (internal, or internet-facing when selected) ─> api hosts [nginx ingress ─> hot api]
 worker, scheduler, task-worker: no inbound routes
 all Hot roles ─> RDS / Cloud SQL, Valkey, object storage, secret store (private endpoints)
 user-code egress ─> NAT (stable egress IPs)
 ```
 
-- One load balancer with host-based routing to separate app and API backends.
-  Public exposure uses an internet-facing ALB (AWS) or external Application
-  Load Balancer (GCP); private uses the internal variants. Each endpoint's
-  exposure remains independent.
+- One passthrough TCP load balancer per endpoint, as the decision under
+  [Implementation and acceptance](#implementation-and-acceptance) records. Public
+  exposure uses an internet-facing Network Load Balancer (AWS) or an external
+  passthrough load balancer (GCP); private uses the internal variants. Each
+  endpoint's exposure remains independent.
 - Keep the Nginx configuration from the single-machine bundle as the single
   source for body limits (API `client_max_body_size 300M`), buffering, and
-  streaming routes. On AWS it runs as a sidecar container in the same task;
-  on GCP it runs in the same instance's Compose bundle.
-- Streaming routes use 330 s proxy timeouts today. Set the ALB idle timeout
-  (60 s by default) and the GCP backend-service timeout (30 s by default) above
-  that, for example 360 s, and qualify SSE reconnects through rolling
-  replacement.
-- Health checks target the sidecar's `/health`. Use deregistration delay and
-  connection draining long enough for in-flight uploads; streaming clients are
-  expected to reconnect.
-- Load-balancer-to-target traffic is re-encrypted with an installation-local
-  certificate on the sidecar. Document that ALB and GCP load balancers do not
-  verify backend certificates.
-- AWS WAF or Cloud Armor is an optional setting for public endpoints.
+  streaming routes. On both clouds it runs in each app and API host's Compose
+  bundle, and TLS ends there with the operator's certificate.
+- A passthrough load balancer adds no proxy timeout for streams. Qualify SSE
+  reconnects through rolling replacement.
+- Health checks target the ingress's `/hot-lb-health`. Deregistration delay and
+  connection draining are 300 seconds, for in-flight uploads; streaming clients
+  are expected to reconnect.
+- AWS WAF or Cloud Armor would need L7 load balancers, so the stacks offer
+  neither.
 - The task-worker, worker, and scheduler have no listeners reachable from
   the load balancer.
 
@@ -1552,13 +1640,14 @@ user-code egress ─> NAT (stable egress IPs)
 - One security group or firewall tag per role. Only the load balancer reaches
   app and API. Only Hot roles reach PostgreSQL and Valkey. Task-worker hosts
   have their own group and receive no inbound traffic.
-- One identity per role: an ECS task role plus execution role per service on
-  AWS, and one service account per managed instance group on GCP. Each reads
-  only its own secrets and the storage prefixes its role needs. The migration
-  identity is separate and used only by the migration job.
-- Secrets reach ECS services through per-service `secrets` (environment
-  variables, the documented exception) and reach Compute Engine instances
-  through the agent's tmpfs files.
+- One identity per role: an IAM role and instance profile per Auto Scaling
+  group on AWS, and one service account per managed instance group on GCP. Each
+  reads the installation's generated and operator secrets and uses its storage
+  prefixes, and the agent gives each service only its own files. Migrations run
+  on the scheduler's host with the scheduler's identity, the only one that can
+  store the generated secret or read a managed database's administrator login.
+- Secrets reach hosts on both clouds through the agent's tmpfs files, so none
+  is in a service's environment.
 
 ### Data tier
 
@@ -1583,39 +1672,35 @@ user-code egress ─> NAT (stable egress IPs)
 
 ### Release and deployment
 
-The release workflow supplies the manifest version as an OpenTofu input, and
-the reviewed apply rolls each role. Order:
+A release moves per-role pointers rather than OpenTofu inputs, so it needs no
+plan, and each role's hosts deploy it as their pointer moves; see
+[Scalable installations](../../infra/README.md#scalable-installations). Order:
 
 1. Verify the manifest and reject unsupported version jumps.
 2. Run the migration job. Only backward-compatible (expand) migrations run
    during a rolling release. Incompatible migrations require a maintenance
    window: drain workers, stop the scheduler, then migrate.
-3. Roll task-worker hosts: drain each host's slots, then replace it through
-   instance refresh (AWS) or a managed instance group rolling update (GCP).
+3. Roll task-worker hosts: each stops with 2 minutes to finish, then starts the
+   release.
 4. Roll queue workers within their drain deadline.
-5. Roll API, then app, with surge capacity and health-gated progression.
-6. Replace the scheduler last, stop-before-start.
+5. Roll API, then app, waiting for every instance in each group.
+6. Roll the scheduler last, stop-before-start.
 
-- **AWS:** each release registers new task definitions using the single image
-  digest, with deployment circuit breakers and automatic rollback. OpenTofu
-  ignores `desired_count` on autoscaled services. Fargate caps `stopTimeout` at
-  120 s, so worker drain must finish or durably requeue within that deadline.
-- **GCP:** each release creates a new immutable instance template, and the
-  managed instance group performs a rolling update with `maxSurge` and
-  `maxUnavailable` set per role. Unlike the single VM, replacement here is the
-  intended behavior. Instances drain when the agent receives the shutdown
-  signal. Use Compute Engine graceful shutdown where available, and never
-  depend on shutdown scripts alone.
+- **Both clouds:** a release replaces no instance: each host deploys it in place.
+  A host image or configuration change replaces instances through each group's
+  rolling update; see [Resizing](../../infra/README.md#resizing).
 - Rollback redeploys the previous manifest when the migration class allows it.
+  Across migrations it means a database restore, with every group at 0 and the
+  pointers back first; see [Upgrading](../../infra/README.md#upgrading).
   Otherwise the release stops and reports the required forward fix or restore.
 
 ### Autoscaling
 
 | Role | Signal | Bounds and scale-in |
 | --- | --- | --- |
-| App, API | CPU and request count per target | Minimum 2; scale-in through normal connection draining |
-| Queue worker | Hot-published backlog and oldest-message age | Fixed counts first; autoscale after the drain protocol is qualified |
-| Task-worker | Hot-published queued tasks and free slots | AWS: per-instance scale-in protection while tasks run, as `hot-cloud` does today. GCP managed instance groups lack per-instance scale-in protection, so scale-in goes only through the agent drain path, with autoscaler scale-in disabled or rate-limited |
+| App, API | CPU (a request count per target would need L7 load balancers) | Minimum 2; scale-in through normal connection draining |
+| Queue worker | Hot-published backlog and oldest-message age | Fixed counts first; autoscale after the drain protocol is qualified. Until then autoscaled workers only scale out on both clouds, and hosts stay until an operator lowers the count, which has no drain |
+| Task-worker | Hot-published queued tasks and free slots | AWS: autoscaled task-workers (`max` above `min`) are protected from the group's scale-in, as `hot-cloud` protects hosts today; a fixed count is not protected, so lowering it removes hosts. GCP managed instance groups lack per-instance scale-in protection, so the autoscaler only scales out, and idle hosts stay until an operator shrinks the group in a quiet window |
 | Scheduler | None | Always exactly one |
 
 Hot must publish the queue and slot metrics through the monitoring contract
@@ -1630,8 +1715,8 @@ exhaust PostgreSQL or Valkey.
   benchmark from: API 0.25 vCPU / 512 MB, app 0.5 vCPU / 1 GB, worker
   0.5 vCPU / 1 GB, scheduler 0.25 vCPU / 512 MB, and `m8i.large` task hosts.
   These are not qualified sizes.
-- Set Fargate ephemeral storage for build-upload staging explicitly, and give
-  Compute Engine instances bounded scratch disks.
+- Give every role's hosts bounded disks for build-upload staging: a 40 GB boot
+  disk and a 20 GB scratch disk, or the size's data disk on task-worker hosts.
 - The target availability claim is: the loss of one instance per role, or of
   one zone for stateless roles, does not stop service. Data services recover
   through their managed failover. Scheduled dispatch pauses until the single
@@ -1690,8 +1775,11 @@ clients, and caches. The replicas share one fresh PostgreSQL database, one
 Redis, and one storage directory, which stands in for S3 or GCS. Events come
 from a separate Redis client, as a worker publishes them. State that a
 per-process cache could hold is changed out of band, through the fixture
-administrator. The suites skip without `HOT_TEST_POSTGRES_URI` and a reachable
-Redis.
+administrator. The suites skip without `HOT_TEST_POSTGRES_URI`, which must name a
+login that can create databases and roles, with `psql` on the PATH. Redis is
+`HOT_TEST_REDIS_URI`, then `HOT_REDIS_URI`, then `REDIS_URL`. A Redis named by one
+of these must answer or the suites fail; only the unset default,
+`redis://127.0.0.1:6379`, can skip them.
 
 - [x] Verify legacy MCP HTTP+SSE, environment subscriptions, and stream
       subscriptions when the paired requests land on different instances.
@@ -1839,8 +1927,7 @@ release of the three presets.
       remain.
 - [ ] Extract independently scalable service modules using the same runtime
       image, configuration, secrets, and migration contract. Deliver secrets
-      through per-service ECS `secrets` on AWS and the agent's tmpfs files on
-      Compute Engine.
+      through the agent's tmpfs files on both clouds.
       Two decisions, made while implementing and open for review:
       - **AWS uses Auto Scaling groups, not ECS.** Both clouds run role
         groups of the same host image and agent, so secrets stay in tmpfs
@@ -1904,14 +1991,18 @@ release of the three presets.
         as well as CPU: target tracking on AWS, a per-group metric on GCP.
       - Task-workers scale out on their average slots in use
         (`slots_target`) as well as CPU.
-      - Groups never remove task hosts. A task host idle for
+      - Groups never remove task hosts. On AWS, a task host idle for
         `retire_idle_minutes` stops its task worker, then leaves its group,
         which shrinks by one.
+      - On GCP, idle task hosts do not retire: IAM cannot limit a grant to one
+        instance group, and a task host runs untrusted boxes. The group stays at its
+        peak size and cost until an operator shrinks it. Moving the grant to the
+        scheduler's host is left for later.
 
       Qualification on each cloud remains.
-- [ ] Keep one scheduler instance with stop-before-start replacement
-      (`minimumHealthyPercent=0`, `maximumPercent=100` on ECS), lock-liveness
-      enforcement, health monitoring, and tested restart/recovery behavior.
+- [ ] Keep one scheduler instance with stop-before-start replacement,
+      lock-liveness enforcement, health monitoring, and tested restart/recovery
+      behavior.
       Scheduler HA and standby failover remain deferred as described above.
       On AWS the scheduler's group refreshes with `min_healthy_percentage = 0`
       and `max_healthy_percentage = 100`; on GCP it runs in a one-instance
@@ -1942,8 +2033,9 @@ release of the three presets.
       VM loss recovers durable work as well as testing the graceful drain path.
       Each role has its own instance template and service account, scoped to
       its pointer, the shared secrets, Valkey, and the storage prefixes.
-      Workers scale on jobs waiting per host, task-workers scale out on slots
-      in use, and idle task hosts leave their group. Missing: autohealing
+      Workers and task-workers scale out only, on jobs waiting per host and on
+      slots in use, and idle task hosts stay until an operator shrinks the group.
+      Missing: autohealing
       health checks for worker and task-worker groups, and a drain before
       worker scale-in. The VM-loss drills remain.
 - [ ] Prove cross-instance behavior for sessions, uploaded builds, files,
@@ -1960,8 +2052,6 @@ release of the three presets.
       [Moving a single machine to the scalable preset](../../infra/README.md#moving-a-single-machine-to-the-scalable-preset)
       documents the steps, the state moves between roots, and what cannot be
       undone automatically. Exercising it on each cloud remains.
-      Not started: infra/README.md does not describe moving a single machine
-      to the scalable preset.
 
 Completion: multiple app/API/worker instances can serve one installation;
 instance loss and rolling upgrades preserve durable work and tenant boundaries;
@@ -1979,7 +2069,7 @@ or an existing operator destination without coupling telemetry to S3.
 
 | Profile | Planned implementation |
 | --- | --- |
-| AWS native default | CloudWatch Logs and metrics/alarms, with a pinned CloudWatch agent on EC2 and the appropriate ECS collection configuration |
+| AWS native default | CloudWatch Logs and metrics/alarms, with a pinned CloudWatch agent on EC2 |
 | GCP native default | Cloud Logging and Cloud Monitoring using a pinned Ops Agent on Compute Engine |
 | Existing destination | Structured log collection and OpenTelemetry/OTLP metrics with explicit endpoint, TLS/authentication, signal support, and operator-owned storage/alerting |
 | Local logging | Bounded container/journal logs and private status/health access; use an operator-supplied external monitor for production outage alerts |
@@ -2079,7 +2169,10 @@ or an existing operator destination without coupling telemetry to S3.
       - Testing the path: the `test-alert` agent command publishes a test
         metric. An `alert-test` alert fires on it and then resolves.
       - Silencing: `selfhost.py maintenance start/end` disables the alarm
-        actions on AWS and snoozes the alert policies on GCP.
+        actions on AWS and snoozes the alert policies on GCP. OpenTofu ignores
+        `actions_enabled` on the AWS alarms, so an apply keeps them off and
+        maintenance does not show as drift; `status` and `diagnostics` warn while
+        alarm actions are off.
 
       Only email channels are created (AWS outputs `alert_topic_arn` for other
       subscribers), and severity and deduplication are not documented.
@@ -2149,7 +2242,7 @@ or an existing operator destination without coupling telemetry to S3.
       [`preflight.py`](../../infra/preflight/preflight.py) is a read-only
       script, and the plan workflow runs it first. It checks identity, zone,
       machine type, vCPU quota, host image, and managed-data offerings, plus
-      GCP APIs and the nested-virtualization policy. Whether nested
+      GCP APIs, which warn when off, and the nested-virtualization policy. Whether nested
       virtualization actually works is shown by the host's first box task.
       Permissions are not checked beyond the caller's identity.
 - [ ] Check CIDR overlap, required routes and egress, private client access,
@@ -2159,11 +2252,19 @@ or an existing operator destination without coupling telemetry to S3.
       - CIDR overlap with the host's fixed networks;
       - existing subnets and private services access;
       - DNS (a warning only);
-      - the public certificate;
-      - existing buckets;
-      - default routes through a NAT on existing networks (Cloud NAT and
-        Private Google Access on GCP);
+      - the public certificate, on an AWS single machine;
+      - an AWS single machine's release pointer;
+      - existing buckets, buckets to provision, and on GCP uniform bucket-level
+        access;
+      - default routes on existing networks: through a NAT on AWS; on GCP Cloud
+        NAT and Private Google Access through the internet gateway, and a warning
+        for an appliance, or for routes it cannot see learned through a Cloud
+        Router or peering;
       - an image mirror's repositories.
+
+      The [Preflight](../../infra/README.md#preflight) list says what is checked
+      in each cloud. The GCP PostgreSQL version and Memorystore's regional
+      availability are left to the apply.
 
       Pulls from public registries, and existing databases, are checked from
       the host, by the first deploy and by the agent.
@@ -2205,7 +2306,9 @@ or an existing operator destination without coupling telemetry to S3.
       configuration schema, migration levels, steps, restore point, error).
       Hot never migrates down, so every migration counts as one-way: rollback
       is safe only at the same migration level, and otherwise needs a forward
-      fix or a restore. Before a release adds migrations the agent takes a
+      fix or a restore. The upgrade check reads the database's real level through a
+      bundle job (`hot db migrate --status`), so a restored database can take the
+      earlier release. Before a release adds migrations the agent takes a
       `pg_dump` of a local database or records the point-in-time restore time.
 - [ ] Test representative upgrade fixtures and interrupted-upgrade recovery for
       the initial release; test supported prior releases as they become
@@ -2284,7 +2387,11 @@ or an existing operator destination without coupling telemetry to S3.
       [Outbound access for user code](#outbound-access-for-user-code), and
       verify that user code cannot read secret files or service environments.
       Isolation is mandatory, `HOT_NETWORK_DENY_CIDRS` denies user code the
-      installation's networks, and box guests sit behind the host baseline.
+      installation's networks, including the data subnets and, on GCP, the
+      private-service-access range, which the stacks pass as
+      `data.<service>.endpoint.deny_cidrs`, and box guests sit behind the host
+      baseline. The stacks pass that range on a new network; on an existing one
+      the operator lists it, and preflight warns while the list is empty.
       The tests on a running installation remain.
 - [ ] Test private/public ingress under the declared trust model. Record
       isolation limitations and required controls; this is an initial release
@@ -2363,7 +2470,7 @@ or an existing operator destination without coupling telemetry to S3.
       lock-owner checks before stale-lock recovery, and retained resource IDs.
       [State, drift, and teardown](../../infra/README.md#state-drift-and-teardown)
       covers stale locks, restoring a state version, adoption through
-      `imports.tf`, and interrupted applies.
+      `imports.tf`, interrupted applies, and an apply that could not save state.
 - [x] Define drift detection and review for manual cloud edits, module/provider
       upgrades, and controllers such as autoscalers. Preserve field ownership;
       do not overwrite autoscaled counts or adopt external resources silently.
@@ -2430,6 +2537,10 @@ or an existing operator destination without coupling telemetry to S3.
 
 ## Validation matrix and first implementation slices
 
+[Real-account qualification](../../infra/README.md#real-account-qualification)
+lists specific checks that review of the stacks has left for a real account or
+project, on top of the layers below.
+
 | Layer | Required checks |
 | --- | --- |
 | Static infrastructure | `tofu fmt`, init/validate against pinned providers, configuration validation, and reviewed plans for each supported preset |
@@ -2487,8 +2598,7 @@ custom-domain automation.
 - [GitHub Actions OpenID Connect](https://docs.github.com/en/actions/security-for-github-actions/security-hardening-your-deployments/about-security-hardening-with-openid-connect),
   [`aws-actions/configure-aws-credentials`](https://github.com/aws-actions/configure-aws-credentials),
   and [`google-github-actions/auth`](https://github.com/google-github-actions/auth).
-- [ECS secrets in environment variables](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/secrets-envvar-secrets-manager.html),
-  [Compose secrets](https://docs.docker.com/compose/how-tos/use-secrets/),
+- [Compose secrets](https://docs.docker.com/compose/how-tos/use-secrets/)
   and [GCP Secret Manager](https://docs.cloud.google.com/secret-manager/docs/overview).
 - [PostgreSQL advisory locks](https://www.postgresql.org/docs/current/explicit-locking.html#ADVISORY-LOCKS).
 - Nested virtualization on [EC2](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/amazon-ec2-nested-virtualization.html)

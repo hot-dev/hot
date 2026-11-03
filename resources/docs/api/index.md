@@ -1437,6 +1437,7 @@ Returns the usage of the credential's **environment** in the current monthly win
 | `usage` | This environment's usage. Runs and compute units count from `plan.period_start`; storage is current |
 | `usage.team_members` | Always `0`: team seats belong to the account, not an environment |
 | `limits` | Account plan limits (-1 = unlimited). `limits.compute_units_used` is this environment's compute units this window |
+| `limits.call_retention_days` | How long call data is kept (-1 = forever). For an account with no plan and no override, the installation's `db.retention.call.days` (`HOT_DB_RETENTION_CALL_DAYS`): a whole number from 1 to 36500, or -1 |
 | `usage_percent` | This environment's usage as a percentage of the account limits (can exceed 100) |
 | `usage_percent.has_warning` | True if any percentage exceeds 90 |
 | `plan.period_start` | Start of the current monthly usage window |
@@ -1444,7 +1445,7 @@ Returns the usage of the credential's **environment** in the current monthly win
 
 The monthly window follows the subscription: a monthly plan's billing period, or monthly anniversaries of an annual or free plan's start. Accounts without a subscription use the calendar month.
 
-For self-hosted/local deployments without a subscription, all limits are unlimited (-1).
+For self-hosted/local deployments without a subscription, all limits are unlimited (-1), apart from `call_retention_days` when the installation sets `db.retention.call.days`.
 
 ---
 

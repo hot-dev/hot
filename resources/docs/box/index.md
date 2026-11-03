@@ -17,7 +17,7 @@ Configure a container with `BoxConf`:
 | Field | Type | Description |
 |-------|------|-------------|
 | `image` | `Str` | Docker/OCI image to run (required). A name without a tag, like `alpine`, means `alpine:latest` |
-| `size` | `BoxSize` | Size preset (default: `"small"`) |
+| `size` | `BoxSize` | Size preset. Without one, the task worker's [box defaults](#without-a-size) apply |
 | `script` | `Str` | Shell script to execute (mutually exclusive with `cmd`) |
 | `cmd` | `Vec<Str>` | Command and arguments (optional, uses image default) |
 | `entrypoint` | `Vec<Str>` | Override image entrypoint (e.g. `[""]` to clear it) |
@@ -48,6 +48,44 @@ A task's `timeout` covers the whole task on the worker, image pull included, so 
 | `2xlarge` | 4 GB | 100% | 2 GB | 50 GB | 3600s | 16.0x |
 | `4xlarge` | 8 GB | 100% | 4 GB | 50 GB | 7200s | 32.0x |
 
+### Without a Size
+
+A box that names no `size` doesn't get the `small` preset. It gets the task
+worker's box defaults, for each field the box doesn't set itself, and it counts
+for billing as the largest preset with no more memory than it has: `medium`, with
+these defaults.
+
+| Setting | Environment variable | Default |
+|---------|----------------------|---------|
+| `task.box-default-memory-mb` | `HOT_TASK_BOX_DEFAULT_MEMORY_MB` | 512 |
+| `task.box-default-tmp-mb` | `HOT_TASK_BOX_DEFAULT_TMP_MB` | 500 |
+| `task.box-default-disk-mb` | `HOT_TASK_BOX_DEFAULT_DISK_MB` | 5120 |
+| `task.box-default-timeout-secs` | `HOT_TASK_BOX_DEFAULT_TIMEOUT_SECS` | 60 |
+| `task.box-default-cpu-quota` | `HOT_TASK_BOX_DEFAULT_CPU_QUOTA` | 50000 (50% of a CPU) |
+
+### What a Worker Admits
+
+A task worker holds a memory and a disk budget for its boxes. Each box counts its
+memory plus its `/tmp` against the memory budget, and its `/data` plus 2 GB and a
+further quarter of `/data` against the disk budget. A box that could never fit
+fails at once with `Requested resources exceed worker capacity`. One that only has
+to wait for others to finish stays queued.
+
+On Hot's self-hosted AWS and Google Cloud stacks, the installation's size sets the
+budgets, and with them the largest preset a host admits. A box with no `size` fits
+on all of them.
+
+| Installation size | Single machine | Scalable task host |
+|-------------------|----------------|--------------------|
+| `small` | `medium` | `large` |
+| `medium` | `large` | `xlarge` |
+| `large` | `xlarge` | `2xlarge` |
+
+A single machine's sizes set memory aside for one default box in each container
+slot. A larger `task.box-default-memory-mb`, or a box that asks for more memory and
+less `/tmp` than the default, can still run the VM out of memory, and the host then
+kills whichever process it picks.
+
 ## Network Access
 
 | Value | Description |
@@ -56,6 +94,8 @@ A task's `timeout` covers the whole task on the worker, image pull included, so 
 | `"none"` | No network access |
 
 Network access may be restricted by your plan. See [Container Billing](/docs/box/billing) for plan limits.
+
+On a self-hosted installation with an egress proxy, `"internet"` on the Kata backend means through that proxy only, and the task must set it in `env`. See [Box tasks](/docs/configuration/network#box-tasks).
 
 ## Security Model
 
@@ -84,6 +124,26 @@ Both modes provide `/data` (disk-backed) and `/tmp` (tmpfs) as writable director
 | `/data` | Writable disk | Persistent writable storage (size from `disk-size`) |
 | `/tmp` | tmpfs | Ephemeral tmpfs (size from `tmp-size`) |
 | `hot://` | Storage | Access Hot storage via built-in file server |
+
+On Linux, a box's `/data` is a file the task worker allocates in full before the
+box starts, wherever the filesystem supports that, in `task.data-volume-dir`
+(`HOT_TASK_DATA_VOLUME_DIR`, default `/tmp/hot-data-volumes`). The file stays
+allocated for the box's lifetime, whatever the box writes. The disk must also have
+room for the box's image and writable root, as
+[the disk budget counts them](#what-a-worker-admits), so a default 5,120 MB `/data`
+needs 8,448 MB free. Only space free to non-root writers counts, not blocks reserved
+for root. With less, the box fails:
+
+```text
+Requested /data volume could not be provisioned: Data volume I/O error: the disk has N MB available, less than the M MB a box with a K MB /data may use
+```
+
+On a tmpfs directory the file isn't allocated: the box uses memory as it writes, and
+its writes fail once the tmpfs is full.
+
+A task worker in a container needs that directory at the same path on the host,
+with shared mount propagation. [Hot's self-hosted stacks](https://github.com/hot-dev/hot/blob/main/infra/README.md)
+set this up, and an installation's `settings` refuses it.
 
 ## Resource Mounts
 
@@ -158,6 +218,10 @@ How it works:
 
 The image denylist applies to private images by name, like any other image.
 
+With isolation on, `start` also refuses an image whose registry resolves to an address your code may not reach, with `image registry '<name>' is not reachable`. A registry on a private address, including one behind a private VPC endpoint such as ECR, needs `network.allow-hosts` or `network.allow-cidrs` to cover it, and that entry also opens the address to your code. On a network one of Hot's self-hosted stacks created, an address inside its range stays denied, whatever is allowed, so the endpoint has to be outside that range. See [Image registries](/docs/configuration/network#image-registries).
+
+A pull that fails from a registry other than Docker Hub gives only one message, whatever the cause, including a wrong token: `Could not pull image '<image>'. Check the image name and tag, that its registry is reachable from this worker, and, for a private image, its registry-auth`. The reason is in the worker log. On Docker Hub, the message names the `registry-auth` secret the registry refused.
+
 **Self-hosted Kata workers** pull private images through containerd's
 Transfer service, so the token never appears in a process's arguments. That
 needs containerd 1.7 or later, with an `unpack_config` entry for the
@@ -169,6 +233,8 @@ devmapper snapshotter:
     platform = "linux/amd64"
     snapshotter = "devmapper"
 ```
+
+Without the Transfer service, a worker can't pull with `registry-auth`. From a registry other than Docker Hub, the task shows only the message above, and the reason is in the worker log.
 
 The task worker needs the same `HOT_ENCRYPTION_KEY` as the run worker so it
 can open the sealed credential.

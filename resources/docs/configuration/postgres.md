@@ -117,9 +117,13 @@ from a production outage.
 
 5. Start the services with `HOT_DB_URI` only. Don't give them
    `HOT_DB_MIGRATION_URI`. Set `HOT_ENV=production`, and give the app a
-   `HOT_APP_SESSION_SECRET`. Without `HOT_ENV`, Hot runs in local development
-   mode: the app signs every visitor in on a loopback address, and on a network
-   address it refuses to start without a session secret.
+   `HOT_APP_SESSION_SECRET` and the
+   [`self-host` experience](/docs/configuration/accounts#product-experience).
+   Without `HOT_ENV`, Hot runs in local development mode: the app signs every
+   visitor in on a loopback address, and on a network address it refuses to
+   start without a session secret. Without the experience, whatever `HOT_ENV`
+   says, the app refuses to create organizations, environments, or teams, or to
+   invite users.
 
 Run `provision_runtime.sql` again after any later migration that adds tables,
 or the runtime login can't use them. Since rerunning it is safe, the simplest

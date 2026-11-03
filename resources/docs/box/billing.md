@@ -55,6 +55,8 @@ The `duration-ms` field on task results and completion events reflects billable 
 | `2xlarge` | 16.0x |
 | `4xlarge` | 32.0x |
 
+A task that names no `size` counts as the largest preset with no more memory than it has. See [Without a Size](/docs/box#without-a-size).
+
 Get multipliers programmatically with `::hot::box/sizes()`:
 
 ```hot

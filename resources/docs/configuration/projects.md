@@ -138,6 +138,9 @@ The local backend defaults to SQLite. You can select the store backend in
 hot.store.type ::env/get("HOT_STORE_TYPE", "sqlite") // "sqlite" or "postgres"
 ```
 
+[Hot's self-hosted AWS and Google Cloud stacks](https://github.com/hot-dev/hot/blob/main/infra/README.md) set
+`postgres`, and an installation's `settings` refuses `HOT_STORE_TYPE`.
+
 Store maps can also use embeddings for semantic search. These defaults are used
 when a map requests `embedding: EmbeddingOptions.Default`:
 
@@ -147,6 +150,12 @@ hot.store.embedding.model ::env/get("HOT_STORE_EMBEDDING_MODEL", "bge-base-en-v1
 hot.store.embedding.field ::env/get("HOT_STORE_EMBEDDING_FIELD", "content")
 hot.store.models.path ::env/get("HOT_STORE_MODELS_PATH", ".hot/models")
 ```
+
+A map that already has embeddings keeps its model, and asking for a different one
+is refused. To change the model, recreate the map: call `::store/destroy` on a
+`::store/Map` that still asks for the old model, because one asking for the new
+model is refused too. That deletes the map and its entries. The next use creates
+the map with the new model, and its entries have to be written again.
 
 ## Project Naming
 

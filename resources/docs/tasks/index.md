@@ -290,3 +290,5 @@ msg ::ws/receive(conn)
 ```
 
 WebSocket connections outlive a single run, making them ideal for real-time sessions inside tasks.
+
+`::ws/connect` follows the same [outbound network rules](/docs/configuration/network) as `::hot::http` and `::hot::tcp`: each destination is resolved and checked immediately before connecting. On an installation with an egress proxy, it is refused, since the proxy carries HTTP(S) requests only.

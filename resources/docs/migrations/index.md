@@ -627,6 +627,28 @@ schema owner's `--db.migration-uri`: the runtime login can't read the
 migration ledger. A migration that fails rolls back on its own, while the ones
 before it stay applied, so check the status before you retry.
 
+`hot db migrate --status` gives tools the same answer as one JSON line on standard
+output, and changes nothing:
+
+```json
+{"level":23,"latest":23,"pending":[],"modified":[],"unknown":[]}
+```
+
+- `level` is the highest migration in the database's ledger, whichever Hot applied
+  it. 0 means none has run.
+- `latest` is the highest migration this Hot has. A database a newer Hot migrated
+  has a `level` above it.
+- `pending` lists the migrations this Hot has and the database doesn't, `modified`
+  those applied from a different file, and `unknown` those this Hot doesn't have.
+
+On PostgreSQL it needs `db.migration-uri`, naming the same database as `db.uri`. It
+exits non-zero when it can't read the ledger, including with no migration URI or a
+SQLite file that isn't there, which it doesn't create. A database a newer Hot
+migrated, or one with a modified migration, still exits 0. Earlier releases don't
+have the flag, and exit with a usage error. Hot's self-hosted stacks run it
+before an upgrade, so a database restored to before the upgrade can go back to the
+earlier release.
+
 On PostgreSQL, each migration statement waits at most 5 seconds for a lock
 held by running traffic, then the migration rolls back and is retried, up to
 five times. Set `db.migration-lock-timeout-ms` to change the wait.
