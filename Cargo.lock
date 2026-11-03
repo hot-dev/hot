@@ -3250,6 +3250,7 @@ dependencies = [
  "tower",
  "tower-http 0.7.1",
  "tracing",
+ "tracing-subscriber",
  "url",
  "utoipa",
  "utoipa-swagger-ui",
@@ -3369,6 +3370,7 @@ name = "hot_scheduler"
 version = "3.0.1"
 dependencies = [
  "ahash",
+ "async-trait",
  "chrono",
  "croner",
  "english-to-cron",

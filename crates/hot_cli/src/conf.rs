@@ -100,6 +100,9 @@ pub(crate) fn get_blob_resolved_conf(conf: Val, in_project: bool, managed_runtim
 const SETTINGS_WITHOUT_DEFAULTS: &[&str] = &[
     "HOT_APP_SIGNUP",
     "HOT_DB_RETENTION_CALL_DAYS",
+    "HOT_EMAIL_ALERTS_FROM",
+    "HOT_EMAIL_ALERTS_PROVIDER",
+    "HOT_EMAIL_FROM",
     "HOT_EMAIL_PROVIDER",
     "HOT_EMAIL_SMTP_HOST",
     "HOT_EMAIL_SMTP_PASSWORD",
@@ -110,8 +113,10 @@ const SETTINGS_WITHOUT_DEFAULTS: &[&str] = &[
 ];
 
 /// Hyphenated keys that deployments commonly set from the environment;
-/// underscores alone cannot spell them.
+/// underscores alone cannot spell them. `HOT_JIT`, the name the init templates
+/// use, is here because alone it would replace the whole `jit` map.
 const HYPHENATED_ENV_KEYS: &[(&str, &str)] = &[
+    ("HOT_JIT", "jit.mode"),
     ("HOT_DB_MIGRATION_URI", "db.migration-uri"),
     ("HOT_BUILD_AWS_ACCESS_KEY_ID", "build.aws.access-key-id"),
     (
@@ -125,6 +130,13 @@ const HYPHENATED_ENV_KEYS: &[(&str, &str)] = &[
         "file.aws.secret-access-key",
     ),
     ("HOT_FILE_AWS_SESSION_TOKEN", "file.aws.session-token"),
+    ("HOT_EMAIL_FROM_NAME", "email.from-name"),
+    ("HOT_EMAIL_ALERTS_FROM_NAME", "email.alerts.from-name"),
+    ("HOT_EMAIL_APP_URL", "email.app-url"),
+    ("HOT_EMAIL_WEB_URL", "email.web-url"),
+    ("HOT_EMAIL_DOCS_URL", "email.docs-url"),
+    ("HOT_EMAIL_LOGO_URL", "email.logo-url"),
+    ("HOT_EMAIL_SMTP_CA_CERT", "email.smtp.ca-cert"),
     (
         "HOT_EMAIL_SMTP_TIMEOUT_SECONDS",
         "email.smtp.timeout-seconds",
@@ -156,6 +168,21 @@ const HYPHENATED_ENV_KEYS: &[(&str, &str)] = &[
     ),
     ("HOT_TASK_WORKER_MEMORY_MB", "task.worker-memory-mb"),
     ("HOT_TASK_WORKER_DISK_MB", "task.worker-disk-mb"),
+    ("HOT_TASK_DATA_VOLUME_DIR", "task.data-volume-dir"),
+    (
+        "HOT_TASK_BOX_DEFAULT_MEMORY_MB",
+        "task.box-default-memory-mb",
+    ),
+    ("HOT_TASK_BOX_DEFAULT_DISK_MB", "task.box-default-disk-mb"),
+    ("HOT_TASK_BOX_DEFAULT_TMP_MB", "task.box-default-tmp-mb"),
+    (
+        "HOT_TASK_BOX_DEFAULT_TIMEOUT_SECS",
+        "task.box-default-timeout-secs",
+    ),
+    (
+        "HOT_TASK_BOX_DEFAULT_CPU_QUOTA",
+        "task.box-default-cpu-quota",
+    ),
     ("HOT_WORKER_RUN_TIMEOUT", "worker.run-timeout"),
     ("HOT_WORKER_MAX_RUN_TIMEOUT", "worker.max-run-timeout"),
     ("HOT_WORKER_CANCEL_ON_TIMEOUT", "worker.cancel-on-timeout"),
@@ -280,10 +307,11 @@ pub(crate) fn create_default_conf() -> Val {
             }
         }
     });
-    // Queue type "" is sentinel for "not yet set" - will be resolved later
-    let queue_conf = val!({
-        "type": ""  // Sentinel: resolved to "sqlite" (in-project) or "none" (outside)
-    });
+    // Queue type "" is sentinel for "not yet set" - will be resolved later to
+    // "sqlite" (in-project) or "none" (outside). The tuning defaults are here
+    // so the environment overlay finds their hyphenated keys and types.
+    let queue_conf =
+        hot::queue::get_resolved_conf(Val::map_empty(), false).set("type", Val::from(""));
     let redis_conf = hot::redis::get_resolved_conf(Val::map_empty());
     let serialization_conf = hot::data::serialization::get_resolved_conf(Val::map_empty());
     let domain_conf = hot::domain::get_resolved_conf(Val::map_empty());
@@ -295,6 +323,7 @@ pub(crate) fn create_default_conf() -> Val {
         "max-concurrent": 4i64,
         "code-max-concurrent": 500i64,
         "code-vm-memory-mb": 256i64,
+        "code-memory-percent": 50i64,
         "container-max-concurrent": "auto",
         "container-reserved-memory-mb": 512i64,
         "container-reserved-disk-mb": 10_240i64,
@@ -436,10 +465,15 @@ pub(crate) fn apply_env_vars(conf: Val) -> Val {
 
 fn apply_env_bindings(
     conf: Val,
-    bindings: std::collections::BTreeMap<String, String>,
+    mut bindings: std::collections::BTreeMap<String, String>,
 ) -> Result<Val, String> {
     let mut conf = conf;
     let mut secret_files = Val::map_empty();
+
+    // `hot db move-storage` reads this name itself. Its file has one id per
+    // line and adds to HOT_MOVE_STORAGE_SKIP, unlike other `<NAME>_FILE` names,
+    // whose file holds the setting's value.
+    bindings.remove("HOT_MOVE_STORAGE_SKIP_FILE");
 
     for (name, resolved) in hot::environment::resolve_hot(bindings) {
         let setting = match resolved {
@@ -1972,8 +2006,8 @@ mod tests {
         );
     }
 
-    /// A `HOT_*_FILE` name always names a file holding a setting's value, so
-    /// a setting spelled that way could never be set from the environment.
+    /// The overlay reads a `HOT_*_FILE` name as a file holding a setting's value,
+    /// so a setting spelled that way could never be set from the environment.
     #[test]
     fn no_environment_setting_name_ends_in_file() {
         for (name, _) in HYPHENATED_ENV_KEYS {
@@ -2180,6 +2214,57 @@ mod tests {
         let settings = hot::email_smtp::SmtpSettings::from_conf(&conf).unwrap();
         assert_eq!(settings.host, "smtp.example.com");
         assert_eq!(settings.timeout, std::time::Duration::from_secs(10));
+
+        // Each name reaches the hyphenated key its reader uses, and the sender
+        // name does not extend `email.from`.
+        let pem = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----";
+        let conf = apply_env_bindings(
+            create_default_conf(),
+            [
+                ("HOT_EMAIL_FROM".into(), "hot@acme.com".into()),
+                ("HOT_EMAIL_FROM_NAME".into(), "Acme, Inc.".into()),
+                ("HOT_EMAIL_ALERTS_FROM".into(), "alerts@acme.com".into()),
+                ("HOT_EMAIL_ALERTS_FROM_NAME".into(), "Acme Alerts".into()),
+                ("HOT_EMAIL_APP_URL".into(), "https://app.acme.com".into()),
+                ("HOT_EMAIL_WEB_URL".into(), "https://acme.com".into()),
+                ("HOT_EMAIL_DOCS_URL".into(), "https://docs.acme.com".into()),
+                (
+                    "HOT_EMAIL_LOGO_URL".into(),
+                    "https://acme.com/logo.png".into(),
+                ),
+                ("HOT_EMAIL_SMTP_HOST".into(), "smtp.example.com".into()),
+                ("HOT_EMAIL_SMTP_CA_CERT".into(), pem.into()),
+            ]
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(conf.get_str("email.from"), "hot@acme.com");
+        assert_eq!(conf.get_str("email.from-name"), "Acme, Inc.");
+        assert_eq!(conf.get_str("email.alerts.from"), "alerts@acme.com");
+        assert_eq!(conf.get_str("email.alerts.from-name"), "Acme Alerts");
+        assert_eq!(conf.get_str("email.app-url"), "https://app.acme.com");
+        assert_eq!(conf.get_str("email.web-url"), "https://acme.com");
+        assert_eq!(conf.get_str("email.docs-url"), "https://docs.acme.com");
+        assert_eq!(conf.get_str("email.logo-url"), "https://acme.com/logo.png");
+        let settings = hot::email_smtp::SmtpSettings::from_conf(&conf).unwrap();
+        assert_eq!(settings.ca_cert.as_deref(), Some(pem));
+        assert_eq!(
+            hot::email::EmailConfig::from_conf(&conf).from_address(),
+            "\"Acme, Inc.\" <hot@acme.com>"
+        );
+        assert_eq!(
+            hot::email::EmailConfig::alerts_from_conf(&conf).from_address(),
+            "Acme Alerts <alerts@acme.com>"
+        );
+
+        // A name alone leaves the sender address unset rather than a map.
+        let conf = apply_env_bindings(
+            create_default_conf(),
+            [("HOT_EMAIL_FROM_NAME".into(), "Acme".into())].into(),
+        )
+        .unwrap();
+        assert!(conf.get("email.from").is_none());
+        assert_eq!(conf.get_str("email.from-name"), "Acme");
     }
 
     #[test]
@@ -2198,6 +2283,38 @@ mod tests {
         assert_eq!(conf.get_int("task.worker-memory-mb"), 1536);
         assert!(!conf.get_bool("network.allow-private"));
         assert!(conf.get("task.code.max.concurrent").is_none());
+    }
+
+    /// A bundle has no hot.hot, so the environment is the only way to set
+    /// these, and they have no defaults for the overlay to find.
+    #[test]
+    fn box_settings_reach_the_keys_the_task_worker_reads() {
+        let conf = apply_env_bindings(
+            create_default_conf(),
+            [
+                (
+                    "HOT_TASK_DATA_VOLUME_DIR".into(),
+                    "/var/lib/hot/data/data-volumes".into(),
+                ),
+                ("HOT_TASK_BOX_DEFAULT_MEMORY_MB".into(), "1024".into()),
+                ("HOT_TASK_BOX_DEFAULT_DISK_MB".into(), "2048".into()),
+                ("HOT_TASK_BOX_DEFAULT_TMP_MB".into(), "128".into()),
+                ("HOT_TASK_BOX_DEFAULT_TIMEOUT_SECS".into(), "60".into()),
+                ("HOT_TASK_BOX_DEFAULT_CPU_QUOTA".into(), "50000".into()),
+            ]
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::command::worker::data_volume_base_dir(&conf).as_deref(),
+            Some("/var/lib/hot/data/data-volumes")
+        );
+        assert!(conf.get("task.data.volume.dir").is_none());
+        assert_eq!(conf.get_str("task.box-default-memory-mb"), "1024");
+        assert_eq!(conf.get_str("task.box-default-disk-mb"), "2048");
+        assert_eq!(conf.get_str("task.box-default-tmp-mb"), "128");
+        assert_eq!(conf.get_str("task.box-default-timeout-secs"), "60");
+        assert_eq!(conf.get_str("task.box-default-cpu-quota"), "50000");
     }
 
     #[test]
@@ -2246,6 +2363,139 @@ mod tests {
         assert!(conf.get("custom.bar.baz").is_none());
     }
 
+    /// Every `hot.<key> ... ::env/get("HOT_NAME", ...)` line in the init
+    /// templates names a variable that also sets `<key>` when no hot.hot
+    /// exists, as in a self-hosted bundle.
+    #[test]
+    fn template_environment_variables_set_their_keys_without_a_hot_hot() {
+        // Hot reads these straight from the environment, not from the key.
+        let read_directly = [
+            "HOT_API_URL",
+            "HOT_APP_URL",
+            "HOT_RETRY_DEFAULT_DELAY_MS",
+            "HOT_RETRY_MAX_ATTEMPTS",
+            "HOT_RETRY_MAX_DELAY_MS",
+        ];
+        // These mean something only with a hot.hot, or nowhere in this
+        // repository: `hot deploy` runs in a project, SQLite is for local
+        // projects, and the domain provider and Stripe keys belong to the
+        // deployment layer above Hot.
+        let needs_hot_hot = |name: &str| {
+            name == "HOT_API_KEY"
+                || ["HOT_DB_SQLITE_", "HOT_DOMAIN_AWS_", "HOT_STRIPE_"]
+                    .iter()
+                    .any(|prefix| name.starts_with(prefix))
+        };
+        let templates =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources/init");
+        let conf = create_default_conf();
+        let mut wrong = std::collections::BTreeSet::new();
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&templates)
+            .unwrap()
+            .filter_map(Result::ok)
+        {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("template") {
+                continue;
+            }
+            for line in std::fs::read_to_string(&path).unwrap().lines() {
+                let Some(setting) = line.trim().strip_prefix("hot.") else {
+                    continue;
+                };
+                let Some((_, name)) = setting.split_once("::env/get(\"") else {
+                    continue;
+                };
+                let key = setting.split_whitespace().next().unwrap();
+                let name = name.split('"').next().unwrap();
+                if read_directly.contains(&name) || needs_hot_hot(name) {
+                    continue;
+                }
+                checked += 1;
+                let mapped = env_var_to_conf_key_in(&conf, name);
+                if mapped != key {
+                    wrong.insert(format!("{name} sets {mapped}, not {key}"));
+                }
+            }
+        }
+        assert!(checked >= 100, "found only {checked} template settings");
+        assert!(
+            wrong.is_empty(),
+            "{}",
+            wrong.into_iter().collect::<Vec<_>>().join("\n")
+        );
+    }
+
+    #[test]
+    fn tuning_variables_reach_their_readers_with_their_types() {
+        let bindings = [
+            ("HOT_QUEUE_TASK_ORPHAN_IDLE_MS", "300000"),
+            ("HOT_QUEUE_INFRA_RETRY_BACKOFF_MS", "2500"),
+            ("HOT_QUEUE_WAIT_TARGET_P99_MS", "50"),
+            ("HOT_QUEUE_METRICS_ENABLED", "0"),
+            ("HOT_TASK_CODE_MEMORY_PERCENT", "25"),
+            ("HOT_WORKER_READ_BATCH_SIZE", "16"),
+            ("HOT_WORKER_TENANT_SERVICE_CACHE_MAX_ENTRIES", "64"),
+            ("HOT_JIT", "disabled"),
+        ]
+        .map(|(name, value)| (name.to_string(), value.to_string()));
+        let conf = apply_env_bindings(create_default_conf(), bindings.into()).unwrap();
+
+        // The queue's own defaults arrive later and must not undo the overlay,
+        // and the sentinel still lets its type resolve from context.
+        let queue = hot::queue::get_resolved_conf(conf.get("queue").unwrap(), true);
+        assert_eq!(queue.get_int("task-orphan-idle-ms"), 300_000);
+        assert_eq!(queue.get_int("infra-retry-backoff-ms"), 2_500);
+        assert_eq!(queue.get_int("wait-target-p99-ms"), 50);
+        assert!(!queue.get_bool_or_default("metrics-enabled", true));
+        assert_eq!(queue.get_int("event-orphan-idle-ms"), 60_000);
+        assert_eq!(queue.get_str("type"), "sqlite");
+
+        assert_eq!(conf.get_int("task.code-memory-percent"), 25);
+        assert_eq!(conf.get_int("worker.read-batch-size"), 16);
+
+        // The small self-host size gives the box the whole budget: zero is a
+        // real value here, not an unset one, and stays an Int for the budget.
+        let conf_with_zeros = apply_env_bindings(
+            create_default_conf(),
+            [
+                ("HOT_TASK_CONTAINER_RESERVED_MEMORY_MB", "0"),
+                ("HOT_TASK_CODE_MEMORY_PERCENT", "0"),
+            ]
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(
+            conf_with_zeros.get("task.container-reserved-memory-mb"),
+            Some(Val::Int(0))
+        );
+        assert_eq!(
+            conf_with_zeros.get("task.code-memory-percent"),
+            Some(Val::Int(0))
+        );
+        assert_eq!(conf.get_int("worker.tenant-service-cache-max-entries"), 64);
+
+        // `HOT_JIT` sets the mode and leaves the rest of the JIT settings.
+        assert_eq!(conf.get_str("jit.mode"), "disabled");
+        assert_eq!(conf.get_int("jit.threshold"), 100);
+
+        // A broken file for one of these stops the command like any other.
+        let broken = apply_env_bindings(
+            create_default_conf(),
+            [(
+                "HOT_QUEUE_TASK_ORPHAN_IDLE_MS_FILE".to_string(),
+                "/nonexistent/hot-setting".to_string(),
+            )]
+            .into(),
+        );
+        assert!(
+            broken
+                .unwrap_err()
+                .contains("HOT_QUEUE_TASK_ORPHAN_IDLE_MS_FILE")
+        );
+    }
+
     /// Every `| \`setting\` | \`HOT_NAME\` |` row in the docs names the key
     /// the environment variable really sets.
     #[test]
@@ -2282,6 +2532,15 @@ mod tests {
                 }
                 let text = std::fs::read_to_string(&path).unwrap();
                 for (key, name) in text.lines().filter_map(row) {
+                    // A key with a default is present whatever the variable
+                    // sets, so compare the mapping before applying it.
+                    let mapped = env_var_to_conf_key_in(&create_default_conf(), &name);
+                    assert_eq!(
+                        mapped,
+                        key,
+                        "{} documents {name} for {key}, but it sets {mapped}",
+                        path.display()
+                    );
                     let conf = apply_env_bindings(
                         create_default_conf(),
                         [(name.clone(), "1".to_string())].into(),
@@ -2289,9 +2548,8 @@ mod tests {
                     .unwrap();
                     assert!(
                         conf.get(&key).is_some(),
-                        "{} documents {name} for {key}, but it sets {}",
-                        path.display(),
-                        env_var_to_conf_key_in(&create_default_conf(), &name)
+                        "{} documents {name} for {key}, but Hot ignores it",
+                        path.display()
                     );
                     checked += 1;
                 }
@@ -2318,11 +2576,21 @@ mod tests {
             [("HOT_ENCRYPTION_KEY_FILE".to_string(), missing.clone())].into(),
         );
         assert!(direct.is_err());
-        // Settings with no default: a broken proxy, SMTP password, or CA
-        // file must not leave Hot running without them.
+        // Settings with no default: a broken proxy, SMTP password, sender, or
+        // CA file must not leave Hot running without them.
         for name in [
             "HOT_NETWORK_EGRESS_PROXY_FILE",
             "HOT_EMAIL_SMTP_PASSWORD_FILE",
+            "HOT_EMAIL_FROM_FILE",
+            "HOT_EMAIL_FROM_NAME_FILE",
+            "HOT_EMAIL_ALERTS_FROM_FILE",
+            "HOT_EMAIL_ALERTS_FROM_NAME_FILE",
+            "HOT_EMAIL_ALERTS_PROVIDER_FILE",
+            "HOT_EMAIL_APP_URL_FILE",
+            "HOT_EMAIL_WEB_URL_FILE",
+            "HOT_EMAIL_DOCS_URL_FILE",
+            "HOT_EMAIL_LOGO_URL_FILE",
+            "HOT_EMAIL_SMTP_CA_CERT_FILE",
             "HOT_REDIS_CA_CERT_FILE",
         ] {
             let undefaulted = apply_env_bindings(
@@ -2330,6 +2598,51 @@ mod tests {
                 [(name.to_string(), missing.clone())].into(),
             );
             assert!(undefaulted.unwrap_err().contains(name), "{name}");
+        }
+    }
+
+    /// `hot db move-storage` reads this variable, and its file is a list of ids
+    /// that adds to `HOT_MOVE_STORAGE_SKIP`, not that setting's value. So nothing
+    /// here warns, fails, or copies the list into configuration.
+    #[test]
+    fn the_move_skip_file_is_not_the_file_form_of_the_skip_setting() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "id-from-the-file\n").unwrap();
+        let empty = tempfile::NamedTempFile::new().unwrap();
+        let path = |file: &tempfile::NamedTempFile| file.path().to_string_lossy().into_owned();
+
+        let conf = apply_env_bindings(
+            create_default_conf(),
+            [
+                (
+                    "HOT_MOVE_STORAGE_SKIP".to_string(),
+                    "id-from-the-variable".to_string(),
+                ),
+                ("HOT_MOVE_STORAGE_SKIP_FILE".to_string(), path(&file)),
+            ]
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(conf.get_str("move.storage.skip"), "id-from-the-variable");
+        assert_eq!(conf.get("_secret-files"), Some(Val::map_empty()));
+
+        for variable in [
+            path(&file),
+            path(&empty),
+            "/nonexistent/move-storage-skip".to_string(),
+            String::new(),
+        ] {
+            let conf = apply_env_bindings(
+                create_default_conf(),
+                [("HOT_MOVE_STORAGE_SKIP_FILE".to_string(), variable.clone())].into(),
+            )
+            .unwrap_or_else(|error| panic!("{variable:?}: {error}"));
+            assert_eq!(conf.get("move.storage.skip"), None, "{variable:?}");
+            assert_eq!(
+                conf.get("_secret-files"),
+                Some(Val::map_empty()),
+                "{variable:?}"
+            );
         }
     }
 

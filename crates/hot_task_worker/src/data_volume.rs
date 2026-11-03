@@ -1,7 +1,10 @@
 //! Writable volume for container `/data/` directory.
 //!
-//! **Linux (production):** Creates a sparse file, formats it as ext4, and
-//! loop-mounts it to a temporary directory with size enforcement.
+//! **Linux (production):** Allocates a file, formats it as ext4, and
+//! loop-mounts it to a temporary directory with size enforcement. The file
+//! keeps its blocks for the box's lifetime, so a box can't write more than the
+//! disk holds: that disk may be PostgreSQL's and Valkey's too. On tmpfs the file
+//! stays sparse: see `ensure_disk_holds`.
 //!
 //! **Non-Linux (dev):** Creates a plain directory at
 //! `.hot/box/data/{task_id}-{nonce}` for Docker bind-mount. No size
@@ -57,6 +60,111 @@ impl Drop for DetachedCleanupSlot {
     }
 }
 
+/// Whether a failed `fallocate` leaves `truncate` to make the backing file: only
+/// where fallocate can't work at all, because the tool is missing or the
+/// filesystem doesn't support it. Any other failure, no space above all, is
+/// returned. A sparse file there would promise the box a `/data` the disk can't
+/// hold, and its writes would fill a disk PostgreSQL and Valkey may share.
+#[cfg(any(target_os = "linux", test))]
+fn fall_back_from_fallocate(
+    fallocate: &std::io::Result<std::process::Output>,
+) -> Result<(), DataVolumeError> {
+    let failure = match fallocate {
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("Operation not supported") {
+                return Ok(());
+            }
+            stderr.trim().to_string()
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => error.to_string(),
+    };
+    Err(DataVolumeError::Io(format!(
+        "could not allocate the backing file: {failure}"
+    )))
+}
+
+/// Refuse a box larger than what the disk has free for unprivileged writers.
+/// `available_bytes` leaves out the blocks ext4 keeps for root. `fallocate` runs
+/// as root and can take those too, and then PostgreSQL, which doesn't run as
+/// root, finds the disk full.
+///
+/// A real disk must hold all that admission counts for the box, not just its
+/// volume: the image and writable rootfs come next, from a thin pool in a sparse
+/// file on the same disk, and a box that only just fits would leave PostgreSQL
+/// next to nothing for as long as it runs.
+///
+/// tmpfs is exempt, and its backing file stays sparse. Its blocks are memory,
+/// which the box would hold at its full size for its whole lifetime, and its
+/// writes can't reach a data disk. A box that outgrows it gets write errors in
+/// its own `/data`.
+#[cfg(any(target_os = "linux", test))]
+fn ensure_disk_holds(
+    available_bytes: u64,
+    size_mb: u64,
+    on_tmpfs: bool,
+) -> Result<(), DataVolumeError> {
+    const MB: u64 = 1024 * 1024;
+    if on_tmpfs {
+        return Ok(());
+    }
+    let required_mb = crate::resource_budget::disk_admission_mb(size_mb);
+    if available_bytes < required_mb.saturating_mul(MB) {
+        return Err(DataVolumeError::Io(format!(
+            "the disk has {} MB available, less than the {} MB a box with a {} MB /data may use",
+            available_bytes / MB,
+            required_mb,
+            size_mb
+        )));
+    }
+    Ok(())
+}
+
+/// `mkfs.ext4` options for a box's `/data`, with no journal for speed. By default
+/// `mkfs.ext4` discards a regular file's blocks, which punches holes in the file
+/// and gives its allocation back to the disk, so `nodiscard` keeps them. tmpfs
+/// has no allocation to keep: see `ensure_disk_holds`.
+#[cfg(any(target_os = "linux", test))]
+fn mkfs_ext4_options(on_tmpfs: bool) -> &'static [&'static str] {
+    if on_tmpfs {
+        &["-q", "-O", "^has_journal", "-F"]
+    } else {
+        &["-q", "-O", "^has_journal", "-E", "nodiscard", "-F"]
+    }
+}
+
+/// What the filesystem under a new volume offers it.
+#[cfg(target_os = "linux")]
+struct VolumeDisk {
+    available_bytes: u64,
+    on_tmpfs: bool,
+}
+
+#[cfg(target_os = "linux")]
+fn volume_disk(path: &Path) -> std::io::Result<VolumeDisk> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: `path` is NUL-terminated, and `statfs` fills `stat` when it returns 0.
+    let stat = unsafe {
+        if libc::statfs(path.as_ptr(), stat.as_mut_ptr()) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        stat.assume_init()
+    };
+    Ok(VolumeDisk {
+        available_bytes: (stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64),
+        on_tmpfs: stat.f_type as u64 == libc::TMPFS_MAGIC as u64,
+    })
+}
+
+/// Held from the free-space check through the allocation, so two boxes can't both
+/// pass the check on the same free space.
+#[cfg(target_os = "linux")]
+static VOLUME_ALLOCATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[derive(Debug)]
 pub struct DataVolume {
     mount_point: PathBuf,
@@ -84,8 +192,10 @@ pub struct DataVolume {
 impl DataVolume {
     /// Create a new disk-backed volume with the specified size.
     ///
-    /// - Allocates a sparse file of `size_mb` megabytes
-    /// - Formats it as ext4
+    /// - Refuses a box the disk doesn't have room for
+    /// - Allocates a file of `size_mb` megabytes (sparse only on tmpfs and where
+    ///   fallocate can't work)
+    /// - Formats it as ext4, keeping the file's blocks
     /// - Loop-mounts it to a unique directory under `base_dir`
     ///
     /// Requires Linux (fallocate, mkfs.ext4, mount -o loop).
@@ -174,19 +284,18 @@ impl DataVolume {
                 ))
             })?;
 
-        // Create sparse file
         let size_bytes = size_mb * 1024 * 1024;
-        let output = Self::killable_command("fallocate")
-            .args([
-                "-l",
-                &size_bytes.to_string(),
-                volume.backing_file.to_string_lossy().as_ref(),
-            ])
-            .output()
-            .await;
+        let allocating = VOLUME_ALLOCATION.lock().await;
+        let disk = tokio::task::spawn_blocking(move || volume_disk(&vol_dir))
+            .await
+            .map_err(std::io::Error::other)
+            .flatten()
+            .map_err(|e| DataVolumeError::Io(format!("check free space: {e}")))?;
+        ensure_disk_holds(disk.available_bytes, size_mb, disk.on_tmpfs)?;
 
-        if !output.as_ref().is_ok_and(|output| output.status.success()) {
-            // Fallback: truncate for systems without fallocate
+        let allocated = !disk.on_tmpfs && volume.allocate_backing_file(size_bytes).await?;
+        if !allocated {
+            // Sparse: on tmpfs, and for systems without fallocate
             let output = match Self::killable_command("truncate")
                 .args([
                     "-s",
@@ -208,15 +317,12 @@ impl DataVolume {
             }
         }
 
-        // Format as ext4 (quiet, no journaling for perf)
+        drop(allocating);
+
+        // Format as ext4
         let output = match Self::killable_command("mkfs.ext4")
-            .args([
-                "-q",
-                "-O",
-                "^has_journal",
-                "-F",
-                volume.backing_file.to_string_lossy().as_ref(),
-            ])
+            .args(mkfs_ext4_options(disk.on_tmpfs))
+            .arg(&volume.backing_file)
             .output()
             .await
         {
@@ -269,6 +375,33 @@ impl DataVolume {
         }
 
         Ok(volume)
+    }
+
+    /// `fallocate` the backing file. False where that can't work at all, which
+    /// leaves `truncate` to make the file: see `fall_back_from_fallocate`.
+    #[cfg(target_os = "linux")]
+    async fn allocate_backing_file(&self, size_bytes: u64) -> Result<bool, DataVolumeError> {
+        // In English for fall_back_from_fallocate.
+        let output = Self::killable_command("fallocate")
+            .env("LC_ALL", "C")
+            .args([
+                "-l",
+                &size_bytes.to_string(),
+                self.backing_file.to_string_lossy().as_ref(),
+            ])
+            .output()
+            .await;
+
+        if output.as_ref().is_ok_and(|output| output.status.success()) {
+            return Ok(true);
+        }
+        if let Err(error) = fall_back_from_fallocate(&output) {
+            // A fallocate that runs out of space keeps what it got, and
+            // removal on drop waits for a cleanup thread, if it gets one.
+            let _ = tokio::fs::remove_file(&self.backing_file).await;
+            return Err(error);
+        }
+        Ok(false)
     }
 
     fn killable_command(program: &str) -> tokio::process::Command {
@@ -488,6 +621,172 @@ mod tests {
             drop_join: Some(std::sync::Arc::new(std::sync::Mutex::new(None))),
         };
         (mount_point, volume)
+    }
+
+    fn fallocate_failed(stderr: &str) -> std::io::Result<std::process::Output> {
+        Ok(std::process::Output {
+            status: std::process::ExitStatus::default(),
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        })
+    }
+
+    #[test]
+    fn only_a_fallocate_that_cannot_work_falls_back_to_a_sparse_file() {
+        let unsupported = fallocate_failed("fallocate: fallocate failed: Operation not supported");
+        assert!(fall_back_from_fallocate(&unsupported).is_ok());
+        let missing = Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert!(fall_back_from_fallocate(&missing).is_ok());
+
+        let no_space = fallocate_failed("fallocate: fallocate failed: No space left on device\n");
+        let error = fall_back_from_fallocate(&no_space).unwrap_err().to_string();
+        assert!(error.contains("No space left on device"), "{error}");
+        // It couldn't start, which says nothing about what the disk can hold.
+        let spawn_failed = Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        assert!(fall_back_from_fallocate(&spawn_failed).is_err());
+    }
+
+    #[test]
+    fn a_volume_must_fit_in_what_unprivileged_writers_have_free() {
+        const MB: u64 = 1024 * 1024;
+        // A real disk holds what admission counts for the box: room to fit the
+        // volume alone isn't enough.
+        assert!(ensure_disk_holds(8448 * MB, 5120, false).is_ok());
+        assert!(ensure_disk_holds(5120 * MB, 5120, false).is_err());
+        let error = ensure_disk_holds(8448 * MB - 1, 5120, false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("8447 MB available"), "{error}");
+        assert!(error.contains("the 8448 MB a box"), "{error}");
+        assert!(error.contains("a 5120 MB /data"), "{error}");
+
+        // tmpfs gets a sparse file, so its free space says nothing about the box.
+        assert!(ensure_disk_holds(0, 5120, true).is_ok());
+    }
+
+    #[test]
+    fn only_a_real_disk_has_mkfs_keep_the_file_blocks() {
+        let keeps_blocks = |options: &[&str]| options.windows(2).any(|o| o == ["-E", "nodiscard"]);
+        assert!(keeps_blocks(mkfs_ext4_options(false)));
+        assert!(!keeps_blocks(mkfs_ext4_options(true)));
+        for on_tmpfs in [false, true] {
+            assert!(
+                mkfs_ext4_options(on_tmpfs)
+                    .windows(2)
+                    .any(|o| o == ["-O", "^has_journal"])
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn volume_disk_reads_the_filesystem_under_a_path() {
+        let disk = volume_disk(&std::env::temp_dir()).unwrap();
+        assert!(disk.available_bytes > 0);
+        assert!(volume_disk(Path::new("/nonexistent/hot-data-volume")).is_err());
+    }
+
+    /// Run as root where loop mounts work, with `/var/tmp` not on tmpfs and 3 GB free:
+    /// `cargo test -p hot_task_worker a_volume_keeps_its_allocation -- --ignored`
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires root and loop devices"]
+    async fn a_volume_keeps_its_allocation_and_one_the_disk_cannot_hold_is_refused() {
+        use std::os::unix::fs::MetadataExt;
+        const MB: u64 = 1024 * 1024;
+
+        let base = Path::new("/var/tmp").join(format!("hot-datavol-{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&base).unwrap();
+
+        let volume = DataVolume::create(&base, "keeps", 64).await.unwrap();
+        let allocated = std::fs::metadata(&volume.backing_file).unwrap().blocks() * 512;
+        assert!(
+            allocated >= 64 * MB,
+            "mkfs gave the allocation back: {allocated} bytes of {}",
+            64 * MB
+        );
+
+        // Fits in what is left after the first, with no room for its rootfs.
+        let too_big = volume_disk(&base).unwrap().available_bytes / MB - 1;
+        let error = DataVolume::create(&base, "refused", too_big)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("MB available"), "{error}");
+
+        volume.cleanup().await;
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// A 600 MB tmpfs in a new directory, for the root-only tmpfs tests.
+    #[cfg(target_os = "linux")]
+    fn mount_test_tmpfs() -> PathBuf {
+        let base = Path::new("/var/tmp").join(format!("hot-datavol-{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&base).unwrap();
+        let mounted = std::process::Command::new("mount")
+            .args(["-t", "tmpfs", "-o", "size=600m", "tmpfs"])
+            .arg(&base)
+            .status()
+            .unwrap();
+        assert!(mounted.success());
+        assert!(volume_disk(&base).unwrap().on_tmpfs);
+        base
+    }
+
+    #[cfg(target_os = "linux")]
+    fn unmount_test_tmpfs(base: &Path) {
+        let unmounted = std::process::Command::new("umount")
+            .arg(base)
+            .status()
+            .unwrap();
+        assert!(unmounted.success());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    /// Run as root where loop mounts work:
+    /// `cargo test -p hot_task_worker on_tmpfs -- --ignored`
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires root and loop devices"]
+    async fn boxes_started_together_on_tmpfs_each_get_a_volume() {
+        let base = mount_test_tmpfs();
+
+        // Together they're more than the tmpfs has.
+        let (first, second) = tokio::join!(
+            DataVolume::create(&base, "first", 400),
+            DataVolume::create(&base, "second", 400),
+        );
+        let (first, second) = (first.unwrap(), second.unwrap());
+
+        first.cleanup().await;
+        second.cleanup().await;
+        unmount_test_tmpfs(&base);
+    }
+
+    /// Run as root where loop mounts work:
+    /// `cargo test -p hot_task_worker on_tmpfs -- --ignored`
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires root and loop devices"]
+    async fn a_box_larger_than_the_free_space_on_tmpfs_gets_a_sparse_volume() {
+        use std::os::unix::fs::MetadataExt;
+        const MB: u64 = 1024 * 1024;
+
+        let base = mount_test_tmpfs();
+
+        let volume = DataVolume::create(&base, "larger", 1024).await.unwrap();
+        let metadata = std::fs::metadata(&volume.backing_file).unwrap();
+        assert_eq!(metadata.len(), 1024 * MB);
+        let allocated = metadata.blocks() * 512;
+        assert!(
+            allocated < 300 * MB,
+            "the tmpfs holds {allocated} bytes of a sparse file"
+        );
+
+        std::fs::write(volume.mount_point().join("written"), b"data").unwrap();
+
+        volume.cleanup().await;
+        unmount_test_tmpfs(&base);
     }
 
     #[test]

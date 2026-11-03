@@ -616,30 +616,35 @@ pub(crate) fn build_router(
         .layer(middleware::from_fn(error_envelope_middleware))
         .layer(
             TraceLayer::new_for_http()
-                .make_span_with(|request: &axum::http::Request<_>| {
-                    let path = request.uri().path();
-                    let redacted = if path.starts_with("/webhook/") {
-                        // Redact the last path segment (capability token) from trace spans
-                        match path.rfind('/') {
-                            Some(pos) => format!("{}/[redacted]", &path[..pos]),
-                            None => path.to_string(),
-                        }
-                    } else {
-                        path.to_string()
-                    };
-                    tracing::info_span!(
-                        "http_request",
-                        method = %request.method(),
-                        uri = %redacted,
-                        request_id = %hot::request_id::of(request),
-                    )
-                })
+                .make_span_with(request_span)
                 .on_request(trace::DefaultOnRequest::new().level(tracing::Level::DEBUG))
                 .on_response(trace::DefaultOnResponse::new().level(tracing::Level::DEBUG)),
         )
         // Outside the trace layer, so each request's span carries its ID.
         .layer(middleware::from_fn(hot::request_id::middleware))
         .with_state(state)
+}
+
+/// The span that gives a request's log lines its ID. At ERROR so it exists at
+/// every log level: below the filter's level no line logged inside it would
+/// carry the ID. A span's level only decides that; the span logs nothing itself.
+fn request_span<B>(request: &axum::http::Request<B>) -> tracing::Span {
+    let path = request.uri().path();
+    let redacted = if path.starts_with("/webhook/") {
+        // Redact the last path segment (capability token) from trace spans
+        match path.rfind('/') {
+            Some(pos) => format!("{}/[redacted]", &path[..pos]),
+            None => path.to_string(),
+        }
+    } else {
+        path.to_string()
+    };
+    tracing::error_span!(
+        "http_request",
+        method = %request.method(),
+        uri = %redacted,
+        request_id = %hot::request_id::of(request),
+    )
 }
 
 pub async fn handler() -> &'static str {
@@ -685,4 +690,64 @@ async fn error_envelope_middleware(
     );
     let body = serde_json::to_vec(&error).unwrap_or_default();
     axum::response::Response::from_parts(parts, axum::body::Body::from(body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    thread_local! {
+        static LOG: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    }
+
+    #[derive(Default)]
+    struct ThreadLog;
+
+    impl std::io::Write for ThreadLog {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            LOG.with(|log| log.borrow_mut().push_str(&String::from_utf8_lossy(bytes)));
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// What a line logged while handling a request looks like at a log level.
+    fn line_inside_request(log_level: &str, path: &str) -> String {
+        LOG.with(|log| log.borrow_mut().clear());
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_env_filter(tracing_subscriber::EnvFilter::new(log_level))
+            .with_writer(ThreadLog::default)
+            .finish();
+        let mut request = axum::http::Request::get(path).body(()).unwrap();
+        request
+            .extensions_mut()
+            .insert(hot::request_id::RequestId("request-1".into()));
+        tracing::subscriber::with_default(subscriber, || {
+            let _span = request_span(&request).entered();
+            tracing::error!("inside the request");
+        });
+        LOG.with(|log| log.borrow().clone())
+    }
+
+    #[test]
+    fn a_requests_lines_carry_its_id_at_every_log_level() {
+        for log_level in ["trace", "debug", "info", "warn", "error"] {
+            let line = line_inside_request(log_level, "/v1/org");
+            assert!(
+                line.contains(r#""request_id":"request-1""#),
+                "{log_level}: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_requests_span_hides_a_webhooks_capability_token() {
+        let line = line_inside_request("info", "/webhook/hook/capability-token");
+        assert!(line.contains("/webhook/hook/[redacted]"), "{line}");
+        assert!(!line.contains("capability-token"), "{line}");
+    }
 }

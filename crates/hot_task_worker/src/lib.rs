@@ -523,6 +523,29 @@ fn validate_task_fairness_conf(conf: &Val) -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
+/// Docker box guests use plain bridge networking, so they would connect directly,
+/// past an egress proxy meant to be the only way out. With Hot Box off this
+/// worker runs no guests (see `container_task_refusal`), and code tasks do use the proxy.
+fn validate_egress_proxy_backend(
+    backend: Backend,
+    conf: &Val,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let proxy = hot::outbound::egress_proxy_setting(conf)?;
+    if backend == Backend::Docker
+        && proxy.is_some()
+        && hot::lang::hot::r#box::is_box_enabled_from_conf(conf)
+    {
+        return Err(
+            "network.egress-proxy is set, but box tasks on the Docker backend do not apply it \
+             and would connect directly. Set HOT_BOX_BACKEND=kata, turn Hot Box off with \
+             HOT_BOX_ENABLED=false, or unset network.egress-proxy"
+                .into(),
+        );
+    }
+
+    Ok(())
+}
+
 fn validate_task_orphan_idle_ms(
     queue_type: QueueType,
     task_orphan_idle_ms: u64,
@@ -647,6 +670,7 @@ const CONTAINER_SHELL_FLAGS: &str = "-ec";
 /// Run the task worker.
 pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     validate_task_fairness_conf(&config.worker_conf)?;
+    validate_egress_proxy_backend(config.container_backend, &config.worker_conf)?;
     guest_network::configure(guest_network::GuestNetworkPolicy::from_conf(
         &config.worker_conf,
     )?);
@@ -1049,6 +1073,12 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
         .await?,
     );
 
+    // Each box's /data is a loop mount under this directory, whose path Kata's
+    // shim resolves in the host's mounts. A task worker in a container needs
+    // the directory at this same path on the host, with shared propagation so
+    // the host sees the mounts: on a plain bind the host sees an empty directory
+    // and the box's writes bypass its size limit. The default suits a worker
+    // running on the host itself.
     let data_vol_base = config
         .data_volume_base_dir
         .clone()
@@ -1225,7 +1255,9 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
     }
 
     // Monitor any adopted containers in background poll tasks
-    for (adopted_task_id, adopted_container_id, adopted_ownership_resolved) in adopted {
+    for (adopted_task_id, adopted_container_id, adopted_ownership_resolved, adopted_bundle_lease) in
+        adopted
+    {
         let db = Arc::clone(&db);
         let sp = Arc::clone(&stream_publisher);
         let tq = Arc::clone(&task_queue_arc);
@@ -1233,6 +1265,9 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
         let coord = Arc::clone(&coordinator);
         let monitor_worker_id = worker_id.clone();
         tokio::spawn(async move {
+            let _running = TASK_ACTIVITY.start();
+            // The container may bind-mount resources from its build's extraction.
+            let _bundle_lease = adopted_bundle_lease;
             monitor_adopted_container(
                 adopted_task_id,
                 adopted_container_id,
@@ -1245,6 +1280,31 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
                 adopted_ownership_resolved,
             )
             .await;
+        });
+    }
+
+    // Remove extracted bundles no deployment needs, at startup and then
+    // periodically. Each redeploy adds one, and a long-lived worker would
+    // otherwise fill the disk with them.
+    // Starts after adoption, whose containers hold their leases by now.
+    {
+        let eviction_db = Arc::clone(&db);
+        let eviction_cache = Arc::clone(&bytecode_cache);
+        let eviction_coordinator = Arc::clone(&coordinator);
+        tokio::spawn(async move {
+            let mut ticks = tokio::time::interval(hot::bundle_extractions::EVICTION_INTERVAL);
+            loop {
+                ticks.tick().await;
+                if eviction_coordinator.is_shutting_down() {
+                    break;
+                }
+                let cache = Arc::clone(&eviction_cache);
+                BUNDLE_EXTRACTIONS
+                    .sweep(&eviction_db, move |build_id| {
+                        forget_evicted_bundle(&cache, build_id);
+                    })
+                    .await;
+            }
         });
     }
 
@@ -1301,6 +1361,7 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
                     memory_used_mb: memory
                         .total_memory_mb()
                         .saturating_sub(memory.available_memory_mb()),
+                    last_task_at: TASK_ACTIVITY.last_task_at(),
                 };
                 if let Err(error) = slot_status::write(&path, &status) {
                     tracing::warn!(%error, path = %path.display(), "Could not write the task status file");
@@ -2233,6 +2294,7 @@ async fn process_task(
     queue_timing: QueueLeaseTiming,
     worker_id: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let _running = TASK_ACTIVITY.start();
     let ownership = TaskOwnership::default();
     let recovery = PanicRecovery {
         request: request.clone(),
@@ -2438,6 +2500,7 @@ async fn process_task_inner(
     let stream_id = Uuid::parse_str(&request.stream_id)?;
     let env_id = Uuid::parse_str(&request.env_id)?;
     let build_id = Uuid::parse_str(&request.build_id)?;
+    let _bundle_lease = BUNDLE_EXTRACTIONS.lease(build_id);
     let infra_retry_backoff_ms = worker_conf
         .get_int_or_default("queue.infra-retry-backoff-ms", 1_000)
         .max(0) as u64;
@@ -5364,12 +5427,15 @@ async fn process_code_task(
     let resource_registry_for_task = hot::lang::hot::resource::get_build_registry(&build_id)
         .unwrap_or_else(|| Arc::new(hot::lang::hot::resource::ResourceRegistry::default()));
     let workload_started_at = chrono::Utc::now();
+    let bundle_lease = BUNDLE_EXTRACTIONS.lease(build_id);
     let task_handle = tokio::task::spawn_blocking(move || {
         // Hold the blocking-execution slot for the lifetime of the THREAD,
         // not the JoinHandle: when the timeout arm drops the handle, this
         // detached thread keeps consuming a permit until the closure returns,
         // so admission backpressure reflects wedged VM threads.
         let _blocking_execution_permit = blocking_execution_permit;
+        // Likewise the extraction: a wedged VM can still read its resources.
+        let _bundle_lease = bundle_lease;
         // Scope this task's view of `::hot::resource/*` to the bundle that
         // produced its bytecode. The guard installs the per-build registry
         // as a thread-local before user code runs and restores the prior
@@ -6626,7 +6692,28 @@ fn load_bytecode_live(
 /// the path scheme stays consistent between bytecode loading and other
 /// consumers like container-task `mounts:`.
 fn bundle_extract_dir(build_id: &Uuid) -> std::path::PathBuf {
-    std::path::PathBuf::from(format!(".hot/task-worker/build-{}", build_id.simple()))
+    BUNDLE_EXTRACTIONS.extract_dir(build_id)
+}
+
+/// When this process last ran a task, for its status file.
+static TASK_ACTIVITY: slot_status::TaskActivity = slot_status::TaskActivity::new();
+
+/// This process's extracted bundles. Tasks hold a lease on their build's for
+/// as long as they run, since a task can outlive its build's deployment.
+static BUNDLE_EXTRACTIONS: std::sync::LazyLock<hot::bundle_extractions::BundleExtractions> =
+    std::sync::LazyLock::new(|| {
+        hot::bundle_extractions::BundleExtractions::new(".hot/task-worker")
+    });
+
+/// Drop what goes with a build's extraction: its resource registry points into
+/// the directory, and its bytecode stays in the primary cache otherwise. The
+/// next task on the build extracts it and brings both back (see
+/// `load_bytecode`).
+fn forget_evicted_bundle(cache: &BytecodeCache, build_id: Uuid) {
+    hot::lang::hot::resource::remove_build_registry(&build_id);
+    if let Err(error) = cache.delete(&build_id.to_string()) {
+        tracing::warn!(%build_id, %error, "Failed to remove an evicted build's bytecode");
+    }
 }
 
 /// Prefix of the unique per-attempt temp dirs extraction writes into before
@@ -7094,7 +7181,7 @@ async fn adopt_orphaned_containers(
     task_queue: &ProcessingQueue<TaskRequest>,
     coordinator: &shutdown::TaskShutdownCoordinator,
     worker_id: &str,
-) -> Vec<(Uuid, String, bool)> {
+) -> Vec<(Uuid, String, bool, hot::bundle_extractions::BundleLease)> {
     let mut adopted = Vec::new();
 
     #[cfg(all(target_os = "linux", feature = "kata"))]
@@ -7232,7 +7319,12 @@ async fn adopt_orphaned_containers(
                         ADOPTION_DB_ATTEMPTS,
                     );
                 }
-                adopted.push((task_id, container_id, ownership_resolved));
+                adopted.push((
+                    task_id,
+                    container_id,
+                    ownership_resolved,
+                    BUNDLE_EXTRACTIONS.lease(task.build_id),
+                ));
             }
             Ok(Some(exit_code)) => {
                 // Container stopped — complete the task
@@ -7768,8 +7860,9 @@ async fn start_file_server_for_task(
 /// Build ContainerExtras with bind mounts for the hotbox binary, socket, and data volume.
 ///
 /// For Docker: bind-mounts the hotbox binary and unix socket into the container.
-/// For Kata: sets vsock env vars only (hotbox binary comes from the VM rootfs,
-/// injected via OCI bind mount in the Kata executor's build_spec).
+/// For Kata: sets vsock env vars only (hotbox binary comes from the host, through
+/// an OCI bind mount in the Kata executor's build_spec: the deploy agent's copy of
+/// the running release's hotbox, or the host image's copy when none is installed).
 fn build_container_extras(
     file_server: Option<&file_server::FileServerHandle>,
     data_volume: Option<&data_volume::DataVolume>,
@@ -8510,7 +8603,7 @@ mod tests {
         std::fs::write(extract_dir.join("manifest.hot"), "invalid @@ manifest").unwrap();
         let (_, permit) = load_bytecode(
             &build_id,
-            cache,
+            cache.clone(),
             Some(&db),
             Some(&conf),
             slots.acquire_owned().await.unwrap(),
@@ -8524,7 +8617,10 @@ mod tests {
                 .entries
                 .is_empty()
         );
-        resource::remove_build_registry(&build_id);
+        assert!(cache.exists(&build_id.to_string()));
+        forget_evicted_bundle(&cache, build_id);
+        assert!(resource::get_build_registry(&build_id).is_none());
+        assert!(!cache.exists(&build_id.to_string()));
         std::fs::remove_dir_all(extract_dir).unwrap();
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -10504,6 +10600,80 @@ mod tests {
 
         let err = validate_task_fairness_conf(&conf).unwrap_err().to_string();
         assert!(err.contains("Unsupported task.capacity-fairness"));
+    }
+
+    #[test]
+    fn docker_backend_refuses_an_egress_proxy_it_would_not_apply() {
+        let proxied = val!({
+            "box": {"enabled": true},
+            "network": {"egress-proxy": "http://user:hunter2@proxy.internal:3128"},
+        });
+        let err = validate_egress_proxy_backend(Backend::Docker, &proxied)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("network.egress-proxy"), "{err}");
+        assert!(err.contains("Docker backend"), "{err}");
+        assert!(err.contains("HOT_BOX_BACKEND=kata"), "{err}");
+        assert!(err.contains("HOT_BOX_ENABLED=false"), "{err}");
+        assert!(!err.contains("hunter2"), "{err}");
+
+        // The string form counts as enabled, as it does for container tasks.
+        let enabled_as_string = val!({
+            "box": {"enabled": "true"},
+            "network": {"egress-proxy": "http://proxy.internal:3128"},
+        });
+        assert!(validate_egress_proxy_backend(Backend::Docker, &enabled_as_string).is_err());
+
+        // No proxy to ignore: the setting is absent, or blank from a template.
+        for conf in [
+            val!({"box": {"enabled": true}}),
+            val!({"box": {"enabled": true}, "network": {"egress-proxy": " "}}),
+        ] {
+            assert!(validate_egress_proxy_backend(Backend::Docker, &conf).is_ok());
+        }
+    }
+
+    #[test]
+    fn docker_backend_with_hot_box_off_accepts_an_egress_proxy() {
+        // Off explicitly, or off because the conf never turns it on: this
+        // worker refuses every container task, so no guest can skip the proxy.
+        for conf in [
+            val!({
+                "box": {"enabled": false},
+                "network": {"egress-proxy": "http://proxy.internal:3128"},
+            }),
+            val!({"network": {"egress-proxy": "http://proxy.internal:3128"}}),
+        ] {
+            assert!(validate_egress_proxy_backend(Backend::Docker, &conf).is_ok());
+            assert!(
+                container_task_refusal(hot::lang::hot::r#box::START_FUNCTION, &conf, "alpine:3.21")
+                    .is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn a_malformed_egress_proxy_keeps_its_error_with_hot_box_on_or_off() {
+        for enabled in [true, false] {
+            let malformed = val!({
+                "box": {"enabled": enabled},
+                "network": {"egress-proxy": "proxy.internal:3128"},
+            });
+            let err = validate_egress_proxy_backend(Backend::Docker, &malformed)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("must be an http://"), "{err}");
+        }
+    }
+
+    #[cfg(all(target_os = "linux", feature = "kata"))]
+    #[test]
+    fn kata_backend_accepts_an_egress_proxy() {
+        let proxied = val!({
+            "box": {"enabled": true},
+            "network": {"egress-proxy": "http://proxy.internal:3128"},
+        });
+        assert!(validate_egress_proxy_backend(Backend::Kata, &proxied).is_ok());
     }
 
     #[test]

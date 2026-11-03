@@ -57,6 +57,17 @@ fn exit_on_unsafe_user_code_conf(conf: &Val, service: &str) {
     }
 }
 
+/// Where the task worker keeps box `/data` volumes, when configured.
+pub(crate) fn data_volume_base_dir(conf: &Val) -> Option<String> {
+    conf.get("task")
+        .and_then(|t| t.get("data-volume-dir"))
+        .map(|v| match v {
+            Val::Str(s) => s.to_string(),
+            other => other.to_string().trim_matches('"').to_string(),
+        })
+        .filter(|s| !s.is_empty() && s != "null")
+}
+
 pub(crate) async fn run_task_worker(env: Env, conf: Val) {
     info!(
         "hot.dev: TASK_WORKER starting, version: {} ({})",
@@ -151,14 +162,7 @@ pub(crate) async fn run_task_worker(env: Env, conf: Val) {
     let worker_memory_mb = (get_task_int("worker-memory-mb", 8192) as u64).max(256);
     let worker_disk_mb = (get_task_int("worker-disk-mb", 51200) as u64).max(1024);
 
-    let data_volume_base_dir = task_conf
-        .as_ref()
-        .and_then(|t| t.get("data-volume-dir"))
-        .map(|v| match v {
-            Val::Str(s) => s.to_string(),
-            other => other.to_string().trim_matches('"').to_string(),
-        })
-        .filter(|s| !s.is_empty() && s != "null");
+    let data_volume_base_dir = data_volume_base_dir(&conf);
 
     let opt_u64 = |key: &str| -> Option<u64> {
         let v = get_task_int(key, 0);

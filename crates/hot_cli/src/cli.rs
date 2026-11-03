@@ -951,7 +951,11 @@ pub(crate) enum DbAction {
     /// Show database status
     Status,
     /// Run database migrations
-    Migrate,
+    Migrate {
+        /// Print how far the database has migrated as one JSON line, and change nothing
+        #[arg(long)]
+        status: bool,
+    },
     /// Provision PostgreSQL vector indexes with separate migration credentials
     ProvisionStoreIndexes,
     /// Port a local Hot 1.x development database to the Hot 2.0 schema
@@ -992,9 +996,12 @@ pub(crate) enum DbAction {
         /// List what would move without reading or writing anything
         #[arg(long)]
         dry_run: bool,
-        /// Write one JSON line per object to this file ("-" for standard output)
+        /// Append one JSON line per object to this file ("-" for standard output, with logging off)
         #[arg(long, value_name = "FILE")]
         manifest: Option<String>,
+        /// Leave behind the objects this file lists, one id per line, in addition to HOT_MOVE_STORAGE_SKIP (default: HOT_MOVE_STORAGE_SKIP_FILE)
+        #[arg(long, value_name = "FILE")]
+        skip_file: Option<String>,
     },
 }
 

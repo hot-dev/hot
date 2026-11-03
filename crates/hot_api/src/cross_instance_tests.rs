@@ -14,11 +14,17 @@
 //! so a stale per-process value could not be refreshed by the other instance's
 //! own write.
 //!
-//! Skips unless `HOT_TEST_POSTGRES_URI` names a privileged fixture server and
-//! Redis answers at `HOT_TEST_REDIS_URI` (default `redis://127.0.0.1:6379`).
-//! Redis keys a test writes are named by its fresh environment ID or by an
-//! MCP transport session it opened, and the test deletes them when it
-//! finishes.
+//! `privileged_fixture` says when these tests skip and when they fail: without
+//! `HOT_TEST_POSTGRES_URI` they skip, and it must name a login that can create
+//! databases and roles. Redis keys a test writes are named by its fresh
+//! environment ID or by an MCP transport session it opened, and the test
+//! deletes them when it finishes.
+
+#[macro_use]
+#[path = "../../hot/tests/support/privileged_fixture.rs"]
+pub(crate) mod privileged_fixture;
+#[path = "../../hot/tests/support/sse_reader.rs"]
+mod sse_reader;
 
 use crate::server::build_app;
 use axum::Router;
@@ -26,33 +32,22 @@ use axum::body::{Body, to_bytes};
 use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
 use axum::response::Response;
-use futures::StreamExt;
 use hot::db::{self, DatabasePool, TestData};
 use hot::stream::{
     EnvEvent, EnvPublisher, StreamEvent, StreamPubSub, StreamPubSubType, StreamPublisher,
 };
 use hot::val::Val;
+use privileged_fixture::{PrivilegedDb, TestResult};
 use serde_json::{Value, json};
-use sqlx::{Executor, PgPool};
+use sse_reader::SseReader;
 use std::net::SocketAddr;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
 use tower::ServiceExt;
 use uuid::Uuid;
 
-type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
-
-/// Longest wait for a cross-instance delivery.
-const DELIVERY: Duration = Duration::from_secs(10);
-
 struct Fixture {
-    cluster: PgPool,
-    admin: PgPool,
-    database: String,
-    role: String,
-    runtime_uri: String,
+    postgres: PrivilegedDb,
     redis_uri: String,
     storage: tempfile::TempDir,
     data: TestData,
@@ -64,144 +59,65 @@ struct Fixture {
     redis_keys: std::sync::Mutex<Vec<String>>,
 }
 
-async fn redis_uri_if_available() -> Option<String> {
-    let uri = std::env::var("HOT_TEST_REDIS_URI")
-        .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
-    let client = redis::Client::open(uri.as_str()).ok()?;
-    let ping = async {
-        let mut conn = client.get_multiplexed_async_connection().await.ok()?;
-        redis::cmd("PING")
-            .query_async::<String>(&mut conn)
-            .await
-            .ok()
-    };
-    match tokio::time::timeout(Duration::from_secs(2), ping).await {
-        Ok(Some(_)) => Some(uri),
-        _ => None,
+/// Seed through the administrator, as onboarding would. Returns the test data,
+/// its organization and environment names, and an API key's ID and secret.
+async fn seed(postgres: &PrivilegedDb) -> TestResult<(TestData, String, String, Uuid, String)> {
+    let admin_db = db::create_db_pool(
+        &hot::val!({"uri": postgres.fixture_uri.clone(), "schema": "hot", "rls": {"enforce": false}}),
+    )
+    .await?;
+    let data = db::insert_test_data(&admin_db).await?;
+    let (org_slug, env_name): (String, String) = sqlx::query_as(
+        "SELECT o.slug, e.name FROM hot.env e JOIN hot.org o ON o.org_id = e.org_id \
+         WHERE e.env_id = $1",
+    )
+    .bind(data.env_id)
+    .fetch_one(&postgres.admin)
+    .await?;
+    let api_key_id = Uuid::now_v7();
+    let (api_key, key_data) = db::api_key::ApiKey::generate_api_key(&api_key_id)?;
+    db::api_key::ApiKey::insert_api_key(
+        &admin_db.with_scope(db::DatabaseScope::Environment {
+            org_id: data.org_id,
+            env_id: data.env_id,
+        }),
+        &api_key_id,
+        &data.env_id,
+        "cross-instance",
+        &serde_json::from_str(&key_data)?,
+        &data.user_id,
+        &json!({"*:*": ["*"]}),
+    )
+    .await?;
+    if let DatabasePool::Postgres(pool) = admin_db {
+        pool.close().await;
     }
+    Ok((data, org_slug, env_name, api_key_id, api_key))
 }
 
 impl Fixture {
     /// A fresh database, runtime role, environment, and API key, or `None`
-    /// when PostgreSQL or Redis is not available.
+    /// when the test should skip.
     async fn start() -> TestResult<Option<Self>> {
-        let Ok(admin_uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
-            eprintln!("skipping cross-instance test: HOT_TEST_POSTGRES_URI is not set");
+        let Some((admin_uri, redis_uri)) = privileged_fixture::services().await? else {
             return Ok(None);
         };
-        let Some(redis_uri) = redis_uri_if_available().await else {
-            eprintln!("skipping cross-instance test: Redis is not available");
-            return Ok(None);
-        };
-
-        let suffix = Uuid::new_v4().simple().to_string();
-        let database = format!("hot_xinst_{suffix}");
-        let role = format!("hot_xinst_runtime_{suffix}");
-        let password = Uuid::new_v4().simple().to_string();
-        let cluster = PgPool::connect(&admin_uri).await?;
-        cluster
-            .execute(sqlx::AssertSqlSafe(format!("CREATE DATABASE {database}")))
-            .await?;
-        cluster
-            .execute(sqlx::AssertSqlSafe(format!(
-                "CREATE ROLE {role} LOGIN PASSWORD '{password}' NOSUPERUSER NOBYPASSRLS \
-                 NOINHERIT NOCREATEDB NOCREATEROLE NOREPLICATION"
-            )))
-            .await?;
-
-        let mut url = url::Url::parse(&admin_uri)?;
-        url.set_path(&format!("/{database}"));
-        let fixture_uri = url.to_string();
-        db::run_migrations(
-            &hot::val!({"uri": fixture_uri.clone(), "migration-uri": fixture_uri.clone()}),
-        )
-        .await?;
-        let admin = PgPool::connect(&fixture_uri).await?;
-
-        // Grant the runtime role exactly what deployments grant it.
-        let provisioning_password = url.password().map(str::to_owned);
-        url.set_password(None)
-            .map_err(|_| "invalid fixture password")?;
-        let mut provision = tokio::process::Command::new("psql");
-        provision
-            .args([
-                "-X",
-                "--dbname",
-                url.as_str(),
-                "-v",
-                "ON_ERROR_STOP=1",
-                "-v",
-                &format!("runtime_role={role}"),
-                "-v",
-                "schema=hot",
-                "-f",
-            ])
-            .arg(
-                Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../resources/db/postgres/provision_runtime.sql"),
-            );
-        if let Some(password) = provisioning_password {
-            provision.env("PGPASSWORD", password);
+        let storage = tempfile::tempdir()?;
+        let postgres = PrivilegedDb::create(&admin_uri, "hot_xinst").await?;
+        match seed(&postgres).await {
+            Ok((data, org_slug, env_name, api_key_id, api_key)) => Ok(Some(Self {
+                postgres,
+                redis_uri,
+                storage,
+                data,
+                org_slug,
+                env_name,
+                api_key_id,
+                api_key,
+                redis_keys: Default::default(),
+            })),
+            Err(error) => postgres.abandon(error).await,
         }
-        let output = provision.output().await?;
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        url.set_username(&role)
-            .map_err(|_| "invalid fixture role")?;
-        url.set_password(Some(&password))
-            .map_err(|_| "invalid fixture password")?;
-        let runtime_uri = url.to_string();
-
-        // Seed through the administrator, as onboarding would.
-        let admin_db = db::create_db_pool(
-            &hot::val!({"uri": fixture_uri.clone(), "schema": "hot", "rls": {"enforce": false}}),
-        )
-        .await?;
-        let data = db::insert_test_data(&admin_db).await?;
-        let (org_slug, env_name): (String, String) = sqlx::query_as(
-            "SELECT o.slug, e.name FROM hot.env e JOIN hot.org o ON o.org_id = e.org_id \
-             WHERE e.env_id = $1",
-        )
-        .bind(data.env_id)
-        .fetch_one(&admin)
-        .await?;
-        let api_key_id = Uuid::now_v7();
-        let (api_key, key_data) = db::api_key::ApiKey::generate_api_key(&api_key_id)?;
-        db::api_key::ApiKey::insert_api_key(
-            &admin_db.with_scope(db::DatabaseScope::Environment {
-                org_id: data.org_id,
-                env_id: data.env_id,
-            }),
-            &api_key_id,
-            &data.env_id,
-            "cross-instance",
-            &serde_json::from_str(&key_data)?,
-            &data.user_id,
-            &json!({"*:*": ["*"]}),
-        )
-        .await?;
-        if let DatabasePool::Postgres(pool) = admin_db {
-            pool.close().await;
-        }
-
-        Ok(Some(Self {
-            cluster,
-            admin,
-            database,
-            role,
-            runtime_uri,
-            redis_uri,
-            storage: tempfile::tempdir()?,
-            data,
-            org_slug,
-            env_name,
-            api_key_id,
-            api_key,
-            redis_keys: Default::default(),
-        }))
     }
 
     /// Configuration every replica receives: the same database, Redis, and
@@ -209,7 +125,7 @@ impl Fixture {
     fn conf(&self) -> Val {
         let root = self.storage.path();
         hot::val!({
-            "db": {"uri": self.runtime_uri.clone(), "schema": "hot"},
+            "db": {"uri": self.postgres.runtime_uri.clone(), "schema": "hot"},
             "queue": {"type": "redis"},
             "redis": {"uri": self.redis_uri.clone()},
             "build": {
@@ -244,7 +160,7 @@ impl Fixture {
         format!("/mcp/{}/{}/tools", self.org_slug, self.env_name)
     }
 
-    async fn cleanup(self) -> TestResult {
+    async fn delete_redis_keys(&self) -> TestResult {
         if let Ok(client) = redis::Client::open(self.redis_uri.as_str())
             && let Ok(mut conn) = client.get_multiplexed_async_connection().await
         {
@@ -276,36 +192,15 @@ impl Fixture {
                 let _: () = redis::cmd("DEL").arg(&keys).query_async(&mut conn).await?;
             }
         }
-        self.admin.close().await;
-        self.cluster
-            .execute(sqlx::AssertSqlSafe(format!(
-                "DROP DATABASE {} WITH (FORCE)",
-                self.database
-            )))
-            .await?;
-        self.cluster
-            .execute(sqlx::AssertSqlSafe(format!("DROP ROLE {}", self.role)))
-            .await?;
-        self.cluster.close().await;
         Ok(())
     }
-}
 
-/// Run `body` against a fresh fixture and always clean it up.
-macro_rules! with_fixture {
-    ($body:ident) => {{
-        let Some(fixture) = Fixture::start().await? else {
-            return Ok(());
-        };
-        // Clean up after a failed assertion too, then report it.
-        let outcome =
-            futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe($body(&fixture))).await;
-        fixture.cleanup().await?;
-        match outcome {
-            Ok(result) => result,
-            Err(panic) => std::panic::resume_unwind(panic),
-        }
-    }};
+    /// Drops the database even when Redis has gone away.
+    async fn cleanup(self) -> TestResult {
+        let redis = self.delete_redis_keys().await;
+        let postgres = self.postgres.destroy().await;
+        postgres.and(redis)
+    }
 }
 
 fn request(method: &str, path: &str, token: Option<&str>, body: Body) -> Request<Body> {
@@ -355,62 +250,6 @@ async fn bytes_call(app: &Router, path: &str, token: &str) -> (StatusCode, Vec<u
     let status = response.status();
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     (status, bytes.to_vec())
-}
-
-/// Server-sent events read from a response body. A task drains the body
-/// continuously, as the HTTP server does for a connected client.
-struct SseReader {
-    events: mpsc::UnboundedReceiver<(String, String)>,
-    task: tokio::task::JoinHandle<()>,
-}
-
-impl SseReader {
-    fn new(response: Response) -> Self {
-        assert_eq!(response.status(), StatusCode::OK, "SSE request failed");
-        let (tx, events) = mpsc::unbounded_channel();
-        let task = tokio::spawn(async move {
-            let mut body = response.into_body().into_data_stream();
-            let mut buffer = String::new();
-            while let Some(Ok(chunk)) = body.next().await {
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
-                while let Some(end) = buffer.find("\n\n") {
-                    let frame: String = buffer.drain(..end + 2).collect();
-                    let mut event = "message".to_string();
-                    let mut data = Vec::new();
-                    for line in frame.lines() {
-                        if let Some(name) = line.strip_prefix("event:") {
-                            event = name.trim().to_string();
-                        } else if let Some(value) = line.strip_prefix("data:") {
-                            data.push(value.strip_prefix(' ').unwrap_or(value).to_string());
-                        }
-                    }
-                    if !data.is_empty() && tx.send((event, data.join("\n"))).is_err() {
-                        return;
-                    }
-                }
-            }
-        });
-        Self { events, task }
-    }
-
-    /// The data of the next event named `name`, skipping other events.
-    async fn next(&mut self, name: &str) -> String {
-        let deadline = tokio::time::Instant::now() + DELIVERY;
-        loop {
-            match tokio::time::timeout_at(deadline, self.events.recv()).await {
-                Ok(Some((event, data))) if event == name => return data,
-                Ok(Some(_)) => continue,
-                Ok(None) => panic!("SSE stream ended while waiting for `{name}`"),
-                Err(_) => panic!("no `{name}` event within {DELIVERY:?}"),
-            }
-        }
-    }
-}
-
-impl Drop for SseReader {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
 }
 
 fn json_rpc(id: i64, method: &str) -> Value {
@@ -493,7 +332,7 @@ async fn mcp_http_sse_body(fx: &Fixture) -> TestResult {
     .bind(serde_json::from_str::<Value>(&other_key_data)?)
     .bind(fx.data.user_id)
     .bind(json!({"*:*": ["*"]}))
-    .execute(&fx.admin)
+    .execute(&fx.postgres.admin)
     .await?;
     let (status, body) = post(b.clone(), 4, "ping", other_key, endpoint.clone()).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
@@ -856,7 +695,7 @@ async fn blobs_body(fx: &Fixture) -> TestResult {
     sqlx::query("UPDATE hot.run SET result = $1 WHERE run_id = $2")
         .bind(&spilled)
         .bind(fx.data.run_id)
-        .execute(&fx.admin)
+        .execute(&fx.postgres.admin)
         .await?;
     drop(worker_blobs);
     if let Ok(DatabasePool::Postgres(pool)) = Arc::try_unwrap(worker_db) {
@@ -865,17 +704,17 @@ async fn blobs_body(fx: &Fixture) -> TestResult {
 
     let a = fx.instance().await;
     let b = fx.instance().await;
-    let (status, run) = json_call(
-        &a,
-        "GET",
-        &format!("/v1/runs/{}", fx.data.run_id),
-        &fx.api_key,
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{run}");
-    assert_eq!(run["data"]["result"]["report"], payload);
     for app in [&a, &b] {
+        let (status, run) = json_call(
+            app,
+            "GET",
+            &format!("/v1/runs/{}", fx.data.run_id),
+            &fx.api_key,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{run}");
+        assert_eq!(run["data"]["result"]["report"], payload);
         let (status, bytes) = bytes_call(
             app,
             &format!("/v1/blobs/{blob_ref_id}/download"),
@@ -905,7 +744,7 @@ async fn credentials_body(fx: &Fixture) -> TestResult {
         "POST",
         "/v1/sessions",
         &fx.api_key,
-        Some(json!({"permissions": {"event:*": ["read"]}})),
+        Some(json!({"permissions": {"event:*": ["read"], "stream:*": ["read"]}})),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{session}");
@@ -913,8 +752,31 @@ async fn credentials_body(fx: &Fixture) -> TestResult {
     let session_id = session["data"]["session_id"].as_str().unwrap().to_string();
 
     // Sessions reach the event, task, and stream routes.
+    let task_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO hot.task (task_id, env_id, stream_id, build_id, origin_run_id, function_name) \
+         VALUES ($1, $2, $3, $4, $5, '::app/session-task')",
+    )
+    .bind(task_id)
+    .bind(fx.data.env_id)
+    .bind(fx.data.stream_id)
+    .bind(fx.data.build_id)
+    .bind(fx.data.run_id)
+    .execute(&fx.postgres.admin)
+    .await?;
     let (status, events) = json_call(&b, "GET", "/v1/events", &token, None).await;
     assert_eq!(status, StatusCode::OK, "{events}");
+    let (status, task) = json_call(&b, "GET", &format!("/v1/tasks/{task_id}"), &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{task}");
+    assert_eq!(task["data"]["task_id"], task_id.to_string());
+    let stream_path = format!("/v1/streams/{}/subscribe", fx.data.stream_id);
+    let stream = send(
+        &b,
+        request("GET", &stream_path, Some(&token), Body::empty()),
+    )
+    .await;
+    assert_eq!(stream.status(), StatusCode::OK);
+    drop(stream);
 
     let (status, body) = json_call(
         &b,
@@ -927,6 +789,12 @@ async fn credentials_body(fx: &Fixture) -> TestResult {
     assert!(status.is_success(), "{status} {body}");
     let (status, _) = json_call(&a, "GET", "/v1/events", &token, None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let stream = send(
+        &a,
+        request("GET", &stream_path, Some(&token), Body::empty()),
+    )
+    .await;
+    assert_eq!(stream.status(), StatusCode::UNAUTHORIZED);
 
     // Both instances have just authenticated the API key; revoke it out of
     // band and neither keeps accepting it.
@@ -938,7 +806,7 @@ async fn credentials_body(fx: &Fixture) -> TestResult {
     }
     sqlx::query("UPDATE hot.api_key SET active = false WHERE api_key_id = $1")
         .bind(fx.api_key_id)
-        .execute(&fx.admin)
+        .execute(&fx.postgres.admin)
         .await?;
     for app in [&a, &b] {
         assert_eq!(
@@ -970,20 +838,20 @@ async fn caches_body(fx: &Fixture) -> TestResult {
     }
     sqlx::query("UPDATE hot.project SET name = 'renamed-elsewhere' WHERE project_id = $1")
         .bind(fx.data.project_id)
-        .execute(&fx.admin)
+        .execute(&fx.postgres.admin)
         .await?;
     for app in [&a, &b] {
         let (_, body) = json_call(app, "GET", &project, &fx.api_key, None).await;
         assert_eq!(body["data"]["name"], "renamed-elsewhere");
     }
 
-    // A verified custom domain routes on both instances; once another
-    // instance deletes it, neither keeps routing it from its cache.
+    // A verified custom domain routes on both instances; once it is deleted
+    // out of band, neither keeps routing it from its cache.
     let host = format!("mcp-{}.example.test", Uuid::now_v7().simple());
     sqlx::query("INSERT INTO hot.domain(env_id, domain, verified_at) VALUES ($1, $2, now())")
         .bind(fx.data.env_id)
         .bind(&host)
-        .execute(&fx.admin)
+        .execute(&fx.postgres.admin)
         .await?;
     let ping = |host: String| {
         let mut request = request(
@@ -1003,7 +871,7 @@ async fn caches_body(fx: &Fixture) -> TestResult {
     }
     sqlx::query("UPDATE hot.domain SET deleted_at = now() WHERE domain = $1")
         .bind(&host)
-        .execute(&fx.admin)
+        .execute(&fx.postgres.admin)
         .await?;
     for app in [&a, &b] {
         assert_eq!(

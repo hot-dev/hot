@@ -3,6 +3,7 @@ pub mod blob;
 pub mod build;
 pub mod build_info;
 pub mod bundle;
+pub mod bundle_extractions;
 pub mod cache;
 pub mod check;
 pub mod context_encryption;

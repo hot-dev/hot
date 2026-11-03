@@ -846,6 +846,23 @@ pub async fn call_deletion_days_for_org_or(
     }
 }
 
+/// The call retention to tell an organization about: what its features say,
+/// unless they say unlimited while the installation deletes the calls of
+/// organizations without a plan after `no_plan_days`
+/// ([`crate::db::get_call_retention_days`]).
+pub async fn call_retention_days_for_org(
+    db: &DatabasePool,
+    org_id: &Uuid,
+    features: &super::features::Features,
+    no_plan_days: i32,
+) -> i32 {
+    let days = features.call_retention_days();
+    if days >= 0 || no_plan_days < 0 {
+        return days;
+    }
+    call_deletion_days_for_org_or(db, org_id, no_plan_days).await
+}
+
 /// Organization Usage Tracking
 #[derive(Debug, Clone, FromRow, Serialize)]
 pub struct OrgUsage {

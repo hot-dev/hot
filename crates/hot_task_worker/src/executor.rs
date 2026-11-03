@@ -99,11 +99,29 @@ pub(crate) struct PullFailure {
 /// reason the user can act on. The raw text stays in the worker log: it can
 /// name worker hosts, mirrors and runtime internals. `registry_auth` is the
 /// name of the task's registry-auth secret, if it has one.
+///
+/// Only Docker Hub's answers are told apart. The calling code names any other
+/// registry, which can redirect the pull to an address that code may not
+/// reach, so every failure from one reads the same, in `infra` too: the task's
+/// result carries it, and telling a refusal from a dropped connection would
+/// say what answered at that address.
 pub(crate) fn describe_pull_failure(
     detail: &str,
     image: &str,
     registry_auth: Option<&str>,
 ) -> PullFailure {
+    use hot::lang::hot::r#box::registry_auth::{DOCKER_HUB, image_registry};
+    if image_registry(image) != DOCKER_HUB {
+        return PullFailure {
+            message: format!(
+                "Could not pull image '{image}'. Check the image name and tag, that its \
+                 registry is reachable from this worker, and, for a private image, its \
+                 registry-auth"
+            ),
+            infra: false,
+        };
+    }
+
     // Match on the runtime's words, not on the image name inside them.
     let mut text = detail.to_lowercase();
     for name in [with_default_tag(image).into_owned(), image.to_string()] {
@@ -1247,6 +1265,65 @@ pub(crate) fn normalize_image_ref(image: &str) -> String {
     with_default_tag(&qualified).into_owned()
 }
 
+/// Where each box finds `hotbox`, and where a host image or a standalone
+/// install keeps the copy it was built with. That copy can be older than this
+/// worker, so a box uses it only when no agent installed one.
+#[cfg_attr(not(all(target_os = "linux", feature = "kata")), allow(dead_code))]
+const BAKED_HOTBOX: &str = "/usr/local/bin/hotbox";
+/// Where the deploy agent installs the running release's own `hotbox` on the
+/// host, before that release's task worker starts.
+#[cfg_attr(not(all(target_os = "linux", feature = "kata")), allow(dead_code))]
+const INSTALLED_HOTBOX: &str = "/var/lib/hot/kata/hotbox";
+/// Runs a command in the host's mount namespace, where Kata's shim resolves a
+/// bind mount's source. The task worker can run in a container that does not
+/// mount either path.
+#[cfg_attr(not(all(target_os = "linux", feature = "kata")), allow(dead_code))]
+const IN_HOST_MOUNTS: &[&str] = &["nsenter", "-t", "1", "-m", "--"];
+
+/// The host path to bind-mount as a box's `hotbox`: `installed` if it exists,
+/// or `baked` if it does not. A check that cannot say is an error, not the
+/// fallback, since another release's `hotbox` may not speak this worker's
+/// protocol. `in_host` is the command that reaches the host's mounts.
+#[cfg_attr(not(all(target_os = "linux", feature = "kata")), allow(dead_code))]
+async fn kata_hotbox_source<'a>(
+    in_host: &[&str],
+    installed: &'a str,
+    baked: &'a str,
+) -> ExecutorResult<&'a str> {
+    let output = tokio::process::Command::new(in_host[0])
+        .args(&in_host[1..])
+        .args([
+            "sh",
+            "-c",
+            r#"if [ -e "$1" ]; then echo installed; else echo absent; fi"#,
+            "sh",
+            installed,
+        ])
+        .output()
+        .await
+        .map_err(|e| ExecutorError::Create(format!("hotbox check failed to start: {e}")))?;
+    let answer = String::from_utf8_lossy(&output.stdout);
+    match answer.trim() {
+        "installed" if output.status.success() => Ok(installed),
+        "absent" if output.status.success() => Ok(baked),
+        _ => Err(ExecutorError::Create(format!(
+            "hotbox check failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))),
+    }
+}
+
+/// The OCI mount that gives a box `hotbox` from `source`, a host path.
+#[cfg_attr(not(all(target_os = "linux", feature = "kata")), allow(dead_code))]
+fn kata_hotbox_mount(source: &str) -> serde_json::Value {
+    serde_json::json!({
+        "destination": BAKED_HOTBOX,
+        "type": "bind",
+        "source": source,
+        "options": ["rbind", "ro"]
+    })
+}
+
 /// Derive the base container ID for a task from its trace/task ID: the
 /// last 24 hex chars of the UUID (v7, where most randomness lives). Used
 /// as both the containerd container_id and the Kata sandbox ID so shim
@@ -2166,25 +2243,25 @@ mod kata {
                             "{}/{}/root/kata.hvsock",
                             KATA_VC_DIR, container_id
                         ));
-                        if let Some(parent) = vsock_path.parent() {
-                            if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                                self.cleanup(
-                                    &mut tasks,
-                                    &mut containers,
-                                    &mut snapshots,
-                                    &container_id,
-                                    Some((stdout_fifo.as_str(), stderr_fifo.as_str())),
-                                )
-                                .await;
-                                if needs_network {
-                                    crate::cni::teardown(&cni_container_id).await;
-                                }
-                                return Err(ExecutorError::Other(format!(
-                                    "failed to create vsock dir {}: {}",
-                                    parent.display(),
-                                    e
-                                )));
+                        if let Some(parent) = vsock_path.parent()
+                            && let Err(e) = tokio::fs::create_dir_all(parent).await
+                        {
+                            self.cleanup(
+                                &mut tasks,
+                                &mut containers,
+                                &mut snapshots,
+                                &container_id,
+                                Some((stdout_fifo.as_str(), stderr_fifo.as_str())),
+                            )
+                            .await;
+                            if needs_network {
+                                crate::cni::teardown(&cni_container_id).await;
                             }
+                            return Err(ExecutorError::Other(format!(
+                                "failed to create vsock dir {}: {}",
+                                parent.display(),
+                                e
+                            )));
                         }
                         VsockSetup::HybridUds { path: vsock_path }
                     }
@@ -2581,7 +2658,9 @@ mod kata {
             image_env: &[String],
             task_id: Option<&str>,
         ) -> ExecutorResult<()> {
-            let spec = self.build_spec(id, cmd, env, limits, extras, netns_path, image_env);
+            let hotbox = kata_hotbox_source(IN_HOST_MOUNTS, INSTALLED_HOTBOX, BAKED_HOTBOX).await?;
+            tracing::debug!(container_id = id, hotbox, "kata.hotbox.source");
+            let spec = self.build_spec(id, cmd, env, limits, extras, netns_path, image_env, hotbox);
             let spec_json =
                 serde_json::to_vec(&spec).map_err(|e| ExecutorError::Create(e.to_string()))?;
 
@@ -2644,6 +2723,7 @@ mod kata {
             extras: Option<&ContainerExtras>,
             netns_path: Option<&str>,
             image_env: &[String],
+            hotbox_source: &str,
         ) -> serde_json::Value {
             // Start with the image's embedded ENV, then overlay user/extras env.
             // User-provided vars win over image vars for the same key.
@@ -2792,12 +2872,7 @@ mod kata {
                 }));
             }
 
-            mounts.push(serde_json::json!({
-                "destination": "/usr/local/bin/hotbox",
-                "type": "bind",
-                "source": "/usr/local/bin/hotbox",
-                "options": ["rbind", "ro"]
-            }));
+            mounts.push(kata_hotbox_mount(hotbox_source));
 
             serde_json::json!({
                 "ociVersion": "1.0.0",
@@ -3200,7 +3275,7 @@ mod tests {
 
     #[test]
     fn pull_failures_name_the_users_fix_and_only_worker_causes_are_infra() {
-        let image = "ghcr.io/acme/tool:1";
+        let image = "acme/tool:1";
         let cases = [
             // Docker 29 (containerd image store) for a missing tag.
             (
@@ -3221,8 +3296,8 @@ mod tests {
             (
                 "Docker responded with status code 500: error from registry: denied",
                 image,
-                Some("ghcr-pull"),
-                "registry-auth secret 'ghcr-pull'",
+                Some("hub-pull"),
+                "registry-auth secret 'hub-pull'",
             ),
             (
                 "Docker responded with status code 500: authentication required - incorrect \
@@ -3258,8 +3333,8 @@ mod tests {
         }
 
         for detail in [
-            "Docker responded with status code 500: Get \"https://ghcr.io/v2/\": dial tcp: \
-             i/o timeout",
+            "Docker responded with status code 500: Get \"https://registry-1.docker.io/v2/\": \
+             dial tcp: i/o timeout",
             "this worker's containerd has no Transfer service, which pulling with \
              registry-auth needs (containerd 1.7 or later)",
             "toomanyrequests: You have reached your pull rate limit",
@@ -3274,6 +3349,123 @@ mod tests {
             None,
         );
         assert!(failure.infra);
+    }
+
+    #[test]
+    fn pull_failures_from_other_registries_say_nothing_of_what_answered() {
+        // What a redirected pull could meet at an address the code may not
+        // reach, and what a registry itself says.
+        let details = [
+            "failed to do request: Head \"http://10.0.3.7:6379/v2/x/manifests/y\": dial tcp \
+             10.0.3.7:6379: connect: connection refused",
+            "dial tcp 10.0.3.7:5432: i/o timeout",
+            "unexpected status from HEAD request to http://10.0.3.7:80/v2/: 401 Unauthorized",
+            "pull access denied, repository does not exist or may require 'docker login'",
+            "http://10.0.3.7/v2/x/manifests/y: not found",
+            "toomanyrequests: You have reached your pull rate limit",
+            "no matching manifest for linux/amd64 in the manifest list entries",
+            "media type \"application/vnd.docker.distribution.manifest.v1+prettyjws\"",
+            "invalid reference format",
+            "this worker's containerd has no Transfer service",
+            "",
+        ];
+        for image in [
+            "ghcr.io/acme/tool:1",
+            "registry.attacker.example/x:y",
+            "docker.io.attacker.example/x:y",
+            "docker.io:443/x:y",
+            "docker.io@attacker.example/x:y",
+            "valkey:6379/x:y",
+            "10.68.4.10:5432/x:y",
+            "[::1]:5000/x:y",
+            "localhost:5000/x",
+            "localhost/x",
+            "LOCALHOST/x:y",
+            "FOO/x:y",
+            "https://registry.attacker.example/x:y",
+        ] {
+            let expected = describe_pull_failure("", image, None);
+            assert!(expected.message.contains(image), "{}", expected.message);
+            assert!(!expected.infra, "{image}");
+            for detail in details {
+                for auth_entry in [None, Some("pull-secret")] {
+                    assert_eq!(
+                        describe_pull_failure(detail, image, auth_entry),
+                        expected,
+                        "{image}: {detail}"
+                    );
+                }
+            }
+            // The one message is the same words for every registry.
+            assert_eq!(
+                expected.message.replace(image, "IMAGE"),
+                describe_pull_failure("", "ghcr.io/acme/tool:1", None)
+                    .message
+                    .replace("ghcr.io/acme/tool:1", "IMAGE")
+            );
+        }
+
+        // Docker Hub, by any of its names, still says what is wrong.
+        for image in [
+            "alpine:nope",
+            "acme/tool:nope",
+            "docker.io/library/alpine:nope",
+            "index.docker.io/acme/tool:nope",
+            "registry-1.docker.io/acme/tool:nope",
+        ] {
+            let failure = describe_pull_failure("resolve failed: x: not found", image, None);
+            assert!(failure.message.contains("was not found"), "{image}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_box_uses_the_installed_hotbox_unless_it_is_absent() {
+        let directory = std::env::temp_dir().join(format!("hot-hotbox-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let installed = directory.join("hotbox");
+        let installed = installed.to_str().unwrap();
+        // `env` runs the rest of its arguments, as nsenter does in the host's mounts.
+        let here = &["env"][..];
+
+        // A standalone install: no agent, so the copy it was built with.
+        assert_eq!(
+            kata_hotbox_source(here, installed, BAKED_HOTBOX)
+                .await
+                .unwrap(),
+            BAKED_HOTBOX
+        );
+
+        std::fs::write(installed, b"hotbox").unwrap();
+        assert_eq!(
+            kata_hotbox_source(here, installed, BAKED_HOTBOX)
+                .await
+                .unwrap(),
+            installed
+        );
+
+        // A check that cannot reach the host's mounts is no sign that the file
+        // is absent, whichever way it fails.
+        for broken in [&["false"][..], &["hot-no-such-command"][..]] {
+            assert!(
+                matches!(
+                    kata_hotbox_source(broken, installed, BAKED_HOTBOX).await,
+                    Err(ExecutorError::Create(_))
+                ),
+                "{broken:?}"
+            );
+        }
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn a_box_always_finds_hotbox_at_the_same_path_read_only() {
+        let mount = kata_hotbox_mount(INSTALLED_HOTBOX);
+        assert_eq!(mount["destination"], "/usr/local/bin/hotbox");
+        assert_eq!(mount["source"], "/var/lib/hot/kata/hotbox");
+        assert_eq!(mount["type"], "bind");
+        assert_eq!(mount["options"], serde_json::json!(["rbind", "ro"]));
+        // The agent installs it at this path on the host's data disk.
+        assert_eq!(INSTALLED_HOTBOX, "/var/lib/hot/kata/hotbox");
     }
 
     #[test]

@@ -837,14 +837,40 @@ struct BuildPathCache {
     paths: Arc<RwLock<AHashMap<Uuid, PathBuf>>>,
     /// Per-build extraction locks to ensure only one thread extracts at a time (in-process)
     extraction_locks: Arc<parking_lot::Mutex<AHashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>>,
+    /// The extracted directories themselves, and the runs using them
+    extractions: hot::bundle_extractions::BundleExtractions,
 }
 
 impl BuildPathCache {
     fn new() -> Self {
+        Self::with_extractions(hot::bundle_extractions::BundleExtractions::new(".hot/run"))
+    }
+
+    fn with_extractions(extractions: hot::bundle_extractions::BundleExtractions) -> Self {
         Self {
             paths: Arc::new(RwLock::new(AHashMap::new())),
             extraction_locks: Arc::new(parking_lot::Mutex::new(AHashMap::new())),
+            extractions,
         }
+    }
+
+    /// Keep a build's extraction on disk while a run uses it.
+    fn lease(&self, build_id: Uuid) -> hot::bundle_extractions::BundleLease {
+        self.extractions.lease(build_id)
+    }
+
+    /// Remove the extractions of builds no deployment in any environment needs.
+    async fn evict_unneeded_extractions(&self, db: &DatabasePool) {
+        let paths = Arc::clone(&self.paths);
+        let locks = Arc::clone(&self.extraction_locks);
+        self.extractions
+            .sweep(db, move |build_id| {
+                if let Ok(mut paths) = paths.write() {
+                    paths.remove(&build_id);
+                }
+                locks.lock().remove(&build_id);
+            })
+            .await;
     }
 
     fn get(&self, build_id: &Uuid) -> Option<PathBuf> {
@@ -865,6 +891,10 @@ impl BuildPathCache {
 
     /// Remove cache entries for builds that are no longer deployed.
     /// Called periodically to prevent unbounded memory growth.
+    ///
+    /// Only the in-memory entries: `valid_build_ids` covers one environment, so
+    /// a build missing from it can still be deployed in another. See
+    /// `evict_unneeded_extractions` for the directories.
     fn retain_only(&self, valid_build_ids: &ahash::AHashSet<Uuid>) {
         // Clean up paths cache
         if let Ok(mut paths) = self.paths.write() {
@@ -2600,10 +2630,32 @@ async fn acknowledge_unhandled_event_if_stable(
     Ok(())
 }
 
+/// What notification deliveries send through, built once per worker process.
+/// An SMTP sender owns a connection pool: one per message would pay for a new
+/// connection, TLS handshake, and login each time, which relays throttle, and
+/// log a misconfiguration once per message.
+struct NotificationSenders {
+    app_email: hot::email::EmailSender,
+    alert_email: hot::email::EmailSender,
+    alert_email_config: hot::email::EmailConfig,
+    alert_destinations: hot::outbound::DestinationPolicy,
+}
+
+impl NotificationSenders {
+    fn from_conf(conf: &Val) -> Self {
+        Self {
+            app_email: hot::email::EmailSender::from_conf(conf),
+            alert_email: hot::email::EmailSender::alerts_from_conf(conf),
+            alert_email_config: hot::email::EmailConfig::alerts_from_conf(conf),
+            alert_destinations: hot::outbound::DestinationPolicy::for_alert_delivery(conf),
+        }
+    }
+}
+
 async fn process_alert_delivery_message(
     worker_id: usize,
     db: Arc<DatabasePool>,
-    worker_conf: Val,
+    senders: Arc<NotificationSenders>,
     message: Message,
 ) -> Result<(), WorkerError> {
     let db = Arc::new(db.with_scope(DatabaseScope::Maintenance {
@@ -2621,11 +2673,9 @@ async fn process_alert_delivery_message(
 
     let http_client = alert_http_client();
 
-    let alert_email_sender = hot::email::EmailSender::alerts_from_conf(&worker_conf);
-    let alert_email_config = hot::email::EmailConfig::alerts_from_conf(&worker_conf);
     let email_sender_ref: Option<&dyn hot::db::alert::AlertEmailSender> =
-        if alert_email_sender.is_available() {
-            Some(&alert_email_sender)
+        if senders.alert_email.is_available() {
+            Some(&senders.alert_email)
         } else {
             None
         };
@@ -2633,9 +2683,9 @@ async fn process_alert_delivery_message(
     match hot::db::alert::process_single_alert_delivery(
         &db,
         &http_client,
-        hot::outbound::DestinationPolicy::for_alert_delivery(&worker_conf),
+        senders.alert_destinations.clone(),
         email_sender_ref,
-        &alert_email_config,
+        &senders.alert_email_config,
         &alert_msg.body.alert_delivery_id,
     )
     .await
@@ -2668,7 +2718,7 @@ async fn process_alert_delivery_message(
 async fn process_email_message(
     worker_id: usize,
     db: Arc<DatabasePool>,
-    worker_conf: Val,
+    senders: Arc<NotificationSenders>,
     message: Message,
 ) -> Result<(), WorkerError> {
     let db = Arc::new(db.with_scope(DatabaseScope::Maintenance {
@@ -2684,12 +2734,12 @@ async fn process_email_message(
         email_msg.body.to_address
     );
 
-    let sender = hot::email::EmailSender::from_conf(&worker_conf);
+    let sender = &senders.app_email;
     if !sender.is_available() {
         let _ = hot::db::email_queue::EmailQueueEntry::mark_failed(
             &db,
             &email_msg.body.email_queue_id,
-            "Email sender not configured",
+            sender.unavailable_reason(),
         )
         .await;
         return Ok(());
@@ -4722,6 +4772,9 @@ async fn execute_single_event_handler_inner(
     // The caller already registered `run_id`; from here this guard owns
     // unregistration on every exit path (see `RunRegistration` docs).
     let _run_registration = RunRegistration::new(Arc::clone(&shutdown_coordinator), run_id);
+    // Before the build's extraction is looked up below: the run may outlive
+    // this build's deployment.
+    let _bundle_lease = build_path_cache.lease(build.build_id);
 
     let org_id = event_message
         .body
@@ -5097,8 +5150,12 @@ async fn execute_single_event_handler_inner(
                 let prep_build_id = build.build_id;
                 let prep_project_name = project.name.clone();
                 let holds_file_lock = _file_lock_guard.is_some();
+                // The run's own lease and the file lock go if the setup watchdog
+                // cancels this future, while the closure keeps writing.
+                let prep_lease = build_path_cache.lease(build.build_id);
                 let prepared = tokio::task::spawn_blocking(move || {
                     let _prep_permit = prep_permit;
+                    let _prep_lease = prep_lease;
                     extract_and_precompile_event_bundle(
                         build_data,
                         extract_dir,
@@ -5506,11 +5563,14 @@ async fn execute_single_event_handler_inner(
         let run_id_for_timing = run_id;
         let external_cancel = external_cancel.clone();
         let blocking_execution_permit = blocking_execution_permit;
+        let bundle_lease = build_path_cache.lease(build.build_id);
 
         let panic_label = format!("worker:{}", function_name);
         let spawn_scheduled = std::time::Instant::now();
         tokio::task::spawn_blocking(move || {
             let _blocking_execution_permit = blocking_execution_permit;
+            // A timed-out VM keeps running detached and can still read resources.
+            let _bundle_lease = bundle_lease;
             let _resource_scope =
                 install_event_resource_scope(is_bundle_build, bundle_extract_path.as_deref());
             let spawn_entered = std::time::Instant::now();
@@ -6136,6 +6196,8 @@ pub fn get_resolved_conf(conf: Val) -> Val {
         "handler-concurrency": "serial",
         "shared-process": false,
         "local-write-concurrency": 1i64,
+        "read-batch-size": 8i64,
+        "tenant-service-cache-max-entries": 1_024i64,
         "startup-runtime-build-limit": 1_000i64,
         "startup-runtime-repair": true,
         "max-blocking-executions": -1i64
@@ -7498,6 +7560,14 @@ pub async fn run_with_components_shared_context_and_db(
         }
     }
 
+    let notification_senders = Arc::new(NotificationSenders::from_conf(&worker_conf));
+
+    // A setting retention refuses leaves calls piling up with nothing else to
+    // show for it, so say so now, not only at the next daily maintenance.
+    if let Err(problem) = hot::db::call_retention_setting(&worker_conf) {
+        error!("hot.dev: WORKER {}", problem);
+    }
+
     // In local dev, run call retention cleanup on startup (runs in background so it
     // doesn't block worker startup — the delete batches yield between iterations).
     if hot::env::is_local_dev()
@@ -7637,6 +7707,27 @@ pub async fn run_with_components_shared_context_and_db(
                 startup_shutdown_rx,
             )
             .await;
+        });
+    }
+
+    // Remove extracted bundles no deployment needs, at startup and then
+    // periodically. Each redeploy adds one, and a long-lived worker would
+    // otherwise fill the disk with them.
+    if let Some(eviction_db) = db.clone() {
+        let eviction_cache = build_path_cache.clone();
+        let mut eviction_shutdown = shutdown_rx.clone();
+        tokio::spawn(async move {
+            let mut ticks = tokio::time::interval(hot::bundle_extractions::EVICTION_INTERVAL);
+            loop {
+                tokio::select! {
+                    changed = eviction_shutdown.changed() => {
+                        if changed.is_err() || *eviction_shutdown.borrow() { break; }
+                    }
+                    _ = ticks.tick() => {
+                        eviction_cache.evict_unneeded_extractions(&eviction_db).await;
+                    }
+                }
+            }
         });
     }
 
@@ -7912,7 +8003,7 @@ pub async fn run_with_components_shared_context_and_db(
 
     if let Some(db_for_notifications) = db.clone() {
         let notification_rx = notification_claimed_rx.clone();
-        let notification_worker_conf = worker_conf.clone();
+        let notification_senders_ref = Arc::clone(&notification_senders);
         let notification_shutdown_rx = shutdown_rx.clone();
         let handle: JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>> = tokio::spawn(
             async move {
@@ -7941,16 +8032,11 @@ pub async fn run_with_components_shared_context_and_db(
                     match claimed_queue {
                         ClaimedWorkerQueue::Alert(lease) => {
                             let db = db_for_notifications.clone();
-                            let worker_conf = notification_worker_conf.clone();
+                            let senders = Arc::clone(&notification_senders_ref);
                             if let Err(e) = lease
                                 .process(|message| async move {
-                                    process_alert_delivery_message(
-                                        worker_id,
-                                        db,
-                                        worker_conf,
-                                        message,
-                                    )
-                                    .await
+                                    process_alert_delivery_message(worker_id, db, senders, message)
+                                        .await
                                 })
                                 .await
                             {
@@ -7962,10 +8048,10 @@ pub async fn run_with_components_shared_context_and_db(
                         }
                         ClaimedWorkerQueue::Email(lease) => {
                             let db = db_for_notifications.clone();
-                            let worker_conf = notification_worker_conf.clone();
+                            let senders = Arc::clone(&notification_senders_ref);
                             if let Err(e) = lease
                                 .process(|message| async move {
-                                    process_email_message(worker_id, db, worker_conf, message).await
+                                    process_email_message(worker_id, db, senders, message).await
                                 })
                                 .await
                             {
@@ -8117,6 +8203,7 @@ pub async fn run_with_components_shared_context_and_db(
         let db_clone = db.clone();
         let blob_store_clone = blob_store.clone();
         let worker_conf_clone = worker_conf.clone();
+        let notification_senders_clone = Arc::clone(&notification_senders);
         let emitter_clone = emitter.clone();
         let event_publisher_clone = event_publisher.clone();
         let encryption_clone = encryption.clone();
@@ -9626,7 +9713,10 @@ pub async fn run_with_components_shared_context_and_db(
                                                                 }
                                                             } else {
                                                                 // Organizations without a plan (self-hosted) follow db.retention.call.days.
-                                                                let no_plan_days = hot::db::get_call_retention_days(&worker_conf_ref);
+                                                                let no_plan_days = hot::db::call_retention_setting(&worker_conf_ref).unwrap_or_else(|problem| {
+                                                                    error!("hot.dev: WORKER {} maintenance: {}", worker_id, problem);
+                                                                    -1
+                                                                });
                                                                 let mut org_ids = hot::db::subscription::OrgPlan::get_all_root_org_ids(db).await.unwrap_or_default();
                                                                 for root_id in org_ids.clone() {
                                                                     if let Ok(children) = hot::db::Org::list_children(db, &root_id).await {
@@ -9762,13 +9852,10 @@ pub async fn run_with_components_shared_context_and_db(
                                 match lease
                                     .process(|message| {
                                         let db = db_ref.clone();
-                                        let worker_conf = worker_conf_clone.clone();
+                                        let senders = Arc::clone(&notification_senders_clone);
                                         async move {
                                             process_alert_delivery_message(
-                                                worker_id,
-                                                db,
-                                                worker_conf,
-                                                message,
+                                                worker_id, db, senders, message,
                                             )
                                             .await
                                         }
@@ -9793,15 +9880,10 @@ pub async fn run_with_components_shared_context_and_db(
                                 match lease
                                     .process(|message| {
                                         let db = db_ref.clone();
-                                        let worker_conf = worker_conf_clone.clone();
+                                        let senders = Arc::clone(&notification_senders_clone);
                                         async move {
-                                            process_email_message(
-                                                worker_id,
-                                                db,
-                                                worker_conf,
-                                                message,
-                                            )
-                                            .await
+                                            process_email_message(worker_id, db, senders, message)
+                                                .await
                                         }
                                     })
                                     .await
@@ -13120,6 +13202,189 @@ handler fn () { initialized }
         BuildPathCache::mark_extraction_complete(&extract_dir);
         clear_partial_bundle_extraction(&extract_dir, true).unwrap();
         assert!(BuildPathCache::is_extraction_complete(&extract_dir));
+    }
+
+    /// A relay that counts the connections it accepts and the messages it takes
+    /// on them.
+    async fn counting_smtp_relay() -> (
+        u16,
+        Arc<std::sync::atomic::AtomicUsize>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let messages = Arc::new(AtomicUsize::new(0));
+        let (accepted, taken) = (Arc::clone(&connections), Arc::clone(&messages));
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                accepted.fetch_add(1, Ordering::SeqCst);
+                let taken = Arc::clone(&taken);
+                tokio::spawn(async move {
+                    let (read, mut write) = socket.into_split();
+                    let mut lines = BufReader::new(read).lines();
+                    let mut reply: &[u8] = b"220 test ESMTP\r\n";
+                    while write.write_all(reply).await.is_ok() {
+                        let Ok(Some(line)) = lines.next_line().await else {
+                            break;
+                        };
+                        let command = line.to_ascii_uppercase();
+                        reply = if command.starts_with("DATA") {
+                            write.write_all(b"354 send it\r\n").await.unwrap();
+                            while let Ok(Some(line)) = lines.next_line().await {
+                                if line == "." {
+                                    break;
+                                }
+                            }
+                            taken.fetch_add(1, Ordering::SeqCst);
+                            b"250 queued\r\n"
+                        } else if command.starts_with("QUIT") {
+                            let _ = write.write_all(b"221 bye\r\n").await;
+                            break;
+                        } else {
+                            b"250 ok\r\n"
+                        };
+                    }
+                });
+            }
+        });
+        (port, connections, messages)
+    }
+
+    #[tokio::test]
+    async fn app_emails_share_one_smtp_connection() {
+        use std::sync::atomic::Ordering;
+
+        let (port, connections, messages) = counting_smtp_relay().await;
+        let senders = Arc::new(NotificationSenders::from_conf(&val!({
+            "email": {
+                "provider": "smtp",
+                "from": "hot@example.test",
+                "smtp": {"host": "127.0.0.1", "port": i64::from(port), "security": "none"}
+            }
+        })));
+        let db = Arc::new(hot::db::test_db().await);
+
+        for _ in 0..2 {
+            let message: Message = hot::lang::event::queue::EmailMessage {
+                id: Uuid::now_v7(),
+                head: ahash::AHashMap::new(),
+                body: hot::lang::event::queue::EmailMessageBody {
+                    email_queue_id: Uuid::now_v7(),
+                    to_address: "ops@example.test".to_string(),
+                    subject: "Hello".to_string(),
+                    html_body: None,
+                    text_body: Some("delivered".to_string()),
+                    from_address: "Hot <hot@example.test>".to_string(),
+                },
+            }
+            .into();
+            process_email_message(0, Arc::clone(&db), Arc::clone(&senders), message)
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(messages.load(Ordering::SeqCst), 2);
+        assert_eq!(connections.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn an_app_email_this_worker_cannot_send_records_why() {
+        use hot::db::email_queue::{EmailQueueEntry, EmailQueueStatus};
+
+        let senders = Arc::new(NotificationSenders::from_conf(&val!({
+            "email": {"provider": "mystery", "from": "hot@example.test"}
+        })));
+        let db = Arc::new(hot::db::test_db().await);
+        let (to_address, from_address) = ("ops@example.test", "Hot <hot@example.test>");
+        let email_queue_id = EmailQueueEntry::enqueue(
+            &db,
+            to_address,
+            "Hello",
+            None,
+            Some("undelivered"),
+            from_address,
+        )
+        .await
+        .unwrap();
+        let message: Message = hot::lang::event::queue::EmailMessage {
+            id: Uuid::now_v7(),
+            head: ahash::AHashMap::new(),
+            body: hot::lang::event::queue::EmailMessageBody {
+                email_queue_id,
+                to_address: to_address.to_string(),
+                subject: "Hello".to_string(),
+                html_body: None,
+                text_body: Some("undelivered".to_string()),
+                from_address: from_address.to_string(),
+            },
+        }
+        .into();
+
+        process_email_message(0, Arc::clone(&db), senders, message)
+            .await
+            .unwrap();
+
+        let entry = EmailQueueEntry::get_by_id(&db, &email_queue_id)
+            .await
+            .unwrap();
+        assert_eq!(entry.status_id, EmailQueueStatus::Failed as i16);
+        assert_eq!(
+            entry.error_message.as_deref(),
+            Some("email provider 'mystery' is not registered")
+        );
+    }
+
+    #[test]
+    fn extractions_live_where_the_worker_extracts() {
+        let build_id = Uuid::now_v7();
+        assert_eq!(
+            BuildPathCache::new().extractions.extract_dir(&build_id),
+            bundle_extract_dir(&build_id)
+        );
+        // Eviction skips a build whose extraction lock is held; it must find
+        // the same file the worker locks.
+        drop(BuildPathCache::acquire_file_lock(&build_id).unwrap());
+        let lock_path = bundle_extract_dir(&build_id).with_extension("lock");
+        assert!(lock_path.exists());
+        std::fs::remove_file(lock_path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn only_a_global_sweep_removes_extractions() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = BuildPathCache::with_extractions(
+            hot::bundle_extractions::BundleExtractions::new(temp.path()),
+        );
+        let other_env_build = Uuid::now_v7();
+        let extract_dir = cache.extractions.extract_dir(&other_env_build);
+        std::fs::create_dir_all(&extract_dir).unwrap();
+        BuildPathCache::mark_extraction_complete(&extract_dir);
+        cache.insert(other_env_build, extract_dir.clone());
+        let _ = cache.get_extraction_lock(&other_env_build);
+
+        // Routing prunes by one environment's builds, which says nothing about
+        // a build deployed in another.
+        cache.retain_only(&ahash::AHashSet::new());
+        assert!(cache.get(&other_env_build).is_none());
+        assert!(extract_dir.exists());
+
+        cache.insert(other_env_build, extract_dir.clone());
+        let _ = cache.get_extraction_lock(&other_env_build);
+        let db = hot::db::test_db().await;
+        let lease = cache.lease(other_env_build);
+        cache.evict_unneeded_extractions(&db).await;
+        assert!(extract_dir.exists());
+        assert!(cache.get(&other_env_build).is_some());
+
+        drop(lease);
+        cache.evict_unneeded_extractions(&db).await;
+        assert!(!extract_dir.exists());
+        assert!(cache.get(&other_env_build).is_none());
+        assert!(cache.extraction_locks.lock().is_empty());
     }
 
     #[test]
