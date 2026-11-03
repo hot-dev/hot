@@ -1035,11 +1035,17 @@ class RuntimeContract(unittest.TestCase):
                     if role == "task-worker":
                         budget = int(env["HOT_TASK_WORKER_MEMORY_MB"])
                         self.assertEqual(f"{budget}m", service["mem_limit"])
-                        # Hot gives Kata guests, outside the container, half
-                        # of the budget after its own 1 GB.
-                        caps += (budget - 1024) // 2
+                        slots = int(env["HOT_TASK_CONTAINER_MAX_CONCURRENT"])
                         self.assertGreater(budget, renderer.SIZES[size]["memory"]["task-worker"])
-                        self.assertGreater(int(env["HOT_TASK_CONTAINER_MAX_CONCURRENT"]), renderer.SIZES[size]["task"]["container"])
+                        self.assertGreater(slots, renderer.SIZES[size]["task"]["container"])
+                        # Box guests run outside the container, so each container
+                        # slot's default box counts against the VM beside the cap.
+                        caps += slots * renderer.BOX_HOST_MB
+                        if size == "small":
+                            # Past the plan in the worst case, keeping 512 MB
+                            # rather than 1 GB, which is accepted (SCALABLE_TASK).
+                            self.assertEqual(caps, available + 512)
+                            continue
                     else:
                         self.assertGreaterEqual(caps, available - 256)
                     self.assertLessEqual(caps, available)

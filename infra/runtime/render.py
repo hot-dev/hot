@@ -87,6 +87,12 @@ HOST_RESERVE_MB = 1024
 # vCPU, within its PostgreSQL pool, since one loop would top out near one
 # core. A task-worker host runs tasks in proportion to its vCPUs, within the
 # box pool (40, 100, 200 GB).
+# On medium and large, the task worker's cap, BOX_HOST_MB for each container slot,
+# and HOST_RESERVE_MB add up to the VM. A small task host can reach 512 MB past
+# that plan in the worst case, 5120 + 2 x 1280 against 7168, and then keeps 512 MB
+# rather than 1 GB. This is accepted: it takes the container at its cap, although
+# Hot's share of that cap for boxes is not used inside the container, and a 4608 MB
+# cap or one container slot would fit but run one default box at a time.
 SCALABLE_TASK = {
     "small": {"max": 2, "code": 4, "container": 2, "disk_mb": 30720},
     "medium": {"max": 4, "code": 8, "container": 4, "disk_mb": 81920},
@@ -138,7 +144,8 @@ def task_worker_memory_mb(available_mb):
     """The task worker's memory when its Kata guests share `available_mb`
     with it. Box guests run outside its container, and Hot gives them half
     of what its memory M leaves after the 1 GB it holds back, so
-    M + (M - 1024) / 2 must fit."""
+    M + (M - 1024) / 2 must fit. That is Hot's count: a default box takes
+    BOX_HOST_MB on the host, and SCALABLE_TASK says how that compares."""
     return (2 * available_mb + 1024) // 3 // 512 * 512
 
 
