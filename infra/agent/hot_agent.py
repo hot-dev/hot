@@ -1352,6 +1352,9 @@ class Agent:
         self.meminfo = Path(roots.get("meminfo", "/proc/meminfo"))
         self.backups = self.data_root / "backups"
         self.references = config["secret_references"]
+        # Restarts this process finished and could not take off the state, as
+        # {service: request ID}: see finish_restarts.
+        self._restarted = {}
 
     @staticmethod
     def _run(command, **kwargs):
@@ -2057,6 +2060,16 @@ class Agent:
                 raise AgentError("Change storage in a deploy of the release already running, then upgrade")
             if moves:
                 raise AgentError("Move storage and data services in separate deploys")
+            # A retry cut short before its bundle went in moves the same roles
+            # again. Another role would take over the record of the move that
+            # finished, and with it what that one left behind, which no report
+            # would say then.
+            joining = sorted(set(storage_moves) - set(record.get("storage_manifests", {})))
+            if progress == "moved" and joining:
+                settings = " and ".join(f"storage.{role}" for role in joining)
+                raise AgentError(f"Another storage role must wait: a storage move finished, and the deploy it belongs "
+                                 f"to has not. Put {settings} back, apply, and run deploy-now to finish that deploy, "
+                                 "then move that storage in a deploy of its own")
             # Before anything is delivered or stops: a move that cannot write once
             # it has drained Hot, or whose list of what to leave behind it would
             # refuse, leaves it stopped, waiting for deploy-now.
@@ -2190,6 +2203,7 @@ class Agent:
         cut short also passes on what it stopped (stops), since nothing else
         will say so."""
         carried = {}
+        settled = False
         for earlier in (interrupted, state.get("failed") or {}):
             if not earlier or earlier.get("rolled_back") or Agent.restore_checked(earlier):
                 continue
@@ -2205,14 +2219,17 @@ class Agent:
                 # An attempt whose move finished, or that began from one that had,
                 # has the last word on what it failed or left behind: with nothing
                 # to say, it took that off its record, and a failed record from
-                # before it does not put that back.
+                # before it does not put that back. Not one cut short before its
+                # bundle went in, though: the retry moves again, by the same report,
+                # and when that move finishes it says for itself what is left.
                 keys = ["storage_manifests"]
-                if carried.get("storage_progress") != "moved":
+                if not settled:
                     keys += ["storage_failed", "storage_left_behind"]
                 carried.setdefault("storage_progress", progress)
                 for key in keys:
                     if earlier.get(key):
                         carried.setdefault(key, earlier[key])
+                settled = progress == "moved" and ("storage-moved" not in steps or "rendered" in steps)
         left = Agent.stops(interrupted)
         if left:
             carried["cut_short"] = sorted(left)
@@ -2388,9 +2405,9 @@ class Agent:
     def storage_moves(self, previous):
         """Storage roles whose backend changed since the installed bundle, as
         {role: target}. Moves into S3 or GCS are automated on a single machine.
-        Moving back onto the host, between buckets of one backend, out of GCS, or
-        to another backend on a scalable installation, whose hosts do not move
-        storage, is refused before anything stops."""
+        Moving back onto the host, between buckets of one backend, or out of GCS
+        is refused before anything stops, and so is any change of backend, bucket,
+        or prefix on a scalable installation, whose hosts do not move storage."""
         bundle = self.releases / previous / "bundle"
         if not (bundle / "compose.json").exists():
             return {}
@@ -2402,6 +2419,14 @@ class Agent:
                     raise AgentError(f"A scalable installation does not move storage, and {role} storage changed from "
                                      f"{deployed[role]['backend']} to {target['backend']}: Hot would start on it with "
                                      f"its records still on the old backend. Put storage.{role} back")
+                # As the stacks' plans compare it: a prefix reads the same with or
+                # without a trailing slash. A bucket has one region, so a new region
+                # only corrects the setting.
+                was, now = (f"{side['bucket']}/{side['prefix'].strip('/')}" for side in (deployed[role], target))
+                if was != now:
+                    raise AgentError(f"A scalable installation does not move storage, and {role} storage changed from "
+                                     f"{was} to {now}: Hot would start on it with its records still on the old one. "
+                                     f"Put storage.{role} back")
             return {}
         for role, target in moves.items():
             if target["backend"] == "local":
@@ -2959,8 +2984,10 @@ class Agent:
         """For a deploy that failed before the database changed: run the
         installed release as before, with its own bundle and, after a data
         move, its own secrets, or keep Hot stopped as it was before the
-        deploy (drain-and-stop, or an earlier failed move). Returns the
-        recovery text."""
+        deploy (drain-and-stop, or an earlier failed move). A failed roll-back
+        whose database passed its checks may have started only part of Hot, and
+        this failure takes the place of its record, and of the note that said
+        to run it again, so Hot starts whole here. Returns the recovery text."""
         release, previous, steps = record["release"], record.get("previous"), record["steps"]
         if not previous:
             return "Nothing was installed. Fix the cause, then run deploy-now."
@@ -2975,16 +3002,26 @@ class Agent:
                 self.restore_installed_secrets(None)
                 return (f"The database was not changed, and Hot stays stopped, as it was before this deploy. Fix "
                         f"the cause, then run deploy-now, or point the installation back at {previous} to start it.")
-            if {"draining", "starting", "rebooted"} & stops:
+            if {"draining", "starting", "rebooted"} & stops or self.restore_checked(state.get("failed") or {}):
                 # A data move stopped all of Hot, this release's services
-                # replaced some of the installed one's, or a reboot left only
-                # the data services running.
+                # replaced some of the installed one's, a reboot left only
+                # the data services running, or a roll-back did not finish its start.
                 self.restore_installed_secrets(state.get("data_modes"))
                 self.start_services(installed)
                 steps.append("previous-release-restarted")
-            elif "scheduler-stopped" in stops and "scheduler" in self.roles():
-                self.compose(installed, "up", "-d", "scheduler")
-                steps.append("previous-scheduler-restarted")
+                state.pop("restarting", None)
+            else:
+                waiting = state.get("restarting") or {}
+                if "scheduler-stopped" in stops and "scheduler" in self.roles() and "scheduler" not in waiting:
+                    self.compose(installed, "up", "-d", "scheduler")
+                    steps.append("previous-scheduler-restarted")
+                # What a restart cut short left down: it keeps running only once
+                # it runs again. A start after a boot has that to do, if one is due.
+                if self.boot_settled():
+                    for service, request_id in sorted(waiting.items()):
+                        self.restart(installed, service, request_id)
+                        steps.append(f"previous-{service}-restarted")
+                    state.pop("restarting", None)
         except (AgentError, OSError, subprocess.CalledProcessError) as restart:
             explained = self.explain(restart)
             # Saved with the failure: the loop tries again, and a later failure
@@ -3002,6 +3039,11 @@ class Agent:
             return (f"The database was not changed, but {previous} has not started again: "
                     f"{failure.get('error')}. That start is tried again every {RESUME_RETRY_SECONDS // 60} minutes. "
                     "Fix the cause, then run deploy-now, or point the installation at another release.")
+        if "previous-release-restarted" not in steps and not self.boot_settled():
+            # On AWS a command is its own process, which can get here before the
+            # loop's first cycle after a boot.
+            return (f"The database was not changed, and {previous} has yet to start after this boot: the next cycle "
+                    "starts it. Fix the cause, then run deploy-now, or point the installation at another release.")
         return (f"The database was not changed and {previous} keeps running. Fix the cause, then run deploy-now, "
                 "or point the installation at another release.")
 
@@ -3731,7 +3773,7 @@ class Agent:
         since no command asks for it. A host that is not running says nothing."""
         failed = state.get("failed") or {}
         if (not desired or not render.scalable(self.config) or failed.get("release") in (None, desired)
-                or state.get("stopped") or state.get("resume_failed")
+                or state.get("stopped") or state.get("resume_failed") or state.get("restarting")
                 or state.get("pointer_returned") == failed.get("at")):
             return None
         self.save_state({**state, "pointer_returned": failed.get("at")})
@@ -3782,6 +3824,7 @@ class Agent:
                 if pending:
                     raise AgentError(pending)
                 return self.resume(force=True, request_id=request_id, **self.settle_pointed_back(state))
+            self.finish_restarts()
             return self.report(state="current", request_id=request_id, **self.scheduler_held(state))
         if operation == "status":
             return self.report(state="status", request_id=request_id)
@@ -3810,6 +3853,11 @@ class Agent:
         if operation == "restart-service":
             if service not in self.roles() + (("ingress",) if render.web_roles(self.config) else ()):
                 raise AgentError(f"Unknown service {service!r}")
+            # The next cycle finishes a drain-and-stop cut short or failed, and
+            # stops this service again with the rest (finish_stop).
+            if self.state().get("stopping"):
+                raise AgentError("drain-and-stop has yet to finish: the next cycle stops the rest of Hot. Run "
+                                 "restart-service once it has, or run deploy-now to start all of Hot")
             pending = self.restore_pending(self.state(), release)
             if pending:
                 raise AgentError(pending)
@@ -3863,19 +3911,27 @@ class Agent:
             self.deliver_secrets(data_modes=self.state().get("data_modes"))
             # A rotated connection URI may name another host to probe.
             self._dependencies = None
-            if service == "scheduler":
-                self.compose(bundle, "stop", "scheduler")
-            if service == "task-worker":
-                # A failed deploy that stopped Hot may have left its own.
-                self.install_hotbox(bundle)
-            self.compose(bundle, "up", "-d", "--force-recreate", service)
-            if service in render.web_roles(self.config):
-                self.refresh_ingress(bundle)
+            try:
+                self.restart(bundle, service, request_id)
+            except (OSError, subprocess.SubprocessError) as error:
+                raise CommandFailed(self.explain(error), recovery=self.restart_recovery(service)) from error
             return self.report(state="restarted", service=service, request_id=request_id)
         if operation == "drain-and-stop":
-            self.stop_services(bundle)
-            # Kept stopped across reboots until the next deploy.
-            self.save_state({**self.state(), "stopped": True})
+            # Kept stopped across reboots until the next deploy. Said first, as a
+            # deploy says what it stops: the stop can take minutes, and the agent
+            # may die in it, or Compose fail after part of it took effect. Until it
+            # is over, `stopping` in the state says so, with the request that asked
+            # (finish_stop), and deploy-now starts them all. A disk too full to say
+            # so does not keep Hot from stopping; the save after it reports that.
+            stopped = {**{key: value for key, value in self.state().items() if key not in ("restarting", "stopping")},
+                       "stopped": True}
+            with contextlib.suppress(OSError):
+                self.save_state({**stopped, "stopping": {"request_id": request_id}})
+            try:
+                self.stop_services(bundle)
+            except (OSError, subprocess.SubprocessError) as error:
+                raise CommandFailed(self.explain(error), recovery=self.stop_recovery()) from error
+            self.save_state(stopped)
             return self.report(state="stopped", request_id=request_id)
         if operation == "roll-back":
             return self.report(state="rolled-back", request_id=request_id, **self.roll_back(bundle))
@@ -3894,6 +3950,122 @@ class Agent:
             target = self.dump_postgres(bundle, "manual")
             return self.report(state="backed-up", backup=str(target / "postgres.dump"), request_id=request_id)
         raise AgentError(f"Unhandled command {operation!r}")
+
+    def restart(self, bundle, service, request_id):
+        """Recreate one service from `bundle`. Said first, as a deploy says what it
+        stops: the agent may die in a stop or a recreate, or Compose fail after it
+        took effect, and nothing else would know the service is down. Until it
+        is up, `restarting` in the state names it, with the request that asked
+        (finish_restarts). Doing this again recreates once more what never went
+        down, as that request asked. A hotbox that cannot be copied refuses the
+        restart first, with the service still running."""
+        if service == "task-worker":
+            # A failed deploy that stopped Hot may have left its own.
+            self.install_hotbox(bundle)
+        self.note_restarts(started={service: request_id})
+        if service == "scheduler":
+            self.compose(bundle, "stop", "scheduler")
+        self.compose(bundle, "up", "-d", "--force-recreate", service)
+        recreated = [service]
+        if service in render.web_roles(self.config):
+            # The service is up, so an ingress that fails does not recreate it again.
+            self.note_restarts(started={"ingress": request_id}, done=[service])
+            self.refresh_ingress(bundle)
+            recreated.append("ingress")
+        if not self.note_restarts(done=recreated):
+            self._restarted.update(dict.fromkeys(recreated, request_id))
+
+    def restart_recovery(self, service):
+        """What to do after a restart of `service` failed, going by what the state
+        says now, which is all the next cycle goes by: it may have no word of the
+        restart, or be stopped, and then nothing starts the service again."""
+        state = self.state()
+        waiting = state.get("restarting") or {}
+        if state.get("stopping"):
+            return (f"{service} may be down, and a drain-and-stop has yet to finish: the next cycle stops the rest of "
+                    f"Hot. Run restart-service {service} again once it has, or run deploy-now to start all of Hot.")
+        if state.get("stopped"):
+            return (f"{service} may be down, and Hot is stopped, so nothing will start it again. Fix the cause and run "
+                    f"restart-service {service} again, or run deploy-now to start all of Hot.")
+        if service in waiting:
+            down = service
+        elif service in render.web_roles(self.config) and "ingress" in waiting:
+            down = "ingress"
+        else:
+            return (f"{service} may be down, and nothing will start it again. Fix the cause and run restart-service "
+                    f"{service} again.")
+        return (f"{down} may be down. The next cycle starts it again, and goes on until a start works. Fix the cause, "
+                f"or run restart-service {service} again.")
+
+    def note_restarts(self, started=None, done=()):
+        """Keep in the state what restarts have yet to bring up, {service: request
+        ID}, and return whether that was saved. On a disk too full to say so the
+        restart still runs. A word that cannot be taken back costs one more
+        recreate if another process finds it: on AWS, a command is its own
+        process. The process that finished the restart remembers (finish_restarts)."""
+        state = self.state()
+        waiting = {service: request for service, request in (state.pop("restarting", None) or {}).items()
+                   if service not in done}
+        waiting.update(started or {})
+        try:
+            self.save_state({**state, **({"restarting": waiting} if waiting else {})})
+        except OSError as error:
+            print(json.dumps({"restart_not_recorded": describe(error)}), file=sys.stderr, flush=True)
+            return False
+        return True
+
+    def finish_restarts(self):
+        """Do again the restarts that were cut short or failed, and say so to whoever
+        asked. A stopped installation stays stopped, whatever stopped it after they
+        began, and a scheduler held since keeps to what its note names. Nothing runs
+        while another start has this to do: an interrupted deploy, which starts
+        everything or, failing, returns to the installed release (return_to_previous),
+        or a start after a boot, which starts everything too (resume). A restart this
+        process finished, whose word the disk would not let it take back, is not done
+        again: only taking that back is, on a healthy service that this would stop."""
+        state = self.state()
+        waiting = state.get("restarting") or {}
+        self._restarted = {service: request for service, request in self._restarted.items()
+                           if waiting.get(service) == request}
+        if not waiting or state.get("deploying") or state.get("resume_failed"):
+            return
+        if state.get("stopped"):
+            self.note_restarts(done=list(waiting))
+            return
+        if not self.boot_settled():
+            return
+        bundle = self.releases / state["release"] / "bundle"
+        held = self.scheduler_held(state)
+        for service, request_id in sorted(waiting.items()):
+            if (service == "scheduler" and held) or self._restarted.get(service) == request_id:
+                self.note_restarts(done=[service])
+                continue
+            self.restart(bundle, service, request_id)
+            self.report(state="restarted", service=service, request_id=request_id)
+
+    def stop_recovery(self):
+        """What to do after a drain-and-stop failed, going by what the state says
+        now, as restart_recovery does: on a disk too full to say so, nothing finishes it."""
+        if self.state().get("stopping"):
+            return ("Hot counts as stopped from here, also across reboots, though some of it may still run. The next "
+                    "cycle stops the rest, and goes on until that works. Fix the cause, or run deploy-now to start it all.")
+        return "Some of Hot may still run, and nothing will stop the rest. Fix the cause and run drain-and-stop again."
+
+    def finish_stop(self):
+        """Finish a drain-and-stop that was cut short or failed, and say so to whoever
+        asked. Until then `stopping` in the state and in status says some of Hot may
+        still run: a restore of its database, say, must wait for that. Stopping what
+        already stopped changes nothing, so a stop that a failed deploy or a reboot
+        finished is only answered here. An interrupted deploy has this to do: it
+        starts everything or, failing, stops it again (recover). A deploy that
+        finishes, a roll-back that does, and deploy-now's start end the stop."""
+        state = self.state()
+        stopping = state.get("stopping")
+        if not stopping or state.get("deploying"):
+            return
+        self.stop_services(self.releases / state["release"] / "bundle")
+        self.save_state({key: value for key, value in self.state().items() if key != "stopping"})
+        self.report(state="stopped", request_id=stopping.get("request_id", ""))
 
     @staticmethod
     def bundle_left_behind(bundle, state):
@@ -4048,7 +4220,11 @@ class Agent:
     def take_commands(self, limit=COMMANDS_PER_CYCLE):
         """Commands from the pull subscription (GCP), one message at a time:
         each is acknowledged before it runs, so nothing waits past its
-        acknowledgement deadline behind a long command, and none runs twice."""
+        acknowledgement deadline behind a long command, and none runs twice.
+        Each command first reads the stack's configuration again, as `hot-agent
+        command` does on AWS: an apply that rewrote the instance metadata after
+        this cycle's refresh, followed at once by deploy-now, must not be
+        answered on the configuration from before it."""
         for _ in range(limit):
             received = self.cloud.receive_commands()
             if not received:
@@ -4064,6 +4240,10 @@ class Agent:
                     print(json.dumps({"command_ignored": "Already handled", "request_id": request_id}),
                           file=sys.stderr, flush=True)
                     continue
+                try:
+                    self.refresh_configuration()
+                except Exception as error:  # still answered, on the configuration in the file
+                    print(json.dumps({"configuration_not_refreshed": describe(error)}), file=sys.stderr, flush=True)
                 self.answer(str(request.get("operation", "")), str(request.get("service", "")), request_id,
                             str(request.get("sent", "")), request.get("expires"))
 
@@ -4074,7 +4254,8 @@ class Agent:
         rightly take long beat while they run: a host whose monitoring hangs,
         as when Docker wedges, goes silent, and host-down fires."""
         for step, long_running in ((self.refresh_configuration, False), (self.mount_data, False), (self.resume, True),
-                                   (self.reconcile, True), (self.refresh_guest_network, False), (self.monitor, False),
+                                   (self.finish_stop, True), (self.finish_restarts, True), (self.reconcile, True),
+                                   (self.refresh_guest_network, False), (self.monitor, False),
                                    (self.ship_journal, False), (self.take_commands, True)):
             try:
                 with self.heartbeat() if long_running else contextlib.nullcontext():
@@ -4152,7 +4333,7 @@ class Agent:
         if not force and delivered and (not self.resume_due(failure) if failure else self.boot_settled()):
             return None
         if force and state.get("stopped"):
-            state = {k: v for k, v in state.items() if k != "stopped"}
+            state = {k: v for k, v in state.items() if k not in ("stopped", "stopping")}
             self.save_state(state)
         held = self.scheduler_held(state)
         try:
@@ -4180,8 +4361,10 @@ class Agent:
                                                                    "at": utc_now()}})
             return self.report(state="resume-failed", release=release, error=explained, request_id=request_id, **notes)
         current = self.state()
-        if "resume_failed" in current:
-            self.save_state({k: v for k, v in current.items() if k != "resume_failed"})
+        # What it started takes in any restart cut short, unless a deploy still has that to do.
+        finished = {"resume_failed", *(() if interrupted else ("restarting",))}
+        if finished & current.keys():
+            self.save_state({k: v for k, v in current.items() if k not in finished})
         self.settle_boot()
         if interrupted:
             return self.report(state="resumed", release=release, request_id=request_id, started="data services",
@@ -4431,9 +4614,10 @@ class Agent:
         except Exception as error:
             self.roll_back_failed(state, failed, steps, dump, error)
         failed = {**{k: v for k, v in failed.items() if k != "roll_back_failed"}, "rolled_back": utc_now()}
-        # Hot runs again, so a stop kept by a failed roll-back, or a failed
-        # start after a boot, ends here.
-        self.save_state({**{k: v for k, v in state.items() if k not in ("stopped", "resume_failed")}, "failed": failed})
+        # Hot runs again, so a stop kept by a failed roll-back, a failed start
+        # after a boot, or a restart or stop cut short ends here.
+        self.save_state({**{k: v for k, v in state.items()
+                            if k not in ("stopped", "stopping", "resume_failed", "restarting")}, "failed": failed})
         self.settle_boot()
         self.remember({"release": state.get("release"), "rolled_back_from": failed["release"],
                        "restore_point": failed.get("restore_point"), "steps": steps, "finished": utc_now()})
@@ -4757,10 +4941,18 @@ def main(argv=None):
         # waiting for it (`expires`), and the loop may have taken up and
         # deployed a new configuration. The file is read only with the lock
         # held, or deploy-now would see the one from before the wait as a
-        # change and deploy that.
+        # change and deploy that. The loop writes the file only between its
+        # sleeps, so an apply just before this may not have reached it, and a
+        # failed release is never tried again by the loop: this reads the stack's
+        # own. The loop's next cycle then finds its own copy out of date, and
+        # goes on from there.
         sent = utc_now()
         with locked():
             agent = new_agent()
+            try:
+                agent.refresh_configuration()
+            except Exception as error:  # still answered, on the configuration in the file
+                print(json.dumps({"configuration_not_refreshed": describe(error)}), file=sys.stderr, flush=True)
             with agent.heartbeat():
                 report = agent.answer(args.operation, args.service, args.request_id, sent, args.expires)
         return 1 if report.get("state") in FAILED_STATES else 0

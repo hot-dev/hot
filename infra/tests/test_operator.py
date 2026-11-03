@@ -554,11 +554,16 @@ class ScalableReleases(unittest.TestCase):
     def test_a_failed_gcp_role_names_the_retry_the_helper_allows(self):
         # What the agent itself says after a failed deploy, on a scalable host.
         agent = mock.MagicMock(config={"preset": "scalable"})
+        agent.restore_checked = hot_agent.Agent.restore_checked
         agent.stops.return_value = {"starting"}
         agent.start_services.side_effect = hot_agent.AgentError("the old one is stuck")
         agent.explain.return_value = "the old one is stuck"
         restart_failed = hot_agent.Agent.return_to_previous(agent, {"release": "3.0.2", "previous": "3.0.1", "steps": []}, {})
         agent = mock.MagicMock(config={"preset": "scalable"})
+        # The real check, not a truthy mock: none of these states holds a
+        # roll-back that left part of Hot down. Boot's start is over.
+        agent.restore_checked = hot_agent.Agent.restore_checked
+        agent.boot_settled.return_value = True
         agent.stops.return_value = set()
         retry = f"Fix the cause. {selfhost.ONE_HOST_INSTEAD['deploy-now']}"
         another = "Or point the installation at another release."

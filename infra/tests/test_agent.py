@@ -2921,6 +2921,7 @@ class Hotbox(UpgradeHarness):
         self.assertEqual(report["state"], "rejected", report)
         self.assertIn("Could not copy hotbox", report["error"])
         self.assertEqual(self.run.compose_calls(), [])
+        self.assertNotIn("restarting", self.agent.state(), "nothing stopped, so nothing is left to start")
 
     def test_workers_started_to_drain_the_queue_use_the_installed_releases(self):
         seen = self.wrong_one_in_place()
@@ -3530,11 +3531,48 @@ class Scalable(AgentHarness):
         self.failed_to_deploy_a_later_release()
         self.cloud.parameters["pointer"] = "3.0.1"
         state = self.agent.state()
-        for note in ({"stopped": True}, {"resume_failed": {"release": "3.0.1", "error": "no", "at": "then"}}):
+        for note in ({"stopped": True}, {"resume_failed": {"release": "3.0.1", "error": "no", "at": "then"}},
+                     {"restarting": {"worker": "r1"}}):
             with self.subTest(note=note):
                 self.agent.save_state({**state, **note})
                 self.assertIsNone(self.agent.reconcile())
         self.assertEqual(self.cloud.statuses, [])
+
+    def scheduler_restart_killed(self):
+        """A scheduler host whose restart died between its stop and its start."""
+        self.host(["scheduler"])
+        self.assertEqual(self.agent.reconcile()["state"], "deployed")
+        recorder = self.agent.run_command
+
+        def killed(command, **kwargs):
+            if "up" in command:
+                raise KeyboardInterrupt
+            return recorder(command, **kwargs)
+        self.agent.run_command = killed
+        with self.assertRaises(KeyboardInterrupt):
+            self.agent.answer("restart-service", "scheduler", request_id="r1")
+        self.agent.run_command = recorder
+        self.run.commands.clear()
+        self.assertEqual(self.agent.state()["restarting"], {"scheduler": "r1"})
+
+    def test_the_next_cycle_starts_a_scheduler_a_killed_restart_left_stopped(self):
+        self.scheduler_restart_killed()
+        self.agent.run_once()
+        calls = self.run.compose_calls()
+        self.assertLess(calls.index("stop scheduler"), calls.index("up -d --force-recreate scheduler"))
+        self.assertNotIn("restarting", self.agent.state())
+        self.assertEqual((self.cloud.statuses[-1]["state"], self.cloud.statuses[-1]["request_id"]), ("restarted", "r1"))
+
+    def test_a_later_failed_deploy_starts_the_scheduler_it_would_say_keeps_running(self):
+        self.scheduler_restart_killed()
+        self.manifests["3.2.0"] = manifest("3.2.0", minimum_source="3.1.0")
+        self.cloud.parameters["pointer"] = "3.2.0"
+        report = self.agent.reconcile()
+        self.assertEqual(report["state"], "failed", report)
+        self.assertIn("up -d --force-recreate scheduler", self.run.compose_calls())
+        self.assertIn("previous-scheduler-restarted", report["steps"])
+        self.assertIn("keeps running", report["recovery"])
+        self.assertNotIn("restarting", self.agent.state())
 
     def test_deploy_now_answers_a_returned_pointer_with_its_own_report(self):
         self.host(["worker"])
@@ -3710,12 +3748,36 @@ class Scalable(AgentHarness):
                 status = self.agent.reconcile(retry=True)
                 self.assertEqual(status["state"], "deployed", status)
 
-    def test_a_storage_change_within_a_backend_is_left_as_it_was(self):
+    def test_another_bucket_or_prefix_is_refused_before_anything_stops(self):
+        self.host(["worker"])
+        self.assertEqual(self.agent.reconcile()["state"], "deployed")
+        installed = self.config["storage"]
+        for change, spelled in (({"bucket": "other"}, "acme/files to other/files"),
+                                ({"prefix": "elsewhere"}, "acme/files to acme/elsewhere")):
+            with self.subTest(change=change):
+                self.config["storage"] = dict(installed, file={**installed["file"], **change})
+                self.run.commands.clear()
+                status = self.agent.reconcile(retry=True)
+                self.assertEqual(status["state"], "failed", status)
+                self.assertIn(f"A scalable installation does not move storage, and file storage changed from {spelled}",
+                              status["error"])
+                self.assertIn("Put storage.file back", status["error"])
+                self.assertEqual(self.run.compose_calls(), [], "nothing stops")
+                self.assertIn("keeps running", status["recovery"])
+                self.assertFalse(any("move-storage" in c for c in self.run.commands))
+        # With it put back the host redeploys nothing, and is where it was.
+        self.config["storage"] = installed
+        self.assertIsNone(self.agent.reconcile())
+
+    def test_what_the_plans_do_not_call_a_new_location_is_not_refused(self):
         self.host(["worker"])
         self.agent.reconcile()
-        self.config["storage"] = dict(self.config["storage"], file={
-            "backend": "s3", "bucket": "other", "region": "us-east-1", "prefix": "files"})
-        self.assertEqual(self.agent.reconcile()["state"], "deployed")
+        installed = self.config["storage"]
+        for same in ({"prefix": "files/"}, {"region": "us-west-2"}):
+            with self.subTest(same=same):
+                self.config["storage"] = dict(installed, file={**installed["file"], **same})
+                status = self.agent.reconcile()
+                self.assertEqual(status["state"], "deployed", status)
 
     def test_the_migration_host_goes_by_the_databases_level(self):
         self.host(["scheduler"], migrations=True)
@@ -6239,6 +6301,113 @@ class StorageMoves(UpgradeHarness):
         self.assertEqual(self.jobs, [], "it does not move again")
         self.assertNotIn("warning", report)
 
+    def finish_the_move_then_kill_its_install(self):
+        """Runs a deploy whose move finishes and that dies before its bundle goes
+        in, so the installed bundle still reads the old storage."""
+        install_bundle = self.agent.install_bundle
+
+        def killed(*args, **kwargs):
+            self.agent.install_bundle = install_bundle
+            raise KeyboardInterrupt
+        self.agent.install_bundle = killed
+        with self.assertRaises(KeyboardInterrupt):
+            self.agent.command("deploy-now", request_id="d-killed")
+        self.jobs.clear()
+        deploying = self.agent.state()["deploying"]
+        self.assertIn("storage-moved", deploying["steps"])
+        self.assertNotIn("rendered", deploying["steps"])
+        return deploying
+
+    def test_a_kill_before_the_bundle_goes_in_moves_again_by_the_same_report(self):
+        self.move_that_failed(self.STUCK)
+        # Attempts in one second would share a manifest, as they cannot on a host.
+        state = self.agent.state()
+        report = state["failed"]["storage_failed"]
+        reported = Path(report["manifest"]).with_name("storage-move-file-reported.jsonl")
+        shutil.copy(report["manifest"], reported)
+        report["manifest"] = str(reported)
+        self.agent.save_state(state)
+        self.config["settings"] = {self.SKIP: "3"}
+        self.finish_the_move_then_kill_its_install()
+        report = self.agent.reconcile()
+        self.assertEqual(report["state"], "deployed", report)
+        self.assertEqual(self.jobs, [("file", set(self.STUCK))])
+        self.assertIn("3 object(s) stayed behind", report["warning"])
+        self.assertEqual(self.worker_env()["HOT_FILE_STORAGE_TYPE"], "s3")
+
+    def test_a_kill_before_the_bundle_goes_in_keeps_a_move_with_nothing_left_behind_so(self):
+        # The failed record's count is gone by the end of the move that runs again.
+        self.a_round_left_behind_then_all_were_repaired()
+        self.assertNotIn("storage_left_behind", self.finish_the_move_then_kill_its_install())
+        report = self.agent.reconcile()
+        self.assertEqual(report["state"], "deployed", report)
+        self.assertEqual(self.jobs, [("file", set())])
+        self.assertNotIn("warning", report)
+
+    def test_a_kill_before_the_bundle_goes_in_moves_both_roles_again(self):
+        self.moving_both()
+        self.worker_with_stuck_objects({"build": [], "file": []})
+        worker = self.agent.run_command
+        self.finish_the_move_then_kill_its_install()
+        self.agent.run_command = worker
+        report = self.agent.reconcile()
+        self.assertEqual(report["state"], "deployed", report)
+        self.assertEqual([role for role, _ in self.jobs], ["build", "file"])
+
+    def build_moved_then_its_pull_failed(self, settings):
+        """A build move finished, leaving one object behind, and the deploy it
+        belongs to failed: the bundle is in place, and Hot stopped."""
+        self.config["storage"] = dict(self.config["storage"], build=dict(self.S3, prefix="builds"))
+        self.config["settings"] = settings
+        self.worker_with_stuck_objects({"build": self.STUCK[:1]})
+        worker = self.agent.run_command
+
+        def pull_fails(command, **kwargs):
+            if "pull" in command:
+                raise subprocess.CalledProcessError(1, command)
+            return worker(command, **kwargs)
+        self.agent.run_command = pull_fails
+        status = self.agent.reconcile()
+        self.agent.run_command = worker
+        self.assertEqual(agent_module.Agent.storage_progress(status["failed"]), "moved", status)
+        self.assertEqual(status["failed"]["storage_left_behind"], {"build": 1})
+        self.jobs.clear()
+        self.run.commands.clear()
+
+    def test_another_role_waits_for_the_deploy_of_a_finished_move(self):
+        self.build_moved_then_its_pull_failed({agent_module.MOVE_SKIP_SETTING: self.STUCK[0]})
+        installed = self.config["storage"]
+        self.config["storage"] = dict(installed, file=self.S3)
+        report = self.agent.command("deploy-now", request_id="d1")
+        self.assertEqual((report["state"], report["steps"][-1]), ("failed", "verified"), report)
+        self.assertIn("Put storage.file back, apply, and run deploy-now to finish that deploy", report["error"])
+        self.assertEqual(self.jobs, [], "no job runs")
+        self.assertEqual([c for c in self.run.compose_calls() if not c.startswith("stop ")],
+                         ["up -d --wait --no-recreate postgres valkey"], "only what the database's level is read from")
+        self.assertEqual(report["failed"]["storage_left_behind"], {"build": 1}, "its count stands")
+        self.assertTrue(self.agent.state()["stopped"])
+        # The way the refusal gives finishes that deploy, which says what stayed
+        # behind, and the other role can then move.
+        self.config["storage"] = installed
+        report = self.agent.command("deploy-now", request_id="d2")
+        self.assertEqual(report["state"], "deployed", report)
+        self.assertEqual(self.jobs, [], "the build move does not run again")
+        self.assertIn("1 object(s) stayed behind", report["warning"])
+        self.config["storage"] = dict(installed, file=self.S3)
+        report = self.agent.reconcile()
+        self.assertEqual(report["state"], "deployed", report)
+        self.assertEqual(self.jobs, [("file", set())])
+
+    def test_another_role_waits_however_the_objects_were_left_behind(self):
+        self.build_moved_then_its_pull_failed({agent_module.MOVE_SKIP_SETTING: self.STUCK[0]})
+        self.config["settings"] = {self.SKIP: "1"}
+        installed = self.config["storage"]
+        self.config["storage"] = dict(installed, file=self.S3)
+        report = self.agent.command("deploy-now", request_id="d1")
+        self.assertEqual(report["state"], "failed", report)
+        self.assertIn("Put storage.file back", report["error"])
+        self.assertEqual(report["failed"]["storage_left_behind"], {"build": 1})
+
     def test_a_failure_after_that_kill_reports_the_move_as_a_failure_would_have(self):
         self.a_round_left_behind_then_all_were_repaired()
         self.finish_the_move_then_kill_the_pull()
@@ -8472,6 +8641,713 @@ class Commands(AgentHarness):
         self.assertEqual(self.agent.answer("sh -c id", request_id="x")["state"], "rejected")
 
 
+class CommandsCutShort(UpgradeHarness):
+    """restart-service and drain-and-stop killed at each point, or failing there,
+    with only the state left to say what they did. The next cycle, a deploy-now, a
+    reboot, or a later deploy that fails must act on that, and report Hot as it
+    is. `self.running` is what Docker would have up."""
+
+    HOT = {"scheduler", "worker", "task-worker", "app", "api", "ingress"}
+    DATA = {"postgres", "valkey"}
+    OLD_ENOUGH = "2026-10-29T12:00:00+00:00"
+
+    def setUp(self):
+        super().setUp()
+        self.running = self.HOT | self.DATA
+        self.kill_at, self.changes = None, 0
+        self.cloud.statuses.clear()
+        outer = self.agent.run_command
+
+        def docker(command, **kwargs):
+            args = command[command.index("compose") + 3:] if "compose" in command else [""]
+            if args[0] not in ("stop", "up"):
+                return outer(command, **kwargs)
+            services = {arg for arg in args[1:] if not arg.startswith("-") and not arg.isdigit()}
+            # A stop takes effect as it goes, and a recreate takes the old container away.
+            going = services if args[0] == "stop" or "--force-recreate" in args else set()
+            point, self.changes = self.changes, self.changes + 1
+            moment = self.kill_at[1] if self.kill_at and self.kill_at[0] == point else None
+            if moment == "before":
+                raise KeyboardInterrupt
+            if moment == "during":
+                self.running = self.running - going
+                raise KeyboardInterrupt
+            try:
+                result = outer(command, **kwargs)
+            except subprocess.CalledProcessError:
+                self.running = self.running - going
+                raise
+            self.running = self.running - services if args[0] == "stop" else self.running | services
+            if moment == "after":
+                raise KeyboardInterrupt
+            return result
+        self.agent.run_command = docker
+
+    def start_over(self):
+        self.failing = None
+        self.running = self.HOT | self.DATA
+        self.cloud.parameters["pointer"] = "3.0.1"
+        self.cloud.statuses.clear()
+        self.run.commands.clear()
+        self.agent.save_state({key: value for key, value in self.agent.state().items()
+                               if key not in ("stopped", "stopping", "failed", "restarting", "resume_failed")})
+
+    def killed(self, operation, service="", point=0, moment="after", request_id="c1"):
+        """Run a command that dies at its `point`th Compose call that changes
+        something, which got as far as `moment`. False if it never got there."""
+        self.kill_at, self.changes = (point, moment), 0
+        try:
+            self.agent.answer(operation, service, request_id=request_id)
+        except KeyboardInterrupt:
+            return True
+        finally:
+            self.kill_at = None
+        return False
+
+    def after_each_kill(self, operation, service, then):
+        """`then`, after `operation` is killed at each point of each Compose call."""
+        point = 0
+        while True:
+            for moment in ("before", "during", "after"):
+                if not self.killed(operation, service, point, moment):
+                    self.assertGreater(point, 0, "no call was killed")
+                    self.start_over()
+                    return
+                with self.subTest(operation=operation, service=service, point=point, moment=moment):
+                    then()
+                self.start_over()
+            point += 1
+
+    def after_each_killed_restart(self, then, services=None):
+        def checked():
+            self.assertTrue(self.agent.state()["restarting"], "it says what it has yet to bring up")
+            then()
+        for service in sorted(services or self.HOT):
+            self.after_each_kill("restart-service", service, checked)
+
+    def test_the_next_cycle_finishes_a_restart_cut_short(self):
+        def then():
+            self.agent.run_once()
+            self.assertEqual(self.running, self.HOT | self.DATA)
+            self.assertNotIn("restarting", self.agent.state())
+            self.assertEqual([status["request_id"] for status in self.cloud.statuses if status["state"] == "restarted"],
+                             ["c1"], "whoever asked gets an answer")
+        self.after_each_killed_restart(then)
+
+    def test_deploy_now_finishes_a_restart_cut_short(self):
+        def then():
+            report = self.agent.answer("deploy-now", request_id="d1")
+            self.assertEqual((report["state"], report["request_id"]), ("current", "d1"), report)
+            self.assertEqual(self.running, self.HOT | self.DATA)
+            self.assertNotIn("restarting", report)
+        self.after_each_killed_restart(then)
+
+    def test_a_reboot_starts_what_a_restart_left_down(self):
+        def then():
+            shutil.rmtree(Path(self.tmp.name) / "secrets")
+            (Path(self.tmp.name) / "resumed").unlink()
+            self.running = set()
+            self.run.commands.clear()
+            self.agent.run_once()
+            self.assertEqual(self.running, self.HOT | self.DATA)
+            self.assertNotIn("restarting", self.agent.state())
+            self.assertEqual(self.cloud.statuses[0]["state"], "resumed")
+            self.assertEqual([call for call in self.run.compose_calls()
+                              if call.startswith("up -d --force-recreate") and "--no-deps" not in call], [],
+                             "started once, by the boot's start")
+        self.after_each_killed_restart(then)
+
+    def test_a_later_failed_deploy_says_a_release_keeps_running_only_once_it_does(self):
+        def then():
+            self.release("3.2.0", minimum_source="3.1.0")
+            report = self.agent.reconcile()
+            self.assertEqual(report["state"], "failed", report)
+            self.assertIn("3.0.1 keeps running", report["recovery"])
+            self.assertEqual(self.running, self.HOT | self.DATA)
+            self.assertNotIn("restarting", self.agent.state())
+        self.after_each_killed_restart(then)
+
+    def test_a_later_failed_deploy_says_so_when_what_a_restart_left_down_does_not_start(self):
+        def then():
+            self.release("3.2.0", minimum_source="3.1.0")
+            self.failing = "--force-recreate"
+            report = self.agent.reconcile()
+            self.assertEqual(report["state"], "failed", report)
+            self.assertNotIn("keeps running", report["recovery"])
+            self.assertIn("did not start again", report["recovery"])
+            state = self.agent.state()
+            self.assertIn("restarting", state)
+            self.assertEqual(state["resume_failed"]["release"], "3.0.1")
+            self.failing = None
+            self.cloud.parameters["pointer"] = "3.0.1"
+            state["resume_failed"]["at"] = self.OLD_ENOUGH
+            self.agent.save_state(state)
+            self.agent.run_once()
+            self.assertEqual(self.running, self.HOT | self.DATA)
+            self.assertFalse({"restarting", "resume_failed"} & self.agent.state().keys())
+        with mock.patch("sys.stderr"):
+            self.after_each_killed_restart(then, ("scheduler", "app"))
+
+    def test_a_failed_deploy_ahead_of_a_boots_start_does_not_say_a_release_keeps_running(self):
+        self.assertTrue(self.killed("restart-service", "scheduler"))
+        shutil.rmtree(Path(self.tmp.name) / "secrets")
+        (Path(self.tmp.name) / "resumed").unlink()
+        self.running = set()
+        self.release("3.2.0", minimum_source="3.1.0")
+        report = self.agent.answer("deploy-now", request_id="d1")
+        self.assertEqual(report["state"], "failed", report)
+        self.assertNotIn("keeps running", report["recovery"])
+        self.assertIn("3.0.1 has yet to start after this boot: the next cycle starts it", report["recovery"])
+        self.assertEqual(self.agent.state()["restarting"], {"scheduler": "c1"}, "that start has this to do")
+        self.agent.run_once()
+        self.assertEqual(self.running, self.HOT | self.DATA)
+        self.assertFalse({"restarting", "resume_failed"} & self.agent.state().keys())
+
+    def test_a_deploy_cut_short_takes_over_from_a_restart_cut_short(self):
+        self.assertTrue(self.killed("restart-service", "scheduler"))
+        self.release("3.0.2")
+        with mock.patch.object(self.agent, "pull_images", side_effect=KeyboardInterrupt), \
+                self.assertRaises(KeyboardInterrupt):
+            self.agent.reconcile()
+        self.run.commands.clear()
+        self.agent.finish_restarts()
+        self.assertEqual(self.run.compose_calls(), [], "that deploy has this to do")
+        self.assertEqual(self.agent.state()["restarting"], {"scheduler": "c1"})
+        report = self.agent.reconcile()
+        self.assertEqual(report["state"], "deployed", report)
+        self.assertEqual(self.running, self.HOT | self.DATA)
+        self.assertNotIn("restarting", self.agent.state())
+
+    def test_a_deploy_cut_short_and_then_given_up_returns_to_what_runs(self):
+        self.assertTrue(self.killed("restart-service", "worker", 0, "during"))
+        self.assertNotIn("worker", self.running)
+        self.release("3.0.2")
+        with mock.patch.object(self.agent, "pull_images", side_effect=KeyboardInterrupt), \
+                self.assertRaises(KeyboardInterrupt):
+            self.agent.reconcile()
+        self.cloud.parameters["pointer"] = "3.0.1"
+        report = self.agent.reconcile()
+        self.assertEqual(report["state"], "failed", report)
+        self.assertIn("previous-worker-restarted", report["steps"])
+        self.assertIn("3.0.1 keeps running", report["recovery"])
+        self.assertEqual(self.running, self.HOT | self.DATA)
+        self.assertNotIn("restarting", self.agent.state())
+
+    def test_a_scheduler_held_since_stays_stopped(self):
+        self.assertTrue(self.killed("restart-service", "scheduler"))
+        self.release("3.0.2", latest=23)
+        self.failing = "migrate"
+        report = self.agent.reconcile()
+        self.assertIn("Migrations may be partly applied", report["recovery"])
+        self.assertNotIn("keeps running", report["recovery"])
+        self.failing = None
+        self.cloud.statuses.clear()
+        self.agent.run_once()
+        self.assertEqual(self.running, (self.HOT | self.DATA) - {"scheduler"}, "only roll-back or a fixed release starts it")
+        self.assertNotIn("restarting", self.agent.state())
+        self.assertFalse([status for status in self.cloud.statuses if status["state"] == "restarted"])
+
+    def test_another_service_starts_under_a_scheduler_held_since(self):
+        self.assertTrue(self.killed("restart-service", "worker", 0, "during"))
+        self.release("3.0.2", latest=23)
+        self.failing = "migrate"
+        self.agent.reconcile()
+        self.failing = None
+        self.assertNotIn("worker", self.running)
+        self.agent.run_once()
+        self.assertEqual(self.running, (self.HOT | self.DATA) - {"scheduler"})
+        self.assertNotIn("restarting", self.agent.state())
+
+    def test_a_roll_back_starts_what_a_restart_left_down(self):
+        self.assertTrue(self.killed("restart-service", "worker", 0, "during"))
+        self.release("3.0.2", latest=23)
+        self.failing = "migrate"
+        self.agent.reconcile()
+        self.failing = None
+        self.assertEqual(self.agent.command("roll-back", request_id="rb")["state"], "rolled-back")
+        self.assertEqual(self.running, self.HOT | self.DATA)
+        self.assertNotIn("restarting", self.agent.state())
+
+    def test_a_good_deploy_starts_what_a_restart_left_down(self):
+        self.assertTrue(self.killed("restart-service", "worker", 0, "during"))
+        self.release("3.0.2")
+        report = self.agent.reconcile()
+        self.assertEqual(report["state"], "deployed", report)
+        self.assertEqual(self.running, self.HOT | self.DATA)
+        self.assertNotIn("restarting", self.agent.state())
+
+    def test_a_stop_after_a_restart_cut_short_keeps_it_down(self):
+        self.assertTrue(self.killed("restart-service", "scheduler"))
+        self.assertEqual(self.agent.answer("drain-and-stop", request_id="s1")["state"], "stopped")
+        state = self.agent.state()
+        self.assertTrue(state["stopped"])
+        self.assertNotIn("restarting", state)
+        self.run.commands.clear()
+        self.agent.run_once()
+        self.assertEqual(self.running, self.DATA)
+        self.assertEqual(self.run.compose_calls(), [])
+
+    def test_a_stop_that_came_some_other_way_takes_back_a_restart_cut_short(self):
+        self.assertTrue(self.killed("restart-service", "scheduler"))
+        self.agent.save_state({**self.agent.state(), "stopped": True})
+        self.run.commands.clear()
+        self.agent.finish_restarts()
+        self.assertEqual(self.run.compose_calls(), [])
+        self.assertNotIn("restarting", self.agent.state())
+
+    def test_each_restart_cut_short_is_finished(self):
+        self.assertTrue(self.killed("restart-service", "scheduler"))
+        self.assertTrue(self.killed("restart-service", "task-worker", 0, "during", request_id="c2"))
+        self.assertEqual(self.agent.answer("restart-service", "worker", request_id="c3")["state"], "restarted")
+        self.assertEqual(self.agent.state()["restarting"], {"scheduler": "c1", "task-worker": "c2"})
+        self.agent.run_once()
+        self.assertEqual(self.running, self.HOT | self.DATA)
+        self.assertNotIn("restarting", self.agent.state())
+        self.assertEqual({(status["service"], status["request_id"]) for status in self.cloud.statuses
+                          if status["state"] == "restarted"}, {("scheduler", "c1"), ("task-worker", "c2"), ("worker", "c3")})
+
+    def test_a_restart_killed_in_its_hotbox_copy_stopped_nothing(self):
+        outer = self.agent.run_command
+
+        def killed(command, **kwargs):
+            if command[:2] == ["docker", "cp"]:
+                raise KeyboardInterrupt
+            return outer(command, **kwargs)
+        self.agent.run_command = killed
+        with self.assertRaises(KeyboardInterrupt):
+            self.agent.answer("restart-service", "task-worker", request_id="c1")
+        self.agent.run_command = outer
+        self.assertNotIn("restarting", self.agent.state())
+        self.assertEqual(self.running, self.HOT | self.DATA)
+
+    def test_a_restart_that_fails_is_answered_and_tried_until_it_works(self):
+        self.failing = "--force-recreate"
+        report = self.agent.answer("restart-service", "scheduler", request_id="c1")
+        self.assertEqual((report["state"], report["command"]), ("failed", "restart-service"), report)
+        self.assertIn("--force-recreate scheduler", report["error"])
+        self.assertIn("The next cycle starts it again", report["recovery"])
+        self.assertEqual(report["restarting"], {"scheduler": "c1"})
+        self.assertNotIn("scheduler", self.running)
+        with mock.patch("sys.stderr") as stderr:
+            self.agent.run_once()
+        self.assertIn("finish_restarts", "".join(str(call) for call in stderr.write.call_args_list))
+        self.assertEqual(self.agent.state()["restarting"], {"scheduler": "c1"})
+        self.failing = None
+        self.agent.run_once()
+        self.assertIn("scheduler", self.running)
+        self.assertNotIn("restarting", self.agent.state())
+
+    def test_an_ingress_that_fails_does_not_recreate_the_app_again(self):
+        self.failing = "ingress"
+        report = self.agent.answer("restart-service", "app", request_id="c1")
+        self.assertEqual(report["state"], "failed", report)
+        self.assertEqual(report["restarting"], {"ingress": "c1"})
+        self.assertIn("ingress may be down. The next cycle starts it again", report["recovery"])
+        self.run.commands.clear()
+        with mock.patch("sys.stderr"):
+            self.agent.run_once()
+        calls = self.run.compose_calls()
+        self.assertIn("up -d --force-recreate ingress", calls)
+        self.assertNotIn("up -d --force-recreate app", calls)
+        self.failing = None
+        self.agent.run_once()
+        self.assertEqual(self.running, self.HOT | self.DATA)
+        self.assertNotIn("restarting", self.agent.state())
+
+    def test_the_next_cycle_finishes_a_drain_cut_short(self):
+        def then():
+            state = self.agent.state()
+            self.assertTrue(state["stopped"], "said before anything stops")
+            self.assertEqual(state["stopping"], {"request_id": "c1"}, "and that it has not finished")
+            self.assertEqual(self.agent.answer("status", request_id="q1")["stopping"], {"request_id": "c1"},
+                             "status does not read as a stop that finished")
+            self.run.commands.clear()
+            self.agent.run_once()
+            self.assertEqual(self.running, self.DATA)
+            calls = self.run.compose_calls()
+            self.assertTrue(calls)
+            self.assertEqual([call for call in calls if not call.startswith("stop ")], [], "it starts nothing")
+            state = self.agent.state()
+            self.assertTrue(state["stopped"])
+            self.assertNotIn("stopping", state)
+            self.assertEqual([status["request_id"] for status in self.cloud.statuses if status["state"] == "stopped"],
+                             ["c1"], "whoever asked gets an answer")
+            self.run.commands.clear()
+            self.agent.run_once()
+            self.assertEqual(self.run.compose_calls(), [], "that is the end of it")
+            self.assertEqual(self.running, self.DATA)
+        self.after_each_kill("drain-and-stop", "", then)
+
+    def test_a_drain_cut_short_stays_stopped_across_a_reboot(self):
+        def then():
+            shutil.rmtree(Path(self.tmp.name) / "secrets")
+            (Path(self.tmp.name) / "resumed").unlink()
+            self.running = set()
+            self.agent.run_once()
+            self.assertEqual(self.running, set())
+            self.assertTrue(self.agent.state()["stopped"])
+            self.assertNotIn("stopping", self.agent.state())
+            self.assertTrue(self.agent.boot_settled())
+            self.agent.deliver_secrets()  # for the next round; nothing here starts on them
+        self.after_each_kill("drain-and-stop", "", then)
+
+    def test_a_later_failed_deploy_stops_what_a_drain_cut_short_left_running(self):
+        def then():
+            self.release("3.2.0", minimum_source="3.1.0")
+            report = self.agent.reconcile()
+            self.assertEqual(report["state"], "failed", report)
+            self.assertIn("Hot stays stopped, as it was before this deploy", report["recovery"])
+            self.assertNotIn("keeps running", report["recovery"])
+            self.assertEqual(self.running, self.DATA)
+            self.assertTrue(self.agent.state()["stopped"])
+            self.cloud.statuses.clear()
+            self.agent.run_once()
+            self.assertEqual([status["request_id"] for status in self.cloud.statuses if status["state"] == "stopped"],
+                             ["c1"], "whoever asked gets an answer")
+            self.assertNotIn("stopping", self.agent.state())
+        self.after_each_kill("drain-and-stop", "", then)
+
+    def test_deploy_now_starts_everything_after_a_drain_cut_short(self):
+        def then():
+            report = self.agent.answer("deploy-now", request_id="d1")
+            self.assertEqual((report["state"], report["request_id"]), ("resumed", "d1"), report)
+            self.assertEqual(self.running, self.HOT | self.DATA)
+            self.assertFalse({"stopped", "stopping"} & self.agent.state().keys())
+            self.agent.run_once()
+            self.assertEqual(self.running, self.HOT | self.DATA, "and nothing stops it again")
+        self.after_each_kill("drain-and-stop", "", then)
+
+    def test_a_drain_sent_again_stops_the_rest(self):
+        def then():
+            report = self.agent.answer("drain-and-stop", request_id="s2")
+            self.assertEqual(report["state"], "stopped")
+            self.assertNotIn("stopping", report)
+            self.assertEqual(self.running, self.DATA)
+        self.after_each_kill("drain-and-stop", "", then)
+
+    def test_a_restart_waits_for_a_drain_cut_short_to_finish(self):
+        def then():
+            up, state = set(self.running), self.agent.state()
+            self.run.commands.clear()
+            report = self.agent.answer("restart-service", "worker", request_id="r1")
+            self.assertEqual(report["state"], "rejected", report)
+            self.assertIn("drain-and-stop has yet to finish", report["error"])
+            self.assertEqual(self.run.compose_calls(), [], "before anything changes")
+            self.assertEqual((self.running, self.agent.state()), (up, state))
+            self.cloud.statuses.clear()
+            self.agent.run_once()
+            self.assertEqual(self.running, self.DATA)
+            self.assertEqual([(status["state"], status["request_id"]) for status in self.cloud.statuses
+                              if status["state"] in ("stopped", "restarted")], [("stopped", "c1")])
+            self.assertEqual(self.agent.answer("restart-service", "worker", request_id="r2")["state"], "restarted",
+                             "once it has")
+            self.agent.run_once()
+            self.assertEqual(self.running, self.DATA | {"worker"})
+        self.after_each_kill("drain-and-stop", "", then)
+
+    def test_a_restart_waits_for_a_drain_that_failed_to_finish(self):
+        self.failing = "task-worker"
+        self.assertEqual(self.agent.answer("drain-and-stop", request_id="s1")["state"], "failed")
+        self.failing = None
+        report = self.agent.answer("restart-service", "app", request_id="r1")
+        self.assertEqual(report["state"], "rejected", report)
+        self.assertIn("deploy-now", report["error"])
+        self.agent.run_once()
+        self.assertEqual(self.running, self.DATA)
+        self.assertNotIn("stopping", self.agent.state())
+
+    def test_a_deploy_cut_short_takes_over_from_a_drain_cut_short(self):
+        self.assertTrue(self.killed("drain-and-stop"))
+        self.release("3.0.2")
+        with mock.patch.object(self.agent, "pull_images", side_effect=KeyboardInterrupt), \
+                self.assertRaises(KeyboardInterrupt):
+            self.agent.reconcile()
+        self.run.commands.clear()
+        self.agent.finish_stop()
+        self.assertEqual(self.run.compose_calls(), [], "that deploy has this to do")
+        self.assertEqual(self.agent.state()["stopping"], {"request_id": "c1"})
+        report = self.agent.reconcile()
+        self.assertEqual(report["state"], "deployed", report)
+        self.assertEqual(self.running, self.HOT | self.DATA)
+        self.assertFalse({"stopped", "stopping"} & self.agent.state().keys())
+
+    def test_a_good_deploy_ends_a_drain_cut_short(self):
+        self.assertTrue(self.killed("drain-and-stop"))
+        self.release("3.0.2")
+        self.assertEqual(self.agent.reconcile()["state"], "deployed")
+        self.assertFalse({"stopped", "stopping"} & self.agent.state().keys())
+        self.agent.run_once()
+        self.assertEqual(self.running, self.HOT | self.DATA)
+
+    def migrated_then_drain_cut_short(self):
+        self.release("3.0.2", latest=23)
+        self.failing = "migrate"
+        self.agent.reconcile()
+        self.failing = None
+        self.assertTrue(self.killed("drain-and-stop"))
+
+    def test_a_roll_back_ends_a_drain_cut_short(self):
+        self.migrated_then_drain_cut_short()
+        self.assertEqual(self.agent.command("roll-back", request_id="rb")["state"], "rolled-back")
+        self.assertFalse({"stopped", "stopping"} & self.agent.state().keys())
+        self.agent.run_once()
+        self.assertEqual(self.running, self.HOT | self.DATA)
+
+    def test_a_failed_roll_back_leaves_a_drain_cut_short_to_finish(self):
+        self.migrated_then_drain_cut_short()
+        self.failing = "--remove-orphans"
+        self.assertEqual(self.agent.answer("roll-back", request_id="rb")["state"], "failed")
+        self.failing = None
+        self.assertEqual(self.agent.state()["stopping"], {"request_id": "c1"})
+        self.running |= {"worker", "api"}  # what a start that failed partway left up
+        self.agent.run_once()
+        self.assertEqual(self.running, self.DATA)
+        self.assertNotIn("stopping", self.agent.state())
+        self.assertTrue(self.agent.state()["stopped"])
+
+    def test_a_drain_that_fails_is_tried_until_it_works(self):
+        self.failing = "task-worker"
+        report = self.agent.answer("drain-and-stop", request_id="s1")
+        self.assertEqual(report["stopping"], {"request_id": "s1"})
+        self.assertIn("The next cycle stops the rest, and goes on until that works", report["recovery"])
+        self.cloud.statuses.clear()
+        with mock.patch("sys.stderr") as stderr:
+            self.agent.run_once()
+        self.assertIn("finish_stop", "".join(str(call) for call in stderr.write.call_args_list))
+        self.assertEqual(self.agent.state()["stopping"], {"request_id": "s1"})
+        self.assertEqual([status for status in self.cloud.statuses if status["state"] == "stopped"], [])
+        self.failing = None
+        self.agent.run_once()
+        self.assertEqual(self.running, self.DATA)
+        self.assertNotIn("stopping", self.agent.state())
+        self.assertEqual([status["request_id"] for status in self.cloud.statuses if status["state"] == "stopped"], ["s1"])
+
+    def test_a_drain_that_fails_partway_counts_as_stopped_and_says_so(self):
+        self.failing = "task-worker"
+        report = self.agent.answer("drain-and-stop", request_id="s1")
+        self.assertEqual((report["state"], report["command"]), ("failed", "drain-and-stop"), report)
+        self.assertIn("stop --timeout 120 worker task-worker", report["error"])
+        self.assertIn("Hot counts as stopped", report["recovery"])
+        self.assertIs(report["stopped"], True)
+        self.assertNotIn("scheduler", self.running)
+        self.assertTrue({"app", "api", "ingress"} <= self.running, "it did not get that far")
+        self.failing = None
+        self.assertEqual(self.agent.answer("drain-and-stop", request_id="s2")["state"], "stopped")
+        self.assertEqual(self.running, self.DATA)
+
+    def test_a_full_disk_does_not_keep_a_restart_or_a_stop_from_running(self):
+        full = OSError(28, "No space left on device")
+        with mock.patch.object(self.agent, "save_state", side_effect=full), mock.patch("sys.stderr") as stderr:
+            report = self.agent.answer("restart-service", "scheduler", request_id="c1")
+            self.assertEqual(report["state"], "restarted", report)
+            self.assertIn("restart_not_recorded", "".join(str(call) for call in stderr.write.call_args_list))
+            report = self.agent.answer("drain-and-stop", request_id="s1")
+        self.assertEqual((report["state"], report["command"]), ("failed", "drain-and-stop"), report)
+        self.assertIn("No space left on device", report["error"])
+        self.assertEqual(self.running, self.DATA, "Hot stopped all the same")
+
+    def disk_full_after(self, saves):
+        """A disk that takes `saves` more writes of the state, then is full."""
+        save, left = agent_module.Agent.save_state, [saves]
+
+        def saving(agent, state):
+            if left[0] <= 0:
+                raise OSError(28, "No space left on device")
+            left[0] -= 1
+            save(agent, state)
+        return mock.patch.object(agent_module.Agent, "save_state", saving)
+
+    def recreates(self):
+        return [call for call in self.run.compose_calls() if call.startswith("up -d --force-recreate")]
+
+    def restarted_reports(self):
+        return [status["request_id"] for status in self.cloud.statuses if status["state"] == "restarted"]
+
+    def test_a_word_that_cannot_be_taken_back_recreates_nothing_more_in_the_loop(self):
+        with self.disk_full_after(1), mock.patch("sys.stderr"):
+            report = self.agent.answer("restart-service", "worker", request_id="c1")
+            self.assertEqual(report["state"], "restarted", report)
+            self.assertEqual(report["restarting"], {"worker": "c1"})
+            self.run.commands.clear()
+            for _ in range(4):
+                self.agent.run_once()
+            self.assertEqual(self.recreates(), [], "it did not go down, so nothing does that again")
+        self.assertEqual(self.restarted_reports(), ["c1"])
+        self.assertEqual(self.agent.state()["restarting"], {"worker": "c1"})
+        self.agent.run_once()
+        self.assertEqual(self.recreates(), [])
+        self.assertNotIn("restarting", self.agent.state(), "the word goes once the disk takes it")
+        self.assertIn("worker", self.running)
+
+    def test_a_word_a_command_process_could_not_take_back_costs_one_more_recreate(self):
+        process = agent_module.Agent(self.config, self.cloud, run=self.agent.run_command, sleep=lambda _: None,
+                                     roots=self.roots, chown=lambda *args: None)
+        with self.disk_full_after(1), mock.patch("sys.stderr"):
+            self.assertEqual(process.answer("restart-service", "worker", request_id="c1")["state"], "restarted")
+            self.run.commands.clear()
+            for _ in range(4):
+                self.agent.run_once()
+            self.assertEqual(self.recreates(), ["up -d --force-recreate worker"])
+        self.assertEqual(self.restarted_reports(), ["c1", "c1"])
+        self.agent.run_once()
+        self.assertEqual(self.recreates(), ["up -d --force-recreate worker"])
+        self.assertNotIn("restarting", self.agent.state())
+
+    def test_a_restart_tried_again_on_a_full_disk_recreates_once(self):
+        self.failing = "--force-recreate"
+        self.assertEqual(self.agent.answer("restart-service", "worker", request_id="c1")["state"], "failed")
+        self.failing = None
+        self.run.commands.clear()
+        with self.disk_full_after(0), mock.patch("sys.stderr"):
+            for _ in range(4):
+                self.agent.run_once()
+        self.assertEqual(self.recreates(), ["up -d --force-recreate worker"])
+        self.assertEqual(self.restarted_reports(), ["c1"])
+        self.assertIn("worker", self.running)
+
+    def test_a_word_that_cannot_be_taken_back_recreates_neither_the_app_nor_the_ingress(self):
+        for saves in (1, 2):
+            with self.subTest(saves=saves), self.disk_full_after(saves), mock.patch("sys.stderr"):
+                self.assertEqual(self.agent.answer("restart-service", "app", request_id="c1")["state"], "restarted")
+                self.assertIn(set(self.agent.state()["restarting"]), ({"app"}, {"ingress"}))
+                self.run.commands.clear()
+                for _ in range(3):
+                    self.agent.run_once()
+                self.assertEqual(self.recreates(), [])
+            self.agent.run_once()
+            self.assertEqual(self.recreates(), [])
+            self.assertNotIn("restarting", self.agent.state())
+
+    def test_a_later_request_is_not_taken_for_the_one_that_finished(self):
+        with self.disk_full_after(1), mock.patch("sys.stderr"):
+            self.agent.answer("restart-service", "worker", request_id="c1")
+        self.running -= {"worker"}
+        self.agent.save_state({**self.agent.state(), "restarting": {"worker": "c2"}})  # a command process, killed
+        self.cloud.statuses.clear()
+        self.agent.run_once()
+        self.assertIn("worker", self.running)
+        self.assertEqual(self.restarted_reports(), ["c2"])
+        self.assertNotIn("restarting", self.agent.state())
+
+    def test_a_failed_restart_on_a_stopped_installation_says_nothing_starts_it(self):
+        self.assertEqual(self.agent.answer("drain-and-stop", request_id="s1")["state"], "stopped")
+        self.failing = "--force-recreate"
+        report = self.agent.answer("restart-service", "worker", request_id="c1")
+        self.assertEqual(report["state"], "failed", report)
+        self.assertNotIn("next cycle", report["recovery"])
+        self.assertIn("worker may be down, and Hot is stopped, so nothing will start it again", report["recovery"])
+        self.assertIn("restart-service worker", report["recovery"])
+        self.assertIn("deploy-now", report["recovery"])
+        self.failing = None
+        self.run.commands.clear()
+        self.agent.run_once()
+        self.assertEqual(self.run.compose_calls(), [], "as it says")
+        self.assertNotIn("worker", self.running)
+
+    def test_a_failed_restart_that_could_not_say_so_says_nothing_starts_it(self):
+        self.failing = "--force-recreate"
+        with self.disk_full_after(0), mock.patch("sys.stderr"):
+            report = self.agent.answer("restart-service", "worker", request_id="c1")
+        self.assertEqual(report["state"], "failed", report)
+        self.assertNotIn("next cycle", report["recovery"])
+        self.assertIn("worker may be down, and nothing will start it again", report["recovery"])
+        self.assertIn("restart-service worker", report["recovery"])
+        self.failing = None
+        self.run.commands.clear()
+        self.agent.run_once()
+        self.assertEqual(self.recreates(), [], "as it says")
+        self.assertNotIn("worker", self.running)
+
+    def test_a_hotbox_that_cannot_be_put_in_place_says_nothing_starts_it(self):
+        with mock.patch.object(self.agent, "install_hotbox", side_effect=OSError(5, "Input/output error")):
+            report = self.agent.answer("restart-service", "task-worker", request_id="c1")
+        self.assertEqual(report["state"], "failed", report)
+        self.assertNotIn("next cycle", report["recovery"])
+        self.assertIn("nothing will start it again", report["recovery"])
+        self.assertNotIn("restarting", self.agent.state())
+        self.assertEqual(self.running, self.HOT | self.DATA)
+
+    def test_a_failed_stop_that_could_not_say_so_says_nothing_stops_the_rest(self):
+        self.failing = "task-worker"
+        with self.disk_full_after(0):
+            report = self.agent.answer("drain-and-stop", request_id="s1")
+        self.assertEqual(report["state"], "failed", report)
+        self.assertNotIn("counts as stopped", report["recovery"])
+        self.assertNotIn("next cycle", report["recovery"])
+        self.assertIn("nothing will stop the rest", report["recovery"])
+        self.assertIn("run drain-and-stop again", report["recovery"])
+        self.assertFalse({"stopped", "stopping"} & self.agent.state().keys())
+
+    def test_a_stop_it_could_not_say_had_finished_is_said_once_the_disk_takes_it(self):
+        with self.disk_full_after(1), mock.patch("sys.stderr"):
+            report = self.agent.answer("drain-and-stop", request_id="s1")
+            self.assertEqual(report["state"], "failed", report)
+            self.assertIn("No space left on device", report["error"])
+            self.assertEqual(report["stopping"], {"request_id": "s1"})
+            self.cloud.statuses.clear()
+            self.agent.run_once()
+            self.assertEqual([status for status in self.cloud.statuses if status["state"] == "stopped"], [])
+        self.agent.run_once()
+        self.assertNotIn("stopping", self.agent.state())
+        self.assertEqual([status["request_id"] for status in self.cloud.statuses if status["state"] == "stopped"], ["s1"])
+
+    def roll_back_that_did_not_start_hot(self):
+        """A migration failed, and a roll-back restored the database and saw it
+        pass its checks, then failed to start Hot: only the data services run."""
+        self.release("3.0.2", latest=23)
+        self.failing = "migrate"
+        self.agent.reconcile()
+        self.failing = "--remove-orphans"
+        report = self.agent.answer("roll-back", request_id="rb")
+        self.assertEqual((report["state"], report["steps"]), ("failed", ["stopped", "restored", "checked"]), report)
+        self.assertNotIn("stopped", self.agent.state())
+        self.failing = None
+        self.assertEqual(self.running, self.DATA)
+        self.release("3.2.0", minimum_source="3.1.0")
+
+    def test_a_later_failed_deploy_starts_what_a_failed_roll_back_left_down(self):
+        self.roll_back_that_did_not_start_hot()
+        report = self.agent.reconcile()
+        self.assertEqual(report["state"], "failed", report)
+        self.assertIn("previous-release-restarted", report["steps"])
+        self.assertIn("3.0.1 keeps running", report["recovery"])
+        self.assertEqual(self.running, self.HOT | self.DATA)
+        self.assertEqual(report.get("resume_failed"), None)
+        self.assertEqual(self.agent.scheduler_held(self.agent.state()), {})
+
+    def test_a_later_failed_deploy_says_so_when_what_a_failed_roll_back_left_down_does_not_start(self):
+        self.roll_back_that_did_not_start_hot()
+        self.failing = "--remove-orphans"
+        report = self.agent.reconcile()
+        self.assertEqual(report["state"], "failed", report)
+        self.assertNotIn("keeps running", report["recovery"])
+        self.assertIn("3.0.1 did not start again", report["recovery"])
+        state = self.agent.state()
+        self.assertEqual(state["resume_failed"]["release"], "3.0.1")
+        self.failing = None
+        state["resume_failed"]["at"] = self.OLD_ENOUGH
+        self.agent.save_state(state)
+        self.agent.run_once()
+        self.assertEqual(self.running, self.HOT | self.DATA)
+        self.assertNotIn("resume_failed", self.agent.state())
+
+    def test_a_later_failed_deploy_keeps_a_stopped_installation_stopped_after_a_failed_roll_back(self):
+        self.release("3.0.2", latest=23)
+        self.failing = "migrate"
+        self.agent.reconcile()
+        self.failing = None
+        self.assertEqual(self.agent.answer("drain-and-stop", request_id="s1")["state"], "stopped")
+        self.failing = "--remove-orphans"
+        self.assertEqual(self.agent.answer("roll-back", request_id="rb")["state"], "failed")
+        self.failing = None
+        self.release("3.2.0", minimum_source="3.1.0")
+        report = self.agent.reconcile()
+        self.assertEqual(report["state"], "failed", report)
+        self.assertIn("Hot stays stopped", report["recovery"])
+        self.assertEqual(self.running, self.DATA)
+        self.assertTrue(self.agent.state()["stopped"])
+
+
 class CommandMode(unittest.TestCase):
     def test_a_command_takes_its_send_time_before_it_waits_for_the_lock(self):
         order = []
@@ -8857,26 +9733,23 @@ class ConfigurationRefresh(AgentHarness):
 class CommandBehindTheLoop(UpgradeHarness):
     """On AWS a command is a process of its own, which may wait for the lock
     behind the loop's cycle. The cycle may take up a new configuration, and the
-    command must then act on that one, not on the one from before its wait."""
+    command must then act on that one, not on the one from before its wait. Nor
+    may it act on the file when the loop has yet to wake and read the stack's."""
 
     S3 = {"backend": "s3", "bucket": "acme", "region": "us-east-1", "prefix": "files"}
+    SKIP, STUCK = StorageMoves.SKIP, StorageMoves.STUCK
+    worker_with_stuck_objects = StorageMoves.worker_with_stuck_objects
+    move_that_failed = StorageMoves.move_that_failed
 
-    def run_behind_the_loop(self, changes, *command):
-        """Start `hot-agent command` with the file as it was deployed. While it
-        waits, the stack's parameter changes, and the loop, ahead of it at the
-        lock, refreshes the file and deploys that."""
-        installation_file = Path(self.tmp.name) / "etc/installation.json"
-        installation_file.parent.mkdir(parents=True, exist_ok=True)
-        installation_file.write_text(json.dumps(self.config))
-        changed = {**json.loads(json.dumps(self.config)), **changes}
-        self.cloud.installation = lambda reference: changed
+    def installation_file(self):
+        return Path(self.tmp.name) / "etc/installation.json"
 
-        @agent_module.contextlib.contextmanager
-        def locked():
-            self.assertTrue(self.agent.refresh_configuration())
-            self.assertEqual(self.agent.reconcile()["state"], "deployed")
-            self.run.commands.clear()
-            yield
+    def run_own_process(self, installation, *command, locked=agent_module.contextlib.nullcontext):
+        """Run `hot-agent command` with the file as it was deployed, and the
+        stack's parameter reading as `installation` says."""
+        self.installation_file().parent.mkdir(parents=True, exist_ok=True)
+        self.installation_file().write_text(json.dumps(self.config))
+        self.cloud.installation = installation
         harness = self
 
         class OwnProcess(agent_module.Agent):
@@ -8886,8 +9759,110 @@ class CommandBehindTheLoop(UpgradeHarness):
                 self.wait_ready = lambda: None
         with mock.patch.object(agent_module, "Agent", OwnProcess), mock.patch.object(agent_module, "cloud_for"), \
                 mock.patch.object(agent_module, "locked", locked), \
-                mock.patch.object(agent_module, "INSTALLATION", installation_file):
+                mock.patch.object(agent_module, "INSTALLATION", self.installation_file()):
             return agent_module.main(["command", *command])
+
+    def run_behind_the_loop(self, changes, *command):
+        """While the command waits, the stack's parameter changes, and the loop,
+        ahead of it at the lock, refreshes the file and deploys that."""
+        changed = {**json.loads(json.dumps(self.config)), **changes}
+
+        @agent_module.contextlib.contextmanager
+        def locked():
+            self.assertTrue(self.agent.refresh_configuration())
+            self.assertEqual(self.agent.reconcile()["state"], "deployed")
+            self.run.commands.clear()
+            yield
+        return self.run_own_process(lambda reference: changed, *command, locked=locked)
+
+    def run_ahead_of_the_loop(self, parameter, *command):
+        """`tofu apply && selfhost.py command`, with the loop asleep: the stack's
+        parameter is new, and the file is not. The failure it retries is older."""
+        state = self.agent.state()
+        state["failed"]["at"] = "2026-10-29T12:00:00+00:00"
+        self.agent.save_state(state)
+        return self.run_own_process(lambda reference: parameter, *command)
+
+    def test_a_count_applied_just_before_deploy_now_is_the_one_it_goes_by(self):
+        self.move_that_failed(self.STUCK)
+        applied = {**json.loads(json.dumps(self.config)), "settings": {self.SKIP: "3"}}
+        self.jobs.clear()
+        code = self.run_ahead_of_the_loop(applied, "deploy-now", "--request-id", "d1")
+        report = self.cloud.statuses[-1]
+        self.assertEqual((code, report["state"]), (0, "deployed"), report)
+        self.assertEqual(self.jobs, [("file", set(self.STUCK))], "the first deploy-now uses the setting")
+        self.assertIn("3 object(s) stayed behind", report["warning"])
+        self.assertEqual(json.loads(self.installation_file().read_text()), applied)
+        # The loop catches up, and has nothing to deploy.
+        self.assertTrue(self.agent.refresh_configuration())
+        self.assertIsNone(self.agent.reconcile())
+
+    def test_storage_put_back_just_before_deploy_now_does_not_run_the_move(self):
+        installed = self.config["storage"]
+        objects = {"file": self.STUCK}
+        self.config["storage"] = dict(installed, file=self.S3)
+        self.worker_with_stuck_objects(objects)
+        self.assertEqual(self.agent.reconcile()["state"], "failed")
+        put_back = {**json.loads(json.dumps(self.config)), "storage": installed}
+        objects["file"] = []  # the failure has cleared, so the move would finish
+        self.jobs.clear()
+        code = self.run_ahead_of_the_loop(put_back, "deploy-now", "--request-id", "d1")
+        report = self.cloud.statuses[-1]
+        self.assertEqual((code, report["state"]), (0, "resumed"), report)
+        self.assertEqual(self.jobs, [], "the move does not run")
+        self.assertEqual(self.worker_env()["HOT_FILE_STORAGE_TYPE"], "local")
+        self.assertTrue(self.agent.refresh_configuration())
+        self.assertIsNone(self.agent.reconcile())
+
+    def test_storage_put_back_just_before_a_pulled_deploy_now_does_not_run_the_move(self):
+        # GCP: the cycle refreshed before the apply rewrote the metadata, and
+        # its take_commands pulls the deploy-now sent right after the apply.
+        installed = self.config["storage"]
+        objects = {"file": self.STUCK}
+        self.config["storage"] = dict(installed, file=self.S3)
+        self.worker_with_stuck_objects(objects)
+        self.assertEqual(self.agent.reconcile()["state"], "failed")
+        self.assertFalse(self.agent.refresh_configuration(), "the cycle's refresh came before the apply")
+        put_back = {**json.loads(json.dumps(self.config)), "storage": installed}
+        self.cloud.installation = lambda reference: put_back
+        objects["file"] = []
+        self.jobs.clear()
+        events = []
+        CommandQueue(self.cloud, [("a1", {"operation": "deploy-now", "request_id": "d1"})], events)
+        self.agent.take_commands()
+        report = self.cloud.statuses[-1]
+        self.assertEqual((report["state"], report["request_id"]), ("resumed", "d1"), report)
+        self.assertEqual(self.jobs, [], "the move does not run")
+        self.assertEqual(self.worker_env()["HOT_FILE_STORAGE_TYPE"], "local")
+        self.assertEqual(json.loads(self.installation_file().read_text()), put_back)
+        self.assertFalse(self.agent.refresh_configuration())
+        self.assertIsNone(self.agent.reconcile())
+
+    def test_metadata_that_cannot_be_read_leaves_a_pulled_command_on_the_file(self):
+        for trouble in (agent_module.AgentError("metadata unreachable"), KeyError("secret_references")):
+            with self.subTest(trouble=trouble), mock.patch("sys.stderr") as stderr:
+                self.cloud.installation = mock.Mock(side_effect=trouble)
+                CommandQueue(self.cloud, [("a1", {"operation": "status", "request_id": f"s-{trouble}"})], [])
+                self.agent.take_commands()
+                self.assertEqual(self.cloud.statuses[-1]["request_id"], f"s-{trouble}", "still answered")
+                self.assertEqual(self.agent.config["storage"], self.config["storage"])
+        self.assertIn("configuration_not_refreshed", "".join(str(c) for c in stderr.write.call_args_list))
+
+    def test_a_parameter_that_cannot_be_read_leaves_the_command_on_the_file(self):
+        for trouble in (agent_module.AgentError("AccessDenied"), OSError("unreachable"), ValueError("not JSON"),
+                        KeyError("anything")):
+            with self.subTest(trouble=trouble), mock.patch("sys.stderr"):
+                code = self.run_own_process(mock.Mock(side_effect=trouble), "status", "--request-id", "s1")
+                self.assertEqual((code, self.cloud.statuses[-1]["request_id"]), (0, "s1"), "still answered")
+                self.assertEqual(json.loads(self.installation_file().read_text()), self.config)
+
+    def test_a_status_reads_the_stacks_configuration_and_deploys_nothing(self):
+        applied = {**json.loads(json.dumps(self.config)), "settings": {"HOT_LOG_LEVEL_FILTER": "warn"}}
+        self.run.commands.clear()
+        code = self.run_own_process(lambda reference: applied, "status", "--request-id", "s1")
+        self.assertEqual((code, self.cloud.statuses[-1]["state"]), (0, "status"))
+        self.assertEqual(json.loads(self.installation_file().read_text()), applied)
+        self.assertEqual(self.run.compose_calls(), [])
 
     def worker_env(self):
         compose = json.loads((Path(self.tmp.name) / "releases/3.0.1/bundle/compose.json").read_text())
