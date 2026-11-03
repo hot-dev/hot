@@ -79,7 +79,10 @@ impl User {
         }
     }
 
-    /// Get user by email
+    /// Get the account an address identifies, whatever its capitals. Accounts
+    /// that already differed only in capitals when migration 028 ran answer to
+    /// their exact spelling; any other spelling reaches the one that kept the
+    /// lowered address.
     pub async fn get_user_by_email(
         db: &crate::db::DatabasePool,
         email: &str,
@@ -87,7 +90,7 @@ impl User {
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 let user = sqlx::query_as::<_, User>(
-                    r#"SELECT user_id, email, name, settings, active, created_at, created_by_user_id, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM "user" WHERE email = $1"#
+                    r#"SELECT user_id, email, name, settings, active, created_at, created_by_user_id, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM "user" WHERE email = $1 OR email_lower = lower($1 COLLATE "C") ORDER BY email = $1 DESC LIMIT 1"#
                 )
                 .bind(email)
                 .fetch_one(pg_pool)
@@ -96,7 +99,7 @@ impl User {
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 let user = sqlx::query_as::<_, User>(
-                    "SELECT user_id, email, name, settings, active, created_at, created_by_user_id, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM user WHERE email = ?"
+                    "SELECT user_id, email, name, settings, active, created_at, created_by_user_id, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM user WHERE email = ?1 OR email_lower = lower(?1) ORDER BY email = ?1 DESC LIMIT 1"
                 )
                 .bind(email)
                 .fetch_one(sqlite_pool)
@@ -452,73 +455,34 @@ impl User {
 }
 
 impl UserAuth {
-    /// Get user auth by auth type and identifier
+    /// Get a user's auth row of one type. The address finds the user first,
+    /// through `User::get_user_by_email`, so sign-in and OAuth compare addresses
+    /// in one place. An earlier release could link a provider twice under
+    /// different capitals; the oldest link answers then.
     pub async fn get_user_auth(
         db: &crate::db::DatabasePool,
+        user_id: &Uuid,
         auth_type: &str,
-        auth_identifier: &str,
     ) -> Result<UserAuth, UserError> {
-        tracing::debug!(
-            "UserAuth::get_user_auth called with auth_type='{}', auth_identifier='{}'",
-            auth_type,
-            auth_identifier
-        );
-
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
-                tracing::debug!("Using Postgres database");
                 let user_auth = sqlx::query_as::<_, UserAuth>(
-                    "SELECT user_auth_id, user_id, auth_type, auth_identifier, auth_data, active, created_at, created_by_user_id, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM user_auth WHERE auth_type = $1 AND auth_identifier = $2",
+                    "SELECT user_auth_id, user_id, auth_type, auth_identifier, auth_data, active, created_at, created_by_user_id, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM user_auth WHERE user_id = $1 AND auth_type = $2 ORDER BY created_at, user_auth_id LIMIT 1",
                 )
+                .bind(user_id)
                 .bind(auth_type)
-                .bind(auth_identifier)
                 .fetch_one(pg_pool)
-                .await
-                .map_err(|e| {
-                    tracing::error!("Postgres query failed for auth_type='{}', auth_identifier='{}': {:?}", auth_type, auth_identifier, e);
-                    UserError::Database(e)
-                })?;
-                tracing::debug!(
-                    "Successfully found user_auth record in Postgres: user_id={}",
-                    user_auth.user_id
-                );
+                .await?;
                 Ok(user_auth)
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
-                tracing::debug!("Using SQLite database");
                 let user_auth = sqlx::query_as::<_, UserAuth>(
-                    "SELECT user_auth_id, user_id, auth_type, auth_identifier, auth_data, active, created_at, created_by_user_id, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM user_auth WHERE auth_type = ? AND auth_identifier = ?",
+                    "SELECT user_auth_id, user_id, auth_type, auth_identifier, auth_data, active, created_at, created_by_user_id, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM user_auth WHERE user_id = ? AND auth_type = ? ORDER BY created_at, user_auth_id LIMIT 1",
                 )
+                .bind(user_id)
                 .bind(auth_type)
-                .bind(auth_identifier)
                 .fetch_one(sqlite_pool)
-                .await
-                .map_err(|e| {
-                    tracing::error!("SQLite query failed for auth_type='{}', auth_identifier='{}': {:?}", auth_type, auth_identifier, e);
-                    // Log additional details for specific error types
-                    match &e {
-                        sqlx::Error::RowNotFound => {
-                            tracing::warn!("No user_auth record found for auth_type='{}', auth_identifier='{}'", auth_type, auth_identifier);
-                        }
-                        sqlx::Error::Database(db_err) => {
-                            tracing::error!("Database-specific error: code={:?}, message={}", db_err.code(), db_err.message());
-                        }
-                        sqlx::Error::ColumnNotFound(col) => {
-                            tracing::error!("Column not found: {}", col);
-                        }
-                        sqlx::Error::TypeNotFound { type_name } => {
-                            tracing::error!("Type not found: {}", type_name);
-                        }
-                        _ => {
-                            tracing::error!("Other SQLite error: {:?}", e);
-                        }
-                    }
-                    UserError::Database(e)
-                })?;
-                tracing::debug!(
-                    "Successfully found user_auth record in SQLite: user_id={}",
-                    user_auth.user_id
-                );
+                .await?;
                 Ok(user_auth)
             }
         }

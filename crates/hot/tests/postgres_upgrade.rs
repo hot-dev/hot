@@ -1042,6 +1042,110 @@ async fn duplicate_project_names_stop_019_with_the_key_then_retry_after_repair()
     result
 }
 
+/// 028 keeps every account that differs from another only in capitals, each
+/// under its own spelling, and sees them all though the owner can't bypass
+/// row-level security. The oldest active one answers to any other spelling, and
+/// the restricted runtime login finds them through the new index.
+#[tokio::test]
+async fn upgrade_028_keeps_accounts_that_differ_only_in_capitals() -> TestResult {
+    let Ok(admin_uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
+        return Ok(());
+    };
+    let fixture = UpgradeDatabase::new(&admin_uri, 27).await?;
+    let result: TestResult = async {
+        let [retired, keeper, newest, accented, unaccented, alone] =
+            std::array::from_fn(|_| Uuid::now_v7());
+        let org = Uuid::now_v7();
+        for (user, email, active, created_at) in [
+            // The oldest of the set is deactivated, so the next one keeps the address.
+            (retired, "DANA@corp.example", false, "2026-01-01T00:00:00Z"),
+            (keeper, "dana@corp.example", true, "2026-02-01T00:00:00Z"),
+            (newest, "Dana@corp.example", true, "2026-03-01T00:00:00Z"),
+            // Only ASCII letters fold, so these are two addresses.
+            (accented, "É@corp.example", true, "2026-04-01T00:00:00Z"),
+            (unaccented, "é@corp.example", true, "2026-05-01T00:00:00Z"),
+            (alone, "Sam@corp.example", true, "2026-06-01T00:00:00Z"),
+        ] {
+            sqlx::query("INSERT INTO \"user\"(user_id,email,active,created_at,created_by_user_id) VALUES($1,$2,$3,$4::timestamptz,$1)")
+                .bind(user).bind(email).bind(active).bind(created_at)
+                .execute(&fixture.admin).await?;
+            sqlx::query("INSERT INTO user_auth(user_auth_id,user_id,auth_type,auth_identifier,created_by_user_id) VALUES($1,$2,'email_password',$3,$2)")
+                .bind(Uuid::now_v7()).bind(user).bind(email)
+                .execute(&fixture.admin).await?;
+        }
+        // Memberships stay where they were.
+        sqlx::query("INSERT INTO org(org_id,name,slug,org_type,created_by_user_id) VALUES($1,'Duplicates','duplicates','organization',$2)")
+            .bind(org).bind(keeper).execute(&fixture.admin).await?;
+        for user in [keeper, newest] {
+            sqlx::query("INSERT INTO org_user(org_user_id,org_id,user_id,org_user_role_id,created_by_user_id) VALUES($1,$2,$3,2,$3)")
+                .bind(Uuid::now_v7()).bind(org).bind(user).execute(&fixture.admin).await?;
+        }
+        fixture.upgrade().await?;
+        assert_latest_ledger(&fixture.owner).await?;
+
+        let rows: Vec<(Uuid, String, bool, Option<String>)> = sqlx::query_as(
+            "SELECT user_id, email, email_exact_only, email_lower FROM \"user\" ORDER BY created_at",
+        )
+        .fetch_all(&fixture.admin)
+        .await?;
+        let lowered = |text: &str| Some(text.to_string());
+        assert_eq!(
+            rows,
+            vec![
+                (retired, "DANA@corp.example".to_string(), true, None),
+                (keeper, "dana@corp.example".to_string(), false, lowered("dana@corp.example")),
+                (newest, "Dana@corp.example".to_string(), true, None),
+                (accented, "É@corp.example".to_string(), false, lowered("É@corp.example")),
+                (unaccented, "é@corp.example".to_string(), false, lowered("é@corp.example")),
+                (alone, "Sam@corp.example".to_string(), false, lowered("sam@corp.example")),
+            ]
+        );
+        let members: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM org_user WHERE org_id=$1")
+            .bind(org).fetch_one(&fixture.admin).await?;
+        assert_eq!(members, 2);
+        let forced: bool = sqlx::query_scalar(
+            "SELECT relforcerowsecurity FROM pg_class WHERE oid = 'hot.\"user\"'::regclass",
+        )
+        .fetch_one(&fixture.admin)
+        .await?;
+        assert!(forced, "028 puts FORCE ROW LEVEL SECURITY back");
+
+        fixture.provision_ok().await?;
+        let runtime = db::create_db_pool(&hot::val!({"uri": fixture.runtime_uri.clone()})).await?;
+        let accounts =
+            runtime.with_scope(DatabaseScope::Bootstrap(BootstrapOperation::Authentication));
+        for (spelling, expected) in [
+            ("DANA@corp.example", retired),
+            ("dana@corp.example", keeper),
+            ("Dana@corp.example", newest),
+            ("dAnA@CORP.example", keeper),
+            ("SAM@corp.example", alone),
+            ("É@corp.example", accented),
+            ("é@corp.example", unaccented),
+        ] {
+            let user = hot::db::User::get_user_by_email(&accounts, spelling).await?;
+            assert_eq!(user.user_id, expected, "{spelling}");
+            let auth =
+                hot::db::UserAuth::get_user_auth(&accounts, &user.user_id, "email_password").await?;
+            assert_eq!(auth.user_id, expected, "{spelling} keeps its own password");
+        }
+        let stranger = Uuid::now_v7();
+        assert!(
+            hot::db::User::insert_user(&accounts, &stranger, "daNA@corp.example", None, Some(&stranger))
+                .await
+                .is_err(),
+            "the set can't grow"
+        );
+        if let DatabasePool::Postgres(pool) = &runtime {
+            pool.close().await;
+        }
+        Ok(())
+    }
+    .await;
+    fixture.cleanup().await?;
+    result
+}
+
 /// A deploy migrates while the previous release serves. 020 gives up waiting
 /// for a lock a long request holds instead of stalling every reader queued
 /// behind it, and the migration is retried once the lock frees.

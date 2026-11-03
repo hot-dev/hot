@@ -54,6 +54,23 @@ Hot 3.0.2 masks more secrets in call and run records. See [Secret Masking](/docs
 
 **On PostgreSQL, the upgrade builds an index on `call`.** Migration 025 replaces `call_env_start_time_idx` with an index that also holds each call's size, so hourly usage reconciliation no longer reads the whole table. Trace writes keep running during the build, though they slow down if they share a disk with it. It reads all of `call` and then waits for every older transaction to finish, so give your migration job room: a 2.4 GB table took about 20 s on a 125 MB/s disk. If the job is interrupted, run `hot db migrate` again.
 
+**Email addresses now identify one account, whatever their capitals.** `DANA@corp.com` and `dana@corp.com` are the same address for sign-up, sign-in, verification, invitations and OAuth, and a second account can't be created under other capitals. Mail still goes to the address as it was typed. Only the letters A to Z fold: other letters, dots and `+` suffixes still make a different address.
+
+**Accounts that already differ only in capitals are kept.** Migration 028 merges and deletes nothing, because it can't tell whether two accounts belong to one person, which password to keep, or which role wins in an organization they share. In each such set:
+
+- The oldest active account answers to any spelling.
+- Each of the others answers only to its exact spelling, with its own password, memberships and history.
+
+To list those accounts, run this as a superuser or a `BYPASSRLS` role, because row-level security hides the rows from every other login, the schema owner included. On SQLite, drop the `hot.` prefix.
+
+```sql
+SELECT user_id, email, active FROM hot."user" WHERE email_exact_only ORDER BY lower(email), created_at;
+```
+
+To change which account answers to any spelling, set `email_exact_only` to true on the current one, then to false on the other, in that order.
+
+**On PostgreSQL, migration 028 rewrites `user` and `email_verification`,** blocking reads and writes to them while it runs. Both are small, so this is usually brief.
+
 ## Upgrading from Hot 3.0.0 to 3.0.1 {#upgrading-from-3-0-0-to-3-0-1}
 
 Hot 3.0.1 fixes the issues found in a full review of everything merged after

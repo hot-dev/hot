@@ -178,6 +178,35 @@ async fn hot_path_statements_keep_their_plans_under_rls() -> Result<(), Box<dyn 
         store_plan.contains("Index Cond") && store_plan.contains("org_id ="),
         "{store_plan}"
     );
+    // Sign-in finds an account through its lowered address, a plain text
+    // comparison the policies leave open to an index. A condition on
+    // lower(email) would run them over every account instead.
+    let authentication = ScopedPgPool::new(raw.clone()).with_scope(DatabaseScope::Bootstrap(
+        db::BootstrapOperation::Authentication,
+    ));
+    let lines: Vec<String> = sqlx::query_scalar(
+        r#"EXPLAIN SELECT user_id FROM "user" WHERE email = $1 OR email_lower = lower($1 COLLATE "C") ORDER BY email = $1 DESC LIMIT 1"#,
+    )
+    .bind("Dana@corp.example")
+    .fetch_all(&authentication)
+    .await?;
+    let user_plan = lines.join("\n");
+    assert!(
+        user_plan.contains("Index Cond: (email_lower =")
+            && user_plan.contains("Index Cond: (email ="),
+        "{user_plan}"
+    );
+    let lines: Vec<String> = sqlx::query_scalar(
+        r#"EXPLAIN SELECT verification_id FROM email_verification WHERE email_lower = lower($1 COLLATE "C") AND status_id = 1 ORDER BY created_at DESC LIMIT 1"#,
+    )
+    .bind("Dana@corp.example")
+    .fetch_all(&authentication)
+    .await?;
+    let verification_plan = lines.join("\n");
+    assert!(
+        verification_plan.contains("Index Cond: (email_lower ="),
+        "{verification_plan}"
+    );
     raw.close().await;
     admin.close().await;
     Ok(())

@@ -410,8 +410,10 @@ async fn sqlite_schema(pool: &SqlitePool) -> TestResult<Schema> {
     .await?;
     for table in &tables {
         let mut primary = BTreeMap::new();
+        // Unlike pragma_table_info, this lists generated columns. A virtual
+        // table's own hidden columns are 1.
         for row in sqlx::query(sqlx::AssertSqlSafe(format!(
-            "SELECT name, \"notnull\", pk, dflt_value FROM pragma_table_info('{table}')"
+            "SELECT name, \"notnull\", pk, dflt_value FROM pragma_table_xinfo('{table}') WHERE hidden <> 1"
         )))
         .fetch_all(pool)
         .await?
