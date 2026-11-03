@@ -19,13 +19,13 @@ permissions:
 
 jobs:
   hot:
-    uses: hot-dev/hot/.github/workflows/selfhost-command.yml@v3.0.2
+    uses: hot-dev/hot/.github/workflows/selfhost-command.yml@v3.0.3
     with:
       operation: ${{ inputs.operation }}
       service: ${{ inputs.service }}
       installation: hot-example
       cloud: aws
-      hot_version: v3.0.2
+      hot_version: v3.0.3
       environment: production
       # The installation's preset, as in the infrastructure workflow: scalable
       # for a scalable installation. It decides which hosts a command waits for
