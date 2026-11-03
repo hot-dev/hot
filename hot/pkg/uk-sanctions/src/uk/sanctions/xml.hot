@@ -1,7 +1,7 @@
-::name-screening::xml ns
+::uk::sanctions::xml ns
 meta {
     doc: """
-    A small regex-based XML reader for large list files. The documents are split into record strings, and fields are read
+    A small regex-based XML reader for the UK list file. The document is split into record strings, and fields are read
     from each record with regexes: element text by tag, nested blocks,
     and attributes of start tags. Character references are decoded on
     the way out.
@@ -39,7 +39,7 @@ meta {
     **Example**
 
     ```hot
-    ::name-screening::xml/decode("Smith &amp; Sons &#233;t&#xE9;")  // "Smith & Sons été"
+    ::uk::sanctions::xml/decode("Smith &amp; Sons &#233;t&#xE9;")  // "Smith & Sons été"
     ```
     """
 }
@@ -75,7 +75,7 @@ meta {
     **Example**
 
     ```hot
-    ::name-screening::xml/records("<a><r>1</r><r>2</r></a>", "r")  // ["<r>1</r>", "<r>2</r>"]
+    ::uk::sanctions::xml/records("<a><r>1</r><r>2</r></a>", "r")  // ["<r>1</r>", "<r>2</r>"]
     ```
     """
 }
@@ -112,7 +112,7 @@ meta {
     **Example**
 
     ```hot
-    ::name-screening::xml/texts("<n><v>A &amp; B</v><v/><v> C </v></n>", "v")  // ["A & B", "C"]
+    ::uk::sanctions::xml/texts("<n><v>A &amp; B</v><v/><v> C </v></n>", "v")  // ["A & B", "C"]
     ```
     """
 }
@@ -148,7 +148,7 @@ meta {
     **Example**
 
     ```hot
-    ::name-screening::xml/attr("<nameAlias wholeName=\\"Abu Ali\\" strong=\\"true\\">", "wholeName")  // "Abu Ali"
+    ::uk::sanctions::xml/attr("<nameAlias wholeName=\\"Abu Ali\\" strong=\\"true\\">", "wholeName")  // "Abu Ali"
     ```
     """
 }

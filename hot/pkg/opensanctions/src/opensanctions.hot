@@ -9,8 +9,7 @@ meta {
     OpenSanctions, bring your own key: the hosted `yente` matching API
     (`POST /match/{dataset}`), or a self-hosted yente via `base-url`. It
     screens against OpenSanctions' merged dataset (hundreds of sources,
-    plus PEPs in `default`), not against the lists cached by
-    `hot.dev/name-screening`.
+    plus PEPs in `default`).
 
     **Screening never decides.** A result is `"possible-match"` or
     `"no-match"`, and a person must review every possible match.
@@ -20,18 +19,91 @@ meta {
     hosted API is a paid service with a trial; bulk data for business
     use needs a data license). See https://www.opensanctions.org/licensing/.
 
-    Results use the same `possible-match` / `no-match` shape as local
-    screening (`::name-screening::screen/ScreenResult`) and need the
-    same human review. `sources` names the dataset searched.
+    Results are `ScreenResult` records. `sources` names the dataset
+    searched.
     """
 }
 
 ::cfg ::opensanctions::config
-::http ::name-screening::http
-::screen ::name-screening::screen
+::http ::opensanctions::http
 
-Match ::name-screening::screen/Match
-ScreenResult ::name-screening::screen/ScreenResult
+REVIEW_NOTICE "Automated screening result. Every possible match must be reviewed by a person before any decision; a no-match only means no entry scored above the threshold on the dataset searched."
+
+Match
+meta {
+    doc: """
+    One possible match.
+
+    **Fields**
+    - `status` — always `"possible-match"`: review it
+    - `score` — OpenSanctions' score in [0, 1]
+    - `name-score` — the same score; OpenSanctions gives only one
+    - `matched-name` — OpenSanctions' caption for the entity
+    - `matched-field` — always `"name"`
+    - `matched-fields` — every field that contributed
+    - `explanation` — OpenSanctions' score and its feature explanations,
+      for the reviewer
+    - `entry` — the entity: `{source, list, id, kind, name, aliases,
+      dobs, nationalities, programs, addresses, remarks, url}`
+    """
+}
+type {
+    status: Str,
+    score: Dec,
+    name-score: Dec,
+    matched-name: Str,
+    matched-field: Str,
+    matched-fields: Vec<Str>,
+    explanation: Vec<Str>,
+    entry: Map
+}
+
+ScreenResult
+meta {
+    doc: """
+    The answer to a `screen` call. A person must review every match.
+
+    **Fields**
+    - `status` — `"possible-match"` when any match scored at or above
+      the threshold, else `"no-match"`; never a final decision
+    - `review-required` — true whenever `status` is `"possible-match"`
+    - `notice` — the human-review notice, ending with the dataset searched
+    - `query` — the name and options screened
+    - `threshold` — the threshold used
+    - `matches` — `Match` records, best first
+    - `sources` — what was searched: `{source, list, dataset}`. Nothing
+      else was searched
+    - `warnings` — always empty today
+    - `candidates` — how many results OpenSanctions returned
+    """
+}
+type {
+    status: Str,
+    review-required: Bool,
+    notice: Str,
+    query: Map,
+    threshold: Dec,
+    matches: Vec<Match>,
+    sources: Vec<Map>,
+    warnings: Vec<Str>,
+    candidates: Int
+}
+
+round4
+meta {
+    doc: """Round a number to four decimal places."""
+}
+fn (x: Any): Dec {
+  div(Dec(round(mul(x, 10000))), 10000)
+}
+
+notice-for
+meta {
+    doc: """`REVIEW_NOTICE` followed by what was searched, so the notice says what a `"no-match"` covers wherever it is read."""
+}
+fn (sources: Vec): Str {
+  `${REVIEW_NOTICE} Searched: ${join(map(sources, (s) { s.list }), ", ")}.`
+}
 
 SCHEMAS {
   individual: "Person",
@@ -69,7 +141,7 @@ fn (name: Str, opts: Map): Map {
   kind or(get(opts, "kind"), "entity-or-person")
   schema or(get(SCHEMAS, kind), "LegalEntity")
   country get(opts, "country")
-  code if(is-some(country), ::name-screening::country/code(Str(country)), null)
+  code if(is-some(country), ::opensanctions::country/code(Str(country)), null)
   country-value if(is-some(code), lowercase(code), country)
   props filter-vals({
     name: [name],
@@ -117,7 +189,7 @@ feature-line fn (name: Str, f: Any): Str {
 
 to-match
 meta {
-    doc: """Turn one OpenSanctions scored result into a `::name-screening::screen/Match` (pure). The `entry` carries `source: "opensanctions"`, the OpenSanctions id, the datasets as `programs`, and the score explanations."""
+    doc: """Turn one OpenSanctions scored result into a `Match` (pure). The `entry` carries `source: "opensanctions"`, the OpenSanctions id, the datasets as `programs`, and the score explanations."""
 }
 fn (r: Map, base-url: Str): Match {
   props or(get(r, "properties"), {})
@@ -130,8 +202,8 @@ fn (r: Map, base-url: Str): Match {
   )
   Match({
     status: "possible-match",
-    score: ::name-screening::similarity/round4(or(get(r, "score"), 0)),
-    name-score: ::name-screening::similarity/round4(or(get(r, "score"), 0)),
+    score: round4(or(get(r, "score"), 0)),
+    name-score: round4(or(get(r, "score"), 0)),
     matched-name: caption,
     matched-field: "name",
     matched-fields: ["name"],
@@ -155,7 +227,7 @@ fn (r: Map, base-url: Str): Match {
 
 parse-response
 meta {
-    doc: """Turn a `/match` response body into a `::name-screening::screen/ScreenResult` (pure)."""
+    doc: """Turn a `/match` response body into a `ScreenResult` (pure)."""
 }
 fn (body: Any, name: Str, opts: Map, base-url: Str): ScreenResult {
   results or(get-in(or(body, {}), ["responses", "q", "results"]), [])
@@ -167,12 +239,11 @@ fn (body: Any, name: Str, opts: Map, base-url: Str): ScreenResult {
   ScreenResult({
     status: if(found, "possible-match", "no-match"),
     review-required: found,
-    notice: ::screen/notice-for(sources),
+    notice: notice-for(sources),
     query: filter-vals({name: name, dob: get(opts, "dob"), country: get(opts, "country"), kind: get(opts, "kind")}, is-some),
     threshold: threshold,
     matches: matches,
     sources: sources,
-    not-searched: [],
     warnings: [],
     candidates: length(results)
   })

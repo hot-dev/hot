@@ -1,6 +1,6 @@
 # opensanctions
 
-The [OpenSanctions](https://www.opensanctions.org) `/match` API for Hot, with your own key: the hosted API, or a self-hosted [yente](https://www.opensanctions.org/docs/yente/) server. It screens against OpenSanctions' merged dataset (hundreds of sources, plus PEPs in `default`). It does not use the local cache of `hot.dev/name-screening`, whose result shape it returns.
+The [OpenSanctions](https://www.opensanctions.org) `/match` API for Hot, with your own key: the hosted API, or a self-hosted [yente](https://www.opensanctions.org/docs/yente/) server. It screens against OpenSanctions' merged dataset (hundreds of sources, plus PEPs in `default`) and returns scored, explained results. It stores nothing.
 
 > **Screening never decides.** Every result is `"possible-match"` or `"no-match"`, with each match scored and explained. **A person must review every possible match** before anyone blocks, reports or clears a party. Names are shared by many people, lists carry several transliterations, and the score measures similarity, not probability. A `"no-match"` only means that OpenSanctions returned nothing at or above the threshold on the dataset searched. It is not a clearance, and it covers only that dataset, which `sources` names in every result.
 
@@ -51,13 +51,15 @@ os.sources                      // the dataset searched
 
 | Namespace | Functions |
 |---|---|
-| `::opensanctions` | `screen`, `match-body`, `match-query`, `match-url`, `match-headers`, `parse-response`, `to-match` |
+| `::opensanctions` | `screen`, `match-body`, `match-query`, `match-url`, `match-headers`, `parse-response`, `to-match`, `notice-for`, `round4`; types `Match`, `ScreenResult` |
 | `::opensanctions::config` | `resolve`, `require-api-key` |
+| `::opensanctions::country` | `code` |
+| `::opensanctions::http` | `request`, `http-error`; type `HttpError` |
 
 ## Errors
 
 - `screen` returns an Err without a key on the hosted API, naming `opensanctions.api-key`, and for a blank or null `api-key` in `opts`.
-- HTTP failures are `::name-screening::http/HttpError` (`status`, `url`, `message`). Messages never carry the names screened or API keys.
+- HTTP failures are `::opensanctions::http/HttpError` (`status`, `url`, `message`). Messages never carry the names screened or API keys.
 - Nothing is retried inside a run. Use the schedule's `retry` policy (see the [retries docs](https://hot.dev/docs/retries)).
 
 ## Data handling

@@ -1,9 +1,9 @@
 ::uk::sanctions ns
 meta {
     doc: """
-    **Screening never decides.** Refreshing this list only fills the
-    cache `::name-screening/screen` reads. A result is `"possible-match"`
-    or `"no-match"`, and a person must review every possible match.
+    **Fetch only.** This package fetches and parses the list. It does
+    not screen names and it stores nothing. List data alone is not a
+    clearance decision.
 
     The UK Sanctions List published by the FCDO (`uk`), the single
     source of UK designations since the OFSI Consolidated List closed on
@@ -15,28 +15,165 @@ meta {
     about 22 MB; the CSV is about 50 MB because it repeats every field
     per name). It is larger than the default 16 MiB response cap, so it
     is downloaded in 8 MiB Range requests, which the server supports.
-    Change detection uses its ETag.
+    Change detection uses its ETag: `current-version` reads it without
+    downloading the list, and `fetch` skips the download when you pass
+    the version you already hold.
 
     **Example**
 
     ```hot
-    ::uk::sanctions/refresh()
-    ::name-screening/screen("Petrel 8", {kind: "vessel", sources: ::uk::sanctions/SOURCES})
+    out ::uk::sanctions/fetch()
+    out.version
+    first(out.entries).name
     ```
     """
 }
 
-::sx ::name-screening::xml
-::entry ::name-screening::entry
-::http ::name-screening::http
-::cache ::name-screening::cache
-
-Entry ::name-screening::entry/Entry
-
-SOURCES ["uk"]
+::re ::hot::regex
+::sx ::uk::sanctions::xml
+::http ::uk::sanctions::http
 
 URL "https://sanctionslist.fcdo.gov.uk/docs/UK-Sanctions-List.xml"
 LIST_NAME "UK Sanctions List"
+
+DesignationKind
+meta {
+    doc: """What is designated. The list says `Individual`, `Entity` or `Ship`, and a ship is `"vessel"` here."""
+}
+type "individual" | "entity" | "vessel"
+
+Designation
+meta {
+    doc: """
+    One designation, as the UK Sanctions List XML publishes it.
+
+    **Fields**
+    - `id` — the `UniqueID`
+    - `kind` — a `DesignationKind`
+    - `name` — the primary name, its `Name1` to `Name6` parts joined
+    - `aliases` — every other name, then the non-Latin names
+    - `dobs` — dates of birth as ISO 8601: `YYYY-MM-DD`, `YYYY-MM` or
+      `YYYY` (`dd/mm/1963` is `"1963"`)
+    - `nationalities` — as published
+    - `regimes` — the sanctions regime names
+    - `addresses` — one line per address
+    - `other-information` — the `OtherInformation` text
+    - `designation-source` — who designated it, e.g. `"UN"`
+    - `un-reference` — the `UNReferenceNumber`
+    - `ofsi-group-id` — the `OFSIGroupID`
+    - `date-designated`, `last-updated` — as published (`dd/mm/yyyy`)
+    - `url` — the list file
+    """
+}
+type {
+    id: Str,
+    kind: DesignationKind,
+    name: Str,
+    aliases: Vec<Str>,
+    dobs: Vec<Str>,
+    nationalities: Vec<Str>,
+    regimes: Vec<Str>,
+    addresses: Vec<Str>,
+    other-information: Str?,
+    designation-source: Str?,
+    un-reference: Str?,
+    ofsi-group-id: Str?,
+    date-designated: Str?,
+    last-updated: Str?,
+    url: Str
+}
+
+present fn (v: Any): Bool {
+  match v {
+    Null => { false }
+    Str => { not(is-empty(trim(v))) }
+    _ => { true }
+  }
+}
+
+clean-list
+meta {
+    doc: """Trim strings, drop blanks and duplicates, keep the first-seen order."""
+}
+fn (values: Vec): Vec<Str> {
+  distinct(map(filter(values, present), (v) { trim(Str(v)) }))
+}
+
+other-names
+meta {
+    doc: """Cleaned aliases without the primary name, ignoring case."""
+}
+fn (aliases: Vec, name: Str): Vec<Str> {
+  filter(clean-list(aliases), (a) { ne(lowercase(a), lowercase(name)) })
+}
+
+blank-to-null fn (v: Any): Str? {
+  if(present(v), trim(Str(v)), null)
+}
+
+// ---------------------------------------------------------------------------
+// Dates of birth
+// ---------------------------------------------------------------------------
+
+MONTHS {
+  jan: "01", feb: "02", mar: "03", apr: "04", may: "05", jun: "06",
+  jul: "07", aug: "08", sep: "09", oct: "10", nov: "11", dec: "12"
+}
+
+pad2 fn (s: Str): Str {
+  if(eq(length(s), 1), `0${s}`, s)
+}
+
+iso-date
+meta {
+    doc: """
+    Normalize one published date of birth to ISO 8601, or null when it
+    has no year. Accepts `1948-12-10`, `10 Dec 1948`, `Dec 1948`,
+    `1948`, `circa 1948`, `10/12/1948` and `dd/mm/1948` (day
+    first), and ranges such as `1959 to 1962` or `01 Jan 1960 to 31
+    Dec 1962` (`1959/1962`, `1960/1962`).
+
+    **Example**
+
+    ```hot
+    ::uk::sanctions/iso-date("10 Dec 1948")  // "1948-12-10"
+    ::uk::sanctions/iso-date("dd/mm/1963")   // "1963"
+    ::uk::sanctions/iso-date("1959 to 1962") // "1959/1962"
+    ```
+    """
+}
+fn (raw: Str?): Str? {
+  s lowercase(trim(or(raw, "")))
+  years map(::re/find-all(s, "\\d{4}"), (m) { m.match })
+  is-range and(gte(length(years), 2), ::re/is-match(s, "\\d{4}.*(?:\\bto\\b|–|\\d{4}\\s*/\\s*\\d{4}$)"))
+  iso ::re/capture(s, "^(\\d{4})-(\\d{1,2})-(\\d{1,2})")
+  dmy ::re/capture(s, "^(\\d{1,2})\\s+([a-z]{3})[a-z]*\\.?\\s+(\\d{4})")
+  my ::re/capture(s, "^([a-z]{3})[a-z]*\\.?\\s+(\\d{4})")
+  slash ::re/capture(s, "^(\\d{1,2}|dd)/(\\d{1,2}|mm)/(\\d{4})")
+  year ::re/capture(s, "(\\d{4})")
+  cond {
+    is-range => { `${first(years)}/${last(years)}` }
+    is-some(iso) => { `${iso.groups[0]}-${pad2(iso.groups[1])}-${pad2(iso.groups[2])}` }
+    and(is-some(dmy), is-some(get(MONTHS, dmy.groups[1]))) => {
+      `${dmy.groups[2]}-${get(MONTHS, dmy.groups[1])}-${pad2(dmy.groups[0])}`
+    }
+
+    and(is-some(my), is-some(get(MONTHS, my.groups[0]))) => { `${my.groups[1]}-${get(MONTHS, my.groups[0])}` }
+    is-some(slash) => {
+      d slash.groups[0]
+      m slash.groups[1]
+      y slash.groups[2]
+      cond {
+        eq(m, "mm") => { y }
+        eq(d, "dd") => { `${y}-${pad2(m)}` }
+        => { `${y}-${pad2(m)}-${pad2(d)}` }
+      }
+    }
+
+    is-some(year) => { year.groups[0] }
+    => { null }
+  }
+}
 
 full-name fn (name: Str): Str {
   parts filter(map(["Name1", "Name2", "Name3", "Name4", "Name5", "Name6"], (t) { ::sx/text(name, t) }), is-some)
@@ -59,40 +196,43 @@ address-line fn (address: Str): Str {
 
 parse-designation
 meta {
-    doc: """Turn one `<Designation>` record string into an `Entry`. Exposed for testing."""
+    doc: """Turn one `<Designation>` record string into a `Designation`. Exposed for testing."""
 }
-fn (record: Str): Entry {
+fn (record: Str): Designation {
   names map(::sx/blocks(::sx/block(record, "Names"), "Name"), (n) {
     {name: full-name(n), type: lowercase(or(::sx/text(n, "NameType"), ""))}
   })
   primary or(find-first(names, (n) { eq(n.type, "primary name") }), first(names))
-  pname or(get(or(primary, {}), "name"), "")
+  pname trim(or(get(or(primary, {}), "name"), ""))
   others filter(names, (n) { ne(n.name, pname) })
   non-latin ::sx/texts(::sx/block(record, "NonLatinNames"), "NameNonLatinScript")
   individual ::sx/block(record, "IndividualDetails")
   dobs ::sx/texts(::sx/block(individual, "DOBs"), "DOB")
   nationalities ::sx/texts(::sx/block(individual, "Nationalities"), "Nationality")
-  ::entry/make({
-    source: "uk",
-    list: LIST_NAME,
-    id: ::sx/text(record, "UniqueID"),
+  Designation({
+    id: trim(or(::sx/text(record, "UniqueID"), "")),
     kind: kind(::sx/text(record, "IndividualEntityShip")),
     name: pname,
-    aliases: concat(map(others, (n) { n.name }), non-latin),
-    dobs: filter(map(dobs, ::entry/iso-date), is-some),
-    nationalities: map(nationalities, (c) { or(::name-screening::country/code(c), c) }),
-    programs: ::sx/texts(record, "RegimeName"),
-    addresses: map(::sx/blocks(::sx/block(record, "Addresses"), "Address"), address-line),
-    remarks: ::sx/text(record, "OtherInformation"),
+    aliases: other-names(concat(map(others, (n) { n.name }), non-latin), pname),
+    dobs: clean-list(filter(map(dobs, iso-date), is-some)),
+    nationalities: clean-list(nationalities),
+    regimes: clean-list(::sx/texts(record, "RegimeName")),
+    addresses: clean-list(map(::sx/blocks(::sx/block(record, "Addresses"), "Address"), address-line)),
+    other-information: blank-to-null(::sx/text(record, "OtherInformation")),
+    designation-source: ::sx/text(record, "DesignationSource"),
+    un-reference: ::sx/text(record, "UNReferenceNumber"),
+    ofsi-group-id: ::sx/text(record, "OFSIGroupID"),
+    date-designated: ::sx/text(record, "DateDesignated"),
+    last-updated: ::sx/text(record, "LastUpdated"),
     url: URL
   })
 }
 
 parse
 meta {
-    doc: """Parse the whole UK Sanctions List XML into `Entry` records (pure). Records without a name or id are skipped."""
+    doc: """Parse the whole UK Sanctions List XML into `Designation` records (pure). Records without a name or id are skipped."""
 }
-fn (doc: Str): Vec<Entry> {
+fn (doc: Str): Vec<Designation> {
   entries map(::sx/records(doc, "Designation"), parse-designation)
   filter(entries, (e) { and(not(is-empty(e.id)), not(is-empty(e.name))) })
 }
@@ -101,77 +241,86 @@ version-of fn (info: Map): Str? {
   or(info.etag, info.last-modified)
 }
 
+require-entries
+meta {
+    doc: """The parsed records, or an Err when there are none: a changed file format can parse to nothing, and an empty list must not pass for a list with nobody on it."""
+}
+fn (entries: Vec): Vec {
+  cond {
+    is-empty(entries) => { err("uk-sanctions: the file parsed to no records; its format may have changed") }
+    => { entries }
+  }
+}
+
+current-version
+meta {
+    doc: """
+    The list's current version from one HEAD request, without
+    downloading the list: its ETag, or Last-Modified. Compare it with
+    the version you hold to skip a download. Null when the server sends
+    neither, an Err when the request fails.
+
+    **Example**
+
+    ```hot
+    ::uk::sanctions/current-version()
+    ```
+    """
+}
+fn (): Str? {
+  info ::http/head(URL)
+  cond {
+    is-err(info) => { info }
+    => { version-of(info) }
+  }
+}
+
 fetch
 meta {
     doc: """
-    Download and parse the UK list. Returns `{source, version, entries,
-    unchanged}`. When the HEAD ETag (or Last-Modified) equals
-    `known-version`, nothing is downloaded and `entries` is null.
+    Download and parse the UK list. Returns `{version, entries,
+    unchanged}`, with `Designation` records in `entries`.
+    `known-version` is the version you already hold: when the HEAD ETag
+    (or Last-Modified) equals it, nothing is downloaded, `unchanged` is
+    true and `entries` is null. A list that parses to no records is an
+    Err.
+
+    **Example**
+
+    ```hot
+    out ::uk::sanctions/fetch()
+    again ::uk::sanctions/fetch(out.version)
+    again.unchanged
+    ```
     """
 }
-fn (known-version: Str?): Map {
+fn
+(): Map {
+  fetch(null)
+},
+(known-version: Str?): Map {
   info ::http/head(URL)
   ver if(is-err(info), null, version-of(info))
   cond {
-    and(is-some(ver), eq(ver, known-version)) => { {source: "uk", version: ver, entries: null, unchanged: true} }
+    and(is-some(ver), eq(ver, known-version)) => { {version: ver, entries: null, unchanged: true} }
     => {
       out ::http/get-text(URL)
       cond {
         is-err(out) => { out }
         => {
-          {
-            source: "uk",
-            version: or(ver, or(out.etag, slice(::hot::hash/sha256(out.text), 0, 16))),
-            entries: parse(out.text),
-            unchanged: false
+          entries require-entries(parse(out.text))
+          cond {
+            is-err(entries) => { entries }
+            => {
+              {
+                version: or(ver, or(out.etag, slice(::hot::hash/sha256(out.text), 0, 16))),
+                entries: entries,
+                unchanged: false
+              }
+            }
           }
         }
       }
     }
   }
-}
-
-// ---------------------------------------------------------------------------
-// Cache
-// ---------------------------------------------------------------------------
-
-lists
-meta {
-    doc: """
-    The UK Sanctions List in the form `::name-screening::cache` takes: one
-    `{source, list, fetch}` Map in a Vec, so it concats with other list
-    packages.
-
-    **Example**
-
-    ```hot
-    ::name-screening::cache/refresh-lists(concat(::ofac/lists(), ::uk::sanctions/lists()))
-    ```
-    """
-}
-fn (): Vec<Map> {
-  [{source: "uk", list: LIST_NAME, fetch: (known) { fetch(known) }}]
-}
-
-refresh
-meta {
-    doc: """
-    Refresh this list into the cache. Returns one row (see
-    `::name-screening::cache/refresh-lists`). A failure has
-    `status: "error"` and keeps the previous version. Meant for a daily
-    schedule.
-
-    **Example**
-
-    ```hot
-    ::uk::sanctions/refresh()
-    ```
-    """
-}
-fn
-(): Vec<Map> {
-  refresh({})
-},
-(opts: Map): Vec<Map> {
-  ::cache/refresh-lists(lists(), opts)
 }

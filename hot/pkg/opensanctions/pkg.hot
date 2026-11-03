@@ -4,14 +4,12 @@ hot.pkg.opensanctions {
   name: "hot.dev/opensanctions",
   version: "0.1.0",
   hot-min-version: "3.0.2",
-  description: "The OpenSanctions /match API for Hot with your own key: the hosted API or a self-hosted yente server, returning explained possible-match or no-match results for human review in the hot.dev/name-screening shape. Commercial use needs an OpenSanctions license.",
+  description: "The OpenSanctions /match API for Hot with your own key: the hosted API or a self-hosted yente server, returning explained possible-match or no-match results for human review. Commercial use needs an OpenSanctions license.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
   tags: ["sanctions", "opensanctions", "pep", "compliance", "kyc", "aml", "screening"],
-  deps: {
-    "hot.dev/name-screening": "0.1.0"
-  },
+  deps: {},
   src-paths: ["src/"],
   test-paths: ["test/"]
 }

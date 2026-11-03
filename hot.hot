@@ -109,7 +109,6 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/middesk/test",
     "./hot/pkg/modern-treasury/test",
     "./hot/pkg/mysql/test",
-    "./hot/pkg/name-screening/test",
     "./hot/pkg/notion/test",
     "./hot/pkg/oauth2/test",
     "./hot/pkg/ofac/test",
@@ -213,7 +212,6 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/middesk": { "local": "./hot/pkg/middesk" },
     "hot.dev/modern-treasury": { "local": "./hot/pkg/modern-treasury" },
     "hot.dev/mysql": { "local": "./hot/pkg/mysql" },
-    "hot.dev/name-screening": { "local": "./hot/pkg/name-screening" },
     "hot.dev/notion": { "local": "./hot/pkg/notion" },
     "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" },
     "hot.dev/ofac": { "local": "./hot/pkg/ofac" },
@@ -708,97 +706,65 @@ hot.project.pkg-integration-exa.test.paths ["./hot/pkg/exa/integration-test"]
 hot.project.pkg-integration-exa.test.capture true
 hot.project.pkg-integration-exa.deps {}
 
-// name screening over sanctions-style records unit tests (hermetic)
-hot.project.pkg-test-name-screening.src.paths ["./hot/pkg/name-screening/src"]
-hot.project.pkg-test-name-screening.test.paths ["./hot/pkg/name-screening/test"]
-hot.project.pkg-test-name-screening.test.capture true
-hot.project.pkg-test-name-screening.deps {}
-
-// name screening over sanctions-style records integration tests (live; read-only)
-hot.project.pkg-integration-name-screening.src.paths ["./hot/pkg/name-screening/src"]
-hot.project.pkg-integration-name-screening.test.paths ["./hot/pkg/name-screening/integration-test"]
-hot.project.pkg-integration-name-screening.test.capture true
-hot.project.pkg-integration-name-screening.deps {}
-
 // OFAC sanctions lists unit tests (hermetic)
 hot.project.pkg-test-ofac.src.paths ["./hot/pkg/ofac/src"]
 hot.project.pkg-test-ofac.test.paths ["./hot/pkg/ofac/test"]
 hot.project.pkg-test-ofac.test.capture true
-hot.project.pkg-test-ofac.deps {
-    "hot.dev/name-screening": { "local": "./hot/pkg/name-screening" }
-}
+hot.project.pkg-test-ofac.deps {}
 
 // OFAC sanctions lists integration tests (live; read-only)
 hot.project.pkg-integration-ofac.src.paths ["./hot/pkg/ofac/src"]
 hot.project.pkg-integration-ofac.test.paths ["./hot/pkg/ofac/integration-test"]
 hot.project.pkg-integration-ofac.test.capture true
-hot.project.pkg-integration-ofac.deps {
-    "hot.dev/name-screening": { "local": "./hot/pkg/name-screening" }
-}
+hot.project.pkg-integration-ofac.deps {}
 
 // UK Sanctions List unit tests (hermetic)
 hot.project.pkg-test-uk-sanctions.src.paths ["./hot/pkg/uk-sanctions/src"]
 hot.project.pkg-test-uk-sanctions.test.paths ["./hot/pkg/uk-sanctions/test"]
 hot.project.pkg-test-uk-sanctions.test.capture true
-hot.project.pkg-test-uk-sanctions.deps {
-    "hot.dev/name-screening": { "local": "./hot/pkg/name-screening" }
-}
+hot.project.pkg-test-uk-sanctions.deps {}
 
 // UK Sanctions List integration tests (live; read-only)
 hot.project.pkg-integration-uk-sanctions.src.paths ["./hot/pkg/uk-sanctions/src"]
 hot.project.pkg-integration-uk-sanctions.test.paths ["./hot/pkg/uk-sanctions/integration-test"]
 hot.project.pkg-integration-uk-sanctions.test.capture true
-hot.project.pkg-integration-uk-sanctions.deps {
-    "hot.dev/name-screening": { "local": "./hot/pkg/name-screening" }
-}
+hot.project.pkg-integration-uk-sanctions.deps {}
 
 // EU Consolidated Financial Sanctions List unit tests (hermetic)
 hot.project.pkg-test-eu-sanctions.src.paths ["./hot/pkg/eu-sanctions/src"]
 hot.project.pkg-test-eu-sanctions.test.paths ["./hot/pkg/eu-sanctions/test"]
 hot.project.pkg-test-eu-sanctions.test.capture true
-hot.project.pkg-test-eu-sanctions.deps {
-    "hot.dev/name-screening": { "local": "./hot/pkg/name-screening" }
-}
+hot.project.pkg-test-eu-sanctions.deps {}
 
 // EU Consolidated Financial Sanctions List integration tests (live; read-only)
 hot.project.pkg-integration-eu-sanctions.src.paths ["./hot/pkg/eu-sanctions/src"]
 hot.project.pkg-integration-eu-sanctions.test.paths ["./hot/pkg/eu-sanctions/integration-test"]
 hot.project.pkg-integration-eu-sanctions.test.capture true
-hot.project.pkg-integration-eu-sanctions.deps {
-    "hot.dev/name-screening": { "local": "./hot/pkg/name-screening" }
-}
+hot.project.pkg-integration-eu-sanctions.deps {}
 
 // UN Security Council Consolidated List unit tests (hermetic)
 hot.project.pkg-test-un-sanctions.src.paths ["./hot/pkg/un-sanctions/src"]
 hot.project.pkg-test-un-sanctions.test.paths ["./hot/pkg/un-sanctions/test"]
 hot.project.pkg-test-un-sanctions.test.capture true
-hot.project.pkg-test-un-sanctions.deps {
-    "hot.dev/name-screening": { "local": "./hot/pkg/name-screening" }
-}
+hot.project.pkg-test-un-sanctions.deps {}
 
 // UN Security Council Consolidated List integration tests (live; read-only)
 hot.project.pkg-integration-un-sanctions.src.paths ["./hot/pkg/un-sanctions/src"]
 hot.project.pkg-integration-un-sanctions.test.paths ["./hot/pkg/un-sanctions/integration-test"]
 hot.project.pkg-integration-un-sanctions.test.capture true
-hot.project.pkg-integration-un-sanctions.deps {
-    "hot.dev/name-screening": { "local": "./hot/pkg/name-screening" }
-}
+hot.project.pkg-integration-un-sanctions.deps {}
 
 // OpenSanctions API unit tests (hermetic)
 hot.project.pkg-test-opensanctions.src.paths ["./hot/pkg/opensanctions/src"]
 hot.project.pkg-test-opensanctions.test.paths ["./hot/pkg/opensanctions/test"]
 hot.project.pkg-test-opensanctions.test.capture true
-hot.project.pkg-test-opensanctions.deps {
-    "hot.dev/name-screening": { "local": "./hot/pkg/name-screening" }
-}
+hot.project.pkg-test-opensanctions.deps {}
 
 // OpenSanctions API integration tests (live; read-only)
 hot.project.pkg-integration-opensanctions.src.paths ["./hot/pkg/opensanctions/src"]
 hot.project.pkg-integration-opensanctions.test.paths ["./hot/pkg/opensanctions/integration-test"]
 hot.project.pkg-integration-opensanctions.test.capture true
-hot.project.pkg-integration-opensanctions.deps {
-    "hot.dev/name-screening": { "local": "./hot/pkg/name-screening" }
-}
+hot.project.pkg-integration-opensanctions.deps {}
 
 // OpenFIGI symbology unit tests (hermetic)
 hot.project.pkg-test-openfigi.src.paths ["./hot/pkg/openfigi/src"]

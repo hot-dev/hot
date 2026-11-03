@@ -1,10 +1,11 @@
-::name-screening::http ns
+::uk::sanctions::http ns
 meta {
     doc: """
-    Download helpers for list packages: a typed `HttpError`, text bodies
+    Downloads for the UK list file: a typed `HttpError`, text bodies
     that survive any content type, HEAD-based change detection (ETag and
-    Last-Modified), and Range-chunked downloads for files larger than
-    one response (`http.max-response-bytes`, 16 MiB by default).
+    Last-Modified), and Range-chunked downloads, since the file is
+    larger than one response (`http.max-response-bytes`, 16 MiB by
+    default).
     """
 }
 
@@ -12,14 +13,14 @@ is-ok-response ::hot::http/is-ok-response
 HttpRequest ::hot::http/HttpRequest
 HttpResponse ::hot::http/HttpResponse
 
-USER_AGENT "hot-dev-name-screening-pkg/0.1 (+https://hot.dev)"
+USER_AGENT "hot-dev-uk-sanctions-pkg/0.1 (+https://hot.dev)"
 
 // Range chunk size; keep it under `http.max-response-bytes`.
 DEFAULT_CHUNK_BYTES 8388608
 
 HttpError
 meta {
-    doc: """A non-2xx response from a list publisher or screening API. `url` is the requested URL (without credentials); `message` is a one-line summary."""
+    doc: """A non-2xx response from the UK list server. `url` is the requested URL (without credentials); `message` is a one-line summary."""
 }
 type {
     status: Int,
@@ -156,7 +157,7 @@ fetch-ranges fn (url: Str, ranges: Vec, index: Int, acc: Bytes): Bytes {
         // A server that ignores Range answers 200 with the whole body.
         eq(response.status, 200) => { response.body-bytes }
         eq(response.status, 206) => { fetch-ranges(url, ranges, add(index, 1), concat(acc, response.body-bytes)) }
-        => { err(`name-screening: unexpected HTTP ${response.status} for a Range request to ${url}`) }
+        => { err(`uk-sanctions: unexpected HTTP ${response.status} for a Range request to ${url}`) }
       }
     }
   }
@@ -164,43 +165,34 @@ fetch-ranges fn (url: Str, ranges: Vec, index: Int, acc: Bytes): Bytes {
 
 too-large-message
 meta {
-    doc: """
-    The error for a file over `http.max-response-bytes` that can't be
-    fetched in Range chunks. With `needed-bytes` it says how far to
-    raise the cap. Exposed for testing.
-    """
+    doc: """The error for a file over `http.max-response-bytes` that can't be fetched in Range chunks. Exposed for testing."""
 }
-fn (url: Str, needed-bytes: Int?): Str {
-  raise if(is-some(needed-bytes), `raise http.max-response-bytes to at least ${needed-bytes} (${floor(div(needed-bytes, 1048576))} MiB) for this list`, "raise http.max-response-bytes above the file's size")
-  `name-screening: ${url} is larger than http.max-response-bytes (16 MiB by default) and its server does not support Range requests; ${raise}`
+fn (url: Str): Str {
+  `uk-sanctions: ${url} is larger than http.max-response-bytes (16 MiB by default) and its server does not support Range requests; raise http.max-response-bytes above the file's size`
 }
 
 get-text
 meta {
     doc: """
-    GET a list file as text. A response over `http.max-response-bytes`
-    is fetched again in Range chunks of `chunk-bytes` when the server
-    supports Range. Otherwise it is an Err saying to raise the cap, to
-    `needed-bytes` when the caller knows how far. Returns `{text, etag,
-    last-modified}`.
+    GET the list file as text. A response over `http.max-response-bytes`
+    is fetched again in Range chunks of `chunk-bytes`, which the UK
+    server supports. If it stops supporting them, the Err says to raise
+    the cap. Returns `{text, etag, last-modified}`.
     """
 }
 fn
 (url: Str): Map {
-  get-text(url, DEFAULT_CHUNK_BYTES, null)
+  get-text(url, DEFAULT_CHUNK_BYTES)
 },
 (url: Str, chunk-bytes: Int): Map {
-  get-text(url, chunk-bytes, null)
-},
-(url: Str, chunk-bytes: Int, needed-bytes: Int?): Map {
   response request("GET", url, {}, "")
   cond {
     is-size-limit-error(response) => {
       info head(url)
       size if(is-err(info), null, info.content-length)
       cond {
-        is-null(size) => { err(too-large-message(url, needed-bytes)) }
-        ne(lowercase(or(info.accept-ranges, "")), "bytes") => { err(too-large-message(url, needed-bytes)) }
+        is-null(size) => { err(too-large-message(url)) }
+        ne(lowercase(or(info.accept-ranges, "")), "bytes") => { err(too-large-message(url)) }
         => {
           bytes fetch-ranges(url, byte-ranges(size, chunk-bytes), 0, Bytes([]))
           cond {

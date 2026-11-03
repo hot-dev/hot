@@ -3,9 +3,7 @@ meta ["test"]
 
 ::fx ::ofac::test::fixtures
 ::ofac ::ofac
-::index ::name-screening::index
-::screen ::name-screening::screen
-::cache ::name-screening::cache
+::http ::ofac::http
 
 by-id fn (entries: Vec, id: Str): Map {
   untype(find-first(entries, (e) { eq(e.id, id) }))
@@ -45,6 +43,7 @@ fn () {
     z by-id(es, "2676")
     assert-eq("individual", z.kind)
     assert-eq("AL ZAWAHIRI, Dr. Ayman", z.name)
+    assert-eq("Operational and Military Leader of JIHAD GROUP", z.title)
     assert-eq(["AL-ZAWAHIRI, Ayman", "SALIM, Ahmad Fuad", "AL-ZAWAHIRI, Aiman Muhammad Rabi"], z.aliases)
     assert-eq(["1951-06-19"], z.dobs)
     assert-eq([], z.addresses, "an all -0- address row is dropped")
@@ -54,7 +53,13 @@ test-ofac-vessel-aircraft-and-programs
 meta ["test"]
 fn () {
     es ::ofac/parse("ofac-sdn", ::fx/OFAC_SDN, "", "", ::fx/OFAC_COMMENTS)
-    assert-eq("vessel", by-id(es, "4243").kind)
+    ship by-id(es, "4243")
+    assert-eq("vessel", ship.kind)
+    assert-eq("General Cargo", ship.vessel-type)
+    assert-eq("2595", ship.tonnage)
+    assert-eq("1865", ship.grt)
+    assert-eq("Panama", ship.vessel-flag)
+    assert-eq(null, ship.call-sign)
     assert-eq("aircraft", by-id(es, "15432").kind)
     gpb by-id(es, "17016")
     assert-eq(["UKRAINE-EO13662", "RUSSIA-EO14024"], gpb.programs)
@@ -64,10 +69,10 @@ fn () {
 test-ofac-parse-remarks
 meta ["test"]
 fn () {
-    assert-eq({dobs: ["1951-06-19"], nationalities: ["EG"]}, ::ofac/parse-remarks("DOB 19 Jun 1951; POB Giza, Egypt; nationality Egypt."))
+    assert-eq({dobs: ["1951-06-19"], nationalities: ["Egypt"]}, ::ofac/parse-remarks("DOB 19 Jun 1951; POB Giza, Egypt; nationality Egypt."))
     r ::ofac/parse-remarks("DOB 01 Jan 1960 to 31 Dec 1962; alt. DOB 1959; citizen Iran; alt. nationality Russia (USSR).")
     assert-eq(["1960/1962", "1959"], r.dobs)
-    assert-eq(["RU", "IR"], r.nationalities, "nationality items, then citizen items")
+    assert-eq(["Russia (USSR)", "Iran"], r.nationalities, "nationality items, then citizen items, as published")
     assert-eq({dobs: [], nationalities: []}, ::ofac/parse-remarks(null))
 }
 
@@ -98,67 +103,72 @@ fn () {
 }
 
 // ============================================================================
-// With hot.dev/name-screening
+// Sources
 // ============================================================================
 
-test-lists-register-with-the-cache
+test-unknown-source-is-an-err
 meta ["test"]
 fn () {
-    ls ::ofac/lists()
-    assert-eq(::ofac/SOURCES, map(ls, (l) { l.source }))
-    for-each(ls, (l) {
-      assert-eq(l, ::cache/check-list(l))
-      assert(is-fn(l.fetch), "lists carry their fetch")
-    })
+    assert-eq(["ofac-sdn", "ofac-cons"], ::ofac/SOURCES)
+    assert(is-err(::ofac/manifest("ofac-sdm")), "manifest")
+    assert(is-err(::ofac/fetch("ofac-sdm")), "fetch")
+    assert(is-err(::ofac/current-version("ofac-sdm")), "current-version")
+    assert(contains(err-message(::ofac/fetch("ofac-sdm")), "ofac-sdn, ofac-cons"), "names the sources")
 }
 
-test-screens-the-parsed-list-from-memory
+// ============================================================================
+// Helpers
+// ============================================================================
+
+test-iso-date-formats
 meta ["test"]
 fn () {
-    idx ::index/build(::ofac/parse("ofac-sdn", ::fx/OFAC_SDN, ::fx/OFAC_ALT, ::fx/OFAC_ADD, ::fx/OFAC_COMMENTS))
-    r untype(::screen/screen-index({ofac-sdn: idx}, "Ayman al-Zawahiri", {dob: "1951-06-19", kind: "individual"}))
-    assert-eq("possible-match", r.status)
-    assert-eq(true, r.review-required)
-    assert-eq("2676", first(r.matches).entry.id)
-    assert(gt(length(first(r.matches).explanation), 0), "every match is explained")
+    assert-eq("1948-12-10", ::ofac/iso-date("10 Dec 1948"))
+    assert-eq("1948-12-10", ::ofac/iso-date("1948-12-10"))
+    assert-eq("1948-12", ::ofac/iso-date("Dec 1948"))
+    assert-eq("1948", ::ofac/iso-date("circa 1948"))
+    assert-eq("1963", ::ofac/iso-date("dd/mm/1963"))
+    assert-eq("1972-01-30", ::ofac/iso-date("30/01/1972"))
+    assert-eq("1959/1962", ::ofac/iso-date("1959 to 1962"))
+    assert-eq("1960/1962", ::ofac/iso-date("01 Jan 1960 to 31 Dec 1962"))
+    assert-eq(null, ::ofac/iso-date("unknown"))
+    assert-eq(null, ::ofac/iso-date(null))
 }
 
-test-screens-the-parsed-list-from-the-cache
+test-clean-list-and-other-names
 meta ["test"]
 fn () {
-    store `ofac-sdn-test-${Uuid()}`
-    row ::cache/refresh-source({source: "ofac-sdn", list: "OFAC SDN List", entries: ::ofac/parse("ofac-sdn", ::fx/OFAC_SDN, ::fx/OFAC_ALT, ::fx/OFAC_ADD, ::fx/OFAC_COMMENTS)}, {store: store})
-    assert-eq("updated", row.status)
-    r untype(::name-screening/screen("Ayman al-Zawahiri", {...{dob: "1951-06-19", kind: "individual"}, store: store, sources: ["ofac-sdn"]}))
-    assert-eq("possible-match", r.status)
-    assert-eq("2676", first(r.matches).entry.id)
-    clean untype(::name-screening/screen("Jane Q. Example", {store: store, sources: ["ofac-sdn"]}))
-    assert-eq("no-match", clean.status)
-    assert-eq(["ofac-sdn"], map(clean.sources, (s) { s.source }))
-    assert(contains(clean.notice, "Searched: OFAC SDN List."), clean.notice)
+    assert-eq(["Acme Two"], ::ofac/other-names(["acme", " Acme Two ", "", null, "Acme Two"], "ACME"), "blanks, duplicates and the primary name are dropped")
+    assert-eq(["a", "b"], ::ofac/clean-list([" a ", "b", "a", "  ", null]))
 }
 
-test-a-list-never-refreshed-is-not-a-no-match
+test-require-entries
 meta ["test"]
 fn () {
-    out ::name-screening/screen("Jane Q. Example", {store: `ofac-sdn-test-${Uuid()}`, sources: ::ofac/SOURCES})
-    assert(is-err(out), "an empty cache is not a no-match")
+    assert-eq(["a"], ::ofac/require-entries(["a"]))
+    out ::ofac/require-entries([])
+    assert(is-err(out), "an empty list must not pass for a list with nobody on it")
+    assert(contains(err-message(out), "no records"), err-message(out))
 }
 
-test-screen-typos-match-an-alias
+// ============================================================================
+// HTTP helpers
+// ============================================================================
+
+test-http-error
 meta ["test"]
 fn () {
-    idx ::index/build(::ofac/parse("ofac-sdn", ::fx/OFAC_SDN, ::fx/OFAC_ALT, ::fx/OFAC_ADD, ""))
-    m first(untype(::screen/screen-index({ofac-sdn: idx}, "Aiman Zawahri", {})).matches)
-    assert-eq("2676", m.entry.id)
-    assert(gte(m.score, 0.85), "two typos still screen as a possible match")
+    e untype(::http/http-error(::hot::http/HttpResponse({status: 404, headers: {}, body: "not here"}), "https://example.test/x"))
+    assert-eq(404, e.status)
+    assert-eq("HTTP 404 from https://example.test/x: not here", e.message)
+    blank untype(::http/http-error(::hot::http/HttpResponse({status: 500, headers: {}, body: null}), "https://example.test/y"))
+    assert-eq("HTTP 500 from https://example.test/y", blank.message)
 }
 
-test-screen-entity-suffixes
+test-body-text
 meta ["test"]
 fn () {
-    idx ::index/build(::ofac/parse("ofac-sdn", ::fx/OFAC_SDN, "", "", ""))
-    m first(untype(::screen/screen-index({ofac-sdn: idx}, "Gazprombank", {kind: "entity"})).matches)
-    assert-eq("17016", m.entry.id)
-    assert-eq(1.0, m.score, "JOINT STOCK COMPANY is a legal form")
+    assert-eq("a,b", ::http/body-text({body: "a,b"}))
+    assert-eq("Hi", ::http/body-text({body: Bytes("Hi"), body-bytes: Bytes("Hi")}))
+    assert-eq("[1,2]", ::http/body-text({body: [1, 2], body-bytes: Bytes("[1,2]")}), "prefers the raw bytes")
 }

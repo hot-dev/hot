@@ -1,9 +1,9 @@
 ::eu::sanctions ns
 meta {
     doc: """
-    **Screening never decides.** Refreshing this list only fills the
-    cache `::name-screening/screen` reads. A result is `"possible-match"`
-    or `"no-match"`, and a person must review every possible match.
+    **Fetch only.** This package fetches and parses the list. It does
+    not screen names and it stores nothing. List data alone is not a
+    clearance decision.
 
     The EU Consolidated Financial Sanctions List (`eu`), published by
     the European Commission's Financial Sanctions Files (FSF) service.
@@ -14,26 +14,24 @@ meta {
     (`dG9rZW4tMjAxNw`, base64 for `token-2017`), not a credential; no
     account is needed. The file is about 26 MB and the server ignores
     Range requests, so **raise `http.max-response-bytes` to at least
-    33554432 (32 MiB)** for the run that refreshes this list. Change
-    detection uses Last-Modified from a HEAD request.
+    33554432 (32 MiB)** for the run that fetches this list. Change
+    detection uses Last-Modified: `current-version` reads it with a HEAD
+    request, and `fetch` skips the download when you pass the version
+    you already hold.
 
     **Example**
 
     ```hot
-    ::eu::sanctions/refresh()
-    ::name-screening/screen("Asbat al-Ansar", {kind: "entity", sources: ::eu::sanctions/SOURCES})
+    out ::eu::sanctions/fetch()
+    out.version
+    first(out.entries).name
     ```
     """
 }
 
-::sx ::name-screening::xml
-::entry ::name-screening::entry
-::http ::name-screening::http
-::cache ::name-screening::cache
-
-Entry ::name-screening::entry/Entry
-
-SOURCES ["eu"]
+::re ::hot::regex
+::sx ::eu::sanctions::xml
+::http ::eu::sanctions::http
 
 URL "https://webgate.ec.europa.eu/fsd/fsf/public/files/xmlFullSanctionsList_1_1/content?token=dG9rZW4tMjAxNw"
 PAGE_URL "https://data.europa.eu/data/datasets/consolidated-list-of-persons-groups-and-entities-subject-to-eu-financial-sanctions"
@@ -42,12 +40,146 @@ LIST_NAME "EU Consolidated Financial Sanctions List"
 // The file is about 26 MB and its server ignores Range requests.
 NEEDED_RESPONSE_BYTES 33554432
 
+SubjectKind
+meta {
+    doc: """What the entry is: `"individual"` for the list's `person` subject type, `"entity"` for `enterprise`."""
+}
+type "individual" | "entity"
+
+SanctionEntity
+meta {
+    doc: """
+    One `<sanctionEntity>`, as the FSF XML 1.1 file publishes it.
+
+    **Fields**
+    - `id` — the `logicalId`
+    - `eu-reference` — the `euReferenceNumber`
+    - `un-id` — the `unitedNationId`
+    - `kind` — a `SubjectKind`
+    - `name` — the primary name: the first alias with no `nameLanguage`
+    - `aliases` — every other `wholeName`
+    - `dobs` — dates of birth as ISO 8601: `YYYY-MM-DD` or `YYYY`
+    - `citizenships` — ISO 3166-1 alpha-2 code, or the country
+      description when the list gives no code
+    - `programmes` — the regulations' programme codes
+    - `addresses` — one line per address
+    - `remarks` — the `<remark>` texts, joined with `; `
+    - `url` — the list's page on data.europa.eu
+    """
+}
+type {
+    id: Str,
+    eu-reference: Str?,
+    un-id: Str?,
+    kind: SubjectKind,
+    name: Str,
+    aliases: Vec<Str>,
+    dobs: Vec<Str>,
+    citizenships: Vec<Str>,
+    programmes: Vec<Str>,
+    addresses: Vec<Str>,
+    remarks: Str?,
+    url: Str
+}
+
+present fn (v: Any): Bool {
+  match v {
+    Null => { false }
+    Str => { not(is-empty(trim(v))) }
+    _ => { true }
+  }
+}
+
+clean-list
+meta {
+    doc: """Trim strings, drop blanks and duplicates, keep the first-seen order."""
+}
+fn (values: Vec): Vec<Str> {
+  distinct(map(filter(values, present), (v) { trim(Str(v)) }))
+}
+
+other-names
+meta {
+    doc: """Cleaned aliases without the primary name, ignoring case."""
+}
+fn (aliases: Vec, name: Str): Vec<Str> {
+  filter(clean-list(aliases), (a) { ne(lowercase(a), lowercase(name)) })
+}
+
+blank-to-null fn (v: Any): Str? {
+  if(present(v), trim(Str(v)), null)
+}
+
+// ---------------------------------------------------------------------------
+// Dates of birth
+// ---------------------------------------------------------------------------
+
+MONTHS {
+  jan: "01", feb: "02", mar: "03", apr: "04", may: "05", jun: "06",
+  jul: "07", aug: "08", sep: "09", oct: "10", nov: "11", dec: "12"
+}
+
+pad2 fn (s: Str): Str {
+  if(eq(length(s), 1), `0${s}`, s)
+}
+
+iso-date
+meta {
+    doc: """
+    Normalize one published date of birth to ISO 8601, or null when it
+    has no year. Accepts `1948-12-10`, `10 Dec 1948`, `Dec 1948`,
+    `1948`, `circa 1948`, `10/12/1948` and `dd/mm/1948` (day
+    first), and ranges such as `1959 to 1962` or `01 Jan 1960 to 31
+    Dec 1962` (`1959/1962`, `1960/1962`).
+
+    **Example**
+
+    ```hot
+    ::eu::sanctions/iso-date("10 Dec 1948")  // "1948-12-10"
+    ::eu::sanctions/iso-date("dd/mm/1963")   // "1963"
+    ::eu::sanctions/iso-date("1959 to 1962") // "1959/1962"
+    ```
+    """
+}
+fn (raw: Str?): Str? {
+  s lowercase(trim(or(raw, "")))
+  years map(::re/find-all(s, "\\d{4}"), (m) { m.match })
+  is-range and(gte(length(years), 2), ::re/is-match(s, "\\d{4}.*(?:\\bto\\b|–|\\d{4}\\s*/\\s*\\d{4}$)"))
+  iso ::re/capture(s, "^(\\d{4})-(\\d{1,2})-(\\d{1,2})")
+  dmy ::re/capture(s, "^(\\d{1,2})\\s+([a-z]{3})[a-z]*\\.?\\s+(\\d{4})")
+  my ::re/capture(s, "^([a-z]{3})[a-z]*\\.?\\s+(\\d{4})")
+  slash ::re/capture(s, "^(\\d{1,2}|dd)/(\\d{1,2}|mm)/(\\d{4})")
+  year ::re/capture(s, "(\\d{4})")
+  cond {
+    is-range => { `${first(years)}/${last(years)}` }
+    is-some(iso) => { `${iso.groups[0]}-${pad2(iso.groups[1])}-${pad2(iso.groups[2])}` }
+    and(is-some(dmy), is-some(get(MONTHS, dmy.groups[1]))) => {
+      `${dmy.groups[2]}-${get(MONTHS, dmy.groups[1])}-${pad2(dmy.groups[0])}`
+    }
+
+    and(is-some(my), is-some(get(MONTHS, my.groups[0]))) => { `${my.groups[1]}-${get(MONTHS, my.groups[0])}` }
+    is-some(slash) => {
+      d slash.groups[0]
+      m slash.groups[1]
+      y slash.groups[2]
+      cond {
+        eq(m, "mm") => { y }
+        eq(d, "dd") => { `${y}-${pad2(m)}` }
+        => { `${y}-${pad2(m)}-${pad2(d)}` }
+      }
+    }
+
+    is-some(year) => { year.groups[0] }
+    => { null }
+  }
+}
+
 country-of fn (node: Str): Str? {
   iso ::sx/attr(node, "countryIso2Code")
   desc ::sx/attr(node, "countryDescription")
   cond {
     and(is-some(iso), ne(iso, "00")) => { iso }
-    and(is-some(desc), ne(lowercase(desc), "unknown")) => { or(::name-screening::country/code(desc), desc) }
+    and(is-some(desc), ne(lowercase(desc), "unknown")) => { desc }
     => { null }
   }
 }
@@ -56,8 +188,8 @@ dob-of fn (node: Str): Str? {
   full ::sx/attr(node, "birthdate")
   year ::sx/attr(node, "year")
   cond {
-    is-some(full) => { ::entry/iso-date(full) }
-    is-some(year) => { ::entry/iso-date(year) }
+    is-some(full) => { iso-date(full) }
+    is-some(year) => { iso-date(year) }
     => { null }
   }
 }
@@ -75,115 +207,121 @@ kind fn (code: Str?): Str {
 
 parse-entity
 meta {
-    doc: """Turn one `<sanctionEntity>` record string into an `Entry`. The primary name is the first English (`nameLanguage=""`) alias; the others are aliases. Exposed for testing."""
+    doc: """Turn one `<sanctionEntity>` record string into a `SanctionEntity`. The primary name is the first English (`nameLanguage=""`) alias; the others are aliases. Exposed for testing."""
 }
-fn (record: Str): Entry {
+fn (record: Str): SanctionEntity {
   aliases filter(map(::sx/start-tags(record, "nameAlias"), (a) {
     {name: ::sx/attr(a, "wholeName"), lang: or(::sx/attr(a, "nameLanguage"), "")}
   }), (a) { is-some(a.name) })
   primary or(find-first(aliases, (a) { eq(a.lang, "") }), first(aliases))
-  pname or(get(or(primary, {}), "name"), "")
+  pname trim(or(get(or(primary, {}), "name"), ""))
   head first(::sx/start-tags(record, "sanctionEntity"))
-  ref ::sx/attr(head, "euReferenceNumber")
-  remarks join(filter(concat([if(is-some(ref), `EU reference ${ref}`, null)], ::sx/texts(record, "remark")), is-some), "; ")
-  ::entry/make({
-    source: "eu",
-    list: LIST_NAME,
-    id: ::sx/attr(head, "logicalId"),
+  SanctionEntity({
+    id: trim(or(::sx/attr(head, "logicalId"), "")),
+    eu-reference: ::sx/attr(head, "euReferenceNumber"),
+    un-id: ::sx/attr(head, "unitedNationId"),
     kind: kind(::sx/attr(first(::sx/start-tags(record, "subjectType")), "code")),
     name: pname,
-    aliases: map(filter(aliases, (a) { ne(a.name, pname) }), (a) { a.name }),
-    dobs: filter(map(::sx/start-tags(record, "birthdate"), dob-of), is-some),
-    nationalities: filter(map(::sx/start-tags(record, "citizenship"), country-of), is-some),
-    programs: filter(map(::sx/start-tags(record, "regulation"), (r) { ::sx/attr(r, "programme") }), is-some),
-    addresses: filter(map(::sx/start-tags(record, "address"), address-line), (s) { not(is-empty(s)) }),
-    remarks: remarks,
+    aliases: other-names(map(filter(aliases, (a) { ne(a.name, pname) }), (a) { a.name }), pname),
+    dobs: clean-list(filter(map(::sx/start-tags(record, "birthdate"), dob-of), is-some)),
+    citizenships: clean-list(filter(map(::sx/start-tags(record, "citizenship"), country-of), is-some)),
+    programmes: clean-list(filter(map(::sx/start-tags(record, "regulation"), (r) { ::sx/attr(r, "programme") }), is-some)),
+    addresses: clean-list(filter(map(::sx/start-tags(record, "address"), address-line), (s) { not(is-empty(s)) })),
+    remarks: blank-to-null(join(::sx/texts(record, "remark"), "; ")),
     url: PAGE_URL
   })
 }
 
 parse
 meta {
-    doc: """Parse the whole EU FSF XML 1.1 document into `Entry` records (pure)."""
+    doc: """Parse the whole EU FSF XML 1.1 document into `SanctionEntity` records (pure)."""
 }
-fn (doc: Str): Vec<Entry> {
+fn (doc: Str): Vec<SanctionEntity> {
   entries map(::sx/records(doc, "sanctionEntity"), parse-entity)
   filter(entries, (e) { and(not(is-empty(e.id)), not(is-empty(e.name))) })
+}
+
+require-entries
+meta {
+    doc: """The parsed records, or an Err when there are none: a changed file format can parse to nothing, and an empty list must not pass for a list with nobody on it."""
+}
+fn (entries: Vec): Vec {
+  cond {
+    is-empty(entries) => { err("eu-sanctions: the file parsed to no records; its format may have changed") }
+    => { entries }
+  }
+}
+
+current-version
+meta {
+    doc: """
+    The list's current version from one HEAD request, without
+    downloading the list: its Last-Modified, or ETag. Compare it with
+    the version you hold to skip a download. Null when the server sends
+    neither, an Err when the request fails.
+
+    **Example**
+
+    ```hot
+    ::eu::sanctions/current-version()
+    ```
+    """
+}
+fn (): Str? {
+  info ::http/head(URL)
+  cond {
+    is-err(info) => { info }
+    => { or(info.last-modified, info.etag) }
+  }
 }
 
 fetch
 meta {
     doc: """
-    Download and parse the EU list. Returns `{source, version, entries,
-    unchanged}`. When the HEAD Last-Modified equals `known-version`,
-    nothing is downloaded and `entries` is null. A file over
-    `http.max-response-bytes` is an Err saying how far to raise it.
+    Download and parse the EU list. Returns `{version, entries,
+    unchanged}`, with `SanctionEntity` records in `entries`.
+    `known-version` is the version you already hold: when the HEAD
+    Last-Modified equals it, nothing is downloaded, `unchanged` is true
+    and `entries` is null. A file over `http.max-response-bytes` is an
+    Err saying how far to raise it. A list that parses to no records is
+    an Err.
+
+    **Example**
+
+    ```hot
+    out ::eu::sanctions/fetch()
+    again ::eu::sanctions/fetch(out.version)
+    again.unchanged
+    ```
     """
 }
-fn (known-version: Str?): Map {
+fn
+(): Map {
+  fetch(null)
+},
+(known-version: Str?): Map {
   info ::http/head(URL)
   ver if(is-err(info), null, or(info.last-modified, info.etag))
   cond {
-    and(is-some(ver), eq(ver, known-version)) => { {source: "eu", version: ver, entries: null, unchanged: true} }
+    and(is-some(ver), eq(ver, known-version)) => { {version: ver, entries: null, unchanged: true} }
     => {
-      out ::http/get-text(URL, ::http/DEFAULT_CHUNK_BYTES, NEEDED_RESPONSE_BYTES)
+      text ::http/get-text(URL, NEEDED_RESPONSE_BYTES)
       cond {
-        is-err(out) => { out }
+        is-err(text) => { text }
         => {
-          {
-            source: "eu",
-            version: or(ver, slice(::hot::hash/sha256(out.text), 0, 16)),
-            entries: parse(out.text),
-            unchanged: false
+          entries require-entries(parse(text))
+          cond {
+            is-err(entries) => { entries }
+            => {
+              {
+                version: or(ver, slice(::hot::hash/sha256(text), 0, 16)),
+                entries: entries,
+                unchanged: false
+              }
+            }
           }
         }
       }
     }
   }
-}
-
-// ---------------------------------------------------------------------------
-// Cache
-// ---------------------------------------------------------------------------
-
-lists
-meta {
-    doc: """
-    The EU Consolidated Financial Sanctions List in the form `::name-screening::cache` takes: one
-    `{source, list, fetch}` Map in a Vec, so it concats with other list
-    packages.
-
-    **Example**
-
-    ```hot
-    ::name-screening::cache/refresh-lists(concat(::ofac/lists(), ::eu::sanctions/lists()))
-    ```
-    """
-}
-fn (): Vec<Map> {
-  [{source: "eu", list: LIST_NAME, fetch: (known) { fetch(known) }}]
-}
-
-refresh
-meta {
-    doc: """
-    Refresh this list into the cache. Returns one row (see
-    `::name-screening::cache/refresh-lists`). A failure has
-    `status: "error"` and keeps the previous version. Meant for a daily
-    schedule, whose run needs `http.max-response-bytes` of at least
-    33554432 (32 MiB).
-
-    **Example**
-
-    ```hot
-    ::eu::sanctions/refresh()
-    ```
-    """
-}
-fn
-(): Vec<Map> {
-  refresh({})
-},
-(opts: Map): Vec<Map> {
-  ::cache/refresh-lists(lists(), opts)
 }

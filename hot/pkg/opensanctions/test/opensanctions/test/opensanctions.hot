@@ -144,3 +144,38 @@ fn () {
     out ::os/screen("John Doe", {})
     assert(is-err(out), "no key")
 }
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+test-country-codes
+meta ["test"]
+fn () {
+    assert-eq("MM", ::opensanctions::country/code("Burma"))
+    assert-eq("CD", ::opensanctions::country/code("Congo, Democratic Republic of the"))
+    assert-eq("IR", ::opensanctions::country/code("ir"))
+    assert-eq("RU", ::opensanctions::country/code("USSR (now Russian Federation)"))
+    assert-eq("BY", ::opensanctions::country/code("Former USSR Currently Belarus"))
+    assert-eq("PS", ::opensanctions::country/code("Region: Gaza"))
+    assert-eq("CI", ::opensanctions::country/code("Côte d'Ivoire"))
+    assert-eq(null, ::opensanctions::country/code("Atlantis"))
+    assert-eq(null, ::opensanctions::country/code("QQ"), "unknown two-letter codes are not codes")
+}
+
+test-round4
+meta ["test"]
+fn () {
+    assert-eq(0.6667, ::os/round4(div(2, 3)))
+    assert-eq(1.0, ::os/round4(1))
+}
+
+test-http-error
+meta ["test"]
+fn () {
+    e untype(::opensanctions::http/http-error(::hot::http/HttpResponse({status: 404, headers: {}, body: "not here"}), "https://example.test/x"))
+    assert-eq(404, e.status)
+    assert-eq("HTTP 404 from https://example.test/x: not here", e.message)
+    blank untype(::opensanctions::http/http-error(::hot::http/HttpResponse({status: 500, headers: {}, body: null}), "https://example.test/y"))
+    assert-eq("HTTP 500 from https://example.test/y", blank.message)
+}

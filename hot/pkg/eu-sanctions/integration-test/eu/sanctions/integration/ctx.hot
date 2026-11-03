@@ -2,7 +2,7 @@
 
 ::env ::hot::env
 
-// Live smoke tests send one HEAD request for the public list file, so they only run when
+// Live smoke tests read the public list file (about 26 MB), so they only run when
 // EU_SANCTIONS_LIVE=1.
 
 live

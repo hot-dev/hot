@@ -133,7 +133,6 @@ persona
 middesk
 sumsub
 cipherowl
-name-screening
 ofac
 uk-sanctions
 eu-sanctions

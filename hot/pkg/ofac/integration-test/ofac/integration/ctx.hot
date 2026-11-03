@@ -2,8 +2,8 @@
 
 ::env ::hot::env
 
-// Live smoke tests read the public SLS file listing, so they only run when
-// OFAC_LIVE=1.
+// Live smoke tests read the public SLS file listing and the small
+// Consolidated list, so they only run when OFAC_LIVE=1.
 
 live
 meta {doc: """True when OFAC_LIVE=1: the live tests may run."""}

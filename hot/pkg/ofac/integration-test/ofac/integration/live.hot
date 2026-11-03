@@ -4,7 +4,8 @@ meta ["test"]
 // =============================================================================
 // Integration smoke tests (live, read-only)
 // =============================================================================
-// OFAC_LIVE=1 reads the OFAC SLS file listing. Nothing is written to the store.
+// OFAC_LIVE=1 reads the SLS file listing and downloads the small Consolidated
+// list (about 0.4 MB). The SDN files total about 8.5 MB.
 // Run with: OFAC_LIVE=1 hot test -p pkg-integration-ofac
 
 ::ctx ::ofac::integration::ctx
@@ -17,6 +18,28 @@ meta ["test"] fn () {
             files ::ofac/manifest("ofac-sdn")
             assert(is-some(get(files, "SDN.CSV")), "SDN.CSV is listed")
             assert-eq(16, length(::ofac/version("ofac-sdn", files)))
+            assert-eq(16, length(::ofac/current-version("ofac-sdn")))
+        }
+    }
+}
+
+test-ofac-consolidated-list-downloads-and-parses
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("OFAC_LIVE is not 1") }
+        => {
+            out ::ofac/fetch("ofac-cons")
+            assert(not(out.unchanged), "no known version always downloads")
+            assert(gt(length(out.entries), 50), "the list has a few hundred entries")
+            assert-eq(::ofac/current-version("ofac-cons"), out.version, "the cheap check gives the same version")
+            sample first(out.entries)
+            assert(not(is-empty(sample.name)), "entries have names")
+            assert-eq("ofac-cons", sample.source)
+            assert(some(out.entries, (e) { not(is-empty(e.aliases)) }), "the aliases file was read")
+            assert(some(out.entries, (e) { not(is-empty(e.addresses)) }), "the addresses file was read")
+            again ::ofac/fetch("ofac-cons", out.version)
+            assert(again.unchanged, "the same version downloads nothing")
+            assert-eq(null, again.entries)
         }
     }
 }
