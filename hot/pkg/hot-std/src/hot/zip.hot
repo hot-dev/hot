@@ -1,0 +1,150 @@
+::hot::zip ns
+meta {
+    doc: """
+    Read and create zip archives.
+
+    An archive is either `Bytes` or a `Str` naming a file. Prefer the file for
+    large archives: it's read in place, and the archive isn't recorded as a call
+    argument. With `file.mode` set to `service`, the file is copied to a
+    temporary file on each call, so a large stored archive costs a copy per call.
+
+    Zip64 archives are read. Entries using deflate, store, bzip2 or zstd can be
+    read with `read-entry`, and deflate and store with `read-entry-stream`.
+    Encrypted entries and split archives are an Err.
+
+    **Bad input is an Err.** That covers input that isn't a zip file, a failed
+    checksum, an entry that isn't the size its header claims, two entries of one
+    name, and headers that disagree with each other.
+
+    **Size limits.** Treat archives as untrusted: a few KB can expand to
+    gigabytes. `read-entry` stops with an Err once its output passes
+    `compression.max-output-bytes` (64 MiB by default), whatever the archive
+    claims. Set `hot.compression.max-output-bytes` in `hot.hot`. The `max-bytes` option can lower
+    the limit for one call, never raise it. `read-entry-stream` holds one chunk
+    at a time, so that setting doesn't apply to it. Pass `max-bytes` to stop a
+    stream early. The limit is per entry: each call reads one.
+
+    **Unsafe names.** An entry's `name` comes from the archive and can be
+    anything, such as `../../etc/passwd`. Nothing here writes entries to disk.
+    If you do, use `safe-path` instead of `name`, and skip entries where it's
+    null.
+
+    **What Hot records.** A call's arguments and return value are recorded, so
+    `read-entry` records the entry. Pass `read-entry-stream` to `iter-csv` or
+    `iter-tsv` to keep the rows of a large entry out of the record.
+    """
+}
+
+
+entries
+meta {
+    doc: """
+    List an archive's entries, in archive order, without decompressing any.
+    Sizes are what the archive claims, which can be false.
+
+    Each entry is a Map:
+    - `name`: the name as the archive has it. Pass this to `read-entry`
+    - `safe-path`: the name as a relative path that stays inside the directory it's written to, or null when it wouldn't. See the namespace docs
+    - `size`: size in bytes once decompressed
+    - `compressed-size`: size in bytes in the archive
+    - `method`: `"deflate"`, `"store"`, `"bzip2"`, `"zstd"` or another method's name
+    - `is-dir`: whether the entry is a directory
+    - `is-encrypted`: whether the entry is encrypted
+
+    **Example**
+
+    ```hot
+    archive ::hot::zip/create([{name: "data/a.csv", data: "id\n1\n"}])
+    ::hot::zip/entries(archive)[0].name  // "data/a.csv"
+
+    ::hot::zip/entries("bulk-data.zip")
+    ```
+    """
+}
+fn (source: Bytes | Str): Vec<Map> {
+    call-lib(::hot::zip/entries, [source])
+}
+
+
+read-entry
+meta {
+    doc: """
+    Read one entry, by its exact `name`, as `Bytes`. A name the archive doesn't
+    have is an Err. Output over the limit is an Err; see the namespace docs. Use
+    `::hot::bytes/to-str` on the result for text.
+
+    **Options**
+    - `max-bytes`: stop with an Err past this many bytes. Can only lower `compression.max-output-bytes`
+
+    **Example**
+
+    ```hot
+    archive ::hot::zip/create([{name: "a.txt", data: "hello"}])
+    ::hot::bytes/to-str(::hot::zip/read-entry(archive, "a.txt"))  // "hello"
+
+    ::hot::zip/read-entry("bulk-data.zip", "readme.html", {max-bytes: 1048576})
+    ```
+    """
+}
+fn
+(source: Bytes | Str, name: Str): Bytes {
+    call-lib(::hot::zip/read-entry, [source, name])
+},
+(source: Bytes | Str, name: Str, opts: Map): Bytes {
+    call-lib(::hot::zip/read-entry, [source, name, opts])
+}
+
+
+read-entry-stream
+meta {
+    doc: """
+    Read one entry a chunk at a time, as an iterator of `Bytes`. Use this for an
+    entry too big to hold in memory. Chunks can split anywhere, including inside
+    a character. The entry's size and checksum are checked at the end, so a bad
+    entry is an Err after some chunks, never a short read. Deflate and store
+    entries only.
+
+    **Options**
+    - `max-bytes`: stop with an Err past this many bytes. Default no limit
+
+    **Example**
+
+    ```hot
+    // Rows of a tab-separated entry, one at a time
+    rows iter-tsv(::hot::zip/read-entry-stream("bulk-data.zip", "data/issuers.tsv"))
+    for-each(rows, (row) { print(row.CIK) })
+    ```
+    """
+}
+fn
+(source: Bytes | Str, name: Str): Iter {
+    call-lib(::hot::zip/read-entry-stream, [source, name])
+},
+(source: Bytes | Str, name: Str, opts: Map): Iter {
+    call-lib(::hot::zip/read-entry-stream, [source, name, opts])
+}
+
+
+create
+meta {
+    doc: """
+    Build an archive in memory from a Vec of `{name, data}` Maps. `data` is
+    `Bytes` or `Str`, and entries are compressed with deflate. A `name` that
+    could escape a directory (see `entries`), a name ending in `/` and a repeated
+    name are an Err. The same entries always give the same archive: timestamps
+    are fixed at 1980-01-01.
+
+    **Example**
+
+    ```hot
+    archive ::hot::zip/create([
+        {name: "report/summary.txt", data: "All good"},
+        {name: "report/data.bin", data: Bytes([1, 2, 3])},
+    ])
+    ::hot::file/write-file-bytes("report.zip", archive)
+    ```
+    """
+}
+fn (entries: Vec<Map>): Bytes {
+    call-lib(::hot::zip/create, [entries])
+}

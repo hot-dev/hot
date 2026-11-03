@@ -1027,6 +1027,20 @@ mod tests {
         }
     }
 
+    /// `::hot::http` doesn't decompress, so a gzip body has to reach the caller
+    /// whole, even under a text content type, for `::hot::gzip/decode` to read.
+    #[test]
+    fn a_gzip_body_stays_bytes_under_a_text_content_type() {
+        let gz = match crate::lang::hot::gzip::encode(&[Val::from("<a/>")]) {
+            HotResult::Ok(Val::Bytes(bytes)) => bytes.to_vec(),
+            other => panic!("encode failed: {other:?}"),
+        };
+        for content_type in ["text/xml", "application/json"] {
+            let body = response_body_val(gz.clone(), Some(content_type));
+            assert_eq!(body, Val::bytes(gz.clone()), "{content_type}");
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_http_get_json() {
         // Create a simple JSON endpoint
