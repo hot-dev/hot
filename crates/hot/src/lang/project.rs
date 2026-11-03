@@ -555,21 +555,20 @@ impl DependencyResolver {
     }
 
     /// Get the cache path for a CDN package
-    fn get_cdn_package_path(parsed: &ParsedPkgSpec) -> Result<PathBuf, String> {
-        let cache_dir = Self::get_cdn_cache_dir()?;
+    fn get_cdn_package_path(cache_dir: &Path, parsed: &ParsedPkgSpec) -> PathBuf {
         // Cache structure: {cache_dir}/{org}/{package}/{version}/
-        Ok(cache_dir
+        cache_dir
             .join(&parsed.org)
             .join(&parsed.package)
-            .join(&parsed.version))
+            .join(&parsed.version)
     }
 
     /// Acquire a cross-process file lock for a CDN package.
     fn acquire_cdn_file_lock(
+        cache_dir: &Path,
         parsed: &ParsedPkgSpec,
     ) -> Result<fd_lock::RwLock<std::fs::File>, std::io::Error> {
-        let cache_dir = super::cache::paths::get_cdn_cache_dir();
-        std::fs::create_dir_all(&cache_dir)?;
+        std::fs::create_dir_all(cache_dir)?;
 
         let lock_name = format!("{}-{}-{}.lock", parsed.org, parsed.package, parsed.version);
         let lock_path = cache_dir.join(lock_name);
@@ -586,7 +585,19 @@ impl DependencyResolver {
     /// Resolve a package from the CDN (pkg.hot.dev)
     /// Uses file locking to prevent cross-process races during download/extraction
     fn resolve_from_cdn(parsed: &ParsedPkgSpec, dep_name: &str) -> Result<PathBuf, String> {
-        let pkg_path = Self::get_cdn_package_path(parsed)?;
+        let cache_dir = Self::get_cdn_cache_dir()?;
+        Self::resolve_from_cdn_in(&cache_dir, parsed, dep_name, Self::download_cdn_package)
+    }
+
+    /// Resolve a package into the CDN cache at `cache_dir`, downloading its
+    /// tarball with `fetch` when it isn't cached yet.
+    fn resolve_from_cdn_in(
+        cache_dir: &Path,
+        parsed: &ParsedPkgSpec,
+        dep_name: &str,
+        fetch: impl Fn(&str) -> Result<Vec<u8>, String>,
+    ) -> Result<PathBuf, String> {
+        let pkg_path = Self::get_cdn_package_path(cache_dir, parsed);
 
         // Check if already cached (fast path - no lock needed)
         if pkg_path.exists() && pkg_path.join("pkg.hot").exists() {
@@ -598,9 +609,12 @@ impl DependencyResolver {
             return Ok(pkg_path);
         }
 
-        // Acquire cross-process file lock (best effort - proceed even if locking fails)
-        let mut file_lock = Self::acquire_cdn_file_lock(parsed).ok();
-        let _file_lock_guard = file_lock.as_mut().and_then(|lock| lock.try_write().ok());
+        // Wait for any other process downloading this package, so it is
+        // downloaded once. The OS releases the lock if that process dies.
+        // Without a lock file (a read-only cache, say), go ahead: extraction
+        // uses a temp directory of its own.
+        let mut file_lock = Self::acquire_cdn_file_lock(cache_dir, parsed).ok();
+        let _file_lock_guard = file_lock.as_mut().and_then(|lock| lock.write().ok());
 
         // Re-check if already cached (another process may have just downloaded it)
         if pkg_path.exists() && pkg_path.join("pkg.hot").exists() {
@@ -617,7 +631,7 @@ impl DependencyResolver {
         tracing::info!("Fetching package '{}' from CDN: {}", dep_name, cdn_url);
 
         // Download the tarball
-        let tarball_bytes = Self::download_cdn_package(&cdn_url)?;
+        let tarball_bytes = fetch(&cdn_url)?;
 
         // Extract to cache directory (uses atomic temp dir + rename)
         Self::extract_tarball(&tarball_bytes, &pkg_path)?;
@@ -647,15 +661,7 @@ impl DependencyResolver {
             .build()
             .new_agent();
         let mut response = agent.get(url).call().map_err(|e| match e {
-            ureq::Error::StatusCode(404) => {
-                format!(
-                    "Package not found at {}. Check that the version exists.",
-                    url
-                )
-            }
-            ureq::Error::StatusCode(code) => {
-                format!("HTTP error {} fetching {}", code, url)
-            }
+            ureq::Error::StatusCode(code) => Self::cdn_status_error(code, url),
             other => format!("Network error fetching {}: {}", url, other),
         })?;
 
@@ -667,6 +673,19 @@ impl DependencyResolver {
             .map_err(|e| format!("Failed to read package data: {}", e))?;
 
         Ok(bytes)
+    }
+
+    /// The error for a CDN response with HTTP status `code`.
+    fn cdn_status_error(code: u16, url: &str) -> String {
+        match code {
+            // pkg.hot.dev serves from S3 through CloudFront, which answers
+            // 403 for a file that doesn't exist.
+            403 | 404 => format!(
+                "Package not found at {}. Check that the version exists.",
+                url
+            ),
+            code => format!("HTTP error {} fetching {}", code, url),
+        }
     }
 
     /// Extract a gzipped tarball to a directory
@@ -681,12 +700,21 @@ impl DependencyResolver {
                 .map_err(|e| format!("Failed to create directory: {}", e))?;
         }
 
-        // Create a temporary directory for extraction
-        let temp_dir = dest_path.with_extension("tmp");
-        if temp_dir.exists() {
-            std::fs::remove_dir_all(&temp_dir)
-                .map_err(|e| format!("Failed to clean temp directory: {}", e))?;
-        }
+        // Extract into a temporary directory of this call's own, so another
+        // extraction can't delete or fill it midway. The lock is per
+        // version, and a name like `with_extension("tmp")` gives `1.2.2`
+        // and `1.2.4` the same `1.2.tmp`.
+        static EXTRACTIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dest_name = dest_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let temp_dir = dest_path.with_file_name(format!(
+            "{}.tmp-{}-{}",
+            dest_name,
+            std::process::id(),
+            EXTRACTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         std::fs::create_dir_all(&temp_dir)
             .map_err(|e| format!("Failed to create temp directory: {}", e))?;
 
@@ -712,14 +740,22 @@ impl DependencyResolver {
             temp_dir.clone()
         };
 
-        // Move to final location
+        // Another process that went ahead without the lock may have
+        // finished first; keep its copy.
+        let finished = |path: &Path| path.join("pkg.hot").exists();
+        if finished(dest_path) {
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            return Ok(());
+        }
+
+        // Move to final location, replacing an incomplete copy
         if dest_path.exists() {
             std::fs::remove_dir_all(dest_path)
                 .map_err(|e| format!("Failed to clean destination: {}", e))?;
         }
 
         // Try rename first (fast), fall back to copy (cross-device)
-        if std::fs::rename(&source_dir, dest_path).is_err() {
+        if std::fs::rename(&source_dir, dest_path).is_err() && !finished(dest_path) {
             Self::copy_dir_recursive(&source_dir, dest_path)?;
         }
 
@@ -1633,6 +1669,139 @@ mod tests {
         );
         let hot_std = resolver.resolve_from_defaults("hot.dev/hot-std").unwrap();
         assert_eq!(hot_std.name, "hot-std");
+    }
+
+    /// A package tarball as pkg.hot.dev serves it: one top-level directory.
+    /// Its pkg.hot names `version`.
+    fn package_tarball(version: &str) -> Vec<u8> {
+        let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::default(),
+        ));
+        let pkg_hot = format!("::hot::pkg ns\n// {version}\n");
+        for (path, contents) in [
+            ("demo/pkg.hot", pkg_hot.as_str()),
+            ("demo/src/demo.hot", "::demo ns\n"),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, path, contents.as_bytes())
+                .unwrap();
+        }
+        builder.into_inner().unwrap().finish().unwrap()
+    }
+
+    /// Processes sharing a CDN cache that resolve the same uncached package
+    /// at once all get it, and it is downloaded once. A process used to go
+    /// ahead without the lock while another held it, and both extracted
+    /// into the same temp directory.
+    #[test]
+    fn concurrent_cdn_resolves_share_one_download() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let cache = tempfile::tempdir().unwrap();
+        let parsed = ParsedPkgSpec::parse("hot.dev/demo/1.0.0").unwrap();
+        let tarball = package_tarball("1.0.0");
+        let fetches = AtomicUsize::new(0);
+        let fetch = |_url: &str| {
+            fetches.fetch_add(1, Ordering::SeqCst);
+            // Hold the lock long enough for the others to reach it.
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            Ok(tarball.clone())
+        };
+
+        let results: Vec<_> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        DependencyResolver::resolve_from_cdn_in(
+                            cache.path(),
+                            &parsed,
+                            "hot.dev/demo",
+                            fetch,
+                        )
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+
+        let expected = cache.path().join("hot.dev/demo/1.0.0");
+        for result in results {
+            assert_eq!(result.unwrap(), expected);
+        }
+        assert!(expected.join("pkg.hot").exists());
+        assert!(expected.join("src/demo.hot").exists());
+        assert_eq!(fetches.load(Ordering::SeqCst), 1);
+        let left: Vec<_> = std::fs::read_dir(cache.path().join("hot.dev/demo"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left, ["1.0.0"], "temp directories left behind");
+    }
+
+    /// Two versions of a package downloaded at once each get their own
+    /// files. Both used to extract into one temp directory: `1.2.2` and
+    /// `1.2.4` each became `1.2.tmp`, and the lock is per version, so a
+    /// version could be cached with another version's files.
+    #[test]
+    fn concurrent_cdn_resolves_of_two_versions_keep_them_apart() {
+        let cache = tempfile::tempdir().unwrap();
+        let cache_path = cache.path();
+        let versions = ["1.2.2", "1.2.4"];
+        let fetch = |url: &str| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let version = versions.iter().find(|v| url.contains(*v)).unwrap();
+            Ok(package_tarball(version))
+        };
+
+        std::thread::scope(|scope| {
+            for version in versions {
+                for _ in 0..4 {
+                    scope.spawn(move || {
+                        let parsed =
+                            ParsedPkgSpec::parse(&format!("hot.dev/demo/{version}")).unwrap();
+                        DependencyResolver::resolve_from_cdn_in(
+                            cache_path,
+                            &parsed,
+                            "hot.dev/demo",
+                            fetch,
+                        )
+                        .unwrap();
+                    });
+                }
+            }
+        });
+
+        for version in versions {
+            let pkg_hot = std::fs::read_to_string(
+                cache
+                    .path()
+                    .join("hot.dev/demo")
+                    .join(version)
+                    .join("pkg.hot"),
+            )
+            .unwrap();
+            assert!(pkg_hot.contains(version), "{version} holds: {pkg_hot}");
+        }
+    }
+
+    /// pkg.hot.dev answers 403 for a version that doesn't exist, which is
+    /// the same as a 404 to whoever pinned it.
+    #[test]
+    fn missing_cdn_versions_read_as_not_found() {
+        let url = "https://pkg.hot.dev/hot.dev/demo/9.9.9.tar.gz";
+        for code in [403, 404] {
+            let error = DependencyResolver::cdn_status_error(code, url);
+            assert!(error.starts_with("Package not found at"), "{error}");
+        }
+        assert_eq!(
+            DependencyResolver::cdn_status_error(503, url),
+            format!("HTTP error 503 fetching {url}")
+        );
     }
 }
 
