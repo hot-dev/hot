@@ -1,0 +1,45 @@
+::modern-treasury::events ns
+meta {
+    doc: """Events: the audit log of changes to your objects, the same records webhooks deliver. Poll `list-events` (filtered by `resource` and `event_time_start`) to backstop missed webhooks."""
+}
+
+::api ::modern-treasury::api
+seg ::modern-treasury::api/seg
+
+list-events
+meta {
+    doc: """
+    GET /api/events: one page. Filters: `resource` (e.g.
+    `"payment_order"`), `entity_id` (the object's id), `event_name`
+    (e.g. `"completed"`), `event_time_start`, `event_time_end`,
+    `per_page`, `after_cursor`.
+
+    **Example**
+
+    ```hot
+    page ::modern-treasury::events/list-events({resource: "payment_order", per_page: 25})
+    ```
+    """
+}
+fn
+(): Map {
+  list-events({})
+},
+(params: Map): Map {
+  list-events(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/list-page("/api/events", params, opts)
+}
+
+get-event
+meta {
+    doc: """GET /api/events/{id}: retrieve an event (`resource`, `event_name`, `event_time`, `data`)."""
+}
+fn
+(event-id: Str): Map {
+  get-event(event-id, {})
+},
+(event-id: Str, opts: Map): Map {
+  ::api/call("GET", `/api/events/${seg(event-id)}`, {}, opts)
+}

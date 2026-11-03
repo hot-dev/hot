@@ -6,6 +6,7 @@ use crate::lang::runtime::vm::{CancellationState, FailureState};
 use crate::val::Val;
 use ahash::AHashSet;
 use indexmap::IndexMap;
+use std::sync::Arc;
 // Removed placeholder sanitizer; placeholders are no longer emitted.
 use crate::validate_args;
 
@@ -31,7 +32,7 @@ pub fn fast_length_vec(v: &[Val]) -> Val {
 
 #[inline(always)]
 pub fn fast_length_str(s: &str) -> Val {
-    Val::Int(s.len() as i64)
+    Val::Int(s.chars().count() as i64)
 }
 
 #[inline(always)]
@@ -51,9 +52,9 @@ pub fn fast_first_vec(v: &[Val]) -> Val {
 #[inline(always)]
 pub fn fast_rest_vec(v: &[Val]) -> Val {
     if v.is_empty() {
-        Val::Vec(Vec::new())
+        Val::vec(Vec::new())
     } else {
-        Val::Vec(v[1..].to_vec())
+        Val::vec(v[1..].to_vec())
     }
 }
 
@@ -83,7 +84,7 @@ pub fn fast_concat_vec(a: &[Val], b: &[Val]) -> Val {
     let mut result = Vec::with_capacity(a.len() + b.len());
     result.extend_from_slice(a);
     result.extend_from_slice(b);
-    Val::Vec(result)
+    Val::vec(result)
 }
 
 /// Build an Int range [0..end) — the most common range call. Returns `None` if
@@ -92,20 +93,20 @@ pub fn fast_concat_vec(a: &[Val], b: &[Val]) -> Val {
 /// `Vec`).
 #[inline(always)]
 pub fn fast_range_1_int(end: i64) -> Option<Val> {
-    build_int_range(0, end, 1).map(Val::Vec)
+    build_int_range(0, end, 1).map(Val::vec)
 }
 
 /// Build an Int range [start..end) with step 1. Returns `None` on an
 /// unrepresentable element count (see [`fast_range_1_int`]).
 #[inline(always)]
 pub fn fast_range_2_int(start: i64, end: i64) -> Option<Val> {
-    build_int_range(start, end, 1).map(Val::Vec)
+    build_int_range(start, end, 1).map(Val::vec)
 }
 
 /// Build an Int range [start..end) with explicit step.
 #[inline(always)]
 pub fn fast_range_3_int(start: i64, end: i64, step: i64) -> Option<Val> {
-    build_int_range(start, end, step).map(Val::Vec)
+    build_int_range(start, end, step).map(Val::vec)
 }
 
 fn build_int_range(start: i64, end: i64, step: i64) -> Option<Vec<Val>> {
@@ -194,7 +195,7 @@ fn onerr_variant_val(variant: &str) -> Val {
         Val::from("$type"),
         Val::from(format!("::hot::type/OnErr.{}", variant)),
     );
-    Val::Map(Box::new(map))
+    Val::map(map)
 }
 
 fn unwrap_ok_preserve_err(val: Val) -> Val {
@@ -401,6 +402,21 @@ pub fn last(args: &[Val]) -> HotResult<Val> {
 }
 
 /// Get nth element of a collection (0-indexed)
+/// `s` without its first `n` characters, or empty when it has no more than
+/// that. Stops after `n` characters, so it never costs the rest of `s`.
+fn skip_chars(s: &str, n: usize) -> &str {
+    let mut chars = s.chars();
+    if n > 0 && chars.nth(n - 1).is_none() {
+        return "";
+    }
+    chars.as_str()
+}
+
+/// The first `n` characters of `s`, or all of it when it has no more than that.
+fn take_chars(s: &str, n: usize) -> &str {
+    &s[..s.len() - skip_chars(s, n).len()]
+}
+
 pub fn nth(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::coll/nth", args, 2);
 
@@ -417,14 +433,10 @@ pub fn nth(args: &[Val]) -> HotResult<Val> {
                 HotResult::Ok(Val::Null)
             }
         }
-        Val::Str(s) => {
-            let chars: Vec<char> = s.chars().collect();
-            if index < chars.len() {
-                HotResult::Ok(Val::from(chars[index].to_string()))
-            } else {
-                HotResult::Ok(Val::Null)
-            }
-        }
+        Val::Str(s) => match s.chars().nth(index) {
+            Some(c) => HotResult::Ok(Val::from(c.to_string())),
+            None => HotResult::Ok(Val::Null),
+        },
         _ => HotResult::Err(Val::from("nth requires a collection")),
     }
 }
@@ -448,7 +460,7 @@ pub fn mapcat(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
     // Null collections map to an empty vector.
     if matches!(collection, Val::Null) {
         tracing::debug!("VM: mapcat_vm_aware - collection is null, returning empty vector");
-        return HotResult::Ok(Val::Vec(vec![]));
+        return HotResult::Ok(Val::vec(vec![]));
     }
 
     match collection {
@@ -457,7 +469,7 @@ pub fn mapcat(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
             let mut result = Vec::with_capacity(items.len());
 
             // Apply function to each item and concatenate results
-            for item in items {
+            for item in items.iter() {
                 // Call the function with the item using VM context
                 let function_result = match call_prepared_with_vm(vm, &function, item)
                     .and_then(|val| apply_onerr_disposition(vm, val, disposition))
@@ -473,8 +485,8 @@ pub fn mapcat(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
 
                 // Concatenate the result (should be a vector)
                 match function_result {
-                    Val::Vec(mut sub_items) => {
-                        result.append(&mut sub_items);
+                    Val::Vec(sub_items) => {
+                        result.extend(Arc::unwrap_or_clone(sub_items));
                     }
                     single_item => {
                         result.push(single_item);
@@ -482,7 +494,7 @@ pub fn mapcat(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
                 }
             }
 
-            HotResult::Ok(Val::Vec(result))
+            HotResult::Ok(Val::vec(result))
         }
         Val::Map(map) => {
             let function = prepare_function(function_val);
@@ -490,7 +502,7 @@ pub fn mapcat(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
 
             // Apply function to each key-value pair and concatenate results
             for (key, value) in map.iter() {
-                let pair = Val::Vec(vec![key.clone(), value.clone()]);
+                let pair = Val::vec(vec![key.clone(), value.clone()]);
 
                 // Call the function with the key-value pair using VM context
                 let function_result = match call_prepared_with_vm(vm, &function, &pair)
@@ -507,8 +519,8 @@ pub fn mapcat(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
 
                 // Concatenate the result (should be a vector)
                 match function_result {
-                    Val::Vec(mut sub_items) => {
-                        result.append(&mut sub_items);
+                    Val::Vec(sub_items) => {
+                        result.extend(Arc::unwrap_or_clone(sub_items));
                     }
                     single_item => {
                         result.push(single_item);
@@ -516,7 +528,7 @@ pub fn mapcat(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
                 }
             }
 
-            HotResult::Ok(Val::Vec(result))
+            HotResult::Ok(Val::vec(result))
         }
         _ => HotResult::Err(Val::from("mapcat requires a collection")),
     }
@@ -554,7 +566,7 @@ pub fn filter(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
     // Null collections map to an empty vector.
     if matches!(collection, Val::Null) {
         tracing::debug!("VM: filter - collection is null, returning empty vector");
-        return HotResult::Ok(Val::Vec(vec![]));
+        return HotResult::Ok(Val::vec(vec![]));
     }
 
     match collection {
@@ -563,7 +575,7 @@ pub fn filter(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
             let mut result = Vec::with_capacity(items.len());
 
             // Apply predicate to each item and keep those that return truthy
-            for item in items {
+            for item in items.iter() {
                 // Call the predicate function with the item using VM context
                 let predicate_result = match call_prepared_with_vm(vm, &predicate, item)
                     .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
@@ -597,7 +609,7 @@ pub fn filter(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
                 }
             }
 
-            HotResult::Ok(Val::Vec(result))
+            HotResult::Ok(Val::vec(result))
         }
         Val::Map(map) => {
             let predicate = prepare_function(predicate_val);
@@ -627,11 +639,11 @@ pub fn filter(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
 
                 if is_truthy {
                     // Include the key-value pair as a vector [key, value]
-                    result.push(Val::Vec(vec![key.clone(), value.clone()]));
+                    result.push(Val::vec(vec![key.clone(), value.clone()]));
                 }
             }
 
-            HotResult::Ok(Val::Vec(result))
+            HotResult::Ok(Val::vec(result))
         }
         Val::Str(s) => {
             let predicate = prepare_function(predicate_val);
@@ -662,7 +674,7 @@ pub fn filter(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
                 }
             }
 
-            HotResult::Ok(Val::Vec(result))
+            HotResult::Ok(Val::vec(result))
         }
         Val::Box(boxed) => {
             // Check if it's an iterator
@@ -718,7 +730,7 @@ pub fn filter(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
                     }
                 }
 
-                HotResult::Ok(Val::Vec(result))
+                HotResult::Ok(Val::vec(result))
             } else {
                 HotResult::Err(Val::from(
                     "Filter function expects a collection (Vec, Map, Str, or Iter)".to_string(),
@@ -753,7 +765,7 @@ pub fn map(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
     // Null collections map to an empty vector.
     if matches!(collection, Val::Null) {
         tracing::debug!("VM: map_vm_aware - collection is null, returning empty vector");
-        return HotResult::Ok(Val::Vec(vec![]));
+        return HotResult::Ok(Val::vec(vec![]));
     }
 
     match collection {
@@ -762,7 +774,7 @@ pub fn map(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
             let mut result = Vec::with_capacity(items.len());
 
             // Apply function to each item
-            for item in items {
+            for item in items.iter() {
                 // Call the function with the item using VM context
                 let function_result = match call_prepared_with_vm(vm, &function, item)
                     .and_then(|val| apply_onerr_disposition(vm, val, disposition))
@@ -779,7 +791,7 @@ pub fn map(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
                 result.push(function_result);
             }
 
-            HotResult::Ok(Val::Vec(result))
+            HotResult::Ok(Val::vec(result))
         }
         Val::Map(map) => {
             let function = prepare_function(function_val);
@@ -807,7 +819,7 @@ pub fn map(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
                 result.push(function_result);
             }
 
-            HotResult::Ok(Val::Vec(result))
+            HotResult::Ok(Val::vec(result))
         }
         Val::Str(s) => {
             let function = prepare_function(function_val);
@@ -833,7 +845,7 @@ pub fn map(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
                 result.push(function_result);
             }
 
-            HotResult::Ok(Val::Vec(result))
+            HotResult::Ok(Val::vec(result))
         }
         Val::Box(boxed) => {
             // Check if it's an iterator
@@ -887,7 +899,7 @@ pub fn map(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
                     result.push(function_result);
                 }
 
-                HotResult::Ok(Val::Vec(result))
+                HotResult::Ok(Val::vec(result))
             } else {
                 HotResult::Err(Val::from(
                     "Map function expects a collection (Vec, Map, Str, or Iter)".to_string(),
@@ -918,7 +930,7 @@ pub fn collection_length(val: &Val) -> Option<usize> {
     match crate::val::as_fields(val) {
         Val::Vec(v) => Some(v.len()),
         Val::Map(m) => Some(m.len()),
-        Val::Str(s) => Some(s.len()),
+        Val::Str(s) => Some(s.chars().count()),
         Val::Bytes(b) => Some(b.len()),
         _ => None,
     }
@@ -1036,10 +1048,7 @@ pub fn assoc(args: &[Val]) -> HotResult<Val> {
         Val::Map(m) => {
             let mut new_map = (**m).clone(); // Clone the inner IndexMap
             new_map.insert(key.clone(), value.clone());
-            HotResult::Ok(crate::val::with_type_of(
-                &args[0],
-                Val::Map(Box::new(new_map)),
-            ))
+            HotResult::Ok(crate::val::with_type_of(&args[0], Val::map(new_map)))
         }
         _ => HotResult::Err(Val::from(
             "::hot::coll/assoc expects a Map as the first argument".to_string(),
@@ -1107,7 +1116,7 @@ pub fn concat(args: &[Val]) -> HotResult<Val> {
                     result.extend(bytes.iter());
                 }
             }
-            HotResult::Ok(Val::Bytes(result))
+            HotResult::Ok(Val::bytes(result))
         }
         "Vec" => {
             let mut result = Vec::new();
@@ -1116,7 +1125,7 @@ pub fn concat(args: &[Val]) -> HotResult<Val> {
                     result.extend(vec.iter().cloned());
                 }
             }
-            HotResult::Ok(Val::Vec(result))
+            HotResult::Ok(Val::vec(result))
         }
         "Str" => {
             let mut result = String::new();
@@ -1176,7 +1185,7 @@ fn merge_fields(a: &Val, b: &Val) -> Val {
                 };
                 merged.insert(key.clone(), value);
             }
-            crate::val::with_type_of(a, Val::Map(Box::new(merged)))
+            crate::val::with_type_of(a, Val::map(merged))
         }
         _ => b.clone(),
     }
@@ -1212,7 +1221,7 @@ pub fn reduce(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
         Val::Vec(items) => {
             let mut accumulator = init_val.clone();
 
-            for item in items {
+            for item in items.iter() {
                 let function_result = match call_prepared_with_vm_multi_args(
                     vm,
                     &function,
@@ -1242,7 +1251,7 @@ pub fn reduce(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
             let mut accumulator = init_val.clone();
 
             for (key, value) in map.iter() {
-                let pair = Val::Vec(vec![key.clone(), value.clone()]);
+                let pair = Val::vec(vec![key.clone(), value.clone()]);
 
                 let function_result = match call_prepared_with_vm_multi_args(
                     vm,
@@ -1375,7 +1384,7 @@ pub fn some(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
     match collection {
         Val::Vec(items) => {
             // Apply predicate to each item and return true if any is truthy
-            for item in items {
+            for item in items.iter() {
                 // Call the predicate with the item using VM context
                 let predicate_result = match call_prepared_with_vm(vm, &predicate, item)
                     .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
@@ -1400,7 +1409,7 @@ pub fn some(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
         Val::Map(map) => {
             // Apply predicate to each key-value pair and return true if any is truthy
             for (key, value) in map.iter() {
-                let pair = Val::Vec(vec![key.clone(), value.clone()]);
+                let pair = Val::vec(vec![key.clone(), value.clone()]);
 
                 // Call the predicate with the key-value pair using VM context
                 let predicate_result = match call_prepared_with_vm(vm, &predicate, &pair)
@@ -1528,7 +1537,7 @@ pub fn find_first(
 
     match collection {
         Val::Vec(items) => {
-            for item in items {
+            for item in items.iter() {
                 let predicate_result = match call_function_with_vm(vm, predicate_val, item)
                     .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
                 {
@@ -1550,7 +1559,7 @@ pub fn find_first(
         }
         Val::Map(map) => {
             for (key, value) in map.iter() {
-                let pair = Val::Vec(vec![key.clone(), value.clone()]);
+                let pair = Val::vec(vec![key.clone(), value.clone()]);
 
                 let predicate_result = match call_function_with_vm(vm, predicate_val, &pair)
                     .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
@@ -1663,7 +1672,7 @@ pub fn for_each(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val])
 
     match collection {
         Val::Vec(items) => {
-            for item in items {
+            for item in items.iter() {
                 if let Err(e) = run(vm, item) {
                     return HotResult::Err(e);
                 }
@@ -1672,7 +1681,7 @@ pub fn for_each(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val])
         }
         Val::Map(map) => {
             for (key, value) in map.iter() {
-                let pair = Val::Vec(vec![key.clone(), value.clone()]);
+                let pair = Val::vec(vec![key.clone(), value.clone()]);
                 if let Err(e) = run(vm, &pair) {
                     return HotResult::Err(e);
                 }
@@ -1807,7 +1816,7 @@ fn pmap_vec(
     disposition: OnErrDisposition,
 ) -> HotResult<Val> {
     if items.is_empty() {
-        return HotResult::Ok(Val::Vec(vec![]));
+        return HotResult::Ok(Val::vec(vec![]));
     }
 
     // For small collections, just use sequential map (halt-propagating).
@@ -1816,7 +1825,7 @@ fn pmap_vec(
             OnErrDisposition::Force => onerr_variant_val("Force"),
             OnErrDisposition::Preserve => onerr_variant_val("Preserve"),
         };
-        return map(vm, &[Val::Vec(items.to_vec()), function_val.clone(), onerr]);
+        return map(vm, &[Val::vec(items.to_vec()), function_val.clone(), onerr]);
     }
 
     // Calculate chunk size
@@ -2045,7 +2054,7 @@ fn pmap_vec(
         .into_iter()
         .flat_map(|(_, chunk, _)| chunk)
         .collect();
-    HotResult::Ok(Val::Vec(flattened))
+    HotResult::Ok(Val::vec(flattened))
 }
 
 /// Parallel map over map (for now, delegate to sequential)
@@ -2068,7 +2077,7 @@ fn pmap_map(
             }
         }
     }
-    HotResult::Ok(Val::Vec(results))
+    HotResult::Ok(Val::vec(results))
 }
 
 /// Parallel map over string (for now, delegate to sequential)
@@ -2092,7 +2101,7 @@ fn pmap_str(
             }
         }
     }
-    HotResult::Ok(Val::Vec(results))
+    HotResult::Ok(Val::vec(results))
 }
 
 /// Map with index - applies function to each element with its index
@@ -2132,7 +2141,7 @@ pub fn map_indexed(
                     }
                 }
             }
-            HotResult::Ok(Val::Vec(result))
+            HotResult::Ok(Val::vec(result))
         }
         Val::Map(map) => {
             let mut result_vec = Vec::new();
@@ -2156,7 +2165,7 @@ pub fn map_indexed(
                     }
                 }
             }
-            HotResult::Ok(Val::Vec(result_vec))
+            HotResult::Ok(Val::vec(result_vec))
         }
         Val::Str(s) => {
             let mut result = Vec::new();
@@ -2175,7 +2184,7 @@ pub fn map_indexed(
                     }
                 }
             }
-            HotResult::Ok(Val::Vec(result))
+            HotResult::Ok(Val::vec(result))
         }
         _ => HotResult::Err(Val::from("map-indexed requires a collection")),
     }
@@ -2203,7 +2212,7 @@ pub fn remove(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
     match collection {
         Val::Vec(items) => {
             let mut result = Vec::new();
-            for item in items {
+            for item in items.iter() {
                 match call_function_with_vm(vm, predicate_val, item)
                     .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
                 {
@@ -2221,7 +2230,7 @@ pub fn remove(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
                     }
                 }
             }
-            HotResult::Ok(Val::Vec(result))
+            HotResult::Ok(Val::vec(result))
         }
         Val::Map(map) => {
             let mut result_map = indexmap::IndexMap::new();
@@ -2247,7 +2256,7 @@ pub fn remove(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
                     }
                 }
             }
-            HotResult::Ok(Val::Map(Box::new(result_map)))
+            HotResult::Ok(Val::map(result_map))
         }
         Val::Str(s) => {
             let mut out = String::new();
@@ -2289,20 +2298,21 @@ pub fn delete(args: &[Val]) -> HotResult<Val> {
 
     match (collection, key_or_index) {
         (Val::Str(s), Val::Int(target_index)) => {
-            let chars: Vec<char> = s.chars().collect();
-            let len = chars.len() as i64;
             let actual_index = if *target_index < 0 {
-                len + *target_index
+                s.chars().count() as i64 + *target_index
             } else {
                 *target_index
             };
-            if actual_index < 0 || actual_index >= len {
-                HotResult::Ok(Val::from(s.clone()))
-            } else {
-                let mut result_chars = chars;
-                result_chars.remove(actual_index as usize);
-                HotResult::Ok(Val::from(result_chars.into_iter().collect::<String>()))
+            if actual_index < 0 {
+                return HotResult::Ok(Val::from(s.clone()));
             }
+            let from_target = skip_chars(s, actual_index as usize);
+            let mut after_target = from_target.chars();
+            if after_target.next().is_none() {
+                return HotResult::Ok(Val::from(s.clone()));
+            }
+            let before_target = &s[..s.len() - from_target.len()];
+            HotResult::Ok(Val::from([before_target, after_target.as_str()].concat()))
         }
         (Val::Vec(items), Val::Int(target_index)) => {
             let len = items.len() as i64;
@@ -2314,15 +2324,15 @@ pub fn delete(args: &[Val]) -> HotResult<Val> {
             if actual_index < 0 || actual_index >= len {
                 HotResult::Ok(Val::Vec(items.clone()))
             } else {
-                let mut result_items = items.clone();
+                let mut result_items = items.to_vec();
                 result_items.remove(actual_index as usize);
-                HotResult::Ok(Val::Vec(result_items))
+                HotResult::Ok(Val::vec(result_items))
             }
         }
         (Val::Map(map), Val::Str(target_key)) => {
             let mut result_map = (**map).clone(); // Clone the inner IndexMap
             result_map.shift_remove(&Val::from(target_key.clone()));
-            HotResult::Ok(Val::Map(Box::new(result_map)))
+            HotResult::Ok(Val::map(result_map))
         }
         (Val::Map(map), _) => HotResult::Ok(Val::Map(map.clone())), // map is Box, clone returns Box
         (Val::Str(s), _) => HotResult::Ok(Val::from(s.clone())),
@@ -2343,24 +2353,13 @@ pub fn rest(args: &[Val]) -> HotResult<Val> {
     match &args[0] {
         Val::Vec(vec) => {
             if vec.is_empty() {
-                HotResult::Ok(Val::Vec(Vec::new()))
+                HotResult::Ok(Val::vec(Vec::new()))
             } else {
-                HotResult::Ok(Val::Vec(vec[1..].to_vec()))
+                HotResult::Ok(Val::vec(vec[1..].to_vec()))
             }
         }
-        Val::Str(s) => {
-            if s.is_empty() {
-                HotResult::Ok(Val::from(""))
-            } else {
-                let chars: Vec<char> = s.chars().collect();
-                if chars.len() > 1 {
-                    HotResult::Ok(Val::from(chars[1..].iter().collect::<String>()))
-                } else {
-                    HotResult::Ok(Val::from(""))
-                }
-            }
-        }
-        Val::Null => HotResult::Ok(Val::Vec(Vec::new())),
+        Val::Str(s) => HotResult::Ok(Val::from(skip_chars(s, 1))),
+        Val::Null => HotResult::Ok(Val::vec(Vec::new())),
         _ => HotResult::Err(Val::from("rest requires a collection")),
     }
 }
@@ -2377,26 +2376,17 @@ pub fn butlast(args: &[Val]) -> HotResult<Val> {
     match &args[0] {
         Val::Vec(vec) => {
             if vec.is_empty() {
-                HotResult::Ok(Val::Vec(Vec::new()))
+                HotResult::Ok(Val::vec(Vec::new()))
             } else {
-                HotResult::Ok(Val::Vec(vec[..vec.len() - 1].to_vec()))
+                HotResult::Ok(Val::vec(vec[..vec.len() - 1].to_vec()))
             }
         }
         Val::Str(s) => {
-            if s.is_empty() {
-                HotResult::Ok(Val::from(""))
-            } else {
-                let chars: Vec<char> = s.chars().collect();
-                if chars.len() > 1 {
-                    HotResult::Ok(Val::from(
-                        chars[..chars.len() - 1].iter().collect::<String>(),
-                    ))
-                } else {
-                    HotResult::Ok(Val::from(""))
-                }
-            }
+            let mut chars = s.chars();
+            chars.next_back();
+            HotResult::Ok(Val::from(chars.as_str()))
         }
-        Val::Null => HotResult::Ok(Val::Vec(Vec::new())),
+        Val::Null => HotResult::Ok(Val::vec(Vec::new())),
         _ => HotResult::Err(Val::from("butlast requires a collection")),
     }
 }
@@ -2454,11 +2444,11 @@ pub fn partition(
                 let mut idx = 0usize;
                 while idx < items.len() {
                     let end = std::cmp::min(idx + chunk_size, items.len());
-                    let chunk = Val::Vec(items[idx..end].to_vec());
+                    let chunk = Val::vec(items[idx..end].to_vec());
                     result.push(chunk);
                     idx = end;
                 }
-                return HotResult::Ok(Val::Vec(result));
+                return HotResult::Ok(Val::vec(result));
             }
             Val::Str(s) => {
                 let chars: Vec<Val> = s.chars().map(|c| Val::from(c.to_string())).collect();
@@ -2466,11 +2456,11 @@ pub fn partition(
                 let mut idx = 0usize;
                 while idx < chars.len() {
                     let end = std::cmp::min(idx + chunk_size, chars.len());
-                    let chunk = Val::Vec(chars[idx..end].to_vec());
+                    let chunk = Val::vec(chars[idx..end].to_vec());
                     result.push(chunk);
                     idx = end;
                 }
-                return HotResult::Ok(Val::Vec(result));
+                return HotResult::Ok(Val::vec(result));
             }
             Val::Map(map) => {
                 let mut result: Vec<Val> = Vec::new();
@@ -2478,13 +2468,13 @@ pub fn partition(
                 for (i, (k, v)) in map.iter().enumerate() {
                     current.insert(k.clone(), v.clone());
                     if (i + 1) % chunk_size == 0 {
-                        result.push(Val::Map(Box::new(std::mem::take(&mut current))));
+                        result.push(Val::map(std::mem::take(&mut current)));
                     }
                 }
                 if !current.is_empty() {
-                    result.push(Val::Map(Box::new(current)));
+                    result.push(Val::map(current));
                 }
-                return HotResult::Ok(Val::Vec(result));
+                return HotResult::Ok(Val::vec(result));
             }
             _ => {
                 return HotResult::Err(Val::from("partition requires a collection"));
@@ -2501,7 +2491,7 @@ pub fn partition(
             let mut true_items = Vec::new();
             let mut false_items = Vec::new();
 
-            for item in items {
+            for item in items.iter() {
                 match call_function_with_vm(vm, predicate_val, item)
                     .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
                 {
@@ -2522,14 +2512,14 @@ pub fn partition(
             }
 
             // Return [true_items, false_items]
-            HotResult::Ok(Val::Vec(vec![Val::Vec(true_items), Val::Vec(false_items)]))
+            HotResult::Ok(Val::vec(vec![Val::vec(true_items), Val::vec(false_items)]))
         }
         Val::Map(map) => {
             let mut true_map = indexmap::IndexMap::new();
             let mut false_map = indexmap::IndexMap::new();
 
             for (key, value) in map.iter() {
-                let pair = Val::Vec(vec![key.clone(), value.clone()]);
+                let pair = Val::vec(vec![key.clone(), value.clone()]);
                 match call_function_with_vm(vm, predicate_val, &pair)
                     .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
                 {
@@ -2550,10 +2540,7 @@ pub fn partition(
             }
 
             // Return [true_map, false_map]
-            HotResult::Ok(Val::Vec(vec![
-                Val::Map(Box::new(true_map)),
-                Val::Map(Box::new(false_map)),
-            ]))
+            HotResult::Ok(Val::vec(vec![Val::map(true_map), Val::map(false_map)]))
         }
         _ => HotResult::Err(Val::from("partition requires a collection")),
     }
@@ -2584,14 +2571,14 @@ pub fn partition_by(
     match collection {
         Val::Vec(items) => {
             if items.is_empty() {
-                return HotResult::Ok(Val::Vec(Vec::new()));
+                return HotResult::Ok(Val::vec(Vec::new()));
             }
 
             let mut result = Vec::new();
             let mut current_group = Vec::new();
             let mut current_key: Option<Val> = None;
 
-            for item in items {
+            for item in items.iter() {
                 match call_function_with_vm(vm, function_val, item)
                     .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
                 {
@@ -2599,7 +2586,7 @@ pub fn partition_by(
                         if let Some(ref prev_key) = current_key {
                             // Compare keys - if different, start new group
                             if !vals_equal(prev_key, &key) && !current_group.is_empty() {
-                                result.push(Val::Vec(current_group.clone()));
+                                result.push(Val::vec(current_group.clone()));
                                 current_group.clear();
                             }
                         }
@@ -2617,10 +2604,10 @@ pub fn partition_by(
 
             // Add the last group
             if !current_group.is_empty() {
-                result.push(Val::Vec(current_group));
+                result.push(Val::vec(current_group));
             }
 
-            HotResult::Ok(Val::Vec(result))
+            HotResult::Ok(Val::vec(result))
         }
         _ => HotResult::Err(Val::from("partition-by requires a vector")),
     }
@@ -2662,7 +2649,7 @@ fn map_entries<'a>(name: &str, map: &'a Val) -> Result<&'a IndexMap<Val, Val>, V
 
 fn into_hot_result(result: Result<IndexMap<Val, Val>, Val>) -> HotResult<Val> {
     match result {
-        Ok(map) => HotResult::Ok(Val::Map(Box::new(map))),
+        Ok(map) => HotResult::Ok(Val::map(map)),
         Err(err) => HotResult::Err(err),
     }
 }
@@ -2687,7 +2674,7 @@ fn groups_by(
     }
     Ok(groups
         .into_iter()
-        .map(|(key, items)| (key, Val::Vec(items)))
+        .map(|(key, items)| (key, Val::vec(items)))
         .collect())
 }
 
@@ -2833,7 +2820,7 @@ pub fn distinct(args: &[Val]) -> HotResult<Val> {
             let mut seen = AHashSet::new();
             let mut result = Vec::new();
 
-            for item in items {
+            for item in items.iter() {
                 // Create a simple hash key for the item
                 let key = format!("{:?}", item);
                 if seen.insert(key) {
@@ -2841,7 +2828,7 @@ pub fn distinct(args: &[Val]) -> HotResult<Val> {
                 }
             }
 
-            HotResult::Ok(Val::Vec(result))
+            HotResult::Ok(Val::vec(result))
         }
         Val::Str(s) => {
             let mut seen = AHashSet::new();
@@ -2870,9 +2857,9 @@ pub fn reverse(args: &[Val]) -> HotResult<Val> {
 
     match &args[0] {
         Val::Vec(items) => {
-            let mut reversed = items.clone();
+            let mut reversed = items.to_vec();
             reversed.reverse();
-            HotResult::Ok(Val::Vec(reversed))
+            HotResult::Ok(Val::vec(reversed))
         }
         Val::Str(s) => {
             let reversed: String = s.chars().rev().collect();
@@ -2893,9 +2880,9 @@ pub fn sort(args: &[Val]) -> HotResult<Val> {
 
     match &args[0] {
         Val::Vec(items) => {
-            let mut sorted = items.clone();
+            let mut sorted = items.to_vec();
             sorted.sort_by(compare_vals);
-            HotResult::Ok(Val::Vec(sorted))
+            HotResult::Ok(Val::vec(sorted))
         }
         Val::Str(s) => {
             let mut chars: Vec<char> = s.chars().collect();
@@ -2907,18 +2894,18 @@ pub fn sort(args: &[Val]) -> HotResult<Val> {
     }
 }
 
-/// Helper function to compare two Val instances for sorting
+/// The order `sort` and `sort-by` use. Int and Dec compare by value, as
+/// `lt` does; an Int and a Dec of equal value keep a fixed order (Int
+/// first) so the order stays total. Other values follow `Val`'s own total
+/// order, which groups them by type, numbers together.
 fn compare_vals(a: &Val, b: &Val) -> std::cmp::Ordering {
+    use fastnum::D256;
     use std::cmp::Ordering;
 
     match (a, b) {
-        (Val::Int(a), Val::Int(b)) => a.cmp(b),
-        (Val::Str(a), Val::Str(b)) => a.cmp(b),
-        (Val::Dec(a), Val::Dec(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
-        (Val::Bool(a), Val::Bool(b)) => a.cmp(b),
-        (Val::Byte(a), Val::Byte(b)) => a.cmp(b),
-        // Mixed type comparisons - convert to string for comparison
-        _ => format!("{:?}", a).cmp(&format!("{:?}", b)),
+        (Val::Int(a), Val::Dec(b)) => D256::from(*a).cmp(b).then(Ordering::Less),
+        (Val::Dec(a), Val::Int(b)) => a.cmp(&D256::from(*b)).then(Ordering::Greater),
+        _ => a.cmp(b),
     }
 }
 
@@ -2946,7 +2933,7 @@ pub fn sort_by(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) 
             // Create pairs of (key, original_item) for sorting
             let mut keyed_items = Vec::new();
 
-            for item in items {
+            for item in items.iter() {
                 match call_function_with_vm(vm, key_fn, item)
                     .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
                 {
@@ -2966,7 +2953,7 @@ pub fn sort_by(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) 
             // Extract the sorted items
             let sorted_items: Vec<Val> = keyed_items.into_iter().map(|(_, item)| item).collect();
 
-            HotResult::Ok(Val::Vec(sorted_items))
+            HotResult::Ok(Val::vec(sorted_items))
         }
         _ => HotResult::Err(Val::from("sort-by requires a vector")),
     }
@@ -2985,10 +2972,10 @@ pub fn shuffle(args: &[Val]) -> HotResult<Val> {
 
     match &args[0] {
         Val::Vec(items) => {
-            let mut shuffled = items.clone();
+            let mut shuffled = items.to_vec();
             let mut rng = rand::rng();
             shuffled.shuffle(&mut rng);
-            HotResult::Ok(Val::Vec(shuffled))
+            HotResult::Ok(Val::vec(shuffled))
         }
         Val::Str(s) => {
             let mut chars: Vec<char> = s.chars().collect();
@@ -3004,7 +2991,7 @@ pub fn shuffle(args: &[Val]) -> HotResult<Val> {
 /// Interleave multiple collections
 pub fn interleave(args: &[Val]) -> HotResult<Val> {
     if args.is_empty() {
-        return HotResult::Ok(Val::Vec(Vec::new()));
+        return HotResult::Ok(Val::vec(Vec::new()));
     }
 
     // Convert all arguments to vectors for processing
@@ -3012,7 +2999,7 @@ pub fn interleave(args: &[Val]) -> HotResult<Val> {
 
     for arg in args {
         match arg {
-            Val::Vec(items) => collections.push(items.clone()),
+            Val::Vec(items) => collections.push(items.to_vec()),
             Val::Str(s) => {
                 let chars: Vec<Val> = s.chars().map(|c| Val::from(c.to_string())).collect();
                 collections.push(chars);
@@ -3033,7 +3020,7 @@ pub fn interleave(args: &[Val]) -> HotResult<Val> {
         }
     }
 
-    HotResult::Ok(Val::Vec(result))
+    HotResult::Ok(Val::vec(result))
 }
 
 /// Insert a separator between elements of a collection
@@ -3052,7 +3039,7 @@ pub fn interpose(args: &[Val]) -> HotResult<Val> {
     match collection {
         Val::Vec(items) => {
             if items.is_empty() {
-                return HotResult::Ok(Val::Vec(Vec::new()));
+                return HotResult::Ok(Val::vec(Vec::new()));
             }
 
             let mut result = Vec::new();
@@ -3062,7 +3049,7 @@ pub fn interpose(args: &[Val]) -> HotResult<Val> {
                 }
                 result.push(item.clone());
             }
-            HotResult::Ok(Val::Vec(result))
+            HotResult::Ok(Val::vec(result))
         }
         Val::Str(s) => {
             if s.is_empty() {
@@ -3097,7 +3084,7 @@ pub fn flatten(args: &[Val]) -> HotResult<Val> {
             fn flatten_recursive(val: &Val, out: &mut Vec<Val>) {
                 match val {
                     Val::Vec(nested) => {
-                        for elem in nested {
+                        for elem in nested.iter() {
                             flatten_recursive(elem, out);
                         }
                     }
@@ -3106,10 +3093,10 @@ pub fn flatten(args: &[Val]) -> HotResult<Val> {
             }
 
             let mut result = Vec::new();
-            for item in items {
+            for item in items.iter() {
                 flatten_recursive(item, &mut result);
             }
-            HotResult::Ok(Val::Vec(result))
+            HotResult::Ok(Val::vec(result))
         }
         _ => HotResult::Err(Val::from("flatten requires a vector")),
     }
@@ -3129,13 +3116,13 @@ pub fn zipmap(args: &[Val]) -> HotResult<Val> {
 
     // Convert collections to vectors
     let keys = match keys_collection {
-        Val::Vec(items) => items.clone(),
+        Val::Vec(items) => items.to_vec(),
         Val::Str(s) => s.chars().map(|c| Val::from(c.to_string())).collect(),
         _ => return HotResult::Err(Val::from("zipmap keys must be a collection")),
     };
 
     let values = match values_collection {
-        Val::Vec(items) => items.clone(),
+        Val::Vec(items) => items.to_vec(),
         Val::Str(s) => s.chars().map(|c| Val::from(c.to_string())).collect(),
         _ => return HotResult::Err(Val::from("zipmap values must be a collection")),
     };
@@ -3147,7 +3134,7 @@ pub fn zipmap(args: &[Val]) -> HotResult<Val> {
         result_map.insert(key, value);
     }
 
-    HotResult::Ok(Val::Map(Box::new(result_map)))
+    HotResult::Ok(Val::map(result_map))
 }
 
 /// Check if all elements in a collection satisfy a predicate
@@ -3172,7 +3159,7 @@ pub fn all(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
     let predicate = prepare_function(predicate_val);
     match collection {
         Val::Vec(items) => {
-            for item in items {
+            for item in items.iter() {
                 match call_prepared_with_vm(vm, &predicate, item)
                     .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
                 {
@@ -3193,7 +3180,7 @@ pub fn all(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
         }
         Val::Map(map) => {
             for (key, value) in map.iter() {
-                let pair = Val::Vec(vec![key.clone(), value.clone()]);
+                let pair = Val::vec(vec![key.clone(), value.clone()]);
                 match call_prepared_with_vm(vm, &predicate, &pair)
                     .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
                 {
@@ -3301,22 +3288,22 @@ pub fn slice(args: &[Val]) -> HotResult<Val> {
 
             if start_idx <= end_idx {
                 let sliced = items[start_idx..end_idx].to_vec();
-                HotResult::Ok(Val::Vec(sliced))
+                HotResult::Ok(Val::vec(sliced))
             } else {
-                HotResult::Ok(Val::Vec(Vec::new()))
+                HotResult::Ok(Val::vec(Vec::new()))
             }
         }
         Val::Str(s) => {
-            let chars: Vec<char> = s.chars().collect();
-            let len = chars.len();
-            let start_idx = start.min(len);
-            let end_idx = end.unwrap_or(len).min(len);
-
-            if start_idx <= end_idx {
-                let sliced: String = chars[start_idx..end_idx].iter().collect();
-                HotResult::Ok(Val::from(sliced))
+            let from_start = skip_chars(s, start);
+            let sliced = match end {
+                Some(end) if end <= start => "",
+                Some(end) => take_chars(from_start, end - start),
+                None => from_start,
+            };
+            if sliced.len() == s.len() {
+                HotResult::Ok(Val::from(s.clone()))
             } else {
-                HotResult::Ok(Val::from(""))
+                HotResult::Ok(Val::from(sliced))
             }
         }
         Val::Map(map) => {
@@ -3331,7 +3318,7 @@ pub fn slice(args: &[Val]) -> HotResult<Val> {
                         result_map.insert(k.clone(), v.clone());
                     }
                 }
-                HotResult::Ok(Val::Map(Box::new(result_map)))
+                HotResult::Ok(Val::map(result_map))
             } else {
                 HotResult::Ok(Val::map_empty())
             }
@@ -3343,9 +3330,9 @@ pub fn slice(args: &[Val]) -> HotResult<Val> {
 
             if start_idx <= end_idx {
                 let sliced = bytes[start_idx..end_idx].to_vec();
-                HotResult::Ok(Val::Bytes(sliced))
+                HotResult::Ok(Val::bytes(sliced))
             } else {
-                HotResult::Ok(Val::Bytes(Vec::new()))
+                HotResult::Ok(Val::bytes(Vec::new()))
             }
         }
         _ => HotResult::Err(Val::from(
@@ -3366,15 +3353,15 @@ pub fn keys(args: &[Val]) -> HotResult<Val> {
     match crate::val::as_fields(&args[0]) {
         Val::Map(map) => {
             let keys: Vec<Val> = map.keys().cloned().collect();
-            HotResult::Ok(Val::Vec(keys))
+            HotResult::Ok(Val::vec(keys))
         }
         Val::Vec(items) => {
             let idxs: Vec<Val> = (0..items.len()).map(|i| Val::Int(i as i64)).collect();
-            HotResult::Ok(Val::Vec(idxs))
+            HotResult::Ok(Val::vec(idxs))
         }
         Val::Str(s) => {
             let idxs: Vec<Val> = (0..s.chars().count()).map(|i| Val::Int(i as i64)).collect();
-            HotResult::Ok(Val::Vec(idxs))
+            HotResult::Ok(Val::vec(idxs))
         }
         _ => HotResult::Err(Val::from("keys requires a collection")),
     }
@@ -3392,12 +3379,12 @@ pub fn values(args: &[Val]) -> HotResult<Val> {
     match crate::val::as_fields(&args[0]) {
         Val::Map(map) => {
             let vals: Vec<Val> = map.values().cloned().collect();
-            HotResult::Ok(Val::Vec(vals))
+            HotResult::Ok(Val::vec(vals))
         }
         Val::Vec(items) => HotResult::Ok(Val::Vec(items.clone())),
         Val::Str(s) => {
             let chars: Vec<Val> = s.chars().map(|c| Val::from(c.to_string())).collect();
-            HotResult::Ok(Val::Vec(chars))
+            HotResult::Ok(Val::vec(chars))
         }
         _ => HotResult::Err(Val::from("values requires a collection")),
     }
@@ -3421,7 +3408,7 @@ pub fn range(args: &[Val]) -> HotResult<Val> {
                     }
                     let mut result = Vec::with_capacity(n);
                     result.extend((0..*end_int).map(Val::Int));
-                    HotResult::Ok(Val::Vec(result))
+                    HotResult::Ok(Val::vec(result))
                 }
                 Val::Dec(end_dec) => {
                     let end_num = end_dec.to_string().parse::<f64>().unwrap_or(0.0);
@@ -3439,7 +3426,7 @@ pub fn range(args: &[Val]) -> HotResult<Val> {
                         }
                         current += 1.0;
                     }
-                    HotResult::Ok(Val::Vec(result))
+                    HotResult::Ok(Val::vec(result))
                 }
                 _ => HotResult::Err(Val::from("range end must be a number")),
             }
@@ -3481,7 +3468,7 @@ pub fn range(args: &[Val]) -> HotResult<Val> {
                         current += *step_int;
                     }
                 }
-                return HotResult::Ok(Val::Vec(result));
+                return HotResult::Ok(Val::vec(result));
             }
 
             // Decimal mode using f64 stepping and D256 storage
@@ -3539,7 +3526,7 @@ pub fn range(args: &[Val]) -> HotResult<Val> {
                     count += 1;
                 }
             }
-            HotResult::Ok(Val::Vec(result))
+            HotResult::Ok(Val::vec(result))
         }
         _ => HotResult::Err(Val::from(format!(
             "::hot::coll/range expects 1, 2, or 3 arguments, got {}",
@@ -3566,7 +3553,7 @@ pub fn walk(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
         Val::Map(map) if crate::val::is_tagged_wrapper(map) => form.clone(),
         Val::Vec(items) => {
             let mut result = Vec::with_capacity(items.len());
-            for item in items {
+            for item in items.iter() {
                 match call_function_with_vm(vm, inner, item)
                     .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
                 {
@@ -3574,7 +3561,7 @@ pub fn walk(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
                     Err(err) => return HotResult::Err(Val::from(err)),
                 }
             }
-            Val::Vec(result)
+            Val::vec(result)
         }
         Val::Map(map) => {
             let mut result = IndexMap::with_capacity(map.len());
@@ -3588,7 +3575,7 @@ pub fn walk(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
                     Err(err) => return HotResult::Err(Val::from(err)),
                 }
             }
-            crate::val::with_type_of(form, Val::Map(Box::new(result)))
+            crate::val::with_type_of(form, Val::map(result))
         }
         _ => form.clone(),
     };
@@ -3633,13 +3620,13 @@ pub fn prewalk(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) 
             Val::Map(map) if crate::val::is_tagged_wrapper(map) => HotResult::Ok(transformed),
             Val::Vec(items) => {
                 let mut result = Vec::new();
-                for item in items {
+                for item in items.iter() {
                     match prewalk_recursive(vm, function_val, item) {
                         HotResult::Ok(walked_item) => result.push(walked_item),
                         HotResult::Err(err) => return HotResult::Err(err),
                     }
                 }
-                HotResult::Ok(Val::Vec(result))
+                HotResult::Ok(Val::vec(result))
             }
             Val::Map(map) => {
                 let mut result_map = indexmap::IndexMap::new();
@@ -3651,10 +3638,7 @@ pub fn prewalk(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) 
                         HotResult::Err(err) => return HotResult::Err(err),
                     }
                 }
-                HotResult::Ok(crate::val::with_type_of(
-                    &transformed,
-                    Val::Map(Box::new(result_map)),
-                ))
+                HotResult::Ok(crate::val::with_type_of(&transformed, Val::map(result_map)))
             }
             _ => HotResult::Ok(transformed),
         }
@@ -3686,13 +3670,13 @@ pub fn postwalk(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val])
             Val::Map(map) if crate::val::is_tagged_wrapper(map) => data.clone(),
             Val::Vec(items) => {
                 let mut result = Vec::new();
-                for item in items {
+                for item in items.iter() {
                     match postwalk_recursive(vm, function_val, item) {
                         HotResult::Ok(walked_item) => result.push(walked_item),
                         HotResult::Err(err) => return HotResult::Err(err),
                     }
                 }
-                Val::Vec(result)
+                Val::vec(result)
             }
             Val::Map(map) => {
                 let mut result_map = indexmap::IndexMap::new();
@@ -3704,7 +3688,7 @@ pub fn postwalk(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val])
                         HotResult::Err(err) => return HotResult::Err(err),
                     }
                 }
-                crate::val::with_type_of(data, Val::Map(Box::new(result_map)))
+                crate::val::with_type_of(data, Val::map(result_map))
             }
             _ => data.clone(),
         };
@@ -3754,7 +3738,7 @@ pub fn postwalk_replace(
         // fields is a leaf.
         let walked = match crate::val::as_fields(data) {
             Val::Map(map) if crate::val::is_tagged_wrapper(map) => data.clone(),
-            Val::Vec(items) => Val::Vec(
+            Val::Vec(items) => Val::vec(
                 items
                     .iter()
                     .map(|item| postwalk_replace_recursive(replacement_map, item))
@@ -3768,7 +3752,7 @@ pub fn postwalk_replace(
                         postwalk_replace_recursive(replacement_map, value),
                     );
                 }
-                crate::val::with_type_of(data, Val::Map(Box::new(result_map)))
+                crate::val::with_type_of(data, Val::map(result_map))
             }
             _ => data.clone(),
         };
@@ -3874,14 +3858,11 @@ pub fn assoc_in(args: &[Val]) -> HotResult<Val> {
         match crate::val::as_fields(coll) {
             Val::Map(m) => {
                 let mut new_map = (**m).clone();
-                let child = m
-                    .get(key)
-                    .cloned()
-                    .unwrap_or(Val::Map(Box::new(IndexMap::new())));
+                let child = m.get(key).cloned().unwrap_or(Val::map(IndexMap::new()));
                 let new_child = assoc_in_recursive(&child, rest, value)?;
                 new_map.insert(key.clone(), new_child);
                 // Constructed values along the path keep their types.
-                Ok(crate::val::with_type_of(coll, Val::Map(Box::new(new_map))))
+                Ok(crate::val::with_type_of(coll, Val::map(new_map)))
             }
             Val::Vec(v) => {
                 if let Val::Int(i) = key {
@@ -3897,7 +3878,7 @@ pub fn assoc_in(args: &[Val]) -> HotResult<Val> {
                             i
                         ))
                     })?;
-                    let mut new_vec = v.clone();
+                    let mut new_vec = v.to_vec();
                     if idx >= new_vec.len() {
                         // Growing to `idx + 1` is a user-controlled allocation;
                         // bound it explicitly so a hostile caller can't push the
@@ -3920,9 +3901,9 @@ pub fn assoc_in(args: &[Val]) -> HotResult<Val> {
                     let child = new_vec
                         .get(idx)
                         .cloned()
-                        .unwrap_or(Val::Map(Box::new(IndexMap::new())));
+                        .unwrap_or(Val::map(IndexMap::new()));
                     new_vec[idx] = assoc_in_recursive(&child, rest, value)?;
-                    Ok(Val::Vec(new_vec))
+                    Ok(Val::vec(new_vec))
                 } else {
                     Ok(coll.clone())
                 }
@@ -3930,10 +3911,10 @@ pub fn assoc_in(args: &[Val]) -> HotResult<Val> {
             _ => {
                 // Non-collection at intermediate path: create a new map
                 let mut new_map = IndexMap::new();
-                let child = Val::Map(Box::new(IndexMap::new()));
+                let child = Val::map(IndexMap::new());
                 let new_child = assoc_in_recursive(&child, rest, value)?;
                 new_map.insert(key.clone(), new_child);
-                Ok(Val::Map(Box::new(new_map)))
+                Ok(Val::map(new_map))
             }
         }
     }
@@ -4006,7 +3987,7 @@ mod tests {
         b.insert(Val::from("b"), Val::Int(3));
         b.insert(Val::from("c"), Val::Int(4));
 
-        let result = merge(&[Val::Map(Box::new(a)), Val::Map(Box::new(b))]);
+        let result = merge(&[Val::map(a), Val::map(b)]);
         match result {
             HotResult::Ok(Val::Map(m)) => {
                 let keys: Vec<Val> = m.keys().cloned().collect();
@@ -4032,7 +4013,7 @@ mod tests {
         map.insert(Val::from("b"), Val::Int(2));
 
         // 2-arity: get(map, key) - found
-        let result = get(&[Val::Map(Box::new(map.clone())), Val::from("a")]);
+        let result = get(&[Val::map(map.clone()), Val::from("a")]);
         assert_eq!(result, HotResult::Ok(Val::Int(1)));
     }
 
@@ -4042,7 +4023,7 @@ mod tests {
         map.insert(Val::from("a"), Val::Int(1));
 
         // 2-arity: get(map, key) - not found, returns null
-        let result = get(&[Val::Map(Box::new(map.clone())), Val::from("missing")]);
+        let result = get(&[Val::map(map.clone()), Val::from("missing")]);
         assert_eq!(result, HotResult::Ok(Val::Null));
     }
 
@@ -4052,11 +4033,7 @@ mod tests {
         map.insert(Val::from("a"), Val::Int(1));
 
         // 3-arity: get(map, key, default) - not found, returns default
-        let result = get(&[
-            Val::Map(Box::new(map)),
-            Val::from("missing"),
-            Val::from("default"),
-        ]);
+        let result = get(&[Val::map(map), Val::from("missing"), Val::from("default")]);
         assert_eq!(result, HotResult::Ok(Val::from("default")));
     }
 
@@ -4064,7 +4041,7 @@ mod tests {
     fn test_get_vec_found() {
         let vec = vec![Val::Int(10), Val::Int(20), Val::Int(30)];
 
-        let result = get(&[Val::Vec(vec.clone()), Val::Int(1)]);
+        let result = get(&[Val::vec(vec.clone()), Val::Int(1)]);
         assert_eq!(result, HotResult::Ok(Val::Int(20)));
     }
 
@@ -4073,7 +4050,7 @@ mod tests {
         let vec = vec![Val::Int(10), Val::Int(20)];
 
         // Out of bounds returns null
-        let result = get(&[Val::Vec(vec.clone()), Val::Int(10)]);
+        let result = get(&[Val::vec(vec.clone()), Val::Int(10)]);
         assert_eq!(result, HotResult::Ok(Val::Null));
     }
 
@@ -4082,7 +4059,7 @@ mod tests {
         let vec = vec![Val::Int(10), Val::Int(20)];
 
         // Out of bounds returns default
-        let result = get(&[Val::Vec(vec), Val::Int(10), Val::Int(-1)]);
+        let result = get(&[Val::vec(vec), Val::Int(10), Val::Int(-1)]);
         assert_eq!(result, HotResult::Ok(Val::Int(-1)));
     }
 
@@ -4091,7 +4068,7 @@ mod tests {
         let vec = vec![Val::Int(10), Val::Int(20)];
 
         // Negative index returns null (or default)
-        let result = get(&[Val::Vec(vec), Val::Int(-1)]);
+        let result = get(&[Val::vec(vec), Val::Int(-1)]);
         assert_eq!(result, HotResult::Ok(Val::Null));
     }
 
@@ -4115,10 +4092,10 @@ mod tests {
     fn test_get_bytes_found() {
         let bytes = vec![65u8, 66, 67]; // ABC
 
-        let result = get(&[Val::Bytes(bytes.clone()), Val::Int(0)]);
+        let result = get(&[Val::bytes(bytes.clone()), Val::Int(0)]);
         assert_eq!(result, HotResult::Ok(Val::Int(65)));
 
-        let result = get(&[Val::Bytes(bytes), Val::Int(2)]);
+        let result = get(&[Val::bytes(bytes), Val::Int(2)]);
         assert_eq!(result, HotResult::Ok(Val::Int(67)));
     }
 
@@ -4126,7 +4103,7 @@ mod tests {
     fn test_get_bytes_out_of_bounds() {
         let bytes = vec![65u8, 66, 67];
 
-        let result = get(&[Val::Bytes(bytes), Val::Int(10)]);
+        let result = get(&[Val::bytes(bytes), Val::Int(10)]);
         assert_eq!(result, HotResult::Ok(Val::Null));
     }
 
@@ -4134,19 +4111,19 @@ mod tests {
     fn test_get_bytes_with_default() {
         let bytes = vec![65u8, 66, 67];
 
-        let result = get(&[Val::Bytes(bytes), Val::Int(10), Val::Int(-1)]);
+        let result = get(&[Val::bytes(bytes), Val::Int(10), Val::Int(-1)]);
         assert_eq!(result, HotResult::Ok(Val::Int(-1)));
     }
 
     #[test]
     fn test_get_wrong_arity() {
         // Too few args
-        let result = get(&[Val::Vec(vec![Val::Int(1)])]);
+        let result = get(&[Val::vec(vec![Val::Int(1)])]);
         assert!(matches!(result, HotResult::Err(_)));
 
         // Too many args
         let result = get(&[
-            Val::Vec(vec![Val::Int(1)]),
+            Val::vec(vec![Val::Int(1)]),
             Val::Int(0),
             Val::Int(0),
             Val::Int(0),
@@ -4159,7 +4136,7 @@ mod tests {
         let vec = vec![Val::Int(10), Val::Int(20)];
 
         // String index on Vec should error
-        let result = get(&[Val::Vec(vec), Val::from("a")]);
+        let result = get(&[Val::vec(vec), Val::from("a")]);
         assert!(matches!(result, HotResult::Err(_)));
     }
 
@@ -4171,13 +4148,13 @@ mod tests {
             Val::from("c") => Val::Int(42),
         };
         let mid = indexmap::indexmap! {
-            Val::from("b") => Val::Map(Box::new(inner)),
+            Val::from("b") => Val::map(inner),
         };
         let outer = indexmap::indexmap! {
-            Val::from("a") => Val::Map(Box::new(mid)),
+            Val::from("a") => Val::map(mid),
         };
         let path = vec![Val::from("a"), Val::from("b"), Val::from("c")];
-        let result = get_in(&[Val::Map(Box::new(outer)), Val::Vec(path)]);
+        let result = get_in(&[Val::map(outer), Val::vec(path)]);
         assert_eq!(result, HotResult::Ok(Val::Int(42)));
     }
 
@@ -4186,12 +4163,12 @@ mod tests {
         let user = indexmap::indexmap! {
             Val::from("name") => Val::from("Alice"),
         };
-        let users_vec = vec![Val::Map(Box::new(user))];
+        let users_vec = vec![Val::map(user)];
         let outer = indexmap::indexmap! {
-            Val::from("users") => Val::Vec(users_vec),
+            Val::from("users") => Val::vec(users_vec),
         };
         let path = vec![Val::from("users"), Val::Int(0), Val::from("name")];
-        let result = get_in(&[Val::Map(Box::new(outer)), Val::Vec(path)]);
+        let result = get_in(&[Val::map(outer), Val::vec(path)]);
         assert_eq!(result, HotResult::Ok(Val::from("Alice")));
     }
 
@@ -4199,7 +4176,7 @@ mod tests {
     fn test_get_in_missing_key() {
         let m = indexmap::indexmap! { Val::from("a") => Val::Int(1) };
         let path = vec![Val::from("b"), Val::from("c")];
-        let result = get_in(&[Val::Map(Box::new(m)), Val::Vec(path)]);
+        let result = get_in(&[Val::map(m), Val::vec(path)]);
         assert_eq!(result, HotResult::Ok(Val::Null));
     }
 
@@ -4207,15 +4184,15 @@ mod tests {
     fn test_get_in_with_default() {
         let m = indexmap::indexmap! { Val::from("a") => Val::Int(1) };
         let path = vec![Val::from("b")];
-        let result = get_in(&[Val::Map(Box::new(m)), Val::Vec(path), Val::from("fallback")]);
+        let result = get_in(&[Val::map(m), Val::vec(path), Val::from("fallback")]);
         assert_eq!(result, HotResult::Ok(Val::from("fallback")));
     }
 
     #[test]
     fn test_get_in_empty_path() {
         let m = indexmap::indexmap! { Val::from("a") => Val::Int(1) };
-        let result = get_in(&[Val::Map(Box::new(m.clone())), Val::Vec(vec![])]);
-        assert_eq!(result, HotResult::Ok(Val::Map(Box::new(m))));
+        let result = get_in(&[Val::map(m.clone()), Val::vec(vec![])]);
+        assert_eq!(result, HotResult::Ok(Val::map(m)));
     }
 
     // --- assoc_in tests ---
@@ -4223,9 +4200,9 @@ mod tests {
     #[test]
     fn test_assoc_in_nested() {
         let inner = indexmap::indexmap! { Val::from("b") => Val::Int(1) };
-        let outer = indexmap::indexmap! { Val::from("a") => Val::Map(Box::new(inner)) };
+        let outer = indexmap::indexmap! { Val::from("a") => Val::map(inner) };
         let path = vec![Val::from("a"), Val::from("b")];
-        let result = assoc_in(&[Val::Map(Box::new(outer)), Val::Vec(path), Val::Int(99)]);
+        let result = assoc_in(&[Val::map(outer), Val::vec(path), Val::Int(99)]);
         if let HotResult::Ok(Val::Map(m)) = &result
             && let Some(Val::Map(inner)) = m.get(&Val::from("a"))
         {
@@ -4239,7 +4216,7 @@ mod tests {
     fn test_assoc_in_creates_intermediates() {
         let m = indexmap::indexmap! {};
         let path = vec![Val::from("a"), Val::from("b")];
-        let result = assoc_in(&[Val::Map(Box::new(m)), Val::Vec(path), Val::Int(1)]);
+        let result = assoc_in(&[Val::map(m), Val::vec(path), Val::Int(1)]);
         if let HotResult::Ok(Val::Map(outer)) = &result
             && let Some(Val::Map(inner)) = outer.get(&Val::from("a"))
         {
@@ -4255,9 +4232,9 @@ mod tests {
             Val::from("b") => Val::Int(1),
             Val::from("c") => Val::Int(2),
         };
-        let outer = indexmap::indexmap! { Val::from("a") => Val::Map(Box::new(inner)) };
+        let outer = indexmap::indexmap! { Val::from("a") => Val::map(inner) };
         let path = vec![Val::from("a"), Val::from("b")];
-        let result = assoc_in(&[Val::Map(Box::new(outer)), Val::Vec(path), Val::Int(99)]);
+        let result = assoc_in(&[Val::map(outer), Val::vec(path), Val::Int(99)]);
         if let HotResult::Ok(Val::Map(outer)) = &result
             && let Some(Val::Map(inner)) = outer.get(&Val::from("a"))
         {
@@ -4266,5 +4243,153 @@ mod tests {
             return;
         }
         panic!("assoc_in preserve siblings failed: {:?}", result);
+    }
+
+    // Ints and Decs sort by value together; they used to sort by type, as
+    // their debug strings (`Dec(..)` before `Int(..)`).
+    #[test]
+    fn sort_orders_mixed_int_and_dec_by_value() {
+        let dec = |s: &str| Val::Dec(s.parse().unwrap());
+        let input = Val::vec(vec![dec("82.32"), Val::Int(65), dec("70.5"), Val::Int(100)]);
+        let HotResult::Ok(sorted) = sort(&[input]) else {
+            panic!("sort failed");
+        };
+        assert_eq!(
+            sorted,
+            Val::vec(vec![Val::Int(65), dec("70.5"), dec("82.32"), Val::Int(100)])
+        );
+
+        // Equal values keep a fixed order, and a mixed list is totally
+        // ordered: numbers stay together, by value, among other types.
+        let input = Val::vec(vec![
+            Val::from("b"),
+            dec("2.0"),
+            Val::Null,
+            Val::Int(2),
+            Val::Int(-3),
+            Val::from("a"),
+            dec("-3.5"),
+        ]);
+        let HotResult::Ok(sorted) = sort(&[input]) else {
+            panic!("sort failed");
+        };
+        assert_eq!(
+            sorted,
+            Val::vec(vec![
+                Val::Null,
+                dec("-3.5"),
+                Val::Int(-3),
+                Val::Int(2),
+                dec("2.0"),
+                Val::from("a"),
+                Val::from("b"),
+            ])
+        );
+    }
+
+    /// What `slice` gave when it collected the string's characters.
+    fn slice_by_collecting(s: &str, start: i64, end: Option<i64>) -> String {
+        let chars: Vec<char> = s.chars().collect();
+        let len = chars.len();
+        let start_idx = (start as usize).min(len);
+        let end_idx = end.map_or(len, |end| (end as usize).min(len));
+        if start_idx <= end_idx {
+            chars[start_idx..end_idx].iter().collect()
+        } else {
+            String::new()
+        }
+    }
+
+    /// The functions that read a string by character position no longer collect
+    /// its characters. Each must still give what collecting gave, at every
+    /// position around both ends, on text whose characters vary in width and
+    /// on strings long enough to take the standard library's chunked skip.
+    #[test]
+    fn str_position_functions_match_collecting_the_characters() {
+        let long_ascii = "0123456789".repeat(12);
+        let long_mixed = "aé日🙂".repeat(30);
+        let samples = [
+            "",
+            "a",
+            "é",
+            "🙂",
+            "héllo",
+            "日本語テキスト",
+            "🙂a🙂",
+            "e\u{301}x",
+            long_ascii.as_str(),
+            long_mixed.as_str(),
+        ];
+        let ok = |result: HotResult<Val>, call: String| match result {
+            HotResult::Ok(value) => value,
+            HotResult::Err(error) => panic!("{call}: {error:?}"),
+        };
+        for s in samples {
+            let chars: Vec<char> = s.chars().collect();
+            let len = chars.len() as i64;
+            let mut indexes: Vec<i64> = (-len - 2..=len + 2).collect();
+            indexes.extend([i64::MIN, i64::MAX]);
+            for &start in &indexes {
+                let call = format!("slice({s:?}, {start})");
+                assert_eq!(
+                    ok(slice(&[Val::from(s), Val::Int(start)]), call.clone()),
+                    Val::from(slice_by_collecting(s, start, None)),
+                    "{call}"
+                );
+                for &end in &indexes {
+                    let call = format!("slice({s:?}, {start}, {end})");
+                    assert_eq!(
+                        ok(
+                            slice(&[Val::from(s), Val::Int(start), Val::Int(end)]),
+                            call.clone()
+                        ),
+                        Val::from(slice_by_collecting(s, start, Some(end))),
+                        "{call}"
+                    );
+                }
+
+                let call = format!("nth({s:?}, {start})");
+                let by_collecting = chars
+                    .get(start as usize)
+                    .map_or(Val::Null, |c| Val::from(c.to_string()));
+                assert_eq!(
+                    ok(nth(&[Val::from(s), Val::Int(start)]), call.clone()),
+                    by_collecting,
+                    "{call}"
+                );
+
+                let call = format!("delete({s:?}, {start})");
+                let target = if start < 0 {
+                    len.saturating_add(start)
+                } else {
+                    start
+                };
+                let by_collecting: String = chars
+                    .iter()
+                    .enumerate()
+                    .filter(|(position, _)| *position as i64 != target)
+                    .map(|(_, c)| c)
+                    .collect();
+                assert_eq!(
+                    ok(delete(&[Val::from(s), Val::Int(start)]), call.clone()),
+                    Val::from(by_collecting),
+                    "{call}"
+                );
+            }
+
+            let call = format!("rest({s:?})");
+            assert_eq!(
+                ok(rest(&[Val::from(s)]), call.clone()),
+                Val::from(chars.iter().skip(1).collect::<String>()),
+                "{call}"
+            );
+            let call = format!("butlast({s:?})");
+            let kept = chars.len().saturating_sub(1);
+            assert_eq!(
+                ok(butlast(&[Val::from(s)]), call.clone()),
+                Val::from(chars[..kept].iter().collect::<String>()),
+                "{call}"
+            );
+        }
     }
 }

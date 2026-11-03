@@ -1,0 +1,117 @@
+::stripe::meters ns
+meta {
+    doc: """Billing meters and meter events for usage-based billing: define a meter, attach it to a metered price, and report usage as events. See https://docs.stripe.com/api/billing/meter-event."""
+}
+
+api-call ::stripe::api/call
+seg ::stripe::api/encode-id
+RequestOptions ::stripe::api/RequestOptions
+
+CreateMeterEventRequest type {
+  event_name: Str,
+  payload: Map,
+  identifier: Str?,
+  timestamp: Int?
+}
+
+create-meter-event
+meta {
+    doc: """
+POST /v1/billing/meter_events - Report usage. `payload` must hold the customer (`stripe_customer_id` by default) and the quantity (`value` by default), as strings. Set `identifier` to a unique ID per usage record: Stripe drops duplicates within at least 24 hours, so retries are safe. `timestamp` (Unix seconds) defaults to now and may be up to 35 days in the past.
+
+**Example**
+
+```hot
+::meters ::stripe::meters
+
+::meters/create-meter-event(::meters/CreateMeterEventRequest({
+  event_name: "api_requests",
+  payload: {stripe_customer_id: "cus_...", value: "25"},
+  identifier: "req-batch-2026-11-01T10"
+}))
+```
+"""
+}
+fn
+(request: CreateMeterEventRequest): Map {
+  create-meter-event(request, RequestOptions({}))
+},
+(request: CreateMeterEventRequest, options: RequestOptions | Map): Map {
+  api-call("POST", "/v1/billing/meter_events", request, options)
+}
+
+CreateMeterRequest type {
+  display_name: Str,
+  event_name: Str,
+  default_aggregation: Map,
+  customer_mapping: Map?,
+  value_settings: Map?,
+  event_time_window: Str?,
+  expand: Vec<Str>?
+}
+
+create-meter
+meta {
+    doc: """POST /v1/billing/meters - Create a meter. `default_aggregation` is `{formula: "sum"}` (or `"count"` / `"last"`). Reference it from a price with `recurring: {interval: "month", usage_type: "metered", meter: meter.id}`."""
+}
+fn
+(request: CreateMeterRequest): Map {
+  create-meter(request, RequestOptions({}))
+},
+(request: CreateMeterRequest, options: RequestOptions | Map): Map {
+  api-call("POST", "/v1/billing/meters", request, options)
+}
+
+get-meter
+meta {
+    doc: """GET /v1/billing/meters/{id} - Retrieve a meter by ID."""
+}
+fn
+(meter: Str): Map {
+  get-meter(meter, {})
+},
+(meter: Str, opts: Map): Map {
+  api-call("GET", `/v1/billing/meters/${seg(meter)}`, "", opts)
+}
+
+list-meters
+meta {
+    doc: """GET /v1/billing/meters - List meters. Optional `params`: `status` ("active" or "inactive"), `limit`, `starting_after`."""
+}
+fn
+(): Map {
+  list-meters({})
+},
+(params: Map): Map {
+  list-meters(params, {})
+},
+(params: Map, opts: Map): Map {
+  api-call("GET", "/v1/billing/meters", params, opts)
+}
+
+deactivate-meter
+meta {
+    doc: """POST /v1/billing/meters/{id}/deactivate - Deactivate a meter: it stops accepting events and can't be attached to new prices."""
+}
+fn
+(meter: Str): Map {
+  deactivate-meter(meter, {})
+},
+(meter: Str, opts: Map): Map {
+  api-call("POST", `/v1/billing/meters/${seg(meter)}/deactivate`, {}, opts)
+}
+
+list-meter-event-summaries
+meta {
+    doc: """GET /v1/billing/meters/{id}/event_summaries - Aggregated usage for one customer between `start-time` and `end-time` (Unix seconds, aligned to the minute or, with `value_grouping_window`, the hour/day). Optional `params`: `value_grouping_window` ("day" or "hour"), `limit`, `starting_after`."""
+}
+fn
+(meter: Str, customer: Str, start-time: Int, end-time: Int): Map {
+  list-meter-event-summaries(meter, customer, start-time, end-time, {})
+},
+(meter: Str, customer: Str, start-time: Int, end-time: Int, params: Map): Map {
+  list-meter-event-summaries(meter, customer, start-time, end-time, params, {})
+},
+(meter: Str, customer: Str, start-time: Int, end-time: Int, params: Map, opts: Map): Map {
+  api-call("GET", `/v1/billing/meters/${seg(meter)}/event_summaries`, {...params, customer: customer, start_time: start-time, end_time: end-time}, opts)
+}

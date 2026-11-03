@@ -174,6 +174,9 @@ pub struct Compiler {
     /// Maps unqualified core function names to their qualified names (for lazy param resolution)
     /// e.g. "is-err" -> "::hot::type/is-err"
     core_lazy_function_names: IndexMap<String, String>,
+    /// `namespace/name` of each namespace-level value, such as a lambda or a
+    /// record: a call by that name reaches the value, not a function.
+    namespace_values: AHashSet<String>,
     /// Pre-extracted set of all known function names (populated before bytecode compilation)
     /// Used to distinguish function references from type/variable references at compile time
     known_functions: AHashSet<String>,
@@ -244,6 +247,9 @@ pub struct CompilerSeed {
     namespace_to_file: AHashMap<String, std::path::PathBuf>,
     lazy_params_registry: IndexMap<String, (Vec<bool>, bool)>,
     core_lazy_function_names: IndexMap<String, String>,
+    /// `namespace/name` of each namespace-level value, such as a lambda or a
+    /// record: a call by that name reaches the value, not a function.
+    namespace_values: AHashSet<String>,
     known_functions: AHashSet<String>,
     unit_variants: AHashSet<String>,
     plain_payload_variants: AHashSet<String>,
@@ -363,6 +369,7 @@ impl Compiler {
             emitting_function_body: false,
             lazy_params_registry: IndexMap::new(),
             core_lazy_function_names: IndexMap::new(),
+            namespace_values: AHashSet::new(),
             known_functions: AHashSet::new(),
             unit_variants: AHashSet::new(),
             plain_payload_variants: AHashSet::new(),
@@ -397,6 +404,7 @@ impl Compiler {
             namespace_to_file: self.namespace_to_file.clone(),
             lazy_params_registry: self.lazy_params_registry.clone(),
             core_lazy_function_names: self.core_lazy_function_names.clone(),
+            namespace_values: self.namespace_values.clone(),
             known_functions: self.known_functions.clone(),
             unit_variants: self.unit_variants.clone(),
             plain_payload_variants: self.plain_payload_variants.clone(),
@@ -420,6 +428,7 @@ impl Compiler {
         compiler.namespace_to_file = seed.namespace_to_file;
         compiler.lazy_params_registry = seed.lazy_params_registry;
         compiler.core_lazy_function_names = seed.core_lazy_function_names;
+        compiler.namespace_values = seed.namespace_values;
         compiler.known_functions = seed.known_functions;
         compiler.unit_variants = seed.unit_variants;
         compiler.plain_payload_variants = seed.plain_payload_variants;
@@ -518,11 +527,61 @@ impl Compiler {
     /// Returns a new NsRef with the namespace path resolved through aliases
     fn resolve_ns_ref_alias(&self, ns_ref: &crate::lang::ast::NsRef) -> crate::lang::ast::NsRef {
         let resolved_ns = self.resolve_namespace_alias(&ns_ref.ns);
+        let (ns, function_name) = match &ns_ref.function_name {
+            Some(name) => {
+                let (ns, name) = self.follow_reexports(resolved_ns, name);
+                (ns, Some(name))
+            }
+            None => (resolved_ns, None),
+        };
         crate::lang::ast::NsRef {
-            ns: resolved_ns,
+            ns,
             src: ns_ref.src.clone(),
-            function_name: ns_ref.function_name.clone(),
+            function_name,
         }
+    }
+
+    /// The namespace and name that `name` in `ns` comes from: a namespace that
+    /// imports a type or function offers it to callers under its own name.
+    fn follow_reexports(
+        &self,
+        mut ns: crate::lang::ast::NsPath,
+        name: &str,
+    ) -> (crate::lang::ast::NsPath, String) {
+        // The cap only bounds imports that form a cycle.
+        const MAX_REEXPORTS: usize = 16;
+        let mut name = name.to_string();
+        for _ in 0..MAX_REEXPORTS {
+            let ns_path = ns.to_string();
+            let (base, variant) = match name.split_once('.') {
+                Some((base, variant)) => (base, Some(variant)),
+                None => (name.as_str(), None),
+            };
+            let Some(info) = self.program.namespaces.namespaces.get(&ns_path) else {
+                break;
+            };
+            if info.variables.contains_key(&format!("{ns_path}/{base}")) {
+                break;
+            }
+            let Some((target_ns, target)) = info
+                .variables
+                .get(base)
+                .filter(|var| var.name.starts_with("::"))
+                .and_then(|var| var.name.rsplit_once('/'))
+            else {
+                break;
+            };
+            if target_ns == ns_path && target == base {
+                break;
+            }
+            let followed = match variant {
+                Some(variant) => format!("{target}.{variant}"),
+                None => target.to_string(),
+            };
+            ns = crate::lang::ast::NsPath::from_string(target_ns);
+            name = followed;
+        }
+        (ns, name)
     }
 
     /// Resolve a type name to its full path, returning whether it was found
@@ -771,6 +830,11 @@ impl Compiler {
             let namespace_str = ns_path.to_string();
 
             for (var, value) in &namespace.scope.vars {
+                // A `Ref` is an import, which still names its target.
+                if !matches!(value, Value::Fn(_) | Value::Ref(_)) {
+                    self.namespace_values
+                        .insert(format!("{}/{}", namespace_str, var.sym.name()));
+                }
                 // Check if this is a function definition
                 if let Value::Fn(fn_defs) = value {
                     let func_name = var.sym.name();
@@ -2215,7 +2279,7 @@ impl Compiler {
                         let alias_value_reg = self.allocate_register();
                         let alias_constant = self
                             .program
-                            .add_constant(Constant::Val(Val::Map(Box::new(alias_map))));
+                            .add_constant(Constant::Val(Val::map(alias_map)));
                         self.emit_instruction(Instruction::LoadConst {
                             dest: alias_value_reg,
                             constant: alias_constant,
@@ -2433,8 +2497,8 @@ impl Compiler {
             .iter()
             .map(|arg| {
                 arg.type_annotation
-                    .clone()
-                    .unwrap_or_else(|| "Any".to_string())
+                    .as_deref()
+                    .map_or_else(|| "Any".to_string(), |t| self.signature_param_type(t))
             })
             .collect();
 
@@ -2445,6 +2509,26 @@ impl Compiler {
             // Include type information for precise overload resolution
             format!("{}/{}:{}", function_name, arity, param_types.join(","))
         }
+    }
+
+    /// A parameter's type as a signature key carries it. Namespace aliases
+    /// exist only while compiling, so each `::alias/Type` of a type, union or
+    /// nullable is recorded as the type it names, which is how the runtime tells
+    /// the parameter's type apart. Generic arguments stay as written.
+    fn signature_param_type(&self, written: &str) -> String {
+        written
+            .split('|')
+            .map(|member| {
+                let path = member.trim();
+                let path = path.strip_suffix('?').unwrap_or(path);
+                if path.starts_with("::") && !path.contains(['<', '>', ' ']) {
+                    member.replace(path, &self.resolve_type_path(path).0)
+                } else {
+                    member.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("|")
     }
 
     /// Compile a function definition and return the actual function ID
@@ -2525,6 +2609,7 @@ impl Compiler {
                 lazy_params[0] = true;
             }
         }
+        let keeps_result = lazy_params.first().copied().unwrap_or(false);
 
         // Create function info with empty instructions (will be filled after compilation)
         let function_info = FunctionInfo {
@@ -2571,6 +2656,7 @@ impl Compiler {
             &fn_def.args,
             fn_def.return_type.as_deref(),
             fn_def.precondition.as_ref(),
+            keeps_result,
         );
         let function_instructions =
             self.compile_checked_function_body(&fn_def.body, checks.as_ref())?;
@@ -2680,6 +2766,7 @@ impl Compiler {
                 lazy_params[0] = true;
             }
         }
+        let keeps_result = lazy_params.first().copied().unwrap_or(false);
 
         // Update the pre-reserved FunctionInfo slot with full metadata
         if let Some(func_info) = self.program.functions.get_mut(reserved_id as usize) {
@@ -2721,6 +2808,7 @@ impl Compiler {
             &fn_def.args,
             fn_def.return_type.as_deref(),
             fn_def.precondition.as_ref(),
+            keeps_result,
         );
         let function_instructions =
             self.compile_checked_function_body(&fn_def.body, checks.as_ref())?;
@@ -2875,7 +2963,7 @@ impl Compiler {
                     if compiled_elements.is_empty() {
                         // Empty vector
                         let empty_vector_constant =
-                            self.program.add_constant(Constant::Val(Val::Vec(vec![])));
+                            self.program.add_constant(Constant::Val(Val::vec(vec![])));
                         self.emit_instruction(Instruction::LoadConst {
                             dest: dest_reg,
                             constant: empty_vector_constant,
@@ -3370,10 +3458,33 @@ impl Compiler {
         })
     }
 
+    /// Whether a call by name reaches a value rather than a function, so no
+    /// function's lazy parameters apply: a field of a variable (`source.list(x)`),
+    /// a local that shadows the name, or this namespace's own value of that
+    /// name. A function defined in the body keeps its own lazy parameters.
+    fn calls_a_value(&self, fn_call: &FnCall) -> bool {
+        let Value::Ref(Ref::Var(var_ref)) = fn_call.function.as_ref() else {
+            return false;
+        };
+        let name = var_ref.var.sym.name();
+        if var_ref.var.deep_path.is_some() {
+            return true;
+        }
+        if self.is_local_name(name) {
+            return !self.local_function_names.iter().any(|f| f == name);
+        }
+        let qualified = format!("{}/{}", self.current_namespace, name);
+        self.namespace_values.contains(&qualified)
+            && !self.function_mapping.contains_key(&qualified)
+    }
+
     /// The lazy parameters a call defers arguments for, and whether a
     /// variadic rest parameter is lazy: those of the overload its argument
     /// types select, else of the function its name finds.
     fn call_lazy_params(&self, fn_call: &FnCall) -> (Vec<bool>, bool) {
+        if self.calls_a_value(fn_call) {
+            return (vec![], false);
+        }
         let typed = self
             .typed_overload(fn_call)
             .and_then(|(_, function_id)| self.program.functions.get(function_id as usize));
@@ -3392,6 +3503,9 @@ impl Compiler {
     /// If the function is variadic and the last (variadic) param is lazy,
     /// all overflow arguments should be wrapped as lazy thunks.
     fn get_function_lazy_params(&self, fn_call: &FnCall) -> (Vec<bool>, bool) {
+        if self.calls_a_value(fn_call) {
+            return (vec![], false);
+        }
         // Try to determine the target function name
         let function_name = match fn_call.function.as_ref() {
             Value::Ref(Ref::Var(var_ref)) => {
@@ -3399,11 +3513,13 @@ impl Compiler {
 
                 // Check if this is an alias to another function
                 // Look up the variable in the current namespace to see if it's an alias
+                // This namespace's own function comes before a core function of
+                // the same name, as the call itself resolves.
                 let mut candidates = vec![
-                    name.to_string(),
                     format!("{}/{}", self.current_namespace, name),
-                    format!("{}/{}", name, fn_call.args.len()), // arity-based
                     format!("{}/{}/{}", self.current_namespace, name, fn_call.args.len()),
+                    name.to_string(),
+                    format!("{}/{}", name, fn_call.args.len()), // arity-based
                 ];
 
                 // Check symbol table for function aliases
@@ -3523,6 +3639,7 @@ impl Compiler {
         if !(fn_call.args.len() == 2 || fn_call.args.len() == 3)
             || fn_call.result_path.is_some()
             || fn_call.args.iter().any(|a| a.spread || a.lazy)
+            || self.calls_a_value(fn_call)
         {
             return Ok(None);
         }
@@ -3695,6 +3812,7 @@ impl Compiler {
         if fn_call.args.len() < 2
             || fn_call.result_path.is_some()
             || fn_call.args.iter().any(|a| a.spread || a.lazy)
+            || self.calls_a_value(fn_call)
         {
             return Ok(None);
         }
@@ -4830,8 +4948,13 @@ impl Compiler {
             Some(name) => format!("{}/{}/lambda", self.current_namespace, name),
             None => format!("{}/lambda", self.current_namespace),
         };
-        let checks =
-            self.signature_checks(&label, &lambda.args, lambda.return_type.as_deref(), None);
+        let checks = self.signature_checks(
+            &label,
+            &lambda.args,
+            lambda.return_type.as_deref(),
+            None,
+            false,
+        );
 
         let lambda_instructions: Result<Vec<Instruction>, String> = (|| {
             if let Some(checks) = &checks {
@@ -5193,7 +5316,7 @@ impl Compiler {
                 }
             }
             Val::Vec(vec) => {
-                for v in vec {
+                for v in vec.iter() {
                     self.collect_free_variables_in_val_for_value(v, free_vars);
                 }
             }
@@ -5516,7 +5639,9 @@ impl Compiler {
                             .cloned()
                             .unwrap_or_else(|| "Any".to_string());
                         // Normalize type annotation to match VM's get_val_type_name format
-                        Self::normalize_type_annotation(&type_annotation)
+                        self.signature_param_type(&Self::normalize_type_annotation(
+                            &type_annotation,
+                        ))
                     })
                     .collect();
                 let typed_key = format!("{}/{}:{}", constructor_name, arity, param_types.join(","));
@@ -5716,7 +5841,7 @@ impl Compiler {
                     associated_type_info
                         .insert(Val::from("$type"), Val::from(resolved_type_ref.clone()));
                     // Mark this as a nested type reference (no $all_fields means VM will call the constructor)
-                    Val::Map(Box::new(associated_type_info))
+                    Val::map(associated_type_info)
                 }
             };
             let associated_type_info_constant = self
@@ -6051,22 +6176,22 @@ impl Compiler {
             }
 
             if !fields_info.is_empty() {
-                type_info.insert(Val::from("$fields"), Val::Map(Box::new(fields_info)));
+                type_info.insert(Val::from("$fields"), Val::map(fields_info));
             }
 
             if !required_fields.is_empty() {
-                type_info.insert(Val::from("$required"), Val::Vec(required_fields));
+                type_info.insert(Val::from("$required"), Val::vec(required_fields));
             }
 
             // Always set $all_fields (even if empty) to distinguish top-level type_info
             // from nested type references which only have $type
-            type_info.insert(Val::from("$all_fields"), Val::Vec(all_fields));
+            type_info.insert(Val::from("$all_fields"), Val::vec(all_fields));
         } else {
             // No fields defined - still mark as top-level type_info with empty $all_fields
-            type_info.insert(Val::from("$all_fields"), Val::Vec(vec![]));
+            type_info.insert(Val::from("$all_fields"), Val::vec(vec![]));
         }
 
-        Val::Map(Box::new(type_info))
+        Val::map(type_info)
     }
 
     fn build_field_type_info_from_expr(&self, type_expr: &TypeExpr, include_builtin: bool) -> Val {
@@ -6083,13 +6208,13 @@ impl Compiler {
                 }
 
                 let mut union_info = indexmap::IndexMap::new();
-                union_info.insert(Val::from("$union"), Val::Vec(members));
-                Val::Map(Box::new(union_info))
+                union_info.insert(Val::from("$union"), Val::vec(members));
+                Val::map(union_info)
             }
             TypeExpr::Optional(inner) => {
                 let mut info = self.build_field_type_info_from_expr(inner, true);
                 if let Val::Map(map) = &mut info {
-                    map.insert(Val::from("$optional"), Val::Bool(true));
+                    std::sync::Arc::make_mut(map).insert(Val::from("$optional"), Val::Bool(true));
                 }
                 info
             }
@@ -6101,7 +6226,7 @@ impl Compiler {
                     if !Self::is_empty_map(&item_type_info) {
                         vec_info.insert(Val::from("$item_type"), item_type_info);
                     }
-                    Val::Map(Box::new(vec_info))
+                    Val::map(vec_info)
                 } else {
                     Val::map_empty()
                 }
@@ -6137,7 +6262,7 @@ impl Compiler {
             TypeExpr::Literal(lit) => {
                 let mut type_info = indexmap::IndexMap::new();
                 type_info.insert(Val::from("$literal"), Val::from(lit.to_string()));
-                Val::Map(Box::new(type_info))
+                Val::map(type_info)
             }
             TypeExpr::Generic(name, _) => self.build_custom_type_info(name),
         }
@@ -6156,13 +6281,13 @@ impl Compiler {
 
         let mut type_info = indexmap::IndexMap::new();
         type_info.insert(Val::from("$type"), Val::from(qualified_name));
-        Val::Map(Box::new(type_info))
+        Val::map(type_info)
     }
 
     fn simple_type_info(type_name: &str) -> Val {
         let mut type_info = indexmap::IndexMap::new();
         type_info.insert(Val::from("$type"), Val::from(type_name));
-        Val::Map(Box::new(type_info))
+        Val::map(type_info)
     }
 
     pub(super) fn type_expr_allows_null(type_expr: &TypeExpr) -> bool {
@@ -6433,6 +6558,17 @@ impl Compiler {
         Ok(())
     }
 
+    /// The qualified path an arrow's target registers under. A dotted target
+    /// (`Animal.Bird`) resolves its enum and keeps the variant.
+    fn resolve_arrow_target(&self, target_type: &str) -> String {
+        match target_type.rsplit_once('.') {
+            Some((enum_path, variant)) if !target_type.starts_with("::") => {
+                format!("{}.{}", self.resolve_type_path(enum_path).0, variant)
+            }
+            _ => self.resolve_type_path(target_type).0,
+        }
+    }
+
     fn compile_type_implementation(
         &mut self,
         type_impl: &crate::lang::ast::TypeImplementation,
@@ -6453,22 +6589,16 @@ impl Compiler {
         // For now, compile the implementation function and store it
         let impl_reg = self.compile_value(&type_impl.implementation)?;
 
-        // Register the type implementation in the appropriate scope
-        // Normalize target type name to short form for consistent lookup
-        let target_type_short =
-            if let Some(last_part) = type_impl.target_type.split('/').next_back() {
-                last_part.to_string()
-            } else {
-                type_impl.target_type.clone()
-            };
-        // Resolve the arrow's source type through declaration-site scope
-        // (local declaration, import/alias, core auto-import). Registering
-        // the resolved qualified name is what keeps two namespaces'
+        // Register the type implementation in the appropriate scope.
+        // Resolve both ends of the arrow through declaration-site scope (local
+        // declaration, import/alias, core auto-import). Registering the
+        // resolved qualified names is what keeps two namespaces'
         // same-short-named types from colliding in the global registry: a
         // short name only means something in the scope that declared the
         // arrow, so the registry must not be keyed by it.
         let (qualified_source, _source_found) = self.resolve_type_path(&type_impl.source_type);
-        let key_resolved = (qualified_source.clone(), target_type_short.clone());
+        let qualified_target = self.resolve_arrow_target(&type_impl.target_type);
+        let key_resolved = (qualified_source.clone(), qualified_target.clone());
         let impl_name = format!(
             "impl_{}_{}",
             type_impl.source_type,
@@ -6497,7 +6627,7 @@ impl Compiler {
             // For function-scoped implementations, we need to emit bytecode instructions
             // that will register the implementation in the VM's current scope when executed
             let source_type_id = self.program.add_string_ref(qualified_source.clone());
-            let target_type_id = self.program.add_string_ref(target_type_short.clone());
+            let target_type_id = self.program.add_string_ref(qualified_target.clone());
             let impl_name_id = self.program.add_string_ref(qualified_impl_name.clone());
             self.emit_instruction(
                 crate::lang::bytecode::Instruction::RegisterLocalImplementation {
@@ -6513,9 +6643,9 @@ impl Compiler {
                 impl_name
             );
 
-            // Register under the scope-resolved qualified source name only.
-            // No short-name key: the runtime registry is global, and a bare
-            // source name is only meaningful in the declaring scope.
+            // Register under the scope-resolved qualified names only. No
+            // short-name key: the runtime registry is global, and a bare type
+            // name is only meaningful in the declaring scope.
             self.type_implementations
                 .insert(key_resolved.clone(), qualified_impl_name.clone());
         }
@@ -7597,7 +7727,7 @@ impl Compiler {
                 }
             }
             Val::Vec(vec) => {
-                for v in vec {
+                for v in vec.iter() {
                     self.collect_free_variables_in_val(v, free_vars, bound_vars);
                 }
             }
@@ -8169,9 +8299,9 @@ impl Compiler {
             let mut levels_vec = Vec::new();
             for level in &dependency_levels {
                 let level_vec: Vec<Val> = level.iter().map(|s| Val::from(s.clone())).collect();
-                levels_vec.push(Val::Vec(level_vec));
+                levels_vec.push(Val::vec(level_vec));
             }
-            Val::Vec(levels_vec)
+            Val::vec(levels_vec)
         };
         let metadata_constant = self
             .program

@@ -1,14 +1,85 @@
 use std::path::{Path, PathBuf};
 
+/// Where the macOS package installs Hot's resources.
+const MACOS_PACKAGE_RESOURCES: &str = "/usr/local/share/hot";
+
+/// Where the Linux package installs Hot's resources.
+const LINUX_PACKAGE_RESOURCES: &str = "/usr/share/hot";
+
+/// The resources directories of the running binary's own installation.
+///
+/// - `<prefix>/share/hot` for a binary at `<prefix>/bin/hot`: the macOS and
+///   Linux packages (`/usr/local`, `/usr`), Homebrew (`/opt/homebrew`) and
+///   user installs (`~/.local`)
+/// - `<exe_dir>/resources`: Windows and bundled installs
+///
+/// Both the path the binary was started from and its symlink-resolved path
+/// are tried, so a symlink to `hot` finds the installation it points to.
+pub fn installation_resource_dirs() -> Vec<PathBuf> {
+    match std::env::current_exe() {
+        Ok(exe) => installation_resource_dirs_for(&exe),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn installation_resource_dirs_for(exe: &Path) -> Vec<PathBuf> {
+    let mut exes = vec![exe.to_path_buf()];
+    if let Ok(resolved) = exe.canonicalize()
+        && resolved != exe
+    {
+        exes.push(resolved);
+    }
+
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for exe in &exes {
+        let Some(exe_dir) = exe.parent() else {
+            continue;
+        };
+        let share = exe_dir
+            .parent()
+            .filter(|_| exe_dir.file_name().is_some_and(|name| name == "bin"))
+            .map(|prefix| prefix.join("share").join("hot"));
+        for dir in share.into_iter().chain([exe_dir.join("resources")]) {
+            if dir.is_dir() && !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+        }
+    }
+    dirs
+}
+
+/// Directories that hold hot.dev's bundled packages (hot-std and the others),
+/// in the order they're searched:
+/// 1. `$HOT_HOME/pkg`
+/// 2. `./hot/pkg`, for a checkout of this repository
+/// 3. The running binary's installation (see [`installation_resource_dirs`])
+/// 4. The macOS and Linux package locations
+///
+/// Callers join a package name onto each and take the first that exists.
+pub fn bundled_pkg_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(home) = std::env::var("HOT_HOME") {
+        dirs.push(PathBuf::from(home).join("pkg"));
+    }
+    dirs.push(PathBuf::from("./hot/pkg"));
+    for dir in installation_resource_dirs()
+        .into_iter()
+        .chain([MACOS_PACKAGE_RESOURCES, LINUX_PACKAGE_RESOURCES].map(PathBuf::from))
+    {
+        let pkg = dir.join("pkg");
+        if !dirs.contains(&pkg) {
+            dirs.push(pkg);
+        }
+    }
+    dirs
+}
+
 /// Gets the resources directory path based on the current binary location and installation type.
 ///
 /// This function handles different deployment scenarios:
 /// - HOT_HOME environment variable: Uses `$HOT_HOME/resources` (highest priority)
+/// - Installed binary: Uses its installation's resources (see [`installation_resource_dirs`])
 /// - Development: Uses workspace-relative resources directory
-/// - macOS package install: Uses `/usr/local/share/hot/` when binary is at `/usr/local/bin/hot`
-/// - Linux package install: Uses `/usr/share/hot/` when binary is at `/usr/bin/hot`
-/// - Windows install: Uses resources directory next to executable
-/// - Bundled CLI: Uses embedded resources directory next to executable
 pub fn get_resources_path() -> Result<PathBuf, String> {
     // Try to get the current executable path
     let exe_path = std::env::current_exe()
@@ -29,26 +100,9 @@ pub fn get_resources_path() -> Result<PathBuf, String> {
         }
     }
 
-    // Case 1: macOS package installation (/usr/local/bin/hot -> /usr/local/share/hot/)
-    if exe_dir == Path::new("/usr/local/bin") {
-        let resources_path = PathBuf::from("/usr/local/share/hot");
-        if resources_path.exists() {
-            return Ok(resources_path);
-        }
-    }
-
-    // Case 2: Linux system installation (/usr/bin/hot -> /usr/share/hot/)
-    if exe_dir == Path::new("/usr/bin") {
-        let resources_path = PathBuf::from("/usr/share/hot");
-        if resources_path.exists() {
-            return Ok(resources_path);
-        }
-    }
-
-    // Case 3: Local installation or bundled CLI (resources next to executable)
-    let local_resources = exe_dir.join("resources");
-    if local_resources.exists() {
-        return Ok(local_resources);
+    // Cases 1-3: the binary's own installation
+    if let Some(resources_path) = installation_resource_dirs_for(&exe_path).into_iter().next() {
+        return Ok(resources_path);
     }
 
     // Case 4: Development environment (look for workspace-relative resources)
@@ -289,6 +343,55 @@ pub fn read_init_template(template_file: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Lays out `<prefix>/bin/hot` and `<prefix>/share/hot` under `root`.
+    fn install_prefix(root: &Path, prefix: &str) -> (PathBuf, PathBuf) {
+        let exe = root.join(prefix).join("bin").join("hot");
+        let share = root.join(prefix).join("share").join("hot");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&share).unwrap();
+        std::fs::write(&exe, "").unwrap();
+        (exe, share)
+    }
+
+    #[test]
+    fn a_binary_in_a_bin_dir_finds_the_prefix_share_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let (exe, share) = install_prefix(root.path(), ".local");
+
+        let dirs = installation_resource_dirs_for(&exe);
+        assert_eq!(dirs.first(), Some(&share), "{dirs:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_binary_finds_the_installation_it_points_to() {
+        let root = tempfile::tempdir().unwrap();
+        let (exe, share) = install_prefix(root.path(), "install");
+        let link_dir = root.path().join("elsewhere").join("bin");
+        std::fs::create_dir_all(&link_dir).unwrap();
+        let link = link_dir.join("hot");
+        std::os::unix::fs::symlink(&exe, &link).unwrap();
+
+        let dirs = installation_resource_dirs_for(&link);
+        let share = share.canonicalize().unwrap();
+        assert!(dirs.contains(&share), "{dirs:?} should contain {share:?}");
+    }
+
+    #[test]
+    fn only_a_bin_dir_looks_in_its_prefix_share_dir() {
+        let root = tempfile::tempdir().unwrap();
+        // A build in target/debug must not pick up an unrelated target/share/hot.
+        let exe = root.path().join("target").join("debug").join("hot");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(root.path().join("target").join("share").join("hot")).unwrap();
+        std::fs::write(&exe, "").unwrap();
+        assert!(installation_resource_dirs_for(&exe).is_empty());
+
+        let bundled = root.path().join("target").join("debug").join("resources");
+        std::fs::create_dir_all(&bundled).unwrap();
+        assert_eq!(installation_resource_dirs_for(&exe).first(), Some(&bundled));
+    }
 
     #[test]
     fn test_get_resources_path() {

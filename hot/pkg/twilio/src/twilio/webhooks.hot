@@ -41,14 +41,17 @@ meta {
   **Example**
 
   ```hot
-  // Using context variable (1-arity)
-  is-valid ::twilio::webhooks/verify-request(request)
+  check fn (request: ::hot::http/HttpRequest): Bool {
+    // Using context variable (1-arity)
+    a ::twilio::webhooks/verify-request(request)
 
-  // With explicit auth token (2-arity)
-  is-valid ::twilio::webhooks/verify-request(request, "your-auth-token")
+    // With explicit auth token (2-arity)
+    b ::twilio::webhooks/verify-request(request, "your-auth-token")
 
-  // With the exact configured URL (3-arity)
-  is-valid ::twilio::webhooks/verify-request(request, "your-auth-token", "https://example.com/hooks/sms")
+    // With the exact configured URL (3-arity)
+    c ::twilio::webhooks/verify-request(request, "your-auth-token", "https://example.com/hooks/sms")
+    and(a, b, c)
+  }
   ```
   """
 }
@@ -72,6 +75,7 @@ fn
     is-empty(signature) => { false }
     is-empty(url) => { false }
     => {
+      ::ctx/mark-secret(auth-token)
       body-sha or(get(or(get(request, "query", {}), {}), "bodySHA256", ""), "")
       cond {
         not(is-empty(body-sha)) => {

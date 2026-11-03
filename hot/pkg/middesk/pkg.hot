@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.middesk {
+  name: "hot.dev/middesk",
+  version: "0.1.0",
+  hot-min-version: "3.0.2",
+  description: "Middesk business verification (KYB) bindings for Hot. Businesses with the full report (registrations, TIN match, watchlist, liens, litigations, bankruptcies, people, website, review tasks), orders, documents and PDF reports as Bytes, monitoring, webhook management, X-Middesk-Signature-256 verification, and a deterministic, LLM-friendly report summary with a needs-review flag.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["middesk", "kyb", "business-verification", "compliance", "aml"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

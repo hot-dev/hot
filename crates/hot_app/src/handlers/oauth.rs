@@ -592,16 +592,16 @@ pub async fn github_select_email_post_handler(
 }
 
 /// The account an OAuth sign-in resolved to.
-struct OAuthSignin {
-    user: User,
-    is_new_user: bool,
+pub struct OAuthSignin {
+    pub user: User,
+    pub is_new_user: bool,
     /// Under invite-only sign-up, the invitation that admitted a new account.
-    admitted_by: Option<String>,
+    pub admitted_by: Option<String>,
 }
 
 /// Handle OAuth user creation or login. `invite_code` is the invitation the
 /// sign-in started from, if any.
-async fn handle_oauth_user(
+pub async fn handle_oauth_user(
     db: &DatabasePool,
     conf: &Val,
     email: &str,
@@ -638,7 +638,7 @@ async fn handle_oauth_user(
     match User::get_user_by_email(db, email).await {
         Ok(user) => {
             // User exists, check if they have this OAuth provider linked
-            match UserAuth::get_user_auth(db, provider, email).await {
+            match UserAuth::get_user_auth(db, &user.user_id, provider).await {
                 Ok(_) => {
                     // OAuth already linked, just log them in
                     tracing::debug!("User {} logged in with {}", email, provider);

@@ -421,20 +421,17 @@ async fn a_verification_from_the_open_period_cannot_create_the_invited_persons_a
         "{}",
         snippet(&resp)
     );
+    // A password sign-in belongs to a user, so with no user the earlier
+    // password is not on any account.
     assert!(User::get_user_by_email(&db, email).await.is_err());
-    assert!(
-        UserAuth::get_user_auth(&db, "email_password", email)
-            .await
-            .is_err(),
-        "the earlier password is not on any account"
-    );
 
     // The invitation link gives them an account with their own password, and
     // ends the earlier verification.
     let resp = sign_up_with_password(&mut client, email, "invited-code", &owners_password).await;
     assert!(resp.status.is_redirection(), "{}", snippet(&resp));
     assert!(joined(&db, email, &org_id).await);
-    let auth = UserAuth::get_user_auth(&db, "email_password", email)
+    let user = User::get_user_by_email(&db, email).await.unwrap();
+    let auth = UserAuth::get_user_auth(&db, &user.user_id, "email_password")
         .await
         .unwrap();
     let stored = serde_json::to_string(&auth.auth_data.unwrap()).unwrap();
@@ -828,7 +825,8 @@ async fn an_invitation_link_takes_over_from_a_pending_verification() {
         assert!(joined(&db, &email, &org_id).await, "{label}");
 
         // The account has the invitee's password, not the earlier one.
-        let auth = UserAuth::get_user_auth(&db, "email_password", &email)
+        let user = User::get_user_by_email(&db, &email).await.unwrap();
+        let auth = UserAuth::get_user_auth(&db, &user.user_id, "email_password")
             .await
             .unwrap();
         let stored = serde_json::to_string(&auth.auth_data.unwrap()).unwrap();

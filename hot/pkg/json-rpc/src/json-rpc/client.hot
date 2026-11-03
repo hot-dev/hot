@@ -159,13 +159,14 @@ regardless of the HTTP status. Non-JSON-RPC HTTP failures become an internal
 JSON-RPC client error whose data contains the response body.
 """
 }
-fn (response: HttpResponse): ::types/Response {
+fn (response: Result): ::types/Response {
   sse-message if(
     and(is-str(response.body), eq(response-media-type(response), "text/event-stream")),
     sse-json-rpc-response(response.body),
     null
   )
   cond {
+      is-err(response) => { response }
       and(is-map(response.body), eq(get(response.body, "jsonrpc", null), "2.0")) => {
         parse-response(response.body)
       }
@@ -319,5 +320,5 @@ fn (url: Str, headers: Map, notif: ::types/Notification): Bool {
     }, headers),
     body: body
   }))
-  is-ok-response(response)
+  if(is-err(response), false, is-ok-response(response))
 }

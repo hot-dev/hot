@@ -1,0 +1,185 @@
+::modern-treasury::payment-orders ns
+meta {
+    doc: """
+    Payment orders: instructions to move money from one of your internal
+    accounts. `direction: "credit"` sends money to the receiving account;
+    `direction: "debit"` pulls from it. `type` picks the rail (`"ach"`,
+    `"wire"`, `"rtp"`, `"check"`, `"book"`, `"sepa"`, `"eft"`,
+    `"cross_border"`, ...). Amounts are in the currency's smallest unit.
+
+    Creating a payment order moves money: it needs an `idempotency-key`
+    and is never retried. Agents should not approve payment orders:
+    configure approval rules in Modern Treasury so that orders an agent
+    creates wait in `needs_approval` for a person. Follow
+    `payment_order.*` webhooks for status changes instead of polling.
+    """
+}
+
+::api ::modern-treasury::api
+seg ::modern-treasury::api/seg
+
+REQUIRED ["type", "direction", "amount", "originating_account_id"]
+
+create-payment-order
+meta {
+    doc: """
+    POST /api/payment_orders: create a payment order. Moves money:
+    `opts` must carry an `idempotency-key` (the call errs without one
+    and sends nothing). `params` needs `type`, `direction`, `amount` and
+    `originating_account_id`, plus `receiving_account_id` (or an inline
+    `receiving_account`). Optional: `priority` (`"normal"` or `"high"`,
+    e.g. same-day ACH), `effective_date`, `description`,
+    `statement_descriptor`, `remittance_information`, `purpose`,
+    `metadata`, `line_items: [{amount, description, metadata}]`,
+    `ledger_transaction`, `expires_at`, `process_after`, `subtype` (e.g.
+    `"CCD"`, `"PPD"`), `fallback_type`, `send_remittance_advice`.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::payment-orders/create-payment-order({
+      type: "ach",
+      direction: "credit",
+      amount: 10000,
+      originating_account_id: "0f8e3719-3dfd-4613-9bbf-c0333781b59f",
+      receiving_account_id: "5acec2ef-987b-4260-aa97-b719eeb0a8d5",
+      description: "Invoice 42",
+      metadata: {invoice_id: "42"},
+      line_items: [{amount: 10000, description: "Consulting, October"}]
+    }, {idempotency-key: "invoice-42-payout"})
+    ```
+    """
+}
+fn (params: Map, opts: Map): Map {
+  ::api/move-money("/api/payment_orders", params, REQUIRED, opts, "create-payment-order")
+}
+
+create-payment-order-async
+meta {
+    doc: """POST /api/payment_orders/create_async: queue a payment order for creation (for large batches); returns `{object_id, object_type, status}`. Same body and idempotency requirement as `create-payment-order`; follow `payment_order.created` webhooks for the result."""
+}
+fn (params: Map, opts: Map): Map {
+  ::api/move-money("/api/payment_orders/create_async", params, REQUIRED, opts, "create-payment-order-async")
+}
+
+get-payment-order
+meta {
+    doc: """GET /api/payment_orders/{id}: retrieve a payment order, with its `status` (`needs_approval`, `approved`, `processing`, `sent`, `completed`, `returned`, `reversed`, `cancelled`, `failed`, `denied`, ...)."""
+}
+fn
+(payment-order-id: Str): Map {
+  get-payment-order(payment-order-id, {})
+},
+(payment-order-id: Str, opts: Map): Map {
+  ::api/call("GET", `/api/payment_orders/${seg(payment-order-id)}`, {}, opts)
+}
+
+list-payment-orders
+meta {
+    doc: """
+    GET /api/payment_orders: one page (`{items, after_cursor,
+    per_page}`). Filters: `status`, `type`, `direction`, `priority`,
+    `counterparty_id`, `originating_account_id`, `transaction_id`,
+    `external_id`, `reference_number`, `effective_date_start`,
+    `effective_date_end`, `created_at_start`, `created_at_end`,
+    `metadata: {key: value}`, `per_page`, `after_cursor`.
+
+    **Example**
+
+    ```hot
+    waiting ::modern-treasury::payment-orders/list-payment-orders({status: "needs_approval"})
+    ```
+    """
+}
+fn
+(): Map {
+  list-payment-orders({})
+},
+(params: Map): Map {
+  list-payment-orders(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/list-page("/api/payment_orders", params, opts)
+}
+
+update-payment-order
+meta {
+    doc: """PATCH /api/payment_orders/{id}: change a payment order that hasn't been sent (`amount`, `effective_date`, `description`, `metadata`, `receiving_account_id`, ...), or its `status`. Use `approve-payment-order` and `cancel-payment-order` for status changes."""
+}
+fn
+(payment-order-id: Str, params: Map): Map {
+  update-payment-order(payment-order-id, params, {})
+},
+(payment-order-id: Str, params: Map, opts: Map): Map {
+  ::api/call("PATCH", `/api/payment_orders/${seg(payment-order-id)}`, params, opts)
+}
+
+approve-payment-order
+meta {
+    doc: """Approve a payment order in `needs_approval` (`PATCH {status: "approved"}`), releasing it to be sent. Agents must not approve on their own: leave it to a person, in the Modern Treasury dashboard or through your own approval step that calls this. The API key needs approval permission."""
+}
+fn
+(payment-order-id: Str): Map {
+  approve-payment-order(payment-order-id, {})
+},
+(payment-order-id: Str, opts: Map): Map {
+  update-payment-order(payment-order-id, {status: "approved"}, opts)
+}
+
+cancel-payment-order
+meta {
+    doc: """Cancel a payment order that hasn't been sent (`PATCH {status: "cancelled"}`)."""
+}
+fn
+(payment-order-id: Str): Map {
+  cancel-payment-order(payment-order-id, {})
+},
+(payment-order-id: Str, opts: Map): Map {
+  update-payment-order(payment-order-id, {status: "cancelled"}, opts)
+}
+
+// ---------------------------------------------------------------------------
+// Reversals
+// ---------------------------------------------------------------------------
+
+create-reversal
+meta {
+    doc: """
+    POST /api/payment_orders/{id}/reversals: reverse a sent ACH payment
+    order (NACHA allows it within five banking days, for limited
+    reasons). `reason` is `"duplicate"`, `"incorrect_amount"`,
+    `"incorrect_receiving_account"`, `"date_earlier_than_intended"` or
+    `"date_later_than_intended"`. `params`: `metadata`,
+    `ledger_transaction`. Moves money: needs an `idempotency-key`.
+    """
+}
+fn (payment-order-id: Str, reason: Str, params: Map, opts: Map): Map {
+  ::api/move-money(`/api/payment_orders/${seg(payment-order-id)}/reversals`, {...params, reason: reason}, ["reason"], opts, "create-reversal")
+}
+
+get-reversal
+meta {
+    doc: """GET /api/payment_orders/{id}/reversals/{reversal_id}: retrieve a reversal."""
+}
+fn
+(payment-order-id: Str, reversal-id: Str): Map {
+  get-reversal(payment-order-id, reversal-id, {})
+},
+(payment-order-id: Str, reversal-id: Str, opts: Map): Map {
+  ::api/call("GET", `/api/payment_orders/${seg(payment-order-id)}/reversals/${seg(reversal-id)}`, {}, opts)
+}
+
+list-reversals
+meta {
+    doc: """GET /api/payment_orders/{id}/reversals: one page of a payment order's reversals."""
+}
+fn
+(payment-order-id: Str): Map {
+  list-reversals(payment-order-id, {})
+},
+(payment-order-id: Str, params: Map): Map {
+  list-reversals(payment-order-id, params, {})
+},
+(payment-order-id: Str, params: Map, opts: Map): Map {
+  ::api/list-page(`/api/payment_orders/${seg(payment-order-id)}/reversals`, params, opts)
+}

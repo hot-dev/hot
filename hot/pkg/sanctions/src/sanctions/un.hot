@@ -1,0 +1,98 @@
+::sanctions::un ns
+meta {
+    doc: """
+    The UN Security Council Consolidated List (`un`): every individual
+    and entity subject to Security Council sanctions, about 1,000
+    records.
+
+    **Format used**: the English XML file
+    (`https://scsanctions.un.org/resources/xml/en/consolidated.xml`,
+    about 2 MB; it redirects to a signed Azure Blob URL). It answers
+    only GET, so a refresh downloads it and compares the SHA-256 of the
+    body with the cached version before re-indexing.
+    """
+}
+
+::sx ::sanctions::xml
+::entry ::sanctions::entry
+::http ::sanctions::http
+
+Entry ::sanctions::entry/Entry
+
+URL "https://scsanctions.un.org/resources/xml/en/consolidated.xml"
+LIST_NAME "UN Security Council Consolidated List"
+
+dob-of fn (node: Str): Str? {
+  date ::sx/text(node, "DATE")
+  year ::sx/text(node, "YEAR")
+  from ::sx/text(node, "FROM_YEAR")
+  to ::sx/text(node, "TO_YEAR")
+  cond {
+    is-some(date) => { ::entry/iso-date(date) }
+    is-some(year) => { ::entry/iso-date(year) }
+    and(is-some(from), is-some(to)) => { ::entry/iso-date(`${from} to ${to}`) }
+    is-some(from) => { ::entry/iso-date(from) }
+    => { null }
+  }
+}
+
+address-line fn (node: Str): Str {
+  join(filter(map(["STREET", "CITY", "STATE_PROVINCE", "ZIP_CODE", "COUNTRY"], (t) { ::sx/text(node, t) }), is-some), ", ")
+}
+
+parse-record
+meta {
+    doc: """Turn one `<INDIVIDUAL>` or `<ENTITY>` record string into an `Entry`; `individual` says which. Exposed for testing."""
+}
+fn (record: Str, individual: Bool): Entry {
+  prefix if(individual, "INDIVIDUAL", "ENTITY")
+  name join(filter(map(["FIRST_NAME", "SECOND_NAME", "THIRD_NAME", "FOURTH_NAME"], (t) { ::sx/text(record, t) }), is-some), " ")
+  original ::sx/text(record, "NAME_ORIGINAL_SCRIPT")
+  aliases mapcat(::sx/blocks(record, `${prefix}_ALIAS`), (a) { ::sx/texts(a, "ALIAS_NAME") })
+  ::entry/make({
+    source: "un",
+    list: LIST_NAME,
+    id: ::sx/text(record, "REFERENCE_NUMBER"),
+    kind: if(individual, "individual", "entity"),
+    name: name,
+    aliases: concat(aliases, filter([original], is-some)),
+    dobs: filter(map(::sx/blocks(record, "INDIVIDUAL_DATE_OF_BIRTH"), dob-of), is-some),
+    nationalities: map(::sx/texts(::sx/block(record, "NATIONALITY"), "VALUE"), (c) { or(::sanctions::country/code(c), c) }),
+    programs: ::sx/texts(record, "UN_LIST_TYPE"),
+    addresses: filter(map(::sx/blocks(record, `${prefix}_ADDRESS`), address-line), (s) { not(is-empty(s)) }),
+    remarks: ::sx/text(record, "COMMENTS1"),
+    url: URL
+  })
+}
+
+parse
+meta {
+    doc: """Parse the whole UN consolidated XML into `Entry` records (pure)."""
+}
+fn (doc: Str): Vec<Entry> {
+  people map(::sx/records(doc, "INDIVIDUAL"), (rec) { parse-record(rec, true) })
+  groups map(::sx/records(doc, "ENTITY"), (rec) { parse-record(rec, false) })
+  filter(concat(people, groups), (e) { and(not(is-empty(e.id)), not(is-empty(e.name))) })
+}
+
+fetch
+meta {
+    doc: """
+    Download and parse the UN list. Returns `{source, version, entries,
+    unchanged}`; `version` is the first 16 hex digits of the body's
+    SHA-256, and when it equals `known-version` the file is not parsed.
+    """
+}
+fn (known-version: Str?): Map {
+  out ::http/get-text(URL)
+  cond {
+    is-err(out) => { out }
+    => {
+      ver slice(::hot::hash/sha256(out.text), 0, 16)
+      cond {
+        eq(ver, known-version) => { {source: "un", version: ver, entries: null, unchanged: true} }
+        => { {source: "un", version: ver, entries: parse(out.text), unchanged: false} }
+      }
+    }
+  }
+}

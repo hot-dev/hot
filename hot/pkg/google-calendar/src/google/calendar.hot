@@ -1,97 +1,193 @@
 ::google::calendar ns
 meta {
     doc: """
-    Google Calendar API bindings. Authentication is configured once via
-    the `google.*` context variables — see the `google-core` package.
+    Google Calendar API v3 bindings: events (list with every filter,
+    get, create with Google Meet links, update, patch, delete, quick add,
+    move, recurring instances), incremental sync with sync tokens and
+    push notifications, free/busy, calendars and the calendar list,
+    colors, and sharing (ACL). Credentials and scopes come from
+    `google-core`.
+
+    **Namespaces**
+
+    - `::google::calendar::events` - list/list-all, get, create, update,
+      patch, delete, quick-add, move, instances, event and Meet builders
+    - `::google::calendar::sync` - `sync-events` (sync tokens, 410
+      resync), `watch-events`, `stop-channel`, webhook parsing and
+      verification
+    - `::google::calendar::calendars` - calendar list, calendars get and
+      create, colors, free/busy
+    - `::google::calendar::acl` - list, share, unshare
+
+    Every function has an options arity taking an `opts` Map. Calendar
+    query parameters use the API's own names (`timeMin`, `singleEvents`,
+    `sendUpdates`, ...); credential keys (`token`, `refresh-token`,
+    `service-account`, `subject`, `scopes`, `retry`) are handled by
+    `google-core` and override context for that call. Calendar ids
+    (`primary`, `team@group.calendar.google.com`, ...) and event ids
+    are URL-encoded in every path.
+
+    **Times.** `dateTime` values are RFC 3339 with an offset
+    (`2026-11-03T15:00:00-06:00`) or `Z`; a `timeZone` (IANA, e.g.
+    `America/Chicago`) next to `dateTime` is needed for recurring events
+    and otherwise only labels the time. All-day events use `date`
+    (`2026-11-03`) with an exclusive end date. List filters (`timeMin`,
+    `timeMax`, `updatedMin`) must carry an offset.
 
     **Quick start**
 
     ```hot
-    ::cal ::google::calendar
+    ::events ::google::calendar::events
 
-    events ::cal/list-events("primary", {timeMin: "2026-07-09T00:00:00Z", maxResults: 10})
+    week ::events/list-all-events("primary", {timeMin: "2026-11-02T00:00:00Z", timeMax: "2026-11-09T00:00:00Z", singleEvents: true, orderBy: "startTime"})
 
-    ::cal/create-event("primary", {
-      summary: "Ship the packages",
-      start: {dateTime: "2026-07-10T10:00:00-05:00"},
-      end: {dateTime: "2026-07-10T10:30:00-05:00"}
-    })
+    ::events/create-event("primary", ::events/build-event({
+      summary: "Design review",
+      start: "2026-11-03T15:00:00-06:00",
+      end: "2026-11-03T15:30:00-06:00",
+      attendees: ["ada@example.com"],
+      meet: true
+    }), {sendUpdates: "all"})
     ```
     """
 }
 
 ::api ::google::api
+::ctx ::hot::ctx
 ::uri ::hot::uri
 
+API_ROOT "https://www.googleapis.com"
 BASE_URL "https://www.googleapis.com/calendar/v3"
 
+// Scopes. All Calendar scopes are sensitive (OAuth verification for
+// public apps). Each function defaults to the narrowest that works.
 SCOPE "https://www.googleapis.com/auth/calendar"
 READ_SCOPE "https://www.googleapis.com/auth/calendar.readonly"
+EVENTS_SCOPE "https://www.googleapis.com/auth/calendar.events"
+EVENTS_READ_SCOPE "https://www.googleapis.com/auth/calendar.events.readonly"
+ACL_SCOPE "https://www.googleapis.com/auth/calendar.acls"
+ACL_READ_SCOPE "https://www.googleapis.com/auth/calendar.acls.readonly"
+FREEBUSY_SCOPE "https://www.googleapis.com/auth/calendar.freebusy"
 
-list-calendars
+// ---------------------------------------------------------------------------
+// URL and parameter helpers (shared by the sub-namespaces)
+// ---------------------------------------------------------------------------
+
+api-root
 meta {
-    doc: """GET /users/me/calendarList - The calendars on the authenticated user's list."""
+    ctx: {"google.calendar.api-root": {required: false, secret: false}},
+    doc: """The API root, `https://www.googleapis.com` unless the `google.calendar.api-root` context variable points at a proxy or emulator."""
 }
-fn (): Map {
-  ::api/json(READ_SCOPE, "GET", `${BASE_URL}/users/me/calendarList`)
+fn (): Str {
+  root ::ctx/get("google.calendar.api-root")
+  if(or(is-null(root), eq(root, "")), API_ROOT, root)
 }
 
-list-events
+url
+meta {
+    doc: """A Calendar v3 URL: `/calendar/v3` + `path` with non-null `params` as a query string (Vec values repeat the key)."""
+}
+fn
+(path: Str): Str {
+  url(path, {})
+},
+(path: Str, params: Map): Str {
+  ::api/with-query(`${api-root()}/calendar/v3${path}`, params)
+}
+
+encode-id
+meta {
+    doc: """URL-encode an id for a path segment: `"team@group.calendar.google.com"` becomes `team%40group.calendar.google.com`; `#` in holiday calendar ids is encoded too."""
+}
+fn (id: Str): Str {
+  ::uri/encode(id)
+}
+
+calendar-path
+meta {doc: """`/calendars/{calendarId}` plus `suffix`, with the id encoded."""}
+fn
+(calendar-id: Str): Str {
+  `/calendars/${encode-id(calendar-id)}`
+},
+(calendar-id: Str, suffix: Str): Str {
+  `/calendars/${encode-id(calendar-id)}${suffix}`
+}
+
+event-path
+meta {
+    doc: """`/calendars/{calendarId}/events/{eventId}` plus `suffix`, both ids encoded."""
+}
+fn
+(calendar-id: Str, event-id: Str): Str {
+  event-path(calendar-id, event-id, "")
+},
+(calendar-id: Str, event-id: Str, suffix: Str): Str {
+  `/calendars/${encode-id(calendar-id)}/events/${encode-id(event-id)}${suffix}`
+}
+
+query-params
 meta {
     doc: """
-    GET /calendars/{id}/events - List events. `params` supports the API's
-    query params: `timeMin`/`timeMax` (RFC3339), `q` (text search),
-    `maxResults`, `singleEvents`, `orderBy`, `pageToken`.
+    Build a call's query parameters: `defaults`, overridden by the
+    Calendar parameters in `opts` (credential keys and the function's own
+    `local-keys` are removed), with nulls dropped. Pass a key as null in
+    `opts` to drop a default.
     """
 }
 fn
-(calendar-id: Str): Map {
-  list-events(calendar-id, {})
+(defaults: Map, opts: Map): Map {
+  query-params(defaults, opts, [])
 },
-(calendar-id: Str, params: Map): Map {
-  ::api/json(READ_SCOPE, "GET", `${BASE_URL}/calendars/${::uri/encode(calendar-id)}/events${::uri/query-string(params)}`)
+(defaults: Map, opts: Map, local-keys: Vec): Map {
+  params filter-keys(::api/api-params(opts), (k) { not(in(k, local-keys)) })
+  filter-vals({...defaults, ...params}, is-some)
 }
 
-get-event
+creds
 meta {
-    doc: """GET /calendars/{id}/events/{eventId} - One event."""
+    doc: """The google-core part of `opts` (credentials, scopes, retry), passed through to `::google::api`."""
 }
-fn (calendar-id: Str, event-id: Str): Map {
-  ::api/json(READ_SCOPE, "GET", `${BASE_URL}/calendars/${::uri/encode(calendar-id)}/events/${event-id}`)
+fn (opts: Map): Map {
+  ::api/credential-opts(opts)
 }
 
-create-event
+json
 meta {
-    doc: """
-    POST /calendars/{id}/events - Create an event. The event Map uses the
-    API's resource shape: `summary`, `description`, `start`/`end`
-    (`{dateTime}` or `{date}` for all-day), `attendees`, `reminders`, ...
-    """
+    doc: """`::google::api/json` with this package's conventions: credential opts and a JSON (or empty) body."""
 }
-fn (calendar-id: Str, event: Map): Map {
-  ::api/json(SCOPE, "POST", `${BASE_URL}/calendars/${::uri/encode(calendar-id)}/events`, {}, event)
+fn (scope: Str, method: Str, full-url: Str, body: Any, opts: Map): Any {
+  ::api/json(scope, method, full-url, {}, body, creds(opts))
 }
 
-quick-add
+compact
 meta {
-    doc: """POST /calendars/{id}/events/quickAdd - Create an event from natural language, e.g. `"Lunch with Sam tomorrow at noon"`."""
+    doc: """Drop null values from a request body (Calendar bodies never carry JSON null for unset fields)."""
 }
-fn (calendar-id: Str, text: Str): Map {
-  ::api/json(SCOPE, "POST", `${BASE_URL}/calendars/${::uri/encode(calendar-id)}/events/quickAdd?text=${::uri/encode(text)}`, {}, {})
+fn (body: Map): Map {
+  filter-vals(untype(body), is-some)
 }
 
-update-event
+done
 meta {
-    doc: """PATCH /calendars/{id}/events/{eventId} - Update the provided fields of an event."""
+    doc: """`true` for a successful call whose response has no useful body (delete, stop), or the call's Err."""
 }
-fn (calendar-id: Str, event-id: Str, changes: Map): Map {
-  ::api/json(SCOPE, "PATCH", `${BASE_URL}/calendars/${::uri/encode(calendar-id)}/events/${event-id}`, {}, changes)
+fn (result: Result): Bool {
+  if(is-err(result), result, true)
 }
 
-delete-event
-meta {
-    doc: """DELETE /calendars/{id}/events/{eventId} - Delete an event."""
-}
-fn (calendar-id: Str, event-id: Str): Any {
-  ::api/json(SCOPE, "DELETE", `${BASE_URL}/calendars/${::uri/encode(calendar-id)}/events/${event-id}`)
-}
+// ---------------------------------------------------------------------------
+// Shortcuts to the most used functions
+// ---------------------------------------------------------------------------
+
+list-events ::google::calendar::events/list-events
+list-all-events ::google::calendar::events/list-all-events
+get-event ::google::calendar::events/get-event
+create-event ::google::calendar::events/create-event
+update-event ::google::calendar::events/update-event
+patch-event ::google::calendar::events/patch-event
+delete-event ::google::calendar::events/delete-event
+quick-add ::google::calendar::events/quick-add
+build-event ::google::calendar::events/build-event
+list-calendars ::google::calendar::calendars/list-calendars
+query-free-busy ::google::calendar::calendars/query-free-busy
+sync-events ::google::calendar::sync/sync-events

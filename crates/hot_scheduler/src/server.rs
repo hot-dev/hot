@@ -1733,6 +1733,7 @@ async fn queue_schedule_execution(
         retry_attempt: 0,
         secret_keys: ahash::AHashSet::new(), // Will be populated from ctx metadata
         secret_value_hashes: ahash::AHashSet::new(),
+        secret_values: Default::default(),
         access_id: None, // Scheduler-initiated, no API access log
         agent_type: None,
         queue_timing: None,
@@ -2014,6 +2015,7 @@ async fn process_pending_retries(
             retry_attempt: run.retry_attempt, // Already incremented when marked as pending_retry
             secret_keys: ahash::AHashSet::new(), // Will be populated from ctx metadata
             secret_value_hashes: ahash::AHashSet::new(),
+            secret_values: Default::default(),
             access_id: run.access_id, // Propagate from original run if available
             agent_type: None,
             queue_timing: None,

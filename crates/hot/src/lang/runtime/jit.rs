@@ -2,6 +2,7 @@ use crate::lang::bytecode::{
     BytecodeProgram, Constant, FlowResultModifier, FlowType, FunctionId, FunctionInfo, Instruction,
     LambdaInfo,
 };
+use crate::lang::runtime::jit_hof::{self, FusedRun, PipelinePlan};
 use crate::lang::runtime::limits;
 use crate::lang::runtime::vm::{
     VirtualMachine, VmError, max_recursion_depth, recursion_limit_message,
@@ -28,7 +29,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(test)]
 mod native_parity_tests;
 mod numeric_err;
-use numeric_err::{ErrUseScope, NumericErrUse, numeric_err_use};
+use numeric_err::{Consumer, ErrUseScope, NumericErrUse, numeric_err_use};
 #[cfg(test)]
 mod runtime_tests;
 
@@ -49,6 +50,10 @@ thread_local! {
     /// `owned_flow_trace`).
     static COMPILE_FLOW_TRACES: std::cell::RefCell<Vec<std::pin::Pin<Box<FlowTrace>>>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// The fused pipelines of the code being compiled on this thread (see
+    /// `owned_fused_plan`).
+    static COMPILE_FUSED_PLANS: std::cell::RefCell<Vec<std::pin::Pin<Box<PipelinePlan>>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Where the code being compiled reads the Dec constant `value`: memory the
@@ -61,6 +66,15 @@ fn owned_flow_trace(trace: FlowTrace) -> *const FlowTrace {
     let trace = Box::pin(trace);
     let ptr: *const FlowTrace = &*trace;
     COMPILE_FLOW_TRACES.with(|traces| traces.borrow_mut().push(trace));
+    ptr
+}
+
+/// Where the code being compiled reads `plan`: memory the compiled function
+/// owns, as for its Dec constants (see `owned_dec_constant`).
+fn owned_fused_plan(plan: PipelinePlan) -> *const PipelinePlan {
+    let plan = Box::pin(plan);
+    let ptr: *const PipelinePlan = &*plan;
+    COMPILE_FUSED_PLANS.with(|plans| plans.borrow_mut().push(plan));
     ptr
 }
 
@@ -578,9 +592,12 @@ struct JitHelperRefs {
     failure_err: FuncRef,
     consume_err: FuncRef,
     owned_raw_arg: FuncRef,
+    self_tail_owned_arg: FuncRef,
     call_vm_by_name: FuncRef,
     promote_to_owned: FuncRef,
     make_vec: FuncRef,
+    run_fused_pipeline: FuncRef,
+    take_owned_int: FuncRef,
     call_lib: FuncRef,
     dot_access: FuncRef,
     dot_access_or_default: FuncRef,
@@ -607,6 +624,7 @@ struct JitHelperRefs {
     store_global: FuncRef,
     set_namespace: FuncRef,
     check_constraint: FuncRef,
+    check_param: FuncRef,
     set_pending_proven: FuncRef,
     call_native: FuncRef,
     define_function: FuncRef,
@@ -629,7 +647,7 @@ impl JitHelperRefs {
     /// The helpers that never look up a name in the calling frame or run
     /// Hot code that could. A call to a top-level function runs in its own
     /// frame.
-    fn scope_free(&self) -> [FuncRef; 43] {
+    fn scope_free(&self) -> [FuncRef; 47] {
         [
             self.call_vm,
             self.template_interpolate,
@@ -659,8 +677,11 @@ impl JitHelperRefs {
             self.failure_err,
             self.consume_err,
             self.owned_raw_arg,
+            self.self_tail_owned_arg,
             self.promote_to_owned,
             self.make_vec,
+            self.run_fused_pipeline,
+            self.take_owned_int,
             self.merge_maps,
             self.extract_inner_val,
             self.set_element,
@@ -669,6 +690,7 @@ impl JitHelperRefs {
             self.str_starts_with,
             self.make_vec_with_spread,
             self.set_pending_proven,
+            self.check_param,
             self.length,
             self.length_value,
             self.vec_append,
@@ -698,6 +720,20 @@ fn needs_vm_scope(
                 _ => false,
             })
     })
+}
+
+/// A fused run compiled code has tried, while the pipeline's own stages (the
+/// path for a de-opt) are being emitted.
+struct OpenFusedRun {
+    /// The instruction after the last stage, where both paths meet.
+    resume_ip: usize,
+    result_reg: u32,
+    /// The block a produced result goes to, and that result.
+    produced: cranelift_codegen::ir::Block,
+    result: cranelift_codegen::ir::Value,
+    /// The registers as they were before the stages.
+    kinds_before: Vec<Option<RawKind>>,
+    compile_time_owned_before: std::collections::HashSet<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -781,6 +817,9 @@ pub struct JitCompiledFunction {
     /// The inline flow traces the code reads, held for it (see
     /// `owned_flow_trace`).
     _flow_traces: Vec<std::pin::Pin<Box<FlowTrace>>>,
+    /// The fused pipelines the code runs, held for it (see
+    /// `owned_fused_plan`).
+    _fused_plans: Vec<std::pin::Pin<Box<PipelinePlan>>>,
     /// The code opens flow contexts in the VM for the inline flows it
     /// traces; a call closes any an early return left open.
     traces_flows: bool,
@@ -1135,7 +1174,7 @@ impl JitRuntimeState {
             function_id,
             function_info,
             &signature,
-            names,
+            names.fusing(self.config.hof_fusion_enabled()),
         ) {
             Ok(compiled) => compiled,
             Err(err) => {
@@ -1245,7 +1284,7 @@ impl JitRuntimeState {
             u32::MAX,
             &function_info,
             &signature,
-            names,
+            names.fusing(self.config.hof_fusion_enabled()),
         ) {
             Ok(compiled) => {
                 GLOBAL_JIT_COMPILE_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -1930,6 +1969,10 @@ fn compile_with_return_kind(
     builder.symbol("hot_jit_consume_err", hot_jit_consume_err as *const u8);
     builder.symbol("hot_jit_owned_raw_arg", hot_jit_owned_raw_arg as *const u8);
     builder.symbol(
+        "hot_jit_self_tail_owned_arg",
+        hot_jit_self_tail_owned_arg as *const u8,
+    );
+    builder.symbol(
         "hot_jit_call_vm_by_name",
         hot_jit_call_vm_by_name as *const u8,
     );
@@ -1938,6 +1981,14 @@ fn compile_with_return_kind(
         hot_jit_promote_to_owned as *const u8,
     );
     builder.symbol("hot_jit_make_vec", hot_jit_make_vec as *const u8);
+    builder.symbol(
+        "hot_jit_run_fused_pipeline",
+        hot_jit_run_fused_pipeline as *const u8,
+    );
+    builder.symbol(
+        "hot_jit_take_owned_int",
+        hot_jit_take_owned_int as *const u8,
+    );
     builder.symbol("hot_jit_call_lib", hot_jit_call_lib as *const u8);
     builder.symbol("hot_jit_dot_access", hot_jit_dot_access as *const u8);
     builder.symbol(
@@ -2003,6 +2054,7 @@ fn compile_with_return_kind(
         "hot_jit_check_constraint",
         hot_jit_check_constraint as *const u8,
     );
+    builder.symbol("hot_jit_check_param", hot_jit_check_param as *const u8);
     builder.symbol(
         "hot_jit_set_pending_proven",
         hot_jit_set_pending_proven as *const u8,
@@ -2030,6 +2082,7 @@ fn compile_with_return_kind(
     let mut module = CodeModule::new(JITModule::new(builder));
     COMPILE_DEC_CONSTANTS.with(|constants| constants.borrow_mut().clear());
     COMPILE_FLOW_TRACES.with(|traces| traces.borrow_mut().clear());
+    COMPILE_FUSED_PLANS.with(|plans| plans.borrow_mut().clear());
 
     let ptr_ty = module.target_config().pointer_type();
     let mut sig = module.make_signature();
@@ -2100,6 +2153,7 @@ fn compile_with_return_kind(
     let dec_constants =
         COMPILE_DEC_CONSTANTS.with(|constants| mem::take(&mut *constants.borrow_mut()));
     let flow_traces = COMPILE_FLOW_TRACES.with(|traces| mem::take(&mut *traces.borrow_mut()));
+    let fused_plans = COMPILE_FUSED_PLANS.with(|plans| mem::take(&mut *plans.borrow_mut()));
     Ok(JitCompiledFunction {
         signature: signature.clone(),
         result_kind,
@@ -2108,6 +2162,7 @@ fn compile_with_return_kind(
         _dec_constants: dec_constants,
         traces_flows: !flow_traces.is_empty(),
         _flow_traces: flow_traces,
+        _fused_plans: fused_plans,
         func_id,
         arg_layout,
         result_word_len,
@@ -2319,6 +2374,17 @@ fn hotlib_jit_policy_bails_out(name: &str) -> bool {
     )
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many fused runs compiled code on this thread has produced.
+    static FUSED_RUNS_FOR_TEST: Cell<u64> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn fused_runs_for_test() -> u64 {
+    FUSED_RUNS_FOR_TEST.with(Cell::get)
+}
+
 thread_local! {
     /// Whether a contained helper's panic is waiting for the compiled code
     /// it interrupted to return (see [`contain_helper_panic`]).
@@ -2378,6 +2444,10 @@ macro_rules! contained_helpers {
 }
 
 contained_helpers! {
+    // A panic reads as a de-opt: the stages' own helpers then return at once.
+    hot_jit_run_fused_pipeline = hot_jit_run_fused_pipeline_body(
+        plan: i64, args_ptr: *const i64, args_count: i64
+    ) -> 0;
     // Arithmetic and comparison in hotlib.
     hot_jit_add_numeric = hot_jit_add_numeric_body(
         out: *mut D256, left_kind: i64, left_raw: i64, right_kind: i64, right_raw: i64
@@ -2448,6 +2518,9 @@ contained_helpers! {
     ) -> 0;
     hot_jit_check_constraint = hot_jit_check_constraint_body(
         src_ptr: i64, spec_ptr: i64, test: i64
+    ) -> HALT_SENTINEL;
+    hot_jit_check_param = hot_jit_check_param_body(
+        src_ptr: i64, spec_ptr: i64, mask: i64, each: i64
     ) -> HALT_SENTINEL;
 }
 
@@ -2522,6 +2595,11 @@ unsafe extern "C" fn hot_jit_flow_unwind(count: i64) {
 /// 0/1 — never 2.
 const HALT_SENTINEL: i64 = 2;
 
+/// What consumes an Err `hot_jit_consume_err` halts on (see `Consumer`).
+const CONSUMER_OP: i64 = 0;
+const CONSUMER_CORE: i64 = 1;
+const CONSUMER_FUNCTION: i64 = 2;
+
 const NUMERIC_KIND_INT: i64 = 1;
 const NUMERIC_KIND_DEC: i64 = 2;
 const NUMERIC_KIND_OWNED: i64 = 3;
@@ -2548,7 +2626,9 @@ unsafe fn hot_jit_add_numeric_body(
     right_kind: i64,
     right_raw: i64,
 ) -> i64 {
-    let args = match unsafe { decode_strict_operands(left_kind, left_raw, right_kind, right_raw) } {
+    let args = match unsafe {
+        decode_strict_operands("add", left_kind, left_raw, right_kind, right_raw)
+    } {
         Ok(args) => args,
         Err(msg) => return new_owned_val(Val::err(Val::Str(msg.into()))),
     };
@@ -2563,7 +2643,9 @@ unsafe fn hot_jit_sub_numeric_body(
     right_kind: i64,
     right_raw: i64,
 ) -> i64 {
-    let args = match unsafe { decode_strict_operands(left_kind, left_raw, right_kind, right_raw) } {
+    let args = match unsafe {
+        decode_strict_operands("sub", left_kind, left_raw, right_kind, right_raw)
+    } {
         Ok(args) => args,
         Err(msg) => return new_owned_val(Val::err(Val::Str(msg.into()))),
     };
@@ -2578,7 +2660,9 @@ unsafe fn hot_jit_mul_numeric_body(
     right_kind: i64,
     right_raw: i64,
 ) -> i64 {
-    let args = match unsafe { decode_strict_operands(left_kind, left_raw, right_kind, right_raw) } {
+    let args = match unsafe {
+        decode_strict_operands("mul", left_kind, left_raw, right_kind, right_raw)
+    } {
         Ok(args) => args,
         Err(msg) => return new_owned_val(Val::err(Val::Str(msg.into()))),
     };
@@ -2593,7 +2677,9 @@ unsafe fn hot_jit_div_numeric_body(
     right_kind: i64,
     right_raw: i64,
 ) -> i64 {
-    let args = match unsafe { decode_strict_operands(left_kind, left_raw, right_kind, right_raw) } {
+    let args = match unsafe {
+        decode_strict_operands("div", left_kind, left_raw, right_kind, right_raw)
+    } {
         Ok(args) => args,
         Err(msg) => return new_owned_val(Val::err(Val::Str(msg.into()))),
     };
@@ -2608,7 +2694,9 @@ unsafe fn hot_jit_mod_numeric_body(
     right_kind: i64,
     right_raw: i64,
 ) -> i64 {
-    let args = match unsafe { decode_strict_operands(left_kind, left_raw, right_kind, right_raw) } {
+    let args = match unsafe {
+        decode_strict_operands("mod", left_kind, left_raw, right_kind, right_raw)
+    } {
         Ok(args) => args,
         Err(msg) => return new_owned_val(Val::err(Val::Str(msg.into()))),
     };
@@ -2624,6 +2712,7 @@ unsafe fn hot_jit_ne_numeric_body(
 ) -> i64 {
     eval_numeric_cmp(
         crate::lang::hot::cmp::ne,
+        "ne",
         left_kind,
         left_raw,
         right_kind,
@@ -2639,6 +2728,7 @@ unsafe fn hot_jit_eq_numeric_body(
 ) -> i64 {
     eval_numeric_cmp(
         crate::lang::hot::cmp::eq,
+        "eq",
         left_kind,
         left_raw,
         right_kind,
@@ -2654,6 +2744,7 @@ unsafe fn hot_jit_gt_numeric_body(
 ) -> i64 {
     eval_numeric_cmp(
         crate::lang::hot::cmp::gt,
+        "gt",
         left_kind,
         left_raw,
         right_kind,
@@ -2669,6 +2760,7 @@ unsafe fn hot_jit_gte_numeric_body(
 ) -> i64 {
     eval_numeric_cmp(
         crate::lang::hot::cmp::gte,
+        "gte",
         left_kind,
         left_raw,
         right_kind,
@@ -2684,6 +2776,7 @@ unsafe fn hot_jit_lt_numeric_body(
 ) -> i64 {
     eval_numeric_cmp(
         crate::lang::hot::cmp::lt,
+        "lt",
         left_kind,
         left_raw,
         right_kind,
@@ -2699,6 +2792,7 @@ unsafe fn hot_jit_lte_numeric_body(
 ) -> i64 {
     eval_numeric_cmp(
         crate::lang::hot::cmp::lte,
+        "lte",
         left_kind,
         left_raw,
         right_kind,
@@ -2746,11 +2840,16 @@ unsafe extern "C" fn hot_jit_eq_general(
     // Strict-argument law: Result operands unwrap (Ok) or halt (Err) as at
     // interpreter call boundaries. On halt the failure state is set and 0
     // is the only in-band value for the bare-bool ABI.
-    let left = match strict_prepare_operand(unsafe { decode_helper_val(left_kind, left_raw) }) {
-        Ok(v) => v,
-        Err(_) => return HALT_SENTINEL,
-    };
-    let right = match strict_prepare_operand(unsafe { decode_helper_val(right_kind, right_raw) }) {
+    let left =
+        match strict_prepare_operand(unsafe { decode_helper_val(left_kind, left_raw) }, "eq", 0) {
+            Ok(v) => v,
+            Err(_) => return HALT_SENTINEL,
+        };
+    let right = match strict_prepare_operand(
+        unsafe { decode_helper_val(right_kind, right_raw) },
+        "eq",
+        1,
+    ) {
         Ok(v) => v,
         Err(_) => return HALT_SENTINEL,
     };
@@ -2805,7 +2904,12 @@ unsafe extern "C" fn hot_jit_is_err(raw: i64) -> i64 {
 /// overflow or zero divisor): halt the run as the interpreter does when it
 /// consumes one (`unwrap_result_if_ok`), and return the failure for the frame
 /// to return. Takes ownership of `raw`.
-unsafe extern "C" fn hot_jit_consume_err(raw: i64) -> i64 {
+///
+/// `consumer`, `payload` and `index` say what consumes it, so the halt names
+/// it as the interpreter's would (`emit_consume_err`): `CONSUMER_OP` for the
+/// VM's own operator, `CONSUMER_CORE` with an OwnedVal `Val::Str` naming the
+/// core function, or `CONSUMER_FUNCTION` with a function id.
+unsafe extern "C" fn hot_jit_consume_err(raw: i64, consumer: i64, payload: i64, index: i64) -> i64 {
     let vm_ptr = get_jit_vm_ptr();
     if vm_ptr.is_null()
         || raw == 0
@@ -2817,8 +2921,24 @@ unsafe extern "C" fn hot_jit_consume_err(raw: i64) -> i64 {
     }
     let vm = unsafe { &mut *vm_ptr };
     let value = unsafe { &*(raw as *const Val) }.clone();
-    if vm.unwrap_result_if_ok(&value).is_ok() {
+    if !value.is_err() {
         return raw;
+    }
+    let index = index as usize;
+    match consumer {
+        CONSUMER_CORE => {
+            let name = match unsafe { &*(payload as *const Val) } {
+                Val::Str(name) => name.to_string(),
+                _ => String::new(),
+            };
+            vm.consume_err_for_core(&name, index, &value);
+        }
+        CONSUMER_FUNCTION => {
+            vm.consume_err_for_function(payload as FunctionId, index, &value);
+        }
+        _ => {
+            let _ = vm.unwrap_result_if_ok(&value);
+        }
     }
     // The run now holds the failure. Return it from the frame as an Err, as
     // the halt blocks do (`emit_halt_return`).
@@ -2862,6 +2982,34 @@ unsafe extern "C" fn hot_jit_owned_raw_arg(raw: i64, kind: i64, out: *mut u8) ->
     }
 }
 
+/// A self tail call passes an owned value to a parameter the compiled loop
+/// holds owned, and an arrow can reach that parameter: apply it, as the
+/// interpreter's call would, without nesting a call per iteration. `tagged_only`
+/// says only a tagged value can need one (`ParamArrows::FromTagged`). Returns an
+/// owned handle to the value the loop goes on with, or `HALT_SENTINEL` if the
+/// arrow fails. Borrows `raw`.
+unsafe extern "C" fn hot_jit_self_tail_owned_arg(
+    function_id: i64,
+    index: i64,
+    tagged_only: i64,
+    raw: i64,
+) -> i64 {
+    let vm_ptr = get_jit_vm_ptr();
+    if raw != 0 && !vm_ptr.is_null() {
+        let value = unsafe { &*(raw as *const Val) };
+        if tagged_only != 0 && !matches!(value, Val::Map(_)) {
+            return unsafe { hot_jit_clone_owned_val(raw) };
+        }
+        let vm = unsafe { &mut *vm_ptr };
+        match vm.coerce_self_tail_arg(function_id as u32, index as usize, value) {
+            Ok(Some(coerced)) => return new_owned_val(coerced),
+            Ok(None) => {}
+            Err(err) => return vm_runtime_error_to_halt(vm, err),
+        }
+    }
+    unsafe { hot_jit_clone_owned_val(raw) }
+}
+
 unsafe extern "C" fn hot_jit_drop_owned_val(raw: i64) {
     if owned_trace_enabled() {
         eprintln!("DROP {raw:#x} from {:#x}", owned_trace_caller());
@@ -2881,6 +3029,29 @@ const BINOP_MOD: i64 = 4;
 
 /// JIT helper: type-preserving binary arithmetic for operands that include OwnedVal.
 /// Returns an OwnedVal handle wrapping the exact result type (Int stays Int, etc.).
+/// The core function a lowered `BINOP_*` op stands for.
+fn binop_core_name(op: i64) -> &'static str {
+    match op {
+        BINOP_ADD => "add",
+        BINOP_SUB => "sub",
+        BINOP_MUL => "mul",
+        BINOP_DIV => "div",
+        _ => "mod",
+    }
+}
+
+/// The core function a lowered comparison op (`hot_jit_cmp_general`) stands for.
+fn cmp_core_name(op: i64) -> &'static str {
+    match op {
+        0 => "lt",
+        1 => "gt",
+        2 => "lte",
+        3 => "gte",
+        4 => "eq",
+        _ => "ne",
+    }
+}
+
 unsafe fn hot_jit_binop_general_body(
     op: i64,
     left_kind: i64,
@@ -2891,11 +3062,19 @@ unsafe fn hot_jit_binop_general_body(
     // Strict-argument law: Result operands unwrap (Ok) or halt (Err) as at
     // interpreter call boundaries; on halt the failure state is set and the
     // Err reports through the OwnedVal error channel.
-    let left = match strict_prepare_operand(unsafe { decode_helper_val(left_kind, left_raw) }) {
+    let left = match strict_prepare_operand(
+        unsafe { decode_helper_val(left_kind, left_raw) },
+        binop_core_name(op),
+        0,
+    ) {
         Ok(v) => v,
         Err(_) => return HALT_SENTINEL,
     };
-    let right = match strict_prepare_operand(unsafe { decode_helper_val(right_kind, right_raw) }) {
+    let right = match strict_prepare_operand(
+        unsafe { decode_helper_val(right_kind, right_raw) },
+        binop_core_name(op),
+        1,
+    ) {
         Ok(v) => v,
         Err(_) => return HALT_SENTINEL,
     };
@@ -2932,11 +3111,19 @@ unsafe fn hot_jit_cmp_general_body(
     // interpreter call boundaries. On halt the failure state is set and 0
     // is the only in-band value for the bare-bool ABI; the enclosing
     // frame's boundary observes the halt.
-    let left = match strict_prepare_operand(unsafe { decode_helper_val(left_kind, left_raw) }) {
+    let left = match strict_prepare_operand(
+        unsafe { decode_helper_val(left_kind, left_raw) },
+        cmp_core_name(op),
+        0,
+    ) {
         Ok(v) => v,
         Err(_) => return HALT_SENTINEL,
     };
-    let right = match strict_prepare_operand(unsafe { decode_helper_val(right_kind, right_raw) }) {
+    let right = match strict_prepare_operand(
+        unsafe { decode_helper_val(right_kind, right_raw) },
+        cmp_core_name(op),
+        1,
+    ) {
         Ok(v) => v,
         Err(_) => return HALT_SENTINEL,
     };
@@ -2991,13 +3178,17 @@ unsafe fn hot_jit_call_vm_body(function_id: i64, args_ptr: *const i64, args_coun
     }
 
     let error_capture = vm.error_capture_active;
-    // Same runtime overload dispatch as the interpreter's CallUserFunction,
-    // with the arguments prepared for the overload called.
+    // Same runtime overload dispatch and implicit coercion as the
+    // interpreter's CallUserFunction, with the arguments prepared for the
+    // overload called.
     let function_id = vm
         .overload_for_args(function_id as u32, &args)
         .unwrap_or(function_id as u32);
     let target = crate::lang::runtime::vm::CallTarget::Function(function_id);
-    let args = match vm.prepare_call_args(target, args) {
+    let prepared = vm
+        .prepare_call_args(target, args)
+        .and_then(|args| vm.coerce_call_args(function_id, args));
+    let args = match prepared {
         Ok(args) => args,
         Err(err) => {
             // The callee never ran, so the proof set for it is spent.
@@ -3030,7 +3221,50 @@ unsafe extern "C" fn hot_jit_make_vec(args_ptr: *const i64, args_count: i64) -> 
         let raw = unsafe { *args_ptr.add(i * 2 + 1) };
         elements.push(unsafe { decode_helper_val(kind, raw) });
     }
-    new_owned_val(Val::Vec(elements))
+    new_owned_val(Val::vec(elements))
+}
+
+/// JIT helper: run the fused pipeline `plan` over its source, encoded at
+/// `args_ptr` as for [`hot_jit_make_vec`]: the arguments of its `range` call, or
+/// its source collection. Returns an OwnedVal handle to the result, or 0 for a
+/// de-opt, when the compiled code runs the pipeline's stages instead. The run
+/// is pure and writes nothing, so a de-opt loses nothing.
+unsafe fn hot_jit_run_fused_pipeline_body(plan: i64, args_ptr: *const i64, args_count: i64) -> i64 {
+    let plan = unsafe { &*(plan as *const PipelinePlan) };
+    let args: Vec<Val> = (0..args_count as usize)
+        .map(|i| {
+            let kind = unsafe { *args_ptr.add(i * 2) };
+            let raw = unsafe { *args_ptr.add(i * 2 + 1) };
+            unsafe { decode_helper_val(kind, raw) }
+        })
+        .collect();
+    let run = if plan.range_source.is_some() {
+        jit_hof::run_pipeline_range(plan, &args)
+    } else {
+        jit_hof::run_pipeline(plan, &args[0])
+    };
+    match run {
+        FusedRun::Produced(result) => {
+            jit_hof::record_fused_run();
+            #[cfg(test)]
+            FUSED_RUNS_FOR_TEST.with(|runs| runs.set(runs.get() + 1));
+            new_owned_val(result)
+        }
+        FusedRun::Deopt => {
+            jit_hof::record_fused_deopt();
+            0
+        }
+    }
+}
+
+/// JIT helper: the `Int` in the OwnedVal handle `raw`, which it releases. A fused
+/// `length` hands its count back this way to a register that holds it raw.
+unsafe extern "C" fn hot_jit_take_owned_int(raw: i64) -> i64 {
+    let value = unsafe { Arc::from_raw(raw as *const Val) };
+    match *value {
+        Val::Int(n) => n,
+        _ => 0,
+    }
 }
 
 /// JIT helper: call a hotlib (Rust-native) function by name with a Vec of args.
@@ -3250,7 +3484,7 @@ unsafe extern "C" fn hot_jit_ensure_result(val_ptr: i64) -> i64 {
     let mut map = indexmap::IndexMap::new();
     map.insert(Val::from("$type"), Val::from("::hot::type/Result.Ok"));
     map.insert(Val::from("$val"), val);
-    new_owned_val(Val::Map(Box::new(map)))
+    new_owned_val(Val::map(map))
 }
 
 /// JIT helper: set an element in a collection (map or vec).
@@ -3270,15 +3504,15 @@ unsafe extern "C" fn hot_jit_set_element(
         Val::Map(map) => {
             let mut new_map = (**map).clone();
             new_map.insert(index_val.clone(), value_val.clone());
-            new_owned_val(Val::Map(Box::new(new_map)))
+            new_owned_val(Val::map(new_map))
         }
         Val::Vec(vec) => {
             if let Val::Int(idx) = index_val {
                 let idx = *idx;
                 if idx >= 0 && (idx as usize) < vec.len() {
-                    let mut new_vec = vec.clone();
+                    let mut new_vec = vec.to_vec();
                     new_vec[idx as usize] = value_val.clone();
-                    new_owned_val(Val::Vec(new_vec))
+                    new_owned_val(Val::vec(new_vec))
                 } else {
                     new_owned_val(Val::err(Val::Str(
                         format!("Vector index {} out of bounds (length: {})", idx, vec.len())
@@ -3341,6 +3575,32 @@ unsafe fn hot_jit_check_constraint_body(src_ptr: i64, spec_ptr: i64, test: i64) 
     }
 }
 
+/// JIT helper: a `CheckParam` on an owned value. Returns 0 when the value
+/// stays as it is, reading it in place; otherwise an OwnedVal handle to the
+/// converted value or the `ConstraintError` Err. Primitive checks never look up
+/// a name or run Hot code (see `JitHelperRefs::scope_free`).
+unsafe fn hot_jit_check_param_body(src_ptr: i64, spec_ptr: i64, mask: i64, each: i64) -> i64 {
+    let value = unsafe { &*(src_ptr as *const Val) };
+    if crate::lang::bytecode::param_mask::passes(value, mask as u32, each != 0) {
+        return 0;
+    }
+    let vm_ptr = get_jit_vm_ptr();
+    if vm_ptr.is_null() {
+        return new_owned_val(Val::err(Val::Str(
+            "JIT check_param: no VM available".into(),
+        )));
+    }
+    let vm = unsafe { &mut *vm_ptr };
+    let spec = unsafe { &*(spec_ptr as *const Val) };
+    let error_capture = vm.error_capture_active;
+    use crate::lang::runtime::vm::ParamCheck;
+    match vm.check_param_value(value.clone(), spec, mask as u32) {
+        Ok(ParamCheck::Passed) => 0,
+        Ok(ParamCheck::Converted(value) | ParamCheck::Failed(value)) => new_owned_val(value),
+        Err(err) => vm_error_to_owned_val(err, error_capture),
+    }
+}
+
 /// JIT helper: a `ProvenArgs` before a call through the VM, whose call entry
 /// takes the proofs as it does an interpreted caller's.
 unsafe extern "C" fn hot_jit_set_pending_proven(function_id: i64, mask: i64) {
@@ -3361,13 +3621,13 @@ unsafe extern "C" fn hot_jit_vec_push(vec_ptr: i64, elem_ptr: i64) -> i64 {
     let elem_val = unsafe { &*(elem_ptr as *const Val) };
     match vec_val {
         Val::Vec(vec) => {
-            let mut new_vec = vec.clone();
+            let mut new_vec = vec.to_vec();
             new_vec.push(elem_val.clone());
-            new_owned_val(Val::Vec(new_vec))
+            new_owned_val(Val::vec(new_vec))
         }
         _ => {
             let new_vec = vec![elem_val.clone()];
-            new_owned_val(Val::Vec(new_vec))
+            new_owned_val(Val::vec(new_vec))
         }
     }
 }
@@ -3640,7 +3900,7 @@ unsafe extern "C" fn hot_jit_make_vec_with_spread(
         let val = unsafe { decode_helper_val(kind, raw) };
         if (mask >> i) & 1 == 1 {
             match val {
-                Val::Vec(inner) => elements.extend(inner),
+                Val::Vec(inner) => elements.extend(Arc::unwrap_or_clone(inner)),
                 Val::Null => {}
                 other => elements.push(other),
             }
@@ -3648,7 +3908,7 @@ unsafe extern "C" fn hot_jit_make_vec_with_spread(
             elements.push(val);
         }
     }
-    new_owned_val(Val::Vec(elements))
+    new_owned_val(Val::vec(elements))
 }
 
 /// JIT helper: store a value in a global namespace variable.
@@ -3701,14 +3961,7 @@ unsafe fn hot_jit_call_native_body(function_id: i64, args_ptr: *const i64, args_
     for i in 0..count {
         let kind = unsafe { *args_ptr.add(i * 2) };
         let raw = unsafe { *args_ptr.add(i * 2 + 1) };
-        let val = unsafe { decode_helper_val(kind, raw) };
-        let unwrapped = match vm.unwrap_result_if_ok(&val) {
-            Ok(v) => v,
-            Err(e) => {
-                return vm_error_to_owned_val(e, vm.error_capture_active);
-            }
-        };
-        args.push(unwrapped);
+        args.push(unsafe { decode_helper_val(kind, raw) });
     }
     let func_info = match vm.program.functions.get(function_id as usize) {
         Some(info) => info,
@@ -3718,6 +3971,13 @@ unsafe fn hot_jit_call_native_body(function_id: i64, args_ptr: *const i64, args_
         }
     };
     let function_name = format!("{}/{}", func_info.namespace, func_info.name);
+    // Prepared as the interpreter's CallNative prepares them, so a consumed
+    // Err halts with the same message.
+    let target = crate::lang::runtime::vm::CallTarget::Native(&function_name);
+    let args = match vm.prepare_call_args(target, args) {
+        Ok(args) => args,
+        Err(e) => return vm_error_to_owned_val(e, vm.error_capture_active),
+    };
     match vm.call_hotlib_function(&function_name, &args) {
         Ok(v) => new_owned_val(v),
         Err(e) => vm_error_to_owned_val(e, vm.error_capture_active),
@@ -3801,7 +4061,9 @@ fn ok_payload(val: &Val) -> &Val {
 
 /// JIT helper: consuming an Err argument halts, as at an interpreted call.
 /// Returns HALT_SENTINEL (with the halt recorded) for an Err, 0 otherwise.
-unsafe extern "C" fn hot_jit_check_consumable(val_ptr: i64) -> i64 {
+/// `name_ptr` is an OwnedVal `Val::Str` naming the core function, for the
+/// halt message.
+unsafe extern "C" fn hot_jit_check_consumable(val_ptr: i64, name_ptr: i64) -> i64 {
     if val_ptr == 0 {
         return 0;
     }
@@ -3814,10 +4076,12 @@ unsafe extern "C" fn hot_jit_check_consumable(val_ptr: i64) -> i64 {
         return 0;
     }
     let vm = unsafe { &mut *vm_ptr };
-    match vm.unwrap_result_if_ok(val) {
-        Ok(_) => 0,
-        Err(err) => vm_runtime_error_to_halt(vm, err),
-    }
+    let core = match unsafe { &*(name_ptr as *const Val) } {
+        Val::Str(name) => name.to_string(),
+        _ => String::new(),
+    };
+    let err = vm.consume_err_for_core(&core, 0, val);
+    vm_runtime_error_to_halt(vm, err)
 }
 
 /// Call a function by name through the VM. Used when the function isn't in
@@ -3925,7 +4189,7 @@ unsafe fn hot_jit_call_with_spread_body(
         };
         if (mask >> i) & 1 == 1 {
             if let Val::Vec(elements) = &val {
-                for elem in elements {
+                for elem in elements.iter() {
                     expanded_args.push(elem.clone());
                 }
             } else {
@@ -4162,7 +4426,7 @@ fn declare_jit_helpers(
             func,
             ptr_ty,
             "hot_jit_consume_err",
-            &[types::I64],
+            &[types::I64, types::I64, types::I64, types::I64],
             &[types::I64],
         )?,
         owned_raw_arg: declare_helper_func(
@@ -4171,6 +4435,14 @@ fn declare_jit_helpers(
             ptr_ty,
             "hot_jit_owned_raw_arg",
             &[types::I64, types::I64, ptr_ty],
+            &[types::I64],
+        )?,
+        self_tail_owned_arg: declare_helper_func(
+            module,
+            func,
+            ptr_ty,
+            "hot_jit_self_tail_owned_arg",
+            &[types::I64, types::I64, types::I64, types::I64],
             &[types::I64],
         )?,
         call_vm_by_name: declare_helper_func(
@@ -4195,6 +4467,22 @@ fn declare_jit_helpers(
             ptr_ty,
             "hot_jit_make_vec",
             &[ptr_ty, types::I64],
+            &[types::I64],
+        )?,
+        run_fused_pipeline: declare_helper_func(
+            module,
+            func,
+            ptr_ty,
+            "hot_jit_run_fused_pipeline",
+            &[types::I64, ptr_ty, types::I64],
+            &[types::I64],
+        )?,
+        take_owned_int: declare_helper_func(
+            module,
+            func,
+            ptr_ty,
+            "hot_jit_take_owned_int",
+            &[types::I64],
             &[types::I64],
         )?,
         call_lib: declare_helper_func(
@@ -4397,6 +4685,14 @@ fn declare_jit_helpers(
             &[types::I64, types::I64, types::I64],
             &[types::I64],
         )?,
+        check_param: declare_helper_func(
+            module,
+            func,
+            ptr_ty,
+            "hot_jit_check_param",
+            &[types::I64, types::I64, types::I64, types::I64],
+            &[types::I64],
+        )?,
         set_pending_proven: declare_helper_func(
             module,
             func,
@@ -4482,7 +4778,7 @@ fn declare_jit_helpers(
             func,
             ptr_ty,
             "hot_jit_check_consumable",
-            &[types::I64],
+            &[types::I64, types::I64],
             &[types::I64],
         )?,
         flow_begin: declare_helper_func(
@@ -4565,7 +4861,7 @@ unsafe fn decode_numeric_val(kind: i64, raw: i64) -> Val {
 /// failure state makes the enclosing frame's boundary observe the halt
 /// (the documented Ok-but-failed JIT-frame pattern). Non-Result values pass
 /// through untouched, keeping the pure-numeric fast path unchanged.
-fn strict_prepare_operand(val: Val) -> Result<Val, String> {
+fn strict_prepare_operand(val: Val, core: &str, index: usize) -> Result<Val, String> {
     if !val.is_ok() && !val.is_err() {
         return Ok(val);
     }
@@ -4574,20 +4870,28 @@ fn strict_prepare_operand(val: Val) -> Result<Val, String> {
         return Ok(val);
     }
     let vm = unsafe { &mut *vm_ptr };
+    if val.is_err() {
+        return Err(vm.consume_err_for_core(core, index, &val).to_string());
+    }
     vm.unwrap_result_if_ok(&val).map_err(|e| e.to_string())
 }
 
 /// Decode a lowered binary intrinsic's operands with `strict_prepare_operand`
 /// applied to each.
 unsafe fn decode_strict_operands(
+    core: &str,
     left_kind: i64,
     left_raw: i64,
     right_kind: i64,
     right_raw: i64,
 ) -> Result<[Val; 2], String> {
     Ok([
-        strict_prepare_operand(unsafe { decode_numeric_val(left_kind, left_raw) })?,
-        strict_prepare_operand(unsafe { decode_numeric_val(right_kind, right_raw) })?,
+        strict_prepare_operand(unsafe { decode_numeric_val(left_kind, left_raw) }, core, 0)?,
+        strict_prepare_operand(
+            unsafe { decode_numeric_val(right_kind, right_raw) },
+            core,
+            1,
+        )?,
     ])
 }
 
@@ -4617,17 +4921,19 @@ fn write_numeric_result(
 
 fn eval_numeric_cmp(
     cmp: fn(&[Val]) -> crate::lang::hot::r#type::HotResult<Val>,
+    core: &str,
     left_kind: i64,
     left_raw: i64,
     right_kind: i64,
     right_raw: i64,
 ) -> i64 {
-    let args = match unsafe { decode_strict_operands(left_kind, left_raw, right_kind, right_raw) } {
-        Ok(args) => args,
-        // Failure state is set; the emitted sentinel check routes the
-        // frame to its error return.
-        Err(_) => return HALT_SENTINEL,
-    };
+    let args =
+        match unsafe { decode_strict_operands(core, left_kind, left_raw, right_kind, right_raw) } {
+            Ok(args) => args,
+            // Failure state is set; the emitted sentinel check routes the
+            // frame to its error return.
+            Err(_) => return HALT_SENTINEL,
+        };
     match cmp(&args) {
         crate::lang::hot::r#type::HotResult::Ok(Val::Bool(result)) => {
             if result {
@@ -4688,7 +4994,7 @@ fn vm_error_to_owned_val(err: VmError, error_capture_active: bool) -> i64 {
     if error_capture_active {
         let mut m = indexmap::IndexMap::new();
         m.insert(Val::from("error"), Val::from(err.to_string()));
-        return new_owned_val(Val::Map(Box::new(m)));
+        return new_owned_val(Val::map(m));
     }
     let vm_ptr = get_jit_vm_ptr();
     if vm_ptr.is_null() {
@@ -4917,8 +5223,8 @@ fn emit_empty_accumulator(
     modifier: FlowResultModifier,
 ) -> cranelift_codegen::ir::Value {
     let empty = match modifier {
-        FlowResultModifier::Map => new_owned_val(Val::Map(Box::new(indexmap::IndexMap::new()))),
-        FlowResultModifier::Vec => new_owned_val(Val::Vec(Vec::new())),
+        FlowResultModifier::Map => new_owned_val(Val::map(indexmap::IndexMap::new())),
+        FlowResultModifier::Vec => new_owned_val(Val::vec(Vec::new())),
         FlowResultModifier::One => {
             unreachable!("flow accumulator only created for Map/Vec modifiers")
         }
@@ -6130,6 +6436,124 @@ impl<'a> EmitCtx<'a> {
         Ok(Some(halt_block))
     }
 
+    /// Try a fused run of `plan`, whose first stage is the next instruction,
+    /// and go on in a new block for a de-opt, where the stages are emitted.
+    /// `None` when the run's source isn't in a form the helper reads.
+    fn begin_fused_run(
+        &mut self,
+        builder: &mut FunctionBuilder<'_>,
+        plan: &PipelinePlan,
+    ) -> Result<Option<OpenFusedRun>, String> {
+        let source: Vec<u32> = match plan.range_source {
+            Some(range) => (0..u32::from(range.args_count))
+                .map(|i| range.args_start + i)
+                .collect(),
+            None => vec![plan.source_reg],
+        };
+        for &reg in &source {
+            if !matches!(
+                self.register_kind(reg),
+                Ok(RawKind::Int | RawKind::Bool | RawKind::Dec | RawKind::Null | RawKind::OwnedVal)
+            ) {
+                return Ok(None);
+            }
+        }
+        let slot = builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            (source.len() * 2 * 8) as u32,
+            3,
+        ));
+        for (i, &reg) in source.iter().enumerate() {
+            let (tag, raw) = encode_helper_val_operand(
+                builder,
+                &self.remap,
+                &self.registers,
+                &self.register_kinds,
+                reg,
+            )?;
+            builder
+                .ins()
+                .stack_store(types::I64, tag, slot, (i * 2 * 8) as i32);
+            builder
+                .ins()
+                .stack_store(types::I64, raw, slot, (i * 2 * 8 + 8) as i32);
+        }
+        let plan_ptr = owned_fused_plan(plan.clone());
+        let plan_val = builder.ins().iconst(types::I64, plan_ptr as i64);
+        let args_ptr = builder.ins().stack_addr(self.ptr_ty, slot, 0);
+        let count = builder.ins().iconst(types::I64, source.len() as i64);
+        let call = builder.ins().call(
+            self.helper_refs.run_fused_pipeline,
+            &[plan_val, args_ptr, count],
+        );
+        let result = builder.inst_results(call)[0];
+
+        let produced = builder.create_block();
+        let stages = builder.create_block();
+        builder.ins().brif(result, produced, &[], stages, &[]);
+        builder.switch_to_block(stages);
+        builder.seal_block(stages);
+        Ok(Some(OpenFusedRun {
+            resume_ip: plan.last_stage_ip + 1,
+            result_reg: plan.result_reg,
+            produced,
+            result,
+            kinds_before: self.register_kinds.clone(),
+            compile_time_owned_before: self.compile_time_owned.clone(),
+        }))
+    }
+
+    /// Emit the path of a fused run that produced its result, now that the
+    /// stages are emitted, and join it to theirs. From here on the code treats
+    /// the registers as the stages left them, so this path has to leave the same
+    /// ownership: nothing after the pipeline reads what the stages wrote except
+    /// the result, but it does release what they own.
+    fn finish_fused_run(
+        &mut self,
+        builder: &mut FunctionBuilder<'_>,
+        run: OpenFusedRun,
+    ) -> Result<(), String> {
+        builder.switch_to_block(run.produced);
+        builder.seal_block(run.produced);
+        let result_idx = self.remap_reg(run.result_reg)?;
+        let empty = builder.ins().iconst(types::I64, 0);
+        for idx in 0..self.registers.len() {
+            let owned_before = run.kinds_before[idx] == Some(RawKind::OwnedVal)
+                && !run.compile_time_owned_before.contains(&idx);
+            let owned_after = self.register_kinds[idx] == Some(RawKind::OwnedVal)
+                && !self.compile_time_owned.contains(&idx);
+            // The stages replaced what this register owned; here it is still
+            // there. Releasing an empty register does nothing.
+            if owned_before && (!owned_after || idx == result_idx) {
+                drop_owned_var(builder, &self.helper_refs, self.registers[idx]);
+            }
+            if !owned_before && owned_after {
+                builder.def_var(self.registers[idx], empty);
+            }
+        }
+        let owned_result = !self.compile_time_owned.contains(&result_idx);
+        let value = match self.register_kinds[result_idx] {
+            Some(RawKind::OwnedVal) if owned_result => run.result,
+            // `length` over the stages' result is lowered to a raw count.
+            Some(RawKind::Int) => {
+                let call = builder
+                    .ins()
+                    .call(self.helper_refs.take_owned_int, &[run.result]);
+                builder.inst_results(call)[0]
+            }
+            other => {
+                return Err(unsupported_jit_bailout(
+                    "fused_result_kind",
+                    format!("JIT cannot hold a fused pipeline's result as {other:?}"),
+                ));
+            }
+        };
+        builder.def_var(self.registers[result_idx], value);
+        let resume = self.blocks[run.resume_ip];
+        builder.ins().jump(resume, &[]);
+        Ok(())
+    }
+
     /// Try all call resolution strategies for a named function call (Call instruction).
     /// Returns Ok(true) if handled, Ok(false) if unhandled.
     #[allow(clippy::too_many_arguments)]
@@ -6273,11 +6697,11 @@ impl<'a> EmitCtx<'a> {
                 args_count,
                 self.call_depth,
             )?;
-            let returned = self.numeric_err_use(instructions, ip, dest) == NumericErrUse::Returned;
+            let err_use = self.numeric_err_use(instructions, ip, dest);
             self.define_register(builder, dest, result_kind, raw)?;
             self.jump_to_next(builder, ip)?;
             if let Some((error_block, error_val)) = error_info {
-                self.handle_recursive_call_error(builder, error_block, error_val, returned);
+                self.handle_recursive_call_error(builder, error_block, error_val, err_use);
             }
             return Ok(true);
         }
@@ -6443,11 +6867,11 @@ impl<'a> EmitCtx<'a> {
             args_count,
             self.call_depth,
         )?;
-        let returned = self.numeric_err_use(instructions, ip, dest) == NumericErrUse::Returned;
+        let err_use = self.numeric_err_use(instructions, ip, dest);
         self.define_register(builder, dest, result_kind, raw)?;
         self.jump_to_next(builder, ip)?;
         if let Some((error_block, error_val)) = error_info {
-            self.handle_recursive_call_error(builder, error_block, error_val, returned);
+            self.handle_recursive_call_error(builder, error_block, error_val, err_use);
         }
         Ok(())
     }
@@ -6462,17 +6886,16 @@ impl<'a> EmitCtx<'a> {
         builder: &mut FunctionBuilder<'_>,
         error_block: cranelift_codegen::ir::Block,
         error_val: cranelift_codegen::ir::Value,
-        returned: bool,
+        err_use: NumericErrUse,
     ) {
         builder.switch_to_block(error_block);
         builder.seal_block(error_block);
-        let result = if returned {
-            error_val
-        } else {
-            let call = builder
-                .ins()
-                .call(self.helper_refs.consume_err, &[error_val]);
-            builder.inst_results(call)[0]
+        let result = match err_use {
+            NumericErrUse::Returned => error_val,
+            NumericErrUse::Consumed(consumer) => {
+                emit_consume_err(builder, &self.helper_refs, error_val, consumer)
+            }
+            _ => emit_consume_err(builder, &self.helper_refs, error_val, Consumer::Op),
         };
         self.emit_cleanup_owned(builder);
         builder.ins().return_(&[result]);
@@ -7725,7 +8148,7 @@ impl<'a> EmitCtx<'a> {
                 let (src_ptr, src_temp) = self.owned_operand(builder, *src)?;
                 let ok_key = new_owned_val(Val::Str("ok".into()));
                 let key_ptr = builder.ins().iconst(types::I64, ok_key);
-                let empty_map = new_owned_val(Val::Map(Box::new(indexmap::IndexMap::new())));
+                let empty_map = new_owned_val(Val::map(indexmap::IndexMap::new()));
                 let map_ptr = builder.ins().iconst(types::I64, empty_map);
                 if let Ok(idx) = self.remap_reg(*dest) {
                     self.compile_time_owned.insert(idx);
@@ -8144,6 +8567,91 @@ impl<'a> EmitCtx<'a> {
                 self.emit_halt_return(builder, halt_block);
                 Ok(EmitResult::Handled)
             }
+            // A raw parameter's kind was guarded on entry, so one in the mask
+            // needs no code at all. An owned one is tested in place: a self
+            // call can pass any owned value.
+            Instruction::CheckParam {
+                var_name,
+                spec,
+                mask,
+                each,
+            } => {
+                use crate::lang::bytecode::param_mask as kinds;
+                let name = constant_string(self.program, *var_name)?;
+                let Some(&(var, kind)) = self.locals.get(name) else {
+                    return Err(unsupported_jit_bailout(
+                        "check_param",
+                        format!("parameter '{}' isn't a local", name),
+                    ));
+                };
+                let raw_bit = match kind {
+                    RawKind::Int => Some(kinds::INT),
+                    RawKind::Dec => Some(kinds::DEC),
+                    RawKind::Bool => Some(kinds::BOOL),
+                    RawKind::Null => Some(kinds::NULL),
+                    _ => None,
+                };
+                if !*each && raw_bit.is_some_and(|bit| mask & bit != 0) {
+                    self.jump_to_next(builder, ip)?;
+                    return Ok(EmitResult::Handled);
+                }
+                // A raw value outside the mask is converted or fails, and a
+                // converted local would change kind: the interpreter runs this
+                // signature, as it does a body that can't return from here.
+                if kind != RawKind::OwnedVal || !self.function_body || self.error_capture_active {
+                    return Err(unsupported_jit_bailout(
+                        "check_param",
+                        format!("parameter '{}' needs the checked path", name),
+                    ));
+                }
+                let spec_val = match self.program.constants.get(*spec as usize) {
+                    Some(Constant::Val(v)) => v,
+                    _ => return Err(format!("CheckParam: invalid spec constant {}", spec)),
+                };
+                let spec_raw = builder
+                    .ins()
+                    .iconst(types::I64, new_owned_val(spec_val.clone()));
+                let mask_raw = builder.ins().iconst(types::I64, i64::from(*mask));
+                let each_raw = builder.ins().iconst(types::I64, i64::from(*each));
+                let value = builder.use_var(var);
+                let call = builder.ins().call(
+                    self.helper_refs.check_param,
+                    &[value, spec_raw, mask_raw, each_raw],
+                );
+                let result = builder.inst_results(call)[0];
+                let halt_block = emit_halt_check(builder, result);
+                let checked_block = builder.create_block();
+                let next = self
+                    .blocks
+                    .get(ip + 1)
+                    .copied()
+                    .ok_or_else(|| "CheckParam at end of block list".to_string())?;
+                builder.ins().brif(result, checked_block, &[], next, &[]);
+
+                builder.switch_to_block(checked_block);
+                builder.seal_block(checked_block);
+                let call = builder.ins().call(self.helper_refs.is_err, &[result]);
+                let is_err = builder.inst_results(call)[0];
+                let error_block = builder.create_block();
+                let converted_block = builder.create_block();
+                builder
+                    .ins()
+                    .brif(is_err, error_block, &[], converted_block, &[]);
+
+                builder.switch_to_block(error_block);
+                builder.seal_block(error_block);
+                self.emit_cleanup_owned(builder);
+                builder.ins().return_(&[result]);
+
+                builder.switch_to_block(converted_block);
+                builder.seal_block(converted_block);
+                drop_owned_var(builder, &self.helper_refs, var);
+                builder.def_var(var, result);
+                builder.ins().jump(next, &[]);
+
+                self.emit_halt_return(builder, halt_block);
+                Ok(EmitResult::Handled)
+            }
             // Proofs for the call after it, which passes them on when it
             // goes through the VM (see `emit_call_user_function`).
             Instruction::ProvenArgs { .. } => {
@@ -8340,9 +8848,21 @@ fn build_supported_body(
 
     let mut active_flows: Vec<ActiveFlowState> = Vec::new();
     let mut return_kind: Option<JitValueKind> = None;
+    let fused_plans = if call_scope.fuses_pipelines() {
+        jit_hof::detect_compilable_pipelines(instructions, program)
+    } else {
+        Vec::new()
+    };
+    let mut open_fused_run: Option<OpenFusedRun> = None;
 
     for (ip, instruction) in instructions.iter().enumerate() {
+        if let Some(run) = open_fused_run.take_if(|run| run.resume_ip == ip) {
+            ctx.finish_fused_run(builder, run)?;
+        }
         builder.switch_to_block(ctx.blocks[ip]);
+        if let Some(plan) = fused_plans.iter().find(|plan| plan.first_stage_ip == ip) {
+            open_fused_run = ctx.begin_fused_run(builder, plan)?;
+        }
 
         // A collecting serial flow (`All<Vec>` / `All<Map>`) gathers each
         // binding made directly in its body, as the interpreter's StoreVar
@@ -8846,6 +9366,37 @@ fn build_supported_body(
                     };
                     unboxed.insert(idx, value);
                 }
+                // An owned argument that an arrow can reach gets it here,
+                // before the loop lets go of anything. A later arrow's failure
+                // releases what the earlier ones made.
+                let mut arrow_halts = Vec::new();
+                let mut coerced = Vec::new();
+                for (idx, &(_, param_kind)) in param_locals
+                    .iter()
+                    .enumerate()
+                    .take(usize::from(*args_count))
+                {
+                    let arrows = ctx.call_scope.names.param_arrows.get(idx);
+                    let arrows = arrows.copied().unwrap_or(ParamArrows::None);
+                    if param_kind != RawKind::OwnedVal || arrows == ParamArrows::None {
+                        continue;
+                    }
+                    let reg = *args_start + idx as u32;
+                    let raw = ctx.reg_value(builder, reg)?;
+                    let callee = builder.ins().iconst(types::I64, i64::from(function_id));
+                    let index = builder.ins().iconst(types::I64, idx as i64);
+                    let tagged_only = builder
+                        .ins()
+                        .iconst(types::I64, i64::from(arrows == ParamArrows::FromTagged));
+                    let call = builder.ins().call(
+                        ctx.helper_refs.self_tail_owned_arg,
+                        &[callee, index, tagged_only, raw],
+                    );
+                    let value = builder.inst_results(call)[0];
+                    arrow_halts.push((emit_halt_check(builder, value), coerced.clone()));
+                    coerced.push(value);
+                    unboxed.insert(idx, value);
+                }
                 let mut new_values = Vec::with_capacity(param_locals.len());
                 for (idx, &(param_var, param_kind)) in param_locals
                     .iter()
@@ -8909,6 +9460,16 @@ fn build_supported_body(
                 builder.ins().jump(ctx.blocks[0], &[]);
                 for halt_block in halts {
                     ctx.emit_halt_return(builder, halt_block);
+                }
+                for (halt_block, earlier) in arrow_halts {
+                    builder.switch_to_block(halt_block);
+                    builder.seal_block(halt_block);
+                    for value in earlier {
+                        drop_owned_raw(builder, &ctx.helper_refs, value);
+                    }
+                    let return_block = builder.create_block();
+                    builder.ins().jump(return_block, &[]);
+                    ctx.emit_halt_return(builder, return_block);
                 }
                 if let Some(other_block) = through_vm {
                     builder.switch_to_block(other_block);
@@ -9846,7 +10407,7 @@ fn try_lower_known_core_call(
                 | RawKind::TypeTag => zero,
                 RawKind::OwnedVal => {
                     let raw = builder.use_var(registers[remap_reg(remap, arg(0))?]);
-                    exits.halt = Some(emit_consume_check(builder, &helper_refs, raw));
+                    exits.halt = Some(emit_consume_check(builder, &helper_refs, raw, callee_name));
                     let call = builder.ins().call(helper_refs.is_null, &[raw]);
                     builder.inst_results(call)[0]
                 }
@@ -9869,7 +10430,7 @@ fn try_lower_known_core_call(
                 | RawKind::TypeTag => one,
                 RawKind::OwnedVal => {
                     let raw = builder.use_var(registers[remap_reg(remap, arg(0))?]);
-                    exits.halt = Some(emit_consume_check(builder, &helper_refs, raw));
+                    exits.halt = Some(emit_consume_check(builder, &helper_refs, raw, callee_name));
                     let call = builder.ins().call(helper_refs.is_null, &[raw]);
                     let is_null = builder.inst_results(call)[0];
                     let cmp = builder.ins().icmp_imm_s(
@@ -9966,7 +10527,7 @@ fn try_lower_known_core_call(
                 return Ok(None);
             }
             let raw = builder.use_var(registers[remap_reg(remap, arg(0))?]);
-            exits.halt = Some(emit_consume_check(builder, &helper_refs, raw));
+            exits.halt = Some(emit_consume_check(builder, &helper_refs, raw, callee_name));
             if err_use == NumericErrUse::Kept {
                 // The result is used as a value, so the Err `length` gives a
                 // value that isn't a collection has to be one.
@@ -10048,6 +10609,58 @@ impl NumericExits {
     }
 }
 
+/// Halt on `err`, an owned Err that `consumer` consumes
+/// (`hot_jit_consume_err`), and give the failure to return.
+fn emit_consume_err(
+    builder: &mut FunctionBuilder<'_>,
+    helper_refs: &JitHelperRefs,
+    err: cranelift_codegen::ir::Value,
+    consumer: Consumer,
+) -> cranelift_codegen::ir::Value {
+    let (kind, payload, index) = match consumer {
+        Consumer::Op => (CONSUMER_OP, 0, 0),
+        Consumer::Core(core, index) => (
+            CONSUMER_CORE,
+            new_owned_val(Val::Str(core_call_name(core).into())),
+            index,
+        ),
+        Consumer::Function(function_id, index) => {
+            (CONSUMER_FUNCTION, i64::from(function_id), index)
+        }
+    };
+    let kind = builder.ins().iconst(types::I64, kind);
+    let payload = builder.ins().iconst(types::I64, payload);
+    let index = builder.ins().iconst(types::I64, index as i64);
+    let call = builder
+        .ins()
+        .call(helper_refs.consume_err, &[err, kind, payload, index]);
+    builder.inst_results(call)[0]
+}
+
+/// The bare name a `KnownCoreCall` is called by.
+fn core_call_name(core: KnownCoreCall) -> &'static str {
+    match core {
+        KnownCoreCall::Add => "add",
+        KnownCoreCall::Sub => "sub",
+        KnownCoreCall::Mul => "mul",
+        KnownCoreCall::Div => "div",
+        KnownCoreCall::Mod => "mod",
+        KnownCoreCall::Eq => "eq",
+        KnownCoreCall::Ne => "ne",
+        KnownCoreCall::Gt => "gt",
+        KnownCoreCall::Gte => "gte",
+        KnownCoreCall::Lt => "lt",
+        KnownCoreCall::Lte => "lte",
+        KnownCoreCall::Not => "not",
+        KnownCoreCall::IsZero => "is-zero",
+        KnownCoreCall::IsNull => "is-null",
+        KnownCoreCall::IsSome => "is-some",
+        KnownCoreCall::And => "and",
+        KnownCoreCall::Or => "or",
+        KnownCoreCall::Length => "length",
+    }
+}
+
 /// End the current block by taking `err`, an owned Err a numeric op made,
 /// out of the frame as `err_use` says: consumed, it halts; returned, it is
 /// the frame's result.
@@ -10058,9 +10671,8 @@ fn route_numeric_err(
     err_use: NumericErrUse,
     exits: &mut NumericExits,
 ) {
-    let value = if err_use == NumericErrUse::Consumed {
-        let call = builder.ins().call(helper_refs.consume_err, &[err]);
-        builder.inst_results(call)[0]
+    let value = if let NumericErrUse::Consumed(consumer) = err_use {
+        emit_consume_err(builder, helper_refs, err, consumer)
     } else {
         err
     };
@@ -10495,8 +11107,13 @@ fn emit_consume_check(
     builder: &mut FunctionBuilder<'_>,
     helper_refs: &JitHelperRefs,
     raw: cranelift_codegen::ir::Value,
+    core: &str,
 ) -> cranelift_codegen::ir::Block {
-    let call = builder.ins().call(helper_refs.check_consumable, &[raw]);
+    let name = new_owned_val(Val::Str(core.into()));
+    let name = builder.ins().iconst(types::I64, name);
+    let call = builder
+        .ins()
+        .call(helper_refs.check_consumable, &[raw, name]);
     let checked = builder.inst_results(call)[0];
     emit_halt_check(builder, checked)
 }
@@ -11047,6 +11664,18 @@ fn emit_self_recursive_call(
     }
 }
 
+/// The implicit arrows that can reach a parameter, known when the function is
+/// compiled so that a compiled loop only pays for the check it needs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ParamArrows {
+    /// No arrow has this parameter's type as its target.
+    None,
+    /// A builtin type: only a tagged value can get an arrow.
+    FromTagged,
+    /// A custom type: any value can.
+    FromAny,
+}
+
 /// What the VM knows of the names a call can reach beyond the caller's own
 /// frame: the namespaces' bindings and the core functions. Compiled code
 /// resolves a call name through them as the interpreter does (see
@@ -11054,11 +11683,16 @@ fn emit_self_recursive_call(
 /// goes through the VM by name.
 #[derive(Clone, Copy, Default)]
 pub struct CallNames<'a> {
+    /// What a self tail call can need for each parameter (see
+    /// [`CallNames::param_arrows`]).
+    param_arrows: &'a [ParamArrows],
     namespace_variables: Option<&'a indexmap::IndexMap<String, indexmap::IndexMap<String, Val>>>,
     core_functions: Option<&'a indexmap::IndexMap<String, FunctionId>>,
     native_shadows: Option<&'a crate::lang::runtime::native_core::NativeCoreShadows>,
     /// The VM traces its calls (see [`CallNames::traced`]).
     traced: bool,
+    /// Pipeline fusion is on (see [`CallNames::fusing`]).
+    fusing: bool,
 }
 
 impl<'a> CallNames<'a> {
@@ -11068,10 +11702,21 @@ impl<'a> CallNames<'a> {
         native_shadows: &'a crate::lang::runtime::native_core::NativeCoreShadows,
     ) -> Self {
         Self {
+            param_arrows: &[],
             namespace_variables: Some(namespace_variables),
             core_functions: Some(core_functions),
             native_shadows: Some(native_shadows),
             traced: false,
+            fusing: false,
+        }
+    }
+
+    /// The implicit arrows that can reach each parameter of the function being
+    /// compiled. A loop passes an argument straight on when none can.
+    pub fn param_arrows(self, param_arrows: &'a [ParamArrows]) -> Self {
+        Self {
+            param_arrows,
+            ..self
         }
     }
 
@@ -11080,6 +11725,12 @@ impl<'a> CallNames<'a> {
     /// interpreted call, rather than straight into the compiled code.
     pub fn traced(self, traced: bool) -> Self {
         Self { traced, ..self }
+    }
+
+    /// Whether pipeline fusion is on: then compiled code tries a fused run of
+    /// each pipeline before its stages, as the interpreter does.
+    fn fusing(self, fusing: bool) -> Self {
+        Self { fusing, ..self }
     }
 
     /// Where the code of `function` (the function with id `function_id`)
@@ -11114,6 +11765,17 @@ impl CallScope<'_> {
     /// (see [`CallNames::traced`]).
     fn native_self_calls(&self) -> bool {
         !self.names.traced
+    }
+
+    /// Whether the body's pipelines run fused, as they do in the interpreter:
+    /// fusion runs its stages and their operations natively, so a namespace
+    /// that reaches another function by one of their names runs them as written.
+    fn fuses_pipelines(&self) -> bool {
+        self.names.fusing
+            && !self
+                .names
+                .native_shadows
+                .is_some_and(|shadows| shadows.shadows_fusion(self.namespace))
     }
 
     /// Whether the body traces its inline flows, as the interpreter does
@@ -12782,7 +13444,7 @@ mod tests {
 
         let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
         let mut vm = make_test_vm(program, conf);
-        let input = Val::Vec(vec![val!(1), val!(2), val!(3)]);
+        let input = Val::vec(vec![val!(1), val!(2), val!(3)]);
 
         assert_eq!(
             vm.execute_compiled_user_function(0, std::slice::from_ref(&input))
@@ -12837,8 +13499,8 @@ mod tests {
             vm.execute_compiled_user_function(
                 0,
                 &[
-                    Val::Vec(vec![val!(1), val!(2)]),
-                    Val::Vec(vec![val!(1), val!(2)])
+                    Val::vec(vec![val!(1), val!(2)]),
+                    Val::vec(vec![val!(1), val!(2)])
                 ]
             )
             .unwrap(),
@@ -12848,8 +13510,8 @@ mod tests {
             vm.execute_compiled_user_function(
                 0,
                 &[
-                    Val::Vec(vec![val!(1), val!(2)]),
-                    Val::Vec(vec![val!(1), val!(3)])
+                    Val::vec(vec![val!(1), val!(2)]),
+                    Val::vec(vec![val!(1), val!(3)])
                 ]
             )
             .unwrap(),
@@ -12906,7 +13568,7 @@ mod tests {
         let mut vm = make_test_vm(program, conf);
 
         assert_eq!(
-            vm.execute_compiled_user_function(0, &[Val::Vec(vec![])])
+            vm.execute_compiled_user_function(0, &[Val::vec(vec![])])
                 .unwrap(),
             val!(1)
         );
@@ -17145,8 +17807,8 @@ mod tests {
         payload.insert(val!(0), val!("old"));
         let mut wrapper = IndexMap::new();
         wrapper.insert(Val::from("$type"), Val::from("::test/Tagged"));
-        wrapper.insert(Val::from("$val"), Val::Map(Box::new(payload)));
-        let args = [Val::Map(Box::new(wrapper)), val!(0), val!("new")];
+        wrapper.insert(Val::from("$val"), Val::map(payload));
+        let args = [Val::map(wrapper), val!(0), val!("new")];
         let program = dynamic_dot_set_program();
         let mut interpreter = make_test_vm(
             program.clone(),
@@ -17181,8 +17843,8 @@ mod tests {
         let mut wrapper = IndexMap::new();
         wrapper.insert(Val::from("$type"), Val::from("::hot::run/Failure"));
         wrapper.insert(Val::from("$origin"), val!({"name": "test"}));
-        wrapper.insert(Val::from("$val"), Val::Map(Box::new(payload)));
-        let args = [Val::Map(Box::new(wrapper)), val!("rewritten")];
+        wrapper.insert(Val::from("$val"), Val::map(payload));
+        let args = [Val::map(wrapper), val!("rewritten")];
         let program = static_dot_set_program("message");
         let mut interpreter = make_test_vm(
             program.clone(),

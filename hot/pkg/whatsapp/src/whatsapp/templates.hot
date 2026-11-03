@@ -9,35 +9,84 @@
 ListTemplatesRequest type {
   waba_id: Str,
   limit: Int?,
+  after: Str?,
+  before: Str?,
   status: Str?,
-  name: Str?
+  name: Str?,
+  category: Str?,
+  language: Str?,
+  fields: Vec<Str>?
+}
+
+list-templates-url
+meta {
+    doc: """The list URL with only the set filters, each URL-encoded; `fields` is comma-joined. Exposed for testing."""
+}
+fn
+(request: ListTemplatesRequest): Str {
+  list-templates-url(request, {})
+},
+(request: ListTemplatesRequest, opts: Map): Str {
+  params {
+    limit: request.limit,
+    after: request.after,
+    before: request.before,
+    status: request.status,
+    name: request.name,
+    category: request.category,
+    language: request.language,
+    fields: if(is-some(request.fields), join(request.fields, ","), null)
+  }
+
+  ::api/url(`${::api/segment(request.waba_id)}/message_templates${::hot::uri/query-string(params)}`, opts)
 }
 
 list-templates
 meta {
     doc: """
-List message templates for a WhatsApp Business Account. Filter by `status` ("APPROVED", "PENDING", "REJECTED") or `name`.
+GET /{waba-id}/message_templates - List message templates for a WhatsApp Business Account, one page at a time. Filters: `status` ("APPROVED", "PENDING", "REJECTED", ...), `name`, `category` ("UTILITY", "MARKETING", "AUTHENTICATION"), `language` (e.g. "en_US"). Page with `limit` and the cursor from `next-cursor(response)` as `after` (or `paging.cursors.before` as `before`). `fields` selects the returned fields, e.g. `["name", "status", "language", "components"]`.
 
 **Example**
 
 ```hot
 ::templates ::whatsapp::templates
 
-response ::templates/list-templates(::templates/ListTemplatesRequest({
-  waba_id: "102938475610"
+page ::templates/list-templates(::templates/ListTemplatesRequest({
+  waba_id: "102938475610",
+  status: "APPROVED",
+  limit: 20
 }))
-response.data  // => [{name: "hello_world", status: "APPROVED", ...}, ...]
+page.data  // => [{name: "hello_world", status: "APPROVED", ...}, ...]
+
+cursor ::templates/next-cursor(page)
+next-page if(is-some(cursor),
+  ::templates/list-templates(::templates/ListTemplatesRequest({waba_id: "102938475610", status: "APPROVED", limit: 20, after: cursor})),
+  null)
 ```
 """
 }
-fn (request: ListTemplatesRequest): Map {
-  params []
-  params if(is-some(request.limit), concat(params, [`limit=${request.limit}`]), params)
-  params if(is-some(request.status), concat(params, [`status=${request.status}`]), params)
-  params if(is-some(request.name), concat(params, [`name=${request.name}`]), params)
+fn
+(request: ListTemplatesRequest): Map {
+  list-templates(request, {})
+},
+(request: ListTemplatesRequest, opts: Map): Map {
+  ::api/request("GET", list-templates-url(request, opts), opts)
+}
 
-  query-string if(is-empty(params), "", `?${join(params, "&")}`)
-  ::api/request("GET", ::api/url(`${request.waba_id}/message_templates${query-string}`))
+next-cursor
+meta {
+    doc: """The `after` cursor for the next page of a Graph API list response, or null on the last page (Graph omits `paging.next` there)."""
+}
+fn (response: Map): Str? {
+  paging get(response, "paging")
+  cond {
+    not(is-map(paging)) => { null }
+    is-null(get(paging, "next")) => { null }
+    => {
+      cursors get(paging, "cursors")
+      if(is-map(cursors), get(cursors, "after"), null)
+    }
+  }
 }
 
 GetTemplateRequest type {
@@ -46,10 +95,14 @@ GetTemplateRequest type {
 
 get-template
 meta {
-    doc: """Get a specific message template by its ID."""
+    doc: """GET /{template-id} - Get one message template by id."""
 }
-fn (request: GetTemplateRequest): Map {
-  ::api/request("GET", ::api/url(request.template_id))
+fn
+(request: GetTemplateRequest): Map {
+  get-template(request, {})
+},
+(request: GetTemplateRequest, opts: Map): Map {
+  ::api/request("GET", ::api/url(::api/segment(request.template_id), opts), opts)
 }
 
 CreateTemplateRequest type {
@@ -58,13 +111,14 @@ CreateTemplateRequest type {
   language: Str,
   category: Str,
   components: Vec<Map>,
-  allow_category_change: Bool?
+  allow_category_change: Bool?,
+  parameter_format: Str?
 }
 
 create-template
 meta {
     doc: """
-Create a new message template. Templates must be approved by Meta before they can be sent. `category` must be "UTILITY", "MARKETING", or "AUTHENTICATION".
+POST /{waba-id}/message_templates - Create a message template. Templates must be approved by Meta before they can be sent. `category` must be "UTILITY", "MARKETING", or "AUTHENTICATION". `parameter_format` is "POSITIONAL" (`{{1}}`, the default) or "NAMED" (`{{order_id}}`). `allow_category_change: true` lets Meta reassign the category instead of rejecting the template. Returns `{id, status, category}`.
 
 **Example**
 
@@ -85,15 +139,21 @@ response.status // => "PENDING"
 ```
 """
 }
-fn (request: CreateTemplateRequest): Map {
+fn
+(request: CreateTemplateRequest): Map {
+  create-template(request, {})
+},
+(request: CreateTemplateRequest, opts: Map): Map {
   body {
     name: request.name,
     language: request.language,
     category: request.category,
     components: request.components
-  } |> assoc-some("allow_category_change", request.allow_category_change)
+  }
+    |> assoc-some("allow_category_change", request.allow_category_change)
+    |> assoc-some("parameter_format", request.parameter_format)
 
-  ::api/request("POST", ::api/url(`${request.waba_id}/message_templates`), {}, body)
+  ::api/request("POST", ::api/url(`${::api/segment(request.waba_id)}/message_templates`, opts), {}, body, opts)
 }
 
 EditTemplateRequest type {
@@ -104,14 +164,18 @@ EditTemplateRequest type {
 
 edit-template
 meta {
-    doc: """Edit an existing message template. Only approved or rejected templates can be edited. Editing resubmits for approval."""
+    doc: """POST /{template-id} - Edit an existing message template. Only approved or rejected templates can be edited. Editing resubmits for approval."""
 }
-fn (request: EditTemplateRequest): Map {
+fn
+(request: EditTemplateRequest): Map {
+  edit-template(request, {})
+},
+(request: EditTemplateRequest, opts: Map): Map {
   body {}
     |> assoc-some("components", request.components)
     |> assoc-some("category", request.category)
 
-  ::api/request("POST", ::api/url(request.template_id), {}, body)
+  ::api/request("POST", ::api/url(::api/segment(request.template_id), opts), {}, body, opts)
 }
 
 DeleteTemplateRequest type {
@@ -120,14 +184,27 @@ DeleteTemplateRequest type {
   hsm_id: Str?
 }
 
+delete-templates-url
+meta {
+    doc: """The delete URL: `name` always, `hsm_id` when set, both URL-encoded. Exposed for testing."""
+}
+fn
+(request: DeleteTemplateRequest): Str {
+  delete-templates-url(request, {})
+},
+(request: DeleteTemplateRequest, opts: Map): Str {
+  params {name: request.name, hsm_id: request.hsm_id}
+  ::api/url(`${::api/segment(request.waba_id)}/message_templates${::hot::uri/query-string(params)}`, opts)
+}
+
 delete-template
 meta {
-    doc: """Delete a message template by name. If `hsm_id` is provided, only that specific template is deleted; otherwise all templates with that name (across languages) are deleted."""
+    doc: """DELETE /{waba-id}/message_templates - Delete a message template by name. If `hsm_id` (the template id) is provided, only that template is deleted; otherwise every template with that name (all languages) is deleted. Returns `{success: true}`."""
 }
-fn (request: DeleteTemplateRequest): Map {
-  params [`name=${request.name}`]
-  params if(is-some(request.hsm_id), concat(params, [`hsm_id=${request.hsm_id}`]), params)
-
-  query-string `?${join(params, "&")}`
-  ::api/request("DELETE", ::api/url(`${request.waba_id}/message_templates${query-string}`))
+fn
+(request: DeleteTemplateRequest): Map {
+  delete-template(request, {})
+},
+(request: DeleteTemplateRequest, opts: Map): Map {
+  ::api/request("DELETE", delete-templates-url(request, opts), opts)
 }

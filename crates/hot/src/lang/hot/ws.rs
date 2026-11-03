@@ -370,7 +370,7 @@ async fn ws_connect_async(
                                 Err(_) => Val::from(s),
                             }
                         }
-                        Message::Binary(data) => Val::Bytes(data.to_vec()),
+                        Message::Binary(data) => Val::bytes(data.to_vec()),
                         Message::Close(_) => {
                             closed_for_read.store(true, Ordering::Relaxed);
                             break;
@@ -414,7 +414,7 @@ async fn ws_connect_async(
     conn_map.insert(Val::from("$ws"), Val::Box(Box::new(handle)));
     conn_map.insert(Val::from("$ws_rx"), Val::Box(Box::new(rx_holder)));
 
-    HotResult::Ok(Val::Map(Box::new(conn_map)))
+    HotResult::Ok(Val::map(conn_map))
 }
 
 /// Send a message over an open WebSocket connection.
@@ -648,7 +648,7 @@ fn extract_raw_receiver(fn_name: &str, conn: &Val) -> Result<WsReceiver, Val> {
 fn val_to_message(val: &Val) -> Message {
     match val {
         Val::Str(s) => Message::Text(s.to_string().into()),
-        Val::Bytes(b) => Message::Binary(b.clone().into()),
+        Val::Bytes(b) => Message::Binary(b.to_vec().into()),
         Val::Map(_) | Val::Vec(_) => {
             let json_value: JsonValue = val.into();
             Message::Text(json_value.to_string().into())
@@ -673,14 +673,14 @@ mod tests {
     fn test_val_to_message_map() {
         let mut map = IndexMap::new();
         map.insert(Val::from("type"), Val::from("test"));
-        let val = Val::Map(Box::new(map));
+        let val = Val::map(map);
         let msg = val_to_message(&val);
         assert!(matches!(msg, Message::Text(_)));
     }
 
     #[test]
     fn test_val_to_message_bytes() {
-        let val = Val::Bytes(vec![1, 2, 3]);
+        let val = Val::bytes(vec![1, 2, 3]);
         let msg = val_to_message(&val);
         assert!(matches!(msg, Message::Binary(_)));
     }

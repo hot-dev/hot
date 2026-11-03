@@ -1,0 +1,90 @@
+::modern-treasury::internal-accounts ns
+meta {
+    doc: """Internal accounts (your own bank accounts connected to Modern Treasury) and their balance reports from the bank."""
+}
+
+::api ::modern-treasury::api
+seg ::modern-treasury::api/seg
+
+list-internal-accounts
+meta {
+    doc: """
+    GET /api/internal_accounts: one page (`{items, after_cursor,
+    per_page}`). Filters: `currency`, `counterparty_id`,
+    `legal_entity_id`, `payment_type`, `payment_direction`, `status`,
+    `external_id`, `metadata`, `per_page`, `after_cursor`.
+
+    **Example**
+
+    ```hot
+    page ::modern-treasury::internal-accounts/list-internal-accounts({currency: "USD", per_page: 10})
+    ```
+    """
+}
+fn
+(): Map {
+  list-internal-accounts({})
+},
+(params: Map): Map {
+  list-internal-accounts(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/list-page("/api/internal_accounts", params, opts)
+}
+
+get-internal-account
+meta {
+    doc: """GET /api/internal_accounts/{id}: retrieve an internal account."""
+}
+fn
+(internal-account-id: Str): Map {
+  get-internal-account(internal-account-id, {})
+},
+(internal-account-id: Str, opts: Map): Map {
+  ::api/call("GET", `/api/internal_accounts/${seg(internal-account-id)}`, {}, opts)
+}
+
+list-balance-reports
+meta {
+    doc: """
+    GET /api/internal_accounts/{id}/balance_reports: one page of balance
+    reports. Filters: `as_of_date`, `balance_report_type` (`"intraday"`,
+    `"previous_day"`, `"real_time"`, `"other"`), `per_page`,
+    `after_cursor`. Each report's `balances` lists amounts by
+    `balance_type` (e.g. `closing_ledger`, `current_available`).
+    """
+}
+fn
+(internal-account-id: Str): Map {
+  list-balance-reports(internal-account-id, {})
+},
+(internal-account-id: Str, params: Map): Map {
+  list-balance-reports(internal-account-id, params, {})
+},
+(internal-account-id: Str, params: Map, opts: Map): Map {
+  ::api/list-page(`/api/internal_accounts/${seg(internal-account-id)}/balance_reports`, params, opts)
+}
+
+get-balance-report
+meta {
+    doc: """GET /api/internal_accounts/{id}/balance_reports/{report_id}: one balance report. `report-id` may be `"latest"`."""
+}
+fn
+(internal-account-id: Str, report-id: Str): Map {
+  get-balance-report(internal-account-id, report-id, {})
+},
+(internal-account-id: Str, report-id: Str, opts: Map): Map {
+  ::api/call("GET", `/api/internal_accounts/${seg(internal-account-id)}/balance_reports/${seg(report-id)}`, {}, opts)
+}
+
+latest-balance-report
+meta {
+    doc: """The most recent balance report for an internal account (`get-balance-report(id, "latest")`)."""
+}
+fn
+(internal-account-id: Str): Map {
+  latest-balance-report(internal-account-id, {})
+},
+(internal-account-id: Str, opts: Map): Map {
+  get-balance-report(internal-account-id, "latest", opts)
+}

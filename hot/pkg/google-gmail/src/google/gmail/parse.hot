@@ -1,0 +1,298 @@
+::google::gmail::parse ns
+meta {
+    doc: """
+    Read a Gmail message resource (as returned by `get-message` with
+    `format: "full"`, the default): headers, the plain-text and HTML
+    bodies, and the attachment list, by walking the MIME parts tree.
+    Gmail returns part data base64url encoded; these helpers decode it.
+    All functions are pure.
+
+    `to-email` turns a message into a flat `Email` record, the shape
+    agents and workflows usually want.
+
+    Body text is decoded as UTF-8. Gmail undoes the transfer encoding
+    but not the charset, so a part in another charset (e.g.
+    `iso-8859-1`) may show replacement characters; check `charset`.
+    """
+}
+
+::b64 ::hot::base64
+::mime ::google::gmail::mime
+
+// ---------------------------------------------------------------------------
+// Headers
+// ---------------------------------------------------------------------------
+
+header-list fn (part: Any): Vec {
+  if(is-map(part), or(get(part, "headers"), []), [])
+}
+
+payload fn (message: Map): Map {
+  p get(message, "payload")
+  if(is-map(p), p, {})
+}
+
+headers
+meta {
+    doc: """The message's (or a part's) headers as a Map of lowercased name to value; the first occurrence wins. Accepts a message resource or a `payload` part."""
+}
+fn (message: Map): Map {
+  part if(is-map(get(message, "payload")), message.payload, message)
+  reduce(header-list(part), (acc, h) {
+    k lowercase(Str(h.name))
+    if(is-some(get(acc, k)), acc, assoc(acc, k, h.value))
+  }, {})
+}
+
+header
+meta {
+    doc: """One header value by case-insensitive name (first occurrence), or null: `header(message, "Subject")`."""
+}
+fn (message: Map, name: Str): Str? {
+  get(headers(message), lowercase(name))
+}
+
+header-values
+meta {doc: """Every value of a header, in order (e.g. all `Received` lines)."""}
+fn (message: Map, name: Str): Vec {
+  part if(is-map(get(message, "payload")), message.payload, message)
+  n lowercase(name)
+  map(filter(header-list(part), (h) { eq(lowercase(Str(h.name)), n) }), (h) { h.value })
+}
+
+// ---------------------------------------------------------------------------
+// Parts
+// ---------------------------------------------------------------------------
+
+walk-parts
+meta {doc: """A part and all its descendants, depth first (pure)."""}
+fn (part: Map): Vec {
+  children or(get(part, "parts"), [])
+  concat([part], mapcat(children, walk-parts))
+}
+
+all-parts
+meta {
+    doc: """Every MIME part of a message, depth first, starting with the top-level payload. Empty for `format: "raw"` / `"minimal"` messages."""
+}
+fn (message: Map): Vec {
+  p payload(message)
+  if(is-empty(p), [], walk-parts(p))
+}
+
+decode-data
+meta {
+    doc: """Decode a Gmail base64url `data` string (padded or not) to Bytes; null or `""` give empty Bytes."""
+}
+fn (data: Any): Bytes {
+  if(or(is-null(data), eq(data, "")), Bytes([]), ::b64/decode-url(Str(data)))
+}
+
+part-header fn (part: Map, name: Str): Str? {
+  get(headers(part), lowercase(name))
+}
+
+param
+meta {
+    doc: """A parameter from a header value such as `text/plain; charset="utf-8"`: `param(value, "charset")` is `"utf-8"`. Case-insensitive; null when absent."""
+}
+fn (value: Str?, name: Str): Str? {
+  cond {
+    is-null(value) => { null }
+    => {
+      m ::hot::regex/capture(Str(value), `(?i);\\s*${::hot::regex/escape(name)}\\s*=\\s*"?([^";]*)"?`)
+      if(is-null(m), null, trim(first(m.groups)))
+    }
+  }
+}
+
+is-attachment
+meta {
+    doc: """True for a part that is a file: it has a filename, or `Content-Disposition: attachment`."""
+}
+fn (part: Map): Bool {
+  filename or(get(part, "filename"), "")
+  disposition lowercase(or(part-header(part, "content-disposition"), ""))
+  or(not(eq(filename, "")), starts-with(disposition, "attachment"))
+}
+
+body-part fn (message: Map, mime-type: Str): Map? {
+  find-first(all-parts(message), (p) {
+    and(eq(lowercase(or(get(p, "mimeType"), "")), mime-type), not(is-attachment(p)))
+  })
+}
+
+part-text fn (part: Map?): Str? {
+  cond {
+    is-null(part) => { null }
+    => {
+      body or(get(part, "body"), {})
+      if(is-some(get(body, "data")), Str(decode-data(body.data)), null)
+    }
+  }
+}
+
+text-body
+meta {
+    doc: """The first `text/plain` body (not an attachment), decoded to a Str, or null."""
+}
+fn (message: Map): Str? {
+  part-text(body-part(message, "text/plain"))
+}
+
+html-body
+meta {
+    doc: """The first `text/html` body (not an attachment), decoded to a Str, or null."""
+}
+fn (message: Map): Str? {
+  part-text(body-part(message, "text/html"))
+}
+
+charset
+meta {
+    doc: """The declared charset of the plain-text body (else the HTML body), lowercased, or null."""
+}
+fn (message: Map): Str? {
+  part or(body-part(message, "text/plain"), body-part(message, "text/html"))
+  cs if(is-null(part), null, param(part-header(part, "content-type"), "charset"))
+  if(is-null(cs), null, lowercase(cs))
+}
+
+Attachment
+meta {
+    doc: """
+    A file attached to a message.
+
+    - `message-id`, `part-id`, `filename`, `mime-type`, `size` (bytes)
+    - `attachment-id` - pass to `::google::gmail::messages/get-attachment`
+      (null when the data is inline in the part)
+    - `data` - the bytes when Gmail included them inline, else null
+    - `content-id` - for inline images referenced as `cid:` in HTML
+    - `inline` - `Content-Disposition: inline`
+    """
+}
+type {
+    message-id: Str?,
+    part-id: Str?,
+    filename: Str,
+    mime-type: Str?,
+    size: Int?,
+    attachment-id: Str?,
+    data: Bytes?,
+    content-id: Str?,
+    inline: Bool
+}
+
+to-attachment fn (message-id: Str?, part: Map): Attachment {
+  body or(get(part, "body"), {})
+  cid part-header(part, "content-id")
+  Attachment({
+    message-id: message-id,
+    part-id: get(part, "partId"),
+    filename: or(get(part, "filename"), ""),
+    mime-type: get(part, "mimeType"),
+    size: get(body, "size"),
+    attachment-id: get(body, "attachmentId"),
+    data: if(is-some(get(body, "data")), decode-data(body.data), null),
+    content-id: if(is-null(cid), null, ::hot::regex/replace-all(cid, "[<>\\s]", "")),
+    inline: starts-with(lowercase(or(part-header(part, "content-disposition"), "")), "inline")
+  })
+}
+
+attachments
+meta {
+    doc: """Every attachment of a message (a Vec of `Attachment`), found by walking the parts tree."""
+}
+fn (message: Map): Vec {
+  map(filter(all-parts(message), is-attachment), (p) { to-attachment(get(message, "id"), p) })
+}
+
+// ---------------------------------------------------------------------------
+// A flat record
+// ---------------------------------------------------------------------------
+
+Email
+meta {
+    doc: """
+    A Gmail message flattened for workflows and agents.
+
+    - `id`, `thread-id`, `history-id`, `label-ids`, `snippet`
+    - `message-id` - the RFC 5322 `Message-ID` header
+    - `from`, `to`, `cc`, `reply-to`, `subject`, `date` - header values
+      as Gmail returns them
+    - `from-email` - the sender's address, lowercased
+    - `to-emails`, `cc-emails` - recipient addresses, lowercased
+    - `internal-date` - when Gmail received it (epoch ms, Int)
+    - `unread`, `starred`, `in-inbox`
+    - `text`, `html` - decoded bodies (null when absent)
+    - `attachments` - `Attachment`s
+    - `raw` - the message resource
+    """
+}
+type {
+    id: Str,
+    thread-id: Str?,
+    history-id: Str?,
+    label-ids: Vec,
+    snippet: Str?,
+    message-id: Str?,
+    from: Str?,
+    from-email: Str?,
+    to: Str?,
+    to-emails: Vec,
+    cc: Str?,
+    cc-emails: Vec,
+    reply-to: Str?,
+    subject: Str?,
+    date: Str?,
+    internal-date: Int?,
+    unread: Bool,
+    starred: Bool,
+    in-inbox: Bool,
+    text: Str?,
+    html: Str?,
+    attachments: Vec,
+    raw: Map
+}
+
+to-email
+meta {
+    doc: """
+    Flatten a message resource into an `Email`.
+
+    ```hot
+    email ::google::gmail::parse/to-email(::google::gmail::messages/get-message(id))
+    `${email.from-email}: ${email.subject}`
+    ```
+    """
+}
+fn (message: Map): Email {
+  h headers(message)
+  labels or(get(message, "labelIds"), [])
+  senders ::mime/emails(get(h, "from"))
+  Email({
+    id: or(get(message, "id"), ""),
+    thread-id: get(message, "threadId"),
+    history-id: get(message, "historyId"),
+    label-ids: labels,
+    snippet: get(message, "snippet"),
+    message-id: get(h, "message-id"),
+    from: get(h, "from"),
+    from-email: if(is-empty(senders), null, first(senders)),
+    to: get(h, "to"),
+    to-emails: ::mime/emails(get(h, "to")),
+    cc: get(h, "cc"),
+    cc-emails: ::mime/emails(get(h, "cc")),
+    reply-to: get(h, "reply-to"),
+    subject: get(h, "subject"),
+    date: get(h, "date"),
+    internal-date: ::google::api/parse-int(get(message, "internalDate")),
+    unread: in("UNREAD", labels),
+    starred: in("STARRED", labels),
+    in-inbox: in("INBOX", labels),
+    text: text-body(message),
+    html: html-body(message),
+    attachments: attachments(message),
+    raw: message
+  })
+}

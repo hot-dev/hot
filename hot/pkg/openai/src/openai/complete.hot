@@ -45,7 +45,15 @@ complete-upload
 meta {
     doc: """POST /uploads/{upload_id}/complete - Complete a multi-part upload by providing the ordered list of part IDs."""
 }
-fn (upload-id: Str, request: CompleteUploadRequest): CompleteUploadResponse {
-  response api-request("POST", `${::openai/BASE_URL}/uploads/${upload-id}/complete`, {}, request)
-  if(is-ok-response(response), CompleteUploadResponse(response.body), err(HttpError(response)))
+fn
+(upload-id: Str, request: CompleteUploadRequest): CompleteUploadResponse {
+  complete-upload(upload-id, request, {})
+},
+(upload-id: Str, request: CompleteUploadRequest, opts: Map): CompleteUploadResponse {
+  response api-request("POST", `/uploads/${upload-id}/complete`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { CompleteUploadResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

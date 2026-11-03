@@ -887,15 +887,11 @@ async fn enforce_cus_quota_uncached(
             .and_then(|s| s.current_period_end),
     );
 
-    let usage = crate::db::subscription::OrgUsageStats::calculate_account(
-        db,
-        org_id,
-        period_start,
-        features.call_retention_days(),
-    )
-    .await
-    .map(Some)
-    .map_err(|_| "Unable to check account compute usage".to_string())?;
+    // Counters still moving to a new period read as unused: claim admission
+    // enforces both limits below against the same counters.
+    let usage = crate::db::usage::account_task_usage(db, org_id, period_start)
+        .await
+        .map_err(|_| "Unable to check account compute usage".to_string())?;
 
     let cus_used = usage.as_ref().map(|u| u.compute_units).unwrap_or(0);
 
@@ -1115,9 +1111,9 @@ pub fn allowed_images(_args: &[Val]) -> HotResult<Val> {
         .map(|s| Val::from(s.to_string()))
         .collect();
     result.insert(Val::from("policy"), Val::from("open"));
-    result.insert(Val::from("denied"), Val::Vec(denied));
-    result.insert(Val::from("denied-prefixes"), Val::Vec(prefixes));
-    HotResult::Ok(Val::Map(Box::new(result)))
+    result.insert(Val::from("denied"), Val::vec(denied));
+    result.insert(Val::from("denied-prefixes"), Val::vec(prefixes));
+    HotResult::Ok(Val::constructed("::hot::box/BoxImagePolicy", result))
 }
 
 /// Check whether box (container execution) is enabled via conf. The task
@@ -1165,7 +1161,7 @@ pub fn sizes(_args: &[Val]) -> HotResult<Val> {
         })
     })
     .collect();
-    HotResult::Ok(Val::Vec(sizes))
+    HotResult::Ok(Val::vec(sizes))
 }
 
 /// Get container execution statistics.
@@ -1175,7 +1171,7 @@ pub fn stats(vm: &mut crate::lang::runtime::vm::VirtualMachine, _args: &[Val]) -
         Val::from("enabled"),
         Val::from(is_box_enabled_from_conf(vm.get_conf())),
     );
-    HotResult::Ok(Val::Map(Box::new(result)))
+    HotResult::Ok(Val::constructed("::hot::box/BoxStats", result))
 }
 
 /// Get remaining container task quota for the current org.
@@ -1229,21 +1225,17 @@ pub fn quota(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) ->
                     .and_then(|s| s.current_period_end),
             );
 
-            let usage = crate::db::subscription::OrgUsageStats::calculate_account(
-                &db,
-                &org_id,
-                period_start,
-                features.call_retention_days(),
-            )
-            .await
-            .ok();
+            let usage = crate::db::usage::account_task_usage(&db, &org_id, period_start)
+                .await
+                .ok()
+                .flatten();
 
             let minutes_remaining = {
                 let limit = features.task_minutes_per_month();
                 if limit < 0 {
                     -1i64
                 } else {
-                    let used_ms = usage.as_ref().map(|u| u.task_duration_ms).unwrap_or(0);
+                    let used_ms = usage.as_ref().map(|u| u.duration_ms).unwrap_or(0);
                     let used_min = used_ms / 60_000;
                     if is_free {
                         (limit as i64).saturating_sub(used_min).max(0)
@@ -1310,8 +1302,8 @@ pub fn quota(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) ->
                 Val::Int(concurrent_remaining),
             );
             val_map.insert(Val::from("overage"), Val::Bool(overage));
-            map.insert(Val::from("$val"), Val::Map(Box::new(val_map)));
-            Ok::<Val, String>(Val::Map(Box::new(map)))
+            map.insert(Val::from("$val"), Val::map(val_map));
+            Ok::<Val, String>(Val::map(map))
         })
         .await
     });
@@ -1381,8 +1373,8 @@ pub fn limits(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
             val_map.insert(Val::from("disk-mb"), Val::Int(disk_size_mb));
             val_map.insert(Val::from("timeout-secs"), Val::Int(timeout_secs));
             val_map.insert(Val::from("network"), Val::Bool(network));
-            map.insert(Val::from("$val"), Val::Map(Box::new(val_map)));
-            Ok::<Val, String>(Val::Map(Box::new(map)))
+            map.insert(Val::from("$val"), Val::map(val_map));
+            Ok::<Val, String>(Val::map(map))
         })
         .await
     });
@@ -1856,14 +1848,15 @@ mod tests {
 
     #[test]
     fn test_allowed_images_returns_policy_map() {
-        let result = allowed_images(&[]);
-        match result {
-            HotResult::Ok(Val::Map(m)) => {
-                assert!(m.contains_key(&Val::from("policy")));
-                assert!(m.contains_key(&Val::from("denied")));
-            }
-            _ => panic!("Expected Ok(Map)"),
-        }
+        let HotResult::Ok(result) = allowed_images(&[]) else {
+            panic!("Expected Ok");
+        };
+        assert!(result.is_type("::hot::box/BoxImagePolicy"));
+        let Val::Map(m) = crate::val::as_fields(&result) else {
+            panic!("Expected a BoxImagePolicy");
+        };
+        assert!(m.contains_key(&Val::from("policy")));
+        assert!(m.contains_key(&Val::from("denied")));
     }
 
     #[tokio::test]

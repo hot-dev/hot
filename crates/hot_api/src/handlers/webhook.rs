@@ -640,6 +640,7 @@ async fn webhook_handler_inner(
         retry_attempt: 0,
         secret_keys: AHashSet::new(),
         secret_value_hashes: AHashSet::new(),
+        secret_values: Default::default(),
         access_id: None,
         agent_type: None,
         queue_timing: None,
@@ -661,7 +662,7 @@ async fn webhook_handler_inner(
     // Build args: single argument (the HttpRequest).
     // The same HttpRequest is also passed as `caller` so the worker injects it
     // as the `hot.request` context variable.
-    let args_val = Val::Vec(vec![http_request.clone()]);
+    let args_val = Val::vec(vec![http_request.clone()]);
     let mut event_data_val = build_call_event_data(&function_name, args_val, Some(http_request));
     bind_call_event_to_build(&mut event_data_val, endpoint.build_id);
     // The persisted copy must not retain the webhook capability token that

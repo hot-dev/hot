@@ -1,0 +1,702 @@
+::xero::accounting ns
+meta {
+    doc: """
+    Xero Accounting API records: list (one page or all), get, create,
+    update, upsert and delete, plus invoice PDF and email, status
+    changes, attachments and the organisation. Every function takes the
+    resource name as Xero spells it in the URL (`"Invoices"`,
+    `"BankTransactions"`; case-insensitive) and an optional `opts` Map
+    (see `::xero::api`).
+
+    | Resource | List paging | Create / update | Delete | PDF | Attachments |
+    |---|---|---|---|---|---|
+    | Contacts, Invoices, CreditNotes, BankTransactions, ManualJournals, PurchaseOrders | `page`, `pageSize` | yes | via status | Invoices, CreditNotes, PurchaseOrders | yes |
+    | Quotes | `page` | yes | via status | yes | yes |
+    | Payments | `page`, `pageSize` | create | `delete-payment` | no | no |
+    | BankTransfers | all at once | create | no | no | yes |
+    | Accounts, Items, TrackingCategories | all at once | yes | `delete-record` | no | Accounts |
+    | TaxRates | all at once | yes | no | no | no |
+    | Organisation | read | no | no | no | no |
+
+    **Writes.** `create-records` (PUT) and `upsert-records` (POST) take
+    one record or a Vec (up to 50 per request is a good batch size; Xero
+    caps request size at 3.5 MB). Pass `opts.summarize-errors: false` to
+    get a 200 with per-record `ValidationErrors` instead of one 400 for
+    the whole batch, then read them with `element-errors`. Pass
+    `opts.idempotency-key` to make a write safe to retry.
+
+    **Statuses.** Invoices, credit notes and bills are not deleted:
+    `void-invoice` voids an authorised one, `delete-draft-invoice`
+    deletes a draft. Contacts are archived (`archive-contact`).
+
+    ```hot
+    ::acc ::xero::accounting
+
+    contact first(::acc/create-records("Contacts", {Name: "Acme Corp", EmailAddress: "ap@acme.example"}))
+    invoice first(::acc/create-records("Invoices", {
+      Type: "ACCREC",
+      Contact: {ContactID: contact.ContactID},
+      LineItems: [{Description: "Consulting", Quantity: 10, UnitAmount: 150, AccountCode: "200"}],
+      Date: "2026-11-01",
+      DueDate: "2026-11-30",
+      Status: "AUTHORISED"
+    }, {idempotency-key: "order-4411-invoice"}))
+    ::acc/email-invoice(invoice.InvoiceID)
+    pdf ::acc/invoice-pdf(invoice.InvoiceID)
+    ```
+    """
+}
+
+::api ::xero::api
+
+is-blank ::xero::oauth/is-blank
+
+RESOURCES
+meta {
+    doc: """
+    The supported resources: URL name to `{key, id, paged, page-size,
+    ops, pdf, attachments}`. `key` is the collection key in requests and
+    responses; `ops` lists `list`, `get`, `create`, `update`, `upsert`,
+    `delete`.
+    """
+}
+{
+  Accounts: {key: "Accounts", id: "AccountID", paged: false, page-size: false, ops: ["list", "get", "create", "update", "delete"], pdf: false, attachments: true},
+  BankTransactions: {key: "BankTransactions", id: "BankTransactionID", paged: true, page-size: true, ops: ["list", "get", "create", "update", "upsert"], pdf: false, attachments: true},
+  BankTransfers: {key: "BankTransfers", id: "BankTransferID", paged: false, page-size: false, ops: ["list", "get", "create"], pdf: false, attachments: true},
+  Contacts: {key: "Contacts", id: "ContactID", paged: true, page-size: true, ops: ["list", "get", "create", "update", "upsert"], pdf: false, attachments: true},
+  CreditNotes: {key: "CreditNotes", id: "CreditNoteID", paged: true, page-size: true, ops: ["list", "get", "create", "update", "upsert"], pdf: true, attachments: true},
+  Invoices: {key: "Invoices", id: "InvoiceID", paged: true, page-size: true, ops: ["list", "get", "create", "update", "upsert"], pdf: true, attachments: true},
+  Items: {key: "Items", id: "ItemID", paged: false, page-size: false, ops: ["list", "get", "create", "update", "upsert", "delete"], pdf: false, attachments: false},
+  ManualJournals: {key: "ManualJournals", id: "ManualJournalID", paged: true, page-size: true, ops: ["list", "get", "create", "update", "upsert"], pdf: false, attachments: true},
+  Organisation: {key: "Organisations", id: "OrganisationID", paged: false, page-size: false, ops: ["list"], pdf: false, attachments: false},
+  Payments: {key: "Payments", id: "PaymentID", paged: true, page-size: true, ops: ["list", "get", "create"], pdf: false, attachments: false},
+  PurchaseOrders: {key: "PurchaseOrders", id: "PurchaseOrderID", paged: true, page-size: true, ops: ["list", "get", "create", "update", "upsert"], pdf: true, attachments: true},
+  Quotes: {key: "Quotes", id: "QuoteID", paged: true, page-size: false, ops: ["list", "get", "create", "update", "upsert"], pdf: true, attachments: true},
+  TaxRates: {key: "TaxRates", id: "TaxType", paged: false, page-size: false, ops: ["list", "get", "create", "upsert"], pdf: false, attachments: false},
+  TrackingCategories: {key: "TrackingCategories", id: "TrackingCategoryID", paged: false, page-size: false, ops: ["list", "get", "create", "update", "delete"], pdf: false, attachments: false}
+}
+
+// opts keys that become query parameters on writes.
+WRITE_PARAM_KEYS {summarize-errors: "summarizeErrors", unitdp: "unitdp"}
+
+// ---------------------------------------------------------------------------
+// Lookup and building (pure)
+// ---------------------------------------------------------------------------
+
+canonical-name
+meta {
+    doc: """The canonical resource name (`"invoices"` gives `"Invoices"`), or an Err listing the supported names."""
+}
+fn (name: Str): Str {
+  wanted lowercase(trim(name))
+  hit find-first(keys(RESOURCES), (k) { eq(lowercase(k), wanted) })
+  cond {
+    is-some(hit) => { hit }
+    => { err(`xero: unsupported resource '${name}'. Supported: ${join(sort(keys(RESOURCES)), ", ")}`) }
+  }
+}
+
+resource-info
+meta {
+    doc: """`{name, key, id, paged, page-size, ops, pdf, attachments}` for a resource, or an Err."""
+}
+fn (name: Str): Map {
+  canonical canonical-name(name)
+  cond {
+    is-err(canonical) => { canonical }
+    => { {name: canonical, ...get(RESOURCES, canonical)} }
+  }
+}
+
+require-op
+meta {doc: """The resource info when the resource supports `op`, else an Err."""}
+fn (name: Str, op: Str): Map {
+  info resource-info(name)
+  cond {
+    is-err(info) => { info }
+    in(op, info.ops) => { info }
+    => { err(`xero: ${info.name} does not support ${op}`) }
+  }
+}
+
+check-id fn (id: Any, what: Str): Str {
+  cond {
+    is-blank(id) => { err(`xero: ${what} needs a record id`) }
+    => { Str(id) }
+  }
+}
+
+compact
+meta {
+    doc: """Drop null values from a record (one level), so unset optionals are omitted rather than sent as null."""
+}
+fn (record: Map): Map {
+  filter-vals(untype(record), is-some)
+}
+
+write-body
+meta {
+    doc: """The write body for one record or a Vec: `{Invoices: [ ... ]}` with nulls dropped (pure)."""
+}
+fn (info: Map, records: Map | Vec): Map {
+  rows if(is-vec(records), records, [records])
+  assoc({}, info.key, map(rows, compact))
+}
+
+write-params
+meta {
+    doc: """Query params for a write from `opts` (pure): `summarize-errors` becomes `summarizeErrors`, `unitdp` stays."""
+}
+fn (opts: Map): Map {
+  reduce(keys(WRITE_PARAM_KEYS), (acc, k) {
+    v get(opts, k)
+    if(is-some(v), assoc(acc, get(WRITE_PARAM_KEYS, k), v), acc)
+  }, {})
+}
+
+list-params
+meta {
+    doc: """
+    The query params for one list page (pure): `page` (1-based; only for
+    paged resources) and `pageSize` (1-1000; only where supported), plus
+    every other param (`where`, `order`, `IDs`, `Statuses`,
+    `ContactIDs`, `searchTerm`, `includeArchived`, `summaryOnly`, ...)
+    with nulls dropped.
+    """
+}
+fn (info: Map, params: Map, page: Int?): Map {
+  p filter-vals(untype(params), is-some)
+  size get(p, "pageSize")
+  base delete(delete(p, "page"), "pageSize")
+  with-page if(and(info.paged, is-some(page)), {...base, page: page}, base)
+  if(and(info.page-size, is-some(size)), {...with-page, pageSize: min(max(or(size, 1), 1), ::xero/MAX_PAGE_SIZE)}, with-page)
+}
+
+Page
+meta {
+    doc: """
+    One list page: `items`, `page` (null for unpaged resources),
+    `next-page` (null on the last page), `pagination` (Xero's
+    `{page, pageSize, pageCount, itemCount}` when sent), `warnings`,
+    `not-modified` (true for a 304 with `If-Modified-Since`) and the
+    raw `response`.
+    """
+}
+type {
+    items: Vec,
+    page: Int?,
+    next-page: Int?,
+    pagination: Map?,
+    warnings: Vec?,
+    not-modified: Bool,
+    response: Any
+}
+
+to-page
+meta {doc: """Turn a list response into a `Page` (pure)."""}
+fn (info: Map, body: Any, page: Int?, size: Int): Page {
+  b if(is-map(body), body, {})
+  items or(get(b, info.key), [])
+  pagination get(b, "pagination")
+  Page({
+    items: items,
+    page: page,
+    next-page: if(and(info.paged, is-some(page)), ::api/next-page(or(page, 1), size, length(items), pagination), null),
+    pagination: pagination,
+    warnings: get(b, "Warnings"),
+    not-modified: eq(get(b, "not-modified"), true),
+    response: body
+  })
+}
+
+element-errors
+meta {
+    doc: """
+    Per-record validation errors from a write made with
+    `summarize-errors: false` (pure): `[{index, id, messages}]` for each
+    record whose `HasValidationErrors` is true or that carries
+    `ValidationErrors`. `id` is the record's id field when Xero returned
+    one. Pass the response body (`{Invoices: [...]}`) or its Vec.
+    """
+}
+fn (resource: Str, body: Any): Vec {
+  info resource-info(resource)
+  cond {
+    is-err(info) => { info }
+    => {
+      rows cond {
+        is-vec(body) => { body }
+        is-map(body) => { or(get(body, info.key), []) }
+        => { [] }
+      }
+
+      indexed map-indexed(rows, (i, r) {
+        messages if(is-map(r), map(filter(or(get(r, "ValidationErrors"), []), is-map), (e) { Str(or(get(e, "Message"), "")) }), [])
+        failed and(is-map(r), or(eq(get(r, "HasValidationErrors"), true), not(is-empty(messages))))
+        if(failed, filter-vals({index: i, id: get(r, info.id), messages: messages}, is-some), null)
+      })
+      filter(indexed, is-some)
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Reads
+// ---------------------------------------------------------------------------
+
+list-page
+meta {
+    doc: """
+    GET /{resource} - one page (page 1 unless `params.page` is set).
+    `params` are Xero's own: `where`, `order`, `page`, `pageSize`,
+    `IDs`, `Statuses`, `ContactIDs`, `InvoiceNumbers`, `searchTerm`,
+    `includeArchived`, `summaryOnly`, `unitdp`, `createdByMyApp`.
+    `opts.if-modified-since` returns only records changed since then.
+
+    ```hot
+    page ::xero::accounting/list-page("Invoices", {Statuses: ["AUTHORISED"], pageSize: 500})
+    page.next-page
+    ```
+    """
+}
+fn
+(resource: Str): Page {
+  list-page(resource, {}, {})
+},
+(resource: Str, params: Map): Page {
+  list-page(resource, params, {})
+},
+(resource: Str, params: Map, opts: Map): Page {
+  info require-op(resource, "list")
+  cond {
+    is-err(info) => { info }
+    => {
+      page or(::xero::oauth/int-or-null(get(params, "page")), 1)
+      size or(::xero::oauth/int-or-null(get(params, "pageSize")), ::xero/DEFAULT_PAGE_SIZE)
+      body ::api/json("GET", `/${info.name}`, list-params(info, params, if(info.paged, page, null)), "", opts)
+      if(is-err(body), body, to-page(info, body, if(info.paged, page, null), size))
+    }
+  }
+}
+
+collect-loop fn (resource: Str, params: Map, page: Int, limit: Int?, acc: Vec, pages: Int, opts: Map): Vec {
+  result list-page(resource, {...params, page: page}, opts)
+  cond {
+    is-err(result) => { result }
+    => {
+      all concat(acc, result.items)
+      cond {
+        and(is-some(limit), gte(length(all), or(limit, 0))) => { slice(all, 0, limit) }
+        is-null(result.next-page) => { all }
+        gte(pages, ::api/MAX_PAGES) => { all }
+        => { collect-loop(resource, params, or(result.next-page, 1), limit, all, add(pages, 1), opts) }
+      }
+    }
+  }
+}
+
+list-all
+meta {
+    doc: """
+    Every record of a list, following pages (from page 1), or at most
+    `limit` (null for no limit). Unpaged resources return in one call.
+    Paged resources use `pageSize: 1000` unless `params.pageSize` says
+    otherwise. Each page is a call against the per-minute and daily
+    limits.
+    """
+}
+fn
+(resource: Str): Vec {
+  list-all(resource, {}, null, {})
+},
+(resource: Str, params: Map): Vec {
+  list-all(resource, params, null, {})
+},
+(resource: Str, params: Map, limit: Int?): Vec {
+  list-all(resource, params, limit, {})
+},
+(resource: Str, params: Map, limit: Int?, opts: Map): Vec {
+  info require-op(resource, "list")
+  cond {
+    is-err(info) => { info }
+    not(info.paged) => {
+      page list-page(resource, params, opts)
+      cond {
+        is-err(page) => { page }
+        is-some(limit) => { slice(page.items, 0, min(or(limit, 0), length(page.items))) }
+        => { page.items }
+      }
+    }
+    => {
+      p untype(params)
+      sized if(and(info.page-size, is-null(get(p, "pageSize"))), {...p, pageSize: ::xero/MAX_PAGE_SIZE}, p)
+      collect-loop(resource, sized, 1, limit, [], 1, opts)
+    }
+  }
+}
+
+get-record
+meta {
+    doc: """GET /{resource}/{id} - one record (the first of the returned collection), or an Err. For TaxRates the id is the `TaxType`."""
+}
+fn
+(resource: Str, id: Str): Map {
+  get-record(resource, id, {})
+},
+(resource: Str, id: Str, opts: Map): Map {
+  info require-op(resource, "get")
+  checked check-id(id, "get-record")
+  cond {
+    is-err(info) => { info }
+    is-err(checked) => { checked }
+    => {
+      body ::api/json("GET", `/${info.name}/${::api/segment(checked)}`, {}, "", opts)
+      rows if(and(not(is-err(body)), is-map(body)), or(get(body, info.key), []), [])
+      cond {
+        is-err(body) => { body }
+        is-empty(rows) => { err(`xero: ${info.name} ${checked} was not found`) }
+        => { first(rows) }
+      }
+    }
+  }
+}
+
+get-organisation
+meta {
+    doc: """GET /Organisation - the connected organisation (name, base currency, country, financial year end, ...)."""
+}
+fn
+(): Map {
+  get-organisation({})
+},
+(opts: Map): Map {
+  page list-page("Organisation", {}, opts)
+  cond {
+    is-err(page) => { page }
+    is-empty(page.items) => { err("xero: no organisation returned") }
+    => { first(page.items) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Writes
+// ---------------------------------------------------------------------------
+
+written fn (info: Map, body: Any): Vec {
+  cond {
+    is-err(body) => { body }
+    is-map(body) => { or(get(body, info.key), []) }
+    => { [] }
+  }
+}
+
+create-records
+meta {
+    doc: """PUT /{resource} - create one record or a Vec; returns the created records. See the namespace doc for `summarize-errors` and `idempotency-key`."""
+}
+fn
+(resource: Str, records: Map | Vec): Vec {
+  create-records(resource, records, {})
+},
+(resource: Str, records: Map | Vec, opts: Map): Vec {
+  info require-op(resource, "create")
+  cond {
+    is-err(info) => { info }
+    => { written(info, ::api/json("PUT", `/${info.name}`, write-params(opts), write-body(info, records), opts)) }
+  }
+}
+
+upsert-records
+meta {
+    doc: """POST /{resource} - create or update one record or a Vec (records with an id are updated); returns the records."""
+}
+fn
+(resource: Str, records: Map | Vec): Vec {
+  upsert-records(resource, records, {})
+},
+(resource: Str, records: Map | Vec, opts: Map): Vec {
+  info require-op(resource, "upsert")
+  cond {
+    is-err(info) => { info }
+    => { written(info, ::api/json("POST", `/${info.name}`, write-params(opts), write-body(info, records), opts)) }
+  }
+}
+
+update-record
+meta {
+    doc: """POST /{resource}/{id} - update one record with the fields in `fields` (others are left as they are); returns it."""
+}
+fn
+(resource: Str, id: Str, fields: Map): Map {
+  update-record(resource, id, fields, {})
+},
+(resource: Str, id: Str, fields: Map, opts: Map): Map {
+  info require-op(resource, "update")
+  checked check-id(id, "update-record")
+  cond {
+    is-err(info) => { info }
+    is-err(checked) => { checked }
+    => {
+      rows written(info, ::api/json("POST", `/${info.name}/${::api/segment(checked)}`, write-params(opts), write-body(info, fields), opts))
+      cond {
+        is-err(rows) => { rows }
+        is-empty(rows) => { err(`xero: updating ${info.name} ${checked} returned no record`) }
+        => { first(rows) }
+      }
+    }
+  }
+}
+
+delete-record
+meta {
+    doc: """DELETE /{resource}/{id} for Accounts, Items and TrackingCategories. Returns true. Transactions are voided or deleted by status instead."""
+}
+fn
+(resource: Str, id: Str): Bool {
+  delete-record(resource, id, {})
+},
+(resource: Str, id: Str, opts: Map): Bool {
+  info require-op(resource, "delete")
+  checked check-id(id, "delete-record")
+  cond {
+    is-err(info) => { info }
+    is-err(checked) => { checked }
+    => {
+      body ::api/json("DELETE", `/${info.name}/${::api/segment(checked)}`, {}, "", opts)
+      if(is-err(body), body, true)
+    }
+  }
+}
+
+void-invoice
+meta {
+    doc: """Void an authorised invoice or bill (`Status: "VOIDED"`). Paid invoices must have their payments removed first."""
+}
+fn
+(invoice-id: Str): Map {
+  void-invoice(invoice-id, {})
+},
+(invoice-id: Str, opts: Map): Map {
+  update-record("Invoices", invoice-id, {Status: "VOIDED"}, opts)
+}
+
+delete-draft-invoice
+meta {doc: """Delete a draft or submitted invoice (`Status: "DELETED"`)."""}
+fn
+(invoice-id: Str): Map {
+  delete-draft-invoice(invoice-id, {})
+},
+(invoice-id: Str, opts: Map): Map {
+  update-record("Invoices", invoice-id, {Status: "DELETED"}, opts)
+}
+
+archive-contact
+meta {doc: """Archive a contact (`ContactStatus: "ARCHIVED"`)."""}
+fn
+(contact-id: Str): Map {
+  archive-contact(contact-id, {})
+},
+(contact-id: Str, opts: Map): Map {
+  update-record("Contacts", contact-id, {ContactStatus: "ARCHIVED"}, opts)
+}
+
+delete-payment
+meta {
+    doc: """POST /Payments/{id} with `Status: "DELETED"` - remove a payment (its invoice becomes unpaid again). Returns the payment."""
+}
+fn
+(payment-id: Str): Map {
+  delete-payment(payment-id, {})
+},
+(payment-id: Str, opts: Map): Map {
+  checked check-id(payment-id, "delete-payment")
+  cond {
+    is-err(checked) => { checked }
+    => {
+      rows written({key: "Payments"}, ::api/json("POST", `/Payments/${::api/segment(checked)}`, {}, {Status: "DELETED"}, opts))
+      if(is-err(rows), rows, if(is-empty(rows), null, first(rows)))
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// PDF, email, online invoice
+// ---------------------------------------------------------------------------
+
+record-pdf
+meta {
+    doc: """GET /{resource}/{id} as `application/pdf` (Invoices, CreditNotes, PurchaseOrders, Quotes). Returns `Bytes`."""
+}
+fn
+(resource: Str, id: Str): Bytes {
+  record-pdf(resource, id, {})
+},
+(resource: Str, id: Str, opts: Map): Bytes {
+  info resource-info(resource)
+  checked check-id(id, "record-pdf")
+  cond {
+    is-err(info) => { info }
+    is-err(checked) => { checked }
+    not(info.pdf) => { err(`xero: ${info.name} has no PDF`) }
+    => { ::api/bytes(`/${info.name}/${::api/segment(checked)}`, "application/pdf", opts) }
+  }
+}
+
+invoice-pdf
+meta {doc: """An invoice (or bill) as PDF `Bytes`."""}
+fn
+(invoice-id: Str): Bytes {
+  record-pdf("Invoices", invoice-id, {})
+},
+(invoice-id: Str, opts: Map): Bytes {
+  record-pdf("Invoices", invoice-id, opts)
+}
+
+email-invoice
+meta {
+    doc: """POST /Invoices/{id}/Email - email a sales invoice (ACCREC, status SUBMITTED, AUTHORISED or PAID) to its contact, using the organisation's email template. Returns true. Xero limits how many invoice emails an organisation can send per day."""
+}
+fn
+(invoice-id: Str): Bool {
+  email-invoice(invoice-id, {})
+},
+(invoice-id: Str, opts: Map): Bool {
+  checked check-id(invoice-id, "email-invoice")
+  cond {
+    is-err(checked) => { checked }
+    => {
+      body ::api/json("POST", `/Invoices/${::api/segment(checked)}/Email`, {}, {}, opts)
+      if(is-err(body), body, true)
+    }
+  }
+}
+
+online-invoice-url
+meta {
+    doc: """GET /Invoices/{id}/OnlineInvoice - the customer-facing online invoice URL (sales invoices that are not drafts)."""
+}
+fn
+(invoice-id: Str): Str {
+  online-invoice-url(invoice-id, {})
+},
+(invoice-id: Str, opts: Map): Str {
+  checked check-id(invoice-id, "online-invoice-url")
+  cond {
+    is-err(checked) => { checked }
+    => {
+      body ::api/json("GET", `/Invoices/${::api/segment(checked)}/OnlineInvoice`, {}, "", opts)
+      rows if(and(not(is-err(body)), is-map(body)), or(get(body, "OnlineInvoices"), []), [])
+      cond {
+        is-err(body) => { body }
+        is-empty(rows) => { err("xero: no online invoice URL returned") }
+        => { get(first(rows), "OnlineInvoiceUrl") }
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Attachments
+// ---------------------------------------------------------------------------
+
+attachments-info fn (resource: Str, id: Str, what: Str): Map {
+  info resource-info(resource)
+  checked check-id(id, what)
+  cond {
+    is-err(info) => { info }
+    is-err(checked) => { checked }
+    not(info.attachments) => { err(`xero: ${info.name} does not take attachments`) }
+    => { {...info, record-id: checked} }
+  }
+}
+
+check-file-name
+meta {
+    doc: """A file name for an attachment, or an Err: non-empty, at most 255 characters, no `/` or `\`."""
+}
+fn (name: Str): Str {
+  cond {
+    is-empty(trim(name)) => { err("xero: an attachment needs a file name") }
+    gt(length(name), 255) => { err("xero: attachment file names are at most 255 characters") }
+    or(contains(name, "/"), contains(name, "\\")) => { err("xero: attachment file names cannot contain / or \\") }
+    => { name }
+  }
+}
+
+list-attachments
+meta {
+    doc: """GET /{resource}/{id}/Attachments - `[{AttachmentID, FileName, Url, MimeType, ContentLength, IncludeOnline}]`."""
+}
+fn
+(resource: Str, id: Str): Vec {
+  list-attachments(resource, id, {})
+},
+(resource: Str, id: Str, opts: Map): Vec {
+  info attachments-info(resource, id, "list-attachments")
+  cond {
+    is-err(info) => { info }
+    => {
+      body ::api/json("GET", `/${info.name}/${::api/segment(info.record-id)}/Attachments`, {}, "", opts)
+      if(is-err(body), body, or(get(or(body, {}), "Attachments"), []))
+    }
+  }
+}
+
+upload-attachment
+meta {
+    doc: """
+    PUT /{resource}/{id}/Attachments/{file-name} - attach a file
+    (`Bytes`, or a Str sent as UTF-8) with its MIME type. Xero allows up
+    to 10 attachments of at most 25 MB each per record. `opts.include-online:
+    true` shows it on the online invoice (Invoices, CreditNotes). Returns
+    the attachment record.
+
+    ```hot
+    receipt ::hot::file/read-file-bytes("receipt-4411.pdf")
+    ::xero::accounting/upload-attachment("Invoices", invoice-id, "receipt-4411.pdf", receipt, "application/pdf")
+    ```
+    """
+}
+fn
+(resource: Str, id: Str, file-name: Str, content: Bytes | Str, mime-type: Str): Map {
+  upload-attachment(resource, id, file-name, content, mime-type, {})
+},
+(resource: Str, id: Str, file-name: Str, content: Bytes | Str, mime-type: Str, opts: Map): Map {
+  info attachments-info(resource, id, "upload-attachment")
+  name check-file-name(file-name)
+  bytes if(is-bytes(content), content, Bytes(Str(content)))
+  params if(eq(get(opts, "include-online"), true), {IncludeOnline: true}, {})
+  cond {
+    is-err(info) => { info }
+    is-err(name) => { name }
+    => {
+      body ::api/json("PUT", `/${info.name}/${::api/segment(info.record-id)}/Attachments/${::api/segment(name)}`, params, bytes,
+        {Content-Type: mime-type}, opts)
+      rows if(and(not(is-err(body)), is-map(body)), or(get(body, "Attachments"), []), [])
+      cond {
+        is-err(body) => { body }
+        is-empty(rows) => { body }
+        => { first(rows) }
+      }
+    }
+  }
+}
+
+get-attachment
+meta {
+    doc: """GET /{resource}/{id}/Attachments/{file-name} - the file as `Bytes` (`mime-type` is sent as `Accept`)."""
+}
+fn
+(resource: Str, id: Str, file-name: Str, mime-type: Str): Bytes {
+  get-attachment(resource, id, file-name, mime-type, {})
+},
+(resource: Str, id: Str, file-name: Str, mime-type: Str, opts: Map): Bytes {
+  info attachments-info(resource, id, "get-attachment")
+  name check-file-name(file-name)
+  cond {
+    is-err(info) => { info }
+    is-err(name) => { name }
+    => { ::api/bytes(`/${info.name}/${::api/segment(info.record-id)}/Attachments/${::api/segment(name)}`, mime-type, opts) }
+  }
+}

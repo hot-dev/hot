@@ -1,0 +1,24 @@
+::modern-treasury::integration::ctx ns
+
+::env ::hot::env
+
+// Credentials for the modern-treasury integration suite. Unset
+// environment variables are skipped entirely, so absent credentials
+// behave exactly as if never configured.
+::hot::ctx/set(filter-vals({
+    "modern-treasury.organization.id": ::env/get("MODERN_TREASURY_ORG_ID", ""),
+    "modern-treasury.api.key": ::env/get("MODERN_TREASURY_API_KEY", ""),
+    "modern-treasury.environment": ::env/get("MODERN_TREASURY_ENVIRONMENT", ""),
+}, (v) { not(is-empty(v)) }))
+
+// True when both MODERN_TREASURY_ORG_ID and MODERN_TREASURY_API_KEY are
+// set. Tests call this first and `skip` when it is false, so an
+// unconfigured run makes no calls.
+configured fn (): Bool {
+    and(not(is-empty(::env/get("MODERN_TREASURY_ORG_ID", ""))), not(is-empty(::env/get("MODERN_TREASURY_API_KEY", ""))))
+}
+
+skip fn (): Bool {
+    println("skipped: set MODERN_TREASURY_ORG_ID and MODERN_TREASURY_API_KEY (sandbox) to run the Modern Treasury integration tests")
+    assert(true, "skipped: no Modern Treasury credentials")
+}

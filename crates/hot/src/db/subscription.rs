@@ -969,7 +969,8 @@ pub struct OrgUsageStats {
     pub file_storage_bytes: i64,
     /// Number of active team members
     pub team_members_count: i32,
-    /// Call data storage in bytes (within retention period)
+    /// Retained call data in bytes, from the counter the storage limit enforces.
+    /// It includes data kept past the plan's visible retention for upgrades.
     pub call_storage_bytes: i64,
     /// Total number of calls (within retention period)
     pub call_count: i64,
@@ -1008,13 +1009,15 @@ impl OrgUsageStats {
             operation: super::MaintenanceOperation::Billing,
             org_id: Some(root_id),
         });
-        let mut total = Self::calculate(&db, &root_id, period_start, retention_days).await?;
+        let mut total =
+            Self::calculate_org(&db, &root_id, period_start, retention_days, false).await?;
         let children = super::org::Org::list_children(&db, &root_id)
             .await
             .map_err(|error| PlanError::InvalidOrganization(error.to_string()))?;
         for child in children {
-            let usage = Self::calculate(&db, &child.org_id, period_start, retention_days).await?;
-            total.runs_this_period += usage.runs_this_period;
+            let usage =
+                Self::calculate_org(&db, &child.org_id, period_start, retention_days, false)
+                    .await?;
             total.file_storage_bytes += usage.file_storage_bytes;
             total.call_storage_bytes += usage.call_storage_bytes;
             total.call_count += usage.call_count;
@@ -1059,12 +1062,25 @@ impl OrgUsageStats {
         period_start: DateTime<Utc>,
         retention_days: i32,
     ) -> Result<Self, PlanError> {
+        Self::calculate_org(db, org_id, period_start, retention_days, true).await
+    }
+
+    /// `count_runs` is false for account usage, which counts runs from the
+    /// admission ledger: each org's retained runs would only be overwritten.
+    async fn calculate_org(
+        db: &DatabasePool,
+        org_id: &Uuid,
+        period_start: DateTime<Utc>,
+        retention_days: i32,
+        count_runs: bool,
+    ) -> Result<Self, PlanError> {
         match db {
             DatabasePool::Postgres(pool) => {
-                Self::calculate_postgres(pool, org_id, period_start, retention_days).await
+                Self::calculate_postgres(pool, org_id, period_start, retention_days, count_runs)
+                    .await
             }
             DatabasePool::Sqlite(pool) => {
-                Self::calculate_sqlite(pool, org_id, period_start, retention_days).await
+                Self::calculate_sqlite(pool, org_id, period_start, retention_days, count_runs).await
             }
         }
     }
@@ -1074,6 +1090,7 @@ impl OrgUsageStats {
         org_id: &Uuid,
         period_start: DateTime<Utc>,
         retention_days: i32,
+        count_runs: bool,
     ) -> Result<Self, PlanError> {
         // Pre-fetch env_ids for this org once (tiny table, instant) to eliminate
         // JOIN env from every subsequent query — lets Postgres use env_id indexes directly.
@@ -1082,13 +1099,19 @@ impl OrgUsageStats {
             .fetch_all(pool)
             .await?;
 
-        let runs_fut = sqlx::query_as::<_, (i64,)>(
-            "SELECT COUNT(*)::bigint FROM run
-             WHERE env_id = ANY($1) AND start_time >= $2 AND run_type_id != 7",
-        )
-        .bind(&env_ids)
-        .bind(period_start)
-        .fetch_one(pool);
+        let runs_fut = async {
+            if !count_runs {
+                return Ok((0i64,));
+            }
+            sqlx::query_as::<_, (i64,)>(
+                "SELECT COUNT(*)::bigint FROM run
+                 WHERE env_id = ANY($1) AND start_time >= $2 AND run_type_id != 7",
+            )
+            .bind(&env_ids)
+            .bind(period_start)
+            .fetch_one(pool)
+            .await
+        };
 
         let file_fut = sqlx::query_as::<_, (Option<i64>,)>(
             "SELECT SUM(size)::bigint FROM file
@@ -1104,32 +1127,44 @@ impl OrgUsageStats {
         .bind(org_id)
         .fetch_one(pool);
 
+        // Bytes come from the storage counter. Counting calls needs only
+        // call_env_start_time_size_idx, so neither reads the trace heap.
         let retention_str = retention_days.to_string();
         let call_fut = async {
             if retention_days < 0 {
-                sqlx::query_as::<_, (i64, i64, Option<DateTime<Utc>>)>(
-                    "SELECT COALESCE(SUM(c.size), 0)::bigint, COUNT(*)::bigint, MIN(c.start_time)
+                sqlx::query_as::<_, (i64, Option<DateTime<Utc>>)>(
+                    "SELECT COUNT(*)::bigint, MIN(c.start_time)
                      FROM call c
-                     JOIN run r ON r.run_id = c.run_id
-                     WHERE r.env_id = ANY($1)",
+                     WHERE c.env_id = ANY($1)",
                 )
                 .bind(&env_ids)
                 .fetch_one(pool)
                 .await
             } else if retention_days == 0 {
-                Ok((0i64, 0i64, None))
+                Ok((0i64, None))
             } else {
-                sqlx::query_as::<_, (i64, i64, Option<DateTime<Utc>>)>(
-                    "SELECT COALESCE(SUM(c.size), 0)::bigint, COUNT(*)::bigint, MIN(c.start_time)
+                sqlx::query_as::<_, (i64, Option<DateTime<Utc>>)>(
+                    "SELECT COUNT(*)::bigint, MIN(c.start_time)
                      FROM call c
-                     JOIN run r ON r.run_id = c.run_id
-                     WHERE r.env_id = ANY($1) AND c.start_time > NOW() - ($2 || ' days')::interval",
+                     WHERE c.env_id = ANY($1) AND c.start_time > NOW() - ($2 || ' days')::interval",
                 )
                 .bind(&env_ids)
                 .bind(&retention_str)
                 .fetch_one(pool)
                 .await
             }
+        };
+
+        let call_bytes_fut = async {
+            if retention_days == 0 {
+                return Ok((0i64,));
+            }
+            sqlx::query_as::<_, (i64,)>(
+                "SELECT COALESCE(SUM(call_bytes), 0)::bigint FROM usage_storage WHERE org_id = $1",
+            )
+            .bind(org_id)
+            .fetch_one(pool)
+            .await
         };
 
         let store_fut = sqlx::query_as::<_, (i64,)>(
@@ -1171,25 +1206,35 @@ impl OrgUsageStats {
         .bind(org_id)
         .fetch_one(pool);
 
-        let (runs_row, file_row, team_row, call_row, store_row, blob_row, task_row, schedule_row) =
-            tokio::try_join!(
-                runs_fut,
-                file_fut,
-                team_fut,
-                call_fut,
-                store_fut,
-                blob_fut,
-                task_fut,
-                schedule_fut
-            )?;
+        let (
+            runs_row,
+            file_row,
+            team_row,
+            call_row,
+            call_bytes_row,
+            store_row,
+            blob_row,
+            task_row,
+            schedule_row,
+        ) = tokio::try_join!(
+            runs_fut,
+            file_fut,
+            team_fut,
+            call_fut,
+            call_bytes_fut,
+            store_fut,
+            blob_fut,
+            task_fut,
+            schedule_fut
+        )?;
 
         Ok(Self {
             runs_this_period: runs_row.0,
             file_storage_bytes: file_row.0.unwrap_or(0),
             team_members_count: team_row.0 as i32,
-            call_storage_bytes: call_row.0,
-            call_count: call_row.1,
-            oldest_call_time: call_row.2,
+            call_storage_bytes: call_bytes_row.0,
+            call_count: call_row.0,
+            oldest_call_time: call_row.1,
             store_storage_bytes: store_row.0,
             blob_storage_bytes: blob_row.0,
             tasks_this_period: task_row.0,
@@ -1204,6 +1249,7 @@ impl OrgUsageStats {
         org_id: &Uuid,
         period_start: DateTime<Utc>,
         retention_days: i32,
+        count_runs: bool,
     ) -> Result<Self, PlanError> {
         // SQLite doesn't support ANY(...), so use an IN-subquery to avoid the JOIN.
         // The subquery is evaluated once and the result set is tiny (few env_ids per org).
@@ -1212,10 +1258,16 @@ impl OrgUsageStats {
         let runs_q = format!(
             "SELECT COUNT(*) FROM run WHERE {ENV_SUB} AND start_time >= ? AND run_type_id != 7",
         );
-        let runs_fut = sqlx::query_as::<_, (i64,)>(sqlx::AssertSqlSafe(runs_q.as_str()))
-            .bind(org_id)
-            .bind(period_start)
-            .fetch_one(pool);
+        let runs_fut = async {
+            if !count_runs {
+                return Ok((0i64,));
+            }
+            sqlx::query_as::<_, (i64,)>(sqlx::AssertSqlSafe(runs_q.as_str()))
+                .bind(org_id)
+                .bind(period_start)
+                .fetch_one(pool)
+                .await
+        };
 
         let file_fut = sqlx::query_as::<_, (Option<i64>,)>(
             "SELECT SUM(size) FROM file
@@ -1232,29 +1284,27 @@ impl OrgUsageStats {
         .fetch_one(pool);
 
         let call_q_all = format!(
-            "SELECT COALESCE(SUM(c.size), 0), COUNT(*), MIN(c.start_time)
+            "SELECT COUNT(*), MIN(c.start_time)
              FROM call c
-             JOIN run r ON r.run_id = c.run_id
-             WHERE r.{ENV_SUB}",
+             WHERE c.{ENV_SUB}",
         );
         let call_q_retention = format!(
-            "SELECT COALESCE(SUM(c.size), 0), COUNT(*), MIN(c.start_time)
+            "SELECT COUNT(*), MIN(c.start_time)
              FROM call c
-             JOIN run r ON r.run_id = c.run_id
-             WHERE r.{ENV_SUB} AND c.start_time > datetime('now', '-' || ? || ' days')",
+             WHERE c.{ENV_SUB} AND c.start_time > datetime('now', '-' || ? || ' days')",
         );
         let call_fut = async {
             if retention_days < 0 {
-                sqlx::query_as::<_, (i64, i64, Option<DateTime<Utc>>)>(sqlx::AssertSqlSafe(
+                sqlx::query_as::<_, (i64, Option<DateTime<Utc>>)>(sqlx::AssertSqlSafe(
                     call_q_all.as_str(),
                 ))
                 .bind(org_id)
                 .fetch_one(pool)
                 .await
             } else if retention_days == 0 {
-                Ok((0i64, 0i64, None))
+                Ok((0i64, None))
             } else {
-                sqlx::query_as::<_, (i64, i64, Option<DateTime<Utc>>)>(sqlx::AssertSqlSafe(
+                sqlx::query_as::<_, (i64, Option<DateTime<Utc>>)>(sqlx::AssertSqlSafe(
                     call_q_retention.as_str(),
                 ))
                 .bind(org_id)
@@ -1262,6 +1312,18 @@ impl OrgUsageStats {
                 .fetch_one(pool)
                 .await
             }
+        };
+
+        let call_bytes_fut = async {
+            if retention_days == 0 {
+                return Ok((0i64,));
+            }
+            sqlx::query_as::<_, (i64,)>(
+                "SELECT COALESCE(SUM(call_bytes), 0) FROM usage_storage WHERE org_id = ?",
+            )
+            .bind(org_id)
+            .fetch_one(pool)
+            .await
         };
 
         let task_q = format!(
@@ -1305,25 +1367,35 @@ impl OrgUsageStats {
         .bind(org_id)
         .fetch_one(pool);
 
-        let (runs_row, file_row, team_row, call_row, store_row, blob_row, task_row, schedule_row) =
-            tokio::try_join!(
-                runs_fut,
-                file_fut,
-                team_fut,
-                call_fut,
-                store_fut,
-                blob_fut,
-                task_fut,
-                schedule_fut
-            )?;
+        let (
+            runs_row,
+            file_row,
+            team_row,
+            call_row,
+            call_bytes_row,
+            store_row,
+            blob_row,
+            task_row,
+            schedule_row,
+        ) = tokio::try_join!(
+            runs_fut,
+            file_fut,
+            team_fut,
+            call_fut,
+            call_bytes_fut,
+            store_fut,
+            blob_fut,
+            task_fut,
+            schedule_fut
+        )?;
 
         Ok(Self {
             runs_this_period: runs_row.0,
             file_storage_bytes: file_row.0.unwrap_or(0),
             team_members_count: team_row.0 as i32,
-            call_storage_bytes: call_row.0,
-            call_count: call_row.1,
-            oldest_call_time: call_row.2,
+            call_storage_bytes: call_bytes_row.0,
+            call_count: call_row.0,
+            oldest_call_time: call_row.1,
             store_storage_bytes: store_row.0,
             blob_storage_bytes: blob_row.0,
             tasks_this_period: task_row.0,

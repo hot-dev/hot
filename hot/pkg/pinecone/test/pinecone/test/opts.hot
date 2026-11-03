@@ -1,0 +1,189 @@
+::pinecone::test::opts ns
+meta ["test"]
+
+// Hermetic: no network and no pinecone.* context.
+
+::api ::pinecone::api
+::indexes ::pinecone::indexes
+::inference ::pinecone::inference
+::namespaces ::pinecone::namespaces
+::records ::pinecone::records
+::vectors ::pinecone::vectors
+
+HOST "docs-abc.svc.aped-4627.pinecone.io"
+OFFLINE_HOST "http://127.0.0.1:1"
+OPTS {api-key: "tenant-key"}
+
+// Nothing listens on port 1, so a call fails at the socket, with the URL
+// in the error. That error proves the call got past the credential check
+// and used this `opts`, without any network traffic.
+reaches fn (result: Result): Bool {
+    and(is-err(result), contains(err-message(result), "127.0.0.1:1"))
+}
+
+// Control-plane URLs are fixed, so a blank credential proves `opts` got
+// there: it can only come from the call's own opts.
+stops-at-opts fn (result: Result): Bool {
+    and(is-err(result), contains(err-message(result), "api-key is in the call's opts"))
+}
+
+// Refused before any request: the failure names the key and isn't the socket.
+refused fn (result: Result): Bool {
+    and(is-err(result), contains(err-message(result), "api-key"), not(reaches(result)))
+}
+
+test-resolve-opts-override-ctx
+meta ["test"] fn () {
+    r ::api/resolve-from({api-key: "opt-key", api-version: "2026-04"}, {"pinecone.api.key": "ctx-key", "pinecone.api.version": "2025-10"})
+    assert-eq("opt-key", r.api-key)
+    assert-eq("2026-04", r.api-version)
+}
+
+test-resolve-ctx-then-defaults
+meta ["test"] fn () {
+    r ::api/resolve-from({}, {"pinecone.api.key": "ctx-key", "pinecone.api.version": "2025-10"})
+    assert-eq("ctx-key", r.api-key)
+    assert-eq("2025-10", r.api-version)
+    assert-eq("2026-07", ::api/resolve-from({}, {"pinecone.api.key": "ctx-key"}).api-version)
+}
+
+test-resolve-missing-credential-is-a-clear-error
+meta ["test"] fn () {
+    out ::api/resolve-from({}, {})
+    assert(is-err(out))
+    assert(contains(err-message(out), "pinecone.api.key"))
+}
+
+test-resolve-returns-marked-value-unchanged
+meta ["test"] fn () {
+    assert-eq("call-key-value", ::api/resolve({api-key: "call-key-value"}).api-key)
+    assert-eq("call-key-value", ::api/resolve({api-key: "call-key-value"}, OFFLINE_HOST).api-key)
+}
+
+test-resolve-never-writes-ctx
+meta ["test"] fn () {
+    before ::hot::ctx/get("pinecone.api.key")
+    assert-eq("call-key", ::api/resolve({api-key: "call-key"}).api-key)
+    assert(reaches(::vectors/list-ids(OFFLINE_HOST, {}, OPTS)))
+    assert-eq(before, ::hot::ctx/get("pinecone.api.key"))
+}
+
+test-blank-credential-in-opts-is-an-error
+meta ["test"] fn () {
+    ctx {"pinecone.api.key": "ctx-key"}
+    results map([{api-key: ""}, {api-key: "   "}, {api-key: null}], (o) {
+        out ::api/resolve-from(o, ctx)
+        assert(is-err(out), "never falls back to pinecone.api.key")
+        assert(contains(err-message(out), "api-key"))
+        on-host ::api/resolve-from(o, ctx, `https://${HOST}/query`)
+        assert(is-err(on-host), "on an index host too")
+        true
+    })
+    assert-eq(3, length(results))
+}
+
+test-is-pinecone-url
+meta ["test"] fn () {
+    assert(::api/is-pinecone-url(`https://${HOST}/query`))
+    assert(::api/is-pinecone-url("https://api.pinecone.io/indexes"))
+    assert(::api/is-pinecone-url(`https://${HOST}:443/vectors/fetch?ids=a@b`))
+    assert(not(::api/is-pinecone-url("http://api.pinecone.io/indexes")), "never over http")
+    assert(not(::api/is-pinecone-url("https://collector.example/query")))
+    assert(not(::api/is-pinecone-url("https://pinecone.io.collector.example/query")))
+    assert(not(::api/is-pinecone-url("https://notpinecone.io/query")))
+    assert(not(::api/is-pinecone-url("https://a.pinecone.io@collector.example/query")))
+    assert(not(::api/is-pinecone-url("https://collector.example/.pinecone.io/query")))
+    assert(not(::api/is-pinecone-url("https://collector.example?.pinecone.io")))
+    assert(not(::api/is-pinecone-url("http://localhost:5080/query")))
+}
+
+test-foreign-host-without-credential-is-an-error
+meta ["test"] fn () {
+    ctx {"pinecone.api.key": "ctx_secret_key"}
+    out ::api/resolve-from({}, ctx, "https://collector.example/query")
+    assert(is-err(out), "the context key must not go to a per-call host")
+    assert(contains(err-message(out), "host"))
+    assert(contains(err-message(out), "api-key"))
+    assert(not(contains(err-message(out), "ctx_secret_key")), "the key stays out of messages")
+    assert-eq("tenant", ::api/resolve-from({api-key: "tenant"}, ctx, "https://collector.example/query").api-key, "with a credential it works")
+    assert-eq("ctx_secret_key", ::api/resolve-from({}, ctx, `https://${HOST}/query`).api-key, "a Pinecone host uses the context key")
+}
+
+test-foreign-host-without-credential-sends-nothing
+meta ["test"] fn () {
+    before ::hot::ctx/get("pinecone.api.key")
+    ::hot::ctx/set-secret("pinecone.api.key", "ctx_secret_key")
+    assert-eq("ctx_secret_key", ::api/resolve({}).api-key, "control: the live context key is set")
+    assert(refused(::vectors/fetch(OFFLINE_HOST, ["a"])))
+    assert(refused(::vectors/query(OFFLINE_HOST, {vector: [0.1]})))
+    assert(refused(::namespaces/list-namespaces(OFFLINE_HOST)))
+    assert(refused(::records/upsert-records(OFFLINE_HOST, "ns", [{_id: "a"}])))
+    assert(reaches(::vectors/fetch(OFFLINE_HOST, ["a"], OPTS)), "control: with a credential it reaches the socket")
+    ::hot::ctx/set-secret("pinecone.api.key", before)
+}
+
+test-build-request
+meta ["test"] fn () {
+    bare ::api/build-request("GET", "https://api.pinecone.io/indexes", "", null, ::api/resolve-from({api-key: "a"}, {}))
+    assert-eq("a", get(bare.headers, "Api-Key"))
+    assert-eq("2026-07", get(bare.headers, "X-Pinecone-Api-Version"))
+    assert(is-null(get(bare.headers, "Content-Type")))
+    posted ::api/build-request("POST", "https://x.pinecone.io/query", "{}", "application/json", ::api/resolve-from({api-key: "b", api-version: "2026-04"}, {}))
+    assert-eq("2026-04", get(posted.headers, "X-Pinecone-Api-Version"))
+    assert-eq("application/json", get(posted.headers, "Content-Type"))
+}
+
+test-opts-reach-every-data-plane-function
+meta ["test"] fn () {
+    assert(reaches(::api/json("GET", `${OFFLINE_HOST}/x`, "", OPTS)))
+    assert(reaches(::api/ndjson(`${OFFLINE_HOST}/x`, [{_id: "a"}], OPTS)))
+    assert(reaches(::vectors/upsert(OFFLINE_HOST, [{id: "a", values: [0.1]}], OPTS)))
+    assert(reaches(::vectors/upsert(OFFLINE_HOST, [{id: "a", values: [0.1]}], "ns", OPTS)))
+    assert(reaches(::vectors/query(OFFLINE_HOST, {vector: [0.1]}, OPTS)))
+    assert(reaches(::vectors/fetch(OFFLINE_HOST, ["a"], OPTS)))
+    assert(reaches(::vectors/fetch(OFFLINE_HOST, ["a"], "ns", OPTS)))
+    assert(reaches(::vectors/fetch-by-metadata(OFFLINE_HOST, {a: 1}, {}, OPTS)))
+    assert(reaches(::vectors/update(OFFLINE_HOST, "a", {values: [0.1]}, OPTS)))
+    assert(reaches(::vectors/update(OFFLINE_HOST, "a", {values: [0.1]}, "ns", OPTS)))
+    assert(reaches(::vectors/update-by-filter(OFFLINE_HOST, {a: 1}, {b: 2}, {}, OPTS)))
+    assert(reaches(::vectors/list-ids(OFFLINE_HOST, {}, OPTS)))
+    assert(reaches(::vectors/list-all-ids(OFFLINE_HOST, {}, OPTS)))
+    assert(reaches(::vectors/delete-vectors(OFFLINE_HOST, {ids: ["a"]}, OPTS)))
+    assert(reaches(::vectors/describe-stats(OFFLINE_HOST, null, OPTS)))
+    assert(reaches(::namespaces/list-namespaces(OFFLINE_HOST, {}, OPTS)))
+    assert(reaches(::namespaces/describe-namespace(OFFLINE_HOST, "ns", OPTS)))
+    assert(reaches(::namespaces/create-namespace(OFFLINE_HOST, "ns", null, OPTS)))
+    assert(reaches(::namespaces/delete-namespace(OFFLINE_HOST, "ns", OPTS)))
+    assert(reaches(::records/upsert-records(OFFLINE_HOST, "ns", [{_id: "a"}], OPTS)))
+    assert(reaches(::records/search-records(OFFLINE_HOST, "ns", "q", {}, OPTS)))
+}
+
+test-opts-reach-every-control-plane-function
+meta ["test"] fn () {
+    blank {api-key: ""}
+    assert(stops-at-opts(::indexes/list-indexes(blank)))
+    assert(stops-at-opts(::indexes/describe-index("docs", blank)))
+    assert(stops-at-opts(::indexes/create-index("docs", 3, {}, blank)))
+    assert(stops-at-opts(::indexes/create-index-from-schema("docs", {fields: {}}, {}, blank)))
+    assert(stops-at-opts(::indexes/create-index-for-model("docs", "m", {}, blank)))
+    assert(stops-at-opts(::indexes/configure-index("docs", {}, blank)))
+    assert(stops-at-opts(::indexes/delete-index("docs", blank)))
+    assert(stops-at-opts(::inference/embed("m", ["t"], null, blank)))
+    assert(stops-at-opts(::inference/rerank("m", "q", ["d"], {}, blank)))
+}
+
+test-explicit-key-arity-still-works
+meta ["test"] fn () {
+    assert(stops-at-opts(::api/json("GET", "https://api.pinecone.io/indexes", "", "")))
+    assert(stops-at-opts(::api/ndjson("https://x.pinecone.io/r", [], "")))
+}
+
+test-existing-arity-reads-ctx
+meta ["test"] fn () {
+    before ::hot::ctx/get("pinecone.api.key")
+    ::hot::ctx/set("pinecone.api.key", "")
+    out ::indexes/list-indexes()
+    assert(is-err(out))
+    assert(contains(err-message(out), "pinecone.api.key"))
+    ::hot::ctx/set("pinecone.api.key", before)
+}

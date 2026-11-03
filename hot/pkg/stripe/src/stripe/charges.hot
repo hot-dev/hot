@@ -1,0 +1,63 @@
+::stripe::charges ns
+meta {
+    doc: """Charges (read-only): the individual payment attempts behind PaymentIntents, with outcome, receipt, and fee details. Create payments with `::stripe::payment-intents`. See https://docs.stripe.com/api/charges."""
+}
+
+api-call ::stripe::api/call
+seg ::stripe::api/encode-id
+
+get-charge
+meta {
+    doc: """GET /v1/charges/{charge} - Retrieve a charge by ID. Optional `params` such as `{expand: ["balance_transaction"]}` for fees and net amount."""
+}
+fn
+(charge: Str): Map {
+  get-charge(charge, {})
+},
+(charge: Str, params: Map): Map {
+  get-charge(charge, params, {})
+},
+(charge: Str, params: Map, opts: Map): Map {
+  api-call("GET", `/v1/charges/${seg(charge)}`, params, opts)
+}
+
+ListChargesRequest type {
+  customer: Str?,
+  payment_intent: Str?,
+  transfer_group: Str?,
+  created: Any?,
+  limit: Int?,
+  starting_after: Str?,
+  ending_before: Str?,
+  expand: Vec<Str>?
+}
+
+list-charges
+meta {
+    doc: """GET /v1/charges - List charges, most recent first. Filter by `customer`, `payment_intent`, or `created`."""
+}
+fn
+(): Map {
+  list-charges(ListChargesRequest({}))
+},
+(request: ListChargesRequest): Map {
+  list-charges(request, {})
+},
+(request: ListChargesRequest, opts: Map): Map {
+  api-call("GET", "/v1/charges", request, opts)
+}
+
+search-charges
+meta {
+    doc: """GET /v1/charges/search - Search charges with Stripe's search query language, e.g. `amount>999 AND status:"succeeded"`. Pass `next_page` back as `page` in `params` to continue."""
+}
+fn
+(query: Str): Map {
+  search-charges(query, {})
+},
+(query: Str, params: Map): Map {
+  search-charges(query, params, {})
+},
+(query: Str, params: Map, opts: Map): Map {
+  api-call("GET", "/v1/charges/search", {...params, query: query}, opts)
+}

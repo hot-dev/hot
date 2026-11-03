@@ -1,0 +1,457 @@
+::quickbooks::auth ns
+meta {
+    ctx: {
+        "quickbooks.access.token": {required: false},
+        "quickbooks.refresh.token": {required: false},
+        "quickbooks.client.id": {required: false, secret: false},
+        "quickbooks.client.secret": {required: false},
+        "quickbooks.token.store": {required: false, secret: false}
+    },
+    doc: """
+    Credential resolution, the per-run access-token cache, and the opt-in
+    store-backed token keeper. Usually used indirectly through
+    `::quickbooks::api`.
+
+    **Sources.** Every request takes an `opts` Map; its credential keys
+    override context for that call, which is how one run acts for many
+    companies:
+
+    | Credential | `opts` keys | Context variables |
+    |---|---|---|
+    | Access token | `access-token` | `quickbooks.access.token` |
+    | Token keeper | `token-store` (+ `token-store-key`) | `quickbooks.token.store` |
+    | Refresh token | `refresh-token` | `quickbooks.refresh.token` |
+    | App (for refresh) | `client-id`, `client-secret` | `quickbooks.client.id`, `quickbooks.client.secret` |
+
+    When `opts` carries a primary credential (`access-token`,
+    `token-store` or `refresh-token`) context credentials are ignored for
+    the call; the app's client id and secret still fall back to context.
+    Within one source the order is access token, keeper, refresh token.
+    A credential key in `opts` that is blank or null is an Err naming the
+    key, never a fallback to context. Per-call credentials are marked, so
+    they are masked in call records.
+
+    **Run cache.** A refreshed access token is cached in the run's
+    context (as a secret) until a minute before it expires, together with
+    the newest refresh token, so a run that makes 200 calls refreshes once
+    and a rotated refresh token is used for any later refresh in the same
+    run. `current-refresh-token(opts)` returns that newest value: persist
+    it at the end of the run if you are not using the keeper.
+
+    **Token keeper (opt-in).** Set `quickbooks.token.store` (or
+    `opts.token-store`) to the name of a `::hot::store` Map. Entries are
+    keyed by realm id (or `opts.token-store-key`) and hold the refresh
+    token, the current access token and their expiries. A run reads the
+    entry, reuses its access token while fresh, and otherwise refreshes
+    and writes the result back with `::hot::store/put-if`, so rotated
+    refresh tokens are persisted for you. Seed an entry once with
+    `keeper-seed` (or let the first refresh use `quickbooks.refresh.token`).
+
+    *Race note.* Two runs that find the same stale entry can both
+    refresh with the same refresh token. `put-if` lets exactly one write
+    win; the loser re-reads the entry and uses the winner's tokens when
+    they are fresh. Intuit normally returns the same refresh token within
+    a day, so both refreshes succeed, but if your workload refreshes the
+    same company from many concurrent runs, route refreshes through one
+    scheduled function instead. Store values are not encrypted beyond
+    the platform's storage; restrict who can read the store.
+    """
+}
+
+::ctx ::hot::ctx
+::hash ::hot::hash
+::store ::hot::store
+::oauth ::quickbooks::oauth
+
+CACHE_PREFIX "quickbooks.token-cache."
+EXPIRY_MARGIN_SECONDS 60
+
+// Credential keys that are an Err when present in `opts` but blank or null.
+NO_FALLBACK_KEYS ["access-token", "refresh-token", "token-store", "token-store-key", "client-id", "client-secret"]
+
+// Keys an `opts` Map may carry that belong to this package (credentials,
+// company, version, retry) rather than to the API being called.
+CREDENTIAL_KEYS [
+  "access-token",
+  "refresh-token",
+  "client-id",
+  "client-secret",
+  "token-store",
+  "token-store-key",
+  "realm-id",
+  "environment",
+  "minorversion",
+  "retry",
+  "request-id",
+  "idempotent"
+]
+
+is-blank ::quickbooks::oauth/is-blank
+now-ms ::quickbooks::oauth/now-ms
+token-error ::quickbooks::oauth/token-error
+
+// ---------------------------------------------------------------------------
+// Resolution (pure)
+// ---------------------------------------------------------------------------
+
+has-primary-credential
+meta {
+    doc: """True when `source` carries `access-token`, `token-store` or `refresh-token`."""
+}
+fn (source: Map): Bool {
+  or(
+    not(is-blank(get(source, "access-token"))),
+    not(is-blank(get(source, "token-store"))),
+    not(is-blank(get(source, "refresh-token")))
+  )
+}
+
+ctx-source
+meta {doc: """The credential source read from context, in the `opts` shape."""}
+fn (): Map {
+  {
+    access-token: ::ctx/get("quickbooks.access.token"),
+    refresh-token: ::ctx/get("quickbooks.refresh.token"),
+    token-store: ::ctx/get("quickbooks.token.store"),
+    client-id: ::ctx/get("quickbooks.client.id"),
+    client-secret: ::ctx/get("quickbooks.client.secret")
+  }
+}
+
+merge-sources
+meta {
+    doc: """Pick the source for a call: `opts` when it has a primary credential (client id and secret still fall back to `ctx`), else `ctx`. Pure."""
+}
+fn (opts: Map, ctx: Map): Map {
+  base if(has-primary-credential(opts), opts, ctx)
+  {
+    ...base,
+    client-id: or(get(opts, "client-id"), get(ctx, "client-id")),
+    client-secret: or(get(opts, "client-secret"), get(ctx, "client-secret")),
+    token-store-key: get(opts, "token-store-key")
+  }
+}
+
+credentials-from
+meta {
+    doc: """
+    Turn a source Map into resolved credentials: `{kind: "token", token}`,
+    `{kind: "keeper", store, key, seed-refresh-token, client-id,
+    client-secret}` or `{kind: "refresh", refresh-token, client-id,
+    client-secret}`. `realm-id` keys keeper entries when no
+    `token-store-key` is given. Returns a `TokenError` when nothing usable
+    is set. Pure.
+    """
+}
+fn (source: Map, realm-id: Str?): Map {
+  app-missing or(is-blank(get(source, "client-id")), is-blank(get(source, "client-secret")))
+  app-error token-error("quickbooks: refreshing needs the app's client id and secret. Set quickbooks.client.id and quickbooks.client.secret, or pass client-id and client-secret in opts.")
+  cond {
+    not(is-blank(get(source, "access-token"))) => { {kind: "token", token: Str(get(source, "access-token"))} }
+
+    not(is-blank(get(source, "token-store"))) => {
+      key or(get(source, "token-store-key"), realm-id)
+      cond {
+        is-blank(key) => { err(token-error("quickbooks: the token keeper needs a realm id or opts.token-store-key to key its entry")) }
+        app-missing => { err(app-error) }
+        => {
+          {
+            kind: "keeper",
+            store: Str(get(source, "token-store")),
+            key: Str(key),
+            seed-refresh-token: if(is-blank(get(source, "refresh-token")), null, Str(get(source, "refresh-token"))),
+            client-id: Str(get(source, "client-id")),
+            client-secret: Str(get(source, "client-secret"))
+          }
+        }
+      }
+    }
+
+    not(is-blank(get(source, "refresh-token"))) => {
+      cond {
+        app-missing => { err(app-error) }
+        => {
+          {
+            kind: "refresh",
+            refresh-token: Str(get(source, "refresh-token")),
+            client-id: Str(get(source, "client-id")),
+            client-secret: Str(get(source, "client-secret"))
+          }
+        }
+      }
+    }
+
+    => {
+      err(token-error("quickbooks: no credentials configured. Set quickbooks.access.token, or quickbooks.refresh.token with quickbooks.client.id and quickbooks.client.secret, in Context Variables, or pass access-token / refresh-token in opts."))
+    }
+  }
+}
+
+resolve-credentials
+meta {
+    doc: """Resolve the credentials for a call from `opts` and context, marking per-call credentials so they are masked in call records. A credential key in `opts` that is blank or null is a `TokenError` naming the key."""
+}
+fn (opts: Map, realm-id: Str?): Map {
+  ::ctx/mark-secret([get(opts, "access-token"), get(opts, "refresh-token"), get(opts, "client-secret")])
+  blank ::oauth/blank-option(opts, NO_FALLBACK_KEYS)
+  cond {
+    is-some(blank) => {
+      err(token-error(`quickbooks: ${blank} is in the call's opts but is blank or null. Pass a value, or leave ${blank} out to use context.`))
+    }
+    => { credentials-from(merge-sources(opts, ctx-source()), realm-id) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Cache entries (pure)
+// ---------------------------------------------------------------------------
+
+cache-key
+meta {
+    doc: """The run-context key a token is cached under, or null for explicit access tokens. Derived from the app and the refresh token (or the keeper store and key), hashed."""
+}
+fn (creds: Map): Str? {
+  cond {
+    eq(creds.kind, "refresh") => { concat(CACHE_PREFIX, ::hash/sha256(join(["refresh", creds.client-id, creds.refresh-token], "|"))) }
+    eq(creds.kind, "keeper") => { concat(CACHE_PREFIX, ::hash/sha256(join(["keeper", creds.store, creds.key], "|"))) }
+    => { null }
+  }
+}
+
+token-entry
+meta {
+    doc: """The cached or stored form of a `TokenSet`: `{access-token, expires-at, refresh-token, refresh-token-expires-at, updated-at}`; `expires-at` is pulled in by `EXPIRY_MARGIN_SECONDS`."""
+}
+fn (tokens: Map, now: Int): Map {
+  expires-in or(get(tokens, "expires-in"), 3600)
+  filter-vals({
+    access-token: get(tokens, "access-token"),
+    expires-at: add(now, mul(sub(expires-in, EXPIRY_MARGIN_SECONDS), 1000)),
+    refresh-token: get(tokens, "refresh-token"),
+    refresh-token-expires-at: get(tokens, "refresh-token-expires-at"),
+    updated-at: now
+  }, is-some)
+}
+
+is-fresh
+meta {
+    doc: """True when an entry has an access token that has not reached its margin-adjusted expiry."""
+}
+fn (entry: Any, now: Int): Bool {
+  and(is-map(entry), is-some(get(entry, "access-token")), lt(now, or(get(entry, "expires-at"), 0)))
+}
+
+keeper-refresh-token
+meta {
+    doc: """The refresh token to use for a keeper entry: the stored one, else the seed. Null when neither exists."""
+}
+fn (entry: Any, seed: Str?): Str? {
+  stored if(is-map(entry), get(entry, "refresh-token"), null)
+  if(is-blank(stored), seed, stored)
+}
+
+// ---------------------------------------------------------------------------
+// Minting
+// ---------------------------------------------------------------------------
+
+mark-entry
+meta {
+    doc: """Mask the tokens in a keeper entry and return it unchanged. Null passes through. Exposed for testing."""
+}
+fn (entry: Any): Any {
+  if(is-map(entry), ::ctx/mark-secret([get(entry, "access-token"), get(entry, "refresh-token")]), null)
+  entry
+}
+
+store-map fn (name: Str) {
+  ::store/Map({name: name})
+}
+
+keeper-seed
+meta {
+    doc: """
+    Seed (or replace) a keeper entry with a refresh token, for example
+    right after `::quickbooks::oauth/exchange-code`. Pass the whole
+    `TokenSet` to store its access token too. Returns the entry written.
+
+    ```hot
+    tokens ::quickbooks::oauth/exchange-code(cb.code, redirect-uri)
+    ::quickbooks::auth/keeper-seed("quickbooks-tokens", cb.realm-id, tokens)
+    ```
+    """
+}
+fn (store-name: Str, key: Str, tokens: Str | Map): Map {
+  now now-ms()
+  entry mark-entry(if(is-str(tokens), {refresh-token: tokens, updated-at: now}, token-entry(untype(tokens), now)))
+  ::store/put(store-map(store-name), key, entry)
+  entry
+}
+
+keeper-entry
+meta {
+    doc: """Read a keeper entry (null when absent). The entry holds tokens: never log it."""
+}
+fn (store-name: Str, key: Str): Map? {
+  mark-entry(::store/get(store-map(store-name), key))
+}
+
+refresh-into-entry fn (creds: Map, refresh-token: Str, now: Int): Map {
+  tokens ::oauth/refresh(refresh-token, {client-id: creds.client-id, client-secret: creds.client-secret})
+  if(is-err(tokens), tokens, token-entry(untype(tokens), now))
+}
+
+keeper-mint
+meta {
+    doc: """Return a fresh entry for keeper credentials: the stored one when fresh, else refresh and write back with `put-if` (re-reading on a lost race)."""
+}
+fn (creds: Map, now: Int): Map {
+  sm store-map(creds.store)
+  current mark-entry(::store/get(sm, creds.key))
+  cond {
+    is-fresh(current, now) => { current }
+    => {
+      rt keeper-refresh-token(current, get(creds, "seed-refresh-token"))
+      cond {
+        is-blank(rt) => {
+          err(token-error(`quickbooks: the token keeper has no refresh token for this company. Seed it with ::quickbooks::auth/keeper-seed or set quickbooks.refresh.token.`))
+        }
+        => {
+          fresh refresh-into-entry(creds, rt, now)
+          cond {
+            is-err(fresh) => { fresh }
+            ::store/put-if(sm, creds.key, current, fresh) => { fresh }
+            => {
+              // Another run wrote first; prefer its tokens when usable.
+              winner mark-entry(::store/get(sm, creds.key))
+              if(is-fresh(winner, now), winner, fresh)
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+mint-entry fn (creds: Map, cached: Any, now: Int): Map {
+  cond {
+    eq(creds.kind, "keeper") => { keeper-mint(creds, now) }
+    => {
+      // Use the newest refresh token seen in this run (it may have rotated).
+      rt keeper-refresh-token(cached, creds.refresh-token)
+      refresh-into-entry(creds, rt, now)
+    }
+  }
+}
+
+bearer
+meta {
+    doc: """
+    Resolve a bearer token for resolved credentials, using the run cache.
+    Returns `{token, cache-key, cached}` (`cached` is true when the token
+    came from the cache, so a 401 should `evict` and retry), or a
+    `TokenError`.
+    """
+}
+fn (creds: Map): Map {
+  cond {
+    eq(creds.kind, "token") => { {token: creds.token, cache-key: null, cached: false} }
+    => {
+      key cache-key(creds)
+      now now-ms()
+      hit ::ctx/get(key)
+      cond {
+        is-fresh(hit, now) => { {token: hit.access-token, cache-key: key, cached: true} }
+        => {
+          entry mint-entry(creds, hit, now)
+          cond {
+            is-err(entry) => { entry }
+            => {
+              ::ctx/set-secret(key, entry)
+              {token: entry.access-token, cache-key: key, cached: false}
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+evict
+meta {
+    doc: """Expire a cached access token (after a 401) while keeping the newest refresh token, and expire a keeper entry's access token. No-op for null."""
+}
+fn (creds: Map, cache-key: Str?): Bool {
+  cond {
+    is-null(cache-key) => { false }
+    => {
+      hit ::ctx/get(cache-key)
+      if(is-map(hit), ::ctx/set-secret(cache-key, {...hit, expires-at: 0}), null)
+      cond {
+        eq(creds.kind, "keeper") => {
+          sm store-map(creds.store)
+          current mark-entry(::store/get(sm, creds.key))
+          if(is-map(current), ::store/put-if(sm, creds.key, current, {...current, expires-at: 0}), false)
+          true
+        }
+        => { true }
+      }
+    }
+  }
+}
+
+access-token
+meta {
+    doc: """
+    An access token for a call from `opts` and context (refreshing and
+    caching as needed), or a `TokenError`.
+
+    ```hot
+    token ::quickbooks::auth/access-token({refresh-token: stored-refresh-token})
+    ```
+    """
+}
+fn
+(): Str {
+  access-token({})
+},
+(opts: Map): Str {
+  creds resolve-credentials(opts, or(get(opts, "realm-id"), ::ctx/get("quickbooks.realm.id")))
+  cond {
+    is-err(creds) => { creds }
+    => {
+      auth bearer(creds)
+      if(is-err(auth), auth, auth.token)
+    }
+  }
+}
+
+current-refresh-token
+meta {
+    doc: """
+    The newest refresh token known to this run for the credentials in
+    `opts` / context: the rotated value when a refresh in this run
+    returned one, else the configured one (null for access-token
+    credentials). Persist it when you are not using the token keeper.
+
+    ```hot
+    latest ::quickbooks::auth/current-refresh-token({refresh-token: stored})
+    if(ne(latest, stored), save-refresh-token(realm-id, latest), null)
+    ```
+    """
+}
+fn
+(): Str? {
+  current-refresh-token({})
+},
+(opts: Map): Str? {
+  creds resolve-credentials(opts, or(get(opts, "realm-id"), ::ctx/get("quickbooks.realm.id")))
+  cond {
+    is-err(creds) => { null }
+    eq(creds.kind, "token") => { null }
+    => {
+      hit ::ctx/get(cache-key(creds))
+      fallback if(eq(creds.kind, "refresh"), creds.refresh-token, keeper-refresh-token(keeper-entry(creds.store, creds.key), get(creds, "seed-refresh-token")))
+      keeper-refresh-token(hit, fallback)
+    }
+  }
+}

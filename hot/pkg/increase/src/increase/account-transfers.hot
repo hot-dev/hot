@@ -1,0 +1,91 @@
+::increase::account-transfers ns
+meta {
+    doc: """
+    Account Transfers: book transfers between two of your Increase
+    accounts. They complete instantly unless `require_approval` holds them
+    in `pending_approval`.
+    """
+}
+
+::api ::increase::api
+seg ::increase::api/seg
+
+create-account-transfer
+meta {
+    doc: """
+    POST /account_transfers: create an Account Transfer. Moves money: `opts` must carry an
+    `idempotency-key` (the call errs without one and sends nothing), and
+    the call is never retried. `params` needs `account_id`, `amount`, `description`, `destination_account_id`.
+
+    Both accounts must be yours at Increase; the transfer is instant.
+
+    **Example**
+
+    ```hot
+    ::increase::account-transfers/create-account-transfer({
+      account_id: "account_in71c4amph0vgo2qllky",
+      destination_account_id: "account_uf16sut2ct5bevmq3eh",
+      amount: 100,
+      description: "Move to reserve",
+      require_approval: true
+    }, {idempotency-key: "reserve-2026-11"})
+    ```
+
+    Set `require_approval: true` (or the `increase.transfers.require-approval`
+    context variable) so a person approves the transfer before it is sent.
+    """
+}
+fn (params: Map, opts: Map): Map {
+  ::api/move-money("/account_transfers", params, ["account_id", "amount", "description", "destination_account_id"], true, opts, "create-account-transfer")
+}
+
+get-account-transfer
+meta {
+    doc: """GET /account_transfers/{id}: retrieve an Account Transfer."""
+}
+fn
+(transfer-id: Str): Map {
+  get-account-transfer(transfer-id, {})
+},
+(transfer-id: Str, opts: Map): Map {
+  ::api/call("GET", `/account_transfers/${seg(transfer-id)}`, {}, opts)
+}
+
+list-account-transfers
+meta {
+    doc: """GET /account_transfers: one page of Account Transfers (`{data, next_cursor}`). Filters: `account_id`, `idempotency_key`, `created_at: {after, before, on_or_after, on_or_before}`, `limit`, `cursor`."""
+}
+fn
+(): Map {
+  list-account-transfers({})
+},
+(params: Map): Map {
+  list-account-transfers(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/list-page("/account_transfers", params, opts)
+}
+
+approve-account-transfer
+meta {
+    doc: """POST /account_transfers/{id}/approve: approve an Account Transfer in `pending_approval`. Approving releases the transfer to be sent: agents must not approve on their own; leave it to a person (in the Increase dashboard, or through your own approval step that calls this)."""
+}
+fn
+(transfer-id: Str): Map {
+  approve-account-transfer(transfer-id, {})
+},
+(transfer-id: Str, opts: Map): Map {
+  ::api/call("POST", `/account_transfers/${seg(transfer-id)}/approve`, {}, opts)
+}
+
+cancel-account-transfer
+meta {
+    doc: """POST /account_transfers/{id}/cancel: cancel an Account Transfer that is still `pending_approval`."""
+}
+fn
+(transfer-id: Str): Map {
+  cancel-account-transfer(transfer-id, {})
+},
+(transfer-id: Str, opts: Map): Map {
+  ::api/call("POST", `/account_transfers/${seg(transfer-id)}/cancel`, {}, opts)
+}

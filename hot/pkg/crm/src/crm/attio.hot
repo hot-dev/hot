@@ -1,17 +1,31 @@
 ::crm::attio ns
+meta {
+    doc: """The Attio backend for `::crm`: people, companies, deals, and notes over `hot.dev/attio`. Called through `::crm`; the builders are exposed for testing."""
+}
 
+::ctx ::hot::ctx
 ::records ::attio::records
 ::notes ::attio::notes
+
+is-blank-value ::crm/is-blank-value
 
 // Attio value entries can be plain or {value/email_address/...} shaped;
 // pull the useful scalar out of the first entry.
 first-value fn (values: Map, attribute: Str, key: Str): Any {
   entries get(values, attribute, [])
   cond {
-    is-empty(entries) => { null }
+    or(is-null(entries), is-empty(entries)) => { null }
     => { get(first(entries), key) }
   }
 }
+
+record-ref fn (object: Str, record-id: Any): Any {
+  if(is-blank-value(record-id), null, [{target_object: object, target_record_id: Str(record-id)}])
+}
+
+// ============================================================================
+// Normalizers
+// ============================================================================
 
 normalize-contact
 meta {
@@ -24,73 +38,373 @@ fn (record: Map): ::crm/Contact {
     email: first-value(values, "email_addresses", "email_address"),
     first-name: first-value(values, "name", "first_name"),
     last-name: first-value(values, "name", "last_name"),
+    phone: first-value(values, "phone_numbers", "original_phone_number"),
+    company-id: first-value(values, "company", "target_record_id"),
     provider: "attio",
     raw: untype(record)
   })
 }
 
-normalize-company fn (record: Map): ::crm/Company {
+normalize-company
+meta {
+    doc: """Normalize an Attio company record into `::crm/Company`. Exposed for testing."""
+}
+fn (record: Map): ::crm/Company {
   values or(get(record, "values"), {})
   ::crm/Company({
     id: record.id.record_id,
     name: first-value(values, "name", "value"),
-    domain: first-value(values, "domains", "domain"),
+    domain: ::crm/normalize-domain(first-value(values, "domains", "domain")),
     provider: "attio",
     raw: untype(record)
   })
 }
 
+normalize-deal
+meta {
+    doc: """Normalize an Attio deal record into `::crm/Deal` (`stage` is the status title; Attio deals have no close date). Exposed for testing."""
+}
+fn (record: Map): ::crm/Deal {
+  values or(get(record, "values"), {})
+  status first-value(values, "stage", "status")
+  ::crm/Deal({
+    id: record.id.record_id,
+    name: first-value(values, "name", "value"),
+    stage: if(is-map(status), get(status, "title"), status),
+    amount: first-value(values, "value", "currency_value"),
+    close-date: null,
+    company-id: first-value(values, "associated_company", "target_record_id"),
+    provider: "attio",
+    raw: untype(record)
+  })
+}
+
+normalize-activity
+meta {
+    doc: """Normalize an Attio note into `::crm/Activity`. Exposed for testing."""
+}
+fn (note: Map): ::crm/Activity {
+  ::crm/Activity({
+    id: get(or(get(note, "id"), {}), "note_id"),
+    subject: get(note, "title"),
+    body: get(note, "content_plaintext"),
+    occurred-at: get(note, "created_at"),
+    provider: "attio",
+    raw: untype(note)
+  })
+}
+
+// ============================================================================
+// Builders (pure)
+// ============================================================================
+
+needs-existing-name
+meta {
+    doc: """True when exactly one of first/last name is given. Attio's personal-name is a single value written whole, so the missing part must come from the existing record or it would be blanked. Exposed for testing."""
+}
+fn (fields: Map): Bool {
+  has-first not(is-blank-value(get(fields, "first-name")))
+  has-last not(is-blank-value(get(fields, "last-name")))
+  ne(has-first, has-last)
+}
+
 build-person-values
 meta {
-    doc: """Build Attio person values from normalized fields. Exposed for testing."""
+    doc: """
+    Build Attio person values from normalized fields, writing only what
+    was provided. The name is written only when a name part is given;
+    a part that is not given is taken from `existing` (a `Contact` or
+    null) so a lone `first-name` does not clear the stored last name.
+    `company-id` links the person's `company`. Exposed for testing.
+    """
+}
+fn
+(fields: Map): Map {
+  build-person-values(fields, null, null)
+},
+(fields: Map, existing: Any, company-id: Any): Map {
+  given-first get(fields, "first-name")
+  given-last get(fields, "last-name")
+  first-name if(is-blank-value(given-first), get(or(existing, {}), "first-name"), given-first)
+  last-name if(is-blank-value(given-last), get(or(existing, {}), "last-name"), given-last)
+  has-name or(not(is-blank-value(given-first)), not(is-blank-value(given-last)))
+  phone get(fields, "phone")
+  filter-vals({
+    email_addresses: [{email_address: fields.email}],
+    name: if(has-name, [{
+      first_name: or(first-name, ""),
+      last_name: or(last-name, ""),
+      full_name: ::crm/full-name(first-name, last-name)
+    }], null),
+    phone_numbers: if(is-blank-value(phone), null, [{original_phone_number: phone}]),
+    company: record-ref("companies", company-id)
+  }, is-some)
+}
+
+build-company-values
+meta {
+    doc: """Attio company values for an assert on `domains`: the normalized domain, and `name` when given. Exposed for testing."""
 }
 fn (fields: Map): Map {
-  first-name get(fields, "first-name")
-  last-name get(fields, "last-name")
-  base {email_addresses: [{email_address: fields.email}]}
+  name get(fields, "name")
+  filter-vals({
+    domains: [{domain: fields.domain}],
+    name: if(is-blank-value(name), null, [{value: name}])
+  }, is-some)
+}
+
+deal-owner
+meta {
+    ctx: {"crm.attio.deal-owner": {required: false, secret: false}},
+    doc: """The deal owner's workspace-member email: `fields.owner`, else `crm.attio.deal-owner`."""
+}
+fn (fields: Map): Any {
+  or(get(fields, "owner"), ::ctx/get("crm.attio.deal-owner"))
+}
+
+build-deal-values
+meta {
+    doc: """Attio deal values from normalized fields, omitting unset ones: `name`, `stage` (status title), `value` (`amount`), `owner` (member email), `associated_company`, `associated_people`. Exposed for testing."""
+}
+fn (fields: Map, owner: Any): Map {
+  name get(fields, "name")
+  stage get(fields, "stage")
+  amount get(fields, "amount")
+  filter-vals({
+    name: if(is-blank-value(name), null, [{value: name}]),
+    stage: if(is-blank-value(stage), null, [{status: stage}]),
+    value: if(is-null(amount), null, [{currency_value: amount}]),
+    owner: if(is-blank-value(owner), null, [{workspace_member_email_address: owner}]),
+    associated_company: record-ref("companies", get(fields, "company-id")),
+    associated_people: record-ref("people", get(fields, "contact-id"))
+  }, is-some)
+}
+
+build-deal-filter
+meta {
+    doc: """The deals query for a `find-deals` filter: `name` and `stage` equality, and `associated_company`/`associated_people` references, joined with `$and`; newest first. Unset keys add no condition. Exposed for testing."""
+}
+fn (criteria: Map): Map {
+  name get(criteria, "name")
+  stage get(criteria, "stage")
+  company-id get(criteria, "company-id")
+  contact-id get(criteria, "contact-id")
+  conditions filter([
+    if(is-blank-value(name), null, {name: name}),
+    if(is-blank-value(stage), null, {stage: stage}),
+    if(is-blank-value(company-id), null, {associated_company: {target_object: "companies", target_record_id: company-id}}),
+    if(is-blank-value(contact-id), null, {associated_people: {target_object: "people", target_record_id: contact-id}})
+  ], is-some)
+  filter-vals({
+    filter: if(is-empty(conditions), null, {"$and": conditions}),
+    sorts: [{attribute: "created_at", direction: "desc"}],
+    limit: or(get(criteria, "limit"), 20)
+  }, is-some)
+}
+
+// ============================================================================
+// Contacts
+// ============================================================================
+
+query-first fn
+(object: Str, filter: Map): Any {
+  query-first(object, filter, {})
+},
+(object: Str, filter: Map, opts: Map): Any {
+  out ::records/query-records(object, {filter: filter, limit: 1}, opts)
   cond {
-    and(is-null(first-name), is-null(last-name)) => { base }
+    is-err(out) => { out }
+    is-empty(out.data) => { null }
+    => { first(out.data) }
+  }
+}
+
+find-contact fn
+(email: Str): Any {
+  find-contact(email, {})
+},
+(email: Str, opts: Map): Any {
+  found query-first("people", {email_addresses: {email_address: {"$eq": email}}}, opts)
+  cond {
+    is-err(found) => { found }
+    is-null(found) => { null }
+    => { normalize-contact(found) }
+  }
+}
+
+resolve-company-id
+meta {
+    doc: """The company record to link: `company-id` when given, else the company named `company` (created when none exists), else null."""
+}
+fn
+(fields: Map): Any {
+  resolve-company-id(fields, {})
+},
+(fields: Map, opts: Map): Any {
+  company-id get(fields, "company-id")
+  company get(fields, "company")
+  cond {
+    not(is-blank-value(company-id)) => { company-id }
+    is-blank-value(company) => { null }
     => {
-      full trim(`${or(first-name, "")} ${or(last-name, "")}`)
-      {...base, name: [{first_name: or(first-name, ""), last_name: or(last-name, ""), full_name: full}]}
+      found query-first("companies", {name: company}, opts)
+      cond {
+        is-err(found) => { found }
+        is-some(found) => { found.id.record_id }
+        => {
+          created ::records/create-record("companies", {name: [{value: company}]}, opts)
+          cond {
+            is-err(created) => { created }
+            => { created.id.record_id }
+          }
+        }
+      }
     }
   }
 }
 
-upsert-contact fn (fields: Map): ::crm/Contact {
-  asserted ::records/assert-record("people", "email_addresses", build-person-values(fields))
-  match asserted {
-    Result.Err => { err(asserted) }
+upsert-contact fn
+(fields: Map): ::crm/Contact {
+  upsert-contact(fields, {})
+},
+(fields: Map, opts: Map): ::crm/Contact {
+  existing if(needs-existing-name(fields), find-contact(fields.email, opts), null)
+  company-id cond {
+    is-err(existing) => { null }
+    => { resolve-company-id(fields, opts) }
+  }
 
-    _ => { normalize-contact(asserted) }
+  cond {
+    is-err(existing) => { existing }
+    is-err(company-id) => { company-id }
+    => {
+      asserted ::records/assert-record("people", "email_addresses", build-person-values(fields, existing, company-id), opts)
+      cond {
+        is-err(asserted) => { asserted }
+        => { normalize-contact(asserted) }
+      }
+    }
   }
 }
 
-find-contact fn (email: Str): Any {
-  out ::records/query-records("people", {
-    filter: {email_addresses: {email_address: {"$eq": email}}},
-    limit: 1
-  })
+// ============================================================================
+// Activities
+// ============================================================================
+
+log-activity fn
+(contact-id: Str, body: Str, options: Map): ::crm/Activity {
+  log-activity(contact-id, body, options, {})
+},
+(contact-id: Str, body: Str, options: Map, opts: Map): ::crm/Activity {
+  note ::notes/create-note("people", contact-id, or(get(options, "subject"), "Note"), body, opts)
+  cond {
+    is-err(note) => { note }
+    => { normalize-activity(note) }
+  }
+}
+
+list-activities fn
+(contact-id: Str, limit: Int): Vec {
+  list-activities(contact-id, limit, {})
+},
+(contact-id: Str, limit: Int, opts: Map): Vec {
+  out ::notes/list-notes("people", contact-id, opts)
   cond {
     is-err(out) => { out }
-    is-empty(out.data) => { null }
-    => { normalize-contact(first(out.data)) }
+    => {
+      notes map(or(get(out, "data"), []), normalize-activity)
+      newest reverse(sort-by(notes, (n) { Str(or(n.occurred-at, "")) }))
+      slice(newest, 0, min(limit, length(newest)))
+    }
   }
 }
 
-log-activity fn (contact-id: Str, body: Str): Any {
-  ::notes/create-note("people", contact-id, "Note", body)
+// ============================================================================
+// Companies
+// ============================================================================
+
+find-company fn
+(domain: Str): Any {
+  find-company(domain, {})
+},
+(domain: Str, opts: Map): Any {
+  found query-first("companies", {domains: {domain: {"$eq": domain}}}, opts)
+  cond {
+    is-err(found) => { found }
+    is-null(found) => { null }
+    => { normalize-company(found) }
+  }
 }
 
-upsert-company fn (fields: Map): ::crm/Company {
-  values filter-vals({
-    domains: [{domain: get(fields, "domain")}],
-    name: if(is-null(get(fields, "name")), null, [{value: get(fields, "name")}])
-  }, is-some)
-  asserted ::records/assert-record("companies", "domains", values)
-  match asserted {
-    Result.Err => { err(asserted) }
-
-    _ => { normalize-company(asserted) }
+upsert-company fn
+(fields: Map): ::crm/Company {
+  upsert-company(fields, {})
+},
+(fields: Map, opts: Map): ::crm/Company {
+  asserted ::records/assert-record("companies", "domains", build-company-values(fields), opts)
+  cond {
+    is-err(asserted) => { asserted }
+    => { normalize-company(asserted) }
   }
+}
+
+// ============================================================================
+// Deals
+// ============================================================================
+
+find-deals fn
+(criteria: Map): Vec {
+  find-deals(criteria, {})
+},
+(criteria: Map, opts: Map): Vec {
+  out ::records/query-records("deals", build-deal-filter(criteria), opts)
+  cond {
+    is-err(out) => { out }
+    => { map(out.data, normalize-deal) }
+  }
+}
+
+create-deal fn
+(fields: Map): ::crm/Deal {
+  create-deal(fields, {})
+},
+(fields: Map, opts: Map): ::crm/Deal {
+  owner deal-owner(fields)
+  missing filter(["name", "stage"], (k) { is-blank-value(get(fields, k)) })
+  cond {
+    not(is-empty(missing)) => { err(`crm: an Attio deal needs ${join(missing, ", ")}`) }
+    is-blank-value(owner) => { err("crm: an Attio deal needs an owner: pass 'owner' (a workspace member email) or set crm.attio.deal-owner") }
+    => {
+      created ::records/create-record("deals", build-deal-values(fields, owner), opts)
+      cond {
+        is-err(created) => { created }
+        => { normalize-deal(created) }
+      }
+    }
+  }
+}
+
+update-deal fn
+(id: Str, fields: Map): ::crm/Deal {
+  update-deal(id, fields, {})
+},
+(id: Str, fields: Map, opts: Map): ::crm/Deal {
+  values build-deal-values(fields, get(fields, "owner"))
+  written cond {
+    is-empty(values) => { ::records/get-record("deals", id, opts) }
+    => { ::records/update-record("deals", id, values, opts) }
+  }
+
+  cond {
+    is-err(written) => { written }
+    => { normalize-deal(written) }
+  }
+}
+
+move-stage fn
+(id: Str, stage: Str): ::crm/Deal {
+  move-stage(id, stage, {})
+},
+(id: Str, stage: Str, opts: Map): ::crm/Deal {
+  update-deal(id, {stage: stage}, opts)
 }

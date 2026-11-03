@@ -1,0 +1,92 @@
+::quickbooks::test::reports ns
+meta ["test"]
+
+::r ::quickbooks::reports
+
+// A trimmed ProfitAndLoss in the shape Intuit returns.
+PNL {
+    Header: {ReportName: "ProfitAndLoss", StartPeriod: "2026-01-01", EndPeriod: "2026-09-30", Currency: "USD"},
+    Columns: {Column: [
+        {ColTitle: "", ColType: "Account", MetaData: [{Name: "ColKey", Value: "account"}]},
+        {ColTitle: "Total", ColType: "Money", MetaData: [{Name: "ColKey", Value: "total"}]}
+    ]},
+    Rows: {Row: [
+        {
+            Header: {ColData: [{value: "Income"}, {value: ""}]},
+            Rows: {Row: [
+                {ColData: [{value: "Design income", id: "82"}, {value: "2250.00"}], type: "Data"},
+                {
+                    Header: {ColData: [{value: "Landscaping Services", id: "45"}, {value: ""}]},
+                    Rows: {Row: [{ColData: [{value: "Job Materials", id: "46"}, {value: "1500.50"}], type: "Data"}]},
+                    Summary: {ColData: [{value: "Total Landscaping Services"}, {value: "1500.50"}]},
+                    type: "Section"
+                }
+            ]},
+            Summary: {ColData: [{value: "Total Income"}, {value: "3750.50"}]},
+            type: "Section",
+            group: "Income"
+        },
+        {Summary: {ColData: [{value: "Net Income"}, {value: "1000.25"}]}, type: "Section", group: "NetIncome"}
+    ]}
+}
+
+test-column-keys
+meta ["test"] fn () {
+    assert-eq(["account", "Total"], ::r/column-keys(PNL), "ColTitle, else ColKey")
+    dupes {Columns: {Column: [{ColTitle: "Amount"}, {ColTitle: "Amount"}, {ColType: "Date"}, {}]}}
+    assert-eq(["Amount", "Amount_1", "Date", "col3"], ::r/column-keys(dupes), "keys are unique")
+}
+
+test-flatten-report
+meta ["test"] fn () {
+    rows ::r/flatten-report(PNL)
+    assert-eq(5, length(rows))
+
+    design rows[0]
+    assert-eq("Data", design.type)
+    assert-eq("Design income", design.label)
+    assert-eq("82", design.id)
+    assert-eq(["Income"], design.path)
+    assert-eq("Income", design.group)
+    assert-eq({account: "Design income", Total: "2250.00"}, design.values)
+    assert-eq(1, design.depth)
+
+    materials rows[1]
+    assert-eq(["Income", "Landscaping Services"], materials.path, "nested sections extend the path")
+    assert-eq("Income", materials.group, "the nearest group is inherited")
+    assert-eq(2, materials.depth)
+
+    assert-eq("Summary", rows[2].type)
+    assert-eq("Total Landscaping Services", rows[2].label)
+    assert-eq("Total Income", rows[3].label)
+    assert-eq("3750.50", rows[3].values.Total)
+
+    net rows[4]
+    assert-eq("NetIncome", net.group)
+    assert-eq([], net.path)
+    assert-eq("1000.25", net.values.Total)
+}
+
+test-flatten-empty
+meta ["test"] fn () {
+    assert-eq([], ::r/flatten-report({}))
+    assert-eq([], ::r/flatten-report({Columns: {Column: []}, Rows: {}}))
+}
+
+test-parse-amount
+meta ["test"] fn () {
+    assert-eq(Dec("1500.50"), ::r/parse-amount("1500.50"))
+    assert-eq(Dec("-35.5"), ::r/parse-amount(" -35.5 "))
+    assert-eq(Dec(12), ::r/parse-amount(12))
+    assert(is-null(::r/parse-amount("")), "blanks are null")
+    assert(is-null(::r/parse-amount("N/A")), "non-numbers never halt")
+}
+
+test-report-name-check
+meta ["test"] fn () {
+    assert-eq("ProfitAndLoss", ::r/check-name("ProfitAndLoss"))
+    assert(is-err(::r/check-name("../companyinfo")), "path tricks are rejected")
+    assert(is-err(::r/run-report("Profit And Loss")), "invalid names err before any call")
+    assert(in("AgedReceivables", ::r/REPORTS))
+    assert(in("GeneralLedger", ::r/REPORTS))
+}

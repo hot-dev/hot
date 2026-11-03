@@ -2,8 +2,10 @@
 
 #[cfg(test)]
 mod run_tests {
+    use crate::lang::bytecode::Instruction;
     use crate::lang::compiler::Compiler;
     use crate::lang::parser;
+    use crate::lang::runtime::jit_hof::{PipelinePlan, detect_compilable_pipelines};
     use crate::lang::runtime::vm::VirtualMachine;
     use crate::val;
     use crate::val::Val;
@@ -108,6 +110,24 @@ f fn (n: Int): Str {
     reduce(range(n), (acc, i) { concat(acc, `item-${i}-`) }, "")
 }
 length(f(200))"#,
+            // --- Results that change kind between Int and Dec, per element ---
+            r#"::t ns
+f fn (n: Int): Dec {
+    range(1, add(n, 1))
+    |> map((x) { div(x, 2) })
+    |> map((d) { mul(d, 3) })
+    |> reduce((acc, x) { add(acc, x) }, 0)
+}
+f(50)"#,
+            // --- A Str accumulator replaced for every element, newest first ---
+            r#"::t ns
+f fn (n: Int): Str {
+    range(1, add(n, 1))
+    |> map((i) { `item-${i}` })
+    |> map((s) { concat(s, "!") })
+    |> reduce((acc, s) { concat(s, acc) }, "")
+}
+f(10)"#,
             // --- Some/All terminals ---
             r#"::t ns
 f fn (n: Int): Bool {
@@ -154,6 +174,10 @@ f(100)"#,
             )
             .expect("fusion-off run");
             assert_eq!(on, off, "fusion parity mismatch for:\n{}", src);
+            let compiled =
+                compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"threshold": 1}})))
+                    .expect("compiled run");
+            assert_eq!(on, compiled, "compiled code differs for:\n{}", src);
             // sanity: never null/error
             assert!(
                 !matches!(on, Val::Null) && !on.is_err(),
@@ -162,6 +186,608 @@ f(100)"#,
                 src
             );
         }
+    }
+
+    /// Reading a few characters from the start of a string costs the same at
+    /// any length. A read that copied the string would take far longer on the
+    /// large one, so the margin leaves only that able to fail this.
+    #[test]
+    fn reading_the_start_of_a_string_costs_the_same_at_any_length() {
+        let src = r#"::t ns
+fastest-ms fn (f: Fn): Int {
+    tries map(range(3), (_try) {
+        start ::hot::time/epoch-millis(::hot::time/now())
+        done map(range(500), (i) { f(i) })
+        sub(::hot::time/epoch-millis(::hot::time/now()), start)
+    })
+    reduce(tries, min(%1, %2), first(tries))
+}
+timings fn (s: Str): Map {
+    {
+        slice-start: fastest-ms((i) { slice(s, 0, 5) }),
+        get: fastest-ms((i) { get(s, 3) }),
+        nth: fastest-ms((i) { ::hot::coll/nth(s, 3) }),
+        index: fastest-ms((i) { s[3] }),
+    }
+}
+sixteen-mb reduce(range(20), (acc, _i) { concat(acc, acc) }, "0123456789abcdef")
+{small: timings("0123456789"), large: timings(sixteen-mb)}"#;
+        for conf in [
+            Some(val!({"jit": {"mode": "off"}})),
+            Some(val!({"jit": {"threshold": 1}})),
+        ] {
+            let label = format!("{conf:?}");
+            let out = compile_and_run_with_std_conf(src, conf).expect("run");
+            let (Some(Val::Map(small)), Some(Val::Map(large))) = (out.get("small"), out.get("large"))
+            else {
+                panic!("{label}: unexpected result {out:?}");
+            };
+            for (read, small_ms) in small.iter() {
+                let (Val::Int(small_ms), Some(Val::Int(large_ms))) = (small_ms, large.get(read)) else {
+                    panic!("{label}: {read} has no timing");
+                };
+                assert!(
+                    *large_ms <= small_ms * 20 + 100,
+                    "{label}: {read} took {small_ms}ms on 10 characters, {large_ms}ms on 16 MB"
+                );
+            }
+        }
+    }
+
+    /// Reading a Map or Vec shares its storage rather than copying it, which
+    /// is what makes a read cost the same at any size. Each entry of the result
+    /// holds the same collection, reached by a different read: a copy on any of
+    /// those paths gives that entry an allocation of its own. The JIT reads
+    /// values through different code, so both modes run.
+    #[test]
+    fn reads_share_collection_storage() {
+        let src = r#"::t ns
+same fn (x) { x }
+annotated fn (x: Map): Map { x }
+annotated-bytes fn (x: Bytes): Bytes { x }
+bound fn (x) {
+    y x
+    z y
+    z
+}
+held fn (x) {
+    box {x: x}
+    box.x
+}
+reads fn (m: Map, v: Vec, b: Bytes) {
+    reader () { m }
+    bytes-reader () { b }
+    called map([1, 2], (i) { same(m) })
+    mapped map([1], (i) { v })
+    bytes-mapped map([1], (i) { same(b) })
+    listed [m, v, b]
+    {
+        m: [same(m), annotated(m), bound(m), reader(), called[0], called[1], listed[0], held(m)],
+        v: [same(v), bound(v), mapped[0], listed[1], held(v)],
+        child: [m.child, get(m, "child"), same(m).child],
+        item: [v[0], first(v), get(v, 0), same(v)[0]],
+        b: [same(b), annotated-bytes(b), bound(b), bytes-reader(), bytes-mapped[0], listed[2], held(b)],
+        data: [m.data, get(m, "data"), same(m).data],
+    }
+}
+run fn () {
+    b Bytes([1, 2, 3])
+    m {child: {a: 1}, other: 2, data: Bytes([4, 5])}
+    v [{b: 1}, {b: 2}]
+    {m, v, b, reads: reads(m, v, b)}
+}
+run()
+run()
+run()"#;
+        for conf in [
+            Some(val!({"jit": {"mode": "off"}})),
+            Some(val!({"jit": {"threshold": 1}})),
+        ] {
+            let label = format!("{conf:?}");
+            let out = compile_and_run_with_std_conf(src, conf).expect("run");
+            let field = |value: &Val, name: &str| value.get(name).expect(name);
+            let reads = field(&out, "reads");
+            let m = field(&out, "m");
+            let v = field(&out, "v");
+            let b = field(&out, "b");
+            let child = field(&m, "child");
+            let data = field(&m, "data");
+            let Val::Vec(items) = &v else {
+                panic!("v is {v:?}");
+            };
+            for (expected, name) in [
+                (&m, "m"),
+                (&v, "v"),
+                (&child, "child"),
+                (&items[0], "item"),
+                (&b, "b"),
+                (&data, "data"),
+            ] {
+                let Val::Vec(held) = field(&reads, name) else {
+                    panic!("{name} is not a Vec");
+                };
+                for (index, value) in held.iter().enumerate() {
+                    let shared = match (expected, value) {
+                        (Val::Map(a), Val::Map(b)) => Arc::ptr_eq(a, b),
+                        (Val::Vec(a), Val::Vec(b)) => Arc::ptr_eq(a, b),
+                        (Val::Bytes(a), Val::Bytes(b)) => Arc::ptr_eq(a, b),
+                        _ => false,
+                    };
+                    assert!(shared, "{label}: read {index} of {name} was copied: {value:?}");
+                }
+            }
+        }
+    }
+
+    /// The other half of sharing: writing one holder of a collection leaves
+    /// every other holder as it was, in both JIT modes. `shared-values.hot`
+    /// covers the language's writes one by one.
+    #[test]
+    fn writes_leave_the_other_holders_of_a_collection() {
+        let src = r#"::t ns
+write fn (m: Map): Map {
+    m.child.a 2
+    m
+}
+m {child: {a: 1}}
+held [m]
+written write(m)
+grown assoc(m, "b", 1)
+[m.child.a, held[0].child.a, written.child.a, length(m), length(grown)]"#;
+        assert_same_with_and_without_jit(src, &val!([1, 1, 2, 1, 2]));
+    }
+
+    /// A read costs the same whatever the size of the collection. One that
+    /// scaled would take far longer on the large collection, so the margin
+    /// leaves only that able to fail this. `bench-large-reads.hot` prints the
+    /// numbers.
+    #[test]
+    fn reads_cost_the_same_at_any_size() {
+        let src = r#"::t ns
+ignore-it fn (coll, i) { i }
+fastest-ms fn (f: Fn): Int {
+    tries map(range(3), (_try) {
+        start ::hot::time/epoch-millis(::hot::time/now())
+        done map(range(500), (i) { f(i) })
+        sub(::hot::time/epoch-millis(::hot::time/now()), start)
+    })
+    reduce(tries, min(%1, %2), first(tries))
+}
+rows fn (n: Int): Vec {
+    map(range(n), (i) { {k: `k-${i}`, v: "some text in the value"} })
+}
+timings fn (n: Int, b: Bytes): Map {
+    v rows(n)
+    m index-by(v, %.k)
+    {
+        map-pass: fastest-ms((i) { ignore-it(m, i) }),
+        map-get: fastest-ms((i) { get(m, "k-0") }),
+        map-dot: fastest-ms((i) { m.k-0 }),
+        map-length: fastest-ms((i) { length(m) }),
+        vec-pass: fastest-ms((i) { ignore-it(v, i) }),
+        vec-index: fastest-ms((i) { v[0] }),
+        vec-first: fastest-ms((i) { first(v) }),
+        bytes-pass: fastest-ms((i) { ignore-it(b, i) }),
+        bytes-length: fastest-ms((i) { length(b) }),
+        bytes-get: fastest-ms((i) { get(b, 0) }),
+    }
+}
+sixty-four-mb reduce(range(6), (acc, _i) { concat(acc, acc) }, random-bytes(1000000))
+{small: timings(10, random-bytes(10)), large: timings(200000, sixty-four-mb)}"#;
+        for conf in [
+            Some(val!({"jit": {"mode": "off"}})),
+            Some(val!({"jit": {"threshold": 1}})),
+        ] {
+            let label = format!("{conf:?}");
+            let out = compile_and_run_with_std_conf(src, conf).expect("run");
+            let (Some(Val::Map(small)), Some(Val::Map(large))) = (out.get("small"), out.get("large"))
+            else {
+                panic!("{label}: unexpected result {out:?}");
+            };
+            for (read, small_ms) in small.iter() {
+                let (Val::Int(small_ms), Some(Val::Int(large_ms))) = (small_ms, large.get(read)) else {
+                    panic!("{label}: {read} has no timing");
+                };
+                assert!(
+                    *large_ms <= small_ms * 20 + 100,
+                    "{label}: {read} took {small_ms}ms small, {large_ms}ms large"
+                );
+            }
+        }
+    }
+
+    /// Meta keeps a call written in it unevaluated, and the call runs when the
+    /// value read from meta is passed to a function. That needs a walk over the
+    /// argument, which every other program is spared.
+    #[test]
+    fn a_call_in_meta_runs_when_its_value_is_passed() {
+        let src = r#"::t ns
+bump fn (n: Int): Int { add(n, 1) }
+same fn (x) { x }
+f meta {count: bump(1), list: [bump(2)], plain: 1} fn () { 1 }
+g fn () {
+    m ::hot::meta/get(f)
+    out same(m)
+    [out.count, out.list, out.plain, same(m.list)]
+}
+g()"#;
+        let expected = val!([2, [3], 1, [3]]);
+        let out = compile_and_run_with_std_ast(src).expect("run");
+        assert_eq!(out, expected);
+    }
+
+    /// What `src` gives with `conf`, and how many fused runs compiled code made.
+    fn run_counting_compiled_fused_runs(src: &str, conf: Option<Val>) -> (Val, u64) {
+        let before = crate::lang::runtime::jit::fused_runs_for_test();
+        let out = compile_and_run_with_std_conf(src, conf).expect("run");
+        (out, crate::lang::runtime::jit::fused_runs_for_test() - before)
+    }
+
+    /// A function that crosses the JIT threshold keeps its pipeline fused.
+    /// Compiled code that called each stage on its own ran this about 20x
+    /// slower. A benchmark that stays under the threshold can't see that, so
+    /// this runs past it, at the threshold's default.
+    #[test]
+    fn a_pipeline_stays_fused_once_its_function_is_compiled() {
+        let src = r#"::t ns
+f fn (n: Int): Int {
+    range(1, add(n, 1))
+    |> filter((x) { is-zero(mod(x, 2)) })
+    |> map((x) { mul(x, x) })
+    |> reduce((acc, x) { add(acc, x) }, 0)
+}
+run fn (): Int {
+    reduce(range(150), (_acc, _i) { f(20) }, 0)
+}
+run()"#;
+        let (out, runs) = run_counting_compiled_fused_runs(src, None);
+        assert_eq!(out, val!(1540));
+        assert!(runs >= 40, "compiled code made {runs} fused runs");
+
+        // The kill switch reaches compiled code too.
+        let (out, runs) =
+            run_counting_compiled_fused_runs(src, Some(val!({"jit": {"hof": {"fusion": false}}})));
+        assert_eq!(out, val!(1540));
+        assert_eq!(runs, 0, "fusion is off");
+    }
+
+    /// Fusion runs its stages and their operations natively, so a namespace
+    /// that reaches another function by one of their names runs them as
+    /// written, in compiled code as in the interpreter.
+    #[test]
+    fn compiled_code_does_not_fuse_over_a_shadowed_name() {
+        let src = r#"::t ns
+add fn (a: Int, b: Int): Int { 7 }
+f fn (v: Vec): Int {
+    reduce(v, (acc, x) { add(acc, x) }, 0)
+}
+[f([1, 2]), f([1, 2]), f([1, 2])]"#;
+        let (out, runs) = run_counting_compiled_fused_runs(src, Some(val!({"jit": {"threshold": 1}})));
+        assert_eq!(out, val!([7, 7, 7]));
+        assert_eq!(runs, 0);
+    }
+
+    /// Compiled code tries a fused run and keeps the stages for a de-opt, and
+    /// both paths meet with the same registers. So each of these runs with the
+    /// JIT off, where only the stages run, and compiled from the first call:
+    /// work around the pipeline has to read what it left, and a de-opt has to
+    /// reach the stages. Failures have to match as well.
+    #[test]
+    fn compiled_pipelines_give_what_the_stages_give() {
+        let programs = [
+            // Values made before the pipeline, read after it.
+            r#"::t ns
+f fn (v: Vec, label: Str): Map {
+    before {label: label, size: length(v)}
+    total v
+    |> filter((x) { gt(x, 1) })
+    |> map((x) { mul(x, 2) })
+    |> reduce((acc, x) { add(acc, x) }, 0)
+    again v |> map((x) { add(x, 1) }) |> reduce((acc, x) { add(acc, x) }, 100)
+    {before, total, again, label, v}
+}
+[f([1, 2, 3], "a"), f([1, 2, 3], "a"), f([4, 5], "b")]"#,
+            // A count held raw, then used.
+            r#"::t ns
+f fn (v: Vec): Int {
+    count v |> filter((x) { gt(x, 1) }) |> length()
+    add(mul(count, 10), 1)
+}
+[f([1, 2, 3]), f([]), f([5])]"#,
+            // A pipeline in each arm of a flow.
+            r#"::t ns
+f fn cond (n: Int): Int {
+    gt(n, 5) => { range(n) |> map((x) { mul(x, 2) }) |> reduce((acc, x) { add(acc, x) }, 0) }
+    eq(n, 5) => { range(n) |> filter((x) { gt(x, 1) }) |> length() }
+    => { add(n, 1) }
+}
+[f(9), f(5), f(1), f(9), f(5)]"#,
+            // Bools from `some` and `all`, branched on.
+            r#"::t ns
+f fn (v: Vec): Str {
+    if(v |> map((x) { mul(x, 2) }) |> some((x) { gt(x, 4) }), "some", "none")
+}
+g fn (v: Vec): Str {
+    if(v |> all((x) { gt(x, 0) }), "all", "not all")
+}
+[f([1, 2, 3]), f([1]), g([1, 2]), g([0, 1]), f([]), g([])]"#,
+            // A pipeline among the arguments of a self tail call.
+            r#"::t ns
+f fn cond (i: Int, acc: Int): Int {
+    eq(i, 0) => { acc }
+    => {
+        f(
+            sub(i, 1),
+            add(acc, range(i) |> map((x) { mul(x, 2) }) |> reduce((a, x) { add(a, x) }, 0)),
+        )
+    }
+}
+[f(5, 0), f(50, 1)]"#,
+            // A pipeline with another call's register live around it.
+            r#"::t ns
+f fn (n: Int, s: Str): Str {
+    `${s}:${add(mul(n, 2), range(n) |> reduce((a, x) { add(a, x) }, 0))}:${s}`
+}
+[f(3, "x"), f(4, "y"), f(5, "z")]"#,
+            // A pipeline in a lambda that gets hot.
+            r#"::t ns
+f fn (ns: Vec): Vec {
+    map(ns, (n) { range(n) |> map((x) { mul(x, 2) }) |> reduce((a, x) { add(a, x) }, 0) })
+}
+f([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])"#,
+            // Results of other types, where a register holds them owned.
+            r#"::t ns
+f fn (n: Int): Vec {
+    dec range(1, n) |> map((x) { div(x, 2) }) |> reduce((a, x) { add(a, x) }, 0)
+    text reduce(range(n), (a, i) { concat(a, `i${i}`) }, "")
+    [dec, text, dec]
+}
+[f(4), f(6), f(4)]"#,
+            // De-opts: a predicate that isn't a Bool, and a source of another type.
+            r#"::t ns
+f fn (v: Vec): Int {
+    v |> filter((x) { x }) |> reduce((a, x) { add(a, x) }, 0)
+}
+g fn (m: Any): Any {
+    reduce(m, (a, x) { add(a, x) }, 0)
+}
+[f([1, 2]), f([]), f([3]), g([1, 2]), g({a: 1, b: 2}), g([3])]"#,
+            // Overflow de-opts, and the stages report it.
+            r#"::t ns
+f fn (v: Vec): Int {
+    reduce(v, (a, x) { mul(a, x) }, 1)
+}
+[f([2, 3]), f([9223372036854775807, 2]), f([4])]"#,
+            // A range the fused run declines.
+            r#"::t ns
+f fn (n: Any): Int {
+    range(n) |> reduce((a, x) { add(a, x) }, 0)
+}
+[f(3), f(1.5), f(3)]"#,
+        ];
+        // Where a failure is reported from differs between the tiers.
+        let comparable = |result: Result<Val, String>| {
+            result.map_err(|err| {
+                err.split("instruction_pointer").next().unwrap().to_string()
+            })
+        };
+        for src in programs {
+            let stages = compile_and_run_with_std_conf(src, Some(val!({"jit": {"mode": "off"}})));
+            let before = crate::lang::runtime::jit::fused_runs_for_test();
+            let compiled =
+                compile_and_run_with_std_conf(src, Some(val!({"jit": {"threshold": 1}})));
+            let runs = crate::lang::runtime::jit::fused_runs_for_test() - before;
+            assert!(runs > 0, "compiled code made no fused run of:\n{src}");
+            assert_eq!(
+                comparable(stages),
+                comparable(compiled),
+                "compiled code differs for:\n{src}"
+            );
+        }
+    }
+
+    /// Runs `src` compiled, with `edit` given the instructions of `::t/f` and
+    /// its one pipeline. Returns the result and how many fused runs it made.
+    fn run_with_pipeline_edited(
+        src: &str,
+        edit: impl FnOnce(&mut Vec<Instruction>, &PipelinePlan),
+    ) -> (Val, u64) {
+        let before = crate::lang::runtime::jit::fused_runs_for_test();
+        let out = run_with_std_edited(
+            src,
+            Some(val!({"jit": {"threshold": 1}})),
+            false,
+            false,
+            |program| {
+                let id = program
+                    .functions
+                    .iter()
+                    .position(|function| function.name == "::t/f")
+                    .expect("the function exists");
+                let plans = detect_compilable_pipelines(&program.functions[id].instructions, program);
+                let [plan] = plans.as_slice() else {
+                    panic!("expected one pipeline, found {plans:?}");
+                };
+                edit(&mut program.functions[id].instructions, plan);
+            },
+        )
+        .expect("run");
+        (out, crate::lang::runtime::jit::fused_runs_for_test() - before)
+    }
+
+    const READS_ITS_ARGUMENT_THROUGH_A_PIPELINE: &str = r#"::t ns
+f fn (v: Vec): Int {
+    v |> filter((x) { gt(x, 1) }) |> reduce((a, x) { add(a, x) }, 0)
+}
+run fn (): Map {
+    v [1, 2, 3]
+    total reduce(range(300), (acc, _i) { add(acc, f(v)) }, 0)
+    {v, total}
+}
+run()"#;
+
+    fn assert_read_argument_released(out: &Val, runs: u64) {
+        assert!(runs >= 200, "compiled code made {runs} fused runs");
+        assert_eq!(out.get("total"), Some(val!(1500)));
+        let Some(Val::Vec(v)) = out.get("v") else {
+            panic!("unexpected result {out:?}");
+        };
+        assert!(
+            Arc::strong_count(&v) < 10,
+            "{} references to the collection remain",
+            Arc::strong_count(&v)
+        );
+    }
+
+    // The compiler writes fresh registers in a pipeline's stages, so these
+    // rewrite the bytecode for the cases it doesn't reach today. A fused run
+    // skips those stages, and what follows treats the registers as they left
+    // them, so it has to leave the same ownership.
+
+    /// The register the source was loaded into, before the stages: the first
+    /// instruction after the parameter checks loads it.
+    fn loaded_source_register(instructions: &[Instruction]) -> u32 {
+        let first = instructions
+            .iter()
+            .find(|ins| !matches!(ins, Instruction::CheckParam { .. }));
+        let Some(Instruction::LoadVar { dest, .. }) = first else {
+            panic!("expected the source to load first, found {instructions:?}");
+        };
+        *dest
+    }
+
+    /// A stage overwrites a register that owned a value: its value is released.
+    #[test]
+    fn a_fused_run_releases_what_its_stages_overwrite() {
+        let (out, runs) = run_with_pipeline_edited(
+            READS_ITS_ARGUMENT_THROUGH_A_PIPELINE,
+            |instructions, plan| {
+                let source = loaded_source_register(instructions);
+                // The `reduce` initial value, the last argument it loads, goes
+                // through the source's register.
+                let Instruction::Call { args_start, .. } = instructions[plan.last_stage_ip] else {
+                    panic!("expected the last stage's call");
+                };
+                let span = plan.first_stage_ip..plan.last_stage_ip;
+                let initial_move = span
+                    .clone()
+                    .rev()
+                    .find(|&ip| {
+                        matches!(instructions[ip], Instruction::Move { dest, .. } if dest == args_start + 2)
+                    })
+                    .expect("the initial value moves into place");
+                let Instruction::Move { src, .. } = &mut instructions[initial_move] else {
+                    unreachable!();
+                };
+                let loaded = std::mem::replace(src, source);
+                for ins in &mut instructions[span] {
+                    if let Instruction::LoadConst { dest, .. } = ins
+                        && *dest == loaded
+                    {
+                        *dest = source;
+                    }
+                }
+            },
+        );
+        assert_read_argument_released(&out, runs);
+    }
+
+    /// The result lands in a register that owned a value: its value is
+    /// released, and the result takes its place.
+    #[test]
+    fn a_fused_run_releases_what_its_result_replaces() {
+        let (out, runs) = run_with_pipeline_edited(
+            READS_ITS_ARGUMENT_THROUGH_A_PIPELINE,
+            |instructions, plan| {
+                // The first stage's argument register owns its source.
+                let source = plan.source_reg;
+                let Instruction::Call { dest, .. } = &mut instructions[plan.last_stage_ip] else {
+                    panic!("expected the last stage's call");
+                };
+                let result = std::mem::replace(dest, source);
+                for ins in &mut instructions[plan.last_stage_ip + 1..] {
+                    if let Instruction::Return { value } = ins
+                        && *value == result
+                    {
+                        *value = source;
+                    }
+                }
+            },
+        );
+        assert_read_argument_released(&out, runs);
+    }
+
+    /// A stage leaves a value owned in a register that held a raw scalar. What
+    /// follows releases that register, so a fused run mustn't leave the scalar
+    /// there: released as a value, it is a wild pointer.
+    #[test]
+    fn a_fused_run_leaves_no_scalar_where_its_stages_leave_a_value() {
+        let src = r#"::t ns
+f fn (n: Int, v: Vec): Int {
+    k add(n, 7)
+    total v |> filter((x) { gt(x, 1) }) |> reduce((a, x) { add(a, x) }, 0)
+    add(total, k)
+}
+run fn (): Int {
+    v [1, 2, 3]
+    reduce(range(300), (acc, _i) { add(acc, f(1, v)) }, 0)
+}
+run()"#;
+        let (out, runs) = run_with_pipeline_edited(src, |instructions, plan| {
+            // The first stage's result moves to the register that held the 7,
+            // a constant Int, which is held raw.
+            let scalar = instructions[..plan.first_stage_ip]
+                .iter()
+                .find_map(|ins| match ins {
+                    Instruction::LoadConst { dest, .. } => Some(*dest),
+                    _ => None,
+                })
+                .expect("the 7 loads before the pipeline");
+            let Instruction::Call { dest, .. } = &mut instructions[plan.first_stage_ip] else {
+                panic!("expected the first stage's call");
+            };
+            let result = std::mem::replace(dest, scalar);
+            for ins in &mut instructions[plan.first_stage_ip + 1..=plan.last_stage_ip] {
+                if let Instruction::Move { src, .. } = ins
+                    && *src == result
+                {
+                    *src = scalar;
+                }
+            }
+        });
+        assert!(runs >= 200, "compiled code made {runs} fused runs");
+        assert_eq!(out, val!(3900));
+    }
+
+    /// Compiled code owns references to the values it reads. A fused run
+    /// leaves its registers holding what the stages would own, so it has to
+    /// release the same references, on the fused path and on a de-opt's.
+    #[test]
+    fn compiled_pipelines_release_what_they_read() {
+        let src = r#"::t ns
+fused fn (v: Vec): Int {
+    v |> filter((x) { gt(x, 1) }) |> map((x) { mul(x, 2) }) |> reduce((a, x) { add(a, x) }, 0)
+}
+deopts fn (v: Vec): Int {
+    v |> filter((x) { x }) |> reduce((a, x) { add(a, x) }, 0)
+}
+run fn (): Map {
+    v [1, 2, 3]
+    total reduce(range(300), (acc, _i) { add(acc, add(fused(v), deopts(v))) }, 0)
+    {v, total}
+}
+run()"#;
+        let (out, runs) = run_counting_compiled_fused_runs(src, Some(val!({"jit": {"threshold": 1}})));
+        assert!(runs >= 200, "compiled code made {runs} fused runs");
+        assert_eq!(out.get("total"), Some(val!(4800)));
+        let Some(Val::Vec(v)) = out.get("v") else {
+            panic!("unexpected result {out:?}");
+        };
+        assert!(
+            Arc::strong_count(&v) < 10,
+            "{} references to the collection remain",
+            Arc::strong_count(&v)
+        );
     }
 
     /// Helper to compile and execute Hot code with hot-std included
@@ -221,7 +847,7 @@ make-error(3)"#;
     }
 
     fn strs(values: &[&str]) -> Val {
-        Val::Vec(values.iter().map(|s| Val::from(*s)).collect())
+        Val::vec(values.iter().map(|s| Val::from(*s)).collect())
     }
 
     /// A value imported from another namespace evaluates in its home
@@ -293,6 +919,257 @@ probe()"#;
         );
     }
 
+    /// A value whose Map or Vec literal calls into another namespace waits
+    /// for that namespace to run, so the callee finds its own constants.
+    /// Calls held inside a literal were invisible to the ordering, and the
+    /// importer (first in source order) ran before `CONST` was stored.
+    #[test]
+    fn value_calling_another_namespace_inside_a_literal_runs_after_it() {
+        let src = r#"::rdoc::a ns
+VALUE {name: ::zz::b/get-name().name}
+NAMES [::zz::b/get-name().name, "y"]
+SPREAD {...::zz::b/get-name(), extra: ::zz::b/get-name().name}
+
+::zz::b ns
+CONST "x"
+get-name fn (): Map { {name: CONST} }
+
+::main ns
+names ::rdoc::a/NAMES
+[::rdoc::a/VALUE.name, names[0], ::rdoc::a/SPREAD.extra]"#;
+        assert_same_with_and_without_jit(src, &strs(&["x", "x", "x"]));
+    }
+
+    /// An Err passed to a parameter not declared `Result` halts by design
+    /// (the Result-boundary rule); the halt names that parameter and
+    /// function, since the Err may have been made far from the call.
+    #[test]
+    fn consumed_err_argument_halt_names_parameter_and_function() {
+        let src = r#"::t ns
+takes fn (x: Int): Int { add(x, 1) }
+probe fn (s: Str): Int {
+    n Int(s)
+    takes(n)
+}
+probe("1")
+probe("2")
+probe("3")
+probe("abc")"#;
+        for (mode, conf) in [
+            ("jit", crate::val!({"jit": {"threshold": 1}})),
+            ("interpreter", crate::val!({"jit": {"mode": "off"}})),
+        ] {
+            let error = compile_and_run_with_std_conf(src, Some(conf))
+                .expect_err("an Err passed to an Int parameter halts");
+            assert!(
+                error.contains(
+                    "Result error: Cannot convert 'abc' to Int (an Err passed to parameter `x` of ::t/takes; declare the parameter `Result` to receive Errs)"
+                ),
+                "{mode}: {error}"
+            );
+        }
+    }
+
+    /// Lambdas, placeholder lambdas and natives consume an Err as user
+    /// functions do, and each halt names what consumed it.
+    #[test]
+    fn consumed_err_halt_names_lambda_placeholder_and_native() {
+        let cases = [
+            (
+                "probe fn (): Any { f (x) { 1 }\n f(err(\"boom\")) }",
+                "boom (an Err passed to parameter `x` of a lambda;",
+            ),
+            (
+                "probe fn (): Any { map([err(\"boom\")], add(%, 1)) }",
+                "boom (an Err passed to placeholder `%` of a lambda;",
+            ),
+            (
+                "probe fn (): Any { is-null(err(\"boom\")) }",
+                "boom (an Err passed as argument 1 of ::hot::type/is-null, which needs a value;",
+            ),
+            (
+                "probe fn (n: Int): Any { add(n, err(\"boom\")) }",
+                "boom (an Err passed as argument 2 of ::hot::math/add, which needs a value;",
+            ),
+            (
+                "probe fn (): Any { length(err(\"boom\")) }",
+                "boom (an Err passed as argument 1 of ::hot::coll/length, which needs a value;",
+            ),
+        ];
+        for (body, expected) in cases {
+            let call = if body.contains("(n: Int)") { "probe(1)" } else { "probe()" };
+            let src = format!("::t ns\n{body}\n{call}");
+            for (mode, conf) in [
+                ("jit", crate::val!({"jit": {"threshold": 1}})),
+                ("interpreter", crate::val!({"jit": {"mode": "off"}})),
+            ] {
+                let error = compile_and_run_with_std_conf(&src, Some(conf))
+                    .expect_err("the Err is consumed");
+                assert!(
+                    error.contains(&format!("Result error: {expected}")),
+                    "{mode}: {error}\n{src}"
+                );
+            }
+        }
+    }
+
+    /// Compiled code halts on a numeric op's Err at the op when every path
+    /// consumes it, so it has to name the consumer the interpreter names.
+    #[test]
+    fn numeric_err_consumed_in_compiled_code_names_its_consumer() {
+        let cases = [
+            (
+                "takes fn (x: Int): Int { x }\nprobe fn (n: Int): Int { takes(add(n, 9223372036854775807)) }",
+                "Integer overflow (an Err passed to parameter `x` of ::t/takes;",
+            ),
+            (
+                "probe fn (n: Int): Int { mul(add(n, 9223372036854775807), 2) }",
+                "Integer overflow (an Err passed as argument 1 of ::hot::math/mul, which needs a value;",
+            ),
+        ];
+        for (body, expected) in cases {
+            let src = format!("::t ns\n{body}\nprobe(0)\nprobe(0)\nprobe(1)");
+            for (mode, conf) in [
+                ("jit", crate::val!({"jit": {"threshold": 1}})),
+                ("interpreter", crate::val!({"jit": {"mode": "off"}})),
+            ] {
+                let error = compile_and_run_with_std_conf(&src, Some(conf))
+                    .expect_err("the overflow is consumed");
+                assert!(
+                    error.contains(&format!("Result error: {expected}")),
+                    "{mode}: {error}\n{src}"
+                );
+            }
+        }
+    }
+
+    /// Serve `requests` HTTP requests on a local port with a fixed JSON reply,
+    /// and return the port's base URL.
+    fn serve_json(requests: usize) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!("http://{}", listener.local_addr().expect("addr"));
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(requests) {
+                let Ok(mut stream) = stream else { return };
+                let mut seen = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => seen.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let body = r#"{"secret":"account-123"}"#;
+                let reply = format!(
+                    "HTTP/1.1 404 Not Found\r\ncontent-type: application/json\r\nx-trace: abc\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(reply.as_bytes());
+            }
+        });
+        url
+    }
+
+    /// A real response has its declared type, so `Target(response)` runs the
+    /// `HttpResponse -> Target` arrow instead of copying fields, here dropping
+    /// a body the arrow redacts. It used to be an untagged Map, so the arrow
+    /// only ran for values built with `HttpResponse(...)`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn real_http_response_runs_a_declared_arrow() {
+        let src = |url: &str| {
+            format!(
+                r#"::t ns
+::http ::hot::http
+HttpResponse ::http/HttpResponse
+HttpRequest ::http/HttpRequest
+Target type {{ status: Int, body: Any, message: Str? }}
+HttpResponse -> Target fn (r: HttpResponse): Target {{
+    Target({{status: r.status, body: "redacted", message: `arrow ran ${{r.status}}`}})
+}}
+typed-param fn (x: HttpResponse): Target {{ Target(x) }}
+describe fn match (r: Any): Str {{
+    HttpResponse => {{ "a response" }}
+    => {{ "something else" }}
+}}
+probe fn (): Vec {{
+    r ::http/request("GET", "{url}", {{}}, "")
+    fetched ::http/get("{url}")
+    sent ::http/request(HttpRequest({{method: "GET", url: "{url}"}}))
+    direct Target(r)
+    via-param typed-param(r)
+    via-get Target(fetched)
+    via-request Target(sent)
+    tagged from-json(to-json(r))
+    plain from-json(to-json(untype(r)))
+    spread {{...r, extra: 1}}
+    [
+        direct.message, direct.body, via-param.message,
+        via-get.message, via-request.message,
+        r.status, r.body.secret, get(r.headers, "x-trace"),
+        get(r, "status"), is-type(r, HttpResponse), describe(r),
+        ::http/is-ok-response(r), is-map(untype(r)),
+        is-type(tagged, HttpResponse), is-type(plain, HttpResponse), plain.status,
+        spread.status, get(assoc(r, "status", 201), "status"),
+    ]
+}}
+probe()
+probe()
+probe()"#
+            )
+        };
+        let expected = Val::vec(vec![
+            Val::from("arrow ran 404"),
+            Val::from("redacted"),
+            Val::from("arrow ran 404"),
+            Val::from("arrow ran 404"),
+            Val::from("arrow ran 404"),
+            Val::Int(404),
+            Val::from("account-123"),
+            Val::from("abc"),
+            Val::Int(404),
+            Val::Bool(true),
+            Val::from("a response"),
+            Val::Bool(false),
+            Val::Bool(true),
+            Val::Bool(true),
+            Val::Bool(false),
+            Val::Int(404),
+            Val::Int(404),
+            Val::Int(201),
+        ]);
+        for conf in [
+            crate::val!({"jit": {"mode": "disabled"}}),
+            crate::val!({"jit": {"threshold": 1}}),
+        ] {
+            // HTTP natives block on the runtime, so they run off its threads.
+            let program = src(&serve_json(9));
+            let run_conf = conf.clone();
+            let out = tokio::task::spawn_blocking(move || {
+                compile_and_run_with_std_conf(&program, Some(run_conf))
+            })
+            .await
+            .expect("the run finishes")
+            .unwrap_or_else(|e| panic!("{conf:?}: {e}"));
+            assert_eq!(out, expected, "{conf:?}");
+        }
+    }
+
+    /// A lambda bound at top level and called by name receives an Err in a
+    /// `Result` parameter. The by-name call found only functions named `f`,
+    /// not the lambda its dispatch runs, so the argument was consumed.
+    #[test]
+    fn top_level_lambda_with_result_parameter_receives_err() {
+        let src = r#"::t ns
+f (x: Result) { is-err(x) }
+r err("boom")
+[f(err("boom")), f(r), f(ok(1))]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &Val::vec(vec![Val::Bool(true), Val::Bool(true), Val::Bool(false)]),
+        );
+    }
+
     /// `Name({...})` inside a custom constructor of a field-less `Name type fn`
     /// type reaches the default Map constructor. These types had no default
     /// constructor, so the inner call resolved back to a custom overload and
@@ -316,7 +1193,7 @@ c Email({value: "m@b.com"})
 Point type fn (x: Int, y: Int): Point { Point({x, y}) }
 p Point(10, 20)
 [p.x, p.y]"#;
-        assert_same_with_and_without_jit(point, &Val::Vec(vec![Val::Int(10), Val::Int(20)]));
+        assert_same_with_and_without_jit(point, &Val::vec(vec![Val::Int(10), Val::Int(20)]));
     }
 
     /// A Map that is not a literal (a variable or a call result) selects the
@@ -520,6 +1397,114 @@ m {a: 1}
         );
     }
 
+    /// Same-arity overloads whose parameter types share a short name reach the
+    /// overload of the argument's own type, whichever is declared last and
+    /// however the type is written, on a direct call or as a callback. Dispatch
+    /// used to compare short names, so every value tied and went to the overload
+    /// declared last, and a callback didn't dispatch at all.
+    #[test]
+    fn same_named_parameter_types_dispatch_to_their_own_overload() {
+        let src = r#"::a ns
+E1 type { n: Int }
+Kind enum open { Plain }
+
+::b ns
+E1 type { n: Int }
+Kind enum open { Plain }
+
+::one ns
+E1 ::a/E1
+
+::two ns
+E1 ::one/E1
+
+::imports ns
+Ours ::a/E1
+Theirs ::b/E1
+imported fn
+(x: Ours): Any { "a" },
+(x: Theirs): Any { "b" }
+imported-any fn (x: Any): Any { imported(x) }
+
+::local ns
+E1 type { n: Int }
+mixed fn
+(x: E1): Any { "local" },
+(x: ::a/E1): Any { "a" },
+(x: ::b/E1): Any { "b" }
+mixed-any fn (x: Any): Any { mixed(x) }
+make fn (): Any { E1({n: 1}) }
+
+::c ns
+::first ::a
+::second ::b
+a-last fn
+(x: ::b/E1): Any { "b" },
+(x: ::a/E1): Any { "a" }
+b-last fn
+(x: ::a/E1): Any { "a" },
+(x: ::b/E1): Any { "b" }
+aliased fn
+(x: ::first/E1): Any { "a" },
+(x: ::second/E1): Any { "b" }
+nullable fn
+(x: ::first/E1?): Any { "a" },
+(x: ::second/E1?): Any { "b" }
+union fn
+(x: ::first/E1 | Str): Any { "a" },
+(x: ::second/E1 | Int): Any { "b" }
+two-args fn
+(n: Int, x: ::a/E1): Any { "a" },
+(n: Int, x: ::b/E1): Any { "b" }
+variants fn
+(x: ::a/Kind): Any { "a" },
+(x: ::b/Kind): Any { "b" }
+apply-all fn (x: Any): Vec {
+    [
+        a-last(x), b-last(x), aliased(x), nullable(x), union(x), two-args(1, x),
+        ::imports/imported-any(x), ::local/mixed-any(x)
+    ]
+}
+variants-any fn (x: Any): Any { variants(x) }
+reexported fn
+(x: ::two/E1): Any { "own type" },
+(x: Any): Any { "any" }
+reexported-any fn (x: Any): Any { reexported(x) }
+by-name fn (xs: Vec): Vec { map(xs, b-last) }
+
+::t ns
+a-val ::a/E1({n: 1})
+b-val ::b/E1({n: 1})
+run fn (): Vec {
+    from-a ::c/apply-all(a-val)
+    from-b ::c/apply-all(b-val)
+    named ::c/by-name([a-val, b-val, a-val])
+    [
+        ...from-a, ...from-b,
+        ::c/variants-any(::a/Kind.Plain), ::c/variants-any(::b/Kind.Plain),
+        ...named,
+        ::local/mixed-any(::local/make()),
+        ::c/reexported-any(a-val), ::c/reexported-any(b-val)
+    ]
+}
+run()
+run()
+run()"#;
+        let expected = strs(&[
+            "a", "a", "a", "a", "a", "a", "a", "a", //
+            "b", "b", "b", "b", "b", "b", "b", "b", //
+            "a", "b", //
+            "a", "b", "a", //
+            "local", //
+            "own type", "any",
+        ]);
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            let out = compile_and_run_project_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("run failed: {e}"));
+            assert_eq!(out, expected);
+        }
+    }
+
     /// An untyped (`Any`) overload is reachable whichever order it is
     /// declared in, and the most specific overload that accepts the arguments
     /// wins: a single type, then a union or nullable type, then `Any`. The
@@ -643,13 +1628,13 @@ lazy-param fn (lazy before: Any): Int { before(7) }
 ]"#;
         assert_same_with_and_without_jit(
             src,
-            &Val::Vec(vec![
+            &Val::vec(vec![
                 Val::Int(12),
                 Val::Int(12),
                 Val::Int(10),
-                Val::Vec(vec![Val::Int(5), Val::Int(10)]),
+                Val::vec(vec![Val::Int(5), Val::Int(10)]),
                 Val::from("custom"),
-                Val::Vec(vec![Val::Int(101)]),
+                Val::vec(vec![Val::Int(101)]),
                 Val::Int(0),
                 Val::Int(0),
             ]),
@@ -700,7 +1685,405 @@ sq %(mul(%, %))
 [apply-twice(3, add(%, 2)), invoke(4, sq), invoke(4, (v) { mul(v, 3) }), with-local(5)]"#;
         assert_same_with_and_without_jit(
             src,
-            &Val::Vec(vec![Val::Int(7), Val::Int(16), Val::Int(12), Val::Int(15)]),
+            &Val::vec(vec![Val::Int(7), Val::Int(16), Val::Int(12), Val::Int(15)]),
+        );
+    }
+
+    /// A null argument fails at a `Str` parameter, called directly or from a
+    /// caller typed `Any`, and passes at `Str?`. `Null -> Str` is for `Str(null)`
+    /// and interpolation, which still give "".
+    #[test]
+    fn null_fails_at_a_str_parameter_with_and_without_jit() {
+        let src = r#"::t ns
+f fn (x: Str): Any { [is-type(x, Null), x] }
+via-any fn (a: Any): Any { f(a) }
+nullable fn (x: Str?): Any { x }
+via-any("warm")
+via-any("warm")
+via-any("warm")
+[is-err(via-any(null)), is-err(f(null)), f("s"), nullable(null), Str(null), `[${null}]`]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &Val::vec(vec![
+                Val::Bool(true),
+                Val::Bool(true),
+                Val::vec(vec![Val::Bool(false), Val::from("s")]),
+                Val::Null,
+                Val::from(""),
+                Val::from("[]"),
+            ]),
+        );
+    }
+
+    /// A call by a name that reaches a value passes its arguments as values,
+    /// even when a function of that name has lazy parameters: a parameter or
+    /// local, a field of either, a piped call, and the namespace's own value.
+    #[test]
+    fn a_value_named_like_a_lazy_function_gets_values_with_and_without_jit() {
+        let src = r#"::t ns
+deferred fn (lazy x: Any): Any { "deferred" }
+param-source fn (source): Any { source(null) }
+param-assert fn (assert): Any { assert(null) }
+param-assert-eq fn (assert-eq): Any { assert-eq(null, null) }
+param-and fn (and): Any { and(null, null) }
+param-or fn (or): Any { or(null, null) }
+param-if fn (if): Any { if(null, null) }
+param-deferred fn (deferred): Any { deferred(null) }
+local-source fn (): Any {
+    source (x: Str?) { "hit" }
+    source(null)
+}
+field-of-param fn (source): Any { source.list(null) }
+field-of-local fn (): Any {
+    source {list: (x: Str?) { "hit" }}
+    source.list(null)
+}
+piped fn (source): Any { null |> source() }
+eager fn (source): Any {
+    seen source(sub(1, 1))
+    [seen]
+}
+one (x: Str?) { "hit" }
+two (a: Str?, b: Str?) { "hit" }
+int-arg (n: Int) { n }
+[
+    param-source(one), param-assert(one), param-assert-eq(two), param-and(two), param-or(two),
+    param-if(two), param-deferred(one), local-source(), field-of-param({list: one}), field-of-local(),
+    piped(one), eager(int-arg)
+]"#;
+        let mut expected = vec![Val::from("hit"); 11];
+        expected.push(Val::vec(vec![Val::Int(0)]));
+        assert_same_with_and_without_jit(src, &Val::vec(expected));
+    }
+
+    /// A namespace's own value or function of a lazy core function's name
+    /// takes its arguments as values too.
+    #[test]
+    fn a_namespace_binding_named_like_a_lazy_core_function_gets_values() {
+        let src = r#"::t ns
+source (x: Str?) { "value" }
+assert {check: (x: Str?) { "field" }}
+assert-eq fn (a: Str?, b: Str?): Any { "function" }
+[source(null), assert.check(null), assert-eq(null, null)]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &Val::vec(vec![
+                Val::from("value"),
+                Val::from("field"),
+                Val::from("function"),
+            ]),
+        );
+    }
+
+    /// Functions with lazy parameters still defer: the core ones, a
+    /// namespace's own, an import, and one defined in the body, which a local
+    /// binding of the name doesn't hide.
+    #[test]
+    fn functions_with_lazy_parameters_still_defer_with_and_without_jit() {
+        let src = r#"::t ns
+deferred fn (lazy x: Any): Any { "deferred" }
+imported ::t/deferred
+in-body fn (): Any {
+    local-lazy fn (lazy x: Any): Any { "local" }
+    local-lazy(fail("never runs"))
+}
+[
+    deferred(fail("never runs")), imported(fail("never runs")), in-body(),
+    or("first", fail("never runs")), and(false, fail("never runs"))
+]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &Val::vec(vec![
+                Val::from("deferred"),
+                Val::from("deferred"),
+                Val::from("local"),
+                Val::from("first"),
+                Val::Bool(false),
+            ]),
+        );
+    }
+
+    /// A primitive parameter rejects a value of another type at the call, in
+    /// both tiers, whether or not the JIT has seen a good value first.
+    #[test]
+    fn primitive_parameters_reject_other_types_with_and_without_jit() {
+        let src = r#"::t ns
+int fn (x: Int): Any { x }
+dec fn (x: Dec): Any { x }
+str fn (x: Str): Any { x }
+bool fn (x: Bool): Any { x }
+mapped fn (x: Map): Any { x }
+vector fn (x: Vec): Any { x }
+bytes fn (x: Bytes): Any { 1 }
+either fn (x: Int | Dec): Any { x }
+maybe fn (x: Int?): Any { x }
+strs fn (x: Vec<Str>): Any { length(x) }
+any fn (json: Str): Any { from-json(json) }
+warm fn (): Any {
+    [int(1), dec(1.5), str("s"), bool(true), mapped({}), vector([]), either(1), maybe(1)]
+}
+warm()
+warm()
+warm()
+[
+    is-err(int(any("\"443\""))), is-err(int(any("443.5"))), is-err(int(any("true"))),
+    is-err(dec(any("\"1.5\""))), is-err(str(any("443"))), is-err(bool(any("\"x\""))),
+    is-err(mapped(any("[]"))), is-err(vector(any("{}"))), is-err(bytes(any("\"x\""))),
+    is-err(either(any("\"x\""))), is-err(maybe(any("\"x\""))), is-err(int(any("null"))),
+    is-err(str(any("null"))), is-err(mapped(any("null"))),
+    maybe(any("null")), either(any("2.0")), strs(any("[1, 2]"))
+]"#;
+        let mut expected = vec![Val::Bool(true); 14];
+        expected.push(Val::Null);
+        expected.push(Val::Dec(fastnum::D256::from(2)));
+        expected.push(Val::Int(2));
+        assert_same_with_and_without_jit(src, &Val::vec(expected));
+    }
+
+    /// An `Int` becomes a `Dec` and a whole `Dec` an `Int`, as at a `where`
+    /// parameter, directly and when a higher-order function makes the call.
+    #[test]
+    fn primitive_parameters_convert_exact_numbers_with_and_without_jit() {
+        let src = r#"::t ns
+int fn (x: Int): Any { [is-int(x), x] }
+dec fn (x: Dec): Any { [is-dec(x), x] }
+maybe fn (x: Dec?): Any { is-dec(x) }
+any fn (json: Str): Any { from-json(json) }
+int(1)
+int(1)
+dec(1.5)
+dec(1.5)
+[int(any("5.0")), dec(any("5")), maybe(any("5")), first(map(any("[5.0]"), int)), first(map(any("[5]"), dec))]"#;
+        let int_pair = Val::vec(vec![Val::Bool(true), Val::Int(5)]);
+        let dec_pair = Val::vec(vec![Val::Bool(true), Val::Dec(fastnum::D256::from(5))]);
+        assert_same_with_and_without_jit(
+            src,
+            &Val::vec(vec![
+                int_pair.clone(),
+                dec_pair.clone(),
+                Val::Bool(true),
+                int_pair,
+                dec_pair,
+            ]),
+        );
+    }
+
+    /// The check leaves user types alone, keeps a tagged value over an accepted
+    /// kind, and doesn't read a lazy parameter or a `fn match` that takes a
+    /// `Result`.
+    #[test]
+    fn primitive_checks_leave_other_annotations_with_and_without_jit() {
+        let src = r#"::t ns
+User type { id: Str }
+Port type Int
+user fn (x: User): Any { x }
+mapped fn (x: Map): Any { 1 }
+int fn (x: Int): Any { 1 }
+deferred fn (lazy x: Int): Any { 1 }
+kept fn match (x: Str): Any {
+    Result.Err => { "err" }
+    "a" => { "a" }
+    _ => { "other" }
+}
+any fn (json: Str): Any { from-json(json) }
+fails fn (): Str { err("bad") }
+[user(any("\"x\"")), mapped(User({id: "a"})), int(Port(80)), deferred("not an int"), kept(fails()), kept("a")]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &Val::vec(vec![
+                Val::from("x"),
+                Val::Int(1),
+                Val::Int(1),
+                Val::Int(1),
+                Val::from("err"),
+                Val::from("a"),
+            ]),
+        );
+    }
+
+    /// A failure names the parameter, its function and everything a union
+    /// accepts, and a variadic parameter's failure names the value's position.
+    #[test]
+    fn primitive_check_failures_describe_the_parameter() {
+        for (call, expected) in [
+            ("int(any(\"\\\"x\\\"\"))", "parameter `x` of `::t/int` expected Int, got Str"),
+            ("either(any(\"\\\"x\\\"\"))", "parameter `x` of `::t/either` expected Int | Dec, got Str"),
+            ("rest(1, any(\"\\\"x\\\"\"))", "parameter `xs` of `::t/rest` at `[1]` expected Int, got Str"),
+        ] {
+            let src = format!(
+                "::t ns\nint fn (x: Int): Any {{ x }}\neither fn (x: Int | Dec): Any {{ x }}\nrest fn (...xs: Int): Any {{ xs }}\nany fn (json: Str): Any {{ from-json(json) }}\nadd({call}, 1)"
+            );
+            for conf in [
+                crate::val!({"jit": {"threshold": 1}}),
+                crate::val!({"jit": {"mode": "off"}}),
+            ] {
+                let error = compile_and_run_with_std_conf(&src, Some(conf.clone()))
+                    .expect_err("the Err is consumed");
+                assert!(error.contains(expected), "with {conf:?}: {error}");
+            }
+        }
+    }
+
+    /// Native self calls, self tail calls and fused pipelines check too: a
+    /// compiled body can't assume a later call's argument matches the first.
+    #[test]
+    fn primitive_checks_cover_compiled_call_paths() {
+        let src = r#"::t ns
+to-any fn (x: Any): Any { x }
+count fn (s: Str, n: Int): Any {
+    if(eq(n, 0), s, count(to-any(n), sub(n, 1)))
+}
+doubled fn (x: Int): Int { mul(x, 2) }
+big fn (x: Int): Bool { gt(x, 2) }
+total fn (acc: Int, x: Int): Int { add(acc, x) }
+pipeline fn (xs: Vec): Int {
+    xs |> map(doubled) |> filter(big) |> reduce(total, 0)
+}
+good [1, 2, 3]
+[pipeline(good), pipeline(good), pipeline(good), is-err(count("s", 1))]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &Val::vec(vec![
+                Val::Int(10),
+                Val::Int(10),
+                Val::Int(10),
+                Val::Bool(true),
+            ]),
+        );
+        let bad = r#"::t ns
+doubled fn (x: Int): Int { mul(x, 2) }
+pipeline fn (xs: Vec): Any { xs |> map(doubled) |> reduce(add(%1, %2), 0) }
+pipeline([1, 2, 3])
+pipeline([1, 2, 3])
+pipeline(from-json("[1, \"x\"]"))"#;
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            let error = compile_and_run_with_std_conf(bad, Some(conf.clone()))
+                .expect_err("the bad element fails");
+            assert!(
+                error.contains("parameter `x` of `::t/doubled` expected Int, got Str"),
+                "with {conf:?}: {error}"
+            );
+        }
+    }
+
+    /// Overloads with a rest parameter dispatch on their arguments, whatever
+    /// the number of them.
+    #[test]
+    fn variadic_overloads_dispatch_on_their_arguments_with_and_without_jit() {
+        let src = r#"::t ns
+join fn
+(a: Int, ...rest: Int): Str { "ints" },
+(a: Str, ...rest: Str): Str { "strs" },
+(a: Vec, ...rest: Vec): Str { "vecs" }
+[
+    join(1), join("a"), join([]),
+    join(1, 2, 3), join("a", "b", "c"), join([], [], []),
+    concat("a", "b", "c", "d"), concat([1], [2], [3], [4]),
+    concat("n: ", 42, ", ok: ", true), concat(1, ":", 2),
+    slice([1, 2, 3], 1, 2), slice("abc", 1, 2), length([1, 2]), length("abc"),
+    is-empty([]), is-empty(""), is-empty(null)
+]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &Val::vec(vec![
+                Val::from("ints"),
+                Val::from("strs"),
+                Val::from("vecs"),
+                Val::from("ints"),
+                Val::from("strs"),
+                Val::from("vecs"),
+                Val::from("abcd"),
+                Val::vec(vec![Val::Int(1), Val::Int(2), Val::Int(3), Val::Int(4)]),
+                Val::from("n: 42, ok: true"),
+                Val::from("1:2"),
+                Val::vec(vec![Val::Int(2)]),
+                Val::from("b"),
+                Val::Int(2),
+                Val::Int(3),
+                Val::Bool(true),
+                Val::Bool(true),
+                Val::Bool(true),
+            ]),
+        );
+    }
+
+    /// Implicit arrows fire the same way in both tiers: one involving a user
+    /// type applies, a primitive to primitive one doesn't. One parameter
+    /// without an arrow, such as a nullable one or a generic with a comma in
+    /// its type, doesn't stop another parameter's arrow.
+    #[test]
+    fn implicit_arrows_match_with_and_without_jit() {
+        let src = r#"::t ns
+Tri type { s: Int }
+Label type { s: Str }
+Geom enum open { Dot }
+Tri -> Geom.Tri
+Label -> Str fn (l: Label): Str { l.s }
+Str -> Label fn (s: Str): Label { Label({s: s}) }
+
+kind fn match (g: Geom): Str {
+    Geom.Tri => { "tri" }
+    _ => { "other" }
+}
+take-str fn (x: Str): Any { x }
+take-label fn (l: Label): Any { l.s }
+typed-call fn (t: Tri): Str { kind(t) }
+any-call fn (a: Any): Str { kind(a) }
+any-str fn (a: Any): Any { take-str(a) }
+any-label fn (a: Any): Any { take-label(a) }
+through-map fn (t: Tri): Vec { map([t], kind) }
+through-lambda fn (t: Tri): Str {
+    call-kind (g: Geom) { kind(g) }
+    call-kind(t)
+}
+beside-nullable fn (a: Str?, g: Geom): Str { kind(g) }
+call-nullable fn (t: Tri): Str { beside-nullable("x", t) }
+beside-generic fn (m: Map<Str, Int>, g: Geom, h: Geom): Str { kind(h) }
+call-generic fn (t: Tri): Str { beside-generic({}, t, t) }
+countdown fn cond (g: Geom, n: Int, t: Tri): Str {
+    eq(n, 0) => { kind(g) }
+    => {
+        result countdown(t, sub(n, 1), t)
+        result
+    }
+}
+tail-countdown fn cond (g: Geom, n: Int, t: Tri): Str {
+    eq(n, 0) => { kind(g) }
+    => { tail-countdown(t, sub(n, 1), t) }
+}
+t Tri({s: 1})
+run fn (): Vec {
+    [
+        typed-call(t), any-call(t),
+        any-str(Label({s: "from-label"})), is-err(any-str(5)), is-err(any-str(true)),
+        any-label("from-str"),
+        call-nullable(t), call-generic(t),
+        countdown(Geom.Dot, 2, t), tail-countdown(Geom.Dot, 2, t),
+        through-map(t), through-lambda(t)
+    ]
+}
+run()
+run()
+run()"#;
+        assert_same_with_and_without_jit(
+            src,
+            &Val::vec(vec![
+                Val::from("tri"),
+                Val::from("tri"),
+                Val::from("from-label"),
+                Val::Bool(true),
+                Val::Bool(true),
+                Val::from("from-str"),
+                Val::from("tri"),
+                Val::from("tri"),
+                Val::from("tri"),
+                Val::from("tri"),
+                strs(&["tri"]),
+                Val::from("tri"),
+            ]),
         );
     }
 
@@ -736,10 +2119,10 @@ ser-map fn (n: Int): Map {
 [all-vec(), all-map(), par-vec(3), ser-map(3)]"#;
         assert_same_with_and_without_jit(
             src,
-            &Val::Vec(vec![
-                Val::Vec(vec![Val::Int(1), Val::Int(2), Val::Int(3)]),
+            &Val::vec(vec![
+                Val::vec(vec![Val::Int(1), Val::Int(2), Val::Int(3)]),
                 crate::val!({"a": 1, "b": 2}),
-                Val::Vec(vec![Val::Int(4), Val::Int(6)]),
+                Val::vec(vec![Val::Int(4), Val::Int(6)]),
                 crate::val!({"a": 4, "b": 6}),
             ]),
         );
@@ -1013,7 +2396,7 @@ sizes fn cond-all (n: Int): All<Map> {
 ]"#;
         assert_same_with_and_without_jit(
             src,
-            &Val::Vec(vec![
+            &Val::vec(vec![
                 strs(&["Critter.Bird"]),
                 strs(&["Critter.Dog"]),
                 strs(&["positive", "big"]),
@@ -1308,6 +2691,795 @@ label fn match (x: ::k/Kind): Str {
 }
 [label(::k/Kind.Extra({n: 2})), label(::geo/Kind.Full(s: "f")), label(::k/Kind.A)]"#;
         let expected = strs(&["2", "f", "a"]);
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            let out = compile_and_run_project_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("run failed: {e}"));
+            assert_eq!(out, expected);
+        }
+    }
+
+    /// Two namespaces may each declare a same-named type and an arrow to it
+    /// from one source. Each arrow answers for its own target, whether called
+    /// as a constructor or implicitly at a parameter, and whichever namespace
+    /// loads last. The registry used to key targets by short name, so the last
+    /// arrow declared ran for both, and a redacting arrow never ran.
+    #[test]
+    fn same_named_arrow_targets_keep_to_their_namespaces() {
+        let src = r#"::src ns
+Payload type { secret: Str }
+Tri type { s: Int }
+
+::a ns
+Payload ::src/Payload
+Tri ::src/Tri
+Fail type { from: Str }
+Geom enum open { Dot }
+Payload -> Fail fn (p: Payload): Fail { Fail({from: "a"}) }
+Tri -> Geom.Tri
+build fn (p: Any): Any { Fail(p) }
+take fn (f: Fail): Any { f.from }
+through-any fn (x: Any): Any { take(x) }
+shape fn match (g: Geom): Str {
+    Geom.Tri => { "a tri" }
+    _ => { "a other" }
+}
+shape-any fn (x: Any): Str { shape(x) }
+
+::b ns
+Payload ::src/Payload
+Tri ::src/Tri
+Fail type { from: Str }
+Geom enum open { Dot }
+Payload -> Fail fn (p: Payload): Fail { Fail({from: "b"}) }
+Tri -> Geom.Tri
+build fn (p: Any): Any { Fail(p) }
+take fn (f: Fail): Any { f.from }
+through-any fn (x: Any): Any { take(x) }
+shape fn match (g: Geom): Str {
+    Geom.Tri => { "b tri" }
+    _ => { "b other" }
+}
+shape-any fn (x: Any): Str { shape(x) }
+
+::imports ns
+Fail ::a/Fail
+Other ::b/Fail
+take fn (f: Fail): Any { f.from }
+take-other fn (f: Other): Any { f.from }
+through-any fn (x: Any): Any { take(x) }
+through-any-other fn (x: Any): Any { take-other(x) }
+
+::t ns
+p ::src/Payload({secret: "s"})
+t ::src/Tri({s: 1})
+run fn (): Vec {
+    [
+        ::a/build(p).from, ::b/build(p).from,
+        ::a/through-any(p), ::b/through-any(p),
+        ::a/shape-any(t), ::b/shape-any(t),
+        ::imports/through-any(p), ::imports/through-any-other(p),
+        is-type(::a/build(p), ::a/Fail), is-type(::b/build(p), ::b/Fail),
+        is-type(::a/build(p), ::b/Fail)
+    ]
+}
+run()
+run()
+run()"#;
+        let expected = Val::vec(vec![
+            Val::from("a"),
+            Val::from("b"),
+            Val::from("a"),
+            Val::from("b"),
+            Val::from("a tri"),
+            Val::from("b tri"),
+            Val::from("a"),
+            Val::from("b"),
+            Val::Bool(true),
+            Val::Bool(true),
+            Val::Bool(false),
+        ]);
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            let out = compile_and_run_project_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("run failed: {e}"));
+            assert_eq!(out, expected);
+        }
+    }
+
+    /// A parameter's type written in full, through a namespace alias, or by a
+    /// namespace that only imports it gets the implicit arrow as a short name
+    /// does, and same-named targets stay apart. The signature lookup read a
+    /// slash in the type as the end of the function's name, and the alias
+    /// existed only at compile time, so the function received the value
+    /// unconverted.
+    #[test]
+    fn qualified_and_aliased_parameter_types_get_the_implicit_arrow() {
+        let src = r#"::src ns
+Payload type { secret: Str }
+
+::b::api ns
+Payload ::src/Payload
+E1 type { from: Str }
+Kind enum open { Plain }
+Payload -> E1 fn (p: Payload): E1 { E1({from: "b"}) }
+Payload -> Kind.Wrapped
+
+::other ns
+Payload ::src/Payload
+E1 type { from: Str }
+Payload -> E1 fn (p: Payload): E1 { E1({from: "other"}) }
+
+::reexport ns
+E1 ::b::api/E1
+
+::c ns
+::alias ::b::api
+::second ::other
+::again ::reexport
+take-qualified fn (x: ::b::api/E1): Any { x.from }
+take-alias fn (x: ::alias/E1): Any { x.from }
+take-second fn (x: ::second/E1): Any { x.from }
+take-reexport fn (x: ::reexport/E1): Any { x.from }
+take-alias-reexport fn (x: ::again/E1): Any { x.from }
+take-pair fn (n: Int, x: ::alias/E1, s: Str): Any { `${n} ${x.from} ${s}` }
+take-enum fn match (x: ::alias/Kind): Str {
+    ::alias/Kind.Wrapped => { "wrapped" }
+    _ => { "other" }
+}
+take-nested fn (x: ::alias/E1): Any {
+    inner fn (y: ::alias/E1): Any { y.from }
+    inner(x)
+}
+qualified-any fn (x: Any): Any { take-qualified(x) }
+alias-any fn (x: Any): Any { take-alias(x) }
+second-any fn (x: Any): Any { take-second(x) }
+reexport-any fn (x: Any): Any { take-reexport(x) }
+alias-reexport-any fn (x: Any): Any { take-alias-reexport(x) }
+pair-any fn (x: Any): Any { take-pair(1, x, "s") }
+enum-any fn (x: Any): Any { take-enum(x) }
+nested-any fn (x: Any): Any { take-nested(x) }
+
+::t ns
+p ::src/Payload({secret: "s"})
+already ::b::api/E1({from: "kept"})
+run fn (): Vec {
+    [
+        ::c/qualified-any(p), ::c/alias-any(p), ::c/second-any(p),
+        ::c/reexport-any(p), ::c/alias-reexport-any(p),
+        ::c/pair-any(p), ::c/enum-any(p), ::c/nested-any(p),
+        ::c/qualified-any(already), ::c/alias-any(already)
+    ]
+}
+run()
+run()
+run()"#;
+        let expected = strs(&[
+            "b", "b", "other", "b", "b", "1 b s", "wrapped", "b", "kept", "kept",
+        ]);
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            let out = compile_and_run_project_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("run failed: {e}"));
+            assert_eq!(out, expected);
+        }
+    }
+
+    /// Runtime overload dispatch can pick a sibling whose custom parameter type
+    /// is an arrow's target, and that sibling gets the converted value as a
+    /// lone function does, whichever overload is declared last and however the
+    /// type is written. A sibling that declares the argument's own type still
+    /// takes it unconverted. Dispatch used to skip coercion altogether.
+    #[test]
+    fn dispatched_overloads_get_the_implicit_arrow() {
+        let src = r#"::src ns
+Payload type { secret: Str }
+
+::b ns
+Payload ::src/Payload
+E1 type { from: Str }
+Payload -> E1 fn (p: Payload): E1 { E1({from: "arrow"}) }
+
+::c ns
+::alias ::b
+::payloads ::src
+E1 ::b/E1
+Payload ::src/Payload
+arrow-first fn
+(x: E1): Any { x.from },
+(x: Str): Any { "str" }
+arrow-last fn
+(x: Str): Any { "str" },
+(x: E1): Any { x.from }
+qualified fn
+(x: ::b/E1): Any { x.from },
+(x: Str): Any { "str" }
+aliased fn
+(x: ::alias/E1): Any { x.from },
+(x: Str): Any { "str" }
+two-args fn
+(n: Int, x: ::alias/E1): Any { `${n} ${x.from}` },
+(n: Int, x: Str): Any { "str" }
+own-type-first fn
+(x: Payload): Any { "own" },
+(x: E1): Any { x.from },
+(x: Str): Any { "str" }
+own-type-qualified fn
+(x: ::payloads/Payload): Any { "own" },
+(x: E1): Any { x.from },
+(x: Str): Any { "str" }
+tail fn
+(x: ::alias/E1): Any { x.from },
+(x: Vec): Any { tail(first(x)) }
+apply-all fn (x: Any): Vec {
+    [
+        arrow-first(x), arrow-last(x), qualified(x), aliased(x),
+        two-args(1, x), own-type-first(x), own-type-qualified(x)
+    ]
+}
+tail-any fn (x: Any): Any { tail(x) }
+
+::t ns
+p ::src/Payload({secret: "s"})
+already ::b/E1({from: "kept"})
+run fn (): Vec {
+    with-payload ::c/apply-all(p)
+    with-str ::c/apply-all("text")
+    [
+        ...with-payload,
+        ...with-str,
+        ::c/arrow-first(already), ::c/aliased(already),
+        ::c/tail-any([p])
+    ]
+}
+run()
+run()
+run()"#;
+        let expected = strs(&[
+            "arrow", "arrow", "arrow", "arrow", "1 arrow", "own", "own",
+            "str", "str", "str", "str", "str", "str", "str",
+            "kept", "kept",
+            "arrow",
+        ]);
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            let out = compile_and_run_project_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("run failed: {e}"));
+            assert_eq!(out, expected);
+        }
+    }
+
+    /// A parameter type can name one variant, as `Kind.Plain` or `::a/Kind.Plain`,
+    /// through an alias or a re-export too. Overloads dispatch on it, a sibling
+    /// declaring the enum takes the other variants, and an arrow to the variant
+    /// runs. Same-named enums in two namespaces stay apart.
+    #[test]
+    fn parameter_types_can_name_an_enum_variant() {
+        let src = r#"::a ns
+Inner type { text: Str }
+Kind enum open { Plain, Other, Wrapped(Inner) }
+Source type { text: Str }
+Source -> Kind.Sourced fn (s: Source): Kind { Kind.Wrapped({text: `from ${s.text}`}) }
+short fn
+(x: Kind.Plain): Any { "plain" },
+(x: Kind.Wrapped): Any { `wrapped ${x.text}` },
+(x: Kind): Any { "kind" }
+returns fn (): Kind.Plain { Kind.Plain }
+Holder type { kind: Kind.Plain }
+
+::b ns
+Kind enum { Plain, Other }
+
+::reexport ns
+Kind ::a/Kind
+
+::c ns
+::alias ::a
+::other ::b
+qualified fn
+(x: ::a/Kind.Plain): Any { "a plain" },
+(x: ::b/Kind.Plain): Any { "b plain" },
+(x: ::alias/Kind.Wrapped): Any { `a wrapped ${x.text}` },
+(x: ::reexport/Kind.Other): Any { "a other" },
+(x: ::other/Kind.Other): Any { "b other" }
+variant-first fn
+(x: ::a/Kind.Plain): Any { "plain" },
+(x: ::a/Kind): Any { "kind" }
+enum-first fn
+(x: ::alias/Kind): Any { "kind" },
+(x: ::alias/Kind.Plain): Any { "plain" }
+nullable fn (x: ::a/Kind.Plain?): Any { if(is-null(x), "none", "plain") }
+either fn (x: ::a/Kind.Plain | ::a/Kind.Other): Any { "either" }
+lone fn (x: ::a/Kind.Plain): Any { "lone" }
+arrow-target fn (x: ::a/Kind.Sourced): Any { `sourced ${x.text}` }
+hold fn (x: Any): Any { x }
+
+::t ns
+run fn (): Vec {
+    plain ::c/hold(::a/Kind.Plain)
+    wrapped ::c/hold(::a/Kind.Wrapped({text: "w"}))
+    other ::c/hold(::a/Kind.Other)
+    [
+        ::a/short(plain), ::a/short(wrapped), ::a/short(other),
+        ::c/qualified(plain), ::c/qualified(::c/hold(::b/Kind.Plain)),
+        ::c/qualified(wrapped), ::c/qualified(other),
+        ::c/qualified(::c/hold(::b/Kind.Other)),
+        ::c/qualified(::a/Kind.Plain), ::c/qualified(::b/Kind.Other), ::a/short(::a/Kind.Other),
+        ::c/variant-first(plain), ::c/variant-first(other),
+        ::c/enum-first(plain), ::c/enum-first(other),
+        ::c/nullable(plain), ::c/nullable(null), ::c/either(other), ::c/lone(plain),
+        ::c/arrow-target(::c/hold(::a/Source({text: "s"}))),
+        first(map([wrapped], ::a/short)), first(map([plain], ::c/qualified)),
+        is-type(::a/returns(), ::a/Kind),
+        is-type(::a/Holder(kind: ::a/Kind.Plain).kind, ::a/Kind)
+    ]
+}
+run()
+run()
+run()"#;
+        let expected = Val::vec(vec![
+            Val::from("plain"),
+            Val::from("wrapped w"),
+            Val::from("kind"),
+            Val::from("a plain"),
+            Val::from("b plain"),
+            Val::from("a wrapped w"),
+            Val::from("a other"),
+            Val::from("b other"),
+            Val::from("a plain"),
+            Val::from("b other"),
+            Val::from("kind"),
+            Val::from("plain"),
+            Val::from("kind"),
+            Val::from("plain"),
+            Val::from("kind"),
+            Val::from("plain"),
+            Val::from("none"),
+            Val::from("either"),
+            Val::from("lone"),
+            Val::from("sourced from s"),
+            Val::from("wrapped w"),
+            Val::from("a plain"),
+            Val::Bool(true),
+            Val::Bool(true),
+        ]);
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            let out = compile_and_run_project_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("run failed: {e}"));
+            assert_eq!(out, expected);
+        }
+    }
+
+    /// A namespace offers what it imports under its own name: its type's
+    /// constructor, a variant, a function, and a function reference, through an
+    /// alias or another re-export too. Its own definition of a name still wins.
+    #[test]
+    fn calls_reach_types_and_functions_through_a_reexport() {
+        let src = r#"::b::api ns
+E1 type { from: Str }
+Kind enum { Plain, Wrapped(E1) }
+describe fn (e: E1): Any { `described ${e.from}` }
+own fn (): Any { "api" }
+
+::reexport ns
+E1 ::b::api/E1
+Kind ::b::api/Kind
+describe ::b::api/describe
+
+::again ns
+::up ::reexport
+E1 ::up/E1
+Kind ::up/Kind
+describe ::up/describe
+
+::shadowing ns
+own fn (): Any { "shadowing" }
+
+::t ns
+::alias ::again
+E1 ::again/E1
+take fn (x: ::reexport/E1): Any { x.from }
+run fn (): Vec {
+    direct ::reexport/E1({from: "direct"})
+    named E1(from: "named")
+    chained ::again/E1(from: "chained")
+    aliased ::alias/E1({from: "aliased"})
+    [
+        direct.from, named.from, chained.from, aliased.from,
+        is-type(direct, ::b::api/E1),
+        eq(::reexport/Kind.Plain, ::b::api/Kind.Plain),
+        ::alias/Kind.Wrapped({from: "wrapped"}).from,
+        ::reexport/describe(direct), ::alias/describe(chained),
+        first(map([{from: "mapped"}], ::reexport/E1)).from,
+        first(map([direct], ::alias/describe)),
+        take(chained),
+        ::shadowing/own()
+    ]
+}
+run()
+run()
+run()"#;
+        let expected = Val::vec(vec![
+            Val::from("direct"),
+            Val::from("named"),
+            Val::from("chained"),
+            Val::from("aliased"),
+            Val::Bool(true),
+            Val::Bool(true),
+            Val::from("wrapped"),
+            Val::from("described direct"),
+            Val::from("described chained"),
+            Val::from("mapped"),
+            Val::from("described direct"),
+            Val::from("chained"),
+            Val::from("shadowing"),
+        ]);
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            let out = compile_and_run_project_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("run failed: {e}"));
+            assert_eq!(out, expected);
+        }
+    }
+
+    /// An overload set routes a tagged argument to the overload it has an arrow
+    /// to, built-in parameter types included, whichever overload is declared
+    /// last. Overloads that take the argument as it is still win, and an
+    /// unrelated custom type doesn't get in the way. Calls and `map` callbacks
+    /// dispatch alike.
+    #[test]
+    fn overload_dispatch_routes_through_arrows() {
+        let src = r#"::a ns
+Label type { text: Str }
+Other type { n: Int }
+Point type { x: Int }
+Tag type { name: Str }
+Label -> Str fn (l: Label): Str { l.text }
+Point -> Vec fn (p: Point): Vec { [p.x] }
+Label -> Tag fn (l: Label): Tag { Tag({name: l.text}) }
+str-first fn
+(s: Str): Any { `str ${s}` },
+(v: Vec): Any { "vec" }
+str-last fn
+(v: Vec): Any { "vec" },
+(s: Str): Any { `str ${s}` }
+past-others fn
+(i: Int): Any { "int" },
+(s: Str): Any { `str ${s}` },
+(v: Vec): Any { "vec" },
+(b: Bool): Any { "bool" }
+two-args fn
+(n: Int, s: Str): Any { `${n} ${s}` },
+(n: Int, v: Vec): Any { "vec" }
+past-custom fn
+(s: Str): Any { `str ${s}` },
+(o: Other): Any { "other" }
+custom-target fn
+(t: Tag): Any { `tag ${t.name}` },
+(o: Other): Any { "other" }
+own-type fn
+(s: Str): Any { `str ${s}` },
+(l: Label): Any { "own" },
+(v: Vec): Any { "vec" }
+any-sibling fn
+(s: Str): Any { `str ${s}` },
+(x: Any): Any { "any" },
+(v: Vec): Any { "vec" }
+union-sibling fn
+(u: Label | Int): Any { "union" },
+(s: Str): Any { `str ${s}` }
+lone fn (s: Str): Any { `str ${s}` }
+
+::t ns
+l ::a/Label({text: "l"})
+hold fn (x: Any): Any { x }
+run fn (): Vec {
+    label hold(l)
+    point hold(::a/Point({x: 1}))
+    by-value ::a/str-first
+    callbacks flatten([
+        map([label], ::a/str-first), map([label], ::a/str-last),
+        map([label], ::a/past-custom), map(["s", label], ::a/past-others),
+        map([label], ::a/lone), [by-value(label)], [call("::a/str-last", [label])]
+    ])
+    [
+        ::a/str-first(label), ::a/str-last(label), ::a/past-others(label),
+        ::a/two-args(1, label), ::a/past-custom(label), ::a/custom-target(label),
+        ::a/own-type(label), ::a/any-sibling(label), ::a/union-sibling(label),
+        ::a/str-first(point), ::a/str-first("s"), ::a/str-last([1]),
+        ...callbacks
+    ]
+}
+run()
+run()
+run()"#;
+        let expected = strs(&[
+            "str l", "str l", "str l", "1 l", "str l", "tag l", "own", "any", "union",
+            "vec", "str s", "vec",
+            "str l", "str l", "str l", "str s", "str l", "str l", "str l", "str l",
+        ]);
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            let out = compile_and_run_project_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("run failed: {e}"));
+            assert_eq!(out, expected);
+        }
+    }
+
+    /// Arrows that reach two overloads don't choose between them: the call stays
+    /// on the overload it resolved to, whose parameter check then reports the
+    /// mismatch. Neither does an argument route where its arrow can't run: at a
+    /// nullable type, or a built-in value to a built-in type.
+    #[test]
+    fn overload_dispatch_does_not_guess_between_arrows() {
+        let src = r#"::a ns
+Label type { text: Str }
+Label -> Str fn (l: Label): Str { l.text }
+Label -> Vec fn (l: Label): Vec { [l.text] }
+two fn
+(s: Str): Any { "str" },
+(v: Vec): Any { "vec" },
+(i: Int): Any { "int" }
+keeps-resolved fn
+(s: Str): Any { "str" },
+(v: Vec): Any { "vec" }
+nullable fn
+(s: Str?): Any { "str" },
+(i: Int): Any { "int" }
+builtin-value fn
+(s: Str): Any { "str" },
+(v: Vec): Any { "vec" }
+
+::t ns
+l ::a/Label({text: "l"})
+hold fn (x: Any): Any { x }
+describe fn (r: Result): Any { if-err(r, (e) { e.message }) }
+run fn (): Vec {
+    label hold(l)
+    [
+        describe(::a/two(label)),
+        ::a/keeps-resolved(label),
+        describe(::a/nullable(label)),
+        describe(::a/builtin-value(hold(1)))
+    ]
+}
+run()
+run()
+run()"#;
+        let expected = strs(&[
+            "parameter `i` of `::a/two` expected Int, got Label",
+            "vec",
+            "parameter `i` of `::a/nullable` expected Int, got Label",
+            "parameter `v` of `::a/builtin-value` expected Vec, got Int",
+        ]);
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            let out = compile_and_run_project_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("run failed: {e}"));
+            assert_eq!(out, expected);
+        }
+    }
+
+    /// An arrow's failure halts the call to a dispatched overload, as it does
+    /// for a lone function, on a call and on a self tail call.
+    #[test]
+    fn dispatched_overload_arrow_failure_halts() {
+        let declarations = r#"::t ns
+Bad type { n: Int }
+E1 type { from: Str }
+Bad -> E1 fn (b: Bad): E1 { err("arrow failed") }
+take fn
+(x: E1): Any { x.from },
+(x: Str): Any { "str" }
+tail fn
+(x: E1): Any { x.from },
+(x: Vec): Any { tail(first(x)) }
+call-any fn (x: Any): Any { take(x) }
+tail-any fn (x: Any): Any { tail(x) }
+"#;
+        for call in ["call-any(Bad({n: 1}))", "tail-any([Bad({n: 1})])"] {
+            let src = format!("{declarations}{call}");
+            for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+                let err = compile_and_run_project_with_std_conf(&src, conf)
+                    .expect_err("the arrow's failure halts");
+                assert!(err.contains("arrow failed"), "{call}: {err}");
+            }
+        }
+    }
+
+    /// A function's tail call to itself gets its implicit arrows as any call
+    /// does, in both tiers, and goes on looping: a compiled loop that nested a
+    /// call per conversion would hit the recursion limit here. The self call
+    /// used to pass the value unconverted.
+    #[test]
+    fn self_tail_calls_get_the_implicit_arrow() {
+        let src = r#"::t ns
+Payload type { secret: Str }
+Label type { text: Str }
+Count type { n: Int }
+E1 type { from: Str }
+E2 type { from: Str }
+Payload -> E1 fn (p: Payload): E1 { E1({from: "e1"}) }
+Payload -> E2 fn (p: Payload): E2 { E2({from: "e2"}) }
+Label -> Str fn (l: Label): Str { l.text }
+Count -> Int fn (c: Count): Int { c.n }
+walk fn (x: E1, n: Int, q: Any): Any {
+    if(eq(n, 0), x.from, walk(q, sub(n, 1), q))
+}
+walk-cond fn cond (x: E1, n: Int, q: Any): Any {
+    eq(n, 0) => { x.from }
+    => { walk-cond(q, sub(n, 1), q) }
+}
+two fn (x: E1, y: E2, n: Int, q: Any): Any {
+    if(eq(n, 0), `${x.from} ${y.from}`, two(q, q, sub(n, 1), q))
+}
+to-str fn (s: Str, n: Int, q: Any): Any {
+    if(eq(n, 0), s, to-str(q, sub(n, 1), q))
+}
+to-int fn (i: Int, n: Int, q: Any): Any {
+    if(eq(n, 0), i, to-int(q, sub(n, 1), q))
+}
+same-object fn (x: E1, n: Int): Any {
+    if(eq(n, 0), x.from, same-object(x, sub(n, 1)))
+}
+wrapped fn (x: Any): Any { x }
+through-ok fn (x: E1, n: Int, q: Any): Any {
+    if(eq(n, 0), x.from, through-ok(wrapped(q), sub(n, 1), q))
+}
+run fn (): Vec {
+    p Payload({secret: "s"})
+    start E1({from: "start"})
+    [
+        walk(start, 10000, p), walk-cond(start, 10000, p), walk(start, 0, p),
+        two(start, E2({from: "other"}), 3, p),
+        to-str("start", 3, Label({text: "label"})),
+        to-int(0, 3, Count({n: 7})),
+        same-object(start, 1000),
+        through-ok(start, 3, p)
+    ]
+}
+run()
+run()
+run()"#;
+        let expected = Val::vec(vec![
+            Val::from("e1"),
+            Val::from("e1"),
+            Val::from("start"),
+            Val::from("e1 e2"),
+            Val::from("label"),
+            Val::Int(7),
+            Val::from("start"),
+            Val::from("e1"),
+        ]);
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            let out = compile_and_run_project_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("run failed: {e}"));
+            assert_eq!(out, expected);
+        }
+    }
+
+    /// A parameter's built-in type is checked after its arrow has run: a self
+    /// tail call that converts the value passes the check, one with no arrow
+    /// for the value fails it, in both tiers and on the first iteration or a
+    /// later one.
+    #[test]
+    fn self_tail_call_arrows_run_before_the_parameter_check() {
+        let src = r#"::t ns
+Label type { text: Str }
+Count type { n: Int }
+Plain type { n: Int }
+Label -> Str fn (l: Label): Str { l.text }
+Count -> Int fn (c: Count): Int { c.n }
+to-str fn (s: Str, n: Int, q: Any): Any {
+    if(eq(n, 0), s, to-str(q, sub(n, 1), q))
+}
+to-int fn (i: Int, n: Int, q: Any): Any {
+    if(eq(n, 0), i, to-int(q, sub(n, 1), q))
+}
+to-dec fn (d: Dec, n: Int, q: Any): Any {
+    if(eq(n, 0), d, to-dec(q, sub(n, 1), q))
+}
+overloaded fn
+(v: Vec, n: Int, q: Any): Any { "vec" },
+(s: Str, n: Int, q: Any): Any { if(eq(n, 0), s, overloaded(q, sub(n, 1), q)) }
+run fn (): Vec {
+    plain Plain({n: 1})
+    failed-str to-str("start", 3, plain)
+    failed-int to-int(0, 3, plain)
+    failed-overload overloaded("start", 3, plain)
+    [
+        to-str("start", 3, Label({text: "label"})),
+        to-int(0, 3, Count({n: 7})),
+        to-dec(0.5, 3, 2),
+        overloaded("start", 3, Label({text: "label"})),
+        is-err(failed-str), is-err(failed-int), is-err(failed-overload)
+    ]
+}
+run()
+run()
+run()"#;
+        let expected = Val::vec(vec![
+            Val::from("label"),
+            Val::Int(7),
+            Val::Dec(fastnum::D256::from(2)),
+            Val::from("label"),
+            Val::Bool(true),
+            Val::Bool(true),
+            Val::Bool(true),
+        ]);
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            let out = compile_and_run_project_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("run failed: {e}"));
+            assert_eq!(out, expected);
+        }
+    }
+
+    /// An arrow's failure on a self tail call halts the run, in both tiers:
+    /// an Err once it's consumed, as on any call, and a `fail` at once, after
+    /// an earlier argument's arrow has run.
+    #[test]
+    fn self_tail_call_arrow_failure_halts() {
+        let declarations = r#"::t ns
+Good type { n: Int }
+Bad type { n: Int }
+E1 type { from: Str }
+E2 type { from: Str }
+Good -> E1 fn (g: Good): E1 { E1({from: "good"}) }
+Bad -> E1 fn (b: Bad): E1 { err("arrow failed") }
+Bad -> E2 fn (b: Bad): E2 { fail("arrow failed") }
+walk fn (x: E1, n: Int, q: Any): Any {
+    if(eq(n, 0), x.from, walk(q, sub(n, 1), q))
+}
+two fn (x: E1, y: E2, n: Int, p: Any, q: Any): Any {
+    if(eq(n, 0), x.from, two(p, q, sub(n, 1), p, q))
+}
+"#;
+        for call in [
+            r#"walk(E1({from: "start"}), 2, Bad({n: 1}))"#,
+            r#"two(E1({from: "a"}), E2({from: "b"}), 2, Good({n: 1}), Bad({n: 1}))"#,
+        ] {
+            let src = format!("{declarations}{call}");
+            for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+                let err = compile_and_run_project_with_std_conf(&src, conf)
+                    .expect_err("the arrow's failure halts");
+                assert!(err.contains("arrow failed"), "{call}: {err}");
+            }
+        }
+    }
+
+    /// An arrow's source is its qualified type too: a value doesn't run the
+    /// arrow declared for a same-named type in another namespace, and a local
+    /// type named like a core one has arrows of its own, wherever it's declared.
+    #[test]
+    fn same_named_arrow_sources_keep_to_their_namespaces() {
+        let src = r#"::a ns
+Secret type { value: Str }
+Out type { kind: Str }
+Secret -> Out fn (s: Secret): Out { Out({kind: "from a"}) }
+Secret -> Str fn (s: Secret): Str { "core str" }
+build fn (x: Any): Any { Out(x) }
+
+::b ns
+Secret type { kind: Str }
+make fn (): Any { Secret({kind: "copied"}) }
+
+::c ns
+Reduced type { text: Str }
+Holder type { n: Int }
+Holder -> Reduced fn (h: Holder): Reduced { Reduced({text: "local type"}) }
+local fn (h: Any): Any { Reduced(h).text }
+
+::t ns
+run fn (): Vec {
+    [
+        ::a/build(::a/Secret({value: "v"})).kind,
+        ::a/build(::b/make()).kind,
+        Str(::a/Secret({value: "v"})),
+        ::c/local(::c/Holder({n: 1}))
+    ]
+}
+run()
+run()
+run()"#;
+        let expected = Val::vec(vec![
+            Val::from("from a"),
+            Val::from("copied"),
+            Val::from("core str"),
+            Val::from("local type"),
+        ]);
         for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
             let out = compile_and_run_project_with_std_conf(src, conf)
                 .unwrap_or_else(|e| panic!("run failed: {e}"));
@@ -1847,7 +4019,7 @@ probe fn (): Vec {
 probe()
 probe()
 probe()"#;
-        let expected = Val::Vec(vec![
+        let expected = Val::vec(vec![
             Val::Int(610),
             Val::Dec(fastnum::D256::from(5) / fastnum::D256::from(2)),
             Val::Bool(false),
@@ -2259,7 +4431,8 @@ show(5)"#;
             let out = compile_and_run_with_std_conf(bad, Some(conf.clone()));
             assert!(
                 out.as_ref()
-                    .is_err_and(|e| e.contains("first requires a collection")),
+                    .is_err_and(|e| e.contains("first requires a collection")
+                        || e.contains("of `::hot::coll/first` expected Str | Vec | Map")),
                 "with {conf:?}, expected a halt, got {out:?}"
             );
         }
@@ -2474,7 +4647,7 @@ probe()"#;
         let interp =
             compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"mode": "off"}})))
                 .expect("interpreted checks");
-        let expected = Val::Vec(vec![
+        let expected = Val::vec(vec![
             Val::Int(80),
             Val::from("err"),
             Val::from("a"),
@@ -3298,6 +5471,17 @@ caller(true)"#;
         resolve_imports: bool,
         with_ast: bool,
     ) -> Result<Val, String> {
+        run_with_std_edited(source, conf, resolve_imports, with_ast, |_| {})
+    }
+
+    /// Like [`run_with_std`], with `edit` applied to the compiled program.
+    fn run_with_std_edited(
+        source: &str,
+        conf: Option<Val>,
+        resolve_imports: bool,
+        with_ast: bool,
+        edit: impl FnOnce(&mut crate::lang::bytecode::BytecodeProgram),
+    ) -> Result<Val, String> {
         use crate::lang::ast::Program;
         use std::path::Path;
 
@@ -3345,9 +5529,10 @@ caller(true)"#;
 
         let hot_ast = with_ast
             .then(|| Arc::new(crate::lang::ast::HotAst::from_program(combined_program)));
-        let program_arc = compiler.get_program_arc();
+        let mut program = compiler.get_program_arc();
+        edit(Arc::make_mut(&mut program));
         let mut vm = VirtualMachine::new(
-            program_arc,
+            program,
             hot_ast,
             compiler.get_function_mapping_arc(),
             compiler.get_core_functions_arc(),

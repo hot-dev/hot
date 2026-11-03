@@ -1,0 +1,196 @@
+::quickbooks::batch ns
+meta {
+    doc: """
+    The batch endpoint: up to 30 creates, updates, deletes and queries in
+    one request. Items run in order and each succeeds or fails on its
+    own; a failed item does not roll the others back.
+
+    ```hot
+    ::b ::quickbooks::batch
+
+    results ::b/batch([
+      ::b/create-item("Customer", {DisplayName: "Acme Corp"}),
+      ::b/update-item("Invoice", {Id: "130", SyncToken: "2", sparse: true, DueDate: "2026-12-31"}),
+      ::b/delete-item("Bill", "88", "0"),
+      ::b/query-item("select * from Vendor where Active = true")
+    ])
+    failed filter(results, (r) { not(r.ok) })
+    ```
+
+    Intuit allows about 40 batch requests a minute per company. A batch
+    is not idempotent: retrying a partly applied batch can repeat its
+    creates, so check each result before resubmitting.
+    """
+}
+
+::api ::quickbooks::api
+::entities ::quickbooks::entities
+
+OPERATIONS ["create", "update", "delete"]
+
+// ---------------------------------------------------------------------------
+// Items (pure)
+// ---------------------------------------------------------------------------
+
+create-item
+meta {
+    doc: """A batch create for `entity` with `body`. `bid` (optional) names the item in the results; items without one are numbered in order."""
+}
+fn
+(entity: Str, body: Map): Map {
+  create-item(entity, body, null)
+},
+(entity: Str, body: Map, bid: Str?): Map {
+  operation-item("create", entity, filter-vals(untype(body), is-some), bid)
+}
+
+update-item
+meta {
+    doc: """A batch update. `body` carries `Id` and `SyncToken`; add `sparse: true` to change only the fields given."""
+}
+fn
+(entity: Str, body: Map): Map {
+  update-item(entity, body, null)
+},
+(entity: Str, body: Map, bid: Str?): Map {
+  operation-item("update", entity, filter-vals(untype(body), is-some), bid)
+}
+
+delete-item
+meta {doc: """A batch delete of a transaction by `Id` and current `SyncToken`."""}
+fn
+(entity: Str, id: Str | Int, sync-token: Str | Int): Map {
+  delete-item(entity, id, sync-token, null)
+},
+(entity: Str, id: Str | Int, sync-token: Str | Int, bid: Str?): Map {
+  operation-item("delete", entity, ::entities/build-delete-body(Str(id), Str(sync-token)), bid)
+}
+
+query-item
+meta {doc: """A batch query (`select ...`; STARTPOSITION/MAXRESULTS allowed)."""}
+fn
+(q: Str): Map {
+  query-item(q, null)
+},
+(q: Str, bid: Str?): Map {
+  filter-vals({bId: bid, Query: q}, is-some)
+}
+
+// Item builders never Err (an Err inside a Vec literal halts the run);
+// `build-batch` validates the entity and operation of every item.
+operation-item fn (operation: Str, entity: Str, body: Map, bid: Str?): Map {
+  filter-vals({bId: bid, operation: operation, entity: entity, body: body}, is-some)
+}
+
+wire-item
+meta {
+    doc: """Check one item and turn it into its wire form (`{bId, operation, Invoice: {...}}` or `{bId, Query}`), or an Err."""
+}
+fn (item: Map): Map {
+  cond {
+    is-some(get(item, "Query")) => { item }
+    not(in(get(item, "operation"), OPERATIONS)) => { err(`quickbooks: unsupported batch operation '${get(item, "operation")}'`) }
+    => {
+      info ::entities/require-op(Str(or(get(item, "entity"), "")), get(item, "operation"))
+      cond {
+        is-err(info) => { info }
+        => { filter-vals({bId: get(item, "bId"), operation: item.operation, ...assoc({}, info.name, item.body)}, is-some) }
+      }
+    }
+  }
+}
+
+build-batch
+meta {
+    doc: """
+    The batch request body `{BatchItemRequest: [...]}` (pure). Items
+    without a `bId` get their 1-based position. Errs when there are no
+    items, more than 30, a repeated `bId`, or an item whose entity does
+    not support its operation.
+    """
+}
+fn (items: Vec): Map {
+  invalid find-first(items, (item) { is-err(wire-item(item)) })
+  cond {
+    is-empty(items) => { err("quickbooks: a batch needs at least one item") }
+    gt(length(items), ::quickbooks/MAX_BATCH_ITEMS) => {
+      err(`quickbooks: a batch takes at most ${::quickbooks/MAX_BATCH_ITEMS} items (got ${length(items)}); split it with partition`)
+    }
+
+    is-some(invalid) => { wire-item(invalid) }
+    => {
+      numbered map-indexed(items, (i, item) {
+        wire wire-item(item)
+        if(is-some(get(wire, "bId")), wire, {...wire, bId: Str(add(i, 1))})
+      })
+      ids map(numbered, (x) { get(x, "bId") })
+      if(ne(length(distinct(ids)), length(ids)), err("quickbooks: batch bIds must be unique"), {BatchItemRequest: numbered})
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Results (pure)
+// ---------------------------------------------------------------------------
+
+item-result
+meta {
+    doc: """
+    One `BatchItemResponse` as `{bid, ok, entity, value, message, errors}`:
+    `entity` is the entity name (or `"QueryResponse"`), `value` the entity
+    or query response, and for a failed item `message` is readable and
+    `errors` lists each `{message, detail, code, element}`.
+    """
+}
+fn (item: Map): Map {
+  bid get(item, "bId")
+  fault get(item, "Fault")
+  cond {
+    is-map(fault) => {
+      details ::api/fault-details({Fault: fault})
+      text join(map(details.errors, ::api/describe-error), "; ")
+      type-part if(is-some(details.fault-type), `${details.fault-type}: `, "")
+      {
+        bid: bid,
+        ok: false,
+        message: `quickbooks: batch item ${bid} failed: ${type-part}${text}`,
+        errors: details.errors
+      }
+    }
+    => {
+      entity-key find-first(keys(item), (k) { not(in(k, ["bId", "Fault"])) })
+      {bid: bid, ok: true, entity: entity-key, value: if(is-some(entity-key), get(item, entity-key), null)}
+    }
+  }
+}
+
+parse-results
+meta {
+    doc: """Every item of a batch response body as an `item-result`, in response order."""
+}
+fn (body: Map): Vec {
+  map(filter(or(get(body, "BatchItemResponse"), []), is-map), item-result)
+}
+
+// ---------------------------------------------------------------------------
+// Request
+// ---------------------------------------------------------------------------
+
+batch
+meta {
+    doc: """POST /batch: run up to 30 items and return their `item-result`s. The call itself Errs only for request-level failures (auth, throttling, a malformed batch)."""
+}
+fn
+(items: Vec): Vec {
+  batch(items, {})
+},
+(items: Vec, opts: Map): Vec {
+  body build-batch(items)
+  cond {
+    is-err(body) => { body }
+    => {
+      response ::api/json("POST", "/batch", {}, body, opts)
+      if(is-err(response), response, parse-results(response))
+    }
+  }
+}

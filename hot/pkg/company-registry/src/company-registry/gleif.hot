@@ -1,0 +1,388 @@
+::company-registry::gleif ns
+meta {
+    ctx: {"company-registry.gleif.base-url": {required: false, secret: false}},
+    doc: """
+    The GLEIF LEI API (`https://api.gleif.org/api/v1`, JSON:API, no
+    key): LEI records by full-text or filtered search, fuzzy and
+    autocomplete name suggestions, records by LEI or ISIN, ISINs per
+    LEI, and the Level 2 relationship data (direct and ultimate parents,
+    their relationship records and reporting exceptions, and children).
+
+    Lists are page-number paginated (`page[size]` up to 200,
+    `page[number]` from 1); `next-page` reads the next page number from
+    `meta.pagination`, and `collect` follows it. GLEIF asks clients to
+    stay under 60 requests per minute.
+
+    Every function takes an optional trailing `opts` Map: `page-size`,
+    `page`, `filters` (extra `filter[...]` parameters, e.g.
+    `{"entity.legalAddress.country": "US", "entity.status": "ACTIVE"}`),
+    and `gleif-base-url`.
+    """
+}
+
+::api ::company-registry::api
+
+ACCEPT "application/vnd.api+json"
+MAX_PAGE_SIZE 200
+
+gleif-get fn (path: Str, params: Map, opts: Map): Any {
+  cfg ::api/resolve(opts)
+  cond {
+    is-err(cfg) => { cfg }
+    => { ::api/get-json("gleif", `${cfg.gleif-base-url}${path}${::api/query-string(params)}`, {Accept: ACCEPT}) }
+  }
+}
+
+get-or-null fn (path: Str, opts: Map): Any {
+  cfg ::api/resolve(opts)
+  cond {
+    is-err(cfg) => { cfg }
+    => { ::api/get-json-or-null("gleif", `${cfg.gleif-base-url}${path}`, {Accept: ACCEPT}) }
+  }
+}
+
+page-params
+meta {
+    doc: """`page[size]` and `page[number]` from `opts.page-size` (capped at 200) and `opts.page`, omitted when unset (pure)."""
+}
+fn (opts: Map): Map {
+  size get(opts, "page-size")
+  {
+    "page[size]": if(is-some(size), min(size, MAX_PAGE_SIZE), null),
+    "page[number]": get(opts, "page")
+  }
+}
+
+filter-params
+meta {
+    doc: """`filter[<field>]` parameters from a Map of field → value (pure): `{"entity.status": "ACTIVE"}` → `{"filter[entity.status]": "ACTIVE"}`."""
+}
+fn (filters: Map?): Map {
+  m or(filters, {})
+  zipmap(map(keys(m), (k) { `filter[${k}]` }), vals(m))
+}
+
+search-params
+meta {
+    doc: """Query parameters for a full-text LEI search (pure): `filter[fulltext]`, the extra filters, and paging."""
+}
+fn (name: Str, opts: Map): Map {
+  {"filter[fulltext]": name, ...filter-params(get(opts, "filters")), ...page-params(opts)}
+}
+
+lei-path
+meta {
+    doc: """`/lei-records/{lei}` with the LEI upper-cased and encoded (pure)."""
+}
+fn (lei: Str): Str {
+  `/lei-records/${::api/path-segment(uppercase(trim(lei)))}`
+}
+
+is-lei
+meta {
+    doc: """True for a syntactically valid LEI: 20 characters, 18 alphanumerics and two check digits, with a valid ISO 17442 (MOD 97-10) checksum."""
+}
+fn (lei: Str): Bool {
+  s uppercase(trim(lei))
+  cond {
+    not(::hot::regex/is-match(s, "^[A-Z0-9]{18}[0-9]{2}$")) => { false }
+    => { eq(mod97(s), 1) }
+  }
+}
+
+LETTER_VALUES {
+  A: 10, B: 11, C: 12, D: 13, E: 14, F: 15, G: 16, H: 17, I: 18, J: 19, K: 20, L: 21, M: 22,
+  N: 23, O: 24, P: 25, Q: 26, R: 27, S: 28, T: 29, U: 30, V: 31, W: 32, X: 33, Y: 34, Z: 35
+}
+
+mod97 fn (s: Str): Int {
+  digits join(map(::hot::regex/split(s, ""), (c) {
+    v get(LETTER_VALUES, c)
+    if(is-some(v), Str(v), c)
+  }), "")
+  reduce(filter(::hot::regex/split(digits, ""), (c) { not(is-empty(c)) }), (acc, c) {
+    mod(add(mul(acc, 10), Int(c)), 97)
+  }, 0)
+}
+
+// ---------------------------------------------------------------------------
+// Records
+// ---------------------------------------------------------------------------
+
+search
+meta {
+    doc: """
+    Full-text search of LEI records (`filter[fulltext]`: legal and other
+    names, and more). Returns the JSON:API page: `data` (records),
+    `meta.pagination` and `links`.
+
+    **Example**
+
+    ```hot
+    page ::company-registry::gleif/search("apple inc", {page-size: 10, filters: {"entity.legalAddress.country": "US"}})
+    first(page.data).attributes.entity.legalName.name
+    ```
+    """
+}
+fn
+(name: Str): Map {
+  search(name, {})
+},
+(name: Str, opts: Map): Map {
+  gleif-get("/lei-records", search-params(name, opts), opts)
+}
+
+search-legal-name
+meta {
+    doc: """Search by legal name only (`filter[entity.legalName]`), which is stricter than full text."""
+}
+fn
+(name: Str): Map {
+  search-legal-name(name, {})
+},
+(name: Str, opts: Map): Map {
+  gleif-get("/lei-records", {"filter[entity.legalName]": name, ...filter-params(get(opts, "filters")), ...page-params(opts)}, opts)
+}
+
+fuzzy-completions
+meta {
+    doc: """
+    Fuzzy name suggestions (`/fuzzycompletions`), which tolerate
+    misspellings. `opts.field` defaults to `"entity.legalName"`
+    (`"fulltext"` and `"owns"`/`"ownedBy"` also work). Returns
+    `[{name, lei}]`.
+
+    **Example**
+
+    ```hot
+    ::company-registry::gleif/fuzzy-completions("appel inc")  // [{name: "Apple Inc.", lei: "HWUPKR0MPOU8FGXBT394"}, ...]
+    ```
+    """
+}
+fn
+(q: Str): Vec<Map> {
+  fuzzy-completions(q, {})
+},
+(q: Str, opts: Map): Vec<Map> {
+  out gleif-get("/fuzzycompletions", {field: or(get(opts, "field"), "entity.legalName"), q: q}, opts)
+  completions(out)
+}
+
+autocompletions
+meta {
+    doc: """Prefix suggestions (`/autocompletions`, `opts.field` default `"fulltext"`). Returns `[{name, lei}]`."""
+}
+fn
+(q: Str): Vec<Map> {
+  autocompletions(q, {})
+},
+(q: Str, opts: Map): Vec<Map> {
+  out gleif-get("/autocompletions", {field: or(get(opts, "field"), "fulltext"), q: q}, opts)
+  completions(out)
+}
+
+completions
+meta {
+    doc: """`[{name, lei}]` from a fuzzy or auto completion response (pure)."""
+}
+fn (body: Any): Vec<Map> {
+  map(or(get(or(body, {}), "data"), []), (d) {
+    {name: get-in(d, ["attributes", "value"]), lei: get-in(d, ["relationships", "lei-records", "data", "id"])}
+  })
+}
+
+get-record
+meta {
+    doc: """One LEI record by LEI (the JSON:API `data` object), or null when GLEIF has none."""
+}
+fn
+(lei: Str): Map? {
+  get-record(lei, {})
+},
+(lei: Str, opts: Map): Map? {
+  out get-or-null(lei-path(lei), opts)
+  if(is-null(out), null, get(out, "data"))
+}
+
+by-isin
+meta {
+    doc: """The LEI records issuing an ISIN (`filter[isin]`)."""
+}
+fn
+(isin: Str): Vec<Map> {
+  by-isin(isin, {})
+},
+(isin: Str, opts: Map): Vec<Map> {
+  out gleif-get("/lei-records", {"filter[isin]": uppercase(trim(isin)), ...page-params(opts)}, opts)
+  or(get(out, "data"), [])
+}
+
+isins
+meta {
+    doc: """One page of the ISINs mapped to an LEI (GLEIF's daily ISIN-to-LEI file, via the API). Returns the page; `data[].attributes.isin` holds each ISIN."""
+}
+fn
+(lei: Str): Map {
+  isins(lei, {})
+},
+(lei: Str, opts: Map): Map {
+  gleif-get(`${lei-path(lei)}/isins`, page-params(opts), opts)
+}
+
+// ---------------------------------------------------------------------------
+// Relationships
+// ---------------------------------------------------------------------------
+
+direct-parent
+meta {
+    doc: """The direct accounting-consolidation parent's LEI record, or null when none is reported (check `direct-parent-exception` for the reason)."""
+}
+fn
+(lei: Str): Map? {
+  direct-parent(lei, {})
+},
+(lei: Str, opts: Map): Map? {
+  out get-or-null(`${lei-path(lei)}/direct-parent`, opts)
+  if(is-null(out), null, get(out, "data"))
+}
+
+ultimate-parent
+meta {
+    doc: """The ultimate accounting-consolidation parent's LEI record, or null when none is reported."""
+}
+fn
+(lei: Str): Map? {
+  ultimate-parent(lei, {})
+},
+(lei: Str, opts: Map): Map? {
+  out get-or-null(`${lei-path(lei)}/ultimate-parent`, opts)
+  if(is-null(out), null, get(out, "data"))
+}
+
+direct-parent-relationship
+meta {
+    doc: """The direct-parent relationship record (`IS_DIRECTLY_CONSOLIDATED_BY`, with periods and validation), or null."""
+}
+fn
+(lei: Str): Map? {
+  direct-parent-relationship(lei, {})
+},
+(lei: Str, opts: Map): Map? {
+  out get-or-null(`${lei-path(lei)}/direct-parent-relationship`, opts)
+  if(is-null(out), null, get(out, "data"))
+}
+
+ultimate-parent-relationship
+meta {
+    doc: """The ultimate-parent relationship record (`IS_ULTIMATELY_CONSOLIDATED_BY`), or null."""
+}
+fn
+(lei: Str): Map? {
+  ultimate-parent-relationship(lei, {})
+},
+(lei: Str, opts: Map): Map? {
+  out get-or-null(`${lei-path(lei)}/ultimate-parent-relationship`, opts)
+  if(is-null(out), null, get(out, "data"))
+}
+
+direct-parent-exception
+meta {
+    doc: """Why no direct parent is reported (`attributes.reason`, e.g. `NATURAL_PERSONS`, `NON_CONSOLIDATING`), or null."""
+}
+fn
+(lei: Str): Map? {
+  direct-parent-exception(lei, {})
+},
+(lei: Str, opts: Map): Map? {
+  out get-or-null(`${lei-path(lei)}/direct-parent-reporting-exception`, opts)
+  if(is-null(out), null, get(out, "data"))
+}
+
+ultimate-parent-exception
+meta {
+    doc: """Why no ultimate parent is reported, or null."""
+}
+fn
+(lei: Str): Map? {
+  ultimate-parent-exception(lei, {})
+},
+(lei: Str, opts: Map): Map? {
+  out get-or-null(`${lei-path(lei)}/ultimate-parent-reporting-exception`, opts)
+  if(is-null(out), null, get(out, "data"))
+}
+
+direct-children
+meta {
+    doc: """One page of the entities directly consolidated by `lei` (LEI records)."""
+}
+fn
+(lei: Str): Map {
+  direct-children(lei, {})
+},
+(lei: Str, opts: Map): Map {
+  gleif-get(`${lei-path(lei)}/direct-children`, page-params(opts), opts)
+}
+
+ultimate-children
+meta {
+    doc: """One page of the entities ultimately consolidated by `lei` (LEI records)."""
+}
+fn
+(lei: Str): Map {
+  ultimate-children(lei, {})
+},
+(lei: Str, opts: Map): Map {
+  gleif-get(`${lei-path(lei)}/ultimate-children`, page-params(opts), opts)
+}
+
+// ---------------------------------------------------------------------------
+// Pagination
+// ---------------------------------------------------------------------------
+
+next-page
+meta {
+    doc: """The page number after `page` from `meta.pagination` (`currentPage` < `lastPage`), or null on the last page (pure)."""
+}
+fn (page: Any): Int? {
+  p get-in(or(page, {}), ["meta", "pagination"])
+  current get(or(p, {}), "currentPage")
+  last-page get(or(p, {}), "lastPage")
+  cond {
+    or(is-null(current), is-null(last-page)) => { null }
+    lt(current, last-page) => { add(current, 1) }
+    => { null }
+  }
+}
+
+collect-pages fn (fetch: Fn, page-number: Int?, limit: Int, acc: Vec): Vec {
+  page fetch(page-number)
+  items or(get(page, "data"), [])
+  combined concat(acc, items)
+  next next-page(page)
+  cond {
+    gte(length(combined), limit) => { slice(combined, 0, limit) }
+    is-empty(items) => { combined }
+    is-null(next) => { combined }
+    => { collect-pages(fetch, next, limit, combined) }
+  }
+}
+
+collect
+meta {
+    doc: """
+    Follow pages of a paginated GLEIF call until `limit` items or the
+    last page. `fetch` takes `opts` (with `page` and `page-size` set)
+    and returns one page.
+
+    **Example**
+
+    ```hot
+    ::gleif ::company-registry::gleif
+    kids ::gleif/collect((o) { ::gleif/direct-children("HWUPKR0MPOU8FGXBT394", o) }, {}, 500)
+    ```
+    """
+}
+fn (fetch: Fn, opts: Map, limit: Int): Vec {
+  size min(MAX_PAGE_SIZE, max(1, limit))
+  collect-pages((n) { fetch({...opts, page-size: size, page: or(n, 1)}) }, null, limit, [])
+}

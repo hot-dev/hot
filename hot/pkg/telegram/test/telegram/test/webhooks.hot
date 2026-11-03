@@ -1,0 +1,45 @@
+::telegram::test::webhooks ns
+meta ["test"]
+
+::updates ::telegram::updates
+
+SECRET "s3cret-token_ABC"
+
+req fn (headers: Map): Map {
+  {headers: headers, body-raw: """{"update_id":1}"""}
+}
+
+test-verify-accepts-matching-secret
+meta ["test"]
+fn () {
+    assert(::updates/verify-request(req({x-telegram-bot-api-secret-token: SECRET}), SECRET))
+}
+
+test-verify-rejects-wrong-secret
+meta ["test"]
+fn () {
+    assert(not(::updates/verify-request(req({x-telegram-bot-api-secret-token: "s3cret-token_ABD"}), SECRET)), "tampered token")
+    assert(not(::updates/verify-request(req({x-telegram-bot-api-secret-token: "s3cret"}), SECRET)), "prefix of the secret")
+}
+
+test-verify-rejects-missing-header
+meta ["test"]
+fn () {
+    assert(not(::updates/verify-request(req({}), SECRET)), "no header")
+    assert(not(::updates/verify-request(req({x-telegram-bot-api-secret-token: ""}), SECRET)), "empty header")
+}
+
+test-verify-fails-closed-on-empty-secret
+meta ["test"]
+fn () {
+    assert(not(::updates/verify-request(req({x-telegram-bot-api-secret-token: ""}), "")), "empty secret never verifies")
+    assert(not(::updates/verify-request(req({x-telegram-bot-api-secret-token: "anything"}), "")), "empty secret never verifies")
+}
+
+test-verify-uses-ctx-secret
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"telegram.webhook.secret": SECRET})
+    assert(::updates/verify-request(req({x-telegram-bot-api-secret-token: SECRET})), "1-arity reads telegram.webhook.secret")
+    assert(not(::updates/verify-request(req({x-telegram-bot-api-secret-token: "nope"}))), "1-arity rejects a wrong token")
+}

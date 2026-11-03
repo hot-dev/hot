@@ -575,8 +575,11 @@ async fn async_main(providers: CliProviders) {
                     Err(e) => {
                         eprintln!("Installation failed: {}", e);
                         eprintln!();
-                        eprintln!("You can download manually from:");
-                        eprintln!("  {}", platform.download_url);
+                        update::print_install_failure_help(
+                            &platform,
+                            Some(&resolved_version),
+                            None,
+                        );
                         std::process::exit(1);
                     }
                 }
@@ -609,14 +612,11 @@ async fn async_main(providers: CliProviders) {
                     Err(e) => {
                         eprintln!("Installation failed: {}", e);
                         eprintln!();
-                        let install_method = update::detect_install_method();
-                        if install_method == update::InstallMethod::Homebrew {
-                            eprintln!("You can update manually with:");
-                            eprintln!("  brew upgrade hot");
-                        } else {
-                            eprintln!("You can download manually from:");
-                            eprintln!("  {}", platform.download_url);
-                        }
+                        update::print_install_failure_help(
+                            &platform,
+                            None,
+                            Some("brew upgrade hot"),
+                        );
                         std::process::exit(1);
                     }
                 }
@@ -646,16 +646,11 @@ async fn async_main(providers: CliProviders) {
                         Err(e) => {
                             eprintln!("Installation failed: {}", e);
                             eprintln!();
-                            let install_method = update::detect_install_method();
-                            if install_method == update::InstallMethod::Homebrew
-                                && target_version.is_none()
-                            {
-                                eprintln!("You can reinstall manually with:");
-                                eprintln!("  brew reinstall hot");
-                            } else {
-                                eprintln!("You can download manually from:");
-                                eprintln!("  {}", platform.download_url);
-                            }
+                            update::print_install_failure_help(
+                                &platform,
+                                target_version,
+                                target_version.is_none().then_some("brew reinstall hot"),
+                            );
                             std::process::exit(1);
                         }
                     }

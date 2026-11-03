@@ -450,6 +450,20 @@ impl RecordTypes {
         Some((def.clone(), def_ns, def_name))
     }
 
+    /// The declared type at `key`, a namespace and name, through any namespaces
+    /// that import it.
+    fn followed_import(&self, mut key: (String, String)) -> Option<(String, String)> {
+        // The cap only bounds imports that form a cycle.
+        const MAX_REEXPORTS: usize = 16;
+        for _ in 0..MAX_REEXPORTS {
+            if self.declared.contains_key(&key) {
+                return Some(key);
+            }
+            key = self.imports.get(&key)?.clone();
+        }
+        None
+    }
+
     /// The namespace and name of the declared type that `name` (`User`,
     /// `::app::users/User`, `::alias/User`) refers to in namespace `ns`.
     fn resolve(&self, ns: &str, name: &str) -> Option<(String, String)> {
@@ -470,17 +484,16 @@ impl RecordTypes {
                         .cloned()
                 })
                 .unwrap_or_else(|| prefix.to_string());
-            let key = (target_ns, type_name.to_string());
-            return self.declared.contains_key(&key).then_some(key);
+            return self.followed_import((target_ns, type_name.to_string()));
         }
         let key = (ns.to_string(), name.to_string());
         if self.declared.contains_key(&key) {
             return Some(key);
         }
         if let Some(target) = self.imports.get(&key)
-            && self.declared.contains_key(target)
+            && let Some(found) = self.followed_import(target.clone())
         {
-            return Some(target.clone());
+            return Some(found);
         }
         let core_ns = self.core.get(name)?;
         Some((core_ns.clone(), name.to_string()))
@@ -501,7 +514,7 @@ pub(super) fn into_map_call(mut call: FnCall) -> FnCall {
         entries.insert(Val::from(arg.name.unwrap_or_default()), value);
     }
     call.args = vec![FnCallArg {
-        value: Value::Val(Val::Map(Box::new(entries)), Some("Map".to_string())),
+        value: Value::Val(Val::map(entries), Some("Map".to_string())),
         lazy: false,
         spread: false,
         name: None,

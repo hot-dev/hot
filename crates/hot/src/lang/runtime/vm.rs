@@ -7,7 +7,7 @@ use crate::lang::bytecode::{
 use crate::lang::compiler::core_registry::CoreVariableRegistry;
 use crate::lang::runtime::error::RuntimeError;
 use crate::lang::runtime::jit::{
-    CallNames, CodeMemoryStatus, JitConfig, JitFunctionProfile, JitRuntimeState,
+    CallNames, CodeMemoryStatus, JitConfig, JitFunctionProfile, JitRuntimeState, ParamArrows,
 };
 use crate::lang::runtime::native_core::NativeCoreShadows;
 use crate::val::Val;
@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use uuid::Uuid;
 
 mod constraints;
+pub(crate) use constraints::ParamCheck;
 
 /// Default maximum Hot-level recursion depth. Each user-visible function call
 /// adds one to the depth counter (dispatch wrappers like `call`/`call-lib` are
@@ -82,8 +83,9 @@ pub(crate) fn core_function_name<'a>(
 pub(crate) fn merge_map_spread(dest: Val, source: &Val) -> VmResult<Val> {
     match (dest, crate::val::map_spread_entries(source)) {
         (Val::Map(mut dest_map), Some(entries)) => {
+            let dest = Arc::make_mut(&mut dest_map);
             for (k, v) in entries.iter() {
-                dest_map.insert(k.clone(), v.clone());
+                dest.insert(k.clone(), v.clone());
             }
             Ok(Val::Map(dest_map))
         }
@@ -110,10 +112,10 @@ pub(crate) fn merge_map_spread(dest: Val, source: &Val) -> VmResult<Val> {
 pub(crate) fn append_to_vec(target: Val, value: Val) -> VmResult<Val> {
     match target {
         Val::Vec(mut elements) => {
-            elements.push(value);
+            Arc::make_mut(&mut elements).push(value);
             Ok(Val::Vec(elements))
         }
-        Val::Null => Ok(Val::Vec(vec![value])),
+        Val::Null => Ok(Val::vec(vec![value])),
         other => Err(VmError::runtime(format!(
             "Cannot append to {:?}, expected a vector",
             other
@@ -234,10 +236,11 @@ pub(crate) struct VmHostContext {
     task_id: Option<uuid::Uuid>,
     context_storage: AHashMap<String, Val>,
     secret_keys: AHashSet<String>,
-    secret_value_hashes: AHashSet<u64>,
+    ctx_default_hashes: AHashSet<u64>,
     run_start_time: chrono::DateTime<chrono::Utc>,
     run_start_instant: std::time::Instant,
     native_core_shadows: Arc<NativeCoreShadows>,
+    meta_calls_read: Arc<AtomicBool>,
 }
 
 /// Thread-safe cancellation state holder
@@ -529,7 +532,8 @@ pub const DEFAULT_ENGINE_THREADS: usize = 4;
 /// One overload in a same-arity overload set (see `OverloadSet`).
 struct OverloadCandidate {
     function_id: FunctionId,
-    /// Declared parameter types as written (`Str`, `Int | Dec`, `Str?`, ...).
+    /// Declared parameter types (`Str`, `Int | Dec`, `Str?`, ...), each member
+    /// resolved in the overload's namespace (`::a/Type`).
     param_types: Vec<String>,
     lazy_params: Vec<bool>,
 }
@@ -540,6 +544,9 @@ struct OverloadCandidate {
 struct OverloadSet {
     prefix: String,
     arity: usize,
+    /// Its overloads take a rest parameter, so a call can pass one argument
+    /// fewer than `arity`, or any number more.
+    variadic: bool,
     candidates: Vec<OverloadCandidate>,
 }
 
@@ -548,32 +555,130 @@ struct OverloadSet {
 const OVERLOAD_RANK_EXACT: u32 = 0;
 const OVERLOAD_RANK_LOOSE: u32 = 1;
 const OVERLOAD_RANK_ANY: u32 = 2;
+/// A custom type that isn't the argument's. It may be an alias or a literal
+/// union, so it accepts, and counts as `OVERLOAD_RANK_ANY`; see `OverloadFit`.
+const OVERLOAD_RANK_UNKNOWN: u32 = 3;
+/// A built-in type the argument reaches only through an arrow. It outweighs any
+/// number of parameters that accept their arguments as they are.
+const OVERLOAD_RANK_ARROW: u32 = 1 << 16;
+
+/// How an overload accepts a call's arguments.
+#[derive(Clone, Copy)]
+struct OverloadFit {
+    function_id: FunctionId,
+    /// Summed rank over the parameters.
+    rank: u32,
+    /// An arrow converts one of the arguments.
+    arrow: bool,
+    /// A tagged argument is at a custom type that isn't its own and has no
+    /// arrow to it, so it fits only if that type turns out to be an alias.
+    unknown: bool,
+    /// Every parameter declares its argument's own type, which beats an enum
+    /// declared for a variant of it.
+    own_types: bool,
+}
 
 impl OverloadCandidate {
-    /// Summed rank over the parameters, or `None` when a parameter does not
-    /// accept its argument. `names` are the arguments' dispatch type names,
-    /// and `maps` whether each is structurally a Map.
-    fn rank(&self, names: &[std::borrow::Cow<'_, str>], maps: &[bool]) -> Option<u32> {
-        if self.param_types.len() != names.len() {
+    /// The overload's fit, or `None` when a parameter does not accept its
+    /// argument. `names` are the arguments' dispatch type names, `maps` whether
+    /// each is structurally a Map, and `arrow_to` whether a tagged argument has
+    /// an implicit arrow to a declared type.
+    fn fit(
+        &self,
+        names: &[std::borrow::Cow<'_, str>],
+        maps: &[bool],
+        variadic: bool,
+        arrow_to: impl Fn(&str, &str) -> bool,
+    ) -> Option<OverloadFit> {
+        if !variadic && self.param_types.len() != names.len() {
             return None;
         }
-        let mut total = 0;
-        for (i, (declared, name)) in self.param_types.iter().zip(names).enumerate() {
-            total += if self.lazy_params.get(i).copied().unwrap_or(false) {
+        // `coerce_call_args` converts only when each argument has its parameter.
+        let coerces = self.param_types.len() == names.len();
+        // A rest parameter's type is each of its values' type.
+        let rest = self.param_types.len().saturating_sub(1);
+        let mut fit = OverloadFit {
+            function_id: self.function_id,
+            rank: 0,
+            arrow: false,
+            unknown: false,
+            own_types: true,
+        };
+        for (i, name) in names.iter().enumerate() {
+            let param = if variadic { i.min(rest) } else { i };
+            let declared = self.param_types.get(param)?;
+            if self.lazy_params.get(param).copied().unwrap_or(false) {
                 // Lazy arguments arrive as thunks, so their type is unknown.
-                OVERLOAD_RANK_ANY
-            } else {
-                overload_param_rank(declared, name, maps.get(i).copied().unwrap_or(false))?
+                fit.rank += OVERLOAD_RANK_ANY;
+                fit.own_types = false;
+                continue;
+            }
+            fit.own_types &= declared.as_str() == name.as_ref();
+            let rank = overload_param_rank(declared, name, maps.get(i).copied().unwrap_or(false));
+            let arrow = coerces
+                && matches!(rank, None | Some(OVERLOAD_RANK_UNKNOWN))
+                && arrow_to(name, declared);
+            fit.arrow |= arrow;
+            fit.rank += match rank {
+                Some(OVERLOAD_RANK_UNKNOWN) => {
+                    fit.unknown |= !arrow && is_tagged_dispatch_name(name);
+                    OVERLOAD_RANK_ANY
+                }
+                Some(rank) => rank,
+                None if arrow => OVERLOAD_RANK_ARROW,
+                None => return None,
             };
         }
-        Some(total)
+        Some(fit)
     }
+}
+
+/// Whether a dispatch type name (see `dispatch_type_name`) is a value's type
+/// tag. An Err isn't converted: it is passed on as it is.
+fn is_tagged_dispatch_name(name: &str) -> bool {
+    !matches!(
+        name,
+        "Str"
+            | "Int"
+            | "Dec"
+            | "Bool"
+            | "Null"
+            | "Vec"
+            | "Map"
+            | "Bytes"
+            | "Byte"
+            | "Fn"
+            | "Namespace"
+            | "Iter"
+            | "Any"
+            | "::hot::type/Result.Err"
+    )
+}
+
+/// Whether a declared type names the argument's type or, for an enum, a variant
+/// of it (`Shape.Circle`). Two qualified names must match in full: same-named
+/// types in two namespaces are different types. A builtin or a value carrying a
+/// short `$type` has only its short name to go by.
+fn declared_type_matches(declared: &str, actual: &str) -> bool {
+    let (declared, actual) = if declared.starts_with("::") && actual.starts_with("::") {
+        (declared, actual)
+    } else {
+        (short_type_name(declared), short_type_name(actual))
+    };
+    declared == actual
+        || actual
+            .strip_prefix(declared)
+            .is_some_and(|rest| rest.starts_with('.'))
+}
+
+fn short_type_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
 }
 
 /// Rank how the declared parameter type `declared` accepts an argument with
 /// dispatch type name `actual`. Only builtin type names reject: a custom name
 /// may be a type alias, a literal union of builtin values, or the target of a
-/// coercion arrow, so it accepts without preference.
+/// coercion arrow, so it accepts as `OVERLOAD_RANK_UNKNOWN`.
 fn overload_param_rank(declared: &str, actual: &str, is_map: bool) -> Option<u32> {
     let declared = declared.trim();
     if declared.is_empty() || declared == "Any" || actual == "Any" {
@@ -591,15 +696,11 @@ fn overload_param_rank(declared: &str, actual: &str, is_map: bool) -> Option<u32
     let mut best: Option<u32> = None;
     let mut unknown = false;
     for member in members {
-        let name = member.split('<').next().unwrap_or(member).trim();
-        let name = name.rsplit('/').next().unwrap_or(name);
+        let path = member.split('<').next().unwrap_or(member).trim();
+        let name = short_type_name(path);
         let rank = if name == "Any" {
             Some(OVERLOAD_RANK_ANY)
-        } else if name == actual
-            || actual
-                .strip_prefix(name)
-                .is_some_and(|rest| rest.starts_with('.'))
-        {
+        } else if declared_type_matches(path, actual) {
             // The same type, or a variant of the declared enum (`Shape.Circle`).
             Some(if single {
                 OVERLOAD_RANK_EXACT
@@ -632,7 +733,7 @@ fn overload_param_rank(declared: &str, actual: &str, is_map: bool) -> Option<u32
             (best, rank) => best.or(rank),
         };
     }
-    best.or(unknown.then_some(OVERLOAD_RANK_ANY))
+    best.or(unknown.then_some(OVERLOAD_RANK_UNKNOWN))
 }
 
 /// Split `s` on `sep` outside `<...>`, where type parameters can contain it.
@@ -756,10 +857,9 @@ pub struct VirtualMachine {
     pub context_storage: AHashMap<String, Val>,
     /// Set of context keys that are secrets (should be masked in logs/db)
     pub secret_keys: AHashSet<String>,
-    /// Set of secret value hashes that should be masked in call logs
-    /// This is populated when ctx/get returns a secret value
-    /// We store hashes (u64) for efficient comparison and to handle any Val type
-    pub secret_value_hashes: AHashSet<u64>,
+    /// Hashes of the `ctx` defaults this run uses: values in source code, not
+    /// secrets, even under a key declared secret.
+    pub ctx_default_hashes: AHashSet<u64>,
     /// Engine configuration (includes thread count, etc.)
     conf: Val,
     /// Thread count for parallel execution (cached from conf)
@@ -775,7 +875,10 @@ pub struct VirtualMachine {
     /// Used by the `CallUserFunction` opcode handler to apply implicit
     /// `Source -> Target` coercions when the runtime arg types differ from
     /// the declared param types (the type checker has already vetted the call).
-    coercion_param_cache: AHashMap<FunctionId, Option<Vec<String>>>,
+    coercion_param_cache: AHashMap<FunctionId, Option<std::rc::Rc<[String]>>>,
+    /// The arrow `implicit_arrow` found for a value type and parameter type,
+    /// misses included: a scan of the arrows for each call is too slow.
+    coercion_target_cache: AHashMap<String, AHashMap<String, Option<(String, String)>>>,
     /// Per-function-id cache of the same-arity overload set a function belongs
     /// to (`None` when it has no same-arity siblings), used for runtime
     /// overload dispatch (`overload_for_args`).
@@ -798,6 +901,9 @@ pub struct VirtualMachine {
     /// Where bare calls to the core functions every tier runs natively reach
     /// another function. Computed on first use, and shared with worker VMs.
     native_core_shadows: std::cell::OnceCell<Arc<NativeCoreShadows>>,
+    /// Whether this run has read a meta value that still holds a call (see
+    /// `note_meta_read`). Shared with worker VMs, which can hand one back.
+    meta_calls_read: Arc<AtomicBool>,
     /// Number of currently-active `execute_user_function` frames per
     /// FunctionId. Register indices are unique per function but shared across
     /// invocations of the *same* function, so a re-entrant (recursive) call
@@ -826,6 +932,61 @@ pub struct VirtualMachine {
     /// Task ID when this VM is executing inside a task worker.
     /// Used by `::hot::task/checkpoint` and `::hot::task/restore`.
     task_id: Option<uuid::Uuid>,
+}
+
+/// The types of a typed signature key: `::ns/name/1:::other/Type,Str` gives
+/// `::other/Type,Str`. Names and types both contain `/` and `:`, but only the
+/// arity is all digits, so the types start after `/<arity>:`. `None` for an
+/// untyped key (`::ns/name/1`) or a bare name (`::ns/name`).
+fn signature_key_types(key: &str) -> Option<&str> {
+    key.match_indices('/').find_map(|(slash, _)| {
+        let (arity, types) = key[slash + 1..].split_once(':')?;
+        (!arity.is_empty() && arity.bytes().all(|b| b.is_ascii_digit())).then_some(types)
+    })
+}
+
+/// Split the types of a typed signature key, `Map<Str, Int>,Str?`, at the
+/// commas between parameters.
+fn split_param_types(types: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+    for (i, c) in types.char_indices() {
+        match c {
+            '<' | '(' | '{' | '[' => depth += 1,
+            '>' | ')' | '}' | ']' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(types[start..i].to_string());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(types[start..].to_string());
+    parts
+}
+
+/// The exact conversion `CheckParam` would make for `arg` at a parameter of
+/// `param_type`: an `Int` to a `Dec`, or a whole `Dec` to an `Int`.
+fn exact_number_for_param(arg: &Val, param_type: &str) -> Option<Val> {
+    let base = param_type.strip_suffix('?').unwrap_or(param_type);
+    match (base, arg) {
+        ("Dec", Val::Int(n)) => Some(Val::Dec(fastnum::D256::from(*n))),
+        ("Int", Val::Dec(d)) if d.floor() == *d => d.to_i64().ok().map(Val::Int),
+        _ => None,
+    }
+}
+
+/// Whether a parameter's type is a built-in one, as `is_primitive_type_expr`
+/// in the type checker counts them.
+fn is_primitive_param_type(param_type: &str) -> bool {
+    let base = param_type.strip_suffix('?').unwrap_or(param_type);
+    let base = base.split('<').next().unwrap_or(base).trim();
+    let base = base.strip_prefix("::hot::type/").unwrap_or(base);
+    matches!(
+        base,
+        "Str" | "Int" | "Dec" | "Bool" | "Bytes" | "Byte" | "Null" | "Any" | "Vec" | "Map"
+    )
 }
 
 impl VirtualMachine {
@@ -906,17 +1067,19 @@ impl VirtualMachine {
             entry_proven: None,
             context_storage: AHashMap::new(),
             secret_keys: AHashSet::new(),
-            secret_value_hashes: AHashSet::new(),
+            ctx_default_hashes: AHashSet::new(),
             conf,
             thread_count,
             dispatch_cache: AHashMap::new(),
             coercion_param_cache: AHashMap::new(),
+            coercion_target_cache: AHashMap::new(),
             overload_set_cache: AHashMap::new(),
             overload_choice_cache: AHashMap::new(),
             sorted_key_indices: None,
             jit,
             hof_plan_cache: AHashMap::new(),
             native_core_shadows: std::cell::OnceCell::new(),
+            meta_calls_read: Arc::new(AtomicBool::new(false)),
             function_active_depth: vec![0; function_count],
             function_used_registers_cache: AHashMap::new(),
             failure_state: Arc::new(VmFailureState {
@@ -1087,10 +1250,11 @@ impl VirtualMachine {
             task_id: self.task_id,
             context_storage: self.context_storage.clone(),
             secret_keys: self.secret_keys.clone(),
-            secret_value_hashes: self.secret_value_hashes.clone(),
+            ctx_default_hashes: self.ctx_default_hashes.clone(),
             run_start_time: self.run_start_time,
             run_start_instant: self.run_start_instant,
             native_core_shadows: self.native_core_shadows(),
+            meta_calls_read: Arc::clone(&self.meta_calls_read),
         }
     }
 
@@ -1109,9 +1273,10 @@ impl VirtualMachine {
         self.task_id = context.task_id;
         self.context_storage = context.context_storage.clone();
         self.secret_keys = context.secret_keys.clone();
-        self.secret_value_hashes = context.secret_value_hashes.clone();
+        self.ctx_default_hashes = context.ctx_default_hashes.clone();
         self.run_start_time = context.run_start_time;
         self.run_start_instant = context.run_start_instant;
+        self.meta_calls_read = Arc::clone(&context.meta_calls_read);
         // A worker runs the same program, so it shares what was computed.
         let _ = self
             .native_core_shadows
@@ -1533,13 +1698,43 @@ impl VirtualMachine {
         }
     }
 
-    /// Sync secret_value_hashes from VM to execution_context for database masking
-    /// This should be called after any ctx/get call that might return a secret
-    pub fn sync_secret_value_hashes_to_execution_context(&mut self) {
-        if let Some(ref mut ctx) = self.execution_context {
-            // Merge new secret value hashes into the execution context
-            for hash in &self.secret_value_hashes {
-                ctx.secret_value_hashes.insert(*hash);
+    /// Register a secret value with this run's context, which shares it with
+    /// every record of the run. Without a context, nothing is recorded.
+    pub fn register_secret_value(&mut self, value: &Val) {
+        if let Some(ctx) = &self.execution_context {
+            ctx.secret_values.register(value);
+        }
+    }
+
+    /// Register a key given to a native.
+    pub fn register_secret_key(&mut self, key: &Val) {
+        if let Some(ctx) = &self.execution_context {
+            ctx.secret_values.register_key(key);
+        }
+    }
+
+    /// Register a credential a native has just made.
+    pub fn register_minted_secret(&mut self, value: &Val) {
+        if let Some(ctx) = &self.execution_context {
+            ctx.secret_values.register_minted(value);
+        }
+    }
+
+    /// Like [`Self::register_secret_value`], for a value masked only where it
+    /// is the whole value.
+    pub fn register_secret_value_exact(&mut self, value: &Val) {
+        if let Some(ctx) = &self.execution_context {
+            ctx.secret_values.register_exact(value);
+        }
+    }
+
+    /// Fill context keys the run didn't set from their declared defaults.
+    pub fn apply_ctx_defaults(&mut self, defaults: impl IntoIterator<Item = (String, Val)>) {
+        for (key, default_val) in defaults {
+            if !self.context_storage.contains_key(&key) {
+                self.ctx_default_hashes
+                    .insert(crate::lang::masking::value_hash(&default_val));
+                self.context_storage.insert(key, default_val);
             }
         }
     }
@@ -2077,7 +2272,7 @@ impl VirtualMachine {
                     // Extract dependency levels from the constant value
                     if let Val::Vec(levels_vec) = &value {
                         let mut dependency_levels = Vec::new();
-                        for level_val in levels_vec {
+                        for level_val in levels_vec.iter() {
                             if let Val::Vec(var_names_vec) = level_val {
                                 let var_names: Vec<String> = var_names_vec
                                     .iter()
@@ -2760,8 +2955,7 @@ impl VirtualMachine {
                     if (spread_mask >> i) & 1 == 1 {
                         // The spread operand is consumed: it must be a Vec.
                         let unwrapped_arg = self.unwrap_result_if_ok(&arg_val)?;
-                        let resolved_arg =
-                            self.resolve_variable_references_in_val(&unwrapped_arg)?;
+                        let resolved_arg = self.resolve_call_arg(unwrapped_arg)?;
                         match &resolved_arg {
                             Val::Vec(elements) => {
                                 tracing::trace!(
@@ -2769,7 +2963,7 @@ impl VirtualMachine {
                                     elements.len(),
                                     i
                                 );
-                                for elem in elements {
+                                for elem in elements.iter() {
                                     args.push(elem.clone());
                                 }
                             }
@@ -2835,7 +3029,7 @@ impl VirtualMachine {
                         if self.error_capture_active {
                             let mut m = indexmap::IndexMap::new();
                             m.insert(Val::from("error"), Val::from(e.to_string()));
-                            Val::Map(Box::new(m))
+                            Val::map(m)
                         } else {
                             return Err(e);
                         }
@@ -2874,7 +3068,7 @@ impl VirtualMachine {
                         if self.error_capture_active {
                             let mut m = indexmap::IndexMap::new();
                             m.insert(Val::from("error"), Val::from(e.to_string()));
-                            Val::Map(Box::new(m))
+                            Val::map(m)
                         } else {
                             return Err(e);
                         }
@@ -2914,45 +3108,13 @@ impl VirtualMachine {
                 // the actual arg types better is called instead (see
                 // `overload_for_args`), with the arguments prepared for its
                 // parameters: one that declares a `Result` receives an Err.
-                // Otherwise, if a typed signature exists and the actual arg
-                // types differ but a unique `Source -> Target` arrow exists,
-                // coerce in place.
-                // The type checker has already vetted the call, so any miss
-                // here just falls back to invoking the function with the
-                // original args (preserves prior behavior).
-                let dispatched = self.overload_for_args(function_id, &args);
-                if let Some(chosen) = dispatched {
+                // `coerce_call_args` then applies any implicit arrows to the
+                // parameters of the function called.
+                if let Some(chosen) = self.overload_for_args(function_id, &args) {
                     function_id = chosen;
                 }
-                let mut args = self.prepare_call_args(CallTarget::Function(function_id), args)?;
-                if dispatched.is_none()
-                    && let Some(expected) = self.lookup_typed_param_signature(function_id)
-                {
-                    let actual: Vec<String> =
-                        args.iter().map(|a| self.get_val_type_name(a)).collect();
-                    if actual != expected {
-                        let actual_full: Vec<String> =
-                            args.iter().map(|a| self.get_value_type_path(a)).collect();
-                        let mut plan: Vec<Option<(String, String)>> =
-                            Vec::with_capacity(args_count as usize);
-                        let mut all_ok = true;
-                        for ((a, a_full), e) in
-                            actual.iter().zip(actual_full.iter()).zip(expected.iter())
-                        {
-                            if a == e {
-                                plan.push(None);
-                            } else if let Some(arrow) = self.find_coercion_target(a_full, a, e) {
-                                plan.push(Some(arrow));
-                            } else {
-                                all_ok = false;
-                                break;
-                            }
-                        }
-                        if all_ok {
-                            args = self.apply_coercion_plan(&args, &plan)?;
-                        }
-                    }
-                }
+                let args = self.prepare_call_args(CallTarget::Function(function_id), args)?;
+                let args = self.coerce_call_args(function_id, args)?;
 
                 // Execute the user function directly
                 let result = match self.execute_user_function(function_id, &args) {
@@ -2961,7 +3123,7 @@ impl VirtualMachine {
                         if self.error_capture_active {
                             let mut m = indexmap::IndexMap::new();
                             m.insert(Val::from("error"), Val::from(e.to_string()));
-                            Val::Map(Box::new(m))
+                            Val::map(m)
                         } else {
                             return Err(e);
                         }
@@ -3433,7 +3595,7 @@ impl VirtualMachine {
                     let mut map = indexmap::IndexMap::new();
                     map.insert(Val::from("$type"), Val::from("::hot::type/Result.Ok"));
                     map.insert(Val::from("$val"), val);
-                    Val::Map(Box::new(map))
+                    Val::map(map)
                 };
                 self.set_register(dest, result)?;
                 self.instruction_pointer += 1;
@@ -3477,7 +3639,7 @@ impl VirtualMachine {
                             if self.error_capture_active {
                                 let mut m = indexmap::IndexMap::new();
                                 m.insert(Val::from("error"), Val::from(e.to_string()));
-                                Val::Map(Box::new(m))
+                                Val::map(m)
                             } else {
                                 return Err(e);
                             }
@@ -3517,7 +3679,7 @@ impl VirtualMachine {
                         if self.error_capture_active {
                             let mut m = indexmap::IndexMap::new();
                             m.insert(Val::from("error"), Val::from(e.to_string()));
-                            Val::Map(Box::new(m))
+                            Val::map(m)
                         } else {
                             return Err(e);
                         }
@@ -3558,7 +3720,7 @@ impl VirtualMachine {
                     elements.push(element_val);
                 }
 
-                let vector_val = Val::Vec(elements);
+                let vector_val = Val::vec(elements);
                 self.set_register(dest, vector_val)?;
                 self.instruction_pointer += 1;
             }
@@ -3568,12 +3730,11 @@ impl VirtualMachine {
                 let value = *value;
                 // Push a value onto a vector (modifies vec in place)
                 let value_to_push = self.get_register(value)?.clone();
-                let vec_val = self.get_register(vec)?;
+                let vec_val = self.take_register(vec)?;
 
-                if let Val::Vec(elements) = vec_val {
-                    let mut new_elements = elements.clone();
-                    new_elements.push(value_to_push);
-                    self.set_register(vec, Val::Vec(new_elements))?;
+                if let Val::Vec(mut elements) = vec_val {
+                    Arc::make_mut(&mut elements).push(value_to_push);
+                    self.set_register(vec, Val::Vec(elements))?;
                 } else {
                     return Err(VmError::runtime(format!(
                         "VecPush: expected Vec, got {:?}",
@@ -3604,7 +3765,7 @@ impl VirtualMachine {
                         // Spread this element - it should be a Vec
                         match element_val {
                             Val::Vec(inner_elements) => {
-                                for inner_elem in inner_elements {
+                                for inner_elem in Arc::unwrap_or_clone(inner_elements) {
                                     elements.push(inner_elem);
                                 }
                             }
@@ -3627,7 +3788,7 @@ impl VirtualMachine {
                     }
                 }
 
-                let vector_val = Val::Vec(elements);
+                let vector_val = Val::vec(elements);
                 self.set_register(dest, vector_val)?;
                 self.instruction_pointer += 1;
             }
@@ -3663,6 +3824,19 @@ impl VirtualMachine {
                 self.set_register(dest, result)?;
                 self.instruction_pointer += 1;
             }
+            Instruction::CheckParam {
+                var_name,
+                spec,
+                mask,
+                each,
+            } => {
+                if let Some(error) = self.execute_check_param(*var_name, *spec, *mask, *each)? {
+                    self.set_register(0, error)?;
+                    self.instruction_pointer = usize::MAX;
+                    return Ok(());
+                }
+                self.instruction_pointer += 1;
+            }
             Instruction::ProvenArgs { function_id, mask } => {
                 self.pending_proven = Some((*function_id, *mask));
                 self.instruction_pointer += 1;
@@ -3694,21 +3868,21 @@ impl VirtualMachine {
                 let collection = *collection;
                 let index = *index;
                 let value = *value;
-                let collection_val = self.get_register(collection)?.clone();
                 let index_val = self.get_register(index)?.clone();
                 let value_val = self.get_register(value)?.clone();
+                let collection_val = self.take_register(collection)?;
 
                 match collection_val {
                     Val::Map(mut map) => {
                         // Set element in map
-                        map.insert(index_val, value_val);
+                        Arc::make_mut(&mut map).insert(index_val, value_val);
                         self.set_register(collection, Val::Map(map))?;
                     }
                     Val::Vec(mut vec) => {
                         // Set element in vector (if index is an integer)
                         if let Val::Int(idx) = index_val {
                             if idx >= 0 && (idx as usize) < vec.len() {
-                                vec[idx as usize] = value_val;
+                                Arc::make_mut(&mut vec)[idx as usize] = value_val;
                                 self.set_register(collection, Val::Vec(vec))?;
                             } else {
                                 return Err(VmError::runtime(format!(
@@ -3738,7 +3912,7 @@ impl VirtualMachine {
             Instruction::MergeMaps { dest, source } => {
                 let dest = *dest;
                 let source = *source;
-                let dest_val = self.get_register(dest)?.clone();
+                let dest_val = self.take_register(dest)?;
                 // A spread contributes a constructed value's fields, not its
                 // internal `$type`/`$val` wrapper keys.
                 let merged = merge_map_spread(dest_val, self.get_register(source)?)?;
@@ -3776,7 +3950,7 @@ impl VirtualMachine {
                 let val = self.get_register(src)?.clone();
                 let mut m = indexmap::IndexMap::new();
                 m.insert(Val::from("ok"), val);
-                self.set_register(dest, Val::Map(Box::new(m)))?;
+                self.set_register(dest, Val::map(m))?;
                 self.instruction_pointer += 1;
             }
 
@@ -4007,12 +4181,12 @@ impl VirtualMachine {
                     };
                     resolved_map.insert(key.clone(), resolved_value);
                 }
-                Ok(Val::Map(Box::new(resolved_map)))
+                Ok(Val::map(resolved_map))
             }
             Val::Vec(vec) => {
                 // Recursively resolve variable references in vectors
                 let mut resolved_vec = Vec::new();
-                for value in vec {
+                for value in vec.iter() {
                     let resolved_value = if let Val::Box(b) = value {
                         // Check if this is a lazy lambda - if so, preserve it
                         if b.as_any()
@@ -4042,7 +4216,7 @@ impl VirtualMachine {
                     };
                     resolved_vec.push(resolved_value);
                 }
-                Ok(Val::Vec(resolved_vec))
+                Ok(Val::vec(resolved_vec))
             }
             _ => Ok(val.clone()),
         }
@@ -4119,6 +4293,16 @@ impl VirtualMachine {
         self.registers
             .get(reg_id as usize)
             .ok_or(VmError::InvalidRegister(reg_id))
+    }
+
+    /// Move a register's value out, leaving Null. A write to the value it
+    /// returns copies a collection only if something else still holds it.
+    fn take_register(&mut self, reg_id: RegisterId) -> VmResult<Val> {
+        self.get_register(reg_id)?;
+        Ok(std::mem::replace(
+            &mut self.registers[reg_id as usize],
+            Val::Null,
+        ))
     }
 
     fn set_register(&mut self, reg_id: RegisterId, value: Val) -> VmResult<()> {
@@ -4299,7 +4483,7 @@ impl VirtualMachine {
                     }
                     new_vec.push(result);
                 }
-                return Ok(Val::Vec(new_vec));
+                return Ok(Val::vec(new_vec));
             } else {
                 // Not a Vec - return as-is
                 return Ok(data.clone());
@@ -4335,44 +4519,8 @@ impl VirtualMachine {
                 // construct_typed_recursive sees the Vec wants `Geom`, the
                 // element is a tagged Triangle, and rather than failing variant
                 // inference we look up the arrow and call it.
-                let src_short = existing.rsplit('/').next().unwrap_or(existing);
-                let tgt_short = type_name.rsplit('/').next().unwrap_or(&type_name);
-                // Prefer keys whose source is the value's qualified $type;
-                // fall back to short-form comparison for legacy registry
-                // entries. The single-candidate guard keeps ambiguous
-                // matches from silently picking an arrow.
-                let collect_candidates = |exact: bool| -> Vec<(String, String)> {
-                    self.type_implementations
-                        .keys()
-                        .filter_map(|(s, t)| {
-                            let source_matches = if exact {
-                                s == existing
-                            } else {
-                                s.rsplit('/').next().unwrap_or(s) == src_short
-                            };
-                            if !source_matches {
-                                return None;
-                            }
-                            if t == tgt_short || t.starts_with(&format!("{}.", tgt_short)) {
-                                Some((s.clone(), t.clone()))
-                            } else {
-                                None
-                            }
-                        })
-                        .collect()
-                };
-                let mut candidates = collect_candidates(true);
-                if candidates.is_empty() {
-                    candidates = collect_candidates(false);
-                }
-                if candidates.len() == 1
-                    && let Some(impl_name) =
-                        self.resolve_type_implementation(&candidates[0].0, &candidates[0].1)
-                {
-                    return self.execute_function_call_by_qualified_name(
-                        &impl_name,
-                        std::slice::from_ref(data),
-                    );
+                if let Some(coerced) = self.coerce_tagged_via_arrow(data, existing, &type_name)? {
+                    return Ok(coerced);
                 }
             }
 
@@ -4392,7 +4540,7 @@ impl VirtualMachine {
                 let mut result_map = indexmap::IndexMap::new();
                 result_map.insert(Val::from("$type"), Val::from(type_name.clone()));
                 result_map.insert(Val::from("$val"), data.clone());
-                return Ok(Val::Map(Box::new(result_map)));
+                return Ok(Val::map(result_map));
             }
 
             // Check if this type has a direct constructor (struct types do)
@@ -4521,6 +4669,18 @@ impl VirtualMachine {
                 .execute_function_call_by_qualified_name(&type_name, std::slice::from_ref(data));
         }
 
+        // `T(value)` where `value` carries another type's tag runs a
+        // declared `Source -> T` arrow instead of copying fields across:
+        // the arrow is the author's statement of how to build a T from it.
+        if let Val::Map(m) = data
+            && let Some(existing) = crate::val::tagged_type_name(m)
+            && existing != type_name
+            && !existing.starts_with(&format!("{}.", type_name))
+            && let Some(coerced) = self.coerce_tagged_via_arrow(data, existing, &type_name)?
+        {
+            return Ok(coerced);
+        }
+
         // Get all_fields list to check for newtypes
         let all_fields: Vec<String> = type_info_map
             .get(&Val::from("$all_fields"))
@@ -4569,7 +4729,7 @@ impl VirtualMachine {
             let mut result_map = indexmap::IndexMap::new();
             result_map.insert(Val::from("$type"), Val::from(type_name.clone()));
             result_map.insert(Val::from("$val"), data.clone());
-            return Ok(Val::Map(Box::new(result_map)));
+            return Ok(Val::map(result_map));
         }
 
         // If data is already typed (has $type), extract its $val for reconstruction
@@ -4644,7 +4804,7 @@ impl VirtualMachine {
                     new_map.insert(key.clone(), processed_value);
                 }
 
-                Val::Map(Box::new(new_map))
+                Val::map(new_map)
             }
             Val::Vec(vec) => {
                 // For vector data, check if we have item type info
@@ -4665,7 +4825,7 @@ impl VirtualMachine {
                         }
                         new_vec.push(result);
                     }
-                    Val::Vec(new_vec)
+                    Val::vec(new_vec)
                 } else {
                     raw_data.clone()
                 }
@@ -4695,7 +4855,7 @@ impl VirtualMachine {
         result_map.insert(Val::from("$type"), Val::from(type_name));
         result_map.insert(Val::from("$val"), processed_val);
 
-        Ok(Val::Map(Box::new(result_map)))
+        Ok(Val::map(result_map))
     }
 
     fn construct_union_typed(&mut self, data: &Val, members: &[Val]) -> VmResult<Val> {
@@ -5226,7 +5386,7 @@ impl VirtualMachine {
                         }
 
                         tracing::trace!("VM: collect_flow_result |map -> {:?}", result_map);
-                        Ok(Val::Map(Box::new(result_map)))
+                        Ok(Val::map(result_map))
                     }
                     crate::lang::bytecode::FlowResultModifier::Vec => {
                         // Create a vector of results (ignore branch names)
@@ -5237,7 +5397,7 @@ impl VirtualMachine {
                             .collect();
 
                         tracing::trace!("VM: collect_flow_result |vec -> {:?}", result_vec);
-                        Ok(Val::Vec(result_vec))
+                        Ok(Val::vec(result_vec))
                     }
                     crate::lang::bytecode::FlowResultModifier::One => {
                         // For CondAll/MatchAll, return the last truthy result
@@ -5276,7 +5436,7 @@ impl VirtualMachine {
                         }
 
                         tracing::trace!("VM: Serial/Parallel flow |map -> {:?}", result_map);
-                        Ok(Val::Map(Box::new(result_map)))
+                        Ok(Val::map(result_map))
                     }
                     crate::lang::bytecode::FlowResultModifier::Vec => {
                         // Create a vector from variable references (values only)
@@ -5287,7 +5447,7 @@ impl VirtualMachine {
                             .collect();
 
                         tracing::trace!("VM: Serial/Parallel flow |vec -> {:?}", result_vec);
-                        Ok(Val::Vec(result_vec))
+                        Ok(Val::vec(result_vec))
                     }
                     crate::lang::bytecode::FlowResultModifier::One => {
                         // For |one, return the last referenced variable value, or null if none
@@ -5314,7 +5474,7 @@ impl VirtualMachine {
                         }
 
                         tracing::trace!("VM: Pipe flow |map -> {:?}", result_map);
-                        Ok(Val::Map(Box::new(result_map)))
+                        Ok(Val::map(result_map))
                     }
                     crate::lang::bytecode::FlowResultModifier::Vec => {
                         // Create a vector from pipe step results (values only)
@@ -5325,7 +5485,7 @@ impl VirtualMachine {
                             .collect();
 
                         tracing::trace!("VM: Pipe flow |vec -> {:?}", result_vec);
-                        Ok(Val::Vec(result_vec))
+                        Ok(Val::vec(result_vec))
                     }
                     crate::lang::bytecode::FlowResultModifier::One => {
                         // For |one, return the last pipe step result, or null if none
@@ -5506,12 +5666,130 @@ impl VirtualMachine {
             .enumerate()
             .map(|(index, arg)| {
                 if keeps.get(index).copied().unwrap_or(false) {
-                    self.resolve_variable_references_in_val(&arg)
+                    self.resolve_call_arg(arg)
+                } else if arg.is_err() {
+                    Err(self.consume_err_arg(target, index, &arg))
                 } else {
                     self.prepare_call_arg(arg)
                 }
             })
             .collect()
+    }
+
+    /// Halt on an Err passed where the callee consumes it. The message
+    /// names the parameter and its function, lambda or native, so a halt
+    /// far from where the Err was made says why it happened.
+    fn consume_err_arg(&mut self, target: CallTarget<'_>, index: usize, arg: &Val) -> VmError {
+        let err_val = arg.unwrap_err().cloned().unwrap_or(Val::Null);
+        let mut msg = Self::result_err_message(&err_val);
+        if let Some(context) = self.consumed_arg_context(target, index) {
+            msg = format!("{msg} ({context})");
+        }
+        self.set_consumed_failure(msg.clone(), err_val);
+        VmError::runtime(format!("Result error: {}", msg))
+    }
+
+    /// Halt on an Err that compiled code consumes as an argument of a core
+    /// function it runs natively (`add`, `is-null`, ...), with the message
+    /// the interpreter's call to that function gives.
+    pub(crate) fn consume_err_for_core(&mut self, core: &str, index: usize, arg: &Val) -> VmError {
+        // The interpreter calls it by name, as the compiled code was.
+        let callee = Val::from(core);
+        self.consume_err_arg(CallTarget::Value(&callee), index, arg)
+    }
+
+    /// `consume_err_for_core` for an argument of a user function.
+    pub(crate) fn consume_err_for_function(
+        &mut self,
+        function_id: FunctionId,
+        index: usize,
+        arg: &Val,
+    ) -> VmError {
+        self.consume_err_arg(CallTarget::Function(function_id), index, arg)
+    }
+
+    /// Where an argument at `index` of a call to `target` was consumed.
+    fn consumed_arg_context(&mut self, target: CallTarget<'_>, index: usize) -> Option<String> {
+        const DECLARE: &str = "declare the parameter `Result` to receive Errs";
+        let param_name = |names: &[String], variadic: bool| {
+            names
+                .get(index)
+                .or_else(|| names.last().filter(|_| variadic))
+                .map(|name| {
+                    match name
+                        .strip_prefix("__")
+                        .and_then(|n| n.parse::<usize>().ok())
+                    {
+                        // A placeholder lambda's parameters: `%` (`%1`), `%2`, ...
+                        Some(0) => "placeholder `%`".to_string(),
+                        Some(n) => format!("placeholder `%{}`", n + 1),
+                        None => format!("parameter `{name}`"),
+                    }
+                })
+                .unwrap_or_else(|| format!("argument {}", index + 1))
+        };
+        match target {
+            CallTarget::Function(function_id) => {
+                let function = self.program.functions.get(function_id as usize)?;
+                let param = param_name(&function.param_names, function.is_variadic);
+                let name = if function.name.starts_with("::") {
+                    function.name.clone()
+                } else {
+                    format!("{}/{}", function.namespace, function.name)
+                };
+                Some(format!("an Err passed to {param} of {name}; {DECLARE}"))
+            }
+            CallTarget::Lambda(lambda) => {
+                let param = param_name(&lambda.parameters, false);
+                Some(format!("an Err passed to {param} of a lambda; {DECLARE}"))
+            }
+            CallTarget::Native(name) => Some(format!(
+                "an Err passed as argument {} of {name}, which needs a value; test a Result with is-err or is-ok",
+                index + 1
+            )),
+            CallTarget::Value(value) => {
+                let mut value = value;
+                if let Val::Map(map) = value
+                    && crate::val::tagged_type_name(map) == Some("::hot::type/Fn")
+                    && let Some(inner) = map.get(&Val::from("$val"))
+                {
+                    value = inner;
+                }
+                let name = match value {
+                    Val::Box(boxed) => {
+                        if let Some(lambda) = boxed
+                            .as_any()
+                            .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
+                        {
+                            return self.consumed_arg_context(CallTarget::Lambda(lambda), index);
+                        }
+                        boxed
+                            .as_any()
+                            .downcast_ref::<crate::lang::runtime::function_ref::FunctionRef>()?
+                            .name
+                            .clone()
+                    }
+                    Val::Str(name) => name.to_string(),
+                    _ => return None,
+                };
+                if !name.starts_with("::")
+                    && let Ok(Val::Box(boxed)) = self.lookup_variable(&name)
+                    && let Some(lambda) = boxed
+                        .as_any()
+                        .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
+                    && !lambda.is_lazy_param
+                {
+                    return self.consumed_arg_context(CallTarget::Lambda(lambda), index);
+                }
+                let name = self.resolve_function_name(&name).unwrap_or(name);
+                match self.function_mapping.get(&name).copied() {
+                    Some(function_id) => {
+                        self.consumed_arg_context(CallTarget::Function(function_id), index)
+                    }
+                    None => self.consumed_arg_context(CallTarget::Native(&name), index),
+                }
+            }
+        }
     }
 
     /// Keep a halt that a native saw while running Hot code (a callback, a
@@ -5610,6 +5888,21 @@ impl VirtualMachine {
                 if name == "call-lib" || name == "call" {
                     return Vec::new();
                 }
+                // A bare name dispatches to a lambda bound in scope before
+                // any function of that name (`unified_function_lookup`), so
+                // that lambda's parameters decide: `f (x: Result) {...}`
+                // bound at top level and called as `f(err(...))`.
+                if !name.starts_with("::")
+                    && let Ok(Val::Box(boxed)) = self.lookup_variable(&name)
+                    && let Some(lambda) = boxed
+                        .as_any()
+                        .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
+                    && !lambda.is_lazy_param
+                {
+                    return (0..args.len())
+                        .map(|index| lambda.keeps_param(index))
+                        .collect();
+                }
                 let name = self.resolve_function_name(&name).unwrap_or(name);
                 match self.find_best_function_overload(&name, args) {
                     // The sibling a by-name call dispatches to (see
@@ -5636,11 +5929,29 @@ impl VirtualMachine {
             | Val::Bytes(_)
             | Val::Null => Ok(val),
             other => {
-                // Preserve the slower semantic path for Results, boxed AST
-                // references, and nested collections that may need resolution.
                 let unwrapped_arg = self.unwrap_result_if_ok(&other)?;
-                self.resolve_variable_references_in_val(&unwrapped_arg)
+                self.resolve_call_arg(unwrapped_arg)
             }
+        }
+    }
+
+    /// A call argument, with any call written in meta evaluated. Only a value
+    /// read from meta can hold one (see `note_meta_read`), so a program that has
+    /// read none skips the walk over the argument, which would cost a read of a
+    /// collection time in proportion to its size.
+    fn resolve_call_arg(&mut self, arg: Val) -> VmResult<Val> {
+        if self.meta_calls_read.load(Ordering::Relaxed) {
+            self.resolve_variable_references_in_val(&arg)
+        } else {
+            Ok(arg)
+        }
+    }
+
+    /// Note a value `::hot::meta/get` is handing out: meta keeps a call written
+    /// in it unevaluated, and it runs when the value is passed to a function.
+    pub(crate) fn note_meta_read(&self, value: &Val) {
+        if Self::val_needs_resolution(value) {
+            self.meta_calls_read.store(true, Ordering::Relaxed);
         }
     }
 
@@ -5778,7 +6089,7 @@ impl VirtualMachine {
             .overload_for_args(function_id, args)
             .unwrap_or(function_id);
         self.dispatch_cache.insert(cache_key, function_id);
-        self.execute_user_function(function_id, args)
+        self.execute_compiled_user_function(function_id, args)
     }
 
     /// UNIFIED VARIABLE/FUNCTION LOOKUP - Single canonical method for all resolution
@@ -6036,7 +6347,7 @@ impl VirtualMachine {
                 args.len(),
                 cached_fn_id
             );
-            return self.execute_user_function(cached_fn_id, args);
+            return self.execute_compiled_user_function(cached_fn_id, args);
         }
 
         // 2c. CORE FUNCTIONS - Check if it's an auto-imported core function
@@ -6675,22 +6986,30 @@ impl VirtualMachine {
         }
     }
 
-    /// Public helper to find best user function overload for `call`
+    /// Public helper to find best user function overload for `call` and for
+    /// callbacks, which dispatch on the argument types as a direct call does.
     pub fn find_best_user_function_overload(
-        &self,
+        &mut self,
         function_name: &str,
         args: &[Val],
     ) -> Option<u32> {
-        self.find_best_function_overload(function_name, args)
+        let function_id = self.find_best_function_overload(function_name, args)?;
+        Some(
+            self.overload_for_args(function_id, args)
+                .unwrap_or(function_id),
+        )
     }
 
-    /// Public helper to execute a compiled user function by id for `call`
+    /// Public helper to execute a compiled user function by id for `call`,
+    /// and for callbacks. Their arguments get the implicit arrows a direct
+    /// call's do.
     pub fn execute_compiled_user_function(
         &mut self,
         function_id: u32,
         args: &[Val],
     ) -> VmResult<Val> {
-        self.execute_user_function(function_id, args)
+        let coerced = self.coerce_args_of_value_call(function_id, args)?;
+        self.execute_user_function(function_id, coerced.as_deref().unwrap_or(args))
     }
 
     /// Call a function bypassing unified_function_lookup to avoid recursion
@@ -6713,6 +7032,9 @@ impl VirtualMachine {
                 function_name,
                 function_id
             );
+            let function_id = self
+                .overload_for_args(function_id, args)
+                .unwrap_or(function_id);
             return self.execute_user_function(function_id, args);
         }
 
@@ -6787,7 +7109,12 @@ impl VirtualMachine {
                             function_name,
                             function_id
                         );
-                        return self.execute_user_function(function_id, args);
+                        // An arity match ignores the argument types; prefer the
+                        // overload that fits them, as a direct call does.
+                        let function_id = self
+                            .overload_for_args(function_id, args)
+                            .unwrap_or(function_id);
+                        return self.execute_compiled_user_function(function_id, args);
                     }
 
                     if function_name.starts_with("::") && function_name.contains('/') {
@@ -7069,38 +7396,85 @@ impl VirtualMachine {
     /// the compiler picks `function_id` from the arity-only key when arg
     /// types aren't statically known, so the typed param info has to be
     /// recovered here.
-    fn lookup_typed_param_signature(&mut self, function_id: FunctionId) -> Option<Vec<String>> {
+    fn lookup_typed_param_signature(
+        &mut self,
+        function_id: FunctionId,
+    ) -> Option<std::rc::Rc<[String]>> {
         if let Some(cached) = self.coercion_param_cache.get(&function_id) {
             return cached.clone();
         }
-        let mut found: Option<Vec<String>> = None;
+        let mut found: Option<std::rc::Rc<[String]>> = None;
         for (key, &fid) in self.function_mapping.iter() {
             if fid != function_id {
                 continue;
             }
-            // Function-signature keys look like `::ns/name/arity` (untyped)
-            // or `::ns/name/arity:Type1,Type2` (typed). Names contain `:`
-            // (namespaces use `::`), so we must locate the typed-signature
-            // colon as the *first* colon after the last `/`.
-            let last_slash = match key.rfind('/') {
-                Some(i) => i,
-                None => continue,
-            };
-            let after_slash = &key[last_slash + 1..];
-            if let Some(colon_off) = after_slash.find(':') {
-                let types_str = &after_slash[colon_off + 1..];
-                let types: Vec<String> = types_str.split(',').map(|s| s.to_string()).collect();
+            if let Some(types_str) = signature_key_types(key) {
+                let types = split_param_types(types_str);
                 // Skip pure-`Any` signatures — they don't constrain dispatch
                 // and would always "match" any arg, causing useless work.
                 if types.iter().all(|t| t == "Any") {
                     continue;
                 }
-                found = Some(types);
+                let namespace = self
+                    .program
+                    .functions
+                    .get(function_id as usize)
+                    .map_or("", |info| info.namespace.as_str());
+                found = Some(
+                    types
+                        .iter()
+                        .map(|written| self.param_type_path(namespace, written))
+                        .collect(),
+                );
                 break;
             }
         }
         self.coercion_param_cache.insert(function_id, found.clone());
         found
+    }
+
+    /// A parameter's written type as the qualified path arrows register under,
+    /// resolved the way the compiler resolves an arrow's target: a short name
+    /// means something only in the function's `namespace`, and a qualified one
+    /// may name a type its namespace imports. The compiler has already resolved
+    /// namespace aliases. Unions, generics and nullables are no arrow's target,
+    /// so they stay as written.
+    fn param_type_path(&self, namespace: &str, written: &str) -> String {
+        if written == "Any" || written.contains(['<', '|', '?', ' ']) {
+            return written.to_owned();
+        }
+        let (scope, unscoped) = match written.rsplit_once('/') {
+            Some((scope, unscoped)) => (scope, unscoped),
+            None => (namespace, written),
+        };
+        let (name, variant) = match unscoped.split_once('.') {
+            Some((name, variant)) => (name, Some(variant)),
+            None => (unscoped, None),
+        };
+        let local = format!("{scope}/{name}");
+        let variables = self
+            .program
+            .namespaces
+            .namespaces
+            .get(scope)
+            .map(|info| &info.variables);
+        let path = if variables.is_some_and(|vars| vars.contains_key(&local)) {
+            local
+        } else if let Some(imported) = variables.and_then(|vars| vars.get(name)) {
+            imported.name.clone()
+        } else if let Some(core) = self
+            .core_variables
+            .get(name)
+            .filter(|_| !written.starts_with("::"))
+        {
+            format!("{}/{}", core.namespace_path, name)
+        } else {
+            local
+        };
+        match variant {
+            Some(variant) => format!("{path}.{variant}"),
+            None => path,
+        }
     }
 
     /// The same-arity overload set `function_id` belongs to: the overloads
@@ -7127,9 +7501,7 @@ impl VirtualMachine {
 
     fn build_overload_set(&self, function_id: FunctionId) -> Option<OverloadSet> {
         let info = self.program.functions.get(function_id as usize)?;
-        if info.is_variadic {
-            return None;
-        }
+        let variadic = info.is_variadic;
         let arity = info.arity as usize;
         let prefix = format!("{}/{}", info.name, arity);
         // Declared types per overload, from its longest typed key: the
@@ -7172,10 +7544,15 @@ impl VirtualMachine {
             .chain(untyped.map(|id| (id, vec!["Any".to_string(); arity])))
             .filter_map(|(id, param_types): (FunctionId, Vec<String>)| {
                 let overload = self.program.functions.get(id as usize)?;
-                (!overload.is_variadic && param_types.len() == arity).then(|| OverloadCandidate {
-                    function_id: id,
-                    param_types,
-                    lazy_params: overload.lazy_params.clone(),
+                (overload.is_variadic == variadic && param_types.len() == arity).then(|| {
+                    OverloadCandidate {
+                        function_id: id,
+                        param_types: param_types
+                            .iter()
+                            .map(|declared| self.dispatch_param_type(&overload.namespace, declared))
+                            .collect(),
+                        lazy_params: overload.lazy_params.clone(),
+                    }
                 })
             })
             .collect();
@@ -7185,14 +7562,45 @@ impl VirtualMachine {
         (candidates.len() > 1 && belongs).then_some(OverloadSet {
             prefix,
             arity,
+            variadic,
             candidates,
         })
     }
 
+    /// A declared parameter type with each member of a union or nullable type
+    /// resolved in the overload's `namespace`, for `overload_param_rank`, through
+    /// any namespaces that re-export it: a value is tagged with the type's own
+    /// path. Generic arguments play no part in dispatch and are dropped.
+    fn dispatch_param_type(&self, namespace: &str, declared: &str) -> String {
+        // The cap only bounds imports that form a cycle.
+        const MAX_REEXPORTS: usize = 16;
+        let (body, nullable) = match declared.strip_suffix('?') {
+            Some(body) => (body, "?"),
+            None => (declared, ""),
+        };
+        let members: Vec<String> = split_top_level(body, '|')
+            .into_iter()
+            .map(|member| {
+                let written = member.split('<').next().unwrap_or(member).trim();
+                let mut path = self.param_type_path(namespace, written);
+                for _ in 0..MAX_REEXPORTS {
+                    let next = self.param_type_path(namespace, &path);
+                    if next == path {
+                        break;
+                    }
+                    path = next;
+                }
+                path
+            })
+            .collect();
+        format!("{}{nullable}", members.join(" | "))
+    }
+
     /// The type name overload dispatch matches declared parameter types
     /// against, and whether the value is structurally a Map: as
-    /// `get_val_type_name`, but boxed functions, namespaces and iterators are
-    /// told apart so that `Fn` parameters can be selected. An Ok is matched
+    /// `get_value_type_path` for a tagged value, as `get_val_type_name`
+    /// otherwise, but boxed functions, namespaces and iterators are told apart
+    /// so that `Fn` parameters can be selected. An Ok is matched
     /// by its value, which any parameter but a `Result` one receives; an Err
     /// matches `Result`, and isn't a Map.
     fn dispatch_type_name(val: &Val) -> (std::borrow::Cow<'_, str>, bool) {
@@ -7216,9 +7624,7 @@ impl VirtualMachine {
                     // A typed record or variant is structurally a Map; an Err
                     // is not.
                     return (
-                        std::borrow::Cow::Borrowed(
-                            type_name.rsplit('/').next().unwrap_or(type_name),
-                        ),
+                        std::borrow::Cow::Borrowed(type_name),
                         type_name != "::hot::type/Result.Err",
                     );
                 }
@@ -7249,16 +7655,24 @@ impl VirtualMachine {
     /// overloads, the one declared with exactly the runtime argument types
     /// wins, as it does at compile time; failing that, the most specific one
     /// that accepts them (a single type, then a union or nullable type, then
-    /// `Any`). The resolved overload is kept on ties and when nothing else
-    /// accepts the arguments, so implicit coercion still applies to it.
-    /// Returns the overload to call instead, if any.
+    /// `Any`). A declared arrow counts as accepting a tagged argument, behind
+    /// every overload that takes it as it is, but ahead of a custom type it has
+    /// nothing to do with. The resolved overload is kept on ties and when
+    /// nothing else accepts the arguments. Implicit coercion then applies to
+    /// whichever overload is called. Returns the overload to call instead, if
+    /// any.
     pub(crate) fn overload_for_args(
         &mut self,
         function_id: FunctionId,
         args: &[Val],
     ) -> Option<FunctionId> {
         let set = self.overload_set(function_id)?;
-        if args.len() != set.arity {
+        let fits = if set.variadic {
+            args.len() + 1 >= set.arity
+        } else {
+            args.len() == set.arity
+        };
+        if !fits {
             return None;
         }
         let (names, maps): (Vec<std::borrow::Cow<'_, str>>, Vec<bool>) =
@@ -7297,29 +7711,67 @@ impl VirtualMachine {
         let Some(resolved) = set.candidates.iter().find(|c| c.function_id == function_id) else {
             return function_id;
         };
-        let eligible = |c: &&OverloadCandidate| c.lazy_params == resolved.lazy_params;
-        let exact_key = format!("{}:{}", set.prefix, names.join(","));
-        if let Some(&id) = self.function_mapping.get(&exact_key)
-            && set
-                .candidates
-                .iter()
-                .filter(eligible)
-                .any(|c| c.function_id == id)
+        let arrow_to = |name: &str, declared: &str| {
+            is_tagged_dispatch_name(name)
+                && self
+                    .find_coercion_target(name, short_type_name(name), declared)
+                    .is_some()
+        };
+        let fits: Vec<OverloadFit> = set
+            .candidates
+            .iter()
+            .filter(|c| c.lazy_params == resolved.lazy_params)
+            .filter_map(|c| c.fit(names, maps, set.variadic, arrow_to))
+            .collect();
+        let fit_of = |id: FunctionId| fits.iter().find(|fit| fit.function_id == id);
+        let mut best = fit_of(function_id);
+        for fit in &fits {
+            if best.is_none_or(|best| {
+                fit.rank < best.rank || (fit.rank == best.rank && fit.own_types && !best.own_types)
+            }) {
+                best = Some(fit);
+            }
+        }
+        // The overload whose key spells the argument types settles a tie, but a
+        // short name in that key may be a different type from the argument's.
+        let short_names: Vec<&str> = names.iter().map(|name| short_type_name(name)).collect();
+        let exact_key = format!("{}:{}", set.prefix, short_names.join(","));
+        if let Some(fit) = self
+            .function_mapping
+            .get(&exact_key)
+            .and_then(|&id| fit_of(id))
+            && best.is_none_or(|best| fit.rank <= best.rank)
         {
-            return id;
+            best = Some(fit);
         }
-        let mut best = resolved.rank(names, maps).map(|rank| (rank, function_id));
-        for candidate in set.candidates.iter().filter(eligible) {
-            if candidate.function_id == function_id {
-                continue;
-            }
-            if let Some(rank) = candidate.rank(names, maps)
-                && best.is_none_or(|(best_rank, _)| rank < best_rank)
-            {
-                best = Some((rank, candidate.function_id));
+        let Some(best) = best else {
+            return function_id;
+        };
+        // Reached by arrows alone, the arguments have no reason to prefer one
+        // overload over another that is as good, so neither is picked.
+        if best.rank >= OVERLOAD_RANK_ARROW
+            && best.function_id != function_id
+            && fits.iter().filter(|fit| fit.rank == best.rank).count() > 1
+        {
+            return function_id;
+        }
+        if best.unknown {
+            // A declared arrow says more than a type that may be an alias.
+            let mut arrows = fits.iter().filter(|fit| fit.arrow && !fit.unknown);
+            if let Some(first) = arrows.next() {
+                let (lowest, count) = arrows.fold((first, 1), |(lowest, count), fit| {
+                    match fit.rank.cmp(&lowest.rank) {
+                        std::cmp::Ordering::Less => (fit, 1),
+                        std::cmp::Ordering::Equal => (lowest, count + 1),
+                        std::cmp::Ordering::Greater => (lowest, count),
+                    }
+                });
+                if count == 1 {
+                    return lowest.function_id;
+                }
             }
         }
-        best.map_or(function_id, |(_, id)| id)
+        best.function_id
     }
 
     /// Compiled code makes self calls natively, skipping the runtime overload
@@ -7384,16 +7836,39 @@ impl VirtualMachine {
         })
     }
 
+    /// Run the registered `Source -> Target` arrow for a value tagged
+    /// `existing`, when exactly one arrow from that source reaches the
+    /// qualified `target` (or a variant of it); ambiguous matches return
+    /// `None` rather than picking an arrow.
+    fn coerce_tagged_via_arrow(
+        &mut self,
+        data: &Val,
+        existing: &str,
+        target: &str,
+    ) -> VmResult<Option<Val>> {
+        let src_short = existing.rsplit('/').next().unwrap_or(existing);
+        let Some((source, target)) = self.find_coercion_target(existing, src_short, target) else {
+            return Ok(None);
+        };
+        let Some(impl_name) = self.resolve_type_implementation(&source, &target) else {
+            return Ok(None);
+        };
+        self.execute_function_call_by_qualified_name(&impl_name, std::slice::from_ref(data))
+            .map(Some)
+    }
+
     /// Look up a coercion arrow whose source type matches `src` and whose
-    /// target type is either `tgt` exactly or a variant of it (`tgt.X`).
+    /// target type is either the qualified `tgt` exactly or a variant of it
+    /// (`tgt.X`).
     /// Returns the actual target key (used to resolve the impl function via
     /// `resolve_type_implementation`) when exactly one such arrow exists.
     /// Multiple matches return `None` so the dispatcher can fall through
     /// rather than silently picking one.
     /// `src_full` is the value's qualified type path; the registry is keyed
     /// by scope-resolved qualified source names, so that match is
-    /// authoritative. The short-name comparison runs only when no qualified
-    /// key matches (legacy caches, values carrying short $type strings).
+    /// authoritative. The short-name comparison serves only values carrying a
+    /// short $type string: a qualified one is a different type from a
+    /// same-named source in another namespace.
     fn find_coercion_target(
         &self,
         src_full: &str,
@@ -7401,69 +7876,188 @@ impl VirtualMachine {
         tgt: &str,
     ) -> Option<(String, String)> {
         let dotted_prefix = format!("{}.", tgt);
-        let collect = |exact: bool| -> Vec<(String, String)> {
-            self.type_implementations
-                .keys()
-                .filter_map(|(s, t)| {
-                    let source_matches = if exact {
-                        s == src_full
-                    } else {
-                        s.rsplit('/').next().unwrap_or(s) == src_short
-                    };
-                    if !source_matches {
-                        return None;
-                    }
-                    if t == tgt || t.starts_with(&dotted_prefix) {
-                        Some((s.clone(), t.clone()))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        };
-        let mut candidates = collect(true);
-        if candidates.is_empty() {
-            candidates = collect(false);
-        }
-        if candidates.len() == 1 {
-            candidates.into_iter().next()
-        } else {
-            None
-        }
+        let qualified = src_full.starts_with("::");
+        let mut candidates = self.type_implementations.keys().filter(|(s, t)| {
+            let source_matches = if qualified {
+                s == src_full
+            } else {
+                s.rsplit('/').next().unwrap_or(s) == src_short
+            };
+            source_matches && (t == tgt || t.starts_with(&dotted_prefix))
+        });
+        let found = candidates.next()?;
+        candidates.next().is_none().then(|| found.clone())
     }
 
-    /// Apply a coercion plan: for each arg whose entry in `plan` is `Some(target)`,
-    /// invoke the registered `Source -> Target` arrow function and substitute the
-    /// coerced value; pass `None` entries through unchanged. Errors from an arrow
+    /// Implicit `Source -> Target` coercion at a static-dispatch call, for
+    /// interpreted and compiled callers alike. An argument whose type differs
+    /// from its parameter's goes through the unique arrow to that type, when
+    /// there is one; any other argument passes unchanged. Errors from an arrow
     /// propagate to the caller — silent arrow-failure would surprise users who
     /// explicitly registered the conversion.
-    fn apply_coercion_plan(
+    pub(crate) fn coerce_call_args(
         &mut self,
-        args: &[Val],
-        plan: &[Option<(String, String)>],
+        function_id: FunctionId,
+        mut args: Vec<Val>,
     ) -> VmResult<Vec<Val>> {
-        let mut coerced: Vec<Val> = Vec::with_capacity(args.len());
-        for (i, arg) in args.iter().enumerate() {
-            if let Some((source_key, target)) = plan.get(i).and_then(|p| p.as_ref()) {
-                let Some(impl_name) = self.resolve_type_implementation(source_key, target) else {
-                    return Err(VmError::runtime_with_ip(
-                        format!(
-                            "Implicit coercion plan referenced missing arrow {} -> {}",
-                            source_key, target
-                        ),
-                        self.instruction_pointer,
-                    ));
-                };
-                let coerced_val = self.execute_function_call_by_qualified_name(
-                    &impl_name,
-                    std::slice::from_ref(arg),
-                )?;
-                coerced.push(coerced_val);
-            } else {
-                coerced.push(arg.clone());
+        let Some(expected) = self.lookup_typed_param_signature(function_id) else {
+            return Ok(args);
+        };
+        if expected.len() != args.len() {
+            return Ok(args);
+        }
+        for (arg, param_type) in args.iter_mut().zip(expected.iter()) {
+            if let Some(coerced) = self.coerce_call_arg(arg, param_type)? {
+                *arg = coerced;
             }
         }
-        Ok(coerced)
+        Ok(args)
+    }
+
+    /// `coerce_call_args` for arguments held by reference, as a callback's are.
+    /// `None` when they all pass unchanged, which is the usual case.
+    fn coerce_args_of_value_call(
+        &mut self,
+        function_id: FunctionId,
+        args: &[Val],
+    ) -> VmResult<Option<Vec<Val>>> {
+        let Some(expected) = self.lookup_typed_param_signature(function_id) else {
+            return Ok(None);
+        };
+        if expected.len() != args.len() {
+            return Ok(None);
+        }
+        let mut coerced_args = None;
+        for (i, (arg, param_type)) in args.iter().zip(expected.iter()).enumerate() {
+            if let Some(coerced) = self.coerce_call_arg(arg, param_type)? {
+                coerced_args.get_or_insert_with(|| args.to_vec())[i] = coerced;
+            }
+        }
+        Ok(coerced_args)
+    }
+
+    fn coerce_call_arg(&mut self, arg: &Val, param_type: &str) -> VmResult<Option<Val>> {
+        // An exact number conversion ahead of the callee, so that compiled
+        // code for the parameter's own type can take the call.
+        if let Some(converted) = exact_number_for_param(arg, param_type) {
+            return Ok(Some(converted));
+        }
+        self.run_implicit_arrow(arg, param_type)
+    }
+
+    /// The implicit arrows that can reach each of `function_id`'s parameters,
+    /// by the rule in `implicit_arrow`: an untagged value of a builtin type
+    /// doesn't convert to a builtin type. Read once, when it's compiled.
+    fn param_arrows(&mut self, function_id: FunctionId) -> Vec<ParamArrows> {
+        let Some(expected) = self.lookup_typed_param_signature(function_id) else {
+            return Vec::new();
+        };
+        expected
+            .iter()
+            .map(|param_type| {
+                let builtin = is_primitive_param_type(param_type);
+                let variant = format!("{param_type}.");
+                let reachable = self.type_implementations.keys().any(|(source, target)| {
+                    (target == param_type || target.starts_with(&variant))
+                        && !(builtin && is_primitive_param_type(source))
+                });
+                match (reachable, builtin) {
+                    (false, _) => ParamArrows::None,
+                    (true, true) => ParamArrows::FromTagged,
+                    (true, false) => ParamArrows::FromAny,
+                }
+            })
+            .collect()
+    }
+
+    /// `coerce_call_args` for one argument of a self tail call in compiled
+    /// code, which goes on looping with what this returns. `None` when the
+    /// argument passes unchanged.
+    pub(crate) fn coerce_self_tail_arg(
+        &mut self,
+        function_id: FunctionId,
+        index: usize,
+        arg: &Val,
+    ) -> VmResult<Option<Val>> {
+        let Some(expected) = self.lookup_typed_param_signature(function_id) else {
+            return Ok(None);
+        };
+        let Some(param_type) = expected.get(index) else {
+            return Ok(None);
+        };
+        // Usually a tagged argument is already the parameter's type, on every
+        // iteration of the loop. A compiled loop holds an Ok as it came, where
+        // a call would have unwrapped it.
+        let arg = match arg {
+            Val::Map(map) => match crate::val::tagged_type_name(map) {
+                Some(tag) if tag == param_type.as_str() => return Ok(None),
+                Some("::hot::type/Result.Ok") => map.get(&Val::from("$val")).unwrap_or(&Val::Null),
+                _ => arg,
+            },
+            _ => arg,
+        };
+        self.run_implicit_arrow(arg, param_type)
+    }
+
+    /// `arg` converted by the implicit arrow to `param_type`, if there is one.
+    fn run_implicit_arrow(&mut self, arg: &Val, param_type: &str) -> VmResult<Option<Val>> {
+        let Some((source, target)) = self.implicit_arrow(arg, param_type) else {
+            return Ok(None);
+        };
+        let Some(impl_name) = self.resolve_type_implementation(&source, &target) else {
+            return Err(VmError::runtime_with_ip(
+                format!(
+                    "Implicit coercion referenced missing arrow {} -> {}",
+                    source, target
+                ),
+                self.instruction_pointer,
+            ));
+        };
+        self.execute_function_call_by_qualified_name(&impl_name, std::slice::from_ref(arg))
+            .map(Some)
+    }
+
+    /// The arrow that implicitly coerces `arg` to `param_type` (qualified, from
+    /// `lookup_typed_param_signature`), if any. Null
+    /// is never coerced, and neither is a primitive to a primitive: those
+    /// arrows back explicit calls like `Str(null)` and `Int("5")`, the same
+    /// rule as `coercion_available` in the type checker.
+    fn implicit_arrow(&mut self, arg: &Val, param_type: &str) -> Option<(String, String)> {
+        let tag = match arg {
+            Val::Map(map) => crate::val::tagged_type_name(map),
+            _ => None,
+        };
+        if matches!(arg, Val::Null | Val::Box(_))
+            || param_type == "Any"
+            || (tag.is_none() && is_primitive_param_type(param_type))
+        {
+            return None;
+        }
+        let path;
+        let source = match tag {
+            Some(tag) => tag,
+            None => {
+                path = self.get_value_type_path(arg);
+                path.as_str()
+            }
+        };
+        if source == param_type {
+            return None;
+        }
+        let short = source.rsplit('/').next().unwrap_or(source);
+        if let Some(cached) = self
+            .coercion_target_cache
+            .get(source)
+            .and_then(|targets| targets.get(param_type))
+        {
+            return cached.clone();
+        }
+        let found = self.find_coercion_target(source, short, param_type);
+        self.coercion_target_cache
+            .entry(source.to_owned())
+            .or_default()
+            .insert(param_type.to_owned(), found.clone());
+        found
     }
 
     /// Execute a function call by qualified name (`::namespace/function`).
@@ -7472,8 +8066,10 @@ impl VirtualMachine {
     /// fallbacks (all delegated through `find_best_function_overload`).
     ///
     /// Implicit `Source -> Target` coercion is **not** applied here. The
-    /// per-call coercion happens inside the `CallUserFunction` opcode
-    /// handler so that compiler-resolved static dispatch (where
+    /// per-call coercion happens in `coerce_call_args`, called by the
+    /// `CallUserFunction` opcode handler and the JIT's call into the VM, and
+    /// for calls through a function value, so
+    /// that compiler-resolved static dispatch (where
     /// `function_id` may have been picked from the arity-only key)
     /// gets the same treatment without touching this dynamic path —
     /// adding coercion to the dynamic path here previously regressed
@@ -7734,7 +8330,7 @@ impl VirtualMachine {
                         };
 
                     match evaluated_vec {
-                        Val::Vec(vec) => vec,
+                        Val::Vec(vec) => Arc::unwrap_or_clone(vec),
                         _ => {
                             return Err(VmError::runtime(format!(
                                 "call-lib: second argument must evaluate to an array, got {:?}",
@@ -7765,7 +8361,7 @@ impl VirtualMachine {
                         Val::Vec(vec) => {
                             // Evaluate any lazy thunks within the vector
                             let mut evaluated_args = Vec::new();
-                            for arg in vec {
+                            for arg in Arc::unwrap_or_clone(vec) {
                                 if let Val::Box(arg_boxed) = &arg {
                                     if arg_boxed
                                         .as_any()
@@ -7845,7 +8441,7 @@ impl VirtualMachine {
                     );
 
                     // Pass arguments as-is (lazy thunk creation is handled at compile time)
-                    vec.clone()
+                    vec.to_vec()
                 }
                 _ => {
                     return Err(VmError::runtime(format!(
@@ -8477,6 +9073,19 @@ impl VirtualMachine {
                     }
                     // An Err (such as a failed `where` check on a parameter)
                     // returns from the lambda at once.
+                    Instruction::CheckParam {
+                        var_name,
+                        spec,
+                        mask,
+                        each,
+                    } => {
+                        if let Some(error) =
+                            self.execute_check_param(*var_name, *spec, *mask, *each)?
+                        {
+                            last_result = error;
+                            break;
+                        }
+                    }
                     Instruction::ReturnIfErr { src } => {
                         let value = self.get_register(*src)?;
                         if value.is_err() {
@@ -8859,7 +9468,7 @@ impl VirtualMachine {
             vec![], // No args for inline flows
             source,
             start_time,
-            Some(Val::Map(Box::new(flow_map))),
+            Some(Val::map(flow_map)),
         );
         emitter.emit(start_event);
 
@@ -9007,7 +9616,7 @@ impl VirtualMachine {
                     let mut map = IndexMap::new();
                     map.insert(Val::from("type"), Val::from(flow_type_str.to_string()));
                     map.insert(Val::from("fn"), Val::Bool(true)); // Mark as function-level flow
-                    Val::Map(Box::new(map))
+                    Val::map(map)
                 })
             } else {
                 // Check if we're inside an inline flow context
@@ -9028,7 +9637,7 @@ impl VirtualMachine {
                     if let Some(branch) = &ctx.current_branch {
                         map.insert(Val::from("branch"), Val::from(branch.clone()));
                     }
-                    Some(Val::Map(Box::new(map)))
+                    Some(Val::map(map))
                 })
             };
 
@@ -9129,13 +9738,15 @@ impl VirtualMachine {
                 && !self.jit_blocked_by_overload_dispatch(function_id)
             {
                 let shadows = self.native_core_shadows();
+                let param_arrows = self.param_arrows(function_id);
                 let compile_result = self.jit.compile_function(
                     &program,
                     function_id,
                     function_info,
                     args,
                     CallNames::new(&self.namespace_variables, &self.core_functions, &shadows)
-                        .traced(self.traces_calls()),
+                        .traced(self.traces_calls())
+                        .param_arrows(&param_arrows),
                 );
 
                 match compile_result {
@@ -9244,7 +9855,7 @@ impl VirtualMachine {
                     let variadic_len = variadic_args.len();
                     function_scope
                         .variables
-                        .insert(param_name.clone(), Val::Vec(variadic_args));
+                        .insert(param_name.clone(), Val::vec(variadic_args));
                     tracing::trace!(
                         "VM: Bound variadic parameter '{}' with {} args (starting from index {})",
                         param_name,
@@ -9359,7 +9970,7 @@ impl VirtualMachine {
                                     } else {
                                         vec![]
                                     };
-                                    Val::Vec(variadic_args)
+                                    Val::vec(variadic_args)
                                 } else if i < current_args.len() {
                                     current_args[i].clone()
                                 } else {
@@ -9418,6 +10029,7 @@ impl VirtualMachine {
                                         && !self.jit_blocked_by_overload_dispatch(function_id)
                                     {
                                         let shadows = self.native_core_shadows();
+                                        let param_arrows = self.param_arrows(function_id);
                                         match self.jit.compile_function(
                                             &program,
                                             function_id,
@@ -9428,7 +10040,8 @@ impl VirtualMachine {
                                                 &self.core_functions,
                                                 &shadows,
                                             )
-                                            .traced(self.traces_calls()),
+                                            .traced(self.traces_calls())
+                                            .param_arrows(&param_arrows),
                                         ) {
                                             Ok(()) => {}
                                             Err(err) => {
@@ -9754,9 +10367,9 @@ impl VirtualMachine {
                         .unwrap_or_else(|_| value.clone());
                     resolved.insert(key.clone(), value);
                 }
-                Ok(Val::Map(Box::new(resolved)))
+                Ok(Val::map(resolved))
             }
-            Val::Vec(items) => Ok(Val::Vec(
+            Val::Vec(items) => Ok(Val::vec(
                 items
                     .iter()
                     .map(|item| {
@@ -10696,7 +11309,7 @@ impl VirtualMachine {
         // Clear context storage and secret keys
         self.context_storage.clear();
         self.secret_keys.clear();
-        self.secret_value_hashes.clear();
+        self.ctx_default_hashes.clear();
 
         // Reset current namespace
         self.current_namespace = "::hot::main".to_string();
@@ -10750,6 +11363,7 @@ impl VirtualMachine {
         match value {
             Val::Map(map) => {
                 if self.is_tagged_wrapper(map) {
+                    let map = Arc::make_mut(map);
                     if let Some(payload) = map.get_mut(&Val::from("$val")) {
                         self.set_property(payload, property, new_value)?;
                     } else {
@@ -10765,13 +11379,13 @@ impl VirtualMachine {
                 }
 
                 // Map assignment: set the property as a string key
-                map.insert(Val::from(property.to_string()), new_value);
+                Arc::make_mut(map).insert(Val::from(property.to_string()), new_value);
                 Ok(())
             }
             Val::Vec(vec) => {
                 // Vector assignment: try to parse property as index
                 match property.parse::<usize>() {
-                    Ok(index) => Self::set_vector_index(vec, index, new_value),
+                    Ok(index) => Self::set_vector_index(Arc::make_mut(vec), index, new_value),
                     Err(_) => Err(VmError::runtime(format!(
                         "Cannot set property '{}' on vector - property must be a valid index",
                         property
@@ -10782,7 +11396,7 @@ impl VirtualMachine {
                 // Convert null to map and set property
                 let mut new_map = indexmap::IndexMap::new();
                 new_map.insert(Val::from(property.to_string()), new_value);
-                *value = Val::Map(Box::new(new_map));
+                *value = Val::map(new_map);
                 Ok(())
             }
             _ => {
@@ -10848,7 +11462,7 @@ impl VirtualMachine {
 
         match value {
             Val::Map(map) if self.is_tagged_wrapper(map) => {
-                let Some(payload) = map.get_mut(&Val::from("$val")) else {
+                let Some(payload) = Arc::make_mut(map).get_mut(&Val::from("$val")) else {
                     return Err(VmError::runtime(
                         "Cannot dynamically assign through a tagged unit value".to_string(),
                     ));
@@ -10861,7 +11475,7 @@ impl VirtualMachine {
                 Ok(())
             }
             Val::Map(map) => {
-                map.insert(property.clone(), new_value);
+                Arc::make_mut(map).insert(property.clone(), new_value);
                 Ok(())
             }
             Val::Vec(vec) => match property {
@@ -10873,7 +11487,7 @@ impl VirtualMachine {
                     let index = usize::try_from(*index).map_err(|_| {
                         VmError::runtime(format!("Vector index {} is too large to address", index))
                     })?;
-                    Self::set_vector_index(vec, index, new_value)
+                    Self::set_vector_index(Arc::make_mut(vec), index, new_value)
                 }
                 other => Err(VmError::runtime(format!(
                     "Vector index must be an integer, got {:?}",
@@ -10966,12 +11580,10 @@ impl VirtualMachine {
             Val::Str(s) => {
                 // String access: try to parse property as an index for character access
                 if let Ok(index) = property.parse::<usize>() {
-                    let chars: Vec<char> = s.chars().collect();
-                    if index < chars.len() {
-                        Ok(Val::from(chars[index].to_string()))
-                    } else {
-                        Ok(Val::Null) // Index out of bounds returns null
-                    }
+                    // Index out of bounds returns null
+                    Ok(s.chars()
+                        .nth(index)
+                        .map_or(Val::Null, |c| Val::from(c.to_string())))
                 } else {
                     // Property is not a valid index
                     Ok(Val::Null)
@@ -11006,7 +11618,7 @@ impl VirtualMachine {
                             let full_type = format!("{}.{}", type_ref.name, property);
                             let mut result_map = indexmap::IndexMap::new();
                             result_map.insert(Val::from("$type"), Val::from(full_type));
-                            return Ok(Val::Map(Box::new(result_map)));
+                            return Ok(Val::map(result_map));
                         } else {
                             // Type-reference variant: return a function reference to the constructor
                             let constructor_name = format!("{}.{}", type_ref.name, property);
@@ -11379,6 +11991,22 @@ impl VirtualMachine {
                 return Ok(FunctionExecutionResult::Value(last_result));
             }
 
+            // A failed parameter check returns its error, as ReturnIfErr does.
+            if let Instruction::CheckParam {
+                var_name,
+                spec,
+                mask,
+                each,
+            } = instruction
+            {
+                if let Some(error) = self.execute_check_param(*var_name, *spec, *mask, *each)? {
+                    self.instruction_pointer = saved_instruction_pointer;
+                    return Ok(FunctionExecutionResult::Value(error));
+                }
+                func_ip += 1;
+                continue;
+            }
+
             // Handle conditional error return: if the value is an error, return it immediately
             if let Instruction::ReturnIfErr { src } = instruction {
                 let val = self.get_register(*src)?.clone();
@@ -11412,12 +12040,13 @@ impl VirtualMachine {
                 // same-arity sibling (e.g. an `(x: Vec)` overload passing a
                 // Str element back to its own name). The TCO loop runs that
                 // as a regular call. The args are prepared for the function
-                // called.
+                // called and get its implicit arrows, as on any call.
                 let function_id = self
                     .overload_for_args(*function_id, &new_args)
                     .unwrap_or(*function_id);
                 let new_args =
                     self.prepare_call_args(CallTarget::Function(function_id), new_args)?;
+                let new_args = self.coerce_call_args(function_id, new_args)?;
 
                 // Restore instruction pointer before returning tail call request
                 self.instruction_pointer = saved_instruction_pointer;
@@ -11713,15 +12342,12 @@ mod tests {
         // Map payloads: msg, then message, are preferred
         let mut m = IndexMap::new();
         m.insert(Val::from("msg"), Val::from("boom"));
-        assert_eq!(
-            VirtualMachine::result_err_message(&Val::Map(Box::new(m))),
-            "boom"
-        );
+        assert_eq!(VirtualMachine::result_err_message(&Val::map(m)), "boom");
         let mut m = IndexMap::new();
         m.insert(Val::from("message"), Val::from("pg: relation missing"));
         m.insert(Val::from("code"), Val::from("42P01"));
         assert_eq!(
-            VirtualMachine::result_err_message(&Val::Map(Box::new(m))),
+            VirtualMachine::result_err_message(&Val::map(m)),
             "pg: relation missing"
         );
 
@@ -11873,7 +12499,7 @@ mod tests {
             crate::val::Val::from("a string that is not a var ref"),
             crate::val::Val::Bool(true),
             crate::val::Val::Byte(0xAB),
-            crate::val::Val::Bytes(vec![1, 2, 3]),
+            crate::val::Val::bytes(vec![1, 2, 3]),
             crate::val::Val::Null,
         ];
 
@@ -12425,7 +13051,7 @@ roles fn (): Vec {
             let result = run_recursion_source(source, "::test/roles", &[], jit);
             assert_eq!(
                 result,
-                Val::Vec(vec![
+                Val::vec(vec![
                     Val::from("all"),
                     Val::Null,
                     Val::from("read"),
@@ -12570,7 +13196,7 @@ last fn parallel (i: Int): Int {
         }
         assert_eq!(
             run_recursion_source(source, "::test/listed", &[Val::Int(1)], "off"),
-            Val::Vec(vec![Val::Int(3), Val::Int(2), Val::Int(-2)])
+            Val::vec(vec![Val::Int(3), Val::Int(2), Val::Int(-2)])
         );
         assert_eq!(
             run_recursion_source(source, "::test/last", &[Val::Int(1)], "off"),

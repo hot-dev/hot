@@ -1710,6 +1710,22 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
             expected
         );
     }
+    // Early usage checks read the counters under the restricted login, moving
+    // them onto a new period without any row lock outliving a statement.
+    sqlx::query(
+        "UPDATE hot.usage_task SET period_start=now()+interval '10 days' WHERE org_id=ANY($1)",
+    )
+    .bind(vec![child_a, child_b])
+    .execute(&admin)
+    .await?;
+    let rollover_period = chrono::Utc::now() - chrono::Duration::days(1);
+    let moved = db::usage::account_task_usage(&db_a, &root, rollover_period)
+        .await
+        .map_err(|e| format!("account task usage at rollover: {e:?}"))?
+        .ok_or("counters should reach the period")?;
+    let period_totals: (i64, i64) = sqlx::query_as("SELECT COALESCE(SUM(f.compute_units),0)::bigint,COALESCE(SUM(f.duration_ms),0)::bigint FROM hot.task t CROSS JOIN LATERAL hot.task_usage(t) f JOIN hot.env e ON e.env_id=t.env_id WHERE e.org_id=ANY($1) AND f.usage_at >= $2")
+        .bind(vec![child_a, child_b]).bind(rollover_period).fetch_one(&admin).await?;
+    assert_eq!((moved.compute_units, moved.duration_ms), period_totals);
     // A rejected claim at period rollover must not discard counter
     // initialization; otherwise every redelivery rescans history under the
     // account lock.
@@ -2041,6 +2057,25 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
     .fetch_one(&a)
     .await?;
     assert_eq!(actual, expected);
+    // Under the row policy, the check reads sizes from the index alone. The
+    // rows it returns are the proof: without a scope it finds none, and no error.
+    assert!(expected > 0);
+    let mut tx = a.begin().await?;
+    sqlx::raw_sql("SET LOCAL enable_seqscan=off; SET LOCAL enable_bitmapscan=off")
+        .execute(&mut *tx)
+        .await?;
+    let plan: Vec<String> = sqlx::query_scalar(
+        "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF) SELECT CAST(COALESCE(SUM(CASE WHEN size<0 THEN 0 ELSE size END),0) AS BIGINT) FROM call WHERE env_id=$1",
+    )
+    .bind(env_a)
+    .fetch_all(&mut *tx)
+    .await?;
+    let scan = plan
+        .iter()
+        .find(|line| line.contains("Index Only Scan using call_env_start_time_size_idx"))
+        .unwrap_or_else(|| panic!("{plan:#?}"));
+    assert!(!scan.contains("actual rows=0.00"), "{plan:#?}");
+    tx.rollback().await?;
     // Each counter is checked and repaired in its own short transaction: a
     // writer holding one environment's counter delays only that repair, not
     // the account's other environments, and no snapshot spans them.
@@ -2053,6 +2088,11 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
         sqlx::query("INSERT INTO hot.usage_storage(env_id,org_id,slot,store_bytes) VALUES($1,$2,0,7) ON CONFLICT(env_id,slot) DO UPDATE SET store_bytes=hot.usage_storage.store_bytes+7")
             .bind(env).bind(org).execute(&admin).await?;
     }
+    // Real entries too, written through the scope the check reads under. If its
+    // organization didn't match the row policy, it would count none and "repair"
+    // the counter down to nothing.
+    sqlx::query("INSERT INTO store_map_entry(org_id,env_id,store_name,key,value,size) VALUES($1,$2,'reconciled','\"key\"','\"value\"',11)")
+        .bind(child_a).bind(env_a).execute(&a).await?;
     let mut holder = admin.begin().await?;
     sqlx::query("SELECT 1 FROM hot.usage_storage WHERE env_id=$1 AND slot=0 FOR UPDATE")
         .bind(last)
@@ -2079,9 +2119,80 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
         first_repaired && !reconciling.is_finished(),
         "an earlier environment's repair must commit while a later one waits"
     );
+    // A second reconciler skips the unit the first holds, rather than waiting
+    // for it and then adding the same difference again.
+    let second_reconciler = ScopedPgPool::new(
+        PgPoolOptions::new()
+            .max_connections(1)
+            .after_connect(|conn, _| {
+                Box::pin(async move {
+                    conn.execute("SET search_path=hot,public").await?;
+                    Ok(())
+                })
+            })
+            .connect(runtime_url.as_str())
+            .await?,
+    )
+    .with_scope(DatabaseScope::Maintenance {
+        operation: db::MaintenanceOperation::Billing,
+        org_id: Some(root),
+    });
+    let second = tokio::time::timeout(
+        Duration::from_secs(20),
+        db::usage::reconcile_account(&db::DatabasePool::Postgres(second_reconciler.clone()), root),
+    )
+    .await??;
+    assert_eq!(second.storage_rows, 0);
+    assert!(!reconciling.is_finished());
+    second_reconciler.close().await;
     holder.rollback().await?;
     assert_eq!(reconciling.await??.storage_rows, 2);
     assert!(store_matches(last).await?);
+    assert!(store_matches(env_a).await?);
+    // A check that fails doesn't stop the rest of the pass. Here the first
+    // environment's repair gives up on a row a writer holds, the last is still
+    // repaired, the pass reports the failure, and the next tick repairs it once.
+    for (env, org) in [(env_a, child_a), (env_b, child_b)] {
+        sqlx::query("INSERT INTO hot.usage_storage(env_id,org_id,slot,store_bytes) VALUES($1,$2,0,7) ON CONFLICT(env_id,slot) DO UPDATE SET store_bytes=hot.usage_storage.store_bytes+7")
+            .bind(env).bind(org).execute(&admin).await?;
+    }
+    let mut holder = admin.begin().await?;
+    sqlx::query("SELECT 1 FROM hot.usage_storage WHERE env_id=$1 AND slot=0 FOR UPDATE")
+        .bind(first)
+        .execute(&mut *holder)
+        .await?;
+    let impatient = ScopedPgPool::new(
+        PgPoolOptions::new()
+            .max_connections(1)
+            .after_connect(|conn, _| {
+                Box::pin(async move {
+                    conn.execute("SET search_path=hot,public; SET lock_timeout='100ms'")
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect(runtime_url.as_str())
+            .await?,
+    )
+    .with_scope(DatabaseScope::Maintenance {
+        operation: db::MaintenanceOperation::Billing,
+        org_id: Some(root),
+    });
+    let error = db::usage::reconcile_account(&db::DatabasePool::Postgres(impatient.clone()), root)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("lock timeout"), "{error}");
+    assert!(store_matches(last).await?);
+    assert!(!store_matches(first).await?);
+    holder.rollback().await?;
+    assert_eq!(
+        db::usage::reconcile_account(&db::DatabasePool::Postgres(impatient.clone()), root)
+            .await?
+            .storage_rows,
+        1
+    );
+    assert!(store_matches(first).await?);
+    impatient.close().await;
     // Reconciliation needs no dedicated coordination connection, so a
     // one-connection pool keeps its session.
     let one_connection = ScopedPgPool::new(
@@ -2185,6 +2296,26 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
         .await?,
         expected
     );
+    // Trace usage reads that counter under each scope that shows it.
+    let usage_period = chrono::Utc::now();
+    let by_env = db::subscription::OrgUsageStats::calculate_environment(
+        &db_a,
+        &child_a,
+        &env_a,
+        usage_period,
+        -1,
+    )
+    .await
+    .map_err(|e| format!("environment trace usage: {e:?}"))?;
+    assert_eq!(by_env.call_storage_bytes, expected);
+    let read_set = db_a.with_scope(DatabaseScope::ReadSet {
+        org_ids: vec![child_a],
+        env_ids: vec![env_a],
+    });
+    let by_org = db::subscription::OrgUsageStats::calculate(&read_set, &child_a, usage_period, -1)
+        .await
+        .map_err(|e| format!("org trace usage: {e:?}"))?;
+    assert_eq!(by_org.call_storage_bytes, expected);
 
     sqlx::query("DELETE FROM call WHERE call_id=$1")
         .bind(counter_call)

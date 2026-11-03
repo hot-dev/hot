@@ -3,15 +3,21 @@ meta {
     doc: """
     HubSpot CRM bindings.
 
-    HubSpot's CRM v3 API is uniform across object types, so
-    `::hubspot::objects` covers contacts, companies, deals, tickets, and
-    custom objects with one surface; `::hubspot::contacts` /
+    HubSpot's CRM API is uniform across object types, so
+    `::hubspot::objects` covers contacts, companies, deals, tickets,
+    activities, and custom objects with one surface (CRUD, search, batch,
+    associations, pagination); `::hubspot::contacts` /
     `::hubspot::companies` / `::hubspot::deals` are thin conveniences on
-    top, and `::hubspot::notes` logs activity to records.
+    top. `::hubspot::engagements` and `::hubspot::notes` log activity,
+    `::hubspot::pipelines` resolves deal stages, `::hubspot::owners`
+    finds assignees, `::hubspot::properties` describes and creates
+    fields, and `::hubspot::lists` manages segments. Paths use HubSpot's
+    date-based API versions (`2026-09` by default).
 
-    **Setup** — context variable `hubspot.token`: a private-app access
-    token (`pat-...`) from Settings → Integrations → Private Apps.
-    Webhook verification additionally uses `hubspot.client.secret`.
+    **Setup** — context variable `hubspot.token`: a private-app (or
+    service key) access token (`pat-...`). Webhook verification
+    additionally uses `hubspot.client.secret`; `hubspot.api.version`
+    optionally pins another date version.
 
     **Quick start**
 

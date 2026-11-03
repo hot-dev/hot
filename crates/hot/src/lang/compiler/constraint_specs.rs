@@ -18,7 +18,9 @@
 //! - `any`: anything.
 //!
 //! Only types that contain a refinement or a closed literal type are
-//! constrained; every other annotation produces no check at all.
+//! constrained. A parameter with a primitive annotation gets a `base` check
+//! through `CheckParam` (see `plain_param_spec`); every other annotation
+//! produces no check at all.
 
 use ahash::AHashSet;
 
@@ -86,6 +88,70 @@ fn builtin_name(builtin: &BuiltinType) -> &'static str {
         BuiltinType::Vec => "Vec",
         BuiltinType::Map => "Map",
         BuiltinType::Null => "Null",
+    }
+}
+
+/// The kinds a primitive spec accepts without converting, for `CheckParam`.
+fn spec_mask(spec: &Val) -> u32 {
+    use crate::lang::bytecode::param_mask as kinds;
+    match get_str(spec, "kind") {
+        Some("base") => match get_str(spec, "type") {
+            Some("Int") => kinds::INT,
+            Some("Dec") => kinds::DEC,
+            Some("Str") => kinds::STR,
+            Some("Bool") => kinds::BOOL,
+            Some("Vec") => kinds::VEC,
+            Some("Map") => kinds::MAP,
+            Some("Bytes") => kinds::BYTES,
+            Some("Byte") => kinds::BYTE,
+            Some("Null") => kinds::NULL,
+            _ => 0,
+        },
+        Some("optional") => kinds::NULL | spec_entry(spec, "inner").map_or(0, spec_mask),
+        Some("union") => match spec_entry(spec, "members") {
+            Some(Val::Vec(members)) => members.iter().map(spec_mask).fold(0, |a, b| a | b),
+            _ => 0,
+        },
+        _ => 0,
+    }
+}
+
+fn spec_entry<'a>(spec: &'a Val, key: &str) -> Option<&'a Val> {
+    match spec {
+        Val::Map(entries) => entries.get(&Val::from(key)),
+        _ => None,
+    }
+}
+
+fn get_str<'a>(spec: &'a Val, key: &str) -> Option<&'a str> {
+    match spec_entry(spec, key) {
+        Some(Val::Str(s)) => Some(s),
+        _ => None,
+    }
+}
+
+/// The `base` check of a primitive annotation; `None` for an annotation that
+/// names anything else, such as a user type, `Any` or `Fn`. `Vec<T>` and
+/// `Map<K, V>` check only the container, so a call stays O(1).
+fn plain_param_spec(type_expr: &TypeExpr) -> Option<Val> {
+    let base = |name: &str| node("base", vec![("type", Val::from(name))]);
+    let primitive = |name: &str| is_base_type_name(name) && name != "Fn";
+    match type_expr {
+        TypeExpr::Builtin(builtin) => Some(base(builtin_name(builtin))),
+        TypeExpr::Simple(name) | TypeExpr::Named(name) => primitive(name).then(|| base(name)),
+        TypeExpr::Generic(name, _) if matches!(name.as_str(), "Vec" | "Map") => Some(base(name)),
+        TypeExpr::Optional(inner) => {
+            let inner = plain_param_spec(inner)?;
+            Some(node("optional", vec![("inner", inner)]))
+        }
+        TypeExpr::Union(members) => {
+            let members = members
+                .iter()
+                .map(plain_param_spec)
+                .collect::<Option<Vec<Val>>>()?;
+            Some(node("union", vec![("members", Val::vec(members))]))
+        }
+        _ => None,
     }
 }
 
@@ -319,7 +385,7 @@ impl Compiler {
                     .zip(members)
                     .map(|(spec, member)| spec.unwrap_or_else(|| self.base_spec(member)))
                     .collect();
-                Some(node("union", vec![("members", Val::Vec(members))]))
+                Some(node("union", vec![("members", Val::vec(members))]))
             }
             TypeExpr::Literal(_) => Some(self.literal_spec(std::slice::from_ref(type_expr), None)),
         }
@@ -368,7 +434,7 @@ impl Compiler {
             }
             TypeExpr::Union(members) => {
                 let members = members.iter().map(|m| self.full_spec(m)).collect();
-                node("union", vec![("members", Val::Vec(members))])
+                node("union", vec![("members", Val::vec(members))])
             }
             TypeExpr::Literal(_) => self.literal_spec(std::slice::from_ref(type_expr), None),
         }
@@ -382,7 +448,7 @@ impl Compiler {
                 _ => None,
             })
             .collect();
-        let mut entries = vec![("values", Val::Vec(values))];
+        let mut entries = vec![("values", Val::vec(values))];
         if let Some(type_name) = type_name {
             entries.push(("type", Val::from(type_name)));
         }
@@ -605,7 +671,7 @@ impl Compiler {
     fn refine_node(&self, base: Val, refinement: &Refinement, constraint: &str) -> Val {
         let mut node = refine_node(base, refinement, constraint);
         if let (Some(fast), Val::Map(entries)) = (self.fast_form(refinement), &mut node) {
-            entries.insert(Val::from("fast"), fast);
+            std::sync::Arc::make_mut(entries).insert(Val::from("fast"), fast);
         }
         node
     }
@@ -664,6 +730,9 @@ pub(super) struct SignatureChecks {
     function: String,
     /// Refined parameters: name, spec, declared type.
     pub(super) params: Vec<(String, Val, String)>,
+    /// Primitive parameters: name, spec, declared type, and whether the
+    /// parameter is variadic.
+    primitive_params: Vec<(String, Val, String, bool)>,
     /// All parameter names, for the precondition's record of arguments.
     param_names: Vec<String>,
     precondition: Option<Val>,
@@ -672,15 +741,19 @@ pub(super) struct SignatureChecks {
 }
 
 impl Compiler {
-    /// The checks a signature needs, or `None` when it has no constraints.
+    /// The checks a signature needs, or `None` when it has none. `keeps_result`
+    /// says the first parameter holds its argument unconsumed, as a `fn match`
+    /// with `Result` arms does, so its annotation can't be checked on entry.
     pub(super) fn signature_checks(
         &mut self,
         function_name: &str,
         args: &crate::lang::ast::FnArgs,
         return_type: Option<&str>,
         precondition: Option<&Refinement>,
+        keeps_result: bool,
     ) -> Option<SignatureChecks> {
         let mut params = Vec::new();
+        let mut primitive_params = Vec::new();
         for (index, arg) in args.args.iter().enumerate() {
             // Lazy parameters are rejected statically (`unsupported-constraint`).
             if arg.lazy {
@@ -689,11 +762,24 @@ impl Compiler {
             let Some(annotation) = arg.type_annotation.as_deref() else {
                 continue;
             };
+            let variadic = args.variadic && index + 1 == args.args.len();
             let Some(spec) = self.constraint_spec_for_annotation(annotation) else {
+                if !(keeps_result && index == 0)
+                    && let Some(spec) = parse_type_annotation(annotation)
+                        .as_ref()
+                        .and_then(plain_param_spec)
+                {
+                    primitive_params.push((
+                        arg.var.sym.name().to_string(),
+                        spec,
+                        self.display_annotation(annotation),
+                        variadic,
+                    ));
+                }
                 continue;
             };
             // A variadic parameter's annotation types each of its values.
-            let spec = if args.variadic && index + 1 == args.args.len() {
+            let spec = if variadic {
                 node("vec", vec![("elem", spec)])
             } else {
                 spec
@@ -709,7 +795,11 @@ impl Compiler {
             self.constraint_spec_for_annotation(annotation)
                 .map(|spec| (spec, self.display_annotation(annotation)))
         });
-        if params.is_empty() && precondition.is_none() && ret.is_none() {
+        if params.is_empty()
+            && primitive_params.is_empty()
+            && precondition.is_none()
+            && ret.is_none()
+        {
             return None;
         }
         let function = if function_name.starts_with("::") {
@@ -720,6 +810,7 @@ impl Compiler {
         Some(SignatureChecks {
             function,
             params,
+            primitive_params,
             param_names: args
                 .args
                 .iter()
@@ -730,13 +821,37 @@ impl Compiler {
         })
     }
 
-    /// Check each refined parameter, rebinding it to the checked value, then
-    /// the argument-list precondition. A failure returns its `Err` before the
-    /// body runs.
+    /// Check each primitive parameter, then each refined one, rebinding it to
+    /// the checked value, then the argument-list precondition. A failure
+    /// returns its `Err` before the body runs.
     pub(super) fn emit_signature_prologue(
         &mut self,
         checks: &SignatureChecks,
     ) -> Result<(), String> {
+        for (name, spec, annotation, each) in &checks.primitive_params {
+            let var_name = self
+                .program
+                .add_constant(Constant::Val(Val::from(name.as_str())));
+            let boundary = Boundary {
+                function: Some(&checks.function),
+                parameter: Some(name),
+                declared_type: Some(annotation),
+                ..Boundary::new("parameter")
+            };
+            let mask = spec_mask(spec);
+            let type_spec = if *each {
+                node("vec", vec![("elem", spec.clone())])
+            } else {
+                spec.clone()
+            };
+            let spec = self.constraint_boundary_constant(type_spec, &boundary);
+            self.emit_instruction(Instruction::CheckParam {
+                var_name,
+                spec,
+                mask,
+                each: *each,
+            });
+        }
         for (name, spec, annotation) in &checks.params {
             let var_name = self
                 .program
@@ -909,7 +1024,7 @@ impl Compiler {
         if let Some((function, index)) = boundary.proof {
             entries.push((
                 Val::from("proof"),
-                Val::Vec(vec![Val::Int(i64::from(function)), Val::Int(index as i64)]),
+                Val::vec(vec![Val::Int(i64::from(function)), Val::Int(index as i64)]),
             ));
         }
         self.program
@@ -949,7 +1064,7 @@ impl Compiler {
             .collect();
         Some(match specs.len() {
             1 => specs.into_iter().next().unwrap_or(Val::Null),
-            _ => node("union", vec![("members", Val::Vec(specs))]),
+            _ => node("union", vec![("members", Val::vec(specs))]),
         })
     }
 

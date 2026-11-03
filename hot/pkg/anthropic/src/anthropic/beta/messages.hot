@@ -1,6 +1,6 @@
 ::anthropic::beta::messages ns
 
-api-request ::anthropic::api/request
+api-call ::anthropic::api/call
 HttpError ::anthropic::api/HttpError
 is-ok-response ::hot::http/is-ok-response
 
@@ -125,8 +125,15 @@ meta {
     """
 }
 fn (request: BetaMessagesPostRequest): BetaMessagesPostResponse {
-  response api-request("POST", `${::anthropic/BASE_URL}/v1/messages?beta=true`, {}, request)
-  if(is-ok-response(response), BetaMessagesPostResponse(response.body), err(HttpError(response)))
+  post(request, {})
+},
+(request: BetaMessagesPostRequest, opts: Map): BetaMessagesPostResponse {
+  response api-call("POST", `/v1/messages?beta=true`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { BetaMessagesPostResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 BetaMessagesCountTokensPostRequest type {
@@ -182,8 +189,15 @@ meta {
     """
 }
 fn (request: BetaMessagesCountTokensPostRequest): BetaMessagesCountTokensPostResponse {
-  response api-request("POST", `${::anthropic/BASE_URL}/v1/messages/count_tokens?beta=true`, {}, request)
-  if(is-ok-response(response), BetaMessagesCountTokensPostResponse(response.body), err(HttpError(response)))
+  count-tokens-post(request, {})
+},
+(request: BetaMessagesCountTokensPostRequest, opts: Map): BetaMessagesCountTokensPostResponse {
+  response api-call("POST", `/v1/messages/count_tokens?beta=true`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { BetaMessagesCountTokensPostResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 BetaMessagesCountTokensPostRequest type {
@@ -220,6 +234,13 @@ meta {
     """
 }
 fn (request: BetaMessagesCountTokensPostRequest): BetaMessagesCountTokensPostResponse {
-  response api-request("POST", `${::anthropic/BASE_URL}/v1/messages/count_tokens`, {}, request)
-  if(is-ok-response(response), BetaMessagesCountTokensPostResponse(response.body), err(HttpError(response)))
+  count-tokens-post(request, {})
+},
+(request: BetaMessagesCountTokensPostRequest, opts: Map): BetaMessagesCountTokensPostResponse {
+  response api-call("POST", `/v1/messages/count_tokens`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { BetaMessagesCountTokensPostResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

@@ -1,0 +1,294 @@
+::quickbooks::test::api ns
+meta ["test"]
+
+::api ::quickbooks::api
+
+HttpResponse ::hot::http/HttpResponse
+
+VALIDATION_FAULT {
+    Fault: {
+        Error: [{
+            Message: "Duplicate Name Exists Error",
+            Detail: "The name supplied already exists. : Another customer is already using this name.",
+            code: "6240",
+            element: ""
+        }],
+        type: "ValidationFault"
+    },
+    time: "2026-10-31T10:00:00.000-07:00"
+}
+
+AUTH_FAULT {
+    fault: {
+        error: [{
+            message: "message=AuthenticationFailed; errorCode=003200; statusCode=401",
+            detail: "Token expired: 0",
+            code: "3200"
+        }],
+        type: "AUTHENTICATION"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Environment, realm, minorversion
+// ---------------------------------------------------------------------------
+
+test-environment-validation
+meta ["test"] fn () {
+    assert-eq("production", ::api/validate-environment(null), "unset means production")
+    assert-eq("production", ::api/validate-environment(""))
+    assert-eq("sandbox", ::api/validate-environment(" Sandbox "))
+    assert(is-err(::api/validate-environment("prod")), "typos are rejected")
+    assert(is-err(::api/validate-environment("staging")))
+    assert-eq("https://sandbox-quickbooks.api.intuit.com", ::api/base-url("sandbox"))
+    assert-eq("https://quickbooks.api.intuit.com", ::api/base-url("production"))
+}
+
+test-environment-from-opts-and-ctx
+meta ["test"] fn () {
+    ::hot::ctx/set("quickbooks.environment", "sandbox")
+    assert-eq("sandbox", ::api/environment({}))
+    assert-eq("production", ::api/environment({environment: "production"}), "opts win")
+    ::hot::ctx/set("quickbooks.environment", "")
+}
+
+test-realm-validation
+meta ["test"] fn () {
+    assert-eq("9341453", ::api/validate-realm-id("9341453"))
+    assert-eq("9341453", ::api/validate-realm-id(9341453))
+    assert(is-err(::api/validate-realm-id("")), "a realm is required")
+    assert(is-err(::api/validate-realm-id("93/../1")), "path tricks are rejected")
+    assert(is-err(::api/validate-realm-id(null)))
+}
+
+test-minorversion
+meta ["test"] fn () {
+    assert-eq("75", ::api/validate-minorversion(null), "pinned default")
+    assert-eq("76", ::api/validate-minorversion("76"))
+    assert-eq("80", ::api/validate-minorversion(80))
+    assert(is-err(::api/validate-minorversion("65")), "retired versions are rejected")
+    assert(is-err(::api/validate-minorversion("latest")), "non-numbers are rejected")
+}
+
+test-request-id
+meta ["test"] fn () {
+    assert(is-null(::api/validate-request-id(null)))
+    assert-eq("order-1", ::api/validate-request-id("order-1"))
+    assert(is-err(::api/validate-request-id("x123456789x123456789x123456789x123456789x123456789x")), "51 characters is too long")
+}
+
+// ---------------------------------------------------------------------------
+// URLs
+// ---------------------------------------------------------------------------
+
+test-query-string
+meta ["test"] fn () {
+    assert-eq("", ::api/query-string({}))
+    assert-eq("", ::api/query-string({a: null}), "nulls are dropped")
+    assert-eq("?sendTo=ap%40acme.example", ::api/query-string({sendTo: "ap@acme.example"}))
+    assert-eq("?entities=Invoice,Bill", ::api/query-string({entities: ["Invoice", "Bill"]}))
+    assert-eq("?date_macro=Last%20Month", ::api/query-string({date_macro: "Last Month"}), "spaces are %20")
+    assert-eq("?x=true", ::api/query-string({x: true}))
+}
+
+test-company-url
+meta ["test"] fn () {
+    assert-eq(
+        "https://sandbox-quickbooks.api.intuit.com/v3/company/9341453/invoice/130/pdf?minorversion=75",
+        ::api/company-url("sandbox", "9341453", "75", "/invoice/130/pdf", {})
+    )
+    url ::api/company-url("production", "1", "75", "/invoice", {operation: "delete", requestid: null})
+    assert-eq("https://quickbooks.api.intuit.com/v3/company/1/invoice?operation=delete&minorversion=75", url)
+    assert-eq("12%2F..", ::api/segment("12/.."))
+}
+
+test-resolve-opts-override-ctx
+meta ["test"] fn () {
+    ::hot::ctx/set({
+        "quickbooks.environment": "production",
+        "quickbooks.realm.id": "111",
+        "quickbooks.access.token": "CTX-AT",
+        "quickbooks.refresh.token": "",
+        "quickbooks.token.store": ""
+    })
+    r ::api/resolve({environment: "sandbox", realm-id: "42", minorversion: "76", request-id: "r-1", access-token: "TENANT-AT"})
+    assert-eq("sandbox", r.environment, "opts win over ctx")
+    assert-eq("42", r.realm-id)
+    assert-eq("76", r.minorversion)
+    assert-eq("TENANT-AT", r.credentials.token, "per-call credentials win")
+    assert-eq("https://sandbox-quickbooks.api.intuit.com/v3/company/42/customer/5?requestid=r-1&minorversion=76", ::api/resolved-url(r, "/customer/5", {}))
+
+    from-ctx ::api/resolve({})
+    assert-eq("production", from-ctx.environment, "ctx is used when opts is empty")
+    assert-eq("111", from-ctx.realm-id)
+    assert-eq("CTX-AT", from-ctx.credentials.token)
+    assert-eq("75", from-ctx.minorversion)
+
+    assert-eq("111", ::hot::ctx/get("quickbooks.realm.id"), "resolve never writes per-call values to ctx")
+    assert-eq("CTX-AT", ::hot::ctx/get("quickbooks.access.token"))
+    ::hot::ctx/set({"quickbooks.environment": "", "quickbooks.realm.id": "", "quickbooks.access.token": ""})
+}
+
+test-resolve-errors
+meta ["test"] fn () {
+    ::hot::ctx/set({"quickbooks.access.token": "", "quickbooks.refresh.token": "", "quickbooks.token.store": "", "quickbooks.realm.id": ""})
+    none ::api/resolve({realm-id: "42"})
+    assert(is-err(none), "no credentials errs")
+    assert(contains(err-message(none), "no credentials configured"), err-message(none))
+    assert(is-err(::api/resolve({environment: "prod", realm-id: "42", access-token: "AT"})), "bad environment errs")
+    assert(is-err(::api/resolve({realm-id: "abc", access-token: "AT"})), "bad realm errs")
+    assert(is-err(::api/resolve({access-token: "AT"})), "missing realm errs")
+}
+
+test-build-request
+meta ["test"] fn () {
+    req ::api/build-request("POST", "https://x.example/q", "AT", {DisplayName: "Acme"}, {})
+    assert-eq("Bearer AT", req.headers.Authorization)
+    assert-eq("application/json", req.headers.Accept)
+    assert-eq("application/json", get(req.headers, "Content-Type"))
+    assert-eq({DisplayName: "Acme"}, from-json(req.body))
+
+    raw ::api/build-request("POST", "https://x.example/q", "AT", "select * from Invoice", {Content-Type: "application/text"})
+    assert-eq("select * from Invoice", raw.body)
+    assert-eq("application/text", get(raw.headers, "Content-Type"))
+
+    none ::api/build-request("GET", "https://x.example/q", "AT", "", {Accept: "application/pdf"})
+    assert-eq("", none.body)
+    assert(is-null(get(none.headers, "Content-Type")), "no Content-Type without a body")
+    assert-eq("application/pdf", none.headers.Accept, "caller headers win")
+}
+
+test-retry-budget
+meta ["test"] fn () {
+    assert-eq(1, ::api/retry-budget({}, true))
+    assert-eq(0, ::api/retry-budget({}, false), "non-idempotent calls are never retried")
+    assert-eq(0, ::api/retry-budget({retry: false}, true))
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+test-fault-details
+meta ["test"] fn () {
+    d ::api/fault-details(VALIDATION_FAULT)
+    assert-eq("ValidationFault", d.fault-type)
+    assert-eq(1, length(d.errors))
+    assert-eq("6240", d.errors[0].code)
+    assert(is-null(get(d.errors[0], "element")), "blank element is dropped")
+
+    lower ::api/fault-details(AUTH_FAULT)
+    assert-eq("AUTHENTICATION", lower.fault-type, "lowercase auth faults parse")
+    assert-eq("3200", lower.errors[0].code)
+
+    assert-eq([], ::api/fault-details({Customer: {Id: "1"}}).errors)
+    assert-eq([], ::api/fault-details("<html>oops</html>").errors)
+}
+
+test-http-error-message
+meta ["test"] fn () {
+    e ::api/HttpError(HttpResponse({status: 400, headers: {intuit_tid: "1-6730abc"}, body: VALIDATION_FAULT}))
+    assert-eq(400, e.status)
+    assert-eq("quickbooks: HTTP 400 ValidationFault 6240: Duplicate Name Exists Error: The name supplied already exists. : Another customer is already using this name. (intuit_tid: 1-6730abc)", e.message)
+    assert-eq("6240", e.code)
+    assert-eq("1-6730abc", e.intuit-tid)
+    assert-eq("ValidationFault", e.fault-type)
+
+    auth ::api/HttpError(HttpResponse({status: 401, headers: {}, body: AUTH_FAULT}))
+    assert(contains(auth.message, "HTTP 401 AUTHENTICATION 3200"), auth.message)
+    assert(is-null(auth.intuit-tid))
+
+    text ::api/HttpError(HttpResponse({status: 502, headers: {retry-after: "30"}, body: "Bad Gateway"}))
+    assert-eq("quickbooks: HTTP 502: Bad Gateway", text.message)
+    assert-eq(30, text.retry-after)
+
+    bytes ::api/HttpError(HttpResponse({status: 400, headers: {}, body: Bytes(to-json(VALIDATION_FAULT))}))
+    assert-eq("6240", bytes.code, "Bytes bodies (PDF calls) are decoded")
+}
+
+test-unwrap-fault-in-200
+meta ["test"] fn () {
+    ok ::api/unwrap(HttpResponse({status: 200, headers: {}, body: {Customer: {Id: "5"}}}))
+    assert-eq("5", ok.Customer.Id)
+    faulted ::api/unwrap(HttpResponse({status: 200, headers: {}, body: VALIDATION_FAULT}))
+    assert(is-err(faulted), "a 2xx Fault is an error")
+    assert(contains(err-message(faulted), "6240"), err-message(faulted))
+    assert(is-err(::api/unwrap(HttpResponse({status: 404, headers: {}, body: ""}))))
+}
+
+test-is-retryable
+meta ["test"] fn () {
+    throttled ::api/HttpError(HttpResponse({status: 429, headers: {}, body: {Fault: {Error: [{Message: "ThrottleExceeded", code: "3001"}], type: "SERVICE"}}}))
+    assert(::api/is-retryable(err(throttled)))
+    assert(::api/is-retryable(throttled), "a bare HttpError works too")
+    assert(::api/is-retryable(err(::api/HttpError(HttpResponse({status: 503, headers: {}, body: ""})))))
+    assert(not(::api/is-retryable(err(::api/HttpError(HttpResponse({status: 400, headers: {}, body: VALIDATION_FAULT}))))), "validation is permanent")
+    assert(not(::api/is-retryable(err(::api/HttpError(HttpResponse({status: 401, headers: {}, body: AUTH_FAULT}))))))
+    code-only ::api/HttpError(HttpResponse({status: 400, headers: {}, body: {Fault: {Error: [{Message: "Throttle", code: "003001"}], type: "SERVICE"}}}))
+    assert(::api/is-retryable(code-only), "throttle fault codes are retryable")
+    assert(::api/is-retryable(err("http request failed: connection reset")))
+    assert(not(::api/is-retryable(err("response exceeds the size limit"))))
+    assert(not(::api/is-retryable({Customer: {}})), "successes are not retryable")
+}
+
+// ---------------------------------------------------------------------------
+// Per-call credentials
+// ---------------------------------------------------------------------------
+
+test-resolve-blank-option-never-falls-back
+meta ["test"] fn () {
+    ::hot::ctx/set({"quickbooks.access.token": "CTX-AT", "quickbooks.realm.id": "9341453", "quickbooks.environment": "sandbox"})
+    results map(["access-token", "refresh-token", "client-id", "client-secret", "token-store", "token-store-key", "realm-id", "environment"], (name) {
+        {
+            name: name,
+            empty: ::api/resolve(assoc({}, name, "")),
+            spaces: ::api/resolve(assoc({}, name, "   ")),
+            nothing: ::api/resolve(assoc({}, name, null))
+        }
+    })
+    ::hot::ctx/set({"quickbooks.access.token": "", "quickbooks.realm.id": "", "quickbooks.environment": ""})
+    for-each(results, (r) {
+        assert(is-err(r.empty), `blank ${r.name} never falls back to context`)
+        assert(contains(err-message(r.empty), r.name), err-message(r.empty))
+        assert(is-err(r.spaces), `whitespace ${r.name}`)
+        assert(is-err(r.nothing), `null ${r.name}`)
+        assert(contains(err-message(r.nothing), r.name), err-message(r.nothing))
+    })
+}
+
+test-resolve-environment-needs-a-per-call-credential
+meta ["test"] fn () {
+    ::hot::ctx/set({"quickbooks.access.token": "CTX-AT", "quickbooks.realm.id": "9341453", "quickbooks.environment": "production"})
+    to-sandbox ::api/resolve({environment: "sandbox"})
+    same ::api/resolve({environment: " Production "})
+    with-token ::api/resolve({access-token: "TENANT-AT", environment: "sandbox"})
+    with-store ::api/resolve({token-store: "qb-tokens", client-id: "id", client-secret: "sec", environment: "sandbox"})
+    ::hot::ctx/set({"quickbooks.environment": "sandbox"})
+    to-production ::api/resolve({environment: "production"})
+    ::hot::ctx/set({"quickbooks.environment": ""})
+    from-default ::api/resolve({environment: "sandbox"})
+    ::hot::ctx/set({"quickbooks.environment": "staging"})
+    bad-context ::api/resolve({environment: "sandbox"})
+    bad-context-with-token ::api/resolve({access-token: "TENANT-AT", environment: "sandbox"})
+    ::hot::ctx/set({"quickbooks.access.token": "", "quickbooks.realm.id": "", "quickbooks.environment": ""})
+
+    assert(is-err(to-sandbox), "a production token never goes to the sandbox host")
+    assert(contains(err-message(to-sandbox), "environment"), "the error names both keys")
+    assert(contains(err-message(to-sandbox), "access-token"))
+    assert-eq("production", same.environment, "the configured environment needs no credential")
+    assert-eq("sandbox", with-token.environment, "a per-call token may choose its environment")
+    assert-eq("sandbox", with-store.environment)
+    assert(is-err(to-production), "a sandbox token never goes to the production host")
+    assert(is-err(from-default), "unset means production, so the same rule holds")
+    assert(is-err(bad-context), "an invalid quickbooks.environment can't be compared, so it errs")
+    assert-eq("sandbox", bad-context-with-token.environment, "a per-call credential doesn't depend on context")
+}
+
+test-resolve-returns-marked-values-unchanged
+meta ["test"] fn () {
+    token ::api/resolve({realm-id: "42", access-token: "TENANT-AT-VALUE"})
+    assert-eq("TENANT-AT-VALUE", token.credentials.token, "marking a credential doesn't change it")
+    refresh ::api/resolve({realm-id: "42", refresh-token: "TENANT-RT-VALUE", client-id: "id", client-secret: "SECRET-VALUE"})
+    assert-eq("TENANT-RT-VALUE", refresh.credentials.refresh-token)
+    assert-eq("SECRET-VALUE", refresh.credentials.client-secret)
+}

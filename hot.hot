@@ -59,15 +59,30 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/airtable/test",
     "./hot/pkg/anthropic/test",
     "./hot/pkg/attio/test",
+    "./hot/pkg/aws-bedrock/test",
+    "./hot/pkg/aws-core/test",
+    "./hot/pkg/aws-dynamodb/test",
     "./hot/pkg/aws-eventstream/test",
+    "./hot/pkg/aws-lambda/test",
+    "./hot/pkg/aws-s3/test",
+    "./hot/pkg/aws-secrets-manager/test",
+    "./hot/pkg/aws-ses/test",
+    "./hot/pkg/aws-sns/test",
+    "./hot/pkg/aws-sqs/test",
+    "./hot/pkg/box/test",
     "./hot/pkg/cal-com/test",
+    "./hot/pkg/cipherowl/test",
     "./hot/pkg/cloudflare/test",
+    "./hot/pkg/company-registry/test",
     "./hot/pkg/crm/test",
     "./hot/pkg/deepgram/test",
     "./hot/pkg/discord/test",
+    "./hot/pkg/documents/test",
+    "./hot/pkg/dropbox/test",
     "./hot/pkg/elevenlabs/test",
     "./hot/pkg/ffmpeg/test",
     "./hot/pkg/firecrawl/test",
+    "./hot/pkg/gemini/test",
     "./hot/pkg/github/test",
     "./hot/pkg/google-calendar/test",
     "./hot/pkg/google-core/test",
@@ -79,40 +94,57 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/hot-std/test",
     "./hot/pkg/hubspot/test",
     "./hot/pkg/imagemagick/test",
+    "./hot/pkg/increase/test",
     "./hot/pkg/intercom/test",
+    "./hot/pkg/json-rpc/test",
     "./hot/pkg/jwt/test",
     "./hot/pkg/libreoffice/test",
     "./hot/pkg/linear/test",
     "./hot/pkg/mcp/test",
+    "./hot/pkg/microsoft-graph/test",
+    "./hot/pkg/microsoft-onedrive/test",
+    "./hot/pkg/microsoft-sharepoint/test",
+    "./hot/pkg/middesk/test",
+    "./hot/pkg/modern-treasury/test",
     "./hot/pkg/mysql/test",
     "./hot/pkg/notion/test",
     "./hot/pkg/oauth2/test",
     "./hot/pkg/openai-compatible/test",
     "./hot/pkg/openai/test",
     "./hot/pkg/pandoc/test",
+    "./hot/pkg/persona/test",
     "./hot/pkg/pg/test",
     "./hot/pkg/pinecone/test",
     "./hot/pkg/plaid/test",
     "./hot/pkg/playwright/test",
     "./hot/pkg/postmark/test",
     "./hot/pkg/qdrant/test",
+    "./hot/pkg/quickbooks/test",
+    "./hot/pkg/qwen/test",
     "./hot/pkg/redis/test",
+    "./hot/pkg/resend/test",
     "./hot/pkg/salesforce/test",
+    "./hot/pkg/sanctions/test",
     "./hot/pkg/sentry/test",
     "./hot/pkg/shopify/test",
+    "./hot/pkg/slack-admin/test",
     "./hot/pkg/slack/test",
     "./hot/pkg/sox/test",
     "./hot/pkg/sql-mysql/test",
     "./hot/pkg/sql-sqlite/test",
     "./hot/pkg/sql/test",
     "./hot/pkg/stripe/test",
+    "./hot/pkg/sumsub/test",
     "./hot/pkg/supabase-admin/test",
     "./hot/pkg/supabase/test",
+    "./hot/pkg/telegram/test",
     "./hot/pkg/tesseract/test",
     "./hot/pkg/twilio/test",
     "./hot/pkg/web-search/test",
     "./hot/pkg/whatsapp/test",
     "./hot/pkg/whisper/test",
+    "./hot/pkg/xai/test",
+    "./hot/pkg/xero/test",
     "./hot/pkg/zendesk/test"
 ]
 hot.project.hot-pkg-all.test.capture true
@@ -134,11 +166,16 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/aws-ses": { "local": "./hot/pkg/aws-ses" },
     "hot.dev/aws-sns": { "local": "./hot/pkg/aws-sns" },
     "hot.dev/aws-sqs": { "local": "./hot/pkg/aws-sqs" },
+    "hot.dev/box": { "local": "./hot/pkg/box" },
     "hot.dev/cal-com": { "local": "./hot/pkg/cal-com" },
+    "hot.dev/cipherowl": { "local": "./hot/pkg/cipherowl" },
     "hot.dev/cloudflare": { "local": "./hot/pkg/cloudflare" },
+    "hot.dev/company-registry": { "local": "./hot/pkg/company-registry" },
     "hot.dev/crm": { "local": "./hot/pkg/crm" },
     "hot.dev/deepgram": { "local": "./hot/pkg/deepgram" },
     "hot.dev/discord": { "local": "./hot/pkg/discord" },
+    "hot.dev/documents": { "local": "./hot/pkg/documents" },
+    "hot.dev/dropbox": { "local": "./hot/pkg/dropbox" },
     "hot.dev/elevenlabs": { "local": "./hot/pkg/elevenlabs" },
     "hot.dev/ffmpeg": { "local": "./hot/pkg/ffmpeg" },
     "hot.dev/firecrawl": { "local": "./hot/pkg/firecrawl" },
@@ -153,28 +190,37 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/hot-ai-agent": { "local": "./hot/pkg/hot-ai-agent" },
     "hot.dev/hubspot": { "local": "./hot/pkg/hubspot" },
     "hot.dev/imagemagick": { "local": "./hot/pkg/imagemagick" },
+    "hot.dev/increase": { "local": "./hot/pkg/increase" },
     "hot.dev/intercom": { "local": "./hot/pkg/intercom" },
     "hot.dev/json-rpc": { "local": "./hot/pkg/json-rpc" },
     "hot.dev/jwt": { "local": "./hot/pkg/jwt" },
     "hot.dev/libreoffice": { "local": "./hot/pkg/libreoffice" },
     "hot.dev/linear": { "local": "./hot/pkg/linear" },
     "hot.dev/mcp": { "local": "./hot/pkg/mcp" },
+    "hot.dev/microsoft-graph": { "local": "./hot/pkg/microsoft-graph" },
+    "hot.dev/microsoft-onedrive": { "local": "./hot/pkg/microsoft-onedrive" },
+    "hot.dev/microsoft-sharepoint": { "local": "./hot/pkg/microsoft-sharepoint" },
+    "hot.dev/middesk": { "local": "./hot/pkg/middesk" },
+    "hot.dev/modern-treasury": { "local": "./hot/pkg/modern-treasury" },
     "hot.dev/mysql": { "local": "./hot/pkg/mysql" },
     "hot.dev/notion": { "local": "./hot/pkg/notion" },
     "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" },
     "hot.dev/openai": { "local": "./hot/pkg/openai" },
     "hot.dev/openai-compatible": { "local": "./hot/pkg/openai-compatible" },
     "hot.dev/pandoc": { "local": "./hot/pkg/pandoc" },
+    "hot.dev/persona": { "local": "./hot/pkg/persona" },
     "hot.dev/pg": { "local": "./hot/pkg/pg" },
     "hot.dev/pinecone": { "local": "./hot/pkg/pinecone" },
     "hot.dev/plaid": { "local": "./hot/pkg/plaid" },
     "hot.dev/playwright": { "local": "./hot/pkg/playwright" },
     "hot.dev/postmark": { "local": "./hot/pkg/postmark" },
     "hot.dev/qdrant": { "local": "./hot/pkg/qdrant" },
+    "hot.dev/quickbooks": { "local": "./hot/pkg/quickbooks" },
     "hot.dev/qwen": { "local": "./hot/pkg/qwen" },
     "hot.dev/redis": { "local": "./hot/pkg/redis" },
     "hot.dev/resend": { "local": "./hot/pkg/resend" },
     "hot.dev/salesforce": { "local": "./hot/pkg/salesforce" },
+    "hot.dev/sanctions": { "local": "./hot/pkg/sanctions" },
     "hot.dev/sentry": { "local": "./hot/pkg/sentry" },
     "hot.dev/shopify": { "local": "./hot/pkg/shopify" },
     "hot.dev/slack": { "local": "./hot/pkg/slack" },
@@ -185,6 +231,7 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/sql-pg": { "local": "./hot/pkg/sql-pg" },
     "hot.dev/sql-sqlite": { "local": "./hot/pkg/sql-sqlite" },
     "hot.dev/stripe": { "local": "./hot/pkg/stripe" },
+    "hot.dev/sumsub": { "local": "./hot/pkg/sumsub" },
     "hot.dev/supabase": { "local": "./hot/pkg/supabase" },
     "hot.dev/supabase-admin": { "local": "./hot/pkg/supabase-admin" },
     "hot.dev/telegram": { "local": "./hot/pkg/telegram" },
@@ -194,7 +241,9 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/whatsapp": { "local": "./hot/pkg/whatsapp" },
     "hot.dev/whisper": { "local": "./hot/pkg/whisper" },
     "hot.dev/xai": { "local": "./hot/pkg/xai" },
+    "hot.dev/xero": { "local": "./hot/pkg/xero" },
     "hot.dev/zendesk": { "local": "./hot/pkg/zendesk" }
+
 }
 
 hot.db.uri ::env/get("HOT_DB_URI", "sqlite:./.hot/db/hot.sqlite.db")
@@ -390,6 +439,71 @@ hot.project.pkg-test-openai.deps {
     "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" }
 }
 
+// qwen unit tests (base-URL selection, request building, hot-ai adapter)
+hot.project.pkg-test-qwen.src.paths ["./hot/pkg/qwen/src"]
+hot.project.pkg-test-qwen.test.paths ["./hot/pkg/qwen/test"]
+hot.project.pkg-test-qwen.test.capture true
+hot.project.pkg-test-qwen.deps {
+    "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" },
+    "hot.dev/openai": { "local": "./hot/pkg/openai" }
+}
+
+// AWS family unit tests (SigV4 signing, request building, resolvers; hermetic)
+hot.project.pkg-test-aws.src.paths [
+    "./hot/pkg/aws-core/src",
+    "./hot/pkg/aws-bedrock/src",
+    "./hot/pkg/aws-dynamodb/src",
+    "./hot/pkg/aws-eventstream/src",
+    "./hot/pkg/aws-lambda/src",
+    "./hot/pkg/aws-s3/src",
+    "./hot/pkg/aws-secrets-manager/src",
+    "./hot/pkg/aws-ses/src",
+    "./hot/pkg/aws-sns/src",
+    "./hot/pkg/aws-sqs/src"
+]
+hot.project.pkg-test-aws.test.paths [
+    "./hot/pkg/aws-core/test",
+    "./hot/pkg/aws-bedrock/test",
+    "./hot/pkg/aws-dynamodb/test",
+    "./hot/pkg/aws-eventstream/test",
+    "./hot/pkg/aws-lambda/test",
+    "./hot/pkg/aws-s3/test",
+    "./hot/pkg/aws-secrets-manager/test",
+    "./hot/pkg/aws-ses/test",
+    "./hot/pkg/aws-sns/test",
+    "./hot/pkg/aws-sqs/test"
+]
+hot.project.pkg-test-aws.test.capture true
+hot.project.pkg-test-aws.deps {}
+
+// gemini unit tests (request building, credential resolver; hermetic)
+hot.project.pkg-test-gemini.src.paths ["./hot/pkg/gemini/src"]
+hot.project.pkg-test-gemini.test.paths ["./hot/pkg/gemini/test"]
+hot.project.pkg-test-gemini.test.capture true
+hot.project.pkg-test-gemini.deps {
+    "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" }
+}
+
+// xai unit tests (request building, credential resolver; hermetic)
+hot.project.pkg-test-xai.src.paths ["./hot/pkg/xai/src"]
+hot.project.pkg-test-xai.test.paths ["./hot/pkg/xai/test"]
+hot.project.pkg-test-xai.test.capture true
+hot.project.pkg-test-xai.deps {
+    "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" }
+}
+
+// postmark unit tests (request building, credential resolver; hermetic)
+hot.project.pkg-test-postmark.src.paths ["./hot/pkg/postmark/src"]
+hot.project.pkg-test-postmark.test.paths ["./hot/pkg/postmark/test"]
+hot.project.pkg-test-postmark.test.capture true
+hot.project.pkg-test-postmark.deps {}
+
+// resend unit tests (request building, credential resolver; hermetic)
+hot.project.pkg-test-resend.src.paths ["./hot/pkg/resend/src"]
+hot.project.pkg-test-resend.test.paths ["./hot/pkg/resend/test"]
+hot.project.pkg-test-resend.test.capture true
+hot.project.pkg-test-resend.deps {}
+
 // supabase unit tests (pure-Hot filter/query builders, no network required)
 hot.project.pkg-test-supabase.src.paths ["./hot/pkg/supabase/src"]
 hot.project.pkg-test-supabase.test.paths ["./hot/pkg/supabase/test"]
@@ -454,7 +568,137 @@ hot.project.pkg-test-intercom.deps {}
 hot.project.pkg-test-plaid.src.paths ["./hot/pkg/plaid/src"]
 hot.project.pkg-test-plaid.test.paths ["./hot/pkg/plaid/test"]
 hot.project.pkg-test-plaid.test.capture true
-hot.project.pkg-test-plaid.deps {}
+hot.project.pkg-test-plaid.deps {
+    "hot.dev/jwt": { "local": "./hot/pkg/jwt" }
+}
+
+// Persona KYC/KYB unit tests (hermetic)
+hot.project.pkg-test-persona.src.paths ["./hot/pkg/persona/src"]
+hot.project.pkg-test-persona.test.paths ["./hot/pkg/persona/test"]
+hot.project.pkg-test-persona.test.capture true
+hot.project.pkg-test-persona.deps {}
+
+// Persona KYC/KYB integration tests (requires sandbox credentials)
+hot.project.pkg-integration-persona.src.paths ["./hot/pkg/persona/src"]
+hot.project.pkg-integration-persona.test.paths ["./hot/pkg/persona/integration-test"]
+hot.project.pkg-integration-persona.test.capture true
+hot.project.pkg-integration-persona.deps {}
+
+// Middesk KYB unit tests (hermetic)
+hot.project.pkg-test-middesk.src.paths ["./hot/pkg/middesk/src"]
+hot.project.pkg-test-middesk.test.paths ["./hot/pkg/middesk/test"]
+hot.project.pkg-test-middesk.test.capture true
+hot.project.pkg-test-middesk.deps {}
+
+// Middesk KYB integration tests (requires sandbox credentials)
+hot.project.pkg-integration-middesk.src.paths ["./hot/pkg/middesk/src"]
+hot.project.pkg-integration-middesk.test.paths ["./hot/pkg/middesk/integration-test"]
+hot.project.pkg-integration-middesk.test.capture true
+hot.project.pkg-integration-middesk.deps {}
+
+// Sumsub KYC/KYB/AML unit tests (hermetic)
+hot.project.pkg-test-sumsub.src.paths ["./hot/pkg/sumsub/src"]
+hot.project.pkg-test-sumsub.test.paths ["./hot/pkg/sumsub/test"]
+hot.project.pkg-test-sumsub.test.capture true
+hot.project.pkg-test-sumsub.deps {}
+
+// Sumsub KYC/KYB/AML integration tests (requires sandbox credentials)
+hot.project.pkg-integration-sumsub.src.paths ["./hot/pkg/sumsub/src"]
+hot.project.pkg-integration-sumsub.test.paths ["./hot/pkg/sumsub/integration-test"]
+hot.project.pkg-integration-sumsub.test.capture true
+hot.project.pkg-integration-sumsub.deps {}
+
+// CipherOwl blockchain address screening unit tests (hermetic)
+hot.project.pkg-test-cipherowl.src.paths ["./hot/pkg/cipherowl/src"]
+hot.project.pkg-test-cipherowl.test.paths ["./hot/pkg/cipherowl/test"]
+hot.project.pkg-test-cipherowl.test.capture true
+hot.project.pkg-test-cipherowl.deps {}
+
+// CipherOwl blockchain address screening integration tests (requires sandbox credentials)
+hot.project.pkg-integration-cipherowl.src.paths ["./hot/pkg/cipherowl/src"]
+hot.project.pkg-integration-cipherowl.test.paths ["./hot/pkg/cipherowl/integration-test"]
+hot.project.pkg-integration-cipherowl.test.capture true
+hot.project.pkg-integration-cipherowl.deps {}
+
+// sanctions list screening (OFAC, UK, EU, UN) unit tests (hermetic)
+hot.project.pkg-test-sanctions.src.paths ["./hot/pkg/sanctions/src"]
+hot.project.pkg-test-sanctions.test.paths ["./hot/pkg/sanctions/test"]
+hot.project.pkg-test-sanctions.test.capture true
+hot.project.pkg-test-sanctions.deps {}
+
+// sanctions list screening (OFAC, UK, EU, UN) integration tests (requires sandbox credentials)
+hot.project.pkg-integration-sanctions.src.paths ["./hot/pkg/sanctions/src"]
+hot.project.pkg-integration-sanctions.test.paths ["./hot/pkg/sanctions/integration-test"]
+hot.project.pkg-integration-sanctions.test.capture true
+hot.project.pkg-integration-sanctions.deps {}
+
+// company registries (GLEIF, SEC EDGAR, UK Companies House) unit tests (hermetic)
+hot.project.pkg-test-company-registry.src.paths ["./hot/pkg/company-registry/src"]
+hot.project.pkg-test-company-registry.test.paths ["./hot/pkg/company-registry/test"]
+hot.project.pkg-test-company-registry.test.capture true
+hot.project.pkg-test-company-registry.deps {}
+
+// company registries (GLEIF, SEC EDGAR, UK Companies House) integration tests (requires sandbox credentials)
+hot.project.pkg-integration-company-registry.src.paths ["./hot/pkg/company-registry/src"]
+hot.project.pkg-integration-company-registry.test.paths ["./hot/pkg/company-registry/integration-test"]
+hot.project.pkg-integration-company-registry.test.capture true
+hot.project.pkg-integration-company-registry.deps {}
+
+// Increase banking unit tests (hermetic)
+hot.project.pkg-test-increase.src.paths ["./hot/pkg/increase/src"]
+hot.project.pkg-test-increase.test.paths ["./hot/pkg/increase/test"]
+hot.project.pkg-test-increase.test.capture true
+hot.project.pkg-test-increase.deps {}
+
+// Increase banking integration tests (requires sandbox credentials)
+hot.project.pkg-integration-increase.src.paths ["./hot/pkg/increase/src"]
+hot.project.pkg-integration-increase.test.paths ["./hot/pkg/increase/integration-test"]
+hot.project.pkg-integration-increase.test.capture true
+hot.project.pkg-integration-increase.deps {}
+
+// Modern Treasury payments unit tests (hermetic)
+hot.project.pkg-test-modern-treasury.src.paths ["./hot/pkg/modern-treasury/src"]
+hot.project.pkg-test-modern-treasury.test.paths ["./hot/pkg/modern-treasury/test"]
+hot.project.pkg-test-modern-treasury.test.capture true
+hot.project.pkg-test-modern-treasury.deps {}
+
+// Modern Treasury payments integration tests (requires sandbox credentials)
+hot.project.pkg-integration-modern-treasury.src.paths ["./hot/pkg/modern-treasury/src"]
+hot.project.pkg-integration-modern-treasury.test.paths ["./hot/pkg/modern-treasury/integration-test"]
+hot.project.pkg-integration-modern-treasury.test.capture true
+hot.project.pkg-integration-modern-treasury.deps {}
+
+// QuickBooks Online unit tests (hermetic)
+hot.project.pkg-test-quickbooks.src.paths ["./hot/pkg/quickbooks/src"]
+hot.project.pkg-test-quickbooks.test.paths ["./hot/pkg/quickbooks/test"]
+hot.project.pkg-test-quickbooks.test.capture true
+hot.project.pkg-test-quickbooks.deps {
+    "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" }
+}
+
+// QuickBooks Online integration tests (requires sandbox credentials)
+hot.project.pkg-integration-quickbooks.src.paths ["./hot/pkg/quickbooks/src"]
+hot.project.pkg-integration-quickbooks.test.paths ["./hot/pkg/quickbooks/integration-test"]
+hot.project.pkg-integration-quickbooks.test.capture true
+hot.project.pkg-integration-quickbooks.deps {
+    "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" }
+}
+
+// Xero accounting unit tests (hermetic)
+hot.project.pkg-test-xero.src.paths ["./hot/pkg/xero/src"]
+hot.project.pkg-test-xero.test.paths ["./hot/pkg/xero/test"]
+hot.project.pkg-test-xero.test.capture true
+hot.project.pkg-test-xero.deps {
+    "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" }
+}
+
+// Xero accounting integration tests (requires sandbox credentials)
+hot.project.pkg-integration-xero.src.paths ["./hot/pkg/xero/src"]
+hot.project.pkg-integration-xero.test.paths ["./hot/pkg/xero/integration-test"]
+hot.project.pkg-integration-xero.test.capture true
+hot.project.pkg-integration-xero.deps {
+    "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" }
+}
 
 // qdrant unit tests (hermetic)
 hot.project.pkg-test-qdrant.src.paths ["./hot/pkg/qdrant/src"]
@@ -566,11 +810,116 @@ hot.project.pkg-test-google.deps {
     "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" }
 }
 
-// openai-compatible unit tests (url joining + types, hermetic)
+// Microsoft Graph family unit tests (graph core, onedrive, sharepoint; hermetic)
+hot.project.pkg-test-microsoft.src.paths [
+    "./hot/pkg/microsoft-graph/src",
+    "./hot/pkg/microsoft-onedrive/src",
+    "./hot/pkg/microsoft-sharepoint/src"
+]
+hot.project.pkg-test-microsoft.test.paths [
+    "./hot/pkg/microsoft-graph/test",
+    "./hot/pkg/microsoft-onedrive/test",
+    "./hot/pkg/microsoft-sharepoint/test"
+]
+hot.project.pkg-test-microsoft.test.capture true
+hot.project.pkg-test-microsoft.deps {
+    "hot.dev/jwt": { "local": "./hot/pkg/jwt" },
+    "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" }
+}
+
+// Microsoft Graph family integration tests (requires an Entra app and a test tenant)
+hot.project.pkg-integration-microsoft.src.paths [
+    "./hot/pkg/microsoft-graph/src",
+    "./hot/pkg/microsoft-onedrive/src",
+    "./hot/pkg/microsoft-sharepoint/src"
+]
+hot.project.pkg-integration-microsoft.test.paths [
+    "./hot/pkg/microsoft-graph/integration-test",
+    "./hot/pkg/microsoft-onedrive/integration-test",
+    "./hot/pkg/microsoft-sharepoint/integration-test"
+]
+hot.project.pkg-integration-microsoft.test.capture true
+hot.project.pkg-integration-microsoft.deps {
+    "hot.dev/jwt": { "local": "./hot/pkg/jwt" },
+    "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" }
+}
+
+// Dropbox unit tests (hermetic)
+hot.project.pkg-test-dropbox.src.paths ["./hot/pkg/dropbox/src"]
+hot.project.pkg-test-dropbox.test.paths ["./hot/pkg/dropbox/test"]
+hot.project.pkg-test-dropbox.test.capture true
+hot.project.pkg-test-dropbox.deps {
+    "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" }
+}
+
+// Dropbox integration tests (requires a Dropbox app token)
+hot.project.pkg-integration-dropbox.src.paths ["./hot/pkg/dropbox/src"]
+hot.project.pkg-integration-dropbox.test.paths ["./hot/pkg/dropbox/integration-test"]
+hot.project.pkg-integration-dropbox.test.capture true
+hot.project.pkg-integration-dropbox.deps {
+    "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" }
+}
+
+// Box unit tests (hermetic)
+hot.project.pkg-test-box.src.paths ["./hot/pkg/box/src"]
+hot.project.pkg-test-box.test.paths ["./hot/pkg/box/test"]
+hot.project.pkg-test-box.test.capture true
+hot.project.pkg-test-box.deps {
+    "hot.dev/jwt": { "local": "./hot/pkg/jwt" },
+    "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" }
+}
+
+// Box integration tests (requires a Box app)
+hot.project.pkg-integration-box.src.paths ["./hot/pkg/box/src"]
+hot.project.pkg-integration-box.test.paths ["./hot/pkg/box/integration-test"]
+hot.project.pkg-integration-box.test.capture true
+hot.project.pkg-integration-box.deps {
+    "hot.dev/jwt": { "local": "./hot/pkg/jwt" },
+    "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" }
+}
+
+// documents abstraction unit tests (normalizers and adapters over fake responses, hermetic)
+hot.project.pkg-test-documents.src.paths ["./hot/pkg/documents/src"]
+hot.project.pkg-test-documents.test.paths ["./hot/pkg/documents/test"]
+hot.project.pkg-test-documents.test.capture true
+hot.project.pkg-test-documents.deps {
+    "hot.dev/google-core": { "local": "./hot/pkg/google-core" },
+    "hot.dev/google-drive": { "local": "./hot/pkg/google-drive" },
+    "hot.dev/microsoft-graph": { "local": "./hot/pkg/microsoft-graph" },
+    "hot.dev/microsoft-onedrive": { "local": "./hot/pkg/microsoft-onedrive" },
+    "hot.dev/dropbox": { "local": "./hot/pkg/dropbox" },
+    "hot.dev/box": { "local": "./hot/pkg/box" },
+    "hot.dev/aws-core": { "local": "./hot/pkg/aws-core" },
+    "hot.dev/aws-s3": { "local": "./hot/pkg/aws-s3" },
+    "hot.dev/jwt": { "local": "./hot/pkg/jwt" },
+    "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" }
+}
+
+// documents abstraction integration tests (uses whichever provider credentials are set)
+hot.project.pkg-integration-documents.src.paths ["./hot/pkg/documents/src"]
+hot.project.pkg-integration-documents.test.paths ["./hot/pkg/documents/integration-test"]
+hot.project.pkg-integration-documents.test.capture true
+hot.project.pkg-integration-documents.deps {
+    "hot.dev/google-core": { "local": "./hot/pkg/google-core" },
+    "hot.dev/google-drive": { "local": "./hot/pkg/google-drive" },
+    "hot.dev/microsoft-graph": { "local": "./hot/pkg/microsoft-graph" },
+    "hot.dev/microsoft-onedrive": { "local": "./hot/pkg/microsoft-onedrive" },
+    "hot.dev/dropbox": { "local": "./hot/pkg/dropbox" },
+    "hot.dev/box": { "local": "./hot/pkg/box" },
+    "hot.dev/aws-core": { "local": "./hot/pkg/aws-core" },
+    "hot.dev/aws-s3": { "local": "./hot/pkg/aws-s3" },
+    "hot.dev/jwt": { "local": "./hot/pkg/jwt" },
+    "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" }
+}
+
+// openai-compatible unit tests (presets built on openai, hermetic)
 hot.project.pkg-test-openai-compatible.src.paths ["./hot/pkg/openai-compatible/src"]
 hot.project.pkg-test-openai-compatible.test.paths ["./hot/pkg/openai-compatible/test"]
 hot.project.pkg-test-openai-compatible.test.capture true
-hot.project.pkg-test-openai-compatible.deps {}
+hot.project.pkg-test-openai-compatible.deps {
+    "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" },
+    "hot.dev/openai": { "local": "./hot/pkg/openai" }
+}
 
 // elevenlabs unit tests (path building + types, hermetic)
 hot.project.pkg-test-elevenlabs.src.paths ["./hot/pkg/elevenlabs/src"]
@@ -595,6 +944,14 @@ hot.project.pkg-test-slack.src.paths ["./hot/pkg/slack/src"]
 hot.project.pkg-test-slack.test.paths ["./hot/pkg/slack/test"]
 hot.project.pkg-test-slack.test.capture true
 hot.project.pkg-test-slack.deps {}
+
+// slack-admin unit tests (request building and ok:false handling)
+hot.project.pkg-test-slack-admin.src.paths ["./hot/pkg/slack-admin/src"]
+hot.project.pkg-test-slack-admin.test.paths ["./hot/pkg/slack-admin/test"]
+hot.project.pkg-test-slack-admin.test.capture true
+hot.project.pkg-test-slack-admin.deps {
+    "hot.dev/slack": { "local": "./hot/pkg/slack" }
+}
 
 // sql unit tests (placeholder compilation + runtime over fake drivers)
 hot.project.pkg-test-sql.src.paths ["./hot/pkg/sql/src"]
@@ -639,6 +996,12 @@ hot.project.pkg-test-whatsapp.src.paths ["./hot/pkg/whatsapp/src"]
 hot.project.pkg-test-whatsapp.test.paths ["./hot/pkg/whatsapp/test"]
 hot.project.pkg-test-whatsapp.test.capture true
 hot.project.pkg-test-whatsapp.deps {}
+
+// telegram unit tests (secret-token verification and response envelopes)
+hot.project.pkg-test-telegram.src.paths ["./hot/pkg/telegram/src"]
+hot.project.pkg-test-telegram.test.paths ["./hot/pkg/telegram/test"]
+hot.project.pkg-test-telegram.test.capture true
+hot.project.pkg-test-telegram.deps {}
 
 // discord unit tests (Ed25519 interaction webhook verification)
 hot.project.pkg-test-discord.src.paths ["./hot/pkg/discord/src"]
@@ -871,7 +1234,9 @@ hot.project.pkg-integration-shopify.deps {}
 hot.project.pkg-integration-plaid.src.paths ["./hot/pkg/plaid/src"]
 hot.project.pkg-integration-plaid.test.paths ["./hot/pkg/plaid/integration-test"]
 hot.project.pkg-integration-plaid.test.capture true
-hot.project.pkg-integration-plaid.deps {}
+hot.project.pkg-integration-plaid.deps {
+    "hot.dev/jwt": { "local": "./hot/pkg/jwt" }
+}
 
 // sentry integration tests (requires credentials; read-only or self-cleaning)
 hot.project.pkg-integration-sentry.src.paths ["./hot/pkg/sentry/src"]
@@ -976,7 +1341,10 @@ hot.project.pkg-integration-linear.deps {}
 hot.project.pkg-integration-openai-compatible.src.paths ["./hot/pkg/openai-compatible/src"]
 hot.project.pkg-integration-openai-compatible.test.paths ["./hot/pkg/openai-compatible/integration-test"]
 hot.project.pkg-integration-openai-compatible.test.capture true
-hot.project.pkg-integration-openai-compatible.deps {}
+hot.project.pkg-integration-openai-compatible.deps {
+    "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" },
+    "hot.dev/openai": { "local": "./hot/pkg/openai" }
+}
 
 // ElevenLabs integration tests (requires elevenlabs.api.key; uses quota)
 hot.project.pkg-integration-elevenlabs.src.paths ["./hot/pkg/elevenlabs/src"]
@@ -1066,7 +1434,8 @@ hot.project.pkg-integration-qwen.src.paths ["./hot/pkg/qwen/src"]
 hot.project.pkg-integration-qwen.test.paths ["./hot/pkg/qwen/integration-test"]
 hot.project.pkg-integration-qwen.test.capture true
 hot.project.pkg-integration-qwen.deps {
-    "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" }
+    "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" },
+    "hot.dev/openai": { "local": "./hot/pkg/openai" }
 }
 
 // JSON-RPC integration tests

@@ -179,15 +179,18 @@ fn (s: Str): Str {
 // alias these to the coll versions
 length
 meta {
-    core: true,
     doc: """
-    Get the length of string `s`. Alias of `::hot::coll/length`.
+    Get the length of string `s` in characters (Unicode code points, the unit
+    `slice` and `get` use). Alias of `::hot::coll/length`. For its encoded
+    size, use `length(Bytes(s))`.
 
     **Example**
 
     ```hot
-    length("hello")  // 5
-    length("")       // 0
+    length("hello")          // 5
+    length("")               // 0
+    length("héllo")          // 5
+    length(Bytes("héllo"))   // 6
     ```
     """
 }
@@ -197,7 +200,6 @@ fn (s: Str): Int {
 
 is-empty
 meta {
-    core: true,
     doc: """
     Return true if string `s` is empty. Alias of `::hot::coll/is-empty`.
 
@@ -209,13 +211,12 @@ meta {
     ```
     """
 }
-fn (s: Str): Bool {
+fn (s: Str?): Bool {
     ::hot::coll/is-empty(s)
 }
 
 slice
 meta {
-    core: true,
     doc: """
     Get a slice of string `s` from `start` to `end`. Alias of `::hot::coll/slice`.
 
@@ -312,7 +313,7 @@ pad-start
 meta {
     core: true,
     doc: """
-    Pad `s` on the left to `width` using `pad` (default space).
+    Pad `s` on the left to `width` characters using `pad` (default space).
 
     **Example**
 
@@ -334,7 +335,7 @@ pad-end
 meta {
     core: true,
     doc: """
-    Pad `s` on the right to `width` using `pad` (default space).
+    Pad `s` on the right to `width` characters using `pad` (default space).
 
     **Example**
 

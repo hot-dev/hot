@@ -370,6 +370,114 @@ async fn sqlite_upgrades_preserve_populated_data_and_retire_management_credentia
     Ok(())
 }
 
+/// 028 keeps every account that differs from another only in capitals, each
+/// under its own spelling. The oldest active one answers to any other spelling,
+/// and no later account can join the set.
+#[tokio::test]
+async fn sqlite_028_keeps_accounts_that_differ_only_in_capitals() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("existing.db");
+    let pool = existing_database(&path, 27).await?;
+    let [retired, keeper, newest, accented, unaccented, alone] =
+        std::array::from_fn(|_| Uuid::now_v7());
+    for (user, email, active, created_at) in [
+        // The oldest of the set is deactivated, so the next one keeps the address.
+        (retired, "DANA@corp.example", false, "2026-01-01 00:00:00"),
+        (keeper, "dana@corp.example", true, "2026-02-01 00:00:00"),
+        (newest, "Dana@corp.example", true, "2026-03-01 00:00:00"),
+        // Only ASCII letters fold, so these are two addresses.
+        (accented, "É@corp.example", true, "2026-04-01 00:00:00"),
+        (unaccented, "é@corp.example", true, "2026-05-01 00:00:00"),
+        (alone, "Sam@corp.example", true, "2026-06-01 00:00:00"),
+    ] {
+        sqlx::query("INSERT INTO user(user_id,email,active,created_at,created_by_user_id) VALUES(?,?,?,?,?)")
+            .bind(user).bind(email).bind(active).bind(created_at).bind(user)
+            .execute(&pool).await?;
+        sqlx::query("INSERT INTO user_auth(user_auth_id,user_id,auth_type,auth_identifier,created_by_user_id) VALUES(?,?,'email_password',?,?)")
+            .bind(Uuid::now_v7()).bind(user).bind(email).bind(user)
+            .execute(&pool).await?;
+    }
+    pool.close().await;
+
+    db::run_migrations(&hot::val!({"uri": format!("sqlite:{}", path.display())})).await?;
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(&path)
+                .foreign_keys(true),
+        )
+        .await?;
+
+    let rows: Vec<(Uuid, String, bool, Option<String>)> = sqlx::query_as(
+        "SELECT user_id, email, email_exact_only, email_lower FROM user ORDER BY created_at",
+    )
+    .fetch_all(&pool)
+    .await?;
+    let lowered = |text: &str| Some(text.to_string());
+    assert_eq!(
+        rows,
+        vec![
+            (retired, "DANA@corp.example".to_string(), true, None),
+            (
+                keeper,
+                "dana@corp.example".to_string(),
+                false,
+                lowered("dana@corp.example")
+            ),
+            (newest, "Dana@corp.example".to_string(), true, None),
+            (
+                accented,
+                "É@corp.example".to_string(),
+                false,
+                lowered("É@corp.example")
+            ),
+            (
+                unaccented,
+                "é@corp.example".to_string(),
+                false,
+                lowered("é@corp.example")
+            ),
+            (
+                alone,
+                "Sam@corp.example".to_string(),
+                false,
+                lowered("sam@corp.example")
+            ),
+        ]
+    );
+
+    let accounts = db::DatabasePool::Sqlite(pool.clone());
+    for (spelling, expected) in [
+        ("DANA@corp.example", retired),
+        ("dana@corp.example", keeper),
+        ("Dana@corp.example", newest),
+        ("dAnA@CORP.example", keeper),
+        ("SAM@corp.example", alone),
+    ] {
+        let user = hot::db::User::get_user_by_email(&accounts, spelling).await?;
+        assert_eq!(user.user_id, expected, "{spelling}");
+        let auth =
+            hot::db::UserAuth::get_user_auth(&accounts, &user.user_id, "email_password").await?;
+        assert_eq!(auth.user_id, expected, "{spelling} keeps its own password");
+    }
+    let stranger = Uuid::now_v7();
+    assert!(
+        hot::db::User::insert_user(
+            &accounts,
+            &stranger,
+            "daNA@corp.example",
+            None,
+            Some(&stranger)
+        )
+        .await
+        .is_err(),
+        "the set can't grow"
+    );
+    pool.close().await;
+    Ok(())
+}
+
 #[tokio::test]
 async fn sqlite_016_retires_the_objects_deleted_files_left_behind() -> TestResult {
     let directory = tempfile::tempdir()?;

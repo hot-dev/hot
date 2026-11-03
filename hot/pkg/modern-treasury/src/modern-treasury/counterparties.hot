@@ -1,0 +1,116 @@
+::modern-treasury::counterparties ns
+meta {
+    doc: """
+    Counterparties: the people and businesses you pay or collect from,
+    with their external accounts. Counterparty bodies can carry bank
+    account and routing numbers and tax ids: don't log them.
+    """
+}
+
+::api ::modern-treasury::api
+seg ::modern-treasury::api/seg
+
+create-counterparty
+meta {
+    doc: """
+    POST /api/counterparties: create a counterparty, optionally with its
+    bank accounts. `params` needs `name`; optional `email`,
+    `external_id`, `metadata`, `send_remittance_advice`,
+    `legal_entity_id` or `legal_entity`, `taxpayer_identifier`, and
+    `accounts: [{account_type, party_name, party_type, account_details:
+    [{account_number, account_number_type}], routing_details:
+    [{routing_number, routing_number_type, payment_type}]}]`.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::counterparties/create-counterparty({
+      name: "Kubernetes Supply Co",
+      email: "ap@example.com",
+      accounts: [{
+        account_type: "checking",
+        party_name: "Kubernetes Supply Co",
+        account_details: [{account_number: "123456789"}],
+        routing_details: [{routing_number: "021000021", routing_number_type: "aba"}]
+      }]
+    }, {idempotency-key: "vendor-17"})
+    ```
+    """
+}
+fn
+(params: Map): Map {
+  create-counterparty(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/create("/api/counterparties", params, ["name"], opts, "create-counterparty")
+}
+
+get-counterparty
+meta {
+    doc: """GET /api/counterparties/{id}: retrieve a counterparty with its accounts."""
+}
+fn
+(counterparty-id: Str): Map {
+  get-counterparty(counterparty-id, {})
+},
+(counterparty-id: Str, opts: Map): Map {
+  ::api/call("GET", `/api/counterparties/${seg(counterparty-id)}`, {}, opts)
+}
+
+list-counterparties
+meta {
+    doc: """GET /api/counterparties: one page (`{items, after_cursor, per_page}`). Filters: `name`, `email`, `external_id`, `legal_entity_id`, `metadata: {key: value}`, `created_at_lower_bound`, `created_at_upper_bound`, `per_page`, `after_cursor`."""
+}
+fn
+(): Map {
+  list-counterparties({})
+},
+(params: Map): Map {
+  list-counterparties(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/list-page("/api/counterparties", params, opts)
+}
+
+update-counterparty
+meta {
+    doc: """PATCH /api/counterparties/{id}: change `name`, `email`, `external_id`, `metadata`, `send_remittance_advice`, `legal_entity_id` or `taxpayer_identifier`."""
+}
+fn
+(counterparty-id: Str, params: Map): Map {
+  update-counterparty(counterparty-id, params, {})
+},
+(counterparty-id: Str, params: Map, opts: Map): Map {
+  ::api/call("PATCH", `/api/counterparties/${seg(counterparty-id)}`, params, opts)
+}
+
+delete-counterparty
+meta {
+    doc: """DELETE /api/counterparties/{id}: delete a counterparty. Returns null (204). Irreversible."""
+}
+fn
+(counterparty-id: Str): Any {
+  delete-counterparty(counterparty-id, {})
+},
+(counterparty-id: Str, opts: Map): Any {
+  ::api/call("DELETE", `/api/counterparties/${seg(counterparty-id)}`, {}, opts)
+}
+
+collect-account-details
+meta {
+    doc: """
+    POST /api/counterparties/{id}/collect_account: ask the counterparty
+    to enter their own bank details through a Modern Treasury form, so
+    the numbers never pass through you. `direction` is `"credit"` (you
+    will pay them) or `"debit"` (you will pull from them). `params`:
+    `send_email` (default true), `fields`, `custom_redirect`. Returns
+    `{id, form_link, is_resend}`.
+    """
+}
+fn
+(counterparty-id: Str, direction: Str): Map {
+  collect-account-details(counterparty-id, direction, {}, {})
+},
+(counterparty-id: Str, direction: Str, params: Map, opts: Map): Map {
+  ::api/call("POST", `/api/counterparties/${seg(counterparty-id)}/collect_account`, {...params, direction: direction}, opts)
+}

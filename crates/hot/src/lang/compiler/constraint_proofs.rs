@@ -262,7 +262,7 @@ fn collect_bound_names_in_val(val: &Val, names: &mut AHashSet<String>) {
             }
         }
         Val::Vec(items) => {
-            for item in items {
+            for item in items.iter() {
                 collect_bound_names_in_val(item, names);
             }
         }

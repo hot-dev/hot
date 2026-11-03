@@ -29,7 +29,7 @@ pub type DevContextStorage = Arc<RwLock<Option<AHashMap<String, hot::val::Val>>>
 fn merge_dev_context(
     dev_ctx: &AHashMap<String, Val>,
     storage: &mut AHashMap<String, Val>,
-    secret_value_hashes: &mut ahash::AHashSet<u64>,
+    secret_values: &hot::lang::masking::SecretValues,
 ) {
     let secret_keys = dev_ctx.get(hot::lang::hot::ctx::LOADED_SECRET_KEYS);
     for (key, val) in dev_ctx.iter() {
@@ -43,7 +43,7 @@ fn merge_dev_context(
             if let Val::Str(key) = key
                 && let Some(value) = dev_ctx.get(&**key)
             {
-                hot::lang::hot::ctx::hash_secret_value_recursive(value, secret_value_hashes);
+                secret_values.register(value);
             }
         }
     }
@@ -2516,7 +2516,8 @@ async fn hydrate_event_message_from_db(
         "hot:schedule" => hot::db::run::RunType::Schedule.as_id(),
         _ => hot::db::run::RunType::Event.as_id(),
     };
-    let execution_context = ExecutionContext::new_with_event_and_origin(
+    let secret_value_hashes = claimed_context.secret_value_hashes.clone();
+    let mut execution_context = ExecutionContext::new_with_event_and_origin(
         claimed_context.run_id,
         stored_event.stream_id,
         run_type_id,
@@ -2546,6 +2547,7 @@ async fn hydrate_event_message_from_db(
     )
     .with_retry_attempt(claimed_context.retry_attempt)
     .with_access_id(stored_event.access_id);
+    execution_context.secret_value_hashes = secret_value_hashes;
 
     Ok(EventMessage {
         body: hot::lang::event::queue::EventMessageBody {
@@ -4971,6 +4973,11 @@ async fn execute_single_event_handler_inner(
     if let Some(queue_timing) = event_message.body.execution_context.queue_timing.clone() {
         _execution_context = _execution_context.with_queue_timing(queue_timing);
     }
+    _execution_context.secret_value_hashes = event_message
+        .body
+        .execution_context
+        .secret_value_hashes
+        .clone();
     // An org can turn call tracing off (the `call_tracing` feature); the run
     // still records its lifecycle.
     if emitter.is_some() {
@@ -5378,11 +5385,7 @@ async fn execute_single_event_handler_inner(
                             dev_ctx.len(),
                             project.name
                         );
-                        merge_dev_context(
-                            dev_ctx,
-                            &mut storage,
-                            &mut _execution_context.secret_value_hashes,
-                        );
+                        merge_dev_context(dev_ctx, &mut storage, &_execution_context.secret_values);
                     }
                 }
                 Err(_) => {
@@ -5436,13 +5439,17 @@ async fn execute_single_event_handler_inner(
     // Inject hot.request context from caller identity in event data.
     // The MCP handler includes a "caller" map in event.data for service key / session / api key
     // identity. We extract it as a ctx variable so the Hot function can access caller metadata.
-    // Secret masking is handled via pre-computed hashes in execution_context.secret_value_hashes
-    // (set by the API handler for only the sensitive fields, not the entire hot.request).
+    // The API handler hashes only the sensitive fields, not the entire
+    // hot.request: the values it hashed are registered here, where they are
+    // known, so that they mask inside strings too.
     let context_storage = {
         let mut storage = context_storage.unwrap_or_default();
         if let hot::val::Val::Map(ref data_map) = event_message.body.event.event_data
             && let Some(caller) = data_map.get(&hot::val::Val::from("caller"))
         {
+            _execution_context
+                .secret_values
+                .register_hashed(caller, &_execution_context.secret_value_hashes);
             storage.insert("hot.request".to_string(), caller.clone());
             debug!(
                 "Injected hot.request ctx from caller identity for project '{}'",
@@ -6063,6 +6070,14 @@ async fn execute_single_event_handler_inner(
 
         // Convert result to JSON for the stream event
         let result_json = serde_json::to_value(result.to_hot_data_repr()).ok();
+        // A failure is recorded, and logged by what waits on it. A run's result
+        // is left whole: this event delivers it to the webhook or MCP caller
+        // waiting for it, and it may be what they asked for.
+        let failure_mask = hot::lang::masking::RecordMask::new(
+            &_execution_context.secret_values,
+            &_execution_context.secret_value_hashes,
+        );
+        let mask_failure = |text: String| failure_mask.mask_text(&text).into_owned();
 
         // Get run type as string for env event
         let run_type = if event_message.body.event.event_type == "hot:call" {
@@ -6083,14 +6098,14 @@ async fn execute_single_event_handler_inner(
                 env_id,
                 stream_id,
                 event_id,
-                error: result_json.map(|v| v.to_string()),
+                error: result_json.map(|v| mask_failure(v.to_string())),
             }
         } else if is_cancelled_result {
             // Extract cancellation reason from the Cancellation type if available
             let reason = result.unwrap_cancelled().and_then(|v| {
                 if let Val::Map(m) = v {
                     m.get(&Val::from("msg")).and_then(|msg| match msg {
-                        Val::Str(s) => Some((**s).to_owned()),
+                        Val::Str(s) => Some(mask_failure((**s).to_owned())),
                         _ => None,
                     })
                 } else {
@@ -6125,13 +6140,13 @@ async fn execute_single_event_handler_inner(
                 fn_name: Some(function_name.clone()),
                 run_type: run_type.clone(),
                 duration_ms: None, // Duration is tracked by the run record
-                error: result.unwrap_err().map(|v| v.to_string()),
+                error: result.unwrap_err().map(|v| mask_failure(v.to_string())),
             }
         } else if is_cancelled_result {
             let reason = result.unwrap_cancelled().and_then(|v| {
                 if let Val::Map(m) = v {
                     m.get(&Val::from("msg")).and_then(|msg| match msg {
-                        Val::Str(s) => Some((**s).to_owned()),
+                        Val::Str(s) => Some(mask_failure((**s).to_owned())),
                         _ => None,
                     })
                 } else {
@@ -10042,20 +10057,24 @@ mod tests {
         );
 
         let mut storage = AHashMap::new();
-        let mut hashes = ahash::AHashSet::new();
-        merge_dev_context(&dev_ctx, &mut storage, &mut hashes);
+        let secret_values = hot::lang::masking::SecretValues::default();
+        merge_dev_context(&dev_ctx, &mut storage, &secret_values);
 
         assert_eq!(storage.get("regpull"), Some(&credential));
         assert_eq!(storage.get("greeting"), Some(&Val::from("hello")));
         assert!(!storage.contains_key(hot::lang::hot::ctx::LOADED_SECRET_KEYS));
-        let mut expected = ahash::AHashSet::new();
-        hot::lang::hot::ctx::hash_secret_value_recursive(&credential, &mut expected);
-        assert_eq!(hashes, expected, "only the secret's values are masked");
-        let mut token = ahash::AHashSet::new();
-        hot::lang::hot::ctx::hash_secret_value_recursive(&Val::from("ghp_tok"), &mut token);
-        assert!(
-            token.is_subset(&hashes),
+        let no_hashes = ahash::AHashSet::new();
+        let mask = hot::lang::masking::RecordMask::new(&secret_values, &no_hashes);
+        assert_eq!(mask.mask_val(credential), Val::from("<secret>"));
+        assert_eq!(
+            mask.mask_val(Val::from("ghp_tok")),
+            Val::from("<secret>"),
             "fields read from the secret are masked too"
+        );
+        assert_eq!(
+            mask.mask_val(Val::from("hello")),
+            Val::from("hello"),
+            "only the secret's values are masked"
         );
     }
 
@@ -12535,6 +12554,13 @@ handler fn () { initialized }
             0
         );
 
+        // What the API handler hashed must reach the run the worker starts.
+        let mut thin_message = thin_message;
+        thin_message
+            .body
+            .execution_context
+            .secret_value_hashes
+            .insert(42);
         let hydrated = hydrate_event_message_from_db(0, &db, None, thin_message, 0)
             .await
             .expect("thin event should hydrate");
@@ -12543,6 +12569,13 @@ handler fn () { initialized }
         assert_eq!(
             extract_target_function_from_event(&hydrated.body.event.event_data).as_deref(),
             Some(target_fn)
+        );
+        assert!(
+            hydrated
+                .body
+                .execution_context
+                .secret_value_hashes
+                .contains(&42)
         );
         assert_eq!(
             hydrated.body.execution_context.user_id,
@@ -12570,7 +12603,7 @@ handler fn () { initialized }
         let request = val!({"original-url":raw_url,"body":"authoritative body"});
         let original = val!({
             "fn":"::durable/handler",
-            "args": Val::Vec(vec![request.clone()]),
+            "args": Val::vec(vec![request.clone()]),
             "caller":request
         });
         let stored = hot::webhook_url::redact_event_data_original_urls(&original);
@@ -12609,7 +12642,7 @@ handler fn () { initialized }
                         event_type: "hot:call".into(),
                         event_data: val!({
                             "fn":"::untrusted/handler",
-                            "args":Val::Vec(vec![hint_request.clone()]),
+                            "args":Val::vec(vec![hint_request.clone()]),
                             "caller":hint_request
                         }),
                         event_time: chrono::Utc::now(),
@@ -12663,6 +12696,15 @@ handler fn () { initialized }
 
     #[tokio::test]
     async fn hydrate_rehydrates_spilled_event_data_blob_refs() {
+        hydrates_spilled_event_data(false).await;
+    }
+
+    #[tokio::test]
+    async fn hydrate_rehydrates_event_data_stored_whole() {
+        hydrates_spilled_event_data(true).await;
+    }
+
+    async fn hydrates_spilled_event_data(whole: bool) {
         use hot::blob::{BlobConfig, BlobScope, BlobStore, SpillSource};
 
         let (db, db_path) = migrated_sqlite_file_db().await;
@@ -12697,16 +12739,28 @@ handler fn () { initialized }
             env_id: Some(test_data.env_id),
             run_id: None,
         };
-        let spilled = blob_store
-            .spill_large_val(
-                original_event_data.clone(),
-                scope,
-                SpillSource::EventData,
-                Some(&event_id.to_string()),
-            )
-            .await
-            .expect("spill should succeed");
+        let spilled = if whole {
+            blob_store
+                .spill_readable_json(
+                    &serde_json::to_string(&original_event_data).unwrap(),
+                    scope,
+                    SpillSource::EventData,
+                    Some(&event_id.to_string()),
+                )
+                .await
+        } else {
+            blob_store
+                .spill_large_val(
+                    original_event_data.clone(),
+                    scope,
+                    SpillSource::EventData,
+                    Some(&event_id.to_string()),
+                )
+                .await
+        }
+        .expect("spill should succeed");
         assert!(hot::blob::contains_blob_ref(&spilled));
+        assert_eq!(hot::blob::is_blob_ref_val(&spilled), whole);
 
         hot::db::event::Event::insert_event(
             &db,

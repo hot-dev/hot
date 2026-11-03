@@ -5,8 +5,8 @@
 // https://docs.x.ai/docs/guides/chat
 // ============================================================================
 
-api-request ::xai::api/request
-api-request-stream ::xai::api/request-stream
+api-call ::xai::api/call
+api-call-stream ::xai::api/call-stream
 HttpError ::xai::api/HttpError
 is-ok-response ::hot::http/is-ok-response
 
@@ -44,10 +44,10 @@ FunctionCall type {
     arguments: Str
 }
 
-// Tool definition
+// Tool definition. Built-in tools such as web_search carry only `type`.
 Tool type {
     type: Str,
-    function: FunctionDefinition
+    function: FunctionDefinition?
 }
 
 FunctionDefinition type {
@@ -205,8 +205,15 @@ meta {
     """
 }
 fn (request: CreateResponseRequest): CreateResponseResponse {
-    response api-request("POST", `${::xai/BASE_URL}/responses`, {}, request)
-    if(is-ok-response(response), CreateResponseResponse(response.body), err(HttpError(response)))
+    create(request, {})
+},
+(request: CreateResponseRequest, opts: Map): CreateResponseResponse {
+    response api-call("POST", `/responses`, {}, request, opts)
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { CreateResponseResponse(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 // ============================================================================
@@ -243,10 +250,14 @@ meta {
     ```
     """
 }
-fn (request: CreateResponseRequest): StreamingResponseResponse {
+fn
+(request: CreateResponseRequest): StreamingResponseResponse {
+    create-stream(request, {})
+},
+(request: CreateResponseRequest, opts: Map): StreamingResponseResponse {
     // Force stream: true
     streaming-request {...untype(request), stream: true}
-    response api-request-stream("POST", `${::xai/BASE_URL}/responses`, {}, streaming-request, "sse")
+    response api-call-stream("POST", "/responses", {}, streaming-request, "sse", opts)
     cond {
         gte(response.status, 400) => { err(HttpError(response)) }
         => { StreamingResponseResponse(response) }
@@ -281,8 +292,15 @@ meta {
     """
 }
 fn (response-id: Str): CreateResponseResponse {
-    response api-request("GET", `${::xai/BASE_URL}/responses/${response-id}`)
-    if(is-ok-response(response), CreateResponseResponse(response.body), err(HttpError(response)))
+    get(response-id, {})
+},
+(response-id: Str, opts: Map): CreateResponseResponse {
+    response api-call("GET", `/responses/${response-id}`, {}, "", opts)
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { CreateResponseResponse(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 // ============================================================================
@@ -302,8 +320,15 @@ meta {
     """
 }
 fn (response-id: Str): Map {
-    response api-request("DELETE", `${::xai/BASE_URL}/responses/${response-id}`)
-    if(is-ok-response(response), ok(response.body), err(HttpError(response)))
+    delete(response-id, {})
+},
+(response-id: Str, opts: Map): Map {
+    response api-call("DELETE", `/responses/${response-id}`, {}, "", opts)
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { ok(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 // ============================================================================
@@ -337,15 +362,23 @@ fn
 (model: Str, message: Str, system: Str): Str {
     chat(model, message, system, null)
 },
-(model: Str, message: Str, system: Str, max-tokens: Int): Str {
-    request {
+(model: Str, message: Str, system: Str?, max-tokens: Int?): Str {
+    chat(model, message, system, max-tokens, {})
+},
+(model: Str, message: Str, opts: Map): Str {
+    chat(model, message, null, null, opts)
+},
+(model: Str, message: Str, system: Str?, opts: Map): Str {
+    chat(model, message, system, null, opts)
+},
+(model: Str, message: Str, system: Str?, max-tokens: Int?, opts: Map): Str {
+    request assoc-some({
         model: model,
         input: message,
-        instructions: system,
         max_output_tokens: or(max-tokens, 4096)
-    }
+    }, "instructions", system)
 
-    response create(CreateResponseRequest(request))
+    response create(CreateResponseRequest(request), opts)
 
     match response {
         Result.Err => { err(response) }

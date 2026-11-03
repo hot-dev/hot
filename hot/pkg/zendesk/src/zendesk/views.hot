@@ -1,0 +1,100 @@
+::zendesk::views ns
+meta {
+    ctx: {"zendesk.subdomain": {required: false, secret: false}},
+    doc: """Views: the ticket queues agents work. List them, run one, or page through its tickets."""
+}
+
+::api ::zendesk::api
+
+list-views
+meta {
+    doc: """GET /views - One cursor page of views: `{views, meta, links}`. `options`: `active` (Bool), `access` ("personal"/"shared"/"account"), `group_id`, `page_size`, `after`."""
+}
+fn
+(): Any {
+  list-views({})
+},
+(options: Map): Any {
+  list-views(options, {})
+},
+(options: Map, opts: Map): Any {
+  ::api/list-page("/views", options, opts)
+}
+
+list-active-views
+meta {
+    doc: """GET /views/active - Active views shared with the user: `{views}`."""
+}
+fn
+(): Any {
+  list-active-views({})
+},
+(opts: Map): Any {
+  ::api/request("GET", "/views/active", "", opts)
+}
+
+get-view
+meta {
+    doc: """GET /views/{id} - One view's definition. `id` may also be `"incoming"`, `"my"` or `"my_groups"`."""
+}
+fn
+(id: Any): Any {
+  get-view(id, {})
+},
+(id: Any, opts: Map): Any {
+  ::api/request("GET", `/views/${::api/path-segment(id)}`, "", opts)
+}
+
+execute-view
+meta {
+    doc: """GET /views/{id}/execute - The view's columns and rows (`{columns, rows, groups, view, meta}`), each row carrying a partial ticket. Rate-limited to 5 requests a minute per view per agent, and results may be cached for up to 10 minutes. `options`: `sort_by`, `sort_order`, `group_by`, `page_size`, `after`."""
+}
+fn
+(id: Any): Any {
+  execute-view(id, {})
+},
+(id: Any, options: Map): Any {
+  execute-view(id, options, {})
+},
+(id: Any, options: Map, opts: Map): Any {
+  ::api/list-page(`/views/${::api/path-segment(id)}/execute`, options, opts)
+}
+
+list-view-tickets
+meta {
+    doc: """GET /views/{id}/tickets - One cursor page of the view's full ticket objects: `{tickets, meta, links}`. `options`: `sort_by`, `sort_order`, `page_size`, `after`."""
+}
+fn
+(id: Any): Any {
+  list-view-tickets(id, {})
+},
+(id: Any, options: Map): Any {
+  list-view-tickets(id, options, {})
+},
+(id: Any, options: Map, opts: Map): Any {
+  ::api/list-page(`/views/${::api/path-segment(id)}/tickets`, options, opts)
+}
+
+list-all-view-tickets
+meta {
+    doc: """Collect up to `limit` tickets from a view across cursor pages. Returns a Vec."""
+}
+fn
+(id: Any, limit: Int): Vec {
+  list-all-view-tickets(id, limit, {})
+},
+(id: Any, limit: Int, opts: Map): Vec {
+  ::api/collect(`/views/${::api/path-segment(id)}/tickets`, "tickets", {}, limit, opts)
+}
+
+count-view-tickets
+meta {
+    doc: """GET /views/{id}/count - The view's ticket count: `{view_count: {value, pretty, fresh}}`."""
+}
+fn
+(id: Any): Any {
+  count-view-tickets(id, {})
+},
+(id: Any, opts: Map): Any {
+  ::api/request("GET", `/views/${::api/path-segment(id)}/count`, "", opts)
+}

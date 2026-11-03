@@ -1,8 +1,17 @@
 ::discord::channels ns
+meta {
+    doc: """
+    Channels and threads: read, modify and delete channels, permission
+    overwrites, invites, guild channel creation and ordering, and the
+    thread lifecycle (start, join, members, archives).
 
-api-request ::discord::api/request
-HttpError ::discord::api/HttpError
-is-ok-response ::hot::http/is-ok-response
+    Calls that change a guild accept `reason`, recorded in the audit log.
+    """
+}
+
+::api ::discord::api
+
+seg ::discord::api/seg
 
 // ============================================================================
 // Channels
@@ -15,24 +24,25 @@ GetChannelRequest type {
 get-channel
 meta {
     doc: """
-GET /channels/{channel_id} - Get a channel by ID. Returns the full channel object including name, type, topic, and permission overwrites.
+    GET /channels/{channel_id} - A channel or thread by id.
 
-**Example**
+    **Example**
 
-```hot
-::channels ::discord::channels
+    ```hot
+    ::channels ::discord::channels
 
-response ::channels/get-channel(::channels/GetChannelRequest({
-  channel_id: "123456789"
-}))
-response.name  // => "general"
-response.type  // => 0 (guild text channel)
-```
-"""
+    channel ::channels/get-channel(::channels/GetChannelRequest({channel_id: "1100000000000000000"}))
+    channel.name  // => "general"
+    channel.type  // => 0 (guild text)
+    ```
+    """
 }
-fn (request: GetChannelRequest): Map {
-  response api-request("GET", `${::discord::core/BASE_URL}/channels/${request.channel_id}`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: GetChannelRequest): Map {
+  get-channel(request, {})
+},
+(request: GetChannelRequest, opts: Map): Map {
+  ::api/call("GET", `/channels/${seg(request.channel_id)}`, {}, opts)
 }
 
 ModifyChannelRequest type {
@@ -47,79 +57,135 @@ ModifyChannelRequest type {
   user_limit: Int?,
   permission_overwrites: Vec<Map>?,
   parent_id: Str?,
-  default_auto_archive_duration: Int?
+  rtc_region: Str?,
+  video_quality_mode: Int?,
+  default_auto_archive_duration: Int?,
+  flags: Int?,
+  available_tags: Vec<Map>?,
+  default_reaction_emoji: Map?,
+  default_thread_rate_limit_per_user: Int?,
+  default_sort_order: Int?,
+  default_forum_layout: Int?,
+  archived: Bool?,
+  auto_archive_duration: Int?,
+  locked: Bool?,
+  invitable: Bool?,
+  applied_tags: Vec<Str>?,
+  reason: Str?,
+  clear: Vec<Str>?
 }
 
 modify-channel
 meta {
-    doc: """PATCH /channels/{channel_id} - Update a channel's settings. Requires MANAGE_CHANNELS permission. Only specified fields are updated."""
+    doc: """
+    PATCH /channels/{channel_id} - Update a guild channel or thread. Only
+    the fields you set are sent. To null a nullable field on purpose (move
+    a channel out of its category, drop a topic), list it in `clear`, e.g.
+    `clear: ["parent_id"]`. Needs MANAGE_CHANNELS (MANAGE_THREADS for
+    threads). Thread-only fields: `archived`, `auto_archive_duration`,
+    `locked`, `invitable`, `applied_tags`.
+
+    **Example**
+
+    ```hot
+    ::channels ::discord::channels
+
+    ::channels/modify-channel(::channels/ModifyChannelRequest({
+      channel_id: "1100000000000000000",
+      topic: "Release coordination",
+      rate_limit_per_user: 10,
+      reason: "Slow mode during launch"
+    }))
+    ```
+    """
 }
-fn (request: ModifyChannelRequest): Map {
-  body merge({}, {
-    name: request.name,
-    type: request.type,
-    position: request.position,
-    topic: request.topic,
-    nsfw: request.nsfw,
-    rate_limit_per_user: request.rate_limit_per_user,
-    bitrate: request.bitrate,
-    user_limit: request.user_limit,
-    permission_overwrites: request.permission_overwrites,
-    parent_id: request.parent_id,
-    default_auto_archive_duration: request.default_auto_archive_duration
-  })
-  response api-request("PATCH", `${::discord::core/BASE_URL}/channels/${request.channel_id}`, {}, body)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: ModifyChannelRequest): Map {
+  modify-channel(request, {})
+},
+(request: ModifyChannelRequest, opts: Map): Map {
+  ::api/call("PATCH", `/channels/${seg(request.channel_id)}`, {
+    body: ::api/body(request, ["channel_id"]),
+    reason: request.reason
+  }, opts)
 }
 
 DeleteChannelRequest type {
-  channel_id: Str
+  channel_id: Str,
+  reason: Str?
 }
 
 delete-channel
 meta {
-    doc: """DELETE /channels/{channel_id} - Delete a channel or close a DM. Requires MANAGE_CHANNELS for guild channels. Deleting a category does not delete its child channels."""
+    doc: """DELETE /channels/{channel_id} - Delete a guild channel or thread, or close a DM. Returns the deleted channel. Needs MANAGE_CHANNELS (MANAGE_THREADS for threads). Deleting a category leaves its channels in place."""
 }
-fn (request: DeleteChannelRequest): Map {
-  response api-request("DELETE", `${::discord::core/BASE_URL}/channels/${request.channel_id}`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: DeleteChannelRequest): Map {
+  delete-channel(request, {})
+},
+(request: DeleteChannelRequest, opts: Map): Map {
+  ::api/call("DELETE", `/channels/${seg(request.channel_id)}`, {reason: request.reason}, opts)
 }
 
 EditChannelPermissionsRequest type {
   channel_id: Str,
   overwrite_id: Str,
+  type: Int,
   allow: Str?,
   deny: Str?,
-  type: Int
+  reason: Str?
 }
 
 edit-channel-permissions
 meta {
-    doc: """PUT /channels/{channel_id}/permissions/{overwrite_id} - Edit channel permission overwrites for a user or role. `type` 0 = role, 1 = member. `allow` and `deny` are permission bit strings."""
-}
-fn (request: EditChannelPermissionsRequest): Bool {
-  body {
-    allow: request.allow,
-    deny: request.deny,
-    type: request.type
-  }
+    doc: """
+    PUT /channels/{channel_id}/permissions/{overwrite_id} - Create or
+    replace a permission overwrite for a role (`type` 0) or member
+    (`type` 1). `allow`/`deny` are permission bit sets as strings; an
+    omitted one defaults to "0". Needs MANAGE_ROLES.
 
-  response api-request("PUT", `${::discord::core/BASE_URL}/channels/${request.channel_id}/permissions/${request.overwrite_id}`, {}, body)
-  if(is-ok-response(response), true, err(HttpError(response)))
+    **Example**
+
+    ```hot
+    ::channels ::discord::channels
+
+    // Hide the channel from @everyone (role id = guild id)
+    ::channels/edit-channel-permissions(::channels/EditChannelPermissionsRequest({
+      channel_id: "1100000000000000000",
+      overwrite_id: "1000000000000000000",
+      type: 0,
+      deny: "1024"
+    }))
+    ```
+    """
+}
+fn
+(request: EditChannelPermissionsRequest): Bool {
+  edit-channel-permissions(request, {})
+},
+(request: EditChannelPermissionsRequest, opts: Map): Bool {
+  ::api/call-ok("PUT", `/channels/${seg(request.channel_id)}/permissions/${seg(request.overwrite_id)}`, {
+    body: ::api/body(request, ["channel_id", "overwrite_id"]),
+    reason: request.reason
+  }, opts)
 }
 
 DeleteChannelPermissionRequest type {
   channel_id: Str,
-  overwrite_id: Str
+  overwrite_id: Str,
+  reason: Str?
 }
 
 delete-channel-permission
 meta {
-    doc: """DELETE /channels/{channel_id}/permissions/{overwrite_id} - Delete a channel permission overwrite for a user or role. Requires MANAGE_ROLES."""
+    doc: """DELETE /channels/{channel_id}/permissions/{overwrite_id} - Remove a role or member permission overwrite. Needs MANAGE_ROLES."""
 }
-fn (request: DeleteChannelPermissionRequest): Bool {
-  response api-request("DELETE", `${::discord::core/BASE_URL}/channels/${request.channel_id}/permissions/${request.overwrite_id}`)
-  if(is-ok-response(response), true, err(HttpError(response)))
+fn
+(request: DeleteChannelPermissionRequest): Bool {
+  delete-channel-permission(request, {})
+},
+(request: DeleteChannelPermissionRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `/channels/${seg(request.channel_id)}/permissions/${seg(request.overwrite_id)}`, {reason: request.reason}, opts)
 }
 
 GetChannelInvitesRequest type {
@@ -128,11 +194,14 @@ GetChannelInvitesRequest type {
 
 get-channel-invites
 meta {
-    doc: """GET /channels/{channel_id}/invites - Get the invites for a channel. Requires MANAGE_CHANNELS permission."""
+    doc: """GET /channels/{channel_id}/invites - Invites for a channel, with metadata. Needs MANAGE_CHANNELS."""
 }
-fn (request: GetChannelInvitesRequest): Vec<Map> {
-  response api-request("GET", `${::discord::core/BASE_URL}/channels/${request.channel_id}/invites`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: GetChannelInvitesRequest): Vec<Map> {
+  get-channel-invites(request, {})
+},
+(request: GetChannelInvitesRequest, opts: Map): Vec<Map> {
+  ::api/call("GET", `/channels/${seg(request.channel_id)}/invites`, {}, opts)
 }
 
 CreateChannelInviteRequest type {
@@ -143,25 +212,64 @@ CreateChannelInviteRequest type {
   unique: Bool?,
   target_type: Int?,
   target_user_id: Str?,
-  target_application_id: Str?
+  target_application_id: Str?,
+  role_ids: Vec<Str>?,
+  reason: Str?
 }
 
 create-channel-invite
 meta {
-    doc: """POST /channels/{channel_id}/invites - Create a new invite for a channel. `max_age` in seconds (0 = never expires). `max_uses` (0 = unlimited). Requires CREATE_INSTANT_INVITE."""
+    doc: """
+    POST /channels/{channel_id}/invites - Create an invite. `max_age` in
+    seconds (0 = never, default 86400), `max_uses` (0 = unlimited),
+    `unique: true` to skip reusing a similar invite. Needs
+    CREATE_INSTANT_INVITE.
+
+    **Example**
+
+    ```hot
+    ::channels ::discord::channels
+
+    invite ::channels/create-channel-invite(::channels/CreateChannelInviteRequest({
+      channel_id: "1100000000000000000",
+      max_age: 3600,
+      max_uses: 1,
+      unique: true
+    }))
+    `https://discord.gg/${invite.code}`
+    ```
+    """
 }
-fn (request: CreateChannelInviteRequest): Map {
-  body merge({}, {
-    max_age: request.max_age,
-    max_uses: request.max_uses,
-    temporary: request.temporary,
-    unique: request.unique,
-    target_type: request.target_type,
-    target_user_id: request.target_user_id,
-    target_application_id: request.target_application_id
-  })
-  response api-request("POST", `${::discord::core/BASE_URL}/channels/${request.channel_id}/invites`, {}, body)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: CreateChannelInviteRequest): Map {
+  create-channel-invite(request, {})
+},
+(request: CreateChannelInviteRequest, opts: Map): Map {
+  ::api/call("POST", `/channels/${seg(request.channel_id)}/invites`, {
+    body: ::api/body(request, ["channel_id"]),
+    reason: request.reason
+  }, opts)
+}
+
+FollowAnnouncementChannelRequest type {
+  channel_id: Str,
+  webhook_channel_id: Str,
+  reason: Str?
+}
+
+follow-announcement-channel
+meta {
+    doc: """POST /channels/{channel_id}/followers - Follow an Announcement channel into `webhook_channel_id`. Needs MANAGE_WEBHOOKS in the target channel."""
+}
+fn
+(request: FollowAnnouncementChannelRequest): Map {
+  follow-announcement-channel(request, {})
+},
+(request: FollowAnnouncementChannelRequest, opts: Map): Map {
+  ::api/call("POST", `/channels/${seg(request.channel_id)}/followers`, {
+    body: {webhook_channel_id: request.webhook_channel_id},
+    reason: request.reason
+  }, opts)
 }
 
 TriggerTypingIndicatorRequest type {
@@ -170,15 +278,18 @@ TriggerTypingIndicatorRequest type {
 
 trigger-typing-indicator
 meta {
-    doc: """POST /channels/{channel_id}/typing - Show a typing indicator in the channel. The indicator lasts about 10 seconds or until a message is sent."""
+    doc: """POST /channels/{channel_id}/typing - Show "typing..." for about 10 seconds or until the bot sends a message."""
 }
-fn (request: TriggerTypingIndicatorRequest): Bool {
-  response api-request("POST", `${::discord::core/BASE_URL}/channels/${request.channel_id}/typing`)
-  if(is-ok-response(response), true, err(HttpError(response)))
+fn
+(request: TriggerTypingIndicatorRequest): Bool {
+  trigger-typing-indicator(request, {})
+},
+(request: TriggerTypingIndicatorRequest, opts: Map): Bool {
+  ::api/call-ok("POST", `/channels/${seg(request.channel_id)}/typing`, {}, opts)
 }
 
 // ============================================================================
-// Guild Channels
+// Guild channels
 // ============================================================================
 
 GetGuildChannelsRequest type {
@@ -188,23 +299,24 @@ GetGuildChannelsRequest type {
 get-guild-channels
 meta {
     doc: """
-GET /guilds/{guild_id}/channels - List all channels in a guild. Does not include threads.
+    GET /guilds/{guild_id}/channels - Every channel in a guild (threads excluded; see `list-active-threads`).
 
-**Example**
+    **Example**
 
-```hot
-::channels ::discord::channels
+    ```hot
+    ::channels ::discord::channels
 
-response ::channels/get-guild-channels(::channels/GetGuildChannelsRequest({
-  guild_id: "123456789"
-}))
-// => [{id: "...", name: "general", type: 0}, ...]
-```
-"""
+    channels ::channels/get-guild-channels(::channels/GetGuildChannelsRequest({guild_id: "1000000000000000000"}))
+    text-channels filter(channels, (c) { eq(c.type, 0) })
+    ```
+    """
 }
-fn (request: GetGuildChannelsRequest): Vec<Map> {
-  response api-request("GET", `${::discord::core/BASE_URL}/guilds/${request.guild_id}/channels`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: GetGuildChannelsRequest): Vec<Map> {
+  get-guild-channels(request, {})
+},
+(request: GetGuildChannelsRequest, opts: Map): Vec<Map> {
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/channels`, {}, opts)
 }
 
 CreateGuildChannelRequest type {
@@ -219,29 +331,70 @@ CreateGuildChannelRequest type {
   permission_overwrites: Vec<Map>?,
   parent_id: Str?,
   nsfw: Bool?,
-  default_auto_archive_duration: Int?
+  rtc_region: Str?,
+  video_quality_mode: Int?,
+  default_auto_archive_duration: Int?,
+  default_reaction_emoji: Map?,
+  available_tags: Vec<Map>?,
+  default_sort_order: Int?,
+  default_forum_layout: Int?,
+  default_thread_rate_limit_per_user: Int?,
+  flags: Int?,
+  reason: Str?
 }
 
 create-guild-channel
 meta {
-    doc: """POST /guilds/{guild_id}/channels - Create a new channel in a guild. Requires MANAGE_CHANNELS. Channel `type`: 0 = text, 2 = voice, 4 = category, 5 = announcement, 13 = stage, 15 = forum."""
+    doc: """
+    POST /guilds/{guild_id}/channels - Create a channel. `type`: 0 text,
+    2 voice, 4 category, 5 announcement, 13 stage, 15 forum, 16 media.
+    Needs MANAGE_CHANNELS.
+
+    **Example**
+
+    ```hot
+    ::channels ::discord::channels
+
+    ::channels/create-guild-channel(::channels/CreateGuildChannelRequest({
+      guild_id: "1000000000000000000",
+      name: "incident-2026-11-01",
+      type: 0,
+      parent_id: "1400000000000000000",
+      reason: "Incident channel"
+    }))
+    ```
+    """
 }
-fn (request: CreateGuildChannelRequest): Map {
-  body merge({}, {
-    name: request.name,
-    type: request.type,
-    topic: request.topic,
-    bitrate: request.bitrate,
-    user_limit: request.user_limit,
-    rate_limit_per_user: request.rate_limit_per_user,
-    position: request.position,
-    permission_overwrites: request.permission_overwrites,
-    parent_id: request.parent_id,
-    nsfw: request.nsfw,
-    default_auto_archive_duration: request.default_auto_archive_duration
-  })
-  response api-request("POST", `${::discord::core/BASE_URL}/guilds/${request.guild_id}/channels`, {}, body)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: CreateGuildChannelRequest): Map {
+  create-guild-channel(request, {})
+},
+(request: CreateGuildChannelRequest, opts: Map): Map {
+  ::api/call("POST", `/guilds/${seg(request.guild_id)}/channels`, {
+    body: ::api/body(request, ["guild_id"]),
+    reason: request.reason
+  }, opts)
+}
+
+ModifyGuildChannelPositionsRequest type {
+  guild_id: Str,
+  positions: Vec<Map>,
+  reason: Str?
+}
+
+modify-guild-channel-positions
+meta {
+    doc: """PATCH /guilds/{guild_id}/channels - Reorder channels. `positions` is `[{id, position?, lock_permissions?, parent_id?}]`. Needs MANAGE_CHANNELS."""
+}
+fn
+(request: ModifyGuildChannelPositionsRequest): Bool {
+  modify-guild-channel-positions(request, {})
+},
+(request: ModifyGuildChannelPositionsRequest, opts: Map): Bool {
+  ::api/call-ok("PATCH", `/guilds/${seg(request.guild_id)}/channels`, {
+    body: map(request.positions, (p) { ::api/body(p, []) }),
+    reason: request.reason
+  }, opts)
 }
 
 // ============================================================================
@@ -253,22 +406,23 @@ StartThreadFromMessageRequest type {
   message_id: Str,
   name: Str,
   auto_archive_duration: Int?,
-  rate_limit_per_user: Int?
+  rate_limit_per_user: Int?,
+  reason: Str?
 }
 
 start-thread-from-message
 meta {
-    doc: """POST /channels/{channel_id}/messages/{message_id}/threads - Create a new thread from an existing message. `auto_archive_duration` can be 60, 1440, 4320, or 10080 minutes."""
+    doc: """POST /channels/{channel_id}/messages/{message_id}/threads - Start a thread on an existing message. `auto_archive_duration` is 60, 1440, 4320 or 10080 minutes."""
 }
-fn (request: StartThreadFromMessageRequest): Map {
-  body {
-    name: request.name,
-    auto_archive_duration: request.auto_archive_duration,
-    rate_limit_per_user: request.rate_limit_per_user
-  }
-
-  response api-request("POST", `${::discord::core/BASE_URL}/channels/${request.channel_id}/messages/${request.message_id}/threads`, {}, body)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: StartThreadFromMessageRequest): Map {
+  start-thread-from-message(request, {})
+},
+(request: StartThreadFromMessageRequest, opts: Map): Map {
+  ::api/call("POST", `/channels/${seg(request.channel_id)}/messages/${seg(request.message_id)}/threads`, {
+    body: ::api/body(request, ["channel_id", "message_id"]),
+    reason: request.reason
+  }, opts)
 }
 
 StartThreadWithoutMessageRequest type {
@@ -277,23 +431,76 @@ StartThreadWithoutMessageRequest type {
   auto_archive_duration: Int?,
   type: Int?,
   invitable: Bool?,
-  rate_limit_per_user: Int?
+  rate_limit_per_user: Int?,
+  reason: Str?
 }
 
 start-thread-without-message
 meta {
-    doc: """POST /channels/{channel_id}/threads - Create a new thread not attached to a message. `type` 11 = public thread, 12 = private thread."""
+    doc: """POST /channels/{channel_id}/threads - Start a thread with no starter message. `type` 11 = public, 12 = private (the default is private, so set it)."""
 }
-fn (request: StartThreadWithoutMessageRequest): Map {
-  body merge({}, {
-    name: request.name,
-    auto_archive_duration: request.auto_archive_duration,
-    type: request.type,
-    invitable: request.invitable,
-    rate_limit_per_user: request.rate_limit_per_user
-  })
-  response api-request("POST", `${::discord::core/BASE_URL}/channels/${request.channel_id}/threads`, {}, body)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: StartThreadWithoutMessageRequest): Map {
+  start-thread-without-message(request, {})
+},
+(request: StartThreadWithoutMessageRequest, opts: Map): Map {
+  ::api/call("POST", `/channels/${seg(request.channel_id)}/threads`, {
+    body: ::api/body(request, ["channel_id"]),
+    reason: request.reason
+  }, opts)
+}
+
+StartForumThreadRequest type {
+  channel_id: Str,
+  name: Str,
+  message: Map,
+  auto_archive_duration: Int?,
+  rate_limit_per_user: Int?,
+  applied_tags: Vec<Str>?,
+  files: Vec<::discord::api/FileUpload>?,
+  reason: Str?
+}
+
+start-forum-thread
+meta {
+    doc: """
+    POST /channels/{channel_id}/threads - Create a post in a forum or
+    media channel. `message` is the first message
+    (`{content?, embeds?, components?, allowed_mentions?, sticker_ids?, attachments?, flags?}`);
+    `applied_tags` are forum tag ids. `files` are uploaded with it.
+
+    **Example**
+
+    ```hot
+    ::channels ::discord::channels
+
+    post ::channels/start-forum-thread(::channels/StartForumThreadRequest({
+      channel_id: "1500000000000000000",
+      name: "Weekly sync notes",
+      message: {content: "Agenda in the thread"}
+    }))
+    ```
+    """
+}
+fn
+(request: StartForumThreadRequest): Map {
+  start-forum-thread(request, {})
+},
+(request: StartForumThreadRequest, opts: Map): Map {
+  files or(request.files, [])
+  payload ::api/body(request, ["channel_id"])
+  message cond {
+    and(not(is-empty(files)), is-null(get(request.message, "attachments"))) => {
+      assoc(request.message, "attachments", ::api/attachments-for(files))
+    }
+    => { request.message }
+  }
+
+  ::api/call("POST", `/channels/${seg(request.channel_id)}/threads`, {
+    body: assoc(payload, "message", message),
+    files: files,
+    reason: request.reason
+  }, opts)
 }
 
 JoinThreadRequest type {
@@ -302,11 +509,14 @@ JoinThreadRequest type {
 
 join-thread
 meta {
-    doc: """PUT /channels/{channel_id}/thread-members/@me - Join a thread. The bot must have access to the parent channel."""
+    doc: """PUT /channels/{channel_id}/thread-members/@me - Join a thread (it must not be archived)."""
 }
-fn (request: JoinThreadRequest): Bool {
-  response api-request("PUT", `${::discord::core/BASE_URL}/channels/${request.channel_id}/thread-members/@me`)
-  if(is-ok-response(response), true, err(HttpError(response)))
+fn
+(request: JoinThreadRequest): Bool {
+  join-thread(request, {})
+},
+(request: JoinThreadRequest, opts: Map): Bool {
+  ::api/call-ok("PUT", `/channels/${seg(request.channel_id)}/thread-members/@me`, {}, opts)
 }
 
 LeaveThreadRequest type {
@@ -317,9 +527,12 @@ leave-thread
 meta {
     doc: """DELETE /channels/{channel_id}/thread-members/@me - Leave a thread."""
 }
-fn (request: LeaveThreadRequest): Bool {
-  response api-request("DELETE", `${::discord::core/BASE_URL}/channels/${request.channel_id}/thread-members/@me`)
-  if(is-ok-response(response), true, err(HttpError(response)))
+fn
+(request: LeaveThreadRequest): Bool {
+  leave-thread(request, {})
+},
+(request: LeaveThreadRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `/channels/${seg(request.channel_id)}/thread-members/@me`, {}, opts)
 }
 
 AddThreadMemberRequest type {
@@ -329,11 +542,14 @@ AddThreadMemberRequest type {
 
 add-thread-member
 meta {
-    doc: """PUT /channels/{channel_id}/thread-members/{user_id} - Add a user to a thread. Requires the ability to send messages in the thread."""
+    doc: """PUT /channels/{channel_id}/thread-members/{user_id} - Add a user to a thread. Needs SEND_MESSAGES_IN_THREADS."""
 }
-fn (request: AddThreadMemberRequest): Bool {
-  response api-request("PUT", `${::discord::core/BASE_URL}/channels/${request.channel_id}/thread-members/${request.user_id}`)
-  if(is-ok-response(response), true, err(HttpError(response)))
+fn
+(request: AddThreadMemberRequest): Bool {
+  add-thread-member(request, {})
+},
+(request: AddThreadMemberRequest, opts: Map): Bool {
+  ::api/call-ok("PUT", `/channels/${seg(request.channel_id)}/thread-members/${seg(request.user_id)}`, {}, opts)
 }
 
 RemoveThreadMemberRequest type {
@@ -343,11 +559,34 @@ RemoveThreadMemberRequest type {
 
 remove-thread-member
 meta {
-    doc: """DELETE /channels/{channel_id}/thread-members/{user_id} - Remove a user from a thread. Requires MANAGE_THREADS or the thread creator."""
+    doc: """DELETE /channels/{channel_id}/thread-members/{user_id} - Remove a user from a thread. Needs MANAGE_THREADS, or to be the creator of a private thread."""
 }
-fn (request: RemoveThreadMemberRequest): Bool {
-  response api-request("DELETE", `${::discord::core/BASE_URL}/channels/${request.channel_id}/thread-members/${request.user_id}`)
-  if(is-ok-response(response), true, err(HttpError(response)))
+fn
+(request: RemoveThreadMemberRequest): Bool {
+  remove-thread-member(request, {})
+},
+(request: RemoveThreadMemberRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `/channels/${seg(request.channel_id)}/thread-members/${seg(request.user_id)}`, {}, opts)
+}
+
+GetThreadMemberRequest type {
+  channel_id: Str,
+  user_id: Str,
+  with_member: Bool?
+}
+
+get-thread-member
+meta {
+    doc: """GET /channels/{channel_id}/thread-members/{user_id} - One thread member; `with_member: true` adds the guild member object."""
+}
+fn
+(request: GetThreadMemberRequest): Map {
+  get-thread-member(request, {})
+},
+(request: GetThreadMemberRequest, opts: Map): Map {
+  ::api/call("GET", `/channels/${seg(request.channel_id)}/thread-members/${seg(request.user_id)}`, {
+    query: {with_member: request.with_member}
+  }, opts)
 }
 
 ListThreadMembersRequest type {
@@ -359,11 +598,16 @@ ListThreadMembersRequest type {
 
 list-thread-members
 meta {
-    doc: """GET /channels/{channel_id}/thread-members - List members of a thread. Returns thread member objects."""
+    doc: """GET /channels/{channel_id}/thread-members - Thread members (up to `limit`, 1-100). Page with `after` (a user id) when `with_member` is true. Needs the GUILD_MEMBERS intent."""
 }
-fn (request: ListThreadMembersRequest): Vec<Map> {
-  response api-request("GET", `${::discord::core/BASE_URL}/channels/${request.channel_id}/thread-members?with_member=${or(request.with_member, "")}&after=${or(request.after, "")}&limit=${or(request.limit, "")}`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: ListThreadMembersRequest): Vec<Map> {
+  list-thread-members(request, {})
+},
+(request: ListThreadMembersRequest, opts: Map): Vec<Map> {
+  ::api/call("GET", `/channels/${seg(request.channel_id)}/thread-members`, {
+    query: {with_member: request.with_member, after: request.after, limit: request.limit}
+  }, opts)
 }
 
 ListActiveThreadsRequest type {
@@ -372,9 +616,46 @@ ListActiveThreadsRequest type {
 
 list-active-threads
 meta {
-    doc: """GET /guilds/{guild_id}/threads/active - List all active threads in a guild, including public and private threads. Returns threads and thread member objects."""
+    doc: """GET /guilds/{guild_id}/threads/active - Every active thread in a guild the bot can see. Returns `{threads, members}`."""
 }
-fn (request: ListActiveThreadsRequest): Map {
-  response api-request("GET", `${::discord::core/BASE_URL}/guilds/${request.guild_id}/threads/active`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: ListActiveThreadsRequest): Map {
+  list-active-threads(request, {})
+},
+(request: ListActiveThreadsRequest, opts: Map): Map {
+  ::api/call("GET", `/guilds/${seg(request.guild_id)}/threads/active`, {}, opts)
+}
+
+ListArchivedThreadsRequest type {
+  channel_id: Str,
+  before: Str?,
+  limit: Int?
+}
+
+list-public-archived-threads
+meta {
+    doc: """GET /channels/{channel_id}/threads/archived/public - Archived public threads, newest first. `before` is an ISO8601 timestamp. Returns `{threads, members, has_more}`. Needs READ_MESSAGE_HISTORY."""
+}
+fn
+(request: ListArchivedThreadsRequest): Map {
+  list-public-archived-threads(request, {})
+},
+(request: ListArchivedThreadsRequest, opts: Map): Map {
+  ::api/call("GET", `/channels/${seg(request.channel_id)}/threads/archived/public`, {
+    query: {before: request.before, limit: request.limit}
+  }, opts)
+}
+
+list-private-archived-threads
+meta {
+    doc: """GET /channels/{channel_id}/threads/archived/private - Archived private threads. `before` is an ISO8601 timestamp. Returns `{threads, members, has_more}`. Needs READ_MESSAGE_HISTORY and MANAGE_THREADS."""
+}
+fn
+(request: ListArchivedThreadsRequest): Map {
+  list-private-archived-threads(request, {})
+},
+(request: ListArchivedThreadsRequest, opts: Map): Map {
+  ::api/call("GET", `/channels/${seg(request.channel_id)}/threads/archived/private`, {
+    query: {before: request.before, limit: request.limit}
+  }, opts)
 }

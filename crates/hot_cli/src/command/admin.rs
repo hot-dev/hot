@@ -40,7 +40,7 @@ pub(crate) async fn run_admin_bootstrap(
     };
     // A user can exist without a password sign-in: created through OAuth, or
     // by an earlier run that stopped between the two writes.
-    match UserAuth::get_user_auth(&db, PASSWORD_AUTH, &email).await {
+    match UserAuth::get_user_auth(&db, &user_id, PASSWORD_AUTH).await {
         Ok(_) => {
             eprintln!("{email} can already sign in with a password; nothing changed.");
             return Ok(());
@@ -82,13 +82,16 @@ pub(crate) async fn run_admin_reset_password(
     let email = checked_email(email)?;
     let auth_data = password_auth_data(password_file)?;
     let db = onboarding_db(conf).await?;
-    let auth = match UserAuth::get_user_auth(&db, PASSWORD_AUTH, &email).await {
+    let no_password =
+        || format!("{email} has no password sign-in; create one with `hot admin bootstrap`");
+    let user = match User::get_user_by_email(&db, &email).await {
+        Ok(user) => user,
+        Err(error) if error.is_not_found() => return Err(no_password()),
+        Err(error) => return Err(format!("Failed to look up {email}: {error}")),
+    };
+    let auth = match UserAuth::get_user_auth(&db, &user.user_id, PASSWORD_AUTH).await {
         Ok(auth) => auth,
-        Err(error) if error.is_not_found() => {
-            return Err(format!(
-                "{email} has no password sign-in; create one with `hot admin bootstrap`"
-            ));
-        }
+        Err(error) if error.is_not_found() => return Err(no_password()),
         Err(error) => return Err(format!("Failed to look up {email}: {error}")),
     };
     UserAuth::update_auth_data(&db, &auth.user_auth_id, &auth_data, &auth.user_id)
@@ -156,7 +159,8 @@ mod tests {
 
     async fn can_sign_in(conf: &Val, email: &str, password: &str) -> bool {
         let db = onboarding_db(conf).await.unwrap();
-        let auth = UserAuth::get_user_auth(&db, PASSWORD_AUTH, email)
+        let user = User::get_user_by_email(&db, email).await.unwrap();
+        let auth = UserAuth::get_user_auth(&db, &user.user_id, PASSWORD_AUTH)
             .await
             .unwrap();
         let stored = serde_json::to_string(&auth.auth_data.unwrap()).unwrap();
@@ -201,7 +205,7 @@ mod tests {
         run_admin_bootstrap("oauth@example.com", None, file.path(), &conf)
             .await
             .unwrap();
-        let auth = UserAuth::get_user_auth(&db, PASSWORD_AUTH, "oauth@example.com")
+        let auth = UserAuth::get_user_auth(&db, &user_id, PASSWORD_AUTH)
             .await
             .unwrap();
         assert_eq!(auth.user_id, user_id);

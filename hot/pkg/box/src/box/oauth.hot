@@ -1,0 +1,152 @@
+::box::oauth ns
+meta {
+    doc: """
+    Box OAuth 2.0 (authorization code) helpers, built on `hot.dev/oauth2`.
+
+    **Flow**
+
+    1. Redirect the user to `authorize-url(...)`.
+    2. In your callback, `exchange-code(...)` turns `?code=` into tokens:
+       an access token (about 60 minutes) and a refresh token (60 days,
+       **single use**).
+    3. Keep the pair: `::box::auth/save-tokens(account, tokens)` puts it
+       in the store-backed keeper, and later calls pass `{account}`. Or
+       store it yourself and use `refresh-tokens` / `on-refresh`, saving
+       the new refresh token every time.
+
+    ```hot
+    ::oauth ::box::oauth
+
+    url ::oauth/authorize-url(client-id, "https://app.example.com/oauth/box", state)
+
+    // callback handler:
+    tokens ::oauth/exchange-code(client-id, client-secret, request.query.code, "https://app.example.com/oauth/box")
+    ::box::auth/save-tokens(`user:${user-id}`, tokens)
+    ```
+    """
+}
+
+::auth ::box::auth
+::oauth2 ::oauth2
+::uri ::hot::uri
+::http ::hot::http
+
+authorize-url
+meta {
+    doc: """
+    Build the Box consent URL (`https://account.box.com/api/oauth2/authorize`).
+    `state` is your CSRF token. Options (all optional): `scope` (a Vec or
+    space-separated Str such as `"root_readonly"`; omit it for the app's
+    configured scopes), `extra` (any other parameters).
+
+    ```hot
+    url ::box::oauth/authorize-url("abc123clientid", "https://app.example.com/oauth/box", "csrf-123")
+    ```
+    """
+}
+fn
+(client-id: Str, redirect-uri: Str, state: Str): Str {
+  authorize-url(client-id, redirect-uri, state, {})
+},
+(client-id: Str, redirect-uri: Str, state: Str, opts: Map): Str {
+  scope opts.scope
+  scope-str cond {
+    is-vec(scope) => { join(scope, " ") }
+    ::auth/is-blank-value(scope) => { null }
+    => { Str(scope) }
+  }
+
+  ::oauth2/authorize-url(filter-vals({
+    authorize-url: ::box/AUTHORIZE_URL,
+    client-id: client-id,
+    redirect-uri: redirect-uri,
+    scope: scope-str,
+    state: if(::auth/is-blank-value(state), null, state),
+    extra: opts.extra
+  }, is-some))
+}
+
+exchange-code
+meta {
+    doc: """
+    Exchange an authorization code for tokens (codes expire after 30
+    seconds). Returns Box's token response (`access_token`, `expires_in`,
+    `refresh_token`, `token_type`, `restricted_to`), or a
+    `::box::auth/TokenError` such as `"box: token request failed:
+    invalid_grant (Auth code doesn't exist or is invalid for the client)"`.
+    The 3-arity form takes the app keys from `opts` (`client-id`,
+    `client-secret`) or the `box.client.id` / `box.client.secret` context
+    variables.
+    """
+}
+fn
+(code: Str, redirect-uri: Str?, opts: Map): Map {
+  app ::auth/app-keys(opts)
+  if(is-err(app), app, exchange-code(app.client-id, app.client-secret, code, redirect-uri))
+},
+(client-id: Str, client-secret: Str, code: Str, redirect-uri: Str?): Map {
+  ::auth/request-token(::oauth2/build-exchange-body(filter-vals({
+    client-id: client-id,
+    client-secret: client-secret,
+    code: code,
+    redirect-uri: if(::auth/is-blank-value(redirect-uri), null, redirect-uri)
+  }, is-some)))
+}
+
+refresh-tokens
+meta {
+    doc: """
+    Spend a refresh token and return the **new pair** (Box's token
+    response: `access_token`, `refresh_token`, `expires_in`). The refresh
+    token you passed is dead afterwards, so persist `refresh_token` before
+    doing anything else. A used, revoked or expired token yields
+    `error-code: "invalid_grant"`: ask the user to authorize again. The
+    2-arity form takes the app keys from `opts` or context.
+
+    ```hot
+    tokens ::box::oauth/refresh-tokens(client-id, client-secret, saved.refresh_token)
+    save-for-user(user-id, tokens)   // your storage; do this first
+    ::box::folders/list-items("0", {token: tokens.access_token})
+    ```
+    """
+}
+fn
+(refresh-token: Str, opts: Map): Map {
+  app ::auth/app-keys(opts)
+  if(is-err(app), app, ::auth/refresh-token-grant(app.client-id, app.client-secret, refresh-token))
+},
+(client-id: Str, client-secret: Str, refresh-token: Str): Map {
+  ::auth/refresh-token-grant(client-id, client-secret, refresh-token)
+}
+
+revoke-body
+meta {
+    doc: """The `/oauth2/revoke` form body (pure): `client_id`, `client_secret`, `token`."""
+}
+fn (client-id: Str, client-secret: Str, token: Str): Map {
+  {client_id: client-id, client_secret: client-secret, token: token}
+}
+
+revoke-token
+meta {
+    doc: """Revoke an access or refresh token (`POST /oauth2/revoke`; revoking either ends the session). Returns true, or a `TokenError`. Pair it with `::box::auth/forget-tokens` on disconnect. The 2-arity form takes the app keys from `opts` or context."""
+}
+fn
+(token: Str, opts: Map): Bool {
+  app ::auth/app-keys(opts)
+  if(is-err(app), app, revoke-token(app.client-id, app.client-secret, token))
+},
+(client-id: Str, client-secret: Str, token: Str): Bool {
+  ::auth/mark-values([client-secret, token])
+  response ::http/request(::http/HttpRequest({
+    method: "POST",
+    url: `${::box/api-root()}/oauth2/revoke`,
+    headers: {Content-Type: "application/x-www-form-urlencoded"},
+    body: ::uri/encode-query(revoke-body(client-id, client-secret, token))
+  }))
+  cond {
+    is-err(response) => { err(::auth/token-error("box: token revocation failed", err-value(response))) }
+    ::http/is-ok-response(response) => { true }
+    => { err(::auth/token-error("box: token revocation failed", {status: response.status, body: response.body})) }
+  }
+}

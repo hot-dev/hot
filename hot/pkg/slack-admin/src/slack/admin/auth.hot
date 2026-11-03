@@ -1,0 +1,108 @@
+::slack::admin::auth ns
+meta {
+    doc: """
+    `admin.auth.policy.*`: assign users to, or remove them from, an
+    authentication policy (currently `email_password`, which lets them
+    sign in with email and password alongside SSO). `entity_type` is
+    `USER`. Scope: `admin.users:read` / `admin.users:write`.
+
+    **Example**
+
+    ```hot
+    ::auth ::slack::admin::auth
+
+    ::auth/policy-assign-entities(::auth/PolicyAssignEntitiesRequest({
+      policy_name: "email_password",
+      entity_type: "USER",
+      entity_ids: ["U0123ABCDEF"]
+    }))
+    ```
+    """
+}
+
+::api ::slack::admin::api
+
+PolicyGetEntitiesRequest type {
+  policy_name: Str,
+  entity_type: Str?,
+  cursor: Str?,
+  limit: Int?
+}
+
+policy-get-entities
+meta {
+    doc: """
+    admin.auth.policy.getEntities - List the entities assigned to a policy (`entities`, `entity_total_count`).
+
+    Scope: `admin.users:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `policy-get-entities-all`.
+    """
+}
+fn
+(request: PolicyGetEntitiesRequest): Map {
+  policy-get-entities(request, {})
+},
+(request: PolicyGetEntitiesRequest, opts: Map): Map {
+  ::api/call("admin.auth.policy.getEntities", request, opts)
+}
+
+policy-get-entities-all
+meta {
+    doc: """
+    Every `entities` entry from `admin.auth.policy.getEntities`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    """
+}
+fn
+(request: PolicyGetEntitiesRequest): Vec {
+  policy-get-entities-all(request, 1000)
+},
+(request: PolicyGetEntitiesRequest, max-items: Int): Vec {
+  policy-get-entities-all(request, max-items, {})
+},
+(request: PolicyGetEntitiesRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.auth.policy.getEntities", request, "entities", max-items, opts)
+}
+
+PolicyAssignEntitiesRequest type {
+  policy_name: Str,
+  entity_type: Str,
+  entity_ids: Vec<Str>
+}
+
+policy-assign-entities
+meta {
+    doc: """
+    admin.auth.policy.assignEntities - Assign users to a policy.
+
+    Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: PolicyAssignEntitiesRequest): Map {
+  policy-assign-entities(request, {})
+},
+(request: PolicyAssignEntitiesRequest, opts: Map): Map {
+  ::api/call("admin.auth.policy.assignEntities", request, opts)
+}
+
+PolicyRemoveEntitiesRequest type {
+  policy_name: Str,
+  entity_type: Str,
+  entity_ids: Vec<Str>
+}
+
+policy-remove-entities
+meta {
+    doc: """
+    admin.auth.policy.removeEntities - Remove users from a policy.
+
+    Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: PolicyRemoveEntitiesRequest): Map {
+  policy-remove-entities(request, {})
+},
+(request: PolicyRemoveEntitiesRequest, opts: Map): Map {
+  ::api/call("admin.auth.policy.removeEntities", request, opts)
+}

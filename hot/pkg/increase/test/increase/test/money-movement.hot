@@ -1,0 +1,103 @@
+::increase::test::money-movement ns
+meta ["test"]
+
+// Every check here fails before a request is built, so these tests never
+// touch the network (no API key is configured in the unit-test project).
+
+::inbound ::increase::inbound-transfers
+::sim ::increase::simulations
+
+
+ach-params fn (): Map {
+    {account_id: "account_1", external_account_id: "external_account_1", amount: 100, statement_descriptor: "Invoice 42"}
+}
+
+test-transfers-require-an-idempotency-key
+meta ["test"] fn () {
+    none {}
+    ach ::increase::ach-transfers/create-ach-transfer(ach-params(), none)
+    wire ::increase::wire-transfers/create-wire-transfer({account_id: "a", amount: 1, creditor: {name: "x"}, remittance: {category: "unstructured", unstructured: {message: "m"}}}, none)
+    rtp ::increase::rtp-transfers/create-rtp-transfer({amount: 1, creditor_name: "x", source_account_number_id: "n", unstructured_remittance_information: "m"}, none)
+    fednow ::increase::fednow-transfers/create-fednow-transfer({amount: 1, creditor_name: "x", debtor_name: "y", source_account_number_id: "n", unstructured_remittance_information: "m"}, none)
+    check ::increase::check-transfers/create-check-transfer({account_id: "a", amount: 1, fulfillment_method: "third_party", source_account_number_id: "n"}, none)
+    book ::increase::account-transfers/create-account-transfer({account_id: "a", amount: 1, description: "d", destination_account_id: "b"}, none)
+    assert(is-err(ach), "ach")
+    assert(is-err(wire), "wire")
+    assert(is-err(rtp), "rtp")
+    assert(is-err(fednow), "fednow")
+    assert(is-err(check), "check")
+    assert(is-err(book), "account transfer")
+    assert(contains(err-message(ach), "idempotency-key"), "says why")
+}
+
+test-returns-and-reversals-require-an-idempotency-key
+meta ["test"] fn () {
+    none {}
+    decline ::inbound/decline-inbound-ach-transfer("inbound_ach_transfer_1", "payment_stopped", none)
+    ach-return ::inbound/return-inbound-ach-transfer("inbound_ach_transfer_1", "payment_stopped", none)
+    reversal ::inbound/reverse-inbound-wire-transfer("inbound_wire_transfer_1", "duplicate", none)
+    rtp-return ::inbound/return-inbound-rtp-transfer("inbound_real_time_payments_transfer_1", {}, none)
+    assert(is-err(decline), "decline")
+    assert(is-err(ach-return), "ACH return")
+    assert(is-err(reversal), "wire reversal")
+    assert(is-err(rtp-return), "RTP return")
+}
+
+test-transfers-check-required-fields-before-sending
+meta ["test"] fn () {
+    key {idempotency-key: "invoice-42"}
+    out ::increase::ach-transfers/create-ach-transfer({account_id: "account_1", account_number: "987654321012", routing_number: "101050001", amount: 100}, key)
+    assert(is-err(out), "missing statement_descriptor errs locally")
+    assert(contains(err-message(out), "statement_descriptor"))
+    assert(not(contains(err-message(out), "987654321012")), "the account number is never echoed")
+    assert(not(contains(err-message(out), "101050001")), "the routing number is never echoed")
+
+    wire ::increase::wire-transfers/create-wire-transfer({account_id: "account_1", amount: 100}, key)
+    assert(contains(err-message(wire), "creditor"))
+    assert(contains(err-message(wire), "remittance"))
+}
+
+test-transfer-with-key-and-fields-reaches-the-transport
+meta ["test"] fn () {
+    // All local checks pass, so the next failure is the missing API key:
+    // proof the guards don't block a well-formed request.
+    out ::increase::ach-transfers/create-ach-transfer(ach-params(), {idempotency-key: "invoice-42"})
+    assert(is-err(out))
+    assert(contains(err-message(out), "increase.api.key"), "fails on the API key, after the money-movement checks")
+}
+
+test-simulations-refuse-production
+meta ["test"] fn () {
+    prod {environment: "production", api-key: "test_key"}
+    settle ::sim/settle-ach-transfer("ach_transfer_1", {}, prod)
+    ach-return ::sim/return-ach-transfer("ach_transfer_1", {reason: "no_account"}, prod)
+    inbound-ach ::sim/create-inbound-ach-transfer({account_number_id: "account_number_1", amount: 100}, prod)
+    inbound-wire ::sim/create-inbound-wire-transfer({account_number_id: "account_number_1", amount: 100}, prod)
+    card ::sim/authorize-card({card_id: "card_1", amount: 100}, prod)
+    deposit ::sim/submit-check-deposit("check_deposit_1", {}, prod)
+    assert(is-err(settle), "settle")
+    assert(is-err(ach-return), "return")
+    assert(is-err(inbound-ach), "inbound ACH")
+    assert(is-err(inbound-wire), "inbound wire")
+    assert(is-err(card), "card authorization")
+    assert(is-err(deposit), "check deposit")
+    assert(contains(err-message(settle), "sandbox"), "says it is sandbox-only")
+}
+
+test-simulations-refuse-production-from-context
+meta ["test"] fn () {
+    ::hot::ctx/set({"increase.environment": "production"})
+    out ::increase::simulations/settle-ach-transfer("ach_transfer_1")
+    ::hot::ctx/set({"increase.environment": "sandbx"})
+    typo ::increase::simulations/settle-ach-transfer("ach_transfer_1")
+    ::hot::ctx/set({"increase.environment": ""})
+    assert(is-err(out), "increase.environment production blocks simulations")
+    assert(is-err(typo), "an invalid environment blocks simulations")
+}
+
+test-simulation-required-fields
+meta ["test"] fn () {
+    out ::increase::simulations/create-inbound-ach-transfer({amount: 100}, {})
+    assert(is-err(out))
+    assert(contains(err-message(out), "account_number_id"))
+}

@@ -1,0 +1,182 @@
+::increase::test::standard-webhooks ns
+meta ["test"]
+
+// Vectors from the Standard Webhooks reference test suite
+// (github.com/standard-webhooks/standard-webhooks,
+// libraries/python/tests/test_webhooks.py). The unpadded-secret and
+// Increase vectors were computed independently with Python's hmac and
+// base64 modules and checked against the `standardwebhooks` PyPI package.
+
+::sw ::increase::standard-webhooks
+
+SECRET "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+RAW_SECRET "MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+MSG_ID "msg_p5jXN8AQM9LWM0D4loKWxJek"
+TIMESTAMP "1614265330"
+NOW 1614265330
+PAYLOAD """{"test": 2432232314}"""
+SIGNATURE "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="
+BINARY_SIGNATURE "v1,sEcZ042G8Crqgxbybb3y0eDxQR3TcfYsk11I1XULhSI="
+
+key fn (): Bytes {
+    ::sw/decode-secret(SECRET)
+}
+
+headers fn (signature: Str): Map {
+    {webhook-id: MSG_ID, webhook-timestamp: TIMESTAMP, webhook-signature: signature}
+}
+
+binary-payload fn (): Bytes {
+    Bytes(range(0, 256))
+}
+
+// ============================================================================
+// Signing (known answers)
+// ============================================================================
+
+test-sign-reference-vector
+meta ["test"] fn () {
+    assert-eq(SIGNATURE, ::sw/sign(key(), MSG_ID, TIMESTAMP, PAYLOAD))
+}
+
+test-sign-binary-payload
+meta ["test"] fn () {
+    // Every byte value: the body is not valid UTF-8 and is signed as given.
+    assert-eq(BINARY_SIGNATURE, ::sw/sign(::sw/decode-secret(RAW_SECRET), MSG_ID, TIMESTAMP, binary-payload()))
+}
+
+test-sign-str-and-utf8-bytes-agree
+meta ["test"] fn () {
+    payload """{"test": "ünïcödé ✓"}"""
+    assert-eq(::sw/sign(key(), MSG_ID, TIMESTAMP, payload), ::sw/sign(key(), MSG_ID, TIMESTAMP, Bytes(payload)))
+}
+
+test-signed-content
+meta ["test"] fn () {
+    assert-eq("msg_1.1614265330.{}", ::sw/signed-content("msg_1", "1614265330", "{}"))
+    assert(is-bytes(::sw/signed-content("msg_1", "1614265330", Bytes("{}"))), "a Bytes body stays Bytes")
+}
+
+test-endpoint-verification-response
+meta ["test"] fn () {
+    assert-eq("v1,2WoO4Z1kjgoudcvk4PX/8LDD6FNJDEUHMtYqZpNx/FA=",
+        ::sw/endpoint-verification-response(key(), "0njH7N3kV5eXPB+/eh+eoA2Ahvz2JgNp0iC/BLOl6yM="))
+    assert(ne("v1,2WoO4Z1kjgoudcvk4PX/8LDD6FNJDEUHMtYqZpNx/FA=",
+        ::sw/endpoint-verification-response(::sw/decode-secret("whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSx"), "0njH7N3kV5eXPB+/eh+eoA2Ahvz2JgNp0iC/BLOl6yM=")),
+        "depends on the secret")
+}
+
+// ============================================================================
+// Secrets
+// ============================================================================
+
+test-decode-secret-with-and-without-prefix
+meta ["test"] fn () {
+    assert-eq(::sw/decode-secret(SECRET), ::sw/decode-secret(RAW_SECRET))
+    assert-eq(24, length(::sw/decode-secret(SECRET)))
+}
+
+test-decode-secret-unpadded
+meta ["test"] fn () {
+    one ::sw/decode-secret("MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaS")
+    two ::sw/decode-secret("whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSwBr")
+    assert-eq("v1,LVOXivKoo4FWasi/IaHvzhE/u+7/cu2AME+zS/nXqzk=", ::sw/sign(one, MSG_ID, TIMESTAMP, PAYLOAD), "needs one '='")
+    assert-eq("v1,yK2tMbA6BHPrMEJ1lLv7UlJJbgFoqGenJkiajZ29evg=", ::sw/sign(two, MSG_ID, TIMESTAMP, PAYLOAD), "needs '=='")
+    assert-eq("MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaQ=", ::sw/pad-base64("MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaS"), "padded, with the unused low bits cleared")
+    assert-eq("MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw", ::sw/pad-base64("MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"), "canonical input is unchanged")
+}
+
+test-decode-secret-rejects-empty-and-garbage
+meta ["test"] fn () {
+    assert(is-err(::sw/decode-secret("")), "empty")
+    assert(is-err(::sw/decode-secret("whsec_")), "prefix only")
+    assert(is-err(::sw/decode-secret("not base64!")), "not base64")
+}
+
+// ============================================================================
+// Verification
+// ============================================================================
+
+test-verify-valid
+meta ["test"] fn () {
+    assert(::sw/verify-at(headers(SIGNATURE), PAYLOAD, key(), 300, NOW), "reference vector verifies")
+    assert(::sw/verify-at(headers(SIGNATURE), Bytes(PAYLOAD), key(), 300, NOW), "as bytes too")
+    assert(::sw/verify-at(headers(BINARY_SIGNATURE), binary-payload(), key(), 300, NOW), "a binary body verifies byte for byte")
+}
+
+test-verify-header-names-ignore-case
+meta ["test"] fn () {
+    mixed {Webhook-Id: MSG_ID, WEBHOOK-TIMESTAMP: TIMESTAMP, Webhook-Signature: SIGNATURE}
+    assert(::sw/verify-at(mixed, PAYLOAD, key(), 300, NOW))
+}
+
+test-verify-rejects-tampering
+meta ["test"] fn () {
+    assert(not(::sw/verify-at(headers(SIGNATURE), """{"test": 2432232315}""", key(), 300, NOW)), "tampered body")
+    assert(not(::sw/verify-at(headers("v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OA="), PAYLOAD, key(), 300, NOW)), "wrong signature")
+    assert(not(::sw/verify-at({...headers(SIGNATURE), webhook-id: "msg_other"}, PAYLOAD, key(), 300, NOW)), "the id is signed")
+    assert(not(::sw/verify-at({...headers(SIGNATURE), webhook-timestamp: "1614265331"}, PAYLOAD, key(), 300, NOW)), "the timestamp is signed")
+    assert(not(::sw/verify-at(headers(SIGNATURE), PAYLOAD, ::sw/decode-secret("whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSx"), 300, NOW)), "wrong secret")
+    changed concat(slice(::hot::bytes/to-vec(binary-payload()), 0, 255), [0])
+    assert(not(::sw/verify-at(headers(BINARY_SIGNATURE), Bytes(changed), key(), 300, NOW)), "a changed byte")
+}
+
+test-verify-rejects-stale-and-future
+meta ["test"] fn () {
+    assert(::sw/verify-at(headers(SIGNATURE), PAYLOAD, key(), 300, add(NOW, 300)), "exactly at the tolerance passes")
+    assert(not(::sw/verify-at(headers(SIGNATURE), PAYLOAD, key(), 300, add(NOW, 301))), "older than five minutes")
+    assert(not(::sw/verify-at(headers(SIGNATURE), PAYLOAD, key(), 300, sub(NOW, 301))), "more than five minutes in the future")
+    assert(not(::sw/verify(headers(SIGNATURE), PAYLOAD, key())), "the 2021 vector is stale against the real clock")
+}
+
+test-verify-rejects-missing-headers
+meta ["test"] fn () {
+    full headers(SIGNATURE)
+    assert(not(::sw/verify-at(delete(full, "webhook-id"), PAYLOAD, key(), 300, NOW)), "missing id")
+    assert(not(::sw/verify-at(delete(full, "webhook-timestamp"), PAYLOAD, key(), 300, NOW)), "missing timestamp")
+    assert(not(::sw/verify-at(delete(full, "webhook-signature"), PAYLOAD, key(), 300, NOW)), "missing signature")
+    assert(not(::sw/verify-at({}, PAYLOAD, key(), 300, NOW)), "no headers")
+    assert(not(::sw/verify-at({...full, webhook-timestamp: "hello"}, PAYLOAD, key(), 300, NOW)), "non-numeric timestamp")
+}
+
+test-verify-fails-closed-on-empty-key-and-tolerance
+meta ["test"] fn () {
+    assert(not(::sw/verify-at(headers(SIGNATURE), PAYLOAD, "", 300, NOW)), "an empty key never verifies")
+    assert(not(::sw/verify-at(headers(SIGNATURE), PAYLOAD, Bytes(""), 300, NOW)), "an empty Bytes key never verifies")
+    assert(not(::sw/verify-at(headers(SIGNATURE), PAYLOAD, key(), 0, NOW)), "a zero tolerance rejects")
+}
+
+test-verify-multiple-signatures
+meta ["test"] fn () {
+    many join([
+        "v1,Ceo5qEr07ixe2NLpvHk3FH9bwy/WavXrAFQ/9tdO6mc=",
+        "v2,Ceo5qEr07ixe2NLpvHk3FH9bwy/WavXrAFQ/9tdO6mc=",
+        SIGNATURE,
+        "v1,Ceo5qEr07ixe2NLpvHk3FH9bwy/WavXrAFQ/9tdO6mc="
+    ], " ")
+    assert(::sw/verify-at(headers(many), PAYLOAD, key(), 300, NOW), "one valid signature among several (secret rotation)")
+    assert-eq(4, length(::sw/signatures(many)))
+}
+
+test-verify-skips-malformed-signatures
+meta ["test"] fn () {
+    many join(["v1", "v1,not-base64!", "v1,a,b", SIGNATURE], " ")
+    assert(::sw/verify-at(headers(many), PAYLOAD, key(), 300, NOW))
+}
+
+test-verify-rejects-unknown-versions
+meta ["test"] fn () {
+    assert(not(::sw/verify-at(headers("v2,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="), PAYLOAD, key(), 300, NOW)), "v2 isn't v1")
+    assert(not(::sw/verify-at(headers("v1a,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="), PAYLOAD, key(), 300, NOW)), "asymmetric signatures aren't supported")
+    assert(not(::sw/verify-at(headers("g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="), PAYLOAD, key(), 300, NOW)), "an unversioned signature")
+}
+
+test-verify-request-uses-raw-body
+meta ["test"] fn () {
+    ts `${::hot::time/epoch-seconds()}`
+    body """{"id": "evt_1"}"""
+    sig ::sw/sign(key(), "msg_live", ts, body)
+    request {headers: {webhook-id: "msg_live", webhook-timestamp: ts, webhook-signature: sig}, body: {id: "evt_1"}, body-raw: body}
+    assert(::sw/verify-request(request, key()), "a fresh delivery verifies against body-raw")
+    assert(not(::sw/verify-request({...request, body-raw: """{"id":"evt_1"}"""}, key())), "a re-serialized body doesn't")
+}

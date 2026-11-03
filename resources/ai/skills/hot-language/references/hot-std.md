@@ -291,12 +291,41 @@ attr fn (node: Map, name: Str): Str                      // Get attribute value
 at fn (node: Map, path: Str): Any                        // Navigate XML path
 ```
 
+### CSV and TSV (core)
+
+Namespace `::hot::csv`. Values stay `Str`, so ZIP codes and IDs keep their leading zeros. Malformed input is an Err naming the line.
+
+<!-- hot-check: skip -->
+```hot
+from-csv fn (text: Str | Bytes): Vec<Map>                // First row is the header
+from-csv fn (text: Str | Bytes, opts: Map): Vec          // header: false returns Vec<Vec<Str>>
+to-csv fn (rows: Vec): Str                               // Vec of Maps or Vec of Vecs
+to-csv fn (rows: Vec, opts: Map): Str
+iter-csv fn (source: Iter | Str | Bytes): Iter           // One row at a time, from Str or Bytes chunks
+iter-csv fn (source: Iter | Str | Bytes, opts: Map): Iter
+from-tsv, to-tsv, iter-tsv                               // The same, with a tab delimiter
+```
+
+Read options: `delimiter`, `quote` (`false` makes quotes ordinary text), `header`, `columns`, `comment`, `trim`, `skip-empty`, `strict`, `types` (column name to `"Int"`, `"Dec"` or `"Bool"`; an empty cell becomes null). `columns` alone means the first row is data; add `header: true` to replace a header row.
+
+Write options: `delimiter`, `quote`, `columns`, `header`, `line-ending`, `escape-formulas` (off by default because it changes the data; use it for files opened in a spreadsheet).
+
+`from-csv` returns rows that are recorded in `call.return_value` and in the `call.args` of each function they're passed to, in blob storage when they're over 1 MB as JSON. That's slow and memory-heavy for large files, and rows often hold personal data. For large files or personal data use `iter-csv` with a lambda: a lambda's row isn't recorded, but a named function called with one records it.
+
+```hot
+total reduce(iter-csv(read-file-stream("orders.csv")), (sum, row) {
+    add(sum, Dec(row.amount))
+}, 0)
+```
+
 ### File I/O (core)
 
 <!-- hot-check: skip -->
 ```hot
 read-file fn (path: Str): Str                            // Read file as UTF-8 string
 read-file-bytes fn (path: Str): Bytes                    // Read file as bytes
+read-file-stream fn (path: Str): Iter                    // Iterate over Bytes chunks without loading the file
+read-file-stream fn (path: Str, opts: Map): Iter         // opts.chunk-size in bytes, default 64 KB
 write-file fn (path: Str, content: Str): Bool            // Write string to file
 write-file-bytes fn (path: Str, content: Bytes): Bool    // Write bytes to file
 delete-file fn (path: Str): Bool                         // Delete a file
@@ -488,8 +517,13 @@ sha512 fn (data: Str | Bytes): Str                       // SHA-512 (128-char he
 ```hot
 ::hmac ::hot::hmac
 
+hmac-sha256 fn (key: Str | Bytes, data: Str | Bytes): Str  // HMAC-SHA256 (64-char hex)
+hmac-sha256-bytes fn (key: Str | Bytes, data: Str | Bytes): Bytes  // HMAC-SHA256, as raw bytes
 hmac-sha512 fn (key: Str | Bytes, data: Str | Bytes): Str  // HMAC-SHA512 (128-char hex)
 hmac-sha1 fn (key: Str | Bytes, data: Str | Bytes): Str    // HMAC-SHA1 (legacy)
+hmac-verify fn (key: Str | Bytes, data: Str | Bytes, expected: Str, algorithm: Str): Bool       // Check an HMAC in constant time
+hmac-verify-hex fn (key: Str | Bytes, data: Str | Bytes, expected-hex: Str, algorithm: Str): Bool
+hmac-verify-base64 fn (key: Str | Bytes, data: Str | Bytes, expected-b64: Str, algorithm: Str): Bool
 ```
 
 ### ::hot::time

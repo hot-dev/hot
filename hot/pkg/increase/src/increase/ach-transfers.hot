@@ -1,0 +1,99 @@
+::increase::ach-transfers ns
+meta {
+    doc: """
+    ACH Transfers over FedACH. Statuses run `pending_approval` (when
+    `require_approval` was set) to `pending_submission`, `submitted`, and
+    possibly `returned` days later: follow `ach_transfer.updated` events
+    rather than polling. ACH settles in one to three banking days, or the
+    same day with `preferred_effective_date: {settlement_schedule: "same_day"}`.
+    """
+}
+
+::api ::increase::api
+seg ::increase::api/seg
+
+create-ach-transfer
+meta {
+    doc: """
+    POST /ach_transfers: create an ACH Transfer. Moves money: `opts` must carry an
+    `idempotency-key` (the call errs without one and sends nothing), and
+    the call is never retried. `params` needs `account_id`, `amount`, `statement_descriptor`.
+
+    The destination is either `external_account_id` or `account_number`
+    plus `routing_number`. A positive `amount` (cents) is a credit (push);
+    a negative one is a debit (pull), which needs ACH debit approval on
+    the program. Other fields: `individual_name`, `individual_id`,
+    `company_name`, `company_entry_description`,
+    `standard_entry_class_code`, `funding`, `destination_account_holder`,
+    `preferred_effective_date: {date, settlement_schedule}`, `addenda`.
+
+    **Example**
+
+    ```hot
+    ::increase::ach-transfers/create-ach-transfer({
+      account_id: "account_in71c4amph0vgo2qllky",
+      external_account_id: "external_account_ukk55lr923a3ac0pp7iv",
+      amount: 10000,
+      statement_descriptor: "Invoice 42",
+      require_approval: true
+    }, {idempotency-key: "invoice-42-payout"})
+    ```
+
+    Set `require_approval: true` (or the `increase.transfers.require-approval`
+    context variable) so a person approves the transfer before it is sent.
+    """
+}
+fn (params: Map, opts: Map): Map {
+  ::api/move-money("/ach_transfers", params, ["account_id", "amount", "statement_descriptor"], true, opts, "create-ach-transfer")
+}
+
+get-ach-transfer
+meta {
+    doc: """GET /ach_transfers/{id}: retrieve an ACH Transfer."""
+}
+fn
+(transfer-id: Str): Map {
+  get-ach-transfer(transfer-id, {})
+},
+(transfer-id: Str, opts: Map): Map {
+  ::api/call("GET", `/ach_transfers/${seg(transfer-id)}`, {}, opts)
+}
+
+list-ach-transfers
+meta {
+    doc: """GET /ach_transfers: one page of ACH Transfers (`{data, next_cursor}`). Filters: `account_id`, `external_account_id`, `"status.in"`, `idempotency_key`, `created_at: {after, before, on_or_after, on_or_before}`, `limit`, `cursor`."""
+}
+fn
+(): Map {
+  list-ach-transfers({})
+},
+(params: Map): Map {
+  list-ach-transfers(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/list-page("/ach_transfers", params, opts)
+}
+
+approve-ach-transfer
+meta {
+    doc: """POST /ach_transfers/{id}/approve: approve an ACH Transfer in `pending_approval`. Approving releases the transfer to be sent: agents must not approve on their own; leave it to a person (in the Increase dashboard, or through your own approval step that calls this)."""
+}
+fn
+(transfer-id: Str): Map {
+  approve-ach-transfer(transfer-id, {})
+},
+(transfer-id: Str, opts: Map): Map {
+  ::api/call("POST", `/ach_transfers/${seg(transfer-id)}/approve`, {}, opts)
+}
+
+cancel-ach-transfer
+meta {
+    doc: """POST /ach_transfers/{id}/cancel: cancel an ACH Transfer that is still `pending_approval`."""
+}
+fn
+(transfer-id: Str): Map {
+  cancel-ach-transfer(transfer-id, {})
+},
+(transfer-id: Str, opts: Map): Map {
+  ::api/call("POST", `/ach_transfers/${seg(transfer-id)}/cancel`, {}, opts)
+}

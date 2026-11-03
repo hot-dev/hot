@@ -1,46 +1,72 @@
 ::discord::webhooks ns
+meta {
+    doc: """
+    Webhooks: manage channel webhooks with the bot token, send and edit
+    messages through a webhook's own token (no bot token needed), and
+    verify Discord's Ed25519-signed interaction and event requests.
+    """
+}
 
-api-request ::discord::api/request
-HttpError ::discord::api/HttpError
-is-ok-response ::hot::http/is-ok-response
+::api ::discord::api
+::ctx ::hot::ctx
+
+seg ::discord::api/seg
 
 // ============================================================================
-// Webhook Management
+// Webhook management (bot token)
 // ============================================================================
+
+mark-webhook-tokens
+meta {
+    doc: """Mask the `token` of a webhook object, or of each in a Vec, in call records. Returns `value` unchanged. Exposed for testing."""
+}
+fn (value: Any): Any {
+  cond {
+    is-vec(value) => { map(value, mark-webhook-tokens) }
+    and(is-map(value), is-str(get(value, "token"))) => {
+      ::ctx/mark-secret(value.token)
+      value
+    }
+    => { value }
+  }
+}
 
 CreateWebhookRequest type {
   channel_id: Str,
   name: Str,
-  avatar: Str?
+  avatar: Str?,
+  reason: Str?
 }
 
 create-webhook
 meta {
     doc: """
-POST /channels/{channel_id}/webhooks - Create a new webhook for a channel. Requires MANAGE_WEBHOOKS. Webhook names must be between 1 and 80 characters.
+    POST /channels/{channel_id}/webhooks - Create a webhook (name 1-80
+    characters; `avatar` is a data URI). The result carries the `token`
+    used by `execute-webhook`. Needs MANAGE_WEBHOOKS.
 
-**Example**
+    **Example**
 
-```hot
-::webhooks ::discord::webhooks
+    ```hot
+    ::webhooks ::discord::webhooks
 
-response ::webhooks/create-webhook(::webhooks/CreateWebhookRequest({
-  channel_id: "123456789",
-  name: "Hot Notifications"
-}))
-response.id     // => "webhook-id"
-response.token  // => "webhook-token"
-```
-"""
+    hook ::webhooks/create-webhook(::webhooks/CreateWebhookRequest({
+      channel_id: "1100000000000000000",
+      name: "Hot Notifications"
+    }))
+    hook.token
+    ```
+    """
 }
-fn (request: CreateWebhookRequest): Map {
-  body {
-    name: request.name,
-    avatar: request.avatar
-  }
-
-  response api-request("POST", `${::discord::core/BASE_URL}/channels/${request.channel_id}/webhooks`, {}, body)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: CreateWebhookRequest): Map {
+  create-webhook(request, {})
+},
+(request: CreateWebhookRequest, opts: Map): Map {
+  if-ok(::api/call("POST", `/channels/${seg(request.channel_id)}/webhooks`, {
+    body: ::api/body(request, ["channel_id"]),
+    reason: request.reason
+  }, opts), mark-webhook-tokens)
 }
 
 GetChannelWebhooksRequest type {
@@ -49,11 +75,14 @@ GetChannelWebhooksRequest type {
 
 get-channel-webhooks
 meta {
-    doc: """GET /channels/{channel_id}/webhooks - List all webhooks for a channel. Requires MANAGE_WEBHOOKS."""
+    doc: """GET /channels/{channel_id}/webhooks - Webhooks in a channel. Needs MANAGE_WEBHOOKS."""
 }
-fn (request: GetChannelWebhooksRequest): Vec<Map> {
-  response api-request("GET", `${::discord::core/BASE_URL}/channels/${request.channel_id}/webhooks`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: GetChannelWebhooksRequest): Vec<Map> {
+  get-channel-webhooks(request, {})
+},
+(request: GetChannelWebhooksRequest, opts: Map): Vec<Map> {
+  if-ok(::api/call("GET", `/channels/${seg(request.channel_id)}/webhooks`, {}, opts), mark-webhook-tokens)
 }
 
 GetGuildWebhooksRequest type {
@@ -62,11 +91,14 @@ GetGuildWebhooksRequest type {
 
 get-guild-webhooks
 meta {
-    doc: """GET /guilds/{guild_id}/webhooks - List all webhooks for a guild. Requires MANAGE_WEBHOOKS."""
+    doc: """GET /guilds/{guild_id}/webhooks - Webhooks in a guild. Needs MANAGE_WEBHOOKS."""
 }
-fn (request: GetGuildWebhooksRequest): Vec<Map> {
-  response api-request("GET", `${::discord::core/BASE_URL}/guilds/${request.guild_id}/webhooks`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: GetGuildWebhooksRequest): Vec<Map> {
+  get-guild-webhooks(request, {})
+},
+(request: GetGuildWebhooksRequest, opts: Map): Vec<Map> {
+  if-ok(::api/call("GET", `/guilds/${seg(request.guild_id)}/webhooks`, {}, opts), mark-webhook-tokens)
 }
 
 GetWebhookRequest type {
@@ -75,11 +107,78 @@ GetWebhookRequest type {
 
 get-webhook
 meta {
-    doc: """GET /webhooks/{webhook_id} - Get a webhook by ID. Requires MANAGE_WEBHOOKS or that the webhook belongs to the current user."""
+    doc: """GET /webhooks/{webhook_id} - A webhook by id. Needs MANAGE_WEBHOOKS."""
 }
-fn (request: GetWebhookRequest): Map {
-  response api-request("GET", `${::discord::core/BASE_URL}/webhooks/${request.webhook_id}`)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: GetWebhookRequest): Map {
+  get-webhook(request, {})
+},
+(request: GetWebhookRequest, opts: Map): Map {
+  if-ok(::api/call("GET", `/webhooks/${seg(request.webhook_id)}`, {}, opts), mark-webhook-tokens)
+}
+
+ModifyWebhookRequest type {
+  webhook_id: Str,
+  name: Str?,
+  avatar: Str?,
+  channel_id: Str?,
+  reason: Str?,
+  clear: Vec<Str>?
+}
+
+modify-webhook
+meta {
+    doc: """
+    PATCH /webhooks/{webhook_id} - Rename a webhook, change its avatar, or
+    move it to `channel_id`. Only fields you set are sent;
+    `clear: ["avatar"]` removes the avatar. Needs MANAGE_WEBHOOKS.
+
+    **Example**
+
+    ```hot
+    ::webhooks ::discord::webhooks
+
+    ::webhooks/modify-webhook(::webhooks/ModifyWebhookRequest({
+      webhook_id: "1600000000000000000",
+      channel_id: "1100000000000000001"
+    }))
+    ```
+    """
+}
+fn
+(request: ModifyWebhookRequest): Map {
+  modify-webhook(request, {})
+},
+(request: ModifyWebhookRequest, opts: Map): Map {
+  ::api/call("PATCH", `/webhooks/${seg(request.webhook_id)}`, {
+    body: ::api/body(request, ["webhook_id"]),
+    reason: request.reason
+  }, opts)
+}
+
+DeleteWebhookRequest type {
+  webhook_id: Str,
+  reason: Str?
+}
+
+delete-webhook
+meta {
+    doc: """DELETE /webhooks/{webhook_id} - Delete a webhook. Needs MANAGE_WEBHOOKS."""
+}
+fn
+(request: DeleteWebhookRequest): Bool {
+  delete-webhook(request, {})
+},
+(request: DeleteWebhookRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `/webhooks/${seg(request.webhook_id)}`, {reason: request.reason}, opts)
+}
+
+// ============================================================================
+// Webhook-token routes (no bot token)
+// ============================================================================
+
+token-path fn (webhook-id: Str, webhook-token: Str): Str {
+  `/webhooks/${seg(webhook-id)}/${::api/token-seg(webhook-token)}`
 }
 
 GetWebhookWithTokenRequest type {
@@ -89,62 +188,62 @@ GetWebhookWithTokenRequest type {
 
 get-webhook-with-token
 meta {
-    doc: """GET /webhooks/{webhook_id}/{webhook_token} - Get a webhook using its token. Does not require authentication or MANAGE_WEBHOOKS permission."""
+    doc: """GET /webhooks/{webhook_id}/{webhook_token} - A webhook, authenticated by its token (no bot token, no `user` field)."""
 }
-fn (request: GetWebhookWithTokenRequest): Map {
-  response ::hot::http/request(::hot::http/HttpRequest({
-    method: "GET",
-    url: `${::discord::core/BASE_URL}/webhooks/${request.webhook_id}/${request.webhook_token}`,
-    headers: {},
-    body: ""
-  }))
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: GetWebhookWithTokenRequest): Map {
+  get-webhook-with-token(request, {})
+},
+(request: GetWebhookWithTokenRequest, opts: Map): Map {
+  ::api/call("GET", token-path(request.webhook_id, request.webhook_token), {auth: false}, opts)
 }
 
-ModifyWebhookRequest type {
+ModifyWebhookWithTokenRequest type {
   webhook_id: Str,
+  webhook_token: Str,
   name: Str?,
   avatar: Str?,
-  channel_id: Str?
+  clear: Vec<Str>?
 }
 
-modify-webhook
+modify-webhook-with-token
 meta {
-    doc: """PATCH /webhooks/{webhook_id} - Modify a webhook. Requires MANAGE_WEBHOOKS. Can change name, avatar, and channel."""
+    doc: """PATCH /webhooks/{webhook_id}/{webhook_token} - Rename a webhook or change its avatar using its token. Cannot move channels."""
 }
-fn (request: ModifyWebhookRequest): Map {
-  body {
-    name: request.name,
-    avatar: request.avatar,
-    channel_id: request.channel_id
-  }
-
-  response api-request("PATCH", `${::discord::core/BASE_URL}/webhooks/${request.webhook_id}`, {}, body)
-  if(is-ok-response(response), response.body, err(HttpError(response)))
-}
-
-DeleteWebhookRequest type {
-  webhook_id: Str
+fn
+(request: ModifyWebhookWithTokenRequest): Map {
+  modify-webhook-with-token(request, {})
+},
+(request: ModifyWebhookWithTokenRequest, opts: Map): Map {
+  ::api/call("PATCH", token-path(request.webhook_id, request.webhook_token), {
+    body: ::api/body(request, ["webhook_id", "webhook_token"]),
+    auth: false
+  }, opts)
 }
 
-delete-webhook
+DeleteWebhookWithTokenRequest type {
+  webhook_id: Str,
+  webhook_token: Str
+}
+
+delete-webhook-with-token
 meta {
-    doc: """DELETE /webhooks/{webhook_id} - Permanently delete a webhook. Requires MANAGE_WEBHOOKS."""
+    doc: """DELETE /webhooks/{webhook_id}/{webhook_token} - Delete a webhook using its token."""
 }
-fn (request: DeleteWebhookRequest): Bool {
-  response api-request("DELETE", `${::discord::core/BASE_URL}/webhooks/${request.webhook_id}`)
-  if(is-ok-response(response), true, err(HttpError(response)))
+fn
+(request: DeleteWebhookWithTokenRequest): Bool {
+  delete-webhook-with-token(request, {})
+},
+(request: DeleteWebhookWithTokenRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", token-path(request.webhook_id, request.webhook_token), {auth: false}, opts)
 }
-
-// ============================================================================
-// Execute Webhook (no bot auth required — uses webhook token)
-// ============================================================================
 
 ExecuteWebhookRequest type {
   webhook_id: Str,
   webhook_token: Str,
   wait: Bool?,
   thread_id: Str?,
+  with_components: Bool?,
   content: Str?,
   username: Str?,
   avatar_url: Str?,
@@ -152,50 +251,64 @@ ExecuteWebhookRequest type {
   embeds: Vec<Map>?,
   allowed_mentions: Map?,
   components: Vec<Map>?,
-  flags: Int?
+  attachments: Vec<Map>?,
+  flags: Int?,
+  thread_name: Str?,
+  applied_tags: Vec<Str>?,
+  poll: Map?,
+  files: Vec<::discord::api/FileUpload>?
 }
 
 execute-webhook
 meta {
     doc: """
-POST /webhooks/{webhook_id}/{webhook_token} - Execute a webhook to send a message. Does not require bot authentication. Set `wait: true` to get the created message object back.
+    POST /webhooks/{webhook_id}/{webhook_token} - Send a message through a
+    webhook. No bot token needed. Returns the message when `wait: true`,
+    otherwise `null` (204). Provide at least one of `content`, `embeds`,
+    `components`, `poll` or `files`.
 
-**Example**
+    - `thread_id` posts into a thread; in a forum or media channel pass
+      `thread_name` (and optional `applied_tags`) to create a post instead.
+    - `username` / `avatar_url` override the webhook's identity per message.
+    - `with_components: true` is needed for components on a webhook your
+      app doesn't own (non-interactive components only).
+    - `files` uploads attachments (multipart); refer to one in an embed as
+      `attachment://<filename>`.
 
-```hot
-::webhooks ::discord::webhooks
+    **Example**
 
-response ::webhooks/execute-webhook(::webhooks/ExecuteWebhookRequest({
-  webhook_id: "123456789",
-  webhook_token: "my-webhook-token",
-  content: "Alert: deployment complete!",
-  wait: true
-}))
-response.id  // => "message-id" (only when wait=true)
-```
-"""
+    ```hot
+    ::webhooks ::discord::webhooks
+
+    msg ::webhooks/execute-webhook(::webhooks/ExecuteWebhookRequest({
+      webhook_id: "1600000000000000000",
+      webhook_token: "webhook-token",
+      content: "Deploy complete",
+      embeds: [{title: "v2.1.0", color: 3066993}],
+      wait: true
+    }))
+    msg.id
+    ```
+    """
 }
-fn (request: ExecuteWebhookRequest): Map {
-  body {
-    content: request.content,
-    username: request.username,
-    avatar_url: request.avatar_url,
-    tts: request.tts,
-    embeds: request.embeds,
-    allowed_mentions: request.allowed_mentions,
-    components: request.components,
-    flags: request.flags
+fn
+(request: ExecuteWebhookRequest): Map? {
+  execute-webhook(request, {})
+},
+(request: ExecuteWebhookRequest, opts: Map): Map? {
+  files or(request.files, [])
+  payload ::api/body(request, ["webhook_id", "webhook_token", "wait", "thread_id", "with_components"])
+  final cond {
+    and(not(is-empty(files)), is-null(request.attachments)) => { assoc(payload, "attachments", ::api/attachments-for(files)) }
+    => { payload }
   }
 
-  query-wait if(eq(request.wait, true), "true", "")
-  query-thread if(is-some(request.thread_id), request.thread_id, "")
-  response ::hot::http/request(::hot::http/HttpRequest({
-    method: "POST",
-    url: `${::discord::core/BASE_URL}/webhooks/${request.webhook_id}/${request.webhook_token}?wait=${query-wait}&thread_id=${query-thread}`,
-    headers: {Content-Type: "application/json"},
-    body: to-json(untype(body))
-  }))
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+  ::api/call("POST", token-path(request.webhook_id, request.webhook_token), {
+    query: {wait: request.wait, thread_id: request.thread_id, with_components: request.with_components},
+    body: final,
+    files: files,
+    auth: false
+  }, opts)
 }
 
 GetWebhookMessageRequest type {
@@ -207,16 +320,17 @@ GetWebhookMessageRequest type {
 
 get-webhook-message
 meta {
-    doc: """GET /webhooks/{webhook_id}/{webhook_token}/messages/{message_id} - Get a previously sent webhook message."""
+    doc: """GET /webhooks/{webhook_id}/{webhook_token}/messages/{message_id} - A message this webhook sent. Pass `thread_id` for messages in a thread."""
 }
-fn (request: GetWebhookMessageRequest): Map {
-  response ::hot::http/request(::hot::http/HttpRequest({
-    method: "GET",
-    url: `${::discord::core/BASE_URL}/webhooks/${request.webhook_id}/${request.webhook_token}/messages/${request.message_id}?thread_id=${or(request.thread_id, "")}`,
-    headers: {},
-    body: ""
-  }))
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: GetWebhookMessageRequest): Map {
+  get-webhook-message(request, {})
+},
+(request: GetWebhookMessageRequest, opts: Map): Map {
+  ::api/call("GET", `${token-path(request.webhook_id, request.webhook_token)}/messages/${seg(request.message_id)}`, {
+    query: {thread_id: request.thread_id},
+    auth: false
+  }, opts)
 }
 
 EditWebhookMessageRequest type {
@@ -224,31 +338,37 @@ EditWebhookMessageRequest type {
   webhook_token: Str,
   message_id: Str,
   thread_id: Str?,
+  with_components: Bool?,
   content: Str?,
   embeds: Vec<Map>?,
+  flags: Int?,
   allowed_mentions: Map?,
-  components: Vec<Map>?
+  components: Vec<Map>?,
+  attachments: Vec<Map>?,
+  poll: Map?,
+  files: Vec<::discord::api/FileUpload>?,
+  clear: Vec<Str>?
 }
 
 edit-webhook-message
 meta {
-    doc: """PATCH /webhooks/{webhook_id}/{webhook_token}/messages/{message_id} - Edit a previously sent webhook message."""
+    doc: """
+    PATCH /webhooks/{webhook_id}/{webhook_token}/messages/{message_id} -
+    Edit a message this webhook sent. Only fields you set are sent.
+    `attachments` is the full list to keep; new `files` are appended.
+    """
 }
-fn (request: EditWebhookMessageRequest): Map {
-  body {
-    content: request.content,
-    embeds: request.embeds,
-    allowed_mentions: request.allowed_mentions,
-    components: request.components
-  }
-
-  response ::hot::http/request(::hot::http/HttpRequest({
-    method: "PATCH",
-    url: `${::discord::core/BASE_URL}/webhooks/${request.webhook_id}/${request.webhook_token}/messages/${request.message_id}?thread_id=${or(request.thread_id, "")}`,
-    headers: {Content-Type: "application/json"},
-    body: to-json(untype(body))
-  }))
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(request: EditWebhookMessageRequest): Map {
+  edit-webhook-message(request, {})
+},
+(request: EditWebhookMessageRequest, opts: Map): Map {
+  ::api/call("PATCH", `${token-path(request.webhook_id, request.webhook_token)}/messages/${seg(request.message_id)}`, {
+    query: {thread_id: request.thread_id, with_components: request.with_components},
+    body: ::api/body(request, ["webhook_id", "webhook_token", "message_id", "thread_id", "with_components"]),
+    files: or(request.files, []),
+    auth: false
+  }, opts)
 }
 
 DeleteWebhookMessageRequest type {
@@ -260,47 +380,64 @@ DeleteWebhookMessageRequest type {
 
 delete-webhook-message
 meta {
-    doc: """DELETE /webhooks/{webhook_id}/{webhook_token}/messages/{message_id} - Delete a previously sent webhook message."""
+    doc: """DELETE /webhooks/{webhook_id}/{webhook_token}/messages/{message_id} - Delete a message this webhook sent."""
 }
-fn (request: DeleteWebhookMessageRequest): Bool {
-  response ::hot::http/request(::hot::http/HttpRequest({
-    method: "DELETE",
-    url: `${::discord::core/BASE_URL}/webhooks/${request.webhook_id}/${request.webhook_token}/messages/${request.message_id}?thread_id=${or(request.thread_id, "")}`,
-    headers: {},
-    body: ""
-  }))
-  if(is-ok-response(response), true, err(HttpError(response)))
+fn
+(request: DeleteWebhookMessageRequest): Bool {
+  delete-webhook-message(request, {})
+},
+(request: DeleteWebhookMessageRequest, opts: Map): Bool {
+  ::api/call-ok("DELETE", `${token-path(request.webhook_id, request.webhook_token)}/messages/${seg(request.message_id)}`, {
+    query: {thread_id: request.thread_id},
+    auth: false
+  }, opts)
 }
 
 // ============================================================================
-// Interaction Webhook Signature Verification (Ed25519)
+// Request signature verification (Ed25519)
 // ============================================================================
-// Discord signs interaction callbacks with Ed25519. The public key is provided
-// in your application settings. The signature is in the X-Signature-Ed25519
-// header and the timestamp in X-Signature-Timestamp.
+// Discord signs interaction callbacks (and webhook events) with Ed25519
+// over `${X-Signature-Timestamp}${raw body}`, using the application's
+// public key from the Developer Portal. Discord sends a signed PING when
+// you save the endpoint URL and periodically sends invalid signatures to
+// check that you reject them: answer 401 on failure.
 //
 // See: https://discord.com/developers/docs/interactions/receiving-and-responding#security-and-authorization
 
+signed-message fn (timestamp: Str, raw: Str | Bytes): Str | Bytes {
+  if(is-bytes(raw), concat(Bytes(timestamp), raw), `${timestamp}${raw}`)
+}
+
 verify-request
 meta {
-    ctx: {"discord.public.key": {required: false}},
+    ctx: {"discord.public.key": {required: false, secret: false}},
     doc: """
-  Verify a Discord interaction webhook using Ed25519 signature. Returns true if the request is authentic and its timestamp is within the replay window (default 300 seconds; pass 0 as the third argument to disable). Uses the `discord.public.key` context variable by default, or accepts an explicit public key as a second argument.
+    Verify a Discord interaction (or webhook event) request: the Ed25519
+    signature in `X-Signature-Ed25519` over `X-Signature-Timestamp` plus
+    the raw body (`::hot::http/raw-body`), and a replay window on the
+    timestamp (default 300 seconds; pass 0 as the third argument to
+    disable). Returns false for missing headers, a bad signature, a stale
+    or non-numeric timestamp, or an invalid public key.
 
-  The replay window is stricter than Discord requires (Discord mandates only signature verification): a server clock skewed more than 5 minutes will reject every interaction — including Discord's endpoint-verification PING — with no signature error to distinguish it. If verification fails on a host without reliable NTP, pass 0 to disable the window.
+    The 1-arity form reads `discord.public.key` and fails when it is not
+    set. The replay window is stricter than Discord requires: on a host
+    whose clock is more than 5 minutes off, every request (including
+    Discord's endpoint-verification PING) fails, so pass 0 there.
 
-  Discord requires interaction endpoints to verify every request. Failing verification should return a 401 response.
+    **Example**
 
-  **Example**
-
-  ```hot
-  // Using context variable (1-arity, most common)
-  is-valid ::discord::webhooks/verify-request(request)
-
-  // With explicit public key (2-arity)
-  is-valid ::discord::webhooks/verify-request(request, "your-ed25519-public-key")
-  ```
-  """
+    ```hot
+    on-interaction
+    meta {webhook: {service: "discord", path: "/interactions", method: "POST"}}
+    fn (request: ::hot::http/HttpRequest): ::hot::http/HttpResponse {
+      // Uses discord.public.key; pass the hex key as a second argument instead
+      cond {
+        not(::discord::webhooks/verify-request(request)) => { ::hot::http/HttpResponse({status: 401, body: "invalid request signature"}) }
+        => { ::hot::http/HttpResponse({status: 200, body: {type: 1}}) }
+      }
+    }
+    ```
+    """
 }
 fn
 (request: Map): Bool {
@@ -315,8 +452,9 @@ fn
 },
 // 3-arity: explicit replay tolerance in seconds (0 disables the check)
 (request: Map, public-key: Str, tolerance-seconds: Int): Bool {
-  signature get(request.headers, "x-signature-ed25519", "")
-  timestamp get(request.headers, "x-signature-timestamp", "")
+  headers or(get(request, "headers"), {})
+  signature or(get(headers, "x-signature-ed25519"), "")
+  timestamp or(get(headers, "x-signature-timestamp"), "")
 
   cond {
     is-empty(public-key) => { false }
@@ -333,8 +471,9 @@ fn
       cond {
         not(fresh) => { false }
         => {
-          message `${timestamp}${request.body-raw}`
-          ::hot::hash/ed25519-verify(public-key, message, signature)
+          valid ::hot::hash/ed25519-verify(public-key, signed-message(timestamp, ::hot::http/raw-body(request)), signature)
+          // A malformed public key is an Err: fail closed.
+          if(is-err(valid), false, valid)
         }
       }
     }

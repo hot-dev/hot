@@ -178,7 +178,11 @@ pub fn next(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         && let Some(ctx) = vm.get_execution_context()
     {
         let stream_data_id = Uuid::now_v7();
-        let payload_json: serde_json::Value = (&value).into();
+        // A stream's payload is meant for its consumer, but a run's secret isn't.
+        let delivered =
+            crate::lang::masking::RecordMask::new(&ctx.secret_values, &ctx.secret_value_hashes)
+                .mask_delivered(value.to_hot_data_repr());
+        let payload_json: serde_json::Value = (&delivered).into();
 
         let stream_event = crate::stream::StreamEvent::StreamData {
             stream_data_id,
@@ -221,7 +225,7 @@ pub fn next(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     result_map.insert(Val::from("value"), value);
     result_map.insert(Val::from("done"), Val::Bool(done));
 
-    HotResult::Ok(Val::Map(Box::new(result_map)))
+    HotResult::Ok(Val::map(result_map))
 }
 
 /// Collect all values from an iterator into a vector
@@ -258,7 +262,7 @@ pub fn collect(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         }
     }
 
-    HotResult::Ok(Val::Vec(results))
+    HotResult::Ok(Val::vec(results))
 }
 
 /// Check if a value is an iterator
@@ -319,7 +323,7 @@ impl HotIterator for MapIterator {
         } else {
             let (key, value) = self.pairs[self.index].clone();
             self.index += 1;
-            Ok((Val::Vec(vec![key, value]), false))
+            Ok((Val::vec(vec![key, value]), false))
         }
     }
 }
@@ -408,7 +412,7 @@ pub fn iter(args: &[Val]) -> HotResult<Val> {
 
     let iter_box = match &args[0] {
         Val::Vec(v) => {
-            let iterator = VecIterator::new(v.clone());
+            let iterator = VecIterator::new(v.to_vec());
             IteratorBox::new(Box::new(iterator))
         }
         Val::Map(m) => {

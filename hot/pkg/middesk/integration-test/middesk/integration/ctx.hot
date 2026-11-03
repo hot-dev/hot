@@ -1,0 +1,12 @@
+::middesk::integration::ctx ns
+
+::env ::hot::env
+
+// Credentials for the middesk integration suite. Unset environment
+// variables are skipped entirely, so absent credentials behave exactly as
+// if never configured. Use a sandbox key (mk_test_...); its prefix selects
+// api-sandbox.middesk.com.
+::hot::ctx/set(filter-vals({
+    "middesk.api.key": ::env/get("MIDDESK_API_KEY", ""),
+    "middesk.env": ::env/get("MIDDESK_ENV", ""),
+}, (v) { not(is-empty(v)) }))

@@ -1,6 +1,6 @@
 ::gemini::files ns
 
-api-request ::gemini::api/request
+api-call ::gemini::api/call
 HttpError ::gemini::api/HttpError
 is-ok-response ::hot::http/is-ok-response
 
@@ -83,8 +83,15 @@ meta {
     """
 }
 fn (request: FilesGetRequest): FilesGetResponse {
-  response api-request("GET", `${::gemini/BASE_URL}/v1/${request.name}`)
-  if(is-ok-response(response), FilesGetResponse(response.body), err(HttpError(response)))
+  get(request, {})
+},
+(request: FilesGetRequest, opts: Map): FilesGetResponse {
+  response api-call("GET", `/v1/${request.name}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { FilesGetResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 FilesDeleteRequest type {
@@ -111,8 +118,15 @@ meta {
     """
 }
 fn (request: FilesDeleteRequest): FilesDeleteResponse {
-  response api-request("DELETE", `${::gemini/BASE_URL}/v1/${request.name}`)
-  if(is-ok-response(response), FilesDeleteResponse(response.body), err(HttpError(response)))
+  delete(request, {})
+},
+(request: FilesDeleteRequest, opts: Map): FilesDeleteResponse {
+  response api-call("DELETE", `/v1/${request.name}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { FilesDeleteResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 FilesListRequest type {
@@ -145,8 +159,15 @@ meta {
     """
 }
 fn (request: FilesListRequest): FilesListResponse {
-  response api-request("GET", `${::gemini/BASE_URL}/v1/files?pageSize=${request.page-size}&pageToken=${request.page-token}`)
-  if(is-ok-response(response), FilesListResponse(response.body), err(HttpError(response)))
+  list(request, {})
+},
+(request: FilesListRequest, opts: Map): FilesListResponse {
+  response api-call("GET", `/v1/files?pageSize=${request.page-size}&pageToken=${request.page-token}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { FilesListResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 FilesUploadRequest type {
@@ -178,6 +199,13 @@ meta {
     """
 }
 fn (request: FilesUploadRequest): FilesUploadResponse {
-  response api-request("POST", `${::gemini/BASE_URL}/upload/v1/files`, {}, request)
-  if(is-ok-response(response), FilesUploadResponse(response.body), err(HttpError(response)))
+  upload(request, {})
+},
+(request: FilesUploadRequest, opts: Map): FilesUploadResponse {
+  response api-call("POST", `/upload/v1/files`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { FilesUploadResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

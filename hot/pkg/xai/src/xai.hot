@@ -1,3 +1,4 @@
 ::xai ns
 
 BASE_URL "https://api.x.ai/v1"
+MANAGEMENT_BASE_URL "https://management-api.x.ai"

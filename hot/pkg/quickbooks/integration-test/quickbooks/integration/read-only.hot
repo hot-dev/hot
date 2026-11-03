@@ -1,0 +1,46 @@
+::quickbooks::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration tests (live QuickBooks Online sandbox company, read-only)
+// =============================================================================
+// See ctx.hot for the environment variables. Every test only reads.
+// Run with: hot test --project pkg-integration-quickbooks
+
+::ctx ::quickbooks::integration::ctx
+
+test-company-info
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip() }
+        => {
+            info ::quickbooks::company/company-info()
+            assert(not(is-err(info)), `company-info: ${if-err(info, (e) { err-message(e) })}`)
+            assert(is-some(info.CompanyName), "the sandbox company has a name")
+        }
+    }
+}
+
+test-query-one-customer
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip() }
+        => {
+            page ::quickbooks::query/query-page("select * from Customer", 1, 1)
+            assert(not(is-err(page)), `query: ${if-err(page, (e) { err-message(e) })}`)
+            assert(lte(length(page.items), 1), "MAXRESULTS caps the page")
+        }
+    }
+}
+
+test-profit-and-loss
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip() }
+        => {
+            report ::quickbooks::reports/profit-and-loss({date_macro: "This Fiscal Year-to-date"})
+            assert(not(is-err(report)), `report: ${if-err(report, (e) { err-message(e) })}`)
+            assert(is-vec(::quickbooks::reports/flatten-report(report)), "the report flattens")
+        }
+    }
+}

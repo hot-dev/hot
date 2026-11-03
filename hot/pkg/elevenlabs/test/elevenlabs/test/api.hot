@@ -1,26 +1,171 @@
 ::elevenlabs::test::api ns
 meta ["test"]
 
+::api ::elevenlabs::api
 ::tts ::elevenlabs::tts
+::stt ::elevenlabs::stt
+::sound ::elevenlabs::sound
 
 test-base-url
 meta ["test"] fn () {
     assert-eq("https://api.elevenlabs.io", ::elevenlabs/BASE_URL)
 }
 
+// ============================================================================
+// Query strings and paths
+// ============================================================================
+
+test-query-string
+meta ["test"] fn () {
+    assert-eq("?page_size=20&search=deep%20voice", ::api/query-string({page_size: 20, search: "deep voice", category: null}))
+    assert-eq("?voice_ids=a&voice_ids=b", ::api/query-string({voice_ids: ["a", "b"]}))
+    assert-eq("", ::api/query-string({}))
+    assert-eq("", ::api/query-string({search: null}))
+}
+
 test-tts-path-with-and-without-format
 meta ["test"] fn () {
     assert-eq("/v1/text-to-speech/v123", ::tts/tts-path("v123", null))
     assert-eq("/v1/text-to-speech/v123?output_format=ulaw_8000", ::tts/tts-path("v123", "ulaw_8000"))
+    assert-eq("/v1/text-to-speech/v123/with-timestamps?output_format=pcm_16000&enable_logging=false",
+        ::tts/tts-path("v123", "/with-timestamps", {output_format: "pcm_16000", enable_logging: false}))
+    assert-eq("/v1/text-to-speech/a%2Fb/stream", ::tts/tts-path("a/b", "/stream", null), "voice id is encoded")
 }
 
-test-tts-request-type
+// ============================================================================
+// Request bodies
+// ============================================================================
+
+test-tts-request-omits-unset-fields
 meta ["test"] fn () {
     request ::tts/TextToSpeechRequest({
         text: "hello",
         model_id: "eleven_flash_v2_5",
         voice_settings: {stability: 0.5}
     })
-    assert-eq("hello", request.text)
-    assert(is-null(request.seed), "unset optionals are null")
+    body untype(request)
+    assert-eq("hello", body.text)
+    assert-eq(["text", "model_id", "voice_settings"], keys(body), "unset optionals are omitted, not null")
+    assert(not(contains(to-json(body), "null")), "no JSON nulls")
+}
+
+test-sound-effect-body-and-path
+meta ["test"] fn () {
+    body ::sound/sound-effect-body("door creak", {duration_seconds: 2.5, output_format: "mp3_44100_128", loop: null})
+    assert-eq({text: "door creak", duration_seconds: 2.5}, body, "only body fields, nulls omitted")
+    assert-eq("/v1/sound-generation?output_format=mp3_44100_128", ::sound/sound-effect-path({output_format: "mp3_44100_128", duration_seconds: 2.5}))
+    assert-eq("/v1/sound-generation", ::sound/sound-effect-path({}))
+}
+
+// ============================================================================
+// Speech to text multipart
+// ============================================================================
+
+test-stt-form-fields
+meta ["test"] fn () {
+    fields ::stt/form-fields(::stt/SpeechToTextRequest({
+        diarize: true,
+        keyterms: ["Hot Dev", "Scribe"],
+        additional_formats: [{format: "srt"}],
+        enable_logging: false
+    }))
+    assert-eq([
+        ["model_id", "scribe_v2"],
+        ["diarize", "true"],
+        ["keyterms", "Hot Dev"],
+        ["keyterms", "Scribe"],
+        ["additional_formats", "[{\"format\":\"srt\"}]"]
+    ], fields, "default model, repeated keyterms, JSON fields, no query-only or unset fields")
+}
+
+test-stt-model-override
+meta ["test"] fn () {
+    fields ::stt/form-fields(::stt/SpeechToTextRequest({model_id: "scribe_v1"}))
+    assert-eq([["model_id", "scribe_v1"]], fields)
+}
+
+test-stt-multipart-body-keeps-binary-bytes
+meta ["test"] fn () {
+    // Non-UTF-8 audio bytes must survive verbatim (no string interpolation).
+    audio Bytes([0, 255, 254, 1, 128])
+    body ::stt/multipart-body(::stt/SpeechToTextRequest({language_code: "en"}), audio, "clip.wav", "BOUNDARY")
+    head Bytes("--BOUNDARY\r\nContent-Disposition: form-data; name=\"model_id\"\r\n\r\nscribe_v2\r\n--BOUNDARY\r\nContent-Disposition: form-data; name=\"language_code\"\r\n\r\nen\r\n--BOUNDARY\r\nContent-Disposition: form-data; name=\"file\"; filename=\"clip.wav\"\r\nContent-Type: audio/wav\r\n\r\n")
+    expected concat(head, audio, Bytes("\r\n--BOUNDARY--\r\n"))
+    assert-eq(expected, body)
+}
+
+test-stt-multipart-without-file
+meta ["test"] fn () {
+    body Str(::stt/multipart-body(::stt/SpeechToTextRequest({}), null, "", "B"))
+    assert(not(contains(body, "name=\"file\"")), "no file part without audio")
+    assert(ends-with(body, "--B--\r\n"), "body is closed")
+}
+
+test-stt-response-helpers
+meta ["test"] fn () {
+    response {
+        language_code: "eng",
+        text: "Hello there",
+        words: [
+            {text: "Hello", type: "word", start: 0.0, end: 0.4},
+            {text: " ", type: "spacing", start: 0.4, end: 0.5},
+            {text: "(laughs)", type: "audio_event", start: 0.5, end: 0.9},
+            {text: "there", type: "word", start: 0.9, end: 1.2}
+        ]
+    }
+
+    assert-eq("Hello there", ::stt/transcript-text(response))
+    assert-eq(["Hello", "there"], map(::stt/words(response), (w) { w.text }))
+
+    multi {transcripts: [{text: "left"}, {text: "right"}]}
+    assert-eq("left\nright", ::stt/transcript-text(multi))
+    assert-eq("", ::stt/transcript-text({}))
+    assert-eq([], ::stt/words({}))
+}
+
+// ============================================================================
+// TTS with timestamps
+// ============================================================================
+
+test-decode-timestamped
+meta ["test"] fn () {
+    alignment {
+        characters: ["H", "i", " ", "y", "o", "u"],
+        character_start_times_seconds: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5],
+        character_end_times_seconds: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+    }
+
+    out ::tts/decode-timestamped({audio_base64: "AP8BAg==", alignment: alignment, normalized_alignment: null})
+    assert-eq(Bytes([0, 255, 1, 2]), out.audio)
+    assert-eq([
+        {word: "Hi", start: 0.0, end: 0.2},
+        {word: "you", start: 0.3, end: 0.6}
+    ], ::tts/alignment-words(out.alignment))
+    assert-eq([], ::tts/alignment-words(null))
+}
+
+// ============================================================================
+// Errors
+// ============================================================================
+
+test-error-message-shapes
+meta ["test"] fn () {
+    assert-eq("ElevenLabs API error (HTTP 401): invalid_api_key: Invalid API key",
+        ::api/error-message(401, {detail: {status: "invalid_api_key", message: "Invalid API key"}}))
+    assert-eq("ElevenLabs API error (HTTP 404): Voice not found", ::api/error-message(404, {detail: "Voice not found"}))
+    assert-eq("ElevenLabs API error (HTTP 422): Field required; Input should be a valid string",
+        ::api/error-message(422, {detail: [{loc: ["body", "text"], msg: "Field required"}, {msg: "Input should be a valid string"}]}))
+    assert-eq("ElevenLabs API error (HTTP 503)", ::api/error-message(503, null))
+    assert-eq("ElevenLabs API error (HTTP 502): Bad gateway", ::api/error-message(502, "Bad gateway"))
+}
+
+test-http-error-from-response
+meta ["test"] fn () {
+    e ::api/HttpError(::hot::http/HttpResponse({
+        status: 401,
+        headers: {},
+        body: {detail: {status: "quota_exceeded", message: "This request exceeds your quota."}}
+    }))
+    assert-eq(401, e.status)
+    assert(contains(e.message, "quota_exceeded"), "message carries ElevenLabs' detail")
 }

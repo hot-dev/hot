@@ -1661,9 +1661,7 @@ impl Engine {
                 // Apply defaults + secret keys from the ctx requirements
                 // the validation pass already resolved (call graph built once).
                 // Apply default values for keys not already in context_storage
-                for (key, default_val) in ctx_requirements.all_defaults() {
-                    vm.context_storage.entry(key).or_insert(default_val);
-                }
+                vm.apply_ctx_defaults(ctx_requirements.all_defaults());
                 // Set secret keys (all keys that are not marked visible)
                 vm.secret_keys = ctx_requirements.all_secret_keys();
                 vm.sync_secret_keys_to_execution_context();
@@ -1751,9 +1749,7 @@ impl Engine {
                     crate::lang::compiler::ctx_checker::extract_ctx_requirements_via_call_graph(
                         &combined_program,
                     );
-                for (key, default_val) in ctx_requirements.all_defaults() {
-                    vm.context_storage.entry(key).or_insert(default_val);
-                }
+                vm.apply_ctx_defaults(ctx_requirements.all_defaults());
                 vm.secret_keys = ctx_requirements.all_secret_keys();
                 vm.sync_secret_keys_to_execution_context();
 
@@ -2159,9 +2155,7 @@ impl Engine {
         }
 
         // Apply defaults + secret keys
-        for (key, default_val) in ctx_requirements.all_defaults() {
-            vm.context_storage.entry(key).or_insert(default_val);
-        }
+        vm.apply_ctx_defaults(ctx_requirements.all_defaults());
         vm.secret_keys = ctx_requirements.all_secret_keys();
         vm.sync_secret_keys_to_execution_context();
 
@@ -2749,7 +2743,7 @@ fn (): Str { "unused" }
         .unwrap();
         assert_eq!(
             result,
-            crate::val::Val::Vec(vec![
+            crate::val::Val::vec(vec![
                 crate::val::Val::from("acme"),
                 crate::val::Val::from("other")
             ])

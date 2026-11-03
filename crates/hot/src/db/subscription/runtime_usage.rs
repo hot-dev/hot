@@ -28,8 +28,10 @@ impl OrgUsageStats {
                     .bind(org_id).bind(env_id).bind(period_start).fetch_one($pool);
                 let files = sqlx::query_scalar::<_, i64>("SELECT CAST(COALESCE(SUM(size),0) AS BIGINT) FROM file WHERE org_id=$1 AND env_id=$2 AND active=true")
                     .bind(org_id).bind(env_id).fetch_one($pool);
-                let calls = sqlx::query_as::<_, (i64,i64,Option<DateTime<Utc>>)>("SELECT CAST(COALESCE(SUM(c.size),0) AS BIGINT),COUNT(*),MIN(c.start_time) FROM call c JOIN run r ON r.run_id=c.run_id WHERE r.env_id=$1 AND ($2 OR c.start_time >= $3)")
+                let calls = sqlx::query_as::<_, (i64,Option<DateTime<Utc>>)>("SELECT COUNT(*),MIN(c.start_time) FROM call c WHERE c.env_id=$1 AND ($2 OR c.start_time >= $3)")
                     .bind(env_id).bind(retention_days < 0).bind(retention_start).fetch_one($pool);
+                let call_bytes = sqlx::query_scalar::<_, i64>("SELECT CAST(COALESCE(SUM(call_bytes),0) AS BIGINT) FROM usage_storage WHERE env_id=$1")
+                    .bind(env_id).fetch_one($pool);
                 let store = sqlx::query_scalar::<_, i64>("SELECT CAST(COALESCE(SUM(size),0) AS BIGINT) FROM store_map_entry WHERE org_id=$1 AND env_id=$2")
                     .bind(org_id).bind(env_id).fetch_one($pool);
                 let blobs = sqlx::query_scalar::<_, i64>("SELECT CAST(COALESCE(SUM(size),0) AS BIGINT) FROM blob_object WHERE org_id=$1 AND env_id=$2 AND status='available'")
@@ -38,14 +40,14 @@ impl OrgUsageStats {
                     .bind(env_id).bind(period_start).fetch_one($pool);
                 let schedules = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM schedule s JOIN build b ON b.build_id=s.build_id JOIN project p ON p.project_id=b.project_id JOIN env e ON e.env_id=p.env_id WHERE e.env_id=$1 AND e.org_id=$2 AND s.active=true AND b.active=true AND b.deployed=true AND b.runtime_status='ready' AND p.active=true AND e.active=true")
                     .bind(env_id).bind(org_id).fetch_one($pool);
-                let (runs, files, calls, store, blobs, tasks, schedules) = tokio::try_join!(runs, files, calls, store, blobs, tasks, schedules)?;
+                let (runs, files, calls, call_bytes, store, blobs, tasks, schedules) = tokio::try_join!(runs, files, calls, call_bytes, store, blobs, tasks, schedules)?;
                 Ok(Self {
                     runs_this_period: runs,
                     file_storage_bytes: files,
                     team_members_count: 0,
-                    call_storage_bytes: if retention_days == 0 { 0 } else { calls.0 },
-                    call_count: if retention_days == 0 { 0 } else { calls.1 },
-                    oldest_call_time: if retention_days == 0 { None } else { calls.2 },
+                    call_storage_bytes: if retention_days == 0 { 0 } else { call_bytes },
+                    call_count: if retention_days == 0 { 0 } else { calls.0 },
+                    oldest_call_time: if retention_days == 0 { None } else { calls.1 },
                     store_storage_bytes: store,
                     blob_storage_bytes: blobs,
                     tasks_this_period: tasks.0,
@@ -508,6 +510,71 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(environment.compute_units, 12);
+    }
+
+    #[tokio::test]
+    async fn trace_usage_reads_retained_bytes_from_the_counter_and_counts_the_visible_window() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        let recent = Utc::now() - chrono::Duration::days(1);
+        for (start, size) in [
+            (recent, 10i64),
+            (Utc::now() - chrono::Duration::days(20), 5),
+        ] {
+            sqlx::query("INSERT INTO call(call_id,run_id,env_id,function_name,static_scope,runtime_path,call_depth,start_time,size) VALUES(?,?,?,'::trace/test','root','root',0,?,?)")
+                .bind(Uuid::now_v7()).bind(data.run_id).bind(data.env_id).bind(start).bind(size)
+                .execute(pool).await.unwrap();
+        }
+        let (org, env, period) = (data.org_id, data.env_id, Utc::now());
+        let oldest = |usage: &OrgUsageStats| {
+            usage
+                .oldest_call_time
+                .map(|at| (at - recent).num_days().abs() < 2)
+        };
+        for usage in [
+            OrgUsageStats::calculate_account(&db, &org, period, 7)
+                .await
+                .unwrap(),
+            OrgUsageStats::calculate(&db, &org, period, 7)
+                .await
+                .unwrap(),
+            OrgUsageStats::calculate_environment(&db, &org, &env, period, 7)
+                .await
+                .unwrap(),
+        ] {
+            // The limit counts data kept past the visible window, so usage does.
+            assert_eq!(usage.call_storage_bytes, 15);
+            assert_eq!(usage.call_count, 1);
+            assert_eq!(oldest(&usage), Some(true));
+        }
+        let unlimited = OrgUsageStats::calculate_account(&db, &org, period, -1)
+            .await
+            .unwrap();
+        assert_eq!(
+            (unlimited.call_storage_bytes, unlimited.call_count),
+            (15, 2)
+        );
+        for usage in [
+            OrgUsageStats::calculate_account(&db, &org, period, 0)
+                .await
+                .unwrap(),
+            OrgUsageStats::calculate_environment(&db, &org, &env, period, 0)
+                .await
+                .unwrap(),
+        ] {
+            assert_eq!(
+                (
+                    usage.call_storage_bytes,
+                    usage.call_count,
+                    usage.oldest_call_time
+                ),
+                (0, 0, None),
+                "a plan without trace data shows none"
+            );
+        }
     }
 
     #[tokio::test]

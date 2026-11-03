@@ -166,6 +166,10 @@ greet fn (name: Str, title: Str?): Str {
 
 `Str?` is shorthand for `Str | Null`.
 
+Null isn't converted at a call. Null reaching a parameter declared without `?` through an `Any` value fails at the call (see [Parameter Checks](#parameter-checks)). Only `Str(null)` and template interpolation turn null into `""`. Standard library functions return an `Err` for null unless their parameter is declared `Str?`: `lowercase(null)` fails, and `is-empty(null)` is `true`.
+
+`hot check` warns with `null-check-on-non-nullable` on `is-null(x)` or `is-some(x)` for a parameter declared without `?`, and with `null-for-non-nullable` on a literal `null` argument for one. Declare the parameter `Str?` when null is allowed.
+
 > **Note:** The `?` syntax indicates the *type* accepts null—it does not make the parameter omittable. You must still pass an argument (either a value or `null`). For truly optional parameters, use function overloading.
 
 > **Why no `Option` type?** Languages without null (like Rust) use `Option<T>` with `Some(value)` and `None` to represent optional values. Hot has null to align with JavaScript/JSON data types, so `T?` achieves the same thing more concisely. While `Option` can technically express one extra state (`Some(null)` vs `None`), this distinction is rarely needed in practice and adds complexity for everyone. If an `Option` type is needed, you can define a custom type and make it [core](/docs/language/meta#core-functions) to your codebase.
@@ -392,6 +396,23 @@ rate fn match (s: Severity): Int {
 }
 ```
 
+### Variants as Parameter Types
+
+A parameter type can name one variant, in full if it's from another namespace. A sibling overload that declares the enum takes the other variants:
+
+```hot
+Circle type { radius: Dec }
+Shape enum { Circle(Circle), Dot }
+
+area fn
+(s: Shape.Circle): Dec { mul(s.radius, s.radius) },
+(s: Shape): Dec { 0.0 }
+
+radius fn (s: ::geo/Shape.Circle): Dec { s.radius }
+```
+
+Like other user types, it isn't checked at the call: a lone `(s: Shape.Circle)` still receives another variant as it is.
+
 ### Open Enums
 
 Add the `open` modifier to declare an extensible enum. Other modules add
@@ -485,6 +506,51 @@ Arrow coercions are one-hop. Hot does not search a chain such as
 `A -> B -> C` to satisfy a parameter requiring `C`. If more than one direct
 arrow could satisfy the same conversion, the call is ambiguous rather than
 silently choosing one.
+
+Arrows also apply implicitly when a call passes a value to a typed parameter,
+if either side is a declared type: a `Triangle` passed to `s: Shape` goes through
+`Triangle -> Shape.Tri`, and a `Temperature` passed to `x: Str` goes through
+`Temperature -> Str`. An arrow between two built-in types doesn't apply
+implicitly. `Int -> Str` backs `Str(5)`, so `f(5)` for `x: Str` is a type error,
+and a `5` that reaches `x` through an `Any` value fails at the call. Null is
+never converted at a call. Named functions get arrows however they're called,
+by `map` and other higher-order functions or through a variable. Lambdas don't
+apply arrows.
+
+Overloads take arrows into account. A `Temperature` passed to overloads
+`(x: Str)` and `(x: Vec)` reaches `(x: Str)` through `Temperature -> Str`. An
+overload that takes the value as it is comes first, and if arrows reach two
+overloads that are equally good, neither is chosen for it.
+
+### Parameter Checks
+
+A parameter annotated with a built-in type is checked when the function is
+called, after any arrow has run. This catches values `hot check` can't see, such
+as a field of parsed JSON, which is `Any`:
+
+```hot
+port-label fn (port: Int): Str { `port ${port}` }
+
+body from-json("{\"port\": \"443\"}")
+port-label(body.port)  // Err: parameter `port` of `::app/port-label` expected Int, got Str
+```
+
+- The right type passes as it is. The check covers `Int`, `Dec`, `Str`, `Bool`,
+  `Vec`, `Map`, `Bytes`, `Byte` and `Null`, and unions and `?` forms of them.
+- Numbers convert only when nothing is lost: an `Int` becomes a `Dec` at `x: Dec`,
+  and a whole `Dec` such as `443.0` becomes an `Int` at `x: Int`. `443.5` and
+  `"443"` fail at `x: Int`. Convert on purpose with `Int(x)`.
+- Null fails unless the annotation allows it, as `x: Str?` does.
+- `Vec<T>` and `Map<K, V>` check the container, not its contents, so a call costs
+  the same at any size. Use a `where` constraint to check the contents.
+- A value of a declared type over a built-in one, such as `Port(80)` from
+  `Port type Int`, passes `x: Int` and keeps its tag.
+- User types, `Any`, `Fn` and `lazy` parameters aren't checked, and neither is the
+  first parameter of a `fn match` with `Result` arms, which holds the `Result`.
+
+A failed check returns `Err(ConstraintError.Violation)` from the call, before the
+body runs. Using that value halts as any `Err` does, but `if`, `and`, `or` and `not`
+treat an `Err` as false, so use `is-err` where a bad value needs its own branch.
 
 ## Result Types
 

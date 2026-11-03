@@ -136,7 +136,7 @@ fn convert_json_value_to_val(v: &serde_json::Value, depth: usize) -> Result<Val,
             for item in arr.iter() {
                 out.push(convert_json_value_to_val(item, depth + 1)?);
             }
-            Val::Vec(out)
+            Val::vec(out)
         }
         serde_json::Value::Object(map) => {
             if let Some(serde_json::Value::String(type_name)) = map.get("$type") {
@@ -150,7 +150,7 @@ fn convert_json_value_to_val(v: &serde_json::Value, depth: usize) -> Result<Val,
                     && let Some(serde_json::Value::Array(items)) = map.get("$val")
                     && let Some(bytes) = items.iter().map(json_value_to_byte).collect()
                 {
-                    return Ok(Val::Bytes(bytes));
+                    return Ok(Val::bytes(bytes));
                 }
             }
 
@@ -161,7 +161,7 @@ fn convert_json_value_to_val(v: &serde_json::Value, depth: usize) -> Result<Val,
                     convert_json_value_to_val(v, depth + 1)?,
                 );
             }
-            Val::Map(Box::new(out))
+            Val::map(out)
         }
     })
 }
@@ -175,7 +175,7 @@ mod tests {
         let byte = to_json(&[Val::Byte(42)]).ok().unwrap();
         assert_eq!(byte, Val::from(r#"{"$type":"::hot::type/Byte","$val":42}"#));
 
-        let bytes = to_json(&[Val::Bytes(vec![1, 2, 3])]).ok().unwrap();
+        let bytes = to_json(&[Val::bytes(vec![1, 2, 3])]).ok().unwrap();
         assert_eq!(
             bytes,
             Val::from(r#"{"$type":"::hot::type/Bytes","$val":[1,2,3]}"#)
@@ -192,6 +192,6 @@ mod tests {
         let bytes = from_json(&[Val::from(r#"{"$type":"::hot::type/Bytes","$val":[1,2,3]}"#)])
             .ok()
             .unwrap();
-        assert_eq!(bytes, Val::Bytes(vec![1, 2, 3]));
+        assert_eq!(bytes, Val::bytes(vec![1, 2, 3]));
     }
 }

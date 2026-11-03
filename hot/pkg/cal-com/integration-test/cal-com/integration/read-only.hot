@@ -1,0 +1,64 @@
+::cal-com::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration tests (live Cal.com, read-only)
+// =============================================================================
+// Requires ctx: cal-com.api.key (CAL_COM_API_KEY); cal-com.url
+// (CAL_COM_URL) for a self-hosted instance. Every test only reads. Without
+// a key each test records a skip and passes.
+// Run with: hot test --project pkg-integration-cal-com
+
+configured fn (): Bool {
+    is-some(::hot::ctx/get("cal-com.api.key"))
+}
+
+skip fn (): Bool {
+    println("CAL_COM_API_KEY not set - skipping")
+    assert(true, "skipped: no Cal.com API key")
+}
+
+test-me
+meta ["test"] fn () {
+    cond {
+        not(configured()) => { skip() }
+        => {
+            me ::cal-com::users/me()
+            assert(is-some(me.id), "key should resolve to a user")
+        }
+    }
+}
+
+test-list-event-types
+meta ["test"] fn () {
+    cond {
+        not(configured()) => { skip() }
+        => {
+            out ::cal-com::event-types/list-event-types()
+            assert(is-vec(out), "event types come back as a Vec")
+        }
+    }
+}
+
+test-list-bookings-page
+meta ["test"] fn () {
+    cond {
+        not(configured()) => { skip() }
+        => {
+            page ::cal-com::bookings/list-bookings({status: "upcoming", take: 5})
+            assert(lte(length(page.data), 5), "take caps the page")
+            assert(is-some(page.pagination), "envelope keeps pagination")
+        }
+    }
+}
+
+test-list-schedules-and-webhooks
+meta ["test"] fn () {
+    cond {
+        not(configured()) => { skip() }
+        => {
+            assert(is-vec(::cal-com::schedules/list-schedules()), "schedules list")
+            assert(is-vec(::cal-com::webhooks/list-webhooks({take: 5})), "webhooks list")
+        }
+    }
+}

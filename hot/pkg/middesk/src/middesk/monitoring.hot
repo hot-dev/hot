@@ -1,0 +1,74 @@
+::middesk::monitoring ns
+meta {
+    doc: """
+    Monitoring: ongoing checks on a verified business. Middesk sends
+    events (`bankruptcy.created`, `watchlist_result.created`,
+    `registration.updated`, `tin.retrieved`, `lien.found`, ...) when
+    something changes. Monitor types: `bankruptcy`, `watchlist_result`,
+    `registration`, `tin`, `lien` (or `["*"]` for all).
+    """
+}
+
+::api ::middesk::api
+
+seg ::middesk::api/seg
+
+path fn (business-id: Str): Str {
+  `/businesses/${seg(business-id)}/monitor`
+}
+
+get-monitor
+meta {
+    doc: """GET /businesses/{id}/monitor - The business's monitor: `{id, event_types: [{type, enabled_at, status}]}`."""
+}
+fn
+(business-id: Str): Map {
+  get-monitor(business-id, {})
+},
+(business-id: Str, options: Map): Map {
+  ::api/send("GET", path(business-id), {}, null, options)
+}
+
+create-monitor
+meta {
+    doc: """
+    POST /businesses/{id}/monitor - Start monitoring.
+
+    **Example**
+
+    ```hot
+    ::middesk::monitoring/create-monitor("biz_...", ["watchlist_result", "registration", "bankruptcy"])
+    ```
+    """
+}
+fn
+(business-id: Str, event-types: Vec<Str>): Map {
+  create-monitor(business-id, event-types, {})
+},
+(business-id: Str, event-types: Vec<Str>, options: Map): Map {
+  ::api/send("POST", path(business-id), {}, {event_types: event-types}, options)
+}
+
+update-monitor
+meta {
+    doc: """PUT /businesses/{id}/monitor - Replace the monitored types."""
+}
+fn
+(business-id: Str, event-types: Vec<Str>): Map {
+  update-monitor(business-id, event-types, {})
+},
+(business-id: Str, event-types: Vec<Str>, options: Map): Map {
+  ::api/send("PUT", path(business-id), {}, {event_types: event-types}, options)
+}
+
+delete-monitor
+meta {
+    doc: """DELETE /businesses/{id}/monitor - Stop monitoring."""
+}
+fn
+(business-id: Str): Any {
+  delete-monitor(business-id, {})
+},
+(business-id: Str, options: Map): Any {
+  ::api/send("DELETE", path(business-id), {}, null, options)
+}

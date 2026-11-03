@@ -238,7 +238,7 @@ pub fn from_int(args: &[Val]) -> HotResult<Val> {
         all_bytes[..size].to_vec()
     };
 
-    HotResult::Ok(Val::Bytes(bytes))
+    HotResult::Ok(Val::bytes(bytes))
 }
 
 /// CRC32 checksum (IEEE polynomial, same as used in AWS Event Stream)
@@ -246,11 +246,11 @@ pub fn crc32(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::bytes/crc32", args, 1);
 
     let bytes = match &args[0] {
-        Val::Bytes(b) => b.clone(),
+        Val::Bytes(b) => b.to_vec(),
         Val::Str(s) => s.as_bytes().to_vec(),
         Val::Vec(v) => {
             let mut result = Vec::new();
-            for val in v {
+            for val in v.iter() {
                 match val {
                     Val::Int(i) => {
                         if *i >= 0 && *i <= 255 {
@@ -364,7 +364,7 @@ pub fn index_of(args: &[Val]) -> HotResult<Val> {
                     "::hot::bytes/index-of: Needle must not be empty".to_string(),
                 ));
             }
-            b.clone()
+            b.to_vec()
         }
         Val::Byte(b) => vec![*b],
         Val::Int(i) => {
@@ -438,7 +438,7 @@ pub fn xor(args: &[Val]) -> HotResult<Val> {
     }
 
     let result: Vec<u8> = a.iter().zip(b.iter()).map(|(x, y)| x ^ y).collect();
-    HotResult::Ok(Val::Bytes(result))
+    HotResult::Ok(Val::bytes(result))
 }
 
 /// Decode IEEE 754 bytes (4 = f32, 8 = f64) to a Dec value.
@@ -558,7 +558,7 @@ pub fn from_float(args: &[Val]) -> HotResult<Val> {
         _ => unreachable!(),
     };
 
-    HotResult::Ok(Val::Bytes(bytes))
+    HotResult::Ok(Val::bytes(bytes))
 }
 
 /// Convert Bytes to Vec<Int> for easier manipulation
@@ -575,7 +575,7 @@ pub fn to_vec(args: &[Val]) -> HotResult<Val> {
     };
 
     let vec: Vec<Val> = bytes.iter().map(|b| Val::Int(*b as i64)).collect();
-    HotResult::Ok(Val::Vec(vec))
+    HotResult::Ok(Val::vec(vec))
 }
 
 #[cfg(test)]
@@ -586,7 +586,7 @@ mod tests {
     fn test_to_int_be() {
         // 4-byte big-endian
         let bytes = vec![0x00, 0x00, 0x00, 0x10]; // 16
-        let result = to_int(&[Val::Bytes(bytes)]);
+        let result = to_int(&[Val::bytes(bytes)]);
         assert!(matches!(result, HotResult::Ok(Val::Int(16))));
     }
 
@@ -594,14 +594,14 @@ mod tests {
     fn test_to_int_le() {
         // 4-byte little-endian
         let bytes = vec![0x10, 0x00, 0x00, 0x00]; // 16
-        let result = to_int(&[Val::Bytes(bytes), Val::from("le")]);
+        let result = to_int(&[Val::bytes(bytes), Val::from("le")]);
         assert!(matches!(result, HotResult::Ok(Val::Int(16))));
     }
 
     #[test]
     fn test_to_uint() {
         let bytes = vec![0xFF, 0xFF]; // 65535 unsigned
-        let result = to_uint(&[Val::Bytes(bytes)]);
+        let result = to_uint(&[Val::bytes(bytes)]);
         assert!(matches!(result, HotResult::Ok(Val::Int(65535))));
     }
 
@@ -610,7 +610,7 @@ mod tests {
         let result = from_int(&[Val::Int(256), Val::Int(2)]);
         match result {
             HotResult::Ok(Val::Bytes(bytes)) => {
-                assert_eq!(bytes, vec![0x01, 0x00]);
+                assert_eq!(*bytes, vec![0x01, 0x00]);
             }
             _ => panic!("Expected bytes"),
         }
@@ -621,7 +621,7 @@ mod tests {
         let result = from_int(&[Val::Int(256), Val::Int(2), Val::from("le")]);
         match result {
             HotResult::Ok(Val::Bytes(bytes)) => {
-                assert_eq!(bytes, vec![0x00, 0x01]);
+                assert_eq!(*bytes, vec![0x00, 0x01]);
             }
             _ => panic!("Expected bytes"),
         }
@@ -642,14 +642,14 @@ mod tests {
     #[test]
     fn test_get() {
         let bytes = vec![10, 20, 30];
-        let result = get(&[Val::Bytes(bytes), Val::Int(1)]);
+        let result = get(&[Val::bytes(bytes), Val::Int(1)]);
         assert!(matches!(result, HotResult::Ok(Val::Int(20))));
     }
 
     #[test]
     fn test_to_vec() {
         let bytes = vec![1, 2, 3];
-        let result = to_vec(&[Val::Bytes(bytes)]);
+        let result = to_vec(&[Val::bytes(bytes)]);
         match result {
             HotResult::Ok(Val::Vec(v)) => {
                 assert_eq!(v.len(), 3);
@@ -661,7 +661,7 @@ mod tests {
 
     #[test]
     fn test_index_of_int_needle() {
-        let haystack = Val::Bytes(vec![0x52, 0x00, 0x00, 0x08, 0x00]);
+        let haystack = Val::bytes(vec![0x52, 0x00, 0x00, 0x08, 0x00]);
         // Null terminator scan: first 0x00 is at index 1
         let result = index_of(&[haystack.clone(), Val::Int(0)]);
         assert!(matches!(result, HotResult::Ok(Val::Int(1))));
@@ -672,39 +672,39 @@ mod tests {
 
     #[test]
     fn test_index_of_bytes_needle() {
-        let haystack = Val::Bytes(b"SCRAM-SHA-256\0".to_vec());
-        let result = index_of(&[haystack.clone(), Val::Bytes(b"SHA".to_vec())]);
+        let haystack = Val::bytes(b"SCRAM-SHA-256\0".to_vec());
+        let result = index_of(&[haystack.clone(), Val::bytes(b"SHA".to_vec())]);
         assert!(matches!(result, HotResult::Ok(Val::Int(6))));
         // Not found returns Null
-        let result = index_of(&[haystack, Val::Bytes(b"MD5".to_vec())]);
+        let result = index_of(&[haystack, Val::bytes(b"MD5".to_vec())]);
         assert!(matches!(result, HotResult::Ok(Val::Null)));
     }
 
     #[test]
     fn test_index_of_bounds() {
-        let haystack = Val::Bytes(vec![1, 2, 3]);
+        let haystack = Val::bytes(vec![1, 2, 3]);
         // From beyond the end returns Null (not an error)
         let result = index_of(&[haystack.clone(), Val::Int(1), Val::Int(10)]);
         assert!(matches!(result, HotResult::Ok(Val::Null)));
         // Needle longer than remaining haystack returns Null
-        let result = index_of(&[haystack, Val::Bytes(vec![2, 3, 4, 5])]);
+        let result = index_of(&[haystack, Val::bytes(vec![2, 3, 4, 5])]);
         assert!(matches!(result, HotResult::Ok(Val::Null)));
     }
 
     #[test]
     fn test_xor() {
-        let a = Val::Bytes(vec![0b1010, 0xFF, 0x00]);
-        let b = Val::Bytes(vec![0b0110, 0x0F, 0x00]);
+        let a = Val::bytes(vec![0b1010, 0xFF, 0x00]);
+        let b = Val::bytes(vec![0b0110, 0x0F, 0x00]);
         let result = xor(&[a, b]);
         match result {
-            HotResult::Ok(Val::Bytes(bytes)) => assert_eq!(bytes, vec![0b1100, 0xF0, 0x00]),
+            HotResult::Ok(Val::Bytes(bytes)) => assert_eq!(*bytes, vec![0b1100, 0xF0, 0x00]),
             _ => panic!("Expected bytes"),
         }
     }
 
     #[test]
     fn test_xor_length_mismatch() {
-        let result = xor(&[Val::Bytes(vec![1, 2]), Val::Bytes(vec![1])]);
+        let result = xor(&[Val::bytes(vec![1, 2]), Val::bytes(vec![1])]);
         assert!(matches!(result, HotResult::Err(_)));
     }
 
@@ -712,7 +712,7 @@ mod tests {
     fn test_to_float_f64_be() {
         // 1.5 as big-endian f64
         let bytes = 1.5f64.to_be_bytes().to_vec();
-        let result = to_float(&[Val::Bytes(bytes)]);
+        let result = to_float(&[Val::bytes(bytes)]);
         match result {
             HotResult::Ok(Val::Dec(d)) => assert_eq!(d.to_string(), "1.5"),
             other => panic!("Expected Dec, got {:?}", other),
@@ -722,7 +722,7 @@ mod tests {
     #[test]
     fn test_to_float_f32_le() {
         let bytes = 0.25f32.to_le_bytes().to_vec();
-        let result = to_float(&[Val::Bytes(bytes), Val::from("le")]);
+        let result = to_float(&[Val::bytes(bytes), Val::from("le")]);
         match result {
             HotResult::Ok(Val::Dec(d)) => assert_eq!(d.to_string(), "0.25"),
             other => panic!("Expected Dec, got {:?}", other),
@@ -734,7 +734,7 @@ mod tests {
         // 0.1 is not exactly representable in binary; the decoded Dec should be
         // the shortest-roundtrip form "0.1", not the expanded binary expansion.
         let bytes = 0.1f64.to_be_bytes().to_vec();
-        let result = to_float(&[Val::Bytes(bytes)]);
+        let result = to_float(&[Val::bytes(bytes)]);
         match result {
             HotResult::Ok(Val::Dec(d)) => assert_eq!(d.to_string(), "0.1"),
             other => panic!("Expected Dec, got {:?}", other),
@@ -743,7 +743,7 @@ mod tests {
 
     #[test]
     fn test_to_float_invalid_length() {
-        let result = to_float(&[Val::Bytes(vec![0, 1, 2])]);
+        let result = to_float(&[Val::bytes(vec![0, 1, 2])]);
         assert!(matches!(result, HotResult::Err(_)));
     }
 
@@ -752,7 +752,7 @@ mod tests {
         let encoded = from_float(&[Val::from(1.5f64), Val::Int(8)]);
         match encoded {
             HotResult::Ok(Val::Bytes(bytes)) => {
-                assert_eq!(bytes, 1.5f64.to_be_bytes().to_vec());
+                assert_eq!(*bytes, 1.5f64.to_be_bytes().to_vec());
             }
             other => panic!("Expected bytes, got {:?}", other),
         }
@@ -763,7 +763,7 @@ mod tests {
         let encoded = from_float(&[Val::Int(2), Val::Int(4), Val::from("le")]);
         match encoded {
             HotResult::Ok(Val::Bytes(bytes)) => {
-                assert_eq!(bytes, 2.0f32.to_le_bytes().to_vec());
+                assert_eq!(*bytes, 2.0f32.to_le_bytes().to_vec());
             }
             other => panic!("Expected bytes, got {:?}", other),
         }
@@ -795,7 +795,7 @@ mod tests {
         // decoding must not error.
         for special in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             let bytes = special.to_be_bytes().to_vec();
-            let result = to_float(&[Val::Bytes(bytes)]);
+            let result = to_float(&[Val::bytes(bytes)]);
             assert!(
                 matches!(result, HotResult::Ok(_)),
                 "decoding {:?} bytes should not error",

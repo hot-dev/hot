@@ -1005,10 +1005,15 @@ pub async fn resend_verification_handler(
         tracing::error!("Failed to update verification token: {:?}", e);
     }
 
-    // Enqueue the verification email for sending by the worker
+    // Enqueue the verification email for sending by the worker. It goes to the
+    // address as it was typed at sign-up, not this form's capitals.
     let email_enqueuer = AppEmailEnqueuer::from_conf(db.clone(), &conf);
     if let Err(e) = email_enqueuer
-        .send_verification_email(&form.email, verification.name.as_deref(), &new_token)
+        .send_verification_email(
+            &verification.email,
+            verification.name.as_deref(),
+            &new_token,
+        )
         .await
     {
         tracing::error!("Failed to enqueue verification email: {:?}", e);

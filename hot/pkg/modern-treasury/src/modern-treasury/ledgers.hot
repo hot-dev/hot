@@ -1,0 +1,317 @@
+::modern-treasury::ledgers ns
+meta {
+    doc: """
+    Modern Treasury Ledgers: a double-entry ledger for your own
+    accounting. A ledger holds ledger accounts (each with a currency and a
+    `normal_balance` of `"credit"` or `"debit"`); a ledger transaction is
+    a set of ledger entries whose credits and debits balance. Balances
+    come back as `pending_balance`, `posted_balance` and
+    `available_balance`, each `{credits, debits, amount, currency}`.
+    """
+}
+
+::api ::modern-treasury::api
+seg ::modern-treasury::api/seg
+
+// ---------------------------------------------------------------------------
+// Ledgers
+// ---------------------------------------------------------------------------
+
+create-ledger
+meta {
+    doc: """POST /api/ledgers: create a ledger. `params` needs `name`; optional `description`, `metadata`."""
+}
+fn
+(params: Map): Map {
+  create-ledger(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/create("/api/ledgers", params, ["name"], opts, "create-ledger")
+}
+
+get-ledger
+meta {
+    doc: """GET /api/ledgers/{id}: retrieve a ledger."""
+}
+fn
+(ledger-id: Str): Map {
+  get-ledger(ledger-id, {})
+},
+(ledger-id: Str, opts: Map): Map {
+  ::api/call("GET", `/api/ledgers/${seg(ledger-id)}`, {}, opts)
+}
+
+list-ledgers
+meta {
+    doc: """GET /api/ledgers: one page. Filters: `id: [...]` (sent as `id[]`), `metadata`, `updated_at: {gte, lte}`, `per_page`, `after_cursor`."""
+}
+fn
+(): Map {
+  list-ledgers({})
+},
+(params: Map): Map {
+  list-ledgers(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/list-page("/api/ledgers", params, opts)
+}
+
+update-ledger
+meta {
+    doc: """PATCH /api/ledgers/{id}: change `name`, `description` or `metadata`."""
+}
+fn
+(ledger-id: Str, params: Map): Map {
+  update-ledger(ledger-id, params, {})
+},
+(ledger-id: Str, params: Map, opts: Map): Map {
+  ::api/call("PATCH", `/api/ledgers/${seg(ledger-id)}`, params, opts)
+}
+
+// ---------------------------------------------------------------------------
+// Ledger accounts
+// ---------------------------------------------------------------------------
+
+create-ledger-account
+meta {
+    doc: """
+    POST /api/ledger_accounts: create a ledger account. `params` needs
+    `ledger_id`, `name`, `currency` and `normal_balance` (`"credit"` for
+    liabilities and revenue, `"debit"` for assets and expenses); optional
+    `currency_exponent`, `description`, `external_id`, `metadata`,
+    `ledger_account_category_ids`, `ledgerable_id`, `ledgerable_type`.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::ledgers/create-ledger-account({
+      ledger_id: "89c8bd30-e06a-4a79-b396-e6c7e13e7a12",
+      name: "User 42 wallet",
+      currency: "USD",
+      normal_balance: "credit"
+    }, {idempotency-key: "wallet-user-42"})
+    ```
+    """
+}
+fn
+(params: Map): Map {
+  create-ledger-account(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/create("/api/ledger_accounts", params, ["ledger_id", "name", "currency", "normal_balance"], opts, "create-ledger-account")
+}
+
+get-ledger-account
+meta {
+    doc: """GET /api/ledger_accounts/{id}: retrieve a ledger account (by id or `external_id`) with its balances. `balances` options: `as_of_date`, `effective_at`, `effective_at_lower_bound`, `effective_at_upper_bound`, `as_of_lock_version`."""
+}
+fn
+(ledger-account-id: Str): Map {
+  get-ledger-account(ledger-account-id, {})
+},
+(ledger-account-id: Str, balances: Map): Map {
+  get-ledger-account(ledger-account-id, balances, {})
+},
+(ledger-account-id: Str, balances: Map, opts: Map): Map {
+  ::api/call("GET", `/api/ledger_accounts/${seg(ledger-account-id)}`, if(is-empty(balances), {}, {balances: balances}), opts)
+}
+
+get-ledger-account-balances
+meta {
+    doc: """
+    Just the balances of a ledger account: `{pending_balance,
+    posted_balance, available_balance}`. `as-of` options as for
+    `get-ledger-account` (e.g. `{effective_at: "2026-11-01T00:00:00Z"}`).
+
+    **Example**
+
+    ```hot
+    b ::modern-treasury::ledgers/get-ledger-account-balances("f1c7e474-e6d5-4741-9f76-04510c8b6d7a", {})
+    b.posted_balance.amount   // => 10000
+    ```
+    """
+}
+fn
+(ledger-account-id: Str, as-of: Map): Map {
+  get-ledger-account-balances(ledger-account-id, as-of, {})
+},
+(ledger-account-id: Str, as-of: Map, opts: Map): Map {
+  account get-ledger-account(ledger-account-id, as-of, opts)
+  if(is-err(account), account, or(get(account, "balances"), {}))
+}
+
+list-ledger-accounts
+meta {
+    doc: """GET /api/ledger_accounts: one page. Filters: `ledger_id`, `currency`, `normal_balance`, `name: [...]`, `id: [...]`, `external_id`, `ledger_account_category_id`, `metadata`, `balances: {...}`, `posted_balance_amount: {gt, lt, eq}`, `per_page`, `after_cursor`."""
+}
+fn
+(): Map {
+  list-ledger-accounts({})
+},
+(params: Map): Map {
+  list-ledger-accounts(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/list-page("/api/ledger_accounts", params, opts)
+}
+
+update-ledger-account
+meta {
+    doc: """PATCH /api/ledger_accounts/{id}: change `name`, `description`, `external_id` or `metadata`."""
+}
+fn
+(ledger-account-id: Str, params: Map): Map {
+  update-ledger-account(ledger-account-id, params, {})
+},
+(ledger-account-id: Str, params: Map, opts: Map): Map {
+  ::api/call("PATCH", `/api/ledger_accounts/${seg(ledger-account-id)}`, params, opts)
+}
+
+// ---------------------------------------------------------------------------
+// Ledger transactions and entries
+// ---------------------------------------------------------------------------
+
+entry-total fn (entries: Vec, direction: Str): Int {
+  reduce(filter(entries, (e) { eq(get(e, "direction"), direction) }), (acc, e) {
+    amount get(e, "amount")
+    add(acc, if(is-int(amount), amount, 0))
+  }, 0)
+}
+
+is-balanced
+meta {
+    doc: """True when the Int `amount`s of the `credit` entries equal those of the `debit` entries. A pre-check for single-currency transactions (Modern Treasury checks each currency itself). Exposed for testing."""
+}
+fn (entries: Vec): Bool {
+  eq(entry-total(entries, "credit"), entry-total(entries, "debit"))
+}
+
+invalid-entries
+meta {
+    doc: """The positions of `ledger_entries` that lack `ledger_account_id`, `direction` (`"credit"` or `"debit"`) or an `amount`/`amount_string`. Exposed for testing."""
+}
+fn (entries: Vec): Vec<Int> {
+  checked map-indexed(entries, (i, e) {
+    ok and(
+      is-map(e),
+      is-some(get(e, "ledger_account_id")),
+      in(get(e, "direction"), ["credit", "debit"]),
+      or(is-some(get(e, "amount")), is-some(get(e, "amount_string")))
+    )
+    if(ok, null, i)
+  })
+  filter(checked, is-some)
+}
+
+create-ledger-transaction
+meta {
+    doc: """
+    POST /api/ledger_transactions: record a ledger transaction.
+    `params` needs `ledger_entries: [{ledger_account_id, direction,
+    amount}]` (at least two, balanced per currency); optional
+    `description`, `status` (`"pending"`, `"posted"`; default pending),
+    `effective_at`, `effective_date`, `external_id` (unique; a second
+    create with the same one fails), `metadata`, `ledgerable_type` and
+    `ledgerable_id`. Each entry may set `available_balance_amount`,
+    `pending_balance_amount` or `posted_balance_amount` conditions for
+    balance locking. Entries missing an account, direction or amount err
+    locally.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::ledgers/create-ledger-transaction({
+      description: "User 42 top-up",
+      status: "posted",
+      external_id: "topup-42-1",
+      ledger_entries: [
+        {ledger_account_id: "f1c7e474-e6d5-4741-9f76-04510c8b6d7a", direction: "debit", amount: 1000},
+        {ledger_account_id: "0e0e0e0e-1111-2222-3333-444444444444", direction: "credit", amount: 1000}
+      ]
+    }, {idempotency-key: "topup-42-1"})
+    ```
+    """
+}
+fn
+(params: Map): Map {
+  create-ledger-transaction(params, {})
+},
+(params: Map, opts: Map): Map {
+  entries get(params, "ledger_entries")
+  cond {
+    or(not(is-vec(entries)), lt(length(or(entries, [])), 2)) => {
+      err("modern-treasury: create-ledger-transaction needs ledger_entries with at least two entries; nothing was sent")
+    }
+
+    not(is-empty(invalid-entries(entries))) => {
+      err(`modern-treasury: create-ledger-transaction: ledger_entries ${join(map(invalid-entries(entries), (i) { Str(i) }), ", ")} need ledger_account_id, direction and amount; nothing was sent`)
+    }
+    => { ::api/create("/api/ledger_transactions", params, ["ledger_entries"], opts, "create-ledger-transaction") }
+  }
+}
+
+get-ledger-transaction
+meta {
+    doc: """GET /api/ledger_transactions/{id}: retrieve a ledger transaction with its entries."""
+}
+fn
+(ledger-transaction-id: Str): Map {
+  get-ledger-transaction(ledger-transaction-id, {})
+},
+(ledger-transaction-id: Str, opts: Map): Map {
+  ::api/call("GET", `/api/ledger_transactions/${seg(ledger-transaction-id)}`, {}, opts)
+}
+
+list-ledger-transactions
+meta {
+    doc: """GET /api/ledger_transactions: one page. Filters: `ledger_id`, `ledger_account_id`, `status`, `external_id`, `ledgerable_type`, `ledgerable_id`, `effective_at: {gte, lte}`, `posted_at: {...}`, `updated_at: {...}`, `order_by: {created_at: "asc"}`, `metadata`, `per_page`, `after_cursor`."""
+}
+fn
+(): Map {
+  list-ledger-transactions({})
+},
+(params: Map): Map {
+  list-ledger-transactions(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/list-page("/api/ledger_transactions", params, opts)
+}
+
+update-ledger-transaction
+meta {
+    doc: """PATCH /api/ledger_transactions/{id}: change a pending ledger transaction: `status` (`"posted"` or `"archived"`), `description`, `metadata`, `effective_at`, or its `ledger_entries`. Posted transactions are immutable; reverse them instead."""
+}
+fn
+(ledger-transaction-id: Str, params: Map): Map {
+  update-ledger-transaction(ledger-transaction-id, params, {})
+},
+(ledger-transaction-id: Str, params: Map, opts: Map): Map {
+  ::api/call("PATCH", `/api/ledger_transactions/${seg(ledger-transaction-id)}`, params, opts)
+}
+
+reverse-ledger-transaction
+meta {
+    doc: """POST /api/ledger_transactions/{id}/reversal: post a new ledger transaction that undoes a posted one. `params`: `description`, `status`, `effective_at`, `external_id`, `metadata`."""
+}
+fn
+(ledger-transaction-id: Str, params: Map): Map {
+  reverse-ledger-transaction(ledger-transaction-id, params, {})
+},
+(ledger-transaction-id: Str, params: Map, opts: Map): Map {
+  ::api/call("POST", `/api/ledger_transactions/${seg(ledger-transaction-id)}/reversal`, params, opts)
+}
+
+list-ledger-entries
+meta {
+    doc: """GET /api/ledger_entries: one page of ledger entries. Filters: `ledger_account_id`, `ledger_transaction_id`, `direction`, `status`, `effective_at: {...}`, `show_balances` (Bool, adds resulting balances), `order_by: {created_at: "asc"}`, `per_page`, `after_cursor`."""
+}
+fn
+(): Map {
+  list-ledger-entries({})
+},
+(params: Map): Map {
+  list-ledger-entries(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/list-page("/api/ledger_entries", params, opts)
+}

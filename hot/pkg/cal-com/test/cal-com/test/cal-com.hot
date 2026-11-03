@@ -1,16 +1,316 @@
 ::cal-com::test ns
 meta ["test"]
 
+::api ::cal-com::api
+::bookings ::cal-com::bookings
+::slots ::cal-com::slots
+::types ::cal-com::event-types
+::schedules ::cal-com::schedules
+::webhooks ::cal-com::webhooks
+
+// ============================================================================
+// Versions and base URL
+// ============================================================================
+
 test-api-versions-pinned-per-family
 meta ["test"] fn () {
     // Cal.com v2 versions each endpoint family independently; these must
-    // match the documented cal-api-version for each family.
+    // match the cal-api-version each family documents in the v2 OpenAPI spec.
     assert-eq("2024-06-14", ::cal-com/VERSION_EVENT_TYPES)
     assert-eq("2024-09-04", ::cal-com/VERSION_SLOTS)
     assert-eq("2024-08-13", ::cal-com/VERSION_BOOKINGS)
+    assert-eq("2024-06-11", ::cal-com/VERSION_SCHEDULES)
 }
 
-test-base-url-default
+test-base-url-default-and-override
 meta ["test"] fn () {
-    assert-eq("https://api.cal.com/v2", ::cal-com/base-url())
+    assert-eq("https://api.cal.com/v2", ::api/base-url())
+    assert-eq("https://api.cal.com/v2", ::api/normalize-base-url(null))
+    assert-eq("https://api.cal.com/v2", ::api/normalize-base-url("  "))
+    assert-eq("https://cal.example.com/api/v2", ::api/normalize-base-url("https://cal.example.com/api/v2/"))
+    assert-eq("https://cal.example.com/api/v2", ::api/normalize-base-url("https://cal.example.com/api/v2"))
+}
+
+// ============================================================================
+// Headers
+// ============================================================================
+
+test-headers-versioned-with-body
+meta ["test"] fn () {
+    h ::api/build-headers("cal_live_abc", "2024-08-13", true)
+    assert-eq("Bearer cal_live_abc", h.Authorization)
+    assert-eq("2024-08-13", get(h, "cal-api-version"))
+    assert-eq("application/json", get(h, "Content-Type"))
+}
+
+test-headers-unversioned-without-body
+meta ["test"] fn () {
+    h ::api/build-headers("cal_live_abc", "", false)
+    assert-eq(["Authorization"], keys(h), "no version header and no content type")
+}
+
+// ============================================================================
+// Response handling
+// ============================================================================
+
+test-response-data-unwraps-envelope
+meta ["test"] fn () {
+    assert-eq([{id: 1}], ::api/response-data({status: "success", data: [{id: 1}]}))
+    assert-eq({id: 7}, ::api/response-data({id: 7}), "a Map without data is returned whole")
+}
+
+test-response-data-empty-bodies-are-null
+meta ["test"] fn () {
+    assert(is-null(::api/response-data("")), "204 / empty body")
+    assert(is-null(::api/response-data("  ")), "whitespace body")
+    assert(is-null(::api/response-data(null)), "null body")
+    assert-eq("OK", ::api/response-data("OK"), "non-empty text passes through")
+    assert-eq({id: 1}, ::api/response-data({status: "success", data: {id: 1}}))
+}
+
+test-response-envelope-keeps-pagination
+meta ["test"] fn () {
+    env ::api/response-envelope({status: "success", data: [], pagination: {hasNextPage: false}})
+    assert-eq(false, env.pagination.hasNextPage)
+    assert(is-null(::api/response-envelope("")))
+}
+
+test-http-error-from-response
+meta ["test"] fn () {
+    e ::api/HttpError(::hot::http/HttpResponse({status: 404, headers: {"content-type": "application/json"}, body: {status: "error"}}))
+    assert-eq(404, e.status)
+    assert-eq("error", e.body.status)
+}
+
+// ============================================================================
+// Per-call credentials
+// ============================================================================
+
+CTX_VALUES {"cal-com.api.key": "ctx-key", "cal-com.url": "https://cal.example.com/api/v2/"}
+
+err-text fn (out: Result): Str {
+    if-err(out, (e) { e })
+}
+
+test-resolve-from-uses-ctx
+meta ["test"] fn () {
+    out ::api/resolve-from({}, CTX_VALUES)
+    assert-eq("ctx-key", out.api-key)
+    assert-eq("https://cal.example.com/api/v2", out.base-url)
+    assert-eq("https://api.cal.com/v2", ::api/resolve-from({api-key: "k"}, {}).base-url)
+}
+
+test-resolve-from-opts-win
+meta ["test"] fn () {
+    out ::api/resolve-from({api-key: " tenant-key ", base-url: "https://tenant.example.com/v2/"}, CTX_VALUES)
+    assert-eq("tenant-key", out.api-key)
+    assert-eq("https://tenant.example.com/v2", out.base-url)
+}
+
+test-resolve-from-blank-key-never-falls-back
+meta ["test"] fn () {
+    for-each(["", "  ", null], (blank) {
+        out ::api/resolve-from({api-key: blank}, CTX_VALUES)
+        assert(is-err(out), "a blank key is an Err, never ctx")
+        assert(contains(err-text(out), "api-key"), "names the key")
+    })
+}
+
+test-resolve-from-per-call-url-needs-key
+meta ["test"] fn () {
+    out ::api/resolve-from({base-url: "https://evil.example.com"}, CTX_VALUES)
+    assert(is-err(out), "the ctx key never goes to a per-call URL")
+    assert(contains(err-text(out), "base-url"), "names base-url")
+    assert(contains(err-text(out), "api-key"), "names api-key")
+}
+
+test-resolve-from-no-key
+meta ["test"] fn () {
+    assert(contains(err-text(::api/resolve-from({}, {})), "cal-com.api.key"))
+}
+
+test-resolve-returns-marked-key-unchanged
+meta ["test"] fn () {
+    assert-eq("cal_live_tenant_key", ::api/resolve({api-key: "cal_live_tenant_key"}).api-key)
+}
+
+test-opts-arity-errs-before-any-request
+meta ["test"] fn () {
+    assert(is-err(::cal-com::users/me({api-key: ""})))
+    assert(is-err(::bookings/get-booking("uid", {base-url: "https://evil.example.com"})))
+    assert(is-err(::bookings/list-bookings({}, {api-key: null})))
+    assert(is-err(::bookings/list-all-bookings({}, 5, {api-key: " "})), "a failed page comes back as its Err")
+    assert(is-err(::slots/get-slots(1, "2026-07-10", "2026-07-14", "UTC", {}, {api-key: ""})))
+}
+
+test-webhook-secret-marked-unchanged
+meta ["test"] fn () {
+    fields {secret: "webhook-secret-value", active: true}
+    assert-eq(fields, ::webhooks/mark-webhook-secret(fields))
+    assert-eq({active: true}, ::webhooks/mark-webhook-secret({active: true}))
+}
+
+// ============================================================================
+// Query and path building
+// ============================================================================
+
+test-path-segment-encodes
+meta ["test"] fn () {
+    assert-eq("abc%2F..%2Fx", ::api/path-segment("abc/../x"))
+    assert-eq("42", ::api/path-segment(42))
+}
+
+test-query-string-drops-nulls-and-joins-vecs
+meta ["test"] fn () {
+    assert-eq("", ::api/query-string({}))
+    assert-eq("", ::api/query-string({status: null}))
+    assert-eq("?status=upcoming%2Cunconfirmed&take=10", ::api/query-string({status: ["upcoming", "unconfirmed"], attendeeEmail: null, take: 10}))
+}
+
+test-bookings-list-query
+meta ["test"] fn () {
+    q ::bookings/build-list-query({status: "past", afterStart: "2026-07-01T00:00:00Z", take: 50, skip: 100})
+    assert-eq("?status=past&afterStart=2026-07-01T00%3A00%3A00Z&take=50&skip=100", q)
+    assert-eq("", ::bookings/build-list-query({}))
+}
+
+test-slots-query
+meta ["test"] fn () {
+    q ::slots/build-slots-query(123, "2026-07-10", "2026-07-14", "America/Chicago", {})
+    assert-eq("?eventTypeId=123&start=2026-07-10&end=2026-07-14&timeZone=America%2FChicago", q)
+    utc ::slots/build-slots-query(123, "2026-07-10", "2026-07-14", null, {duration: 60})
+    assert-eq("?duration=60&eventTypeId=123&start=2026-07-10&end=2026-07-14", utc, "null time zone omitted, options kept")
+}
+
+// ============================================================================
+// take/skip collection (fake fetch: 5 items served in pages of `take`)
+// ============================================================================
+
+fake-fetch fn (options: Map): Map {
+    all [1, 2, 3, 4, 5]
+    skip options.skip
+    end min(length(all), add(skip, options.take))
+    items if(gte(skip, length(all)), [], slice(all, skip, end))
+    {status: "success", data: items, pagination: {hasNextPage: lt(end, length(all)), seenTake: options.take}}
+}
+
+test-collect-pages-stops-at-last-page
+meta ["test"] fn () {
+    assert-eq([1, 2, 3, 4, 5], ::bookings/collect-pages(fake-fetch, {status: "past"}, 0, 100, []))
+}
+
+test-collect-pages-respects-limit
+meta ["test"] fn () {
+    assert-eq([1, 2, 3], ::bookings/collect-pages(fake-fetch, {}, 0, 3, []))
+    assert-eq([3, 4], ::bookings/collect-pages(fake-fetch, {}, 2, 2, []), "starts at the given skip")
+}
+
+test-collect-pages-stops-on-empty-page
+meta ["test"] fn () {
+    empty-fetch (options) { {data: [], pagination: {hasNextPage: true}} }
+    assert-eq([], ::bookings/collect-pages(empty-fetch, {}, 0, 10, []), "empty page ends even if hasNextPage lies")
+}
+
+// ============================================================================
+// Bodies (unset optionals omitted)
+// ============================================================================
+
+test-compact-omits-nulls
+meta ["test"] fn () {
+    assert-eq({start: "2026-07-10T15:00:00Z"}, ::api/compact({start: "2026-07-10T15:00:00Z", guests: null}))
+}
+
+test-mark-absent-body
+meta ["test"] fn () {
+    body ::bookings/build-absent-body(null, ["ada@example.com"])
+    assert-eq([{email: "ada@example.com", absent: true}], body.attendees)
+    assert(not(in("host", keys(body))), "unset host is omitted")
+
+    host-only ::bookings/build-absent-body(true, [])
+    assert-eq({host: true}, host-only, "empty attendee list is omitted")
+}
+
+test-event-type-create-body
+meta ["test"] fn () {
+    body ::types/build-create-body("Intro call", "intro-call", 30, {description: null, minimumBookingNotice: 120})
+    assert-eq("Intro call", body.title)
+    assert-eq("intro-call", body.slug)
+    assert-eq(30, body.lengthInMinutes)
+    assert-eq(120, body.minimumBookingNotice)
+    assert(not(in("description", keys(body))), "unset options are omitted, not null")
+}
+
+test-schedule-create-body
+meta ["test"] fn () {
+    body ::schedules/build-create-body("Support hours", "America/Chicago", false, {overrides: null})
+    assert-eq({name: "Support hours", timeZone: "America/Chicago", isDefault: false}, body)
+}
+
+test-webhook-create-body
+meta ["test"] fn () {
+    body ::webhooks/build-webhook-body("https://example.com/hook", ["BOOKING_CREATED"], {secret: "s3cret", payloadTemplate: null})
+    assert-eq(true, body.active, "active defaults to true")
+    assert-eq("https://example.com/hook", body.subscriberUrl)
+    assert-eq(["BOOKING_CREATED"], body.triggers)
+    assert-eq("s3cret", body.secret)
+    assert(not(in("payloadTemplate", keys(body))))
+
+    paused ::webhooks/build-webhook-body("https://example.com/hook", ["BOOKING_CREATED"], {active: false})
+    assert-eq(false, paused.active, "explicit active wins")
+}
+
+// ============================================================================
+// Webhook verification (vectors generated independently with Python's hmac)
+// ============================================================================
+
+BOOKING_BODY """{"triggerEvent":"BOOKING_CREATED","createdAt":"2026-07-10T15:00:00.000Z","payload":{"uid":"bk_123"}}"""
+
+test-webhook-verify-accepts-vector
+meta ["test"] fn () {
+    request {
+        headers: {x-cal-signature-256: "a02e50fecea133d48a51b3330105ea62bd1b41dcc131420ddbbc77aa9bbcf3fb"},
+        body-raw: BOOKING_BODY
+    }
+
+    assert(::webhooks/verify-request(request, "cal_wh_test_secret"))
+
+    upper {
+        headers: {x-cal-signature-256: "A02E50FECEA133D48A51B3330105EA62BD1B41DCC131420DDBBC77AA9BBCF3FB"},
+        body-raw: BOOKING_BODY
+    }
+
+    assert(::webhooks/verify-request(upper, "cal_wh_test_secret"), "hex comparison is case-insensitive")
+}
+
+test-webhook-verify-rejects-tampered
+meta ["test"] fn () {
+    // The signature of a BOOKING_CANCELLED body must not verify this body.
+    tampered {
+        headers: {x-cal-signature-256: "367394bccbe88f4e29f85f149d58ef6c431ff93eb2d5627e951337a0055d8ddf"},
+        body-raw: BOOKING_BODY
+    }
+
+    assert(not(::webhooks/verify-request(tampered, "cal_wh_test_secret")), "wrong-body signature fails")
+
+    wrong-secret {
+        headers: {x-cal-signature-256: "a02e50fecea133d48a51b3330105ea62bd1b41dcc131420ddbbc77aa9bbcf3fb"},
+        body-raw: BOOKING_BODY
+    }
+
+    assert(not(::webhooks/verify-request(wrong-secret, "another_secret")), "wrong secret fails")
+}
+
+test-webhook-verify-rejects-missing-and-unsigned
+meta ["test"] fn () {
+    assert(not(::webhooks/verify-request({headers: {}, body-raw: BOOKING_BODY}, "cal_wh_test_secret")), "missing header fails")
+    // Cal.com sends this literal when the webhook has no secret.
+    unsigned {headers: {x-cal-signature-256: "no-secret-provided"}, body-raw: BOOKING_BODY}
+    assert(not(::webhooks/verify-request(unsigned, "cal_wh_test_secret")), "no-secret-provided never verifies")
+}
+
+test-webhook-empty-secret-fails-closed
+meta ["test"] fn () {
+    sig ::hot::hmac/hmac-sha256("", BOOKING_BODY)
+    request {headers: {x-cal-signature-256: sig}, body-raw: BOOKING_BODY}
+    assert(not(::webhooks/verify-request(request, "")), "empty secret fails closed")
 }

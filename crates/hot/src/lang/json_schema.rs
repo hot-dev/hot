@@ -266,13 +266,14 @@ fn wrap_with_defs(schema: Val, ctx: &SchemaContext) -> Val {
     }
     let inlined = inline_top_level_ref(schema, &ctx.defs);
     if let Val::Map(mut existing) = inlined {
-        existing.insert(Val::from("$defs"), Val::Map(Box::new(ctx.defs.clone())));
+        std::sync::Arc::make_mut(&mut existing)
+            .insert(Val::from("$defs"), Val::map(ctx.defs.clone()));
         return Val::Map(existing);
     }
     let mut wrapped = IndexMap::new();
-    wrapped.insert(Val::from("$defs"), Val::Map(Box::new(ctx.defs.clone())));
+    wrapped.insert(Val::from("$defs"), Val::map(ctx.defs.clone()));
     wrapped.insert(Val::from("schema"), inlined);
-    Val::Map(Box::new(wrapped))
+    Val::map(wrapped)
 }
 
 /// If `schema` is exactly `{"$ref": "#/$defs/<name>"}` and `<name>` is
@@ -410,8 +411,8 @@ fn union_to_schema_ctx(parts: &[String], registry: &TypeRegistry, ctx: &mut Sche
         .map(|p| type_to_schema_ctx(p, registry, ctx))
         .collect();
     let mut map = IndexMap::new();
-    map.insert(Val::from("anyOf"), Val::Vec(schemas));
-    Val::Map(Box::new(map))
+    map.insert(Val::from("anyOf"), Val::vec(schemas));
+    Val::map(map)
 }
 
 /// Convert literal members to typed `enum` schemas, one per JSON type
@@ -448,8 +449,8 @@ fn literals_to_schema(literals: &[LiteralType]) -> Val {
         .map(|(json_type, members)| {
             let mut map = IndexMap::new();
             map.insert(Val::from("type"), Val::from(json_type));
-            map.insert(Val::from("enum"), Val::Vec(members));
-            Val::Map(Box::new(map))
+            map.insert(Val::from("enum"), Val::vec(members));
+            Val::map(map)
         })
         .collect();
     if has_null {
@@ -460,8 +461,8 @@ fn literals_to_schema(literals: &[LiteralType]) -> Val {
         return schemas.remove(0);
     }
     let mut map = IndexMap::new();
-    map.insert(Val::from("anyOf"), Val::Vec(schemas));
-    Val::Map(Box::new(map))
+    map.insert(Val::from("anyOf"), Val::vec(schemas));
+    Val::map(map)
 }
 
 /// Convert optional type to JSON Schema with null union
@@ -475,9 +476,9 @@ fn optional_to_schema_ctx(
     let mut map = IndexMap::new();
     map.insert(
         Val::from("anyOf"),
-        Val::Vec(vec![inner_schema, null_schema]),
+        Val::vec(vec![inner_schema, null_schema]),
     );
-    Val::Map(Box::new(map))
+    Val::map(map)
 }
 
 /// Convert generic types to JSON Schema
@@ -497,7 +498,7 @@ fn generic_to_schema_ctx(
             let mut map = IndexMap::new();
             map.insert(Val::from("type"), Val::from("array"));
             map.insert(Val::from("items"), items_schema);
-            Val::Map(Box::new(map))
+            Val::map(map)
         }
         "Map" => {
             let value_schema = if params.len() >= 2 {
@@ -508,7 +509,7 @@ fn generic_to_schema_ctx(
             let mut map = IndexMap::new();
             map.insert(Val::from("type"), Val::from("object"));
             map.insert(Val::from("additionalProperties"), value_schema);
-            Val::Map(Box::new(map))
+            Val::map(map)
         }
         "Result" => {
             if params.is_empty() {
@@ -587,7 +588,7 @@ fn builtin_to_schema(type_str: &str) -> Val {
         }
     }
 
-    Val::Map(Box::new(map))
+    Val::map(map)
 }
 
 /// Convert a custom type to JSON Schema by looking up its definition
@@ -626,7 +627,7 @@ fn custom_type_to_schema_ctx(
         } else {
             let mut map = IndexMap::new();
             map.insert(Val::from("type"), Val::from("object"));
-            Val::Map(Box::new(map))
+            Val::map(map)
         };
         match &type_info.refinement {
             Some(refinement) => apply_refinement(schema, refinement),
@@ -639,7 +640,7 @@ fn custom_type_to_schema_ctx(
             Val::from("description"),
             Val::from(format!("Custom type: {}", type_name)),
         );
-        Val::Map(Box::new(map))
+        Val::map(map)
     };
 
     ctx.visited.remove(&resolved_key);
@@ -656,13 +657,14 @@ fn custom_type_to_schema_ctx(
 }
 
 /// Add a refinement's keywords to its base type's schema. Length bounds
-/// become `minItems`/`maxItems` on arrays. On strings they are described
-/// instead: Hot's `length` counts UTF-8 bytes, and `minLength`/`maxLength`
-/// count characters. A predicate with no schema form is described.
+/// become `minItems`/`maxItems` on arrays and `minLength`/`maxLength` on
+/// strings, where both Hot's `length` and JSON Schema count characters. A
+/// predicate with no schema form is described.
 fn apply_refinement(schema: Val, refinement: &RefinementSchema) -> Val {
-    let Val::Map(mut map) = schema else {
+    let Val::Map(map) = schema else {
         return schema;
     };
+    let mut map = std::sync::Arc::unwrap_or_clone(map);
     let base_type = map
         .get(&Val::from("type"))
         .and_then(|t| match t {
@@ -671,14 +673,10 @@ fn apply_refinement(schema: Val, refinement: &RefinementSchema) -> Val {
         })
         .unwrap_or_default();
     let mut describe = refinement.describe;
-    let mut byte_length = false;
     for (keyword, value) in &refinement.keywords {
         let keyword = match (keyword.as_str(), base_type.as_str()) {
-            ("$minLength" | "$maxLength", "string") => {
-                describe = true;
-                byte_length = true;
-                continue;
-            }
+            ("$minLength", "string") => "minLength",
+            ("$maxLength", "string") => "maxLength",
             ("$minLength", "array") => "minItems",
             ("$maxLength", "array") => "maxItems",
             ("$minLength" | "$maxLength", _) => {
@@ -690,17 +688,14 @@ fn apply_refinement(schema: Val, refinement: &RefinementSchema) -> Val {
         map.insert(Val::from(keyword), value.clone());
     }
     if describe {
-        let mut text = format!("Must satisfy: {}", refinement.source);
-        if byte_length {
-            text.push_str(" (length counts UTF-8 bytes)");
-        }
+        let text = format!("Must satisfy: {}", refinement.source);
         let description = match map.get(&Val::from("description")) {
             Some(Val::Str(existing)) => format!("{existing}. {text}"),
             _ => text,
         };
         map.insert(Val::from("description"), Val::from(description));
     }
-    Val::Map(map)
+    Val::map(map)
 }
 
 /// The JSON Schema form of a `where` predicate. `param` is the predicate's
@@ -946,7 +941,7 @@ fn canonical_predicate(expr: &Value, param: &str, out: &mut Vec<(String, Val)>) 
                 .collect();
             match literals {
                 Some(values) => {
-                    push("enum", Val::Vec(values));
+                    push("enum", Val::vec(values));
                     true
                 }
                 None => false,
@@ -979,7 +974,7 @@ fn ref_to(type_name: &str) -> Val {
         Val::from("$ref"),
         Val::from(format!("#/$defs/{}", sanitize_def_name(type_name))),
     );
-    Val::Map(Box::new(map))
+    Val::map(map)
 }
 
 /// Render an enum's `VariantInfo` list as JSON Schema.
@@ -1001,8 +996,8 @@ fn enum_to_schema_ctx(
             .iter()
             .map(|v| Val::from(v.name.as_str()))
             .collect();
-        map.insert(Val::from("enum"), Val::Vec(names));
-        return Val::Map(Box::new(map));
+        map.insert(Val::from("enum"), Val::vec(names));
+        return Val::map(map);
     }
 
     let one_of: Vec<Val> = variants
@@ -1013,7 +1008,7 @@ fn enum_to_schema_ctx(
             let mut props = IndexMap::new();
             let mut tag_map = IndexMap::new();
             tag_map.insert(Val::from("const"), Val::from(qualified_name.as_str()));
-            props.insert(Val::from("$type"), Val::Map(Box::new(tag_map)));
+            props.insert(Val::from("$type"), Val::map(tag_map));
 
             let mut required = vec![Val::from("$type")];
 
@@ -1025,21 +1020,18 @@ fn enum_to_schema_ctx(
 
             let mut variant_schema = IndexMap::new();
             variant_schema.insert(Val::from("type"), Val::from("object"));
-            variant_schema.insert(Val::from("properties"), Val::Map(Box::new(props)));
-            variant_schema.insert(Val::from("required"), Val::Vec(required));
-            Val::Map(Box::new(variant_schema))
+            variant_schema.insert(Val::from("properties"), Val::map(props));
+            variant_schema.insert(Val::from("required"), Val::vec(required));
+            Val::map(variant_schema)
         })
         .collect();
 
     let mut schema = IndexMap::new();
-    schema.insert(Val::from("oneOf"), Val::Vec(one_of));
+    schema.insert(Val::from("oneOf"), Val::vec(one_of));
     let mut discriminator = IndexMap::new();
     discriminator.insert(Val::from("propertyName"), Val::from("$type"));
-    schema.insert(
-        Val::from("discriminator"),
-        Val::Map(Box::new(discriminator)),
-    );
-    Val::Map(Box::new(schema))
+    schema.insert(Val::from("discriminator"), Val::map(discriminator));
+    Val::map(schema)
 }
 
 /// Convert type fields to JSON Schema object
@@ -1067,13 +1059,13 @@ fn fields_to_schema_ctx(
 
     let mut schema = IndexMap::new();
     schema.insert(Val::from("type"), Val::from("object"));
-    schema.insert(Val::from("properties"), Val::Map(Box::new(properties)));
+    schema.insert(Val::from("properties"), Val::map(properties));
 
     if !required.is_empty() {
-        schema.insert(Val::from("required"), Val::Vec(required));
+        schema.insert(Val::from("required"), Val::vec(required));
     }
 
-    Val::Map(Box::new(schema))
+    Val::map(schema)
 }
 
 /// Generate input schema from function arguments with type registry
@@ -1094,7 +1086,7 @@ pub fn args_to_input_schema_with_ctx(
         let mut map = IndexMap::new();
         map.insert(Val::from("type"), Val::from("object"));
         map.insert(Val::from("properties"), Val::map_empty());
-        return Val::Map(Box::new(map));
+        return Val::map(map);
     }
 
     let mut properties = IndexMap::new();
@@ -1126,13 +1118,13 @@ pub fn args_to_input_schema_with_ctx(
 
     let mut schema = IndexMap::new();
     schema.insert(Val::from("type"), Val::from("object"));
-    schema.insert(Val::from("properties"), Val::Map(Box::new(properties)));
+    schema.insert(Val::from("properties"), Val::map(properties));
 
     if !required.is_empty() {
-        schema.insert(Val::from("required"), Val::Vec(required));
+        schema.insert(Val::from("required"), Val::vec(required));
     }
 
-    Val::Map(Box::new(schema))
+    Val::map(schema)
 }
 
 /// Generate input schema from function arguments (without registry)

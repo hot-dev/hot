@@ -93,9 +93,17 @@ meta {
     ```
     """
 }
-fn (request: GETDomainsRequest): GETDomainsResponse {
-  response api-request("GET", `${::resend/BASE_URL}/domains`)
-  if(is-ok-response(response), GETDomainsResponse(response.body), err(HttpError(response)))
+fn
+(request: GETDomainsRequest): GETDomainsResponse {
+  retrieve-list-domains(request, {})
+},
+(request: GETDomainsRequest, opts: Map): GETDomainsResponse {
+  response api-request("GET", `${::resend/BASE_URL}/domains`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { GETDomainsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 POSTDomainsRequest type {
@@ -117,9 +125,17 @@ create-new-domain
 meta {
     doc: """Register a new sending domain. Returns the domain with DNS records that must be configured for verification."""
 }
-fn (request: POSTDomainsRequest): POSTDomainsResponse {
-  response api-request("POST", `${::resend/BASE_URL}/domains`, {}, request)
-  if(is-ok-response(response), POSTDomainsResponse(response.body), err(HttpError(response)))
+fn
+(request: POSTDomainsRequest): POSTDomainsResponse {
+  create-new-domain(request, {})
+},
+(request: POSTDomainsRequest, opts: Map): POSTDomainsResponse {
+  response api-request("POST", `${::resend/BASE_URL}/domains`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { POSTDomainsResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 GETDomainsDomainIdRequest type {
@@ -154,9 +170,17 @@ meta {
     ```
     """
 }
-fn (request: GETDomainsDomainIdRequest): GETDomainsDomainIdResponse {
-  response api-request("GET", `${::resend/BASE_URL}/domains/${request.domain-id}`)
-  if(is-ok-response(response), GETDomainsDomainIdResponse(response.body), err(HttpError(response)))
+fn
+(request: GETDomainsDomainIdRequest): GETDomainsDomainIdResponse {
+  retrieve-single-domain(request, {})
+},
+(request: GETDomainsDomainIdRequest, opts: Map): GETDomainsDomainIdResponse {
+  response api-request("GET", `${::resend/BASE_URL}/domains/${request.domain-id}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { GETDomainsDomainIdResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 PATCHDomainsDomainIdRequest type {
@@ -175,9 +199,17 @@ update-existing-domain
 meta {
     doc: """Update tracking settings (open tracking, click tracking, TLS) for an existing domain."""
 }
-fn (domain-id: Str, request: PATCHDomainsDomainIdRequest): PATCHDomainsDomainIdResponse {
-  response api-request("PATCH", `${::resend/BASE_URL}/domains/${domain-id}`, {}, request)
-  if(is-ok-response(response), PATCHDomainsDomainIdResponse(response.body), err(HttpError(response)))
+fn
+(domain-id: Str, request: PATCHDomainsDomainIdRequest): PATCHDomainsDomainIdResponse {
+  update-existing-domain(domain-id, request, {})
+},
+(domain-id: Str, request: PATCHDomainsDomainIdRequest, opts: Map): PATCHDomainsDomainIdResponse {
+  response api-request("PATCH", `${::resend/BASE_URL}/domains/${domain-id}`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { PATCHDomainsDomainIdResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 DELETEDomainsDomainIdRequest type {
@@ -193,9 +225,17 @@ DELETEDomainsDomainIdResponse type {
 
 remove-existing-domain
 meta {doc: """Remove a domain from your Resend account. This cannot be undone."""}
-fn (request: DELETEDomainsDomainIdRequest): DELETEDomainsDomainIdResponse {
-  response api-request("DELETE", `${::resend/BASE_URL}/domains/${request.domain-id}`)
-  if(is-ok-response(response), DELETEDomainsDomainIdResponse(response.body), err(HttpError(response)))
+fn
+(request: DELETEDomainsDomainIdRequest): DELETEDomainsDomainIdResponse {
+  remove-existing-domain(request, {})
+},
+(request: DELETEDomainsDomainIdRequest, opts: Map): DELETEDomainsDomainIdResponse {
+  response api-request("DELETE", `${::resend/BASE_URL}/domains/${request.domain-id}`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { DELETEDomainsDomainIdResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 POSTDomainsDomainIdVerifyRequest type {
@@ -212,7 +252,15 @@ verify-existing-domain
 meta {
     doc: """Trigger DNS verification for a domain. DNS records must be configured before calling this."""
 }
-fn (request: POSTDomainsDomainIdVerifyRequest): POSTDomainsDomainIdVerifyResponse {
-  response api-request("POST", `${::resend/BASE_URL}/domains/${request.domain-id}/verify`)
-  if(is-ok-response(response), POSTDomainsDomainIdVerifyResponse(response.body), err(HttpError(response)))
+fn
+(request: POSTDomainsDomainIdVerifyRequest): POSTDomainsDomainIdVerifyResponse {
+  verify-existing-domain(request, {})
+},
+(request: POSTDomainsDomainIdVerifyRequest, opts: Map): POSTDomainsDomainIdVerifyResponse {
+  response api-request("POST", `${::resend/BASE_URL}/domains/${request.domain-id}/verify`, {}, "", opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { POSTDomainsDomainIdVerifyResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

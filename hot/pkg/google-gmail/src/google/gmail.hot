@@ -1,137 +1,188 @@
 ::google::gmail ns
 meta {
     doc: """
-    Gmail API bindings. Authentication is configured once via the
-    `google.*` context variables — see the `google-core` package.
+    Gmail API v1 bindings: send safe MIME email (HTML, attachments,
+    non-ASCII headers, large messages), reply and forward in thread,
+    search and read messages as plain records, threads, drafts, labels,
+    and incremental sync with Pub/Sub push notifications. Credentials and
+    scopes come from `google-core`.
+
+    **Namespaces**
+
+    - `::google::gmail::mime` - build RFC 5322 messages as Bytes (header
+      injection safe, RFC 2047 encoding, multipart, attachments)
+    - `::google::gmail::messages` - send, reply, reply-all, forward,
+      list/search, get, modify labels, batch modify, trash, attachments
+    - `::google::gmail::parse` - read a message: headers, text and HTML
+      bodies, attachment list, `to-email`
+    - `::google::gmail::threads` - list, get, modify, trash
+    - `::google::gmail::drafts` - create (or a reply draft), update,
+      send, list, get, delete
+    - `::google::gmail::labels` - list, get, create, update, delete,
+      `ensure-label`
+    - `::google::gmail::sync` - profile, history (incremental sync),
+      `watch` / `stop-watch`, Pub/Sub push parsing and verification
+
+    Every function has an options arity taking an `opts` Map. Gmail query
+    parameters use Gmail's own names (`q`, `maxResults`, `pageToken`,
+    `labelIds`, `format`, ...); credential keys (`token`,
+    `refresh-token`, `service-account`, `subject`, `scopes`, `retry`) are
+    handled by `google-core` and override context for that call.
+
+    **Service accounts.** Gmail has no service-account mailboxes: a
+    service account must use domain-wide delegation and impersonate a
+    Workspace user (`google.impersonate`, or `subject` per call).
 
     **Quick start**
 
     ```hot
-    ::gmail ::google::gmail
+    ::messages ::google::gmail::messages
 
-    ::gmail/send-message("alice@example.com", "Weekly report", "All green this week.")
+    ::messages/send({to: "ada@example.com", subject: "Weekly report", text: "All green.", html: "<p>All <b>green</b>.</p>"})
 
-    inbox ::gmail/list-messages("is:unread newer_than:7d")
-    message ::gmail/get-message(inbox.messages[0].id)
+    unread ::messages/search-emails("is:unread newer_than:7d", 20)
+    first(unread).subject
     ```
     """
 }
 
 ::api ::google::api
-::b64 ::hot::base64
+::ctx ::hot::ctx
+::uri ::hot::uri
 
-BASE_URL "https://gmail.googleapis.com/gmail/v1"
+API_ROOT "https://gmail.googleapis.com"
+BASE_URL "https://gmail.googleapis.com/gmail/v1/users/me"
+UPLOAD_URL "https://gmail.googleapis.com/upload/gmail/v1/users/me"
 
-SEND_SCOPE "https://www.googleapis.com/auth/gmail.send"
+// Scopes. gmail.readonly, gmail.modify, gmail.compose and the full
+// https://mail.google.com/ scope are restricted (public apps need
+// verification plus a security assessment); gmail.send and gmail.labels
+// are sensitive.
 READ_SCOPE "https://www.googleapis.com/auth/gmail.readonly"
+METADATA_SCOPE "https://www.googleapis.com/auth/gmail.metadata"
 MODIFY_SCOPE "https://www.googleapis.com/auth/gmail.modify"
+SEND_SCOPE "https://www.googleapis.com/auth/gmail.send"
+COMPOSE_SCOPE "https://www.googleapis.com/auth/gmail.compose"
+LABELS_SCOPE "https://www.googleapis.com/auth/gmail.labels"
+FULL_SCOPE "https://mail.google.com/"
 
-// ============================================================================
-// MIME building
-// ============================================================================
+// System label ids.
+INBOX "INBOX"
+UNREAD "UNREAD"
+STARRED "STARRED"
+IMPORTANT "IMPORTANT"
+SPAM "SPAM"
+TRASH "TRASH"
+SENT "SENT"
+DRAFT "DRAFT"
 
-build-mime
+// ---------------------------------------------------------------------------
+// URL and parameter helpers (shared by the sub-namespaces)
+// ---------------------------------------------------------------------------
+
+api-root
+meta {
+    ctx: {"google.gmail.api-root": {required: false, secret: false}},
+    doc: """The API root, `https://gmail.googleapis.com` unless the `google.gmail.api-root` context variable points at a proxy or emulator."""
+}
+fn (): Str {
+  root ::ctx/get("google.gmail.api-root")
+  if(or(is-null(root), eq(root, "")), API_ROOT, root)
+}
+
+url
+meta {
+    doc: """A Gmail v1 URL for the authenticated user (`/gmail/v1/users/me` + `path`) with non-null `params` as a query string (Vec values repeat the key)."""
+}
+fn
+(path: Str): Str {
+  url(path, {})
+},
+(path: Str, params: Map): Str {
+  ::api/with-query(`${api-root()}/gmail/v1/users/me${path}`, params)
+}
+
+upload-url
+meta {
+    doc: """A Gmail v1 media-upload URL (`/upload/gmail/v1/users/me` + `path`) with `params`."""
+}
+fn (path: Str, params: Map): Str {
+  ::api/with-query(`${api-root()}/upload/gmail/v1/users/me${path}`, params)
+}
+
+encode-id
+meta {doc: """URL-encode an id for a path segment."""}
+fn (id: Str): Str {
+  ::uri/encode(id)
+}
+
+query-params
 meta {
     doc: """
-    Build a minimal RFC 2822 plain-text message. `headers` is a Map of
-    additional headers (e.g. `{From: "me@example.com", Cc: "x@y.z"}`).
-    Returns the raw message string — `send-raw` base64url-encodes it.
+    Build a call's query parameters: `defaults`, overridden by the Gmail
+    parameters in `opts` (credential keys and the function's own
+    `local-keys` are removed), with nulls dropped. Pass a key as null in
+    `opts` to drop a default.
     """
 }
 fn
-(to: Str, subject: Str, text: Str): Str {
-  build-mime(to, subject, text, {})
+(defaults: Map, opts: Map): Map {
+  query-params(defaults, opts, [])
 },
-(to: Str, subject: Str, text: Str, headers: Map): Str {
-  extra join(map(keys(headers), (k) { `${k}: ${get(headers, k)}\r\n` }), "")
-  `To: ${to}\r\nSubject: ${subject}\r\n${extra}Content-Type: text/plain; charset="UTF-8"\r\nMIME-Version: 1.0\r\n\r\n${text}`
+(defaults: Map, opts: Map, local-keys: Vec): Map {
+  params filter-keys(::api/api-params(opts), (k) { not(in(k, local-keys)) })
+  filter-vals({...defaults, ...params}, is-some)
 }
 
-// ============================================================================
-// Sending
-// ============================================================================
-
-send-raw
+creds
 meta {
-    doc: """POST /users/me/messages/send - Send a raw RFC 2822 message (built with `build-mime` or by hand). Returns the sent message resource."""
+    doc: """The google-core part of `opts` (credentials, scopes, retry), passed through to `::google::api`."""
 }
-fn (mime: Str): Map {
-  ::api/json(SEND_SCOPE, "POST", `${BASE_URL}/users/me/messages/send`, {}, {
-    raw: ::b64/encode-url(mime)
-  })
+fn (opts: Map): Map {
+  ::api/credential-opts(opts)
 }
 
-send-message
+json
 meta {
-    doc: """
-    Send a plain-text email. The From address is the authenticated user.
-
-    **Example**
-
-    ```hot
-    ::google::gmail/send-message("alice@example.com", "Hi", "Hello from Hot!")
-    ```
-    """
+    doc: """`::google::api/json` with this package's conventions: credential opts and a JSON (or empty) body."""
 }
-fn
-(to: Str, subject: Str, text: Str): Map {
-  send-raw(build-mime(to, subject, text))
-},
-(to: Str, subject: Str, text: Str, headers: Map): Map {
-  send-raw(build-mime(to, subject, text, headers))
+fn (scope: Str, method: Str, full-url: Str, body: Any, opts: Map): Any {
+  ::api/json(scope, method, full-url, {}, body, creds(opts))
 }
 
-// ============================================================================
-// Reading
-// ============================================================================
-
-list-messages
+compact
 meta {
-    doc: """
-    GET /users/me/messages - List message ids, optionally filtered with
-    Gmail search syntax (`q`), e.g. `"from:boss is:unread newer_than:2d"`.
-    Returns `{messages: [{id, threadId}], nextPageToken?}`.
-    """
+    doc: """Drop null values from a request body (Gmail bodies never carry JSON null for unset fields)."""
 }
-fn
-(): Map {
-  ::api/json(READ_SCOPE, "GET", `${BASE_URL}/users/me/messages`)
-},
-(query: Str): Map {
-  ::api/json(READ_SCOPE, "GET", `${BASE_URL}/users/me/messages?q=${::hot::uri/encode(query)}`)
+fn (body: Map): Map {
+  filter-vals(untype(body), is-some)
 }
 
-get-message
+done
 meta {
-    doc: """GET /users/me/messages/{id} - Fetch a full message (headers, body parts, labels)."""
+    doc: """`true` for a successful call whose response has no useful body (delete, stop), or the call's Err."""
 }
-fn (id: Str): Map {
-  ::api/json(READ_SCOPE, "GET", `${BASE_URL}/users/me/messages/${id}?format=full`)
+fn (result: Result): Bool {
+  if(is-err(result), result, true)
 }
 
-trash-message
-meta {
-    doc: """POST /users/me/messages/{id}/trash - Move a message to the trash."""
-}
-fn (id: Str): Map {
-  ::api/json(MODIFY_SCOPE, "POST", `${BASE_URL}/users/me/messages/${id}/trash`, {}, {})
-}
+// ---------------------------------------------------------------------------
+// Shortcuts to the most used functions (the full surface lives in the
+// sub-namespaces listed in the namespace doc)
+// ---------------------------------------------------------------------------
 
-modify-labels
-meta {
-    doc: """POST /users/me/messages/{id}/modify - Add and remove label ids, e.g. `modify-labels(id, ["STARRED"], ["UNREAD"])` to star and mark read."""
-}
-fn (id: Str, add-label-ids: Vec, remove-label-ids: Vec): Map {
-  ::api/json(MODIFY_SCOPE, "POST", `${BASE_URL}/users/me/messages/${id}/modify`, {}, {
-    addLabelIds: add-label-ids,
-    removeLabelIds: remove-label-ids
-  })
-}
-
-list-labels
-meta {
-    doc: """GET /users/me/labels - List the mailbox's labels (system and user)."""
-}
-fn (): Map {
-  ::api/json(READ_SCOPE, "GET", `${BASE_URL}/users/me/labels`)
-}
+send ::google::gmail::messages/send
+send-message ::google::gmail::messages/send-message
+reply ::google::gmail::messages/reply
+reply-all ::google::gmail::messages/reply-all
+forward ::google::gmail::messages/forward
+list-messages ::google::gmail::messages/list-messages
+list-all-messages ::google::gmail::messages/list-all-messages
+search-emails ::google::gmail::messages/search-emails
+get-message ::google::gmail::messages/get-message
+get-email ::google::gmail::messages/get-email
+modify-message ::google::gmail::messages/modify-message
+trash-message ::google::gmail::messages/trash-message
+to-email ::google::gmail::parse/to-email
+list-labels ::google::gmail::labels/list-labels
+get-profile ::google::gmail::sync/get-profile

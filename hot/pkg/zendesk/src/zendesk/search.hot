@@ -1,0 +1,103 @@
+::zendesk::search ns
+meta {
+    ctx: {"zendesk.subdomain": {required: false, secret: false}},
+    doc: """
+    Search across tickets, users, organizations and groups with Zendesk
+    search syntax (`type:ticket status:open priority:urgent`,
+    `requester:ada@example.com`, `created>2026-07-01`).
+
+    Two endpoints, two limits:
+    - `search` (GET /search) pages by offset: at most 100 results a page
+      and 1,000 results per query (page 11 at 100 a page is a 422).
+      Results can repeat between pages.
+    - `export` (GET /search/export) pages by cursor with no total cap,
+      one object type at a time, ordered by `created_at`. Its cursor
+      expires after an hour and it is rate-limited to 100 requests a
+      minute. `search-all` uses it.
+    """
+}
+
+::api ::zendesk::api
+
+build-search-query
+meta {
+    doc: """Build the GET /search query: `query` plus `options` (`sort_by`: "updated_at"/"created_at"/"priority"/"status"/"ticket_type"; `sort_order`: "asc"/"desc"; `page`, `per_page`, `include`). Nulls are dropped. Exposed for testing."""
+}
+fn (query: Str, options: Map): Str {
+  ::api/query-string({query: query, ...options})
+}
+
+search
+meta {
+    doc: """GET /search - One offset page of mixed results: `{results, count, next_page, previous_page, facets}`; each result has a `result_type`. Capped at 1,000 results per query; use `search-all` for more."""
+}
+fn
+(query: Str): Any {
+  search(query, {})
+},
+(query: Str, options: Map): Any {
+  search(query, options, {})
+},
+(query: Str, options: Map, opts: Map): Any {
+  ::api/request("GET", `/search${build-search-query(query, options)}`, "", opts)
+}
+
+count
+meta {
+    doc: """GET /search/count - How many results a query matches: `{count}`."""
+}
+fn
+(query: Str): Any {
+  count(query, {})
+},
+(query: Str, opts: Map): Any {
+  ::api/request("GET", `/search/count${::api/query-string({query: query})}`, "", opts)
+}
+
+build-export-query
+meta {
+    doc: """Build the GET /search/export query: `query`, `filter[type]` (ticket, user, organization or group), and cursor options `page_size` (default 100, max 1000) and `after`. Exposed for testing."""
+}
+fn (query: Str, object-type: Str, options: Map): Str {
+  ::api/cursor-query({query: query, "filter[type]": object-type, ...options})
+}
+
+export
+meta {
+    doc: """GET /search/export - One cursor page of a single object type: `{results, meta: {has_more, after_cursor}, links}`. Don't put `type:` in the query; pass `object-type` instead."""
+}
+fn
+(query: Str, object-type: Str): Any {
+  export(query, object-type, {})
+},
+(query: Str, object-type: Str, options: Map): Any {
+  export(query, object-type, options, {})
+},
+(query: Str, object-type: Str, options: Map, opts: Map): Any {
+  ::api/request("GET", `/search/export${build-export-query(query, object-type, options)}`, "", opts)
+}
+
+search-all
+meta {
+    doc: """
+    Collect up to `limit` results of one object type through the
+    cursor-based export, past the 1,000-result cap. Returns a Vec.
+
+    **Example**
+
+    ```hot
+    stale ::zendesk::search/search-all("status:pending updated<2026-06-01", "ticket", 5000)
+    ```
+    """
+}
+fn
+(query: Str, object-type: Str, limit: Int): Vec {
+  search-all(query, object-type, limit, {})
+},
+(query: Str, object-type: Str, limit: Int, opts: Map): Vec {
+  size min(::zendesk/DEFAULT_PAGE_SIZE, max(1, limit))
+  ::api/collect-pages(
+    (cursor) { export(query, object-type, {page_size: size, after: cursor}, opts) },
+    "results", null, limit, []
+  )
+}

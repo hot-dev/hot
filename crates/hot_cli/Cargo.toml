@@ -45,6 +45,9 @@ dirs = { workspace = true }
 open = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
+tempfile = { workspace = true }
 siphasher = { workspace = true }
 fd-lock = { workspace = true }
 
@@ -60,6 +63,8 @@ winres = { workspace = true }
 # cargo install cargo-bundle
 
 [dev-dependencies]
+base64 = { workspace = true }
+sqlx = { workspace = true }
 tempfile = { workspace = true }
 hot = { workspace = true, features = ["test-utils"] }
 

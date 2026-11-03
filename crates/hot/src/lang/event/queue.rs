@@ -412,7 +412,16 @@ impl From<EventMessage> for Message {
             }
         });
         if let (Val::Map(map), Some(original_urls)) = (&mut body, original_urls) {
-            map.insert(Val::from("webhook_original_urls"), original_urls);
+            Arc::make_mut(map).insert(Val::from("webhook_original_urls"), original_urls);
+        }
+        // What the API handler identified as secret in the request, for the
+        // worker to find in the event: hashes only, never the values.
+        let hashes = &event_msg.body.execution_context.secret_value_hashes;
+        if let (Val::Map(map), false) = (&mut body, hashes.is_empty()) {
+            Arc::make_mut(map).insert(
+                Val::from("secret_value_hashes"),
+                Val::vec(hashes.iter().map(|hash| Val::Int(*hash as i64)).collect()),
+            );
         }
 
         Message {
@@ -484,7 +493,7 @@ impl TryFrom<Message> for EventMessage {
                 .and_then(|hints| crate::webhook_url::event_data_original_url_hints(&hints))
                 .unwrap_or_else(|| crate::val!({}));
             if let Val::Map(map) = &mut hints {
-                map.insert(Val::from("event_id"), Val::from(event_id.to_string()));
+                Arc::make_mut(map).insert(Val::from("event_id"), Val::from(event_id.to_string()));
             }
             hints
         });
@@ -614,7 +623,17 @@ impl TryFrom<Message> for EventMessage {
             origin_run_id: origin_run_id_opt,
             retry_attempt: ctx_val.get_int_or_default("retry_attempt", 0) as i16,
             secret_keys: AHashSet::new(),
-            secret_value_hashes: AHashSet::new(),
+            secret_value_hashes: match msg.body.get("secret_value_hashes") {
+                Some(Val::Vec(hashes)) => hashes
+                    .iter()
+                    .filter_map(|hash| match hash {
+                        Val::Int(hash) => Some(*hash as u64),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => AHashSet::new(),
+            },
+            secret_values: Default::default(),
             access_id: ctx_val.get("access_id").and_then(|v| {
                 if let crate::val::Val::Str(s) = v {
                     Uuid::parse_str(s.as_ref()).ok()
@@ -871,25 +890,32 @@ impl QueueAndDatabaseEventPublisher {
 
 impl EventPublisher for QueueAndDatabaseEventPublisher {
     fn publish(&self, ctx: &ExecutionContext, event: Event) {
+        let event_id = event.event_id;
+        let event_type = event.event_type.clone();
+        if let Err(e) = self.publish_checked(ctx, event) {
+            tracing::error!(
+                event_id = %event_id,
+                event_type = %event_type,
+                "Failed to write event to database; event will NOT be enqueued: {}",
+                e
+            );
+        }
+    }
+
+    fn publish_checked(&self, ctx: &ExecutionContext, event: Event) -> Result<(), String> {
         // CRITICAL: Database write MUST complete before queue enqueue
         // to prevent race condition where worker dequeues event before
         // the event record exists in the database (causing FK violations on run.event_id)
 
         // Step 1: Write to database and WAIT for completion
-        if let Err(e) = self.database_publisher.publish_and_wait(ctx, event.clone()) {
-            tracing::error!(
-                event_id = %event.event_id,
-                event_type = %event.event_type,
-                "Failed to write event to database; event will NOT be enqueued: {}",
-                e
-            );
-            // Don't enqueue if database write failed - this prevents orphaned queue messages
-            return;
-        }
+        // Don't enqueue if database write failed - this prevents orphaned queue messages
+        self.database_publisher
+            .publish_and_wait(ctx, event.clone())?;
 
         // Step 2: Now that database write is complete, enqueue to queue
         // Worker can now safely process this event knowing the event record exists
         self.queue_publisher.publish(ctx, event);
+        Ok(())
     }
 
     fn shutdown(
@@ -1302,6 +1328,57 @@ mod tests {
     }
 
     #[test]
+    fn test_secret_value_hashes_survive_the_queue_but_values_do_not() {
+        let secret = "request-secret-value";
+        let event = Event::new(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            "hot:call".to_string(),
+            crate::val!({"caller": {"auth": {"key": secret}}}),
+        );
+        let mut ctx = ExecutionContext::new(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            4,
+            Some(Uuid::now_v7()),
+            Some(Uuid::now_v7()),
+            Some(Uuid::now_v7()),
+            Some(Uuid::now_v7()),
+        );
+        let hash = crate::lang::masking::value_hash(&Val::from(secret));
+        ctx.secret_value_hashes.insert(hash);
+        // One with the high bit set too, since these travel as an i64.
+        ctx.secret_value_hashes.insert(u64::MAX - 1);
+        ctx.secret_values.register(&Val::from(secret));
+        let message: Message = EventMessage {
+            id: event.event_id,
+            head: AHashMap::new(),
+            body: EventMessageBody {
+                event,
+                execution_context: ctx,
+            },
+        }
+        .into();
+
+        assert!(!format!("{:?}", message.body).contains(secret));
+        let parsed = EventMessage::try_from(message).unwrap();
+        assert!(
+            parsed
+                .body
+                .execution_context
+                .secret_value_hashes
+                .contains(&hash)
+        );
+        assert!(
+            parsed
+                .body
+                .execution_context
+                .secret_value_hashes
+                .contains(&(u64::MAX - 1))
+        );
+    }
+
+    #[test]
     fn test_webhook_url_hints_survive_thin_message_without_request_payload() {
         let raw = "https://hooks.example.test/webhook/svc/path/abcdef123456?x=1";
         let request = crate::val!({
@@ -1312,7 +1389,7 @@ mod tests {
         });
         let data = crate::val!({
             "fn": "::durable/handler",
-            "args": Val::Vec(vec![Val::Null, request.clone()]),
+            "args": Val::vec(vec![Val::Null, request.clone()]),
             "caller": request
         });
         let event = Event::new(

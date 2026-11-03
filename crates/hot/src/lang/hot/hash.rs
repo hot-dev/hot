@@ -128,11 +128,11 @@ pub fn ed25519_verify(args: &[Val]) -> HotResult<Val> {
 fn get_bytes_from_arg(arg: &Val) -> Result<Vec<u8>, String> {
     match arg {
         Val::Str(s) => Ok(s.as_bytes().to_vec()),
-        Val::Bytes(b) => Ok(b.clone()),
+        Val::Bytes(b) => Ok(b.to_vec()),
         Val::Vec(vec) => {
             // Convert Vec<Val> to Vec<u8> if all elements are bytes
             let mut result = Vec::new();
-            for val in vec {
+            for val in vec.iter() {
                 match val {
                     Val::Byte(b) => result.push(*b),
                     _ => {

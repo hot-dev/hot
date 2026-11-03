@@ -1,0 +1,56 @@
+::google::drive::test::webhook ns
+meta ["test"]
+
+::changes ::google::drive::changes
+
+request fn (token: Str?): Map {
+  base {
+      "x-goog-channel-id": "ch-1",
+      "x-goog-channel-expiration": "Sat, 07 Nov 2026 10:00:00 GMT",
+      "x-goog-resource-id": "res-9",
+      "x-goog-resource-uri": "https://www.googleapis.com/drive/v3/changes?pageToken=42",
+      "x-goog-resource-state": "change",
+      "x-goog-message-number": "1234"
+  }
+  {method: "POST", url: "/drive/hook", headers: if(is-null(token), base, {...base, "x-goog-channel-token": token}), body-raw: ""}
+}
+
+test-parse-notification
+meta ["test"] fn () {
+    n ::changes/parse-notification(request("secret-1"))
+    assert-eq("ch-1", n.channel-id)
+    assert-eq("res-9", n.resource-id)
+    assert-eq("change", n.resource-state)
+    assert-eq(1234, n.message-number)
+    assert-eq("secret-1", n.channel-token)
+    assert(not(n.is-sync))
+    assert-eq([], n.changed)
+}
+
+test-parse-notification-sync-and-changed
+meta ["test"] fn () {
+    sync ::changes/parse-notification({headers: {"X-Goog-Resource-State": "sync", "X-Goog-Message-Number": "1", "X-Goog-Changed": "content, parents"}})
+    assert(sync.is-sync, "header names are case-insensitive")
+    assert-eq(1, sync.message-number)
+    assert-eq(["content", "parents"], sync.changed)
+    assert(is-null(sync.channel-token))
+}
+
+test-verify-channel-token
+meta ["test"] fn () {
+    assert(::changes/verify-channel-token(request("secret-1"), "secret-1"), "valid token")
+    assert(not(::changes/verify-channel-token(request("secret-2"), "secret-1")), "tampered token")
+    assert(not(::changes/verify-channel-token(request(null), "secret-1")), "missing header")
+    assert(not(::changes/verify-channel-token(request(""), "")), "empty expected token fails closed")
+    assert(not(::changes/verify-channel-token(request("x"), null)), "null expected token fails closed")
+    assert(not(::changes/verify-channel-token(request("x"), "  ")), "blank expected token fails closed")
+}
+
+test-verify-notification
+meta ["test"] fn () {
+    ok ::changes/verify-notification(request("secret-1"), "secret-1")
+    assert-eq("res-9", ok.resource-id)
+    bad ::changes/verify-notification(request("nope"), "secret-1")
+    assert(is-err(bad))
+    assert(contains(err-message(bad), "X-Goog-Channel-Token"))
+}

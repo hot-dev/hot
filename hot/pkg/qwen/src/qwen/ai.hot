@@ -1,0 +1,326 @@
+::qwen::ai ns
+meta {
+    doc: """
+    hot-ai integration for Qwen. `provider()` returns an
+    `::ai::chat/ProviderRegistration` that runs `::ai::chat/run-loop` and
+    `run-loop-stream` through OpenAI's chat-tools adapter against the
+    configured Model Studio region, with Qwen-specific request fields
+    (thinking, web search, ...) taken from `QwenOptions`.
+
+    It claims models whose id starts with `qwen` (e.g. `qwen3.8-max`),
+    plus any id written as `qwen/<model>` (the `qwen/` part is stripped),
+    which is how to route non-Qwen models Model Studio hosts
+    (`qwen/deepseek-v4.1-flash`, `qwen/kimi-k3`).
+
+    A registration's `variant` is `Provider.Qwen`, enrolled in hot-ai's open
+    `Provider` enum by arrow, so Qwen keeps its identity.
+
+    `ChatOptions.provider-opts` reaches Qwen through `chat-opts-fn` and
+    `chat-stream-opts-fn`, with the keys of `::qwen::api/resolve`: `api-key`,
+    `base-url`, `region`, `workspace-id`, `endpoint`.
+
+    **Example**
+
+    ```hot
+    opts ::ai::chat/ChatOptions({
+        model: "qwen3.8-flash",
+        providers: ::ai::chat/with-providers([::qwen::ai/provider()])
+    })
+    answer ::ai::chat/run-loop(opts, "What is 17 + 25?")
+    ```
+    """
+}
+
+::compat ::openai::compatible
+::tools  ::openai::chat-tools
+::oai    ::openai::api
+
+DEFAULT_MAX_TOKENS 4096
+MODEL_PREFIX "qwen/"
+KEY_NAME "qwen.api.key"
+
+Qwen
+meta { doc: """Qwen's identity in `::ai::chat/Provider`.""" }
+type {
+    name: Str
+}
+
+Qwen -> ::ai::chat/Provider.Qwen
+
+QWEN_PROVIDER
+meta { doc: """The `variant` of every Qwen registration.""" }
+::ai::chat/Provider.Qwen({name: "Qwen"})
+
+QwenOptions
+meta {
+    doc: """
+    Qwen-specific request controls for the hot-ai adapter. Unset fields
+    are not sent, so the model's own defaults apply.
+
+    - `max-tokens`: output ceiling, sent as `max_tokens` (default 4096).
+    - `enable-thinking`: turn thinking on or off on hybrid models (several
+      current models think by default). Some open-weight models only allow
+      thinking when streaming; set `false` for non-streaming `run-loop`
+      with those, or use `run-loop-stream`.
+    - `thinking-budget`: cap on thinking tokens.
+    - `preserve-thinking`: feed prior-turn reasoning back in.
+    - `enable-search` / `search-options`: Model Studio web search, e.g.
+      `{forced_search: true, search_strategy: "max"}` (`turbo`, `max`,
+      `agent`; `enable_search_extension` for vertical search).
+    - `enable-code-interpreter`: built-in code interpreter.
+    - `top-k`, `repetition-penalty`: sampling controls.
+    - `reasoning-effort`: sent as `reasoning_effort` (model-specific values).
+    - `extra`: any other body fields, merged last.
+    """
+}
+type {
+    max-tokens: Int?,
+    enable-thinking: Bool?,
+    thinking-budget: Int?,
+    preserve-thinking: Bool?,
+    enable-search: Bool?,
+    search-options: Map?,
+    enable-code-interpreter: Bool?,
+    top-k: Int?,
+    repetition-penalty: Dec?,
+    reasoning-effort: Str?,
+    extra: Map?
+}
+
+extra-body
+meta {
+    doc: """
+    The Qwen-specific body fields for `QwenOptions`, with unset fields
+    omitted. Pure; exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::qwen::ai/extra-body(::qwen::ai/QwenOptions({enable-thinking: false, top-k: 20}))
+    // => {enable_thinking: false, top_k: 20}
+    ```
+    """
+}
+fn (opts: QwenOptions?): Map {
+    o or(opts, QwenOptions({}))
+    fields {}
+        |> assoc-some("enable_thinking", o.enable-thinking)
+        |> assoc-some("thinking_budget", o.thinking-budget)
+        |> assoc-some("preserve_thinking", o.preserve-thinking)
+        |> assoc-some("enable_search", o.enable-search)
+        |> assoc-some("search_options", o.search-options)
+        |> assoc-some("enable_code_interpreter", o.enable-code-interpreter)
+        |> assoc-some("top_k", o.top-k)
+        |> assoc-some("repetition_penalty", o.repetition-penalty)
+    {...fields, ...or(o.extra, {})}
+}
+
+request-options
+meta {
+    doc: """The `::openai::chat-tools/ChatRequestOptions` used for Qwen: `max_tokens`, stream usage on, and `extra-body(opts)`."""
+}
+fn (opts: QwenOptions?): ::tools/ChatRequestOptions {
+    o or(opts, QwenOptions({}))
+    extra extra-body(o)
+    ::tools/ChatRequestOptions({
+        max-completion-tokens: or(o.max-tokens, DEFAULT_MAX_TOKENS),
+        reasoning-effort: o.reasoning-effort,
+        max-tokens-param: "max_tokens",
+        stream-usage: true,
+        extra-body: if(is-empty(extra), null, extra)
+    })
+}
+
+compatible
+meta {
+    doc: """
+    Qwen as an `::openai::compatible/CompatibleProvider` for an explicit
+    endpoint (see `::qwen::api/endpoint` and `endpoint-for`). Use it with
+    `::openai::compatible/chat-fn` or `list-models`. Pass `key-name` when
+    calls without a key should be an Err naming it.
+    """
+}
+fn
+(ep: ::oai/Endpoint, opts: QwenOptions?): ::compat/CompatibleProvider {
+    compatible(ep, opts, null)
+},
+(ep: ::oai/Endpoint, opts: QwenOptions?, key-name: Str?): ::compat/CompatibleProvider {
+    ::compat/CompatibleProvider({
+        name: "Qwen",
+        endpoint: ep,
+        model-prefix: MODEL_PREFIX,
+        options: request-options(opts),
+        capabilities: ["tools", "streaming", "vision", "json-mode", "search"],
+        variant: QWEN_PROVIDER,
+        key-name: key-name
+    })
+}
+
+opts-fn-for
+meta {
+    doc: """Internal: a `chat-opts-fn` for `p` that also understands `region` and `workspace-id` in `provider-opts`."""
+}
+fn (p: ::compat/CompatibleProvider): Fn {
+    chat ::compat/chat-opts-fn(p)
+    (model, messages, system, tools, provider-opts) {
+        site ::qwen::api/site-opts(provider-opts)
+        cond {
+            is-err(site) => { site }
+            => { chat(model, messages, system, tools, site) }
+        }
+    }
+}
+
+stream-opts-fn-for
+meta {
+    doc: """Internal: a `chat-stream-opts-fn` for `p` that also understands `region` and `workspace-id` in `provider-opts`."""
+}
+fn (p: ::compat/CompatibleProvider): Fn {
+    chat ::compat/chat-stream-opts-fn(p)
+    (model, messages, system, tools, on-delta, provider-opts) {
+        site ::qwen::api/site-opts(provider-opts)
+        cond {
+            is-err(site) => { site }
+            => { chat(model, messages, system, tools, on-delta, site) }
+        }
+    }
+}
+
+registration
+meta { doc: """Internal: the `ProviderRegistration` for `p`.""" }
+fn (p: ::compat/CompatibleProvider): ::ai::chat/ProviderRegistration {
+    ::ai::chat/ProviderRegistration({
+        variant: QWEN_PROVIDER,
+        detect: (model) { is-qwen-model(model) },
+        display-name: "Qwen",
+        chat-fn: ::compat/chat-fn(p),
+        chat-stream-fn: ::compat/chat-stream-fn(p),
+        chat-opts-fn: opts-fn-for(p),
+        chat-stream-opts-fn: stream-opts-fn-for(p),
+        embed-fn: null,
+        meta: {
+            base-url: p.endpoint.base-url,
+            model-prefix: MODEL_PREFIX,
+            capabilities: p.capabilities
+        }
+    })
+}
+
+is-qwen-model
+meta {
+    doc: """
+    True for model ids this provider claims: ids starting with `qwen`
+    (case-insensitive), which includes the `qwen/` routing form.
+
+    **Example**
+
+    ```hot
+    ::qwen::ai/is-qwen-model("qwen3.8-max")           // => true
+    ::qwen::ai/is-qwen-model("qwen/deepseek-v4.1-flash") // => true
+    ::qwen::ai/is-qwen-model("gpt-4o")                // => false
+    ```
+    """
+}
+fn (model: Str): Bool {
+    starts-with(lowercase(model), "qwen")
+}
+
+provider-for
+meta {
+    doc: """
+    Qwen `ProviderRegistration` for an explicit endpoint and options.
+    Reads no ctx.
+
+    **Example**
+
+    ```hot
+    reg ::qwen::ai/provider-for(
+        ::qwen::api/endpoint-for("us", null, "sk-..."),
+        ::qwen::ai/QwenOptions({enable-thinking: false})
+    )
+    ```
+    """
+}
+fn (ep: ::oai/Endpoint, opts: QwenOptions?): ::ai::chat/ProviderRegistration {
+    registration(compatible(ep, opts))
+}
+
+provider
+meta {
+    doc: """
+    Qwen `ProviderRegistration` for the ctx-configured region and key
+    (`qwen.api.key`, `qwen.region`, `qwen.workspace.id`, `qwen.base.url`).
+    With no `qwen.api.key` it still builds, and a call is an Err unless
+    `ChatOptions.provider-opts` carries an `api-key`.
+
+    **Example**
+
+    ```hot
+    registry ::ai::chat/with-providers([
+        ::qwen::ai/provider(::qwen::ai/QwenOptions({enable-search: true}))
+    ])
+    opts ::ai::chat/ChatOptions({model: "qwen3.7-plus", providers: registry})
+    ```
+    """
+}
+fn
+(): ::ai::chat/ProviderRegistration {
+    provider(null)
+},
+(opts: QwenOptions?): ::ai::chat/ProviderRegistration {
+    registration(compatible(::qwen::api/configured-endpoint(), opts, KEY_NAME))
+}
+
+chat-fn
+meta {
+    doc: """
+    A `::ai::chat/run-loop` chat function for the ctx-configured endpoint,
+    for `ChatOptions.chat-fn`.
+
+    **Example**
+
+    ```hot
+    opts ::ai::chat/ChatOptions({chat-fn: ::qwen::ai/chat-fn(null), model: "qwen3.8-flash"})
+    ```
+    """
+}
+fn (opts: QwenOptions?): Fn {
+    ::compat/chat-fn(compatible(::qwen::api/configured-endpoint(), opts, KEY_NAME))
+}
+
+chat-opts-fn
+meta {
+    doc: """
+    A `::ai::chat/run-loop` chat function for the ctx-configured endpoint that
+    also takes `ChatOptions.provider-opts`, for `ChatOptions.chat-opts-fn`.
+
+    **Example**
+
+    ```hot
+    opts ::ai::chat/ChatOptions({
+        chat-opts-fn: ::qwen::ai/chat-opts-fn(null),
+        model: "qwen3.8-flash",
+        provider-opts: {api-key: tenant-key, region: "us"}
+    })
+    ```
+    """
+}
+fn (opts: QwenOptions?): Fn {
+    opts-fn-for(compatible(::qwen::api/configured-endpoint(), opts, KEY_NAME))
+}
+
+chat-stream-fn
+meta {
+    doc: "A `::ai::chat/run-loop-stream` chat function for the ctx-configured endpoint."
+}
+fn (opts: QwenOptions?): Fn {
+    ::compat/chat-stream-fn(compatible(::qwen::api/configured-endpoint(), opts, KEY_NAME))
+}
+
+chat-stream-opts-fn
+meta {
+    doc: "A `::ai::chat/run-loop-stream` chat function for the ctx-configured endpoint that also takes `ChatOptions.provider-opts`, for `ChatOptions.chat-stream-opts-fn`."
+}
+fn (opts: QwenOptions?): Fn {
+    stream-opts-fn-for(compatible(::qwen::api/configured-endpoint(), opts, KEY_NAME))
+}

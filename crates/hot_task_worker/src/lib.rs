@@ -34,6 +34,7 @@ use executor::ExecutorError;
 use base64::Engine;
 use base64::engine::general_purpose;
 use hot::data::serialization::Serialization;
+use hot::db::usage::AccountTaskUsage;
 use hot::db::{
     self, Build, DatabasePool, DatabaseScope, Env, MaintenanceOperation, Project, Task, TaskStatus,
 };
@@ -58,8 +59,7 @@ use tokio::sync::{Mutex, Semaphore, mpsc};
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
-type UsageStatsCache =
-    Arc<Mutex<HashMap<Uuid, (std::time::Instant, hot::db::subscription::OrgUsageStats)>>>;
+type UsageStatsCache = Arc<Mutex<HashMap<Uuid, (std::time::Instant, AccountTaskUsage)>>>;
 
 static USAGE_STATS_LOCKS: std::sync::OnceLock<Mutex<HashMap<Uuid, std::sync::Weak<Mutex<()>>>>> =
     std::sync::OnceLock::new();
@@ -79,61 +79,59 @@ async fn usage_stats_org_lock(org_id: Uuid) -> Arc<Mutex<()>> {
     lock
 }
 
-async fn fresh_cached_usage(
-    cache: &UsageStatsCache,
-    org_id: &Uuid,
-) -> Option<hot::db::subscription::OrgUsageStats> {
+async fn fresh_cached_usage(cache: &UsageStatsCache, org_id: &Uuid) -> Option<AccountTaskUsage> {
     let cache = cache.lock().await;
     cache
         .get(org_id)
         .filter(|(ts, _)| ts.elapsed() < USAGE_STATS_CACHE_TTL)
-        .map(|(_, stats)| stats.clone())
+        .map(|(_, usage)| *usage)
 }
 
+/// The account's task usage from the counters claim admission enforces, so the
+/// cost does not depend on its history. `None` when usage is unknown, including
+/// while the counters are moving to a new billing period.
 async fn cached_usage_stats(
     db: &DatabasePool,
     org_id: Uuid,
     period_start: chrono::DateTime<chrono::Utc>,
-    retention_days: i32,
     cache: &UsageStatsCache,
-) -> Option<hot::db::subscription::OrgUsageStats> {
+) -> Option<AccountTaskUsage> {
     let org_id = hot::db::Org::billing_owner_id_for(db, &org_id).await.ok()?;
     let scoped_db = db.with_scope(DatabaseScope::Maintenance {
         operation: MaintenanceOperation::Billing,
         org_id: Some(org_id),
     });
     let db = &scoped_db;
-    if let Some(stats) = fresh_cached_usage(cache, &org_id).await {
-        return Some(stats);
+    if let Some(usage) = fresh_cached_usage(cache, &org_id).await {
+        return Some(usage);
     }
 
     let org_lock = usage_stats_org_lock(org_id).await;
     let _guard = org_lock.lock().await;
-    if let Some(stats) = fresh_cached_usage(cache, &org_id).await {
-        return Some(stats);
+    if let Some(usage) = fresh_cached_usage(cache, &org_id).await {
+        return Some(usage);
     }
 
-    let stats = match tokio::time::timeout(
+    let usage = match tokio::time::timeout(
         DB_CALL_TIMEOUT,
-        hot::db::subscription::OrgUsageStats::calculate_account(
-            db,
-            &org_id,
-            period_start,
-            retention_days,
-        ),
+        hot::db::usage::account_task_usage(db, &org_id, period_start),
     )
     .await
     {
-        Ok(Ok(stats)) => stats,
+        Ok(Ok(Some(usage))) => usage,
+        Ok(Ok(None)) => {
+            tracing::debug!(org_id = %org_id, "Usage counters are moving to a new billing period");
+            return None;
+        }
         Ok(Err(e)) => {
-            tracing::warn!(org_id = %org_id, "Failed to calculate org usage: {}", e);
+            tracing::warn!(org_id = %org_id, "Failed to read org usage: {}", e);
             return None;
         }
         Err(_) => {
             tracing::warn!(
                 org_id = %org_id,
                 timeout_secs = DB_CALL_TIMEOUT.as_secs(),
-                "Org usage calculation timed out"
+                "Org usage read timed out"
             );
             return None;
         }
@@ -141,8 +139,8 @@ async fn cached_usage_stats(
     cache
         .lock()
         .await
-        .insert(org_id, (std::time::Instant::now(), stats.clone()));
-    Some(stats)
+        .insert(org_id, (std::time::Instant::now(), usage));
+    Some(usage)
 }
 
 const USAGE_STATS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
@@ -151,7 +149,7 @@ const USAGE_STATS_CACHE_TTL: std::time::Duration = std::time::Duration::from_sec
 /// minutes are already used up. `None` when usage is unknown.
 fn exhausted_free_plan_message(
     features: &hot::db::features::Features,
-    usage: Option<&hot::db::subscription::OrgUsageStats>,
+    usage: Option<&AccountTaskUsage>,
 ) -> Option<String> {
     let usage = usage?;
     let cus_limit = features.compute_units_per_month();
@@ -162,7 +160,7 @@ fn exhausted_free_plan_message(
         ));
     }
     let minutes_limit = i64::from(features.task_minutes_per_month());
-    let minutes_used = usage.task_duration_ms / 60_000;
+    let minutes_used = usage.duration_ms / 60_000;
     if minutes_limit > 0 && minutes_used >= minutes_limit {
         return Some(format!(
             "Monthly task minutes exhausted ({}/{}). Upgrade your plan.",
@@ -1111,7 +1109,11 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
         .unwrap_or_else(|| "/tmp/hot-data-volumes".to_string());
     let data_vol_base = Arc::new(std::path::PathBuf::from(data_vol_base));
 
-    let event_publisher: Option<Arc<dyn EventPublisher>> = create_event_publisher(&config, &db)?;
+    let event_publisher: Option<Arc<dyn EventPublisher>> = create_event_publisher(
+        &config,
+        &db,
+        hot::blob::blob_store_from_conf(Arc::clone(&db), &config.worker_conf).await,
+    )?;
 
     let usage_stats_cache: UsageStatsCache = Arc::new(Mutex::new(HashMap::new()));
 
@@ -3506,14 +3508,7 @@ async fn process_container_task(
                     subscription.current_period_start,
                     subscription.current_period_end,
                 );
-                cached_usage_stats(
-                    &db,
-                    *oid,
-                    period_start,
-                    features.call_retention_days(),
-                    &usage_stats_cache,
-                )
-                .await
+                cached_usage_stats(&db, *oid, period_start, &usage_stats_cache).await
             } else {
                 None
             };
@@ -5550,6 +5545,44 @@ async fn process_code_task(
             }
         };
 
+    let blob_store = hot::blob::blob_store_from_conf(Arc::clone(&db), &worker_conf).await;
+
+    // Convert JSON args -> Val. Arguments in blob storage that can't be read
+    // fail the task: it must not run on anything but what it was started with.
+    let args_val: Val = serde_json::from_value(request.args.clone()).unwrap_or(Val::Null);
+    let read_args = read_task_value(&db, blob_store.as_deref(), org_id, env_id, args_val);
+    let args_val = match await_claimed_task_deadline(task_deadline, read_args).await {
+        Ok(Ok(args_val)) => args_val,
+        outcome => {
+            let reason = match outcome {
+                Ok(Err(error_message)) => error_message,
+                _ => "timed out".to_string(),
+            };
+            let error =
+                task_failure_json(&format!("Task arguments could not be read: {reason}"), None);
+            if complete_task_with_event(
+                &db,
+                &stream_publisher,
+                &task_id,
+                env_id,
+                stream_id,
+                &function_name,
+                &task_type,
+                TaskStatus::Failed,
+                Some(&error),
+                None,
+                Some(&worker_id),
+            )
+            .await
+            {
+                publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
+                maybe_retry_task(&db, &task_queue, &task_id, &request).await;
+            }
+            tracing::error!(task_id = %task_id, "Task arguments could not be read: {reason}");
+            return Ok(());
+        }
+    };
+
     // Set up task receive channel (for ::hot::task/receive)
     let (inbox_tx, inbox_rx) = mpsc::channel::<Val>(256);
     let inbox_rx = Arc::new(parking_lot::Mutex::new(inbox_rx));
@@ -5636,6 +5669,7 @@ async fn process_code_task(
         retry_attempt: 0,
         secret_keys: Default::default(),
         secret_value_hashes: Default::default(),
+        secret_values: Default::default(),
         access_id: None,
         agent_type: None,
         queue_timing: None,
@@ -5656,10 +5690,7 @@ async fn process_code_task(
 
     let origin_run_id = execution_context.origin_run_id;
 
-    let emitter: Option<Arc<dyn EngineEventEmitter>> = create_emitter(&db);
-
-    // Convert JSON args -> Val
-    let args_val: Val = serde_json::from_value(request.args.clone()).unwrap_or(Val::Null);
+    let emitter: Option<Arc<dyn EngineEventEmitter>> = create_emitter(&db, blob_store.clone());
 
     let db_exec = Arc::clone(&db);
     let sp_exec = Arc::clone(&stream_publisher);
@@ -5836,21 +5867,78 @@ async fn process_code_task(
             } else {
                 let result_json = serde_json::to_value(result_val.to_hot_data_repr())
                     .unwrap_or(serde_json::Value::Null);
-                complete_task_with_event(
+                match store_task_result(
                     &db,
-                    &stream_publisher,
-                    &task_id,
+                    blob_store.as_ref(),
+                    org_id,
                     env_id,
-                    stream_id,
-                    &function_name,
-                    &task_type,
-                    TaskStatus::Completed,
-                    Some(&result_json),
-                    None,
-                    Some(&worker_id),
+                    &task_id,
+                    result_json,
                 )
-                .await;
-                tracing::info!(task_id = %task_id, status = "completed", "Task finished");
+                .await
+                {
+                    Ok(result_json) => {
+                        let persisted = complete_task_with_event(
+                            &db,
+                            &stream_publisher,
+                            &task_id,
+                            env_id,
+                            stream_id,
+                            &function_name,
+                            &task_type,
+                            TaskStatus::Completed,
+                            Some(&result_json),
+                            None,
+                            Some(&worker_id),
+                        )
+                        .await;
+                        if !persisted {
+                            release_unstored_task_result(
+                                &db,
+                                blob_store.as_ref(),
+                                org_id,
+                                env_id,
+                                &task_id,
+                                &result_json,
+                            )
+                            .await;
+                        }
+                        tracing::info!(task_id = %task_id, status = "completed", "Task finished");
+                    }
+                    Err(e) => {
+                        let error = task_failure_json(
+                            &format!("Task finished, but its result could not be stored: {e}"),
+                            None,
+                        );
+                        if complete_task_with_event(
+                            &db,
+                            &stream_publisher,
+                            &task_id,
+                            env_id,
+                            stream_id,
+                            &function_name,
+                            &task_type,
+                            TaskStatus::Failed,
+                            Some(&error),
+                            None,
+                            Some(&worker_id),
+                        )
+                        .await
+                        {
+                            publish_task_alert(
+                                &db,
+                                org_id,
+                                env_id,
+                                &task_id,
+                                "task:failed",
+                                &error,
+                            )
+                            .await;
+                            maybe_retry_task(&db, &task_queue, &task_id, &request).await;
+                        }
+                        tracing::error!(task_id = %task_id, "Task result could not be stored: {e}");
+                    }
+                }
             }
         }
         Ok(Ok(Err(e))) => {
@@ -5952,6 +6040,118 @@ fn task_failure_json(msg: &str, err: Option<serde_json::Value>) -> serde_json::V
             "err": err.unwrap_or(serde_json::Value::Null)
         }
     })
+}
+
+/// The organization a task's blobs belong to. A request rebuilt from its row
+/// doesn't carry it.
+async fn task_org_id(
+    db: &DatabasePool,
+    org_id: Option<Uuid>,
+    env_id: Uuid,
+) -> Result<Uuid, String> {
+    match org_id {
+        Some(org_id) => Ok(org_id),
+        None => hot::db::Env::get_env(db, &env_id)
+            .await
+            .map(|env| env.org_id)
+            .map_err(|e| format!("cannot resolve the environment's organization: {e}")),
+    }
+}
+
+/// A task value as code receives it: read from blob storage if that's where it
+/// was stored.
+async fn read_task_value(
+    db: &DatabasePool,
+    blob_store: Option<&hot::blob::BlobStore>,
+    org_id: Option<Uuid>,
+    env_id: Uuid,
+    value: Val,
+) -> Result<Val, String> {
+    if !hot::blob::is_blob_ref_val(&value) {
+        return Ok(value);
+    }
+    let scope = hot::blob::BlobScope {
+        org_id: task_org_id(db, org_id, env_id).await?,
+        env_id: Some(env_id),
+        run_id: None,
+    };
+    hot::blob::rehydrate_whole(blob_store, value, scope)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// A task's result as it's stored: in blob storage if it's large.
+async fn store_task_result(
+    db: &DatabasePool,
+    blob_store: Option<&Arc<hot::blob::BlobStore>>,
+    org_id: Option<Uuid>,
+    env_id: Uuid,
+    task_id: &Uuid,
+    result: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let Some(store) = blob_store else {
+        return Ok(result);
+    };
+    let scope = hot::blob::BlobScope {
+        org_id: task_org_id(db, org_id, env_id).await?,
+        env_id: Some(env_id),
+        run_id: None,
+    };
+    store
+        .spill_whole_if_large(
+            result,
+            scope,
+            hot::blob::SpillSource::TaskResult,
+            Some(&task_id.to_string()),
+        )
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Release the blob written for a result that lost the race to end the task,
+/// such as to a cancellation. Only once the row is known to hold something
+/// else: a write reported as failed may still have committed.
+async fn release_unstored_task_result(
+    db: &DatabasePool,
+    blob_store: Option<&Arc<hot::blob::BlobStore>>,
+    org_id: Option<Uuid>,
+    env_id: Uuid,
+    task_id: &Uuid,
+    result: &serde_json::Value,
+) {
+    let Some(store) = blob_store else {
+        return;
+    };
+    if !hot::blob::json_contains_blob_ref(result) {
+        return;
+    }
+    let Ok(task) = Task::get(db, task_id).await else {
+        return;
+    };
+    if task.result.as_ref() == Some(result) {
+        return;
+    }
+    let released = match task_org_id(db, org_id, env_id).await {
+        Ok(org_id) => {
+            let scope = hot::blob::BlobScope {
+                org_id,
+                env_id: Some(env_id),
+                run_id: None,
+            };
+            store
+                .release_source(
+                    scope,
+                    hot::blob::SpillSource::TaskResult,
+                    &task_id.to_string(),
+                )
+                .await
+                .map_err(|e| e.to_string())
+        }
+        Err(e) => Err(e),
+    };
+    if let Err(e) = released {
+        tracing::warn!(task_id = %task_id, error = %e, "failed to release an unstored task result");
+    }
 }
 
 /// Build a `::hot::task/Cancellation` typed JSON value.
@@ -6293,6 +6493,7 @@ async fn complete_task_with_event(
     // durable. Retry briefly, then leave the row non-terminal; process_task's
     // postcondition will withhold the queue ACK and release heartbeat ownership
     // so the zombie reaper can reconcile it.
+    let result_size = result.map_or(0, |result| result.to_string().len());
     let persisted = persist_terminal_task(
         db,
         task_id,
@@ -6300,10 +6501,40 @@ async fn complete_task_with_event(
         result,
         duration_ms_override,
         fence_worker,
-        TASK_COMPLETION_DB_TIMEOUT,
+        hot::blob::timeout_for_size(TASK_COMPLETION_DB_TIMEOUT, result_size),
         TASK_COMPLETION_ATTEMPTS,
     )
     .await;
+    // Retrying can't store a value the database refuses, and the reaper would
+    // report the task as interrupted. Store a failure that says why instead.
+    let oversized_failure = (!persisted && result_size > hot::blob::MAX_INLINE_HARD_LIMIT_BYTES)
+        .then(|| {
+            task_failure_json(
+                &format!(
+                    "Task finished, but its result of {result_size} bytes as JSON is too large \
+                     to store without blob storage (blob.mode)"
+                ),
+                None,
+            )
+        });
+    let (status, result, persisted) = match &oversized_failure {
+        Some(failure) => (
+            TaskStatus::Failed,
+            Some(failure),
+            persist_terminal_task(
+                db,
+                task_id,
+                &TaskStatus::Failed,
+                Some(failure),
+                duration_ms_override,
+                fence_worker,
+                TASK_COMPLETION_DB_TIMEOUT,
+                TASK_COMPLETION_ATTEMPTS,
+            )
+            .await,
+        ),
+        None => (status, result, persisted),
+    };
     if !persisted {
         tracing::error!(
             task_id = %task_id,
@@ -6556,15 +6787,7 @@ async fn check_cus_thresholds_inner(
             .and_then(|s| s.current_period_end),
     );
 
-    let Some(usage) = cached_usage_stats(
-        db,
-        org_id,
-        period_start,
-        features.call_retention_days(),
-        usage_stats_cache,
-    )
-    .await
-    else {
+    let Some(usage) = cached_usage_stats(db, org_id, period_start, usage_stats_cache).await else {
         return;
     };
 
@@ -8299,16 +8522,26 @@ fn ensure_docker_accessible(path: std::path::PathBuf) -> std::path::PathBuf {
     path
 }
 
-fn create_emitter(db: &DatabasePool) -> Option<Arc<dyn EngineEventEmitter>> {
-    let emitter = hot::lang::emitter::DatabaseEngineEventEmitter::new_with_pool(db.clone());
+fn create_emitter(
+    db: &DatabasePool,
+    blob_store: Option<Arc<hot::blob::BlobStore>>,
+) -> Option<Arc<dyn EngineEventEmitter>> {
+    let emitter = hot::lang::emitter::DatabaseEngineEventEmitter::new_with_pool_and_blob_store(
+        db.clone(),
+        blob_store,
+    );
     Some(Arc::new(emitter))
 }
 
 fn create_event_publisher(
     config: &TaskWorkerConfig,
     db: &DatabasePool,
+    blob_store: Option<Arc<hot::blob::BlobStore>>,
 ) -> Result<Option<Arc<dyn EventPublisher>>, Box<dyn std::error::Error + Send + Sync>> {
-    let database_publisher = hot::lang::event::DatabaseEventPublisher::new_with_pool(db.clone());
+    let database_publisher = hot::lang::event::DatabaseEventPublisher::new_with_pool_and_blob_store(
+        db.clone(),
+        blob_store,
+    );
 
     let queue_publisher = hot::lang::event::QueueEventPublisher::new_with_cluster(
         config.queue_type,
@@ -8405,6 +8638,40 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn usage_checks_read_the_counters_and_cache_them_per_account() {
+        let db = hot::db::test_db().await;
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        let finish_task = |units: i64| {
+            sqlx::query("INSERT INTO task(task_id,env_id,stream_id,build_id,function_name,task_type,task_status_id,result,duration_ms,stop_time) VALUES(?,?,?,?,'::usage/task','container',3,?,60000,?)")
+                .bind(Uuid::now_v7()).bind(data.env_id).bind(data.stream_id).bind(data.build_id)
+                .bind(serde_json::json!({"compute-units":units}).to_string()).bind(chrono::Utc::now())
+                .execute(pool)
+        };
+        finish_task(7).await.unwrap();
+        let cache: UsageStatsCache = Arc::new(Mutex::new(HashMap::new()));
+        let period = chrono::Utc::now() - chrono::Duration::days(1);
+        let read = || cached_usage_stats(&db, data.org_id, period, &cache);
+        let expected = AccountTaskUsage {
+            compute_units: 7,
+            duration_ms: 60_000,
+        };
+        assert_eq!(read().await, Some(expected));
+        finish_task(5).await.unwrap();
+        assert_eq!(read().await, Some(expected), "served from the cache");
+        cache.lock().await.clear();
+        assert_eq!(
+            read().await,
+            Some(AccountTaskUsage {
+                compute_units: 12,
+                duration_ms: 120_000,
+            })
+        );
     }
 
     #[tokio::test]
@@ -9542,6 +9809,241 @@ mod tests {
         let row = Task::get(&db, &task.task_id).await.unwrap();
         assert_eq!(row.task_status_id, TaskStatus::Running.as_id());
         assert_eq!(row.result, None);
+    }
+
+    /// A running task in its own database, with a connection that bypasses
+    /// scopes. `None` without `HOT_TEST_POSTGRES_URI`.
+    async fn postgres_task(prefix: &str) -> Option<(DatabasePool, sqlx::PgPool, Task)> {
+        let Ok(admin_uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
+            eprintln!("skipping: HOT_TEST_POSTGRES_URI not set");
+            return None;
+        };
+        let admin = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&admin_uri)
+            .await
+            .unwrap();
+        let name = format!("{prefix}_{}", Uuid::now_v7().simple());
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
+            .execute(&admin)
+            .await
+            .unwrap();
+        let (server, _) = admin_uri.rsplit_once('/').unwrap();
+        let uri = format!("{server}/{name}");
+        let conf = hot::val!({"uri": uri.clone(), "rls": {"enforce": false}});
+        hot::db::run_migrations(&conf).await.unwrap();
+        let db = hot::db::create_db_pool(&conf).await.unwrap();
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let db = db.with_scope(DatabaseScope::Environment {
+            org_id: data.org_id,
+            env_id: data.env_id,
+        });
+        let (_, mut task, _, _, _) = make_task_request_and_row();
+        task.env_id = data.env_id;
+        task.stream_id = data.stream_id;
+        task.build_id = data.build_id;
+        insert_test_task(&db, &task).await;
+        Task::mark_running(&db, &task.task_id).await.unwrap();
+        let raw = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&uri)
+            .await
+            .unwrap();
+        Some((db, raw, task))
+    }
+
+    /// A large result takes the database longer to take in, however fast the
+    /// host is, which must not leave the task for the reaper. Needs
+    /// `HOT_TEST_POSTGRES_URI`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_large_result_gets_longer_to_store() {
+        let Some((db, raw, task)) = postgres_task("hot_task_slow_result").await else {
+            return;
+        };
+        for statement in [
+            "CREATE FUNCTION hot.slow_tasks() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN PERFORM pg_sleep(7); RETURN NEW; END $$",
+            "CREATE TRIGGER slow_tasks BEFORE UPDATE ON hot.task \
+             FOR EACH ROW EXECUTE FUNCTION hot.slow_tasks()",
+        ] {
+            sqlx::query(statement).execute(&raw).await.unwrap();
+        }
+        let publisher =
+            StreamPubSub::new(hot::stream::StreamPubSubType::Memory, None, false).unwrap();
+        let result = serde_json::Value::Array(vec![serde_json::json!(0); 3_000_000]);
+
+        assert!(
+            complete_task_with_event(
+                &db,
+                &publisher,
+                &task.task_id,
+                task.env_id,
+                task.stream_id,
+                &task.function_name,
+                "code",
+                TaskStatus::Completed,
+                Some(&result),
+                None,
+                None,
+            )
+            .await
+        );
+
+        let task = Task::get(&db, &task.task_id).await.unwrap();
+        assert_eq!(task.task_status_id, TaskStatus::Completed.as_id());
+    }
+
+    /// A value the database refuses must end the task with a failure that says
+    /// so, not leave it for the reaper to report as a crash. Needs
+    /// `HOT_TEST_POSTGRES_URI`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_result_too_large_to_store_fails_the_task_and_says_why() {
+        let Some((db, _raw, task)) = postgres_task("hot_task_oversized").await else {
+            return;
+        };
+        let publisher =
+            StreamPubSub::new(hot::stream::StreamPubSubType::Memory, None, false).unwrap();
+        // Past what `jsonb` can hold: about six times the space of its text.
+        let result = serde_json::Value::Array(vec![serde_json::json!(0); 24_000_000]);
+
+        assert!(
+            complete_task_with_event(
+                &db,
+                &publisher,
+                &task.task_id,
+                task.env_id,
+                task.stream_id,
+                &task.function_name,
+                "code",
+                TaskStatus::Completed,
+                Some(&result),
+                None,
+                None,
+            )
+            .await
+        );
+
+        let task = Task::get(&db, &task.task_id).await.unwrap();
+        assert_eq!(task.task_status_id, TaskStatus::Failed.as_id());
+        let stored = task.result.unwrap().to_string();
+        assert!(stored.contains("too large to store"), "{stored}");
+    }
+
+    /// A result that lost the race to end its task is released, and one that's
+    /// in the row isn't, however its write was reported.
+    #[tokio::test]
+    async fn only_a_result_the_row_doesnt_hold_is_released() {
+        let db = hot::db::test_db().await;
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let dir = std::env::temp_dir().join(format!("hot-task-result-{}", Uuid::now_v7()));
+        let store = Arc::new(hot::blob::BlobStore::new(
+            Arc::new(db.clone()),
+            Arc::new(hot::file_storage::LocalFileStorage::new(dir.clone())),
+            hot::blob::BlobConfig {
+                mode: hot::blob::BlobMode::Service,
+                ..Default::default()
+            },
+        ));
+        let scope = hot::blob::BlobScope {
+            org_id: data.org_id,
+            env_id: Some(data.env_id),
+            run_id: None,
+        };
+        let large = serde_json::json!("x".repeat(2 * 1024 * 1024));
+        let active = || async {
+            let DatabasePool::Sqlite(pool) = &db else {
+                panic!("test_db should return SQLite");
+            };
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM blob_ref WHERE source_kind = 'task_result' AND active = 1",
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap()
+        };
+        let (_, mut task, _, _, _) = make_task_request_and_row();
+        task.env_id = data.env_id;
+        task.stream_id = data.stream_id;
+        task.build_id = data.build_id;
+        insert_test_task(&db, &task).await;
+        let stored = store
+            .spill_whole_if_large(
+                large,
+                scope,
+                hot::blob::SpillSource::TaskResult,
+                Some(&task.task_id.to_string()),
+            )
+            .await
+            .unwrap();
+        assert!(hot::blob::json_contains_blob_ref(&stored));
+        assert!(
+            Task::complete(
+                &db,
+                &task.task_id,
+                &TaskStatus::Completed,
+                Some(&stored),
+                None,
+                None
+            )
+            .await
+            .unwrap()
+        );
+
+        release_unstored_task_result(
+            &db,
+            Some(&store),
+            Some(data.org_id),
+            data.env_id,
+            &task.task_id,
+            &stored,
+        )
+        .await;
+        assert_eq!(active().await, 1, "the row holds it");
+
+        let other = serde_json::json!({"other": true});
+        let DatabasePool::Sqlite(pool) = &db else {
+            panic!("test_db should return SQLite");
+        };
+        sqlx::query("UPDATE task SET result = ? WHERE task_id = ?")
+            .bind(other.to_string())
+            .bind(task.task_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        release_unstored_task_result(
+            &db,
+            Some(&store),
+            Some(data.org_id),
+            data.env_id,
+            &task.task_id,
+            &stored,
+        )
+        .await;
+        assert_eq!(active().await, 0, "nothing holds it");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn task_arguments_in_blob_storage_that_cant_be_read_are_an_error() {
+        let db = hot::db::test_db().await;
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let reference = hot::blob::BlobRefVal {
+            id: Uuid::now_v7(),
+            object_id: Uuid::now_v7(),
+            hash_alg: hot::blob::HASH_ALG_BLAKE3.to_string(),
+            hash: "missing".to_string(),
+            size: 1,
+            content_type: None,
+            preview: None,
+            encoding: hot::blob::ENCODING_JSON.to_string(),
+        }
+        .to_val();
+        let read = read_task_value(&db, None, Some(data.org_id), data.env_id, reference).await;
+        assert!(read.is_err());
+
+        let plain = hot::val!({"id": 1});
+        let read = read_task_value(&db, None, None, data.env_id, plain.clone()).await;
+        assert_eq!(read.unwrap(), plain);
     }
 
     #[tokio::test]
@@ -11115,19 +11617,9 @@ mod tests {
             })),
             None,
         );
-        let usage = |compute_units, task_duration_ms| hot::db::subscription::OrgUsageStats {
-            runs_this_period: 0,
-            file_storage_bytes: 0,
-            team_members_count: 0,
-            call_storage_bytes: 0,
-            call_count: 0,
-            oldest_call_time: None,
-            store_storage_bytes: 0,
-            blob_storage_bytes: 0,
-            tasks_this_period: 0,
-            task_duration_ms,
+        let usage = |compute_units, duration_ms| AccountTaskUsage {
             compute_units,
-            active_schedules: 0,
+            duration_ms,
         };
         // Claim-time admission still enforces the limits against the counters.
         assert_eq!(exhausted_free_plan_message(&features, None), None);

@@ -1,0 +1,202 @@
+::sumsub::kyb ns
+meta {
+    doc: """
+    Business verification (KYB 2.0): company applicants and their
+    beneficiaries (UBOs, shareholders, directors, representatives and
+    other roles).
+
+    A company is an applicant with `type: "company"` whose
+    `fixedInfo.companyInfo` holds the company data; it is verified on a
+    KYB level. Beneficiaries are linked to it, either as existing
+    applicants or from `beneficiaryInfo`; a new beneficiary gets its own
+    applicant only when the level configures a verification level for
+    that role.
+    """
+}
+
+::api ::sumsub::api
+
+seg ::sumsub::api/seg
+query ::sumsub::api/query
+
+// Beneficiary roles Sumsub documents for `types` (open: new roles appear).
+BENEFICIARY_TYPES [
+  "ubo", "shareholder", "representative", "director", "companyOfficer", "investor",
+  "secretary", "founder", "legalAdvisor", "authorizedSignatory", "trustee",
+  "trustBeneficiary", "trustSettlor", "trustProtector", "managingPartner",
+  "equityPartner", "fundInvestor", "fundManager", "investmentManager",
+  "investmentAdviser", "fundAdministrator", "depositary", "custodian",
+  "primeBroker", "accountUser"
+]
+
+// UBO subtypes, only valid when `types` includes "ubo".
+UBO_SUBTYPES ["ownershipUbo", "controlUbo", "substituteUbo"]
+
+create-company-request
+meta {
+    doc: """
+    The spec for creating a company applicant. `company-info` needs
+    `companyName` and `country` (alpha-3); optional fields include
+    `registrationNumber`, `incorporatedOn` (`YYYY-MM-DD`), `type`,
+    `legalAddress`, `address` (`{street, town, state, postCode,
+    country}`; `state` is required for US and Canadian registry checks),
+    `taxId`, `leiCode`, `website`, `email`, `phone`, `noUBOs`,
+    `noShareholders`. `options` adds applicant fields (`email`, `lang`,
+    `sourceKey`, `metadata`). Exposed for testing.
+    """
+}
+fn (level-name: Str, external-user-id: Str, company-info: Map, options: Map): Map {
+  info ::api/compact(untype(company-info))
+  cond {
+    or(is-null(get(info, "companyName")), is-null(get(info, "country"))) => {
+      err("sumsub: a company applicant needs companyInfo.companyName and companyInfo.country")
+    }
+    => {
+      {
+        method: "POST",
+        path: `/resources/applicants${query({levelName: level-name})}`,
+        body: ::api/compact({
+          ...untype(options),
+          externalUserId: external-user-id,
+          type: "company",
+          fixedInfo: {companyInfo: info}
+        })
+      }
+    }
+  }
+}
+
+create-company
+meta {
+    doc: """
+    Create a company applicant on a KYB level. Returns the applicant.
+
+    **Example**
+
+    ```hot
+    company ::sumsub::kyb/create-company("kyb-level", "acme-ltd", {
+      companyName: "Acme Ltd",
+      country: "GBR",
+      registrationNumber: "12345678"
+    }, {})
+    ```
+    """
+}
+fn
+(level-name: Str, external-user-id: Str, company-info: Map, options: Map): Map {
+  create-company(level-name, external-user-id, company-info, options, {})
+},
+(level-name: Str, external-user-id: Str, company-info: Map, options: Map, opts: Map): Map {
+  ::api/call(create-company-request(level-name, external-user-id, company-info, options), opts)
+}
+
+update-company-info
+meta {
+    doc: """Overwrite the company data fields you supply (`PATCH .../fixedInfo/companyInfo`)."""
+}
+fn
+(applicant-id: Str, fields: Map): Map {
+  update-company-info(applicant-id, fields, {})
+},
+(applicant-id: Str, fields: Map, opts: Map): Map {
+  ::api/request("PATCH", `/resources/applicants/${seg(applicant-id)}/fixedInfo/companyInfo`, fields, opts)
+}
+
+beneficiary-request
+meta {
+    doc: """
+    The spec for linking a beneficiary. `beneficiary` takes `types`
+    (required, roles from `BENEFICIARY_TYPES`), then either `applicantId`
+    (an existing applicant) or `beneficiaryInfo` (`{firstName, lastName,
+    dob, country, email, ...}` for a person, `{companyName,
+    registrationNumber, ...}` for a company), plus `shareSize` (percent),
+    `subtypes` (`UBO_SUBTYPES`, with `ubo` only) and `natureOfControl`
+    (required for `controlUbo`). Exposed for testing.
+    """
+}
+fn (company-applicant-id: Str, beneficiary: Map): Map {
+  body ::api/compact(untype(beneficiary))
+  types get(body, "types")
+  cond {
+    or(not(is-vec(types)), is-empty(or(types, []))) => { err("sumsub: a beneficiary needs at least one role in types") }
+    and(is-some(get(body, "applicantId")), is-some(get(body, "beneficiaryInfo"))) => {
+      err("sumsub: pass applicantId (an existing applicant) or beneficiaryInfo (a new one), not both")
+    }
+
+    and(is-null(get(body, "applicantId")), is-null(get(body, "beneficiaryInfo"))) => {
+      err("sumsub: a beneficiary needs applicantId or beneficiaryInfo")
+    }
+    => {
+      {
+        method: "POST",
+        path: `/resources/applicants/${seg(company-applicant-id)}/fixedInfo/companyInfo/beneficiaries`,
+        body: body
+      }
+    }
+  }
+}
+
+add-beneficiary
+meta {
+    doc: """
+    Link a beneficiary to a company. Returns `{id, applicantId, types,
+    shareSize, beneficiaryInfo, ...}`; keep `id` (the beneficiary id, not
+    the applicant id) to unlink it later.
+
+    **Example**
+
+    ```hot
+    ubo ::sumsub::kyb/add-beneficiary("65f0c1e2a3b4c5d6e7f80912", {
+      types: ["ubo", "director"],
+      shareSize: 60,
+      subtypes: ["ownershipUbo"],
+      beneficiaryInfo: {firstName: "Ada", lastName: "Lovelace", country: "GBR"}
+    })
+    ```
+    """
+}
+fn
+(company-applicant-id: Str, beneficiary: Map): Map {
+  add-beneficiary(company-applicant-id, beneficiary, {})
+},
+(company-applicant-id: Str, beneficiary: Map, opts: Map): Map {
+  ::api/call(beneficiary-request(company-applicant-id, beneficiary), opts)
+}
+
+link-applicant
+meta {
+    doc: """Link an existing applicant to a company in the given roles; shorthand for `add-beneficiary` with `applicantId`."""
+}
+fn
+(company-applicant-id: Str, applicant-id: Str, types: Vec<Str>): Map {
+  link-applicant(company-applicant-id, applicant-id, types, {})
+},
+(company-applicant-id: Str, applicant-id: Str, types: Vec<Str>, opts: Map): Map {
+  add-beneficiary(company-applicant-id, {types: types, applicantId: applicant-id}, opts)
+}
+
+remove-beneficiary
+meta {
+    doc: """Unlink a beneficiary by its beneficiary `id` (from `add-beneficiary` or `beneficiaries`)."""
+}
+fn
+(company-applicant-id: Str, beneficiary-id: Str): Map {
+  remove-beneficiary(company-applicant-id, beneficiary-id, {})
+},
+(company-applicant-id: Str, beneficiary-id: Str, opts: Map): Map {
+  ::api/request("DELETE", `/resources/applicants/${seg(company-applicant-id)}/fixedInfo/companyInfo/beneficiaries/${seg(beneficiary-id)}`, "", opts)
+}
+
+beneficiaries
+meta {
+    doc: """The beneficiaries on a company applicant (as returned by `::sumsub::applicants/get-applicant`): `fixedInfo.companyInfo.beneficiaries`, falling back to `info.companyInfo.beneficiaries`; `[]` when none. Pure."""
+}
+fn (applicant: Any): Vec {
+  fixed get-in(applicant, ["fixedInfo", "companyInfo", "beneficiaries"])
+  extracted get-in(applicant, ["info", "companyInfo", "beneficiaries"])
+  cond {
+    and(is-vec(fixed), not(is-empty(fixed))) => { fixed }
+    is-vec(extracted) => { extracted }
+    => { [] }
+  }
+}

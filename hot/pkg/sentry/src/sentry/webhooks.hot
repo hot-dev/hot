@@ -1,0 +1,116 @@
+::sentry::webhooks ns
+meta {
+    doc: """
+    Sentry integration-platform webhook verification. Sentry signs each
+    delivery with `Sentry-Hook-Signature`: the hex HMAC-SHA256 of the raw
+    body, keyed with the integration's client secret. It also sends
+    `Sentry-Hook-Resource` (`issue`, `error`, `event_alert`,
+    `metric_alert`, `comment`, `installation`, `seer`, …),
+    `Sentry-Hook-Timestamp` (Unix seconds), and `Request-ID`. See
+    https://docs.sentry.io/organization/integrations/integration-platform/webhooks/.
+
+    The timestamp is not covered by the signature, so it cannot prove
+    freshness; `verify-request` checks it only when given a `max-age-seconds`.
+    """
+}
+
+::ctx ::hot::ctx
+::hmac ::hot::hmac
+
+header fn (request: Map, name: Str): Str? {
+  headers or(get(request, "headers"), {})
+  get(headers, name)
+}
+
+hook-resource
+meta {
+    doc: """The `Sentry-Hook-Resource` header: what the delivery is about (`issue`, `error`, `event_alert`, `metric_alert`, `comment`, `installation`, …), or null."""
+}
+fn (request: Map): Str? {
+  header(request, "sentry-hook-resource")
+}
+
+hook-timestamp
+meta {
+    doc: """The `Sentry-Hook-Timestamp` header as Unix seconds, or null when absent or malformed."""
+}
+fn (request: Map): Int? {
+  raw header(request, "sentry-hook-timestamp")
+  cond {
+    is-null(raw) => { null }
+    not(::hot::regex/is-match(trim(raw), "^[0-9]+$")) => { null }
+    => { Int(trim(raw)) }
+  }
+}
+
+request-id
+meta {
+    doc: """The delivery's `Request-ID` header (a UUID), useful for de-duplicating retries."""
+}
+fn (request: Map): Str? {
+  header(request, "request-id")
+}
+
+timestamp-fresh fn (request: Map, max-age-seconds: Int): Bool {
+  ts hook-timestamp(request)
+  cond {
+    is-null(ts) => { false }
+    => { lte(abs(sub(::hot::time/epoch-seconds(), ts)), max-age-seconds) }
+  }
+}
+
+verify-request
+meta {
+    ctx: {"sentry.webhook.secret": {required: false}},
+    doc: """
+    Verify a Sentry integration webhook: `Sentry-Hook-Signature` must be
+    the hex HMAC-SHA256 of the raw body under the client secret
+    (constant-time compare). Uses `sentry.webhook.secret` by default
+    (failing when it is unset), or an explicit secret, which is masked in
+    call records — an empty secret never verifies. The 3-arity form also
+    rejects deliveries whose
+    `Sentry-Hook-Timestamp` is more than `max-age-seconds` from now
+    (0 or less skips the check).
+
+    **Example**
+
+    ```hot
+    sentry-webhook
+    meta {webhook: {service: "sentry", path: "/sentry/webhook"}}
+    fn (request) {
+      cond {
+        not(::sentry::webhooks/verify-request(request)) => {
+          ::hot::http/HttpResponse({status: 401, body: "invalid signature"})
+        }
+        eq(::sentry::webhooks/hook-resource(request), "issue") => {
+          println(`issue ${request.body.action}: ${request.body.data.issue.title}`)
+          ::hot::http/HttpResponse({status: 200, body: "ok"})
+        }
+        => { ::hot::http/HttpResponse({status: 200, body: "ignored"}) }
+      }
+    }
+    ```
+    """
+}
+fn
+(request: Map): Bool {
+  secret or(::ctx/get("sentry.webhook.secret"), "")
+  if(is-empty(secret),
+    fail("sentry.webhook.secret is not set. Add the integration's client secret in Context Variables to verify webhook requests.")
+  )
+  verify-request(request, secret)
+},
+(request: Map, secret: Str?): Bool {
+  verify-request(request, secret, 0)
+},
+(request: Map, secret: Str?, max-age-seconds: Int): Bool {
+  signature or(header(request, "sentry-hook-signature"), "")
+  cond {
+    // An empty key would make every signature forgeable: fail closed.
+    or(is-null(secret), is-blank(secret)) => { false }
+    is-empty(signature) => { false }
+    not(::hmac/hmac-verify-hex(::ctx/mark-secret(secret), ::hot::http/raw-body(request), trim(signature), "sha256")) => { false }
+    lte(max-age-seconds, 0) => { true }
+    => { timestamp-fresh(request, max-age-seconds) }
+  }
+}

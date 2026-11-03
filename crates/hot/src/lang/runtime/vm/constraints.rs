@@ -7,6 +7,7 @@
 //! value itself never appears in the error.
 
 use super::{VirtualMachine, VmError, VmResult};
+use crate::lang::bytecode::{ConstantId, param_mask};
 use crate::val::Val;
 use ahash::{AHashMap, AHashSet};
 use fastnum::D256;
@@ -30,6 +31,13 @@ enum GuardStop {
     Fuel,
     Depth,
     Native(String),
+}
+
+/// How the checked path of a `CheckParam` ended.
+pub(crate) enum ParamCheck {
+    Passed,
+    Converted(Val),
+    Failed(Val),
 }
 
 /// How a predicate evaluation ended.
@@ -341,6 +349,62 @@ impl VirtualMachine {
         })
     }
 
+    /// Execute `CheckParam` on a parameter in the current frame. Returns the
+    /// `Err` of a failed check, for the caller to return from the function.
+    pub(crate) fn execute_check_param(
+        &mut self,
+        var_name: ConstantId,
+        spec: ConstantId,
+        mask: u32,
+        each: bool,
+    ) -> VmResult<Option<Val>> {
+        let name = self.get_constant_string(var_name)?;
+        let passes = self
+            .scope_stack
+            .last()
+            .and_then(|scope| scope.variables.get(name.as_ref()))
+            .is_some_and(|value| param_mask::passes(value, mask, each));
+        if passes {
+            return Ok(None);
+        }
+        let value = self.lookup_variable(&name)?;
+        let spec = self.get_constant(spec)?;
+        match self.check_param_value(value, &spec, mask)? {
+            ParamCheck::Passed => Ok(None),
+            ParamCheck::Converted(value) => {
+                self.store_variable(&name, value)?;
+                Ok(None)
+            }
+            ParamCheck::Failed(error) => Ok(Some(error)),
+        }
+    }
+
+    /// The checked path of `CheckParam`, for a value outside its mask. A value
+    /// tagged with a type over an accepted kind (`Port(80)` at `x: Int`, which
+    /// `hot check` accepts) keeps its tag.
+    pub(crate) fn check_param_value(
+        &mut self,
+        value: Val,
+        spec: &Val,
+        mask: u32,
+    ) -> VmResult<ParamCheck> {
+        if !value.is_err()
+            && let Val::Map(map) = &value
+            && crate::val::tagged_type_name(map).is_some()
+            && map
+                .get(&Val::from("$val"))
+                .is_some_and(|inner| param_mask::accepts(inner, mask))
+        {
+            return Ok(ParamCheck::Passed);
+        }
+        let checked = self.execute_check_constraint(value, spec, false)?;
+        Ok(if checked.is_err() {
+            ParamCheck::Failed(checked)
+        } else {
+            ParamCheck::Converted(checked)
+        })
+    }
+
     /// The spec cache, rebuilt when the program's table has changed.
     fn constraint_specs(&mut self) -> &ConstraintSpecCache {
         let table = &self.program.constraint_types;
@@ -556,7 +620,7 @@ impl VirtualMachine {
             "base" => Ok(self.check_base(value, get_str(node, "type").unwrap_or("Any"), path)),
             "literal" => {
                 let values = match get(node, "values") {
-                    Some(Val::Vec(values)) => values.clone(),
+                    Some(Val::Vec(values)) => values.to_vec(),
                     _ => Vec::new(),
                 };
                 if values.iter().any(|v| v == &value) {
@@ -576,7 +640,7 @@ impl VirtualMachine {
             }
             "union" => {
                 let members = match get(node, "members") {
-                    Some(Val::Vec(members)) => members.clone(),
+                    Some(Val::Vec(members)) => members.to_vec(),
                     _ => Vec::new(),
                 };
                 let mut failures = Vec::new();
@@ -585,6 +649,18 @@ impl VirtualMachine {
                         Ok(checked) => return Ok(Ok(checked)),
                         Err(failure) => failures.push(failure),
                     }
+                }
+                // No member's base type matched: say what all of them accept.
+                let expected: Vec<&str> = failures
+                    .iter()
+                    .filter_map(|f| match &f.kind {
+                        FailureKind::BaseMismatch { expected } => Some(expected.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                if expected.len() > 1 && expected.len() == failures.len() {
+                    let expected = expected.join(" | ");
+                    return Ok(Err(self.base_mismatch(&expected, &value, path)));
                 }
                 // Prefer the member whose base type matched: its predicate
                 // says more than "expected another type".
@@ -603,7 +679,10 @@ impl VirtualMachine {
                 };
                 let elem = get(node, "elem").cloned().unwrap_or(Val::Null);
                 let mut checked_items = Vec::with_capacity(items.len());
-                for (index, item) in items.into_iter().enumerate() {
+                for (index, item) in std::sync::Arc::unwrap_or_clone(items)
+                    .into_iter()
+                    .enumerate()
+                {
                     path.push(Val::Int(index as i64));
                     let result = self.check_value(item, &elem, path)?;
                     path.pop();
@@ -612,7 +691,7 @@ impl VirtualMachine {
                         Err(failure) => return Ok(Err(failure)),
                     }
                 }
-                Ok(Ok(Val::Vec(checked_items)))
+                Ok(Ok(Val::vec(checked_items)))
             }
             "map" => {
                 let Val::Map(entries) = value else {
@@ -620,7 +699,7 @@ impl VirtualMachine {
                 };
                 let elem = get(node, "elem").cloned().unwrap_or(Val::Null);
                 let mut checked_entries = indexmap::IndexMap::with_capacity(entries.len());
-                for (key, item) in entries.into_iter() {
+                for (key, item) in std::sync::Arc::unwrap_or_clone(entries).into_iter() {
                     path.push(key.clone());
                     let result = self.check_value(item, &elem, path)?;
                     path.pop();
@@ -631,7 +710,7 @@ impl VirtualMachine {
                         Err(failure) => return Ok(Err(failure)),
                     }
                 }
-                Ok(Ok(Val::Map(Box::new(checked_entries))))
+                Ok(Ok(Val::map(checked_entries)))
             }
             "struct" => self.check_struct(value, node, path),
             "enum" => match get(node, "invariant") {
@@ -938,7 +1017,7 @@ impl VirtualMachine {
             ("constraint", Val::from(constraint_name)),
             ("predicate", Val::from(failure.predicate.clone())),
             ("boundary", Val::from(boundary.kind.clone())),
-            ("path", Val::Vec(failure.path.clone())),
+            ("path", Val::vec(failure.path.clone())),
             ("declared-type", optional(&boundary.declared_type)),
             ("function", optional(&boundary.function)),
             ("parameter", optional(&boundary.parameter)),
@@ -969,9 +1048,9 @@ fn fast_check(value: &Val, fast: &Val) -> Option<bool> {
         Val::Dec(d) => Some(*d),
         _ => None,
     };
-    // Hot's `length`: bytes of a Str, entries of a Vec or Map.
+    // Hot's `length`: characters of a Str, entries of a Vec or Map.
     let length = |v: &Val| match crate::val::as_fields(v) {
-        Val::Str(s) => Some(s.len() as i64),
+        Val::Str(s) => Some(s.chars().count() as i64),
         Val::Vec(items) => Some(items.len() as i64),
         Val::Map(entries) => Some(entries.len() as i64),
         _ => None,
@@ -1040,7 +1119,7 @@ fn with_field(value: &Val, field: Val, field_value: Val) -> Val {
         _ => indexmap::IndexMap::new(),
     };
     fields.insert(field, field_value);
-    crate::val::with_type_of(value, Val::Map(Box::new(fields)))
+    crate::val::with_type_of(value, Val::map(fields))
 }
 
 /// The value at `key` inside `value`, looking through a typed value's tag.
@@ -1105,7 +1184,7 @@ mod tests {
     fn literal(value: &str) -> Val {
         spec(
             "literal",
-            vec![("values", Val::Vec(vec![Val::from(value)]))],
+            vec![("values", Val::vec(vec![Val::from(value)]))],
         )
     }
 
@@ -1151,7 +1230,7 @@ mod tests {
                 "::t/A",
                 spec(
                     "union",
-                    vec![("members", Val::Vec(vec![named("::t/B"), literal("x")]))],
+                    vec![("members", Val::vec(vec![named("::t/B"), literal("x")]))],
                 ),
             ),
             ("::t/B", named("::t/A")),
@@ -1160,7 +1239,7 @@ mod tests {
                 "::t/Self",
                 spec(
                     "union",
-                    vec![("members", Val::Vec(vec![literal("x"), named("::t/Self")]))],
+                    vec![("members", Val::vec(vec![literal("x"), named("::t/Self")]))],
                 ),
             ),
         ]);
@@ -1204,7 +1283,7 @@ mod tests {
             "union",
             vec![(
                 "members",
-                Val::Vec(vec![
+                Val::vec(vec![
                     literal("leaf"),
                     spec("vec", vec![("elem", named("::t/Json"))]),
                 ]),
@@ -1220,7 +1299,7 @@ mod tests {
             .expect("a recursive record checks");
         assert_eq!(checked, list);
 
-        let nested = Val::Vec(vec![Val::from("leaf"), Val::Vec(vec![Val::from("leaf")])]);
+        let nested = Val::vec(vec![Val::from("leaf"), Val::vec(vec![Val::from("leaf")])]);
         let checked = vm
             .execute_check_constraint(nested.clone(), &boundary("::t/Json"), true)
             .expect("a recursive collection checks");

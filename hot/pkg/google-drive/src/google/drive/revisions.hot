@@ -1,0 +1,88 @@
+::google::drive::revisions ns
+meta {
+    doc: """
+    File revisions: list, get, download a blob revision, and pin one with
+    keep-forever. Drive may omit older revisions of busy Google Docs from
+    the list, and only blob revisions marked keep-forever (or recent ones)
+    can be downloaded; Google-native revisions are exported through the
+    revision's `exportLinks`.
+
+    **Scopes.** `drive.readonly` to read; `drive` (or `drive.file`) to update.
+    """
+}
+
+::drive ::google::drive
+::api ::google::api
+FileContent ::google::drive/FileContent
+is-ok-response ::hot::http/is-ok-response
+
+REVISION_FIELDS "id,mimeType,modifiedTime,keepForever,published,size,md5Checksum,originalFilename,lastModifyingUser(displayName,emailAddress),exportLinks"
+LIST_FIELDS "nextPageToken,revisions(id,mimeType,modifiedTime,keepForever,published,size,md5Checksum,originalFilename,lastModifyingUser(displayName,emailAddress),exportLinks)"
+
+list-revisions
+meta {
+    doc: """GET /files/{id}/revisions - one page (`{revisions, nextPageToken?}`). Options: `pageSize` (max 1000), `pageToken`, `fields`, credentials."""
+}
+fn
+(file-id: Str): Map {
+  list-revisions(file-id, {})
+},
+(file-id: Str, opts: Map): Map {
+  params ::drive/query-params({fields: LIST_FIELDS}, opts)
+  ::drive/json(::drive/READ_SCOPE, "GET", ::drive/url(`/files/${::drive/encode-id(file-id)}/revisions`, params), "", opts)
+}
+
+list-all-revisions
+meta {doc: """Every revision Drive returns for a file (follows `nextPageToken`)."""}
+fn
+(file-id: Str): Vec {
+  list-all-revisions(file-id, {})
+},
+(file-id: Str, opts: Map): Vec {
+  ::api/collect-pages((token) { list-revisions(file-id, {pageSize: 1000, ...opts, pageToken: token}) }, "revisions")
+}
+
+get-revision
+meta {
+    doc: """GET /files/{id}/revisions/{revisionId} - revision metadata (`"head"` is not accepted; use the file's `headRevisionId`)."""
+}
+fn
+(file-id: Str, revision-id: Str): Map {
+  get-revision(file-id, revision-id, {})
+},
+(file-id: Str, revision-id: Str, opts: Map): Map {
+  params ::drive/query-params({fields: REVISION_FIELDS}, opts)
+  ::drive/json(::drive/READ_SCOPE, "GET", ::drive/url(`/files/${::drive/encode-id(file-id)}/revisions/${::drive/encode-id(revision-id)}`, params), "", opts)
+}
+
+download-revision
+meta {
+    doc: """GET /files/{id}/revisions/{revisionId}?alt=media - a blob revision's bytes as a `FileContent`. Options: `acknowledgeAbuse`, credentials."""
+}
+fn
+(file-id: Str, revision-id: Str): FileContent {
+  download-revision(file-id, revision-id, {})
+},
+(file-id: Str, revision-id: Str, opts: Map): FileContent {
+  params ::drive/query-params({alt: "media"}, opts)
+  full-url ::drive/url(`/files/${::drive/encode-id(file-id)}/revisions/${::drive/encode-id(revision-id)}`, params)
+  response ::api/request(::drive/READ_SCOPE, "GET", full-url, {}, "", ::drive/creds(opts))
+  cond {
+    is-err(response) => { response }
+    not(is-ok-response(response)) => { err(::api/HttpError(response)) }
+    => { ::drive/content-from-response(file-id, response, "download") }
+  }
+}
+
+keep-forever
+meta {
+    doc: """PATCH a blob revision's `keepForever` flag (pinned revisions are never purged; at most 200 per file)."""
+}
+fn
+(file-id: Str, revision-id: Str, keep: Bool): Map {
+  keep-forever(file-id, revision-id, keep, {})
+},
+(file-id: Str, revision-id: Str, keep: Bool, opts: Map): Map {
+  params ::drive/query-params({fields: REVISION_FIELDS}, opts)
+  ::drive/json(::drive/SCOPE, "PATCH", ::drive/url(`/files/${::drive/encode-id(file-id)}/revisions/${::drive/encode-id(revision-id)}`, params), {keepForever: keep}, opts)
+}

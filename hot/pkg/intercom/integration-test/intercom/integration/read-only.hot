@@ -1,0 +1,65 @@
+::intercom::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration tests (live Intercom, read-only)
+// =============================================================================
+// Requires ctx: intercom.token (INTERCOM_TOKEN); intercom.region
+// (INTERCOM_REGION: us/eu/au) for non-US workspaces. Every test only
+// reads. Without a token each test records a skip and passes.
+// Run with: hot test --project pkg-integration-intercom
+
+configured fn (): Bool {
+    is-some(::hot::ctx/get("intercom.token"))
+}
+
+skip fn (): Bool {
+    println("INTERCOM_TOKEN not set - skipping")
+    assert(true, "skipped: no Intercom token")
+}
+
+test-me-and-admins
+meta ["test"] fn () {
+    cond {
+        not(configured()) => { skip() }
+        => {
+            me ::intercom::admins/me()
+            assert(is-some(me.id), "token should resolve to an admin")
+            admins ::intercom::admins/list-admins()
+            assert(gt(length(admins.admins), 0), "workspace has admins")
+        }
+    }
+}
+
+test-find-unknown-contact
+meta ["test"] fn () {
+    cond {
+        not(configured()) => { skip() }
+        => {
+            out ::intercom::contacts/find-contact-by-email("definitely-not-real@hot-dev-itest.example")
+            assert(is-null(out), "unknown email resolves to null")
+        }
+    }
+}
+
+test-search-conversations-page
+meta ["test"] fn () {
+    cond {
+        not(configured()) => { skip() }
+        => {
+            page ::intercom::conversations/search-conversations({field: "open", operator: "=", value: true}, {per_page: 5})
+            assert(lte(length(page.conversations), 5), "per_page caps the page")
+        }
+    }
+}
+
+test-list-tags-and-ticket-types
+meta ["test"] fn () {
+    cond {
+        not(configured()) => { skip() }
+        => {
+            assert(is-vec(::intercom::tags/list-tags().data), "tags list")
+            assert(is-vec(::intercom::tickets/list-ticket-types().data), "ticket types list")
+        }
+    }
+}

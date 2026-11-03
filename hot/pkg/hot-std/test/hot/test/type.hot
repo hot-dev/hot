@@ -23,6 +23,17 @@ meta ["test"] fn () {
     assert(not(is-type(envelope, PlainDate)), "a value of another type")
 }
 
+null-at-str fn (x: Str): Vec { [is-type(x, Null), x] }
+null-at-str-via-any fn (a: Any): Vec { null-at-str(a) }
+
+test-null-fails-at-a-str-parameter
+meta ["test"] fn () {
+    assert(is-err(null-at-str-via-any(null)), "a Str parameter rejects null")
+    assert-eq([false, "s"], null-at-str-via-any("s"), "a Str parameter receives a Str as it is")
+    assert-eq("", Str(null), "Str(null) still gives an empty string")
+    assert-eq("[]", `[${null}]`, "interpolating null still gives an empty string")
+}
+
 test-type
 meta ["test"] fn () {
     // Test dual-purpose type constructors

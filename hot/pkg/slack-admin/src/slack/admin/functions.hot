@@ -1,0 +1,105 @@
+::slack::admin::functions ns
+meta {
+    doc: """
+    `admin.functions.*`: list the custom functions apps provide and
+    control who can use them in workflows. Scope: `admin.workflows:read`
+    / `admin.workflows:write`.
+
+    **Example**
+
+    ```hot
+    ::functions ::slack::admin::functions
+
+    fns ::functions/list(::functions/ListRequest({app_ids: ["A0123ABCDEF"]}))
+    ::functions/permissions-set(::functions/PermissionsSetRequest({
+      function_id: first(fns.functions).id,
+      visibility: "app_collaborators"
+    }))
+    ```
+    """
+}
+
+::api ::slack::admin::api
+
+ListRequest type {
+  app_ids: Vec<Str>,
+  team_id: Str?,
+  cursor: Str?,
+  limit: Int?
+}
+
+list
+meta {
+    doc: """
+    admin.functions.list - List the functions of up to 50 apps (`functions`).
+
+    Scope: `admin.workflows:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `list-all`.
+    """
+}
+fn
+(request: ListRequest): Map {
+  list(request, {})
+},
+(request: ListRequest, opts: Map): Map {
+  ::api/call("admin.functions.list", request, opts)
+}
+
+list-all
+meta {
+    doc: """
+    Every `functions` entry from `admin.functions.list`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    """
+}
+fn
+(request: ListRequest): Vec {
+  list-all(request, 1000)
+},
+(request: ListRequest, max-items: Int): Vec {
+  list-all(request, max-items, {})
+},
+(request: ListRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.functions.list", request, "functions", max-items, opts)
+}
+
+PermissionsLookupRequest type {
+  function_ids: Vec<Str>
+}
+
+permissions-lookup
+meta {
+    doc: """
+    admin.functions.permissions.lookup - Get the visibility and allowed users for functions.
+
+    Scope: `admin.workflows:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: PermissionsLookupRequest): Map {
+  permissions-lookup(request, {})
+},
+(request: PermissionsLookupRequest, opts: Map): Map {
+  ::api/call("admin.functions.permissions.lookup", request, opts)
+}
+
+PermissionsSetRequest type {
+  function_id: Str,
+  visibility: Str,
+  user_ids: Vec<Str>?
+}
+
+permissions-set
+meta {
+    doc: """
+    admin.functions.permissions.set - Set who can use a function: `everyone`, `app_collaborators`, `named_entities` (with `user_ids`) or `no_one`.
+
+    Scope: `admin.workflows:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: PermissionsSetRequest): Map {
+  permissions-set(request, {})
+},
+(request: PermissionsSetRequest, opts: Map): Map {
+  ::api/call("admin.functions.permissions.set", request, opts)
+}

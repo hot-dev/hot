@@ -22,7 +22,9 @@
 //! function-name strings here. A literal name is only ever used as a registry
 //! lookup key.
 
-use crate::lang::bytecode::{BytecodeProgram, Constant, Instruction, LambdaInfo, RegisterId};
+use crate::lang::bytecode::{
+    BytecodeProgram, Constant, Instruction, LambdaInfo, RegisterId, param_mask,
+};
 use crate::lang::hot::libmap::{self, HofExecution, HofStage, PureOp};
 use crate::lang::hot::r#type::{HotResult, str_internal};
 use crate::val::Val;
@@ -148,6 +150,8 @@ pub struct LoweredLambda {
     /// `Other`/`Int`). Used only as a hint; evaluation dispatches on the runtime
     /// value.
     pub result_type: ExprType,
+    /// Whether `code` starts with parameter checks, which `expr` doesn't show.
+    pub guarded: bool,
 }
 
 impl LoweredLambda {
@@ -158,7 +162,21 @@ impl LoweredLambda {
             expr,
             code,
             result_type,
+            guarded: false,
         }
+    }
+
+    /// Check parameters before the body: a value outside its mask de-opts, so
+    /// the interpreter converts it or reports the failure.
+    fn with_param_guards(mut self, guards: Vec<(usize, u32)>) -> Self {
+        self.guarded = !guards.is_empty();
+        let body = std::mem::take(&mut self.code);
+        self.code = guards
+            .into_iter()
+            .map(|(index, mask)| MicroOp::GuardParam { index, mask })
+            .chain(body)
+            .collect();
+        self
     }
 }
 
@@ -223,6 +241,16 @@ pub enum EvalOutcome {
     /// zero, an error value, a type the fast path does not handle, ...) requires
     /// falling back to the interpreter so exact semantics are reproduced.
     DeoptToInterpreter,
+}
+
+/// An `Int` or `Bool` result of an inlined op. A [`PureValue`] is as large as a
+/// `Val`, so moving one goes through memory, and how many of those moves survive
+/// optimization differs from build to build. A `Scalar` travels in registers,
+/// which keeps the speed of the hot loop out of the optimizer's hands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scalar {
+    Int(i64),
+    Bool(bool),
 }
 
 // ---------------------------------------------------------------------------
@@ -342,9 +370,24 @@ fn lower_callable_body(
 
     let mut regs: HashMap<RegisterId, RegContent> = HashMap::new();
     let mut result: Option<(PureExpr, ExprType)> = None;
+    let mut param_guards = Vec::new();
 
     for ins in instructions {
         match ins {
+            Instruction::CheckParam {
+                var_name,
+                mask,
+                each: false,
+                ..
+            } => {
+                let name = const_str(program, *var_name)
+                    .ok_or(Bailout::UnsupportedInstruction("CheckParam:badname"))?;
+                let index = param_index
+                    .get(name.as_str())
+                    .copied()
+                    .ok_or(Bailout::UnknownCapture(name))?;
+                param_guards.push((index, *mask));
+            }
             Instruction::LoadConst { dest, constant } => {
                 match program.constants.get(*constant as usize) {
                     Some(Constant::Val(Val::Int(i))) => {
@@ -501,7 +544,7 @@ fn lower_callable_body(
     }
 
     let (expr, result_type) = result.ok_or(Bailout::UnsupportedInstruction("no-return"))?;
-    Ok(LoweredLambda::new(params.len(), expr, result_type))
+    Ok(LoweredLambda::new(params.len(), expr, result_type).with_param_guards(param_guards))
 }
 
 fn lower_binop(
@@ -661,8 +704,23 @@ fn eval_op(op: PureOp, full_name: &str, operands: &[PureExpr], args: &[PureValue
 /// hotlib `LibFn`, guaranteeing parity (mixed/`Dec`/`Str` operands, integer
 /// overflow, divide/modulo by zero, error values).
 fn apply_op(op: PureOp, full_name: &str, vals: &[PureValue]) -> EvalOutcome {
-    if let Some(out) = fast_op(op, vals) {
-        return out;
+    match fast_op(op, vals) {
+        Some(Scalar::Int(i)) => EvalOutcome::Value(PureValue::Int(i)),
+        Some(Scalar::Bool(b)) => EvalOutcome::Value(PureValue::Bool(b)),
+        None => apply_other_op(op, full_name, vals),
+    }
+}
+
+/// Apply an op to operands the inlined path does not handle: concatenate two
+/// strings, or call the registered hotlib.
+fn apply_other_op(op: PureOp, full_name: &str, vals: &[PureValue]) -> EvalOutcome {
+    if op == PureOp::Concat
+        && let [PureValue::Other(Val::Str(a)), PureValue::Other(Val::Str(b))] = vals
+    {
+        let mut s = String::with_capacity(a.len() + b.len());
+        s.push_str(a);
+        s.push_str(b);
+        return EvalOutcome::Value(PureValue::Other(Val::from(s)));
     }
     let arg_vals: Vec<Val> = vals.iter().map(PureValue::to_val).collect();
     match libmap::call_pure_lib(full_name, &arg_vals) {
@@ -680,28 +738,21 @@ fn apply_op(op: PureOp, full_name: &str, vals: &[PureValue]) -> EvalOutcome {
 /// Inlined evaluation for `Int`/`Bool` operands. Returns `None` when the inline
 /// path cannot guarantee parity (non-`Int` operands, overflow, zero divisor) so
 /// the caller falls back to the exact hotlib implementation.
-fn fast_op(op: PureOp, vals: &[PureValue]) -> Option<EvalOutcome> {
-    fn ok(v: PureValue) -> Option<EvalOutcome> {
-        Some(EvalOutcome::Value(v))
-    }
-
+fn fast_op(op: PureOp, vals: &[PureValue]) -> Option<Scalar> {
     match op {
         PureOp::Add => {
             let (a, b) = (vals[0].as_int()?, vals[1].as_int()?);
             // Overflow falls through to the hotlib, whose overflow Err
             // de-opts the pipeline.
-            a.checked_add(b)
-                .map(|r| EvalOutcome::Value(PureValue::Int(r)))
+            a.checked_add(b).map(Scalar::Int)
         }
         PureOp::Sub => {
             let (a, b) = (vals[0].as_int()?, vals[1].as_int()?);
-            a.checked_sub(b)
-                .map(|r| EvalOutcome::Value(PureValue::Int(r)))
+            a.checked_sub(b).map(Scalar::Int)
         }
         PureOp::Mul => {
             let (a, b) = (vals[0].as_int()?, vals[1].as_int()?);
-            a.checked_mul(b)
-                .map(|r| EvalOutcome::Value(PureValue::Int(r)))
+            a.checked_mul(b).map(Scalar::Int)
         }
         PureOp::Mod => {
             let (a, b) = (vals[0].as_int()?, vals[1].as_int()?);
@@ -710,29 +761,22 @@ fn fast_op(op: PureOp, vals: &[PureValue]) -> Option<EvalOutcome> {
                 None
             } else {
                 // Only `i64::MIN % -1` wraps, and its remainder is 0.
-                ok(PureValue::Int(a.wrapping_rem(b)))
+                Some(Scalar::Int(a.wrapping_rem(b)))
             }
         }
-        PureOp::IsZero => ok(PureValue::Bool(vals[0].as_int()? == 0)),
-        PureOp::Eq => ok(PureValue::Bool(vals[0].as_int()? == vals[1].as_int()?)),
-        PureOp::Ne => ok(PureValue::Bool(vals[0].as_int()? != vals[1].as_int()?)),
-        PureOp::Lt => ok(PureValue::Bool(vals[0].as_int()? < vals[1].as_int()?)),
-        PureOp::Lte => ok(PureValue::Bool(vals[0].as_int()? <= vals[1].as_int()?)),
-        PureOp::Gt => ok(PureValue::Bool(vals[0].as_int()? > vals[1].as_int()?)),
-        PureOp::Gte => ok(PureValue::Bool(vals[0].as_int()? >= vals[1].as_int()?)),
-        PureOp::Not => ok(PureValue::Bool(!vals[0].as_bool()?)),
-        PureOp::Concat => match vals {
-            [PureValue::Other(Val::Str(a)), PureValue::Other(Val::Str(b))] => {
-                let mut s = String::with_capacity(a.len() + b.len());
-                s.push_str(a);
-                s.push_str(b);
-                ok(PureValue::Other(Val::from(s)))
-            }
-            _ => None,
-        },
-        // `Div` can yield a `Dec`; `Abs`/`Min`/`Max`/`Neg` are handled by the
-        // hotlib fallback for full parity.
-        PureOp::Div | PureOp::Abs | PureOp::Min | PureOp::Max | PureOp::Neg => None,
+        PureOp::IsZero => Some(Scalar::Bool(vals[0].as_int()? == 0)),
+        PureOp::Eq => Some(Scalar::Bool(vals[0].as_int()? == vals[1].as_int()?)),
+        PureOp::Ne => Some(Scalar::Bool(vals[0].as_int()? != vals[1].as_int()?)),
+        PureOp::Lt => Some(Scalar::Bool(vals[0].as_int()? < vals[1].as_int()?)),
+        PureOp::Lte => Some(Scalar::Bool(vals[0].as_int()? <= vals[1].as_int()?)),
+        PureOp::Gt => Some(Scalar::Bool(vals[0].as_int()? > vals[1].as_int()?)),
+        PureOp::Gte => Some(Scalar::Bool(vals[0].as_int()? >= vals[1].as_int()?)),
+        PureOp::Not => Some(Scalar::Bool(!vals[0].as_bool()?)),
+        // `Concat` builds a `Str`, and `Div` can yield a `Dec`; `Abs`/`Min`/
+        // `Max`/`Neg` are handled by the hotlib fallback for full parity.
+        PureOp::Concat | PureOp::Div | PureOp::Abs | PureOp::Min | PureOp::Max | PureOp::Neg => {
+            None
+        }
     }
 }
 
@@ -750,6 +794,10 @@ fn fast_op(op: PureOp, vals: &[PureValue]) -> Option<EvalOutcome> {
 /// operands and push one result; `Field` consumes one and pushes one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MicroOp {
+    GuardParam {
+        index: usize,
+        mask: u32,
+    },
     PushParam(usize),
     PushInt(i64),
     PushBool(bool),
@@ -813,62 +861,124 @@ fn flatten_into(expr: &PureExpr, out: &mut Vec<MicroOp>) {
     }
 }
 
+/// A `GuardParam` on a value that isn't in a register's kind.
+#[inline(never)]
+fn other_param_accepted(value: &PureValue, mask: u32) -> bool {
+    matches!(value, PureValue::Other(value) if param_mask::accepts(value, mask))
+}
+
 /// Evaluate a flat program against `args`, reusing `stack` (cleared on entry).
-/// Returns the single top-of-stack result, or a de-opt.
-fn run_program(code: &[MicroOp], args: &[PureValue], stack: &mut Vec<PureValue>) -> EvalOutcome {
+/// Returns the single result where it sits on top of `stack`, or `None` for a
+/// de-opt.
+///
+/// `Int` and `Bool` values stay in registers from here to [`take_result`]. Every
+/// path that handles anything else is out of line, so this loop holds no `Val`
+/// glue, and a change to `Val` can't reshape the code around it.
+fn run_program<'s>(
+    code: &[MicroOp],
+    args: &[PureValue],
+    stack: &'s mut Vec<PureValue>,
+) -> Option<&'s mut PureValue> {
     stack.clear();
     for mop in code {
         match mop {
-            MicroOp::PushParam(i) => match args.get(*i) {
-                Some(v) => stack.push(v.clone()),
-                None => return EvalOutcome::DeoptToInterpreter,
+            MicroOp::GuardParam { index, mask } => match args.get(*index)? {
+                PureValue::Int(_) if mask & param_mask::INT != 0 => {}
+                PureValue::Bool(_) if mask & param_mask::BOOL != 0 => {}
+                other if other_param_accepted(other, *mask) => {}
+                _ => return None,
+            },
+            MicroOp::PushParam(i) => match args.get(*i)? {
+                PureValue::Int(i) => stack.push(PureValue::Int(*i)),
+                PureValue::Bool(b) => stack.push(PureValue::Bool(*b)),
+                other => push_clone(stack, other),
             },
             MicroOp::PushInt(i) => stack.push(PureValue::Int(*i)),
             MicroOp::PushBool(b) => stack.push(PureValue::Bool(*b)),
-            MicroOp::PushVal(v) => stack.push(PureValue::from_val(v.clone())),
+            MicroOp::PushVal(v) => push_const(stack, v),
             MicroOp::Apply {
                 op,
                 full_name,
                 argc,
             } => {
-                if stack.len() < *argc {
-                    return EvalOutcome::DeoptToInterpreter;
+                let base = stack.len().checked_sub(*argc)?;
+                match fast_op(*op, &stack[base..]) {
+                    Some(Scalar::Int(i)) => {
+                        stack.truncate(base);
+                        stack.push(PureValue::Int(i));
+                    }
+                    Some(Scalar::Bool(b)) => {
+                        stack.truncate(base);
+                        stack.push(PureValue::Bool(b));
+                    }
+                    None => apply_other_on_stack(stack, base, *op, full_name)?,
                 }
-                let base = stack.len() - *argc;
-                let v = match apply_op(*op, full_name, &stack[base..]) {
-                    EvalOutcome::Value(v) => v,
-                    deopt => return deopt,
-                };
-                stack.truncate(base);
-                stack.push(v);
             }
-            MicroOp::Field(key) => {
-                let Some(base_val) = stack.pop() else {
-                    return EvalOutcome::DeoptToInterpreter;
-                };
-                let v = match field_of(base_val.into_val(), key) {
-                    EvalOutcome::Value(v) => v,
-                    deopt => return deopt,
-                };
-                stack.push(v);
-            }
-            MicroOp::Template(n) => {
-                if stack.len() < *n {
-                    return EvalOutcome::DeoptToInterpreter;
-                }
-                let base = stack.len() - *n;
-                let v = match template_of(&stack[base..]) {
-                    EvalOutcome::Value(v) => v,
-                    deopt => return deopt,
-                };
-                stack.truncate(base);
-                stack.push(v);
-            }
+            MicroOp::Field(key) => field_on_stack(stack, key)?,
+            MicroOp::Template(n) => template_on_stack(stack, *n)?,
         }
     }
-    match stack.pop() {
-        Some(v) => EvalOutcome::Value(v),
-        None => EvalOutcome::DeoptToInterpreter,
+    stack.last_mut()
+}
+
+#[inline(never)]
+fn push_clone(stack: &mut Vec<PureValue>, value: &PureValue) {
+    stack.push(value.clone());
+}
+
+#[inline(never)]
+fn push_const(stack: &mut Vec<PureValue>, value: &Val) {
+    stack.push(PureValue::from_val(value.clone()));
+}
+
+/// Replace the operands from `base` up with the op's result.
+#[inline(never)]
+fn apply_other_on_stack(
+    stack: &mut Vec<PureValue>,
+    base: usize,
+    op: PureOp,
+    full_name: &str,
+) -> Option<()> {
+    let EvalOutcome::Value(v) = apply_other_op(op, full_name, &stack[base..]) else {
+        return None;
+    };
+    stack.truncate(base);
+    stack.push(v);
+    Some(())
+}
+
+/// Replace the record on top of the stack with its field.
+#[inline(never)]
+fn field_on_stack(stack: &mut Vec<PureValue>, key: &str) -> Option<()> {
+    let base_val = stack.pop()?;
+    let EvalOutcome::Value(v) = field_of(base_val.into_val(), key) else {
+        return None;
+    };
+    stack.push(v);
+    Some(())
+}
+
+/// Replace the top `n` values with the template they interpolate.
+#[inline(never)]
+fn template_on_stack(stack: &mut Vec<PureValue>, n: usize) -> Option<()> {
+    let base = stack.len().checked_sub(n)?;
+    let EvalOutcome::Value(v) = template_of(&stack[base..]) else {
+        return None;
+    };
+    stack.truncate(base);
+    stack.push(v);
+    Some(())
+}
+
+/// Move a program's result into `slot`. An `Int` or `Bool` writes just its
+/// payload instead of copying a whole `PureValue`. Anything else swaps, leaving
+/// the old value on the stack for the next [`run_program`] to clear.
+#[inline]
+fn take_result(result: &mut PureValue, slot: &mut PureValue) {
+    match result {
+        PureValue::Int(i) => *slot = PureValue::Int(*i),
+        PureValue::Bool(b) => *slot = PureValue::Bool(*b),
+        PureValue::Other(_) => std::mem::swap(result, slot),
     }
 }
 
@@ -1111,6 +1221,50 @@ pub fn detect_pipelines(instrs: &[Instruction], program: &BytecodeProgram) -> Ve
     plans
 }
 
+/// The pipelines in a function's instruction stream that its compiled code can
+/// try a fused run of. Compiled code keeps the stages for a de-opt, and joins
+/// both paths after them, so it has to know what the stages do to its registers.
+/// A pipeline qualifies when its stages are plain calls with their arguments
+/// loaded, which write registers and nothing else, and when it can succeed:
+/// a `reduce` without a constant initial value always de-opts.
+pub fn detect_compilable_pipelines(
+    instrs: &[Instruction],
+    program: &BytecodeProgram,
+) -> Vec<PipelinePlan> {
+    let plans = detect_pipelines(instrs, program);
+    let overlaps = |plan: &PipelinePlan| {
+        plans.iter().any(|other| {
+            !std::ptr::eq(other, plan)
+                && other.first_stage_ip <= plan.last_stage_ip
+                && plan.first_stage_ip <= other.last_stage_ip
+        })
+    };
+    let compilable = |plan: &PipelinePlan| {
+        plan.last_stage_ip + 1 < instrs.len()
+            && !overlaps(plan)
+            && !plan
+                .stages
+                .last()
+                .is_some_and(|last| last.stage == HofStage::Reduce && last.initial.is_none())
+            && instrs[plan.first_stage_ip..=plan.last_stage_ip]
+                .iter()
+                .all(|ins| {
+                    matches!(
+                        ins,
+                        Instruction::Move { .. }
+                            | Instruction::LoadConst { .. }
+                            | Instruction::LoadFunctionRef { .. }
+                            | Instruction::Call { .. }
+                    )
+                })
+    };
+    plans
+        .iter()
+        .filter(|plan| compilable(plan))
+        .cloned()
+        .collect()
+}
+
 fn hof_arity_is_fusible(stage: HofStage, args_count: u8) -> bool {
     match stage {
         // Do not fuse the new 3-arg `map(..., OnErr.*)` form yet. The fused
@@ -1319,26 +1473,40 @@ where
     }
 
     // Terminal accumulators.
-    let mut reduce_acc: Option<PureValue> = None;
     let mut count: i64 = 0;
     let mut some_result = false;
     let mut all_result = true;
     let mut string_reduce = string_reduce_builder(terminal);
-    if terminal.stage == HofStage::Reduce && string_reduce.is_none() {
+    let accumulator = if string_reduce.is_some() {
+        // The appended expression never reads its accumulator parameter.
+        PureValue::Other(Val::from(""))
+    } else if terminal.stage == HofStage::Reduce {
         match &terminal.initial {
-            Some(v) => reduce_acc = Some(PureValue::from_val(v.clone())),
+            Some(v) => PureValue::from_val(v.clone()),
             None => return FusedRun::Deopt,
         }
-    }
+    } else {
+        PureValue::Bool(false)
+    };
+
+    // The accumulator and the current element sit side by side, so a `reduce`
+    // lambda reads both where they are instead of having them moved into an
+    // argument array for every element.
+    const ACC: usize = 0;
+    const CUR: usize = 1;
+    let mut regs = [accumulator, PureValue::Bool(false)];
 
     // Value stack reused across every element/stage (no per-element allocation).
     let mut stack: Vec<PureValue> = Vec::with_capacity(8);
 
     for item in items {
-        let mut cur = PureValue::from_val(item);
+        match item {
+            Val::Int(i) => regs[CUR] = PureValue::Int(i),
+            other => regs[CUR] = PureValue::from_val(other),
+        }
         // Calling a stage's lambda consumes an Err element, which halts,
         // even when the lambda never reads its parameter.
-        if value_is_err(&cur) {
+        if value_is_err(&regs[CUR]) {
             return FusedRun::Deopt;
         }
 
@@ -1346,9 +1514,10 @@ where
         for t in transforms {
             match t.stage {
                 HofStage::Filter => {
-                    match run_program(&t.lambda.code, std::slice::from_ref(&cur), &mut stack) {
-                        EvalOutcome::Value(PureValue::Bool(b)) => {
-                            if !b {
+                    let element = std::slice::from_ref(&regs[CUR]);
+                    match run_program(&t.lambda.code, element, &mut stack) {
+                        Some(PureValue::Bool(b)) => {
+                            if !*b {
                                 keep = false;
                                 break;
                             }
@@ -1359,8 +1528,9 @@ where
                     }
                 }
                 HofStage::Map => {
-                    match run_program(&t.lambda.code, std::slice::from_ref(&cur), &mut stack) {
-                        EvalOutcome::Value(v) if !value_is_err(&v) => cur = v,
+                    let element = std::slice::from_ref(&regs[CUR]);
+                    match run_program(&t.lambda.code, element, &mut stack) {
+                        Some(v) if !value_is_err(v) => take_result(v, &mut regs[CUR]),
                         _ => return FusedRun::Deopt,
                     }
                 }
@@ -1375,20 +1545,12 @@ where
         match terminal.stage {
             HofStage::Reduce => {
                 if let Some((out, append_plan)) = &mut string_reduce {
-                    let args = [PureValue::Other(Val::from("")), cur];
-                    if !push_string_append(out, append_plan, &args, &mut stack) {
+                    if !push_string_append(out, append_plan, &regs, &mut stack) {
                         return FusedRun::Deopt;
                     }
                 } else {
-                    // Invariant: `reduce_acc` is `Some` here (initialized before
-                    // the loop and re-set every iteration). De-opt rather than
-                    // panic if a future refactor ever breaks that invariant.
-                    let Some(acc) = reduce_acc.take() else {
-                        return FusedRun::Deopt;
-                    };
-                    let pair = [acc, cur];
-                    match run_program(&terminal.lambda.code, &pair, &mut stack) {
-                        EvalOutcome::Value(v) if !value_is_err(&v) => reduce_acc = Some(v),
+                    match run_program(&terminal.lambda.code, &regs, &mut stack) {
+                        Some(v) if !value_is_err(v) => take_result(v, &mut regs[ACC]),
                         _ => return FusedRun::Deopt,
                     }
                 }
@@ -1397,27 +1559,21 @@ where
                 count += 1;
             }
             HofStage::Some => {
-                match run_program(
-                    &terminal.lambda.code,
-                    std::slice::from_ref(&cur),
-                    &mut stack,
-                ) {
-                    EvalOutcome::Value(PureValue::Bool(true)) => {
+                let element = std::slice::from_ref(&regs[CUR]);
+                match run_program(&terminal.lambda.code, element, &mut stack) {
+                    Some(PureValue::Bool(true)) => {
                         some_result = true;
                         break;
                     }
-                    EvalOutcome::Value(PureValue::Bool(false)) => {}
+                    Some(PureValue::Bool(false)) => {}
                     _ => return FusedRun::Deopt,
                 }
             }
             HofStage::All => {
-                match run_program(
-                    &terminal.lambda.code,
-                    std::slice::from_ref(&cur),
-                    &mut stack,
-                ) {
-                    EvalOutcome::Value(PureValue::Bool(true)) => {}
-                    EvalOutcome::Value(PureValue::Bool(false)) => {
+                let element = std::slice::from_ref(&regs[CUR]);
+                match run_program(&terminal.lambda.code, element, &mut stack) {
+                    Some(PureValue::Bool(true)) => {}
+                    Some(PureValue::Bool(false)) => {
                         all_result = false;
                         break;
                     }
@@ -1428,16 +1584,11 @@ where
         }
     }
 
+    let [accumulator, _] = regs;
     let result = match terminal.stage {
         HofStage::Reduce => match string_reduce {
             Some((out, _)) => Val::from(out),
-            // `reduce_acc` is always `Some` for a non-string reduce (initialized
-            // before the loop, re-set each iteration). De-opt instead of
-            // panicking if that ever fails to hold.
-            None => match reduce_acc {
-                Some(acc) => acc.into_val(),
-                None => return FusedRun::Deopt,
-            },
+            None => accumulator.into_val(),
         },
         HofStage::Length => Val::Int(count),
         HofStage::Some => Val::Bool(some_result),
@@ -1448,7 +1599,8 @@ where
 }
 
 fn string_reduce_builder(terminal: &FusedStage) -> Option<(String, StringAppendPlan)> {
-    if terminal.stage != HofStage::Reduce {
+    // String building reads the body's expression, without the guards in `code`.
+    if terminal.stage != HofStage::Reduce || terminal.lambda.guarded {
         return None;
     }
 
@@ -1488,18 +1640,18 @@ fn push_string_append(
 ) -> bool {
     match append {
         StringAppendPlan::Program(code) => match run_program(code, args, stack) {
-            EvalOutcome::Value(v) if !value_is_err(&v) => push_concat_part(out, &v),
+            Some(v) if !value_is_err(v) => push_concat_part(out, v),
             _ => false,
         },
         StringAppendPlan::Template(parts) => {
             let max_bytes = crate::lang::runtime::limits::max_string_bytes();
             for code in parts {
                 match run_program(code, args, stack) {
-                    EvalOutcome::Value(v) if !value_is_err(&v) => {
+                    Some(v) if !value_is_err(v) => {
                         if matches!(v, PureValue::Other(Val::Map(_))) {
                             return false;
                         }
-                        if !push_template_part(out, &v, max_bytes) {
+                        if !push_template_part(out, v, max_bytes) {
                             return false;
                         }
                     }
@@ -1999,7 +2151,7 @@ f fn (n: Int): Str {
         };
         let mut m = indexmap::IndexMap::new();
         m.insert(Val::from("count"), Val::Int(7));
-        let record = PureValue::Other(Val::Map(Box::new(m)));
+        let record = PureValue::Other(Val::map(m));
         assert_eq!(
             eval_expr(&field, std::slice::from_ref(&record)),
             EvalOutcome::Value(PureValue::Int(7))
@@ -2033,6 +2185,17 @@ f fn (n: Int): Str {
         );
     }
 
+    fn run_program_outcome(
+        code: &[MicroOp],
+        args: &[PureValue],
+        stack: &mut Vec<PureValue>,
+    ) -> EvalOutcome {
+        match run_program(code, args, stack) {
+            Some(v) => EvalOutcome::Value(v.clone()),
+            None => EvalOutcome::DeoptToInterpreter,
+        }
+    }
+
     #[test]
     fn flat_program_matches_tree_walker() {
         // is-zero(mod(add(x, 1), 2)) over a range of inputs, plus a field+template.
@@ -2051,7 +2214,7 @@ f fn (n: Int): Str {
         for x in -5..=5 {
             let args = [PureValue::Int(x)];
             assert_eq!(
-                run_program(&code, &args, &mut stack),
+                run_program_outcome(&code, &args, &mut stack),
                 eval_expr(&expr, &args),
                 "mismatch at x={}",
                 x
@@ -2066,10 +2229,36 @@ f fn (n: Int): Str {
         for x in 0..3 {
             let args = [PureValue::Int(x)];
             assert_eq!(
-                run_program(&tcode, &args, &mut stack),
+                run_program_outcome(&tcode, &args, &mut stack),
                 eval_expr(&tmpl, &args)
             );
         }
+    }
+
+    #[test]
+    fn scalar_results_fit_in_registers() {
+        // Two registers is what keeps the hot loop from moving results through
+        // memory. A larger `Scalar` would bring back the copies it removed.
+        assert!(std::mem::size_of::<Option<Scalar>>() <= 2 * std::mem::size_of::<u64>());
+    }
+
+    #[test]
+    fn take_result_moves_every_kind_of_value() {
+        let text = || PureValue::Other(Val::from("text"));
+
+        let mut slot = text();
+        take_result(&mut PureValue::Int(7), &mut slot);
+        assert_eq!(slot, PureValue::Int(7));
+
+        take_result(&mut PureValue::Bool(true), &mut slot);
+        assert_eq!(slot, PureValue::Bool(true));
+
+        take_result(&mut text(), &mut slot);
+        assert_eq!(slot, text());
+
+        let mut slot = PureValue::Other(Val::from("old"));
+        take_result(&mut text(), &mut slot);
+        assert_eq!(slot, text());
     }
 
     #[test]
@@ -2137,7 +2326,7 @@ f fn (n: Int): Int {
             .expect("fn f");
         let plan = &detect_pipelines(&func.instructions, &prog)[0];
         // range(1, 11) = [1..10]; evens 2,4,6,8,10; squares 4,16,36,64,100; sum=220.
-        let source = Val::Vec((1..=10).map(Val::Int).collect());
+        let source = Val::vec((1..=10).map(Val::Int).collect());
         assert_eq!(
             run_pipeline(plan, &source),
             FusedRun::Produced(Val::Int(220))
@@ -2164,9 +2353,9 @@ f fn (xs: Vec): Int {
             .find(|f| f.name.ends_with("/f"))
             .expect("fn f");
         let plan = &detect_pipelines(&func.instructions, &prog)[0];
-        let plain = Val::Vec(vec![Val::Int(1), Val::Int(2), Val::Int(3)]);
+        let plain = Val::vec(vec![Val::Int(1), Val::Int(2), Val::Int(3)]);
         assert_eq!(run_pipeline(plan, &plain), FusedRun::Produced(Val::Int(3)));
-        let with_err = Val::Vec(vec![
+        let with_err = Val::vec(vec![
             Val::Int(1),
             Val::err(Val::from("Division by zero")),
             Val::Int(3),
@@ -2295,7 +2484,7 @@ f fn (n: Int): Int {
         );
         let plan = &plans[0];
         assert_eq!(plan.stages.len(), 3);
-        let source = Val::Vec((1..=10).map(Val::Int).collect());
+        let source = Val::vec((1..=10).map(Val::Int).collect());
         assert_eq!(
             run_pipeline(plan, &source),
             FusedRun::Produced(Val::Int(220))
@@ -2319,7 +2508,7 @@ f fn (n: Int): Int {
             .find(|f| f.name.ends_with("/f"))
             .expect("fn f");
         let plan = &detect_pipelines(&func.instructions, &prog)[0];
-        let source = Val::Vec(vec![Val::Int(2), Val::from("oops"), Val::Int(4)]);
+        let source = Val::vec(vec![Val::Int(2), Val::from("oops"), Val::Int(4)]);
         assert_eq!(run_pipeline(plan, &source), FusedRun::Deopt);
     }
 
@@ -2342,13 +2531,13 @@ f fn (n: Int): Bool {
         let plan = &detect_pipelines(&func.instructions, &prog)[0];
         assert_eq!(plan.stages.len(), 2);
         assert_eq!(plan.stages[1].stage, HofStage::Some);
-        let source = Val::Vec((1..=5).map(Val::Int).collect());
+        let source = Val::vec((1..=5).map(Val::Int).collect());
         assert_eq!(
             run_pipeline(plan, &source),
             FusedRun::Produced(Val::Bool(true))
         );
 
-        let source = Val::Vec((1..=3).map(Val::Int).collect());
+        let source = Val::vec((1..=3).map(Val::Int).collect());
         assert_eq!(
             run_pipeline(plan, &source),
             FusedRun::Produced(Val::Bool(false))
@@ -2374,13 +2563,13 @@ f fn (n: Int): Bool {
         let plan = &detect_pipelines(&func.instructions, &prog)[0];
         assert_eq!(plan.stages.len(), 2);
         assert_eq!(plan.stages[1].stage, HofStage::All);
-        let source = Val::Vec((1..=5).map(Val::Int).collect());
+        let source = Val::vec((1..=5).map(Val::Int).collect());
         assert_eq!(
             run_pipeline(plan, &source),
             FusedRun::Produced(Val::Bool(true))
         );
 
-        let source = Val::Vec(vec![Val::Int(1), Val::Int(-1), Val::Int(3)]);
+        let source = Val::vec(vec![Val::Int(1), Val::Int(-1), Val::Int(3)]);
         assert_eq!(
             run_pipeline(plan, &source),
             FusedRun::Produced(Val::Bool(false))
@@ -2417,7 +2606,7 @@ f fn (n: Int): Int {
     fn record(count: i64) -> Val {
         let mut m = indexmap::IndexMap::new();
         m.insert(Val::from("count"), Val::Int(count));
-        Val::Map(Box::new(m))
+        Val::map(m)
     }
 
     #[test]
@@ -2439,7 +2628,7 @@ f fn (rows: Vec<Map>): Int {
             .expect("fn f");
         let plan = &detect_pipelines(&func.instructions, &prog)[0];
         // counts: 3, -1 (dropped), 0 (dropped), 5  -> 3 + 5 = 8
-        let source = Val::Vec(vec![record(3), record(-1), record(0), record(5)]);
+        let source = Val::vec(vec![record(3), record(-1), record(0), record(5)]);
         assert_eq!(run_pipeline(plan, &source), FusedRun::Produced(Val::Int(8)));
     }
 
@@ -2495,7 +2684,7 @@ f fn (items: Vec<Str>): Str {
             string_reduce_builder(plan.stages.last().expect("terminal")).is_some(),
             "string concat reduce should use the builder specialization"
         );
-        let source = Val::Vec(vec![Val::from("a"), Val::from("b"), Val::from("c")]);
+        let source = Val::vec(vec![Val::from("a"), Val::from("b"), Val::from("c")]);
         assert_eq!(
             run_pipeline(plan, &source),
             FusedRun::Produced(Val::from("a!b!c!"))
@@ -2517,7 +2706,7 @@ f fn (items: Vec<Int>): Str {
             .find(|f| f.name.ends_with("/f"))
             .expect("fn f");
         let plan = &detect_pipelines(&func.instructions, &prog)[0];
-        let source = Val::Vec(vec![Val::Int(1), Val::Int(2), Val::Int(3)]);
+        let source = Val::vec(vec![Val::Int(1), Val::Int(2), Val::Int(3)]);
         assert_eq!(
             run_pipeline(plan, &source),
             FusedRun::Produced(Val::from("123"))
@@ -2539,7 +2728,7 @@ f fn (items: Vec): Str {
             .find(|f| f.name.ends_with("/f"))
             .expect("fn f");
         let plan = &detect_pipelines(&func.instructions, &prog)[0];
-        let source = Val::Vec(vec![Val::Null, Val::from("ok")]);
+        let source = Val::vec(vec![Val::Null, Val::from("ok")]);
         assert_eq!(
             run_pipeline(plan, &source),
             FusedRun::Produced(Val::from("item=;item=ok;"))
@@ -2561,7 +2750,7 @@ f fn (items: Vec<Map>): Str {
             .find(|f| f.name.ends_with("/f"))
             .expect("fn f");
         let plan = &detect_pipelines(&func.instructions, &prog)[0];
-        let source = Val::Vec(vec![record(1)]);
+        let source = Val::vec(vec![record(1)]);
         assert_eq!(run_pipeline(plan, &source), FusedRun::Deopt);
     }
 }

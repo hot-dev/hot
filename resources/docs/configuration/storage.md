@@ -419,6 +419,14 @@ already stored by the previous backend writes it to the new backend and moves
 the blob object there; existing references to it become readable again.
 Blob cleanup only removes objects in the configured backend.
 
+A blob is kept for as long as something refers to it:
+
+- A call's arguments, return value and flow: until the call is deleted by call retention or a purge.
+- Event data, a task's arguments and result, and a run's result or failure: as long as the event, task or run. Hot doesn't delete those rows, so these blobs stay and their storage grows with your history.
+- A store value: until it's overwritten or deleted, or its store is cleared or destroyed.
+
+Once nothing refers to a blob, cleanup deletes it after 24 hours.
+
 Fresh installations can select GCS from the start with no migration.
 
 ## Amazon S3

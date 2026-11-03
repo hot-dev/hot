@@ -1,26 +1,30 @@
 ::elevenlabs::models ns
+meta {
+    doc: """ElevenLabs models: the text-to-speech and speech-to-speech models available to your account."""
+}
 
-api-request ::elevenlabs::api/request
-HttpError ::elevenlabs::api/HttpError
-is-ok-response ::hot::http/is-ok-response
+::api ::elevenlabs::api
 
 list-models
 meta {
+    ctx: {"elevenlabs.api.key": {required: false}},
     doc: """
-    GET /v1/models - List available TTS models with their capabilities and
-    language support (e.g. `eleven_multilingual_v2`, `eleven_flash_v2_5`).
+    GET /v1/models: the available models with their capabilities and
+    languages (`model_id`, `name`, `can_do_text_to_speech`,
+    `languages`, `max_characters_request_free_user`, ...), e.g.
+    "eleven_multilingual_v2", "eleven_flash_v2_5", "eleven_v3".
+
+    **Example**
+
+    ```hot
+    tts-models filter(::elevenlabs::models/list-models(), (m) { m.can_do_text_to_speech })
+    ```
     """
 }
-fn (): Vec {
-  response api-request("GET", "/v1/models")
-  if(is-ok-response(response), response.body, err(HttpError(response)))
-}
-
-get-user
-meta {
-    doc: """GET /v1/user - Account info including subscription tier and remaining character quota."""
-}
-fn (): Map {
-  response api-request("GET", "/v1/user")
-  if(is-ok-response(response), response.body, err(HttpError(response)))
+fn
+(): Vec {
+  list-models({})
+},
+(opts: Map): Vec {
+  ::api/json("GET", "/v1/models", {}, "", opts)
 }

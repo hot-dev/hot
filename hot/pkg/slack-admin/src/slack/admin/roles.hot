@@ -1,0 +1,116 @@
+::slack::admin::roles ns
+meta {
+    doc: """
+    `admin.roles.*`: list, add and remove admin role assignments (Channel
+    Manager, Workflow Admin, and other system roles) on the org, a
+    workspace, or a channel. `entity_ids` are org (`E...`), team (`T...`)
+    or channel (`C...`) ids. Scope: `admin.roles:read` / `admin.roles:write`.
+
+    **Example**
+
+    ```hot
+    ::roles ::slack::admin::roles
+
+    managers ::roles/list-assignments(::roles/ListAssignmentsRequest({role_ids: ["Rl0A"]}))
+    ::roles/add-assignments(::roles/AddAssignmentsRequest({
+      role_id: "Rl0A",
+      entity_ids: ["C0123ABCDEF"],
+      user_ids: ["U0123ABCDEF"]
+    }))
+    ```
+    """
+}
+
+::api ::slack::admin::api
+
+ListAssignmentsRequest type {
+  role_ids: Vec<Str>?,
+  entity_ids: Vec<Str>?,
+  sort_dir: Str?,
+  cursor: Str?,
+  limit: Int?
+}
+
+list-assignments
+meta {
+    doc: """
+    admin.roles.listAssignments - List role assignments (`role_assignments`), filtered by `role_ids` and/or `entity_ids`.
+
+    Scope: `admin.roles:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `list-assignments-all`.
+    """
+}
+fn
+(): Map {
+  list-assignments(ListAssignmentsRequest({}))
+},
+(request: ListAssignmentsRequest): Map {
+  list-assignments(request, {})
+},
+(request: ListAssignmentsRequest, opts: Map): Map {
+  ::api/call("admin.roles.listAssignments", request, opts)
+}
+
+list-assignments-all
+meta {
+    doc: """
+    Every `role_assignments` entry from `admin.roles.listAssignments`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    """
+}
+fn
+(): Vec {
+  list-assignments-all(ListAssignmentsRequest({}), 1000)
+},
+(request: ListAssignmentsRequest): Vec {
+  list-assignments-all(request, 1000)
+},
+(request: ListAssignmentsRequest, max-items: Int): Vec {
+  list-assignments-all(request, max-items, {})
+},
+(request: ListAssignmentsRequest, max-items: Int, opts: Map): Vec {
+  ::api/paginate("admin.roles.listAssignments", request, "role_assignments", max-items, opts)
+}
+
+AddAssignmentsRequest type {
+  role_id: Str,
+  entity_ids: Vec<Str>,
+  user_ids: Vec<Str>
+}
+
+add-assignments
+meta {
+    doc: """
+    admin.roles.addAssignments - Assign a role to users on the given entities. Partial failures come back in `rejected_users` / `rejected_entities`.
+
+    Scope: `admin.roles:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: AddAssignmentsRequest): Map {
+  add-assignments(request, {})
+},
+(request: AddAssignmentsRequest, opts: Map): Map {
+  ::api/call("admin.roles.addAssignments", request, opts)
+}
+
+RemoveAssignmentsRequest type {
+  role_id: Str,
+  entity_ids: Vec<Str>,
+  user_ids: Vec<Str>
+}
+
+remove-assignments
+meta {
+    doc: """
+    admin.roles.removeAssignments - Remove a role from users on the given entities.
+
+    Scope: `admin.roles:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    """
+}
+fn
+(request: RemoveAssignmentsRequest): Map {
+  remove-assignments(request, {})
+},
+(request: RemoveAssignmentsRequest, opts: Map): Map {
+  ::api/call("admin.roles.removeAssignments", request, opts)
+}

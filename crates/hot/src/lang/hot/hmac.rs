@@ -1,7 +1,24 @@
 use crate::lang::hot::r#type::HotResult;
+use crate::lang::runtime::vm::VirtualMachine;
 use crate::val::Val;
 use crate::validate_args;
 use aws_lc_rs::hmac;
+
+macro_rules! with_secret_key {
+    ($($name:ident => $native:ident),* $(,)?) => {
+        $(pub fn $name(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
+            crate::lang::hot::ctx::with_secret_key(vm, args, $native)
+        })*
+    };
+}
+
+with_secret_key! {
+    hmac_sha256_secret => hmac_sha256,
+    hmac_sha256_bytes_secret => hmac_sha256_bytes,
+    hmac_sha512_secret => hmac_sha512,
+    hmac_sha1_secret => hmac_sha1,
+    hmac_verify_secret => hmac_verify,
+}
 
 /// HMAC-SHA256 - returns hex-encoded string
 pub fn hmac_sha256(args: &[Val]) -> HotResult<Val> {
@@ -44,7 +61,7 @@ pub fn hmac_sha256_bytes(args: &[Val]) -> HotResult<Val> {
 
     let signing_key = hmac::Key::new(hmac::HMAC_SHA256, &key);
     let tag = hmac::sign(&signing_key, &data);
-    HotResult::Ok(Val::Bytes(tag.as_ref().to_vec()))
+    HotResult::Ok(Val::bytes(tag.as_ref().to_vec()))
 }
 
 /// HMAC-SHA512 - returns hex-encoded string
@@ -142,10 +159,10 @@ pub fn hmac_verify(args: &[Val]) -> HotResult<Val> {
 fn get_bytes_from_arg(arg: &Val) -> Result<Vec<u8>, String> {
     match arg {
         Val::Str(s) => Ok(s.as_bytes().to_vec()),
-        Val::Bytes(b) => Ok(b.clone()),
+        Val::Bytes(b) => Ok(b.to_vec()),
         Val::Vec(vec) => {
             let mut result = Vec::new();
-            for val in vec {
+            for val in vec.iter() {
                 match val {
                     Val::Byte(b) => result.push(*b),
                     _ => {

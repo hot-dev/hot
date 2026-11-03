@@ -1,0 +1,38 @@
+::xero::integration::ctx ns
+
+::env ::hot::env
+
+// Credentials for the Xero integration suite, ideally against the Demo
+// Company (free; reset from the Xero developer portal). Unset
+// environment variables are skipped entirely, so absent credentials
+// behave exactly as if never configured.
+//
+// Xero rotates the refresh token on every refresh and the old one stops
+// working 30 minutes later, so a refresh-token run consumes
+// XERO_REFRESH_TOKEN. Prefer XERO_ACCESS_TOKEN (valid 30 minutes) for
+// one-off runs, or set XERO_TOKEN_STORE so the token keeper persists
+// each rotated refresh token in a Hot store between runs.
+::hot::ctx/set(filter-vals({
+    "xero.client.id": ::env/get("XERO_CLIENT_ID", ""),
+    "xero.client.secret": ::env/get("XERO_CLIENT_SECRET", ""),
+    "xero.refresh.token": ::env/get("XERO_REFRESH_TOKEN", ""),
+    "xero.access.token": ::env/get("XERO_ACCESS_TOKEN", ""),
+    "xero.tenant.id": ::env/get("XERO_TENANT_ID", ""),
+    "xero.token.store": ::env/get("XERO_TOKEN_STORE", ""),
+}, (v) { not(is-empty(v)) }))
+
+// True when a tenant and either an access token or a refresh token with
+// the app's client id are set. Tests call this first and skip (pass with
+// a note) when it is false, so an unconfigured run makes no calls.
+configured fn (): Bool {
+    has (name) { not(is-empty(::env/get(name, ""))) }
+    and(
+        has("XERO_TENANT_ID"),
+        or(has("XERO_ACCESS_TOKEN"), and(has("XERO_REFRESH_TOKEN"), has("XERO_CLIENT_ID")))
+    )
+}
+
+skip fn (): Bool {
+    println("skipped: set XERO_TENANT_ID plus XERO_ACCESS_TOKEN, or XERO_REFRESH_TOKEN with XERO_CLIENT_ID and XERO_CLIENT_SECRET, to run the Xero integration tests")
+    assert(true, "skipped: no Xero credentials")
+}

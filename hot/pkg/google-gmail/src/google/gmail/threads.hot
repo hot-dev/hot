@@ -1,0 +1,113 @@
+::google::gmail::threads ns
+meta {
+    doc: """
+    Threads (conversations): list and search, get with every message,
+    label changes, trash and untrash.
+
+    **Scopes.** Listing and `get-thread` use `gmail.readonly`; label
+    changes, trash and untrash `gmail.modify`.
+    """
+}
+
+::gmail ::google::gmail
+::api ::google::api
+::parse ::google::gmail::parse
+::messages ::google::gmail::messages
+
+list-threads
+meta {
+    doc: """
+    GET /users/me/threads - one page of threads: `{threads: [{id,
+    snippet, historyId}], nextPageToken?, resultSizeEstimate}`. A Str
+    argument is a Gmail search. Options: `q`, `maxResults` (max 500),
+    `pageToken`, `labelIds` (Vec), `includeSpamTrash`. Scope:
+    `gmail.readonly`.
+    """
+}
+fn
+(): Map {
+  list-threads({})
+},
+(query: Str): Map {
+  list-threads({q: query})
+},
+(opts: Map): Map {
+  ::gmail/json(::gmail/READ_SCOPE, "GET", ::gmail/url("/threads", ::gmail/query-params({}, opts)), "", opts)
+}
+
+list-all-threads
+meta {
+    doc: """Every matching thread (all pages), or at most `limit`. Same `opts` as `list-threads` (a Str is a search). Scope: `gmail.readonly`."""
+}
+fn
+(opts: Any): Vec {
+  list-all-threads(opts, null)
+},
+(opts: Any, limit: Int?): Vec {
+  base if(is-str(opts), {q: opts}, opts)
+  sized if(is-some(get(base, "maxResults")), base, {...base, maxResults: ::messages/page-size(limit)})
+  ::api/collect-pages((token) { list-threads({...sized, pageToken: token}) }, "threads", limit)
+}
+
+get-thread
+meta {
+    doc: """GET /users/me/threads/{id} - a thread with its `messages` (oldest first). Options: `format` (`full` default, `metadata` with `metadataHeaders`, `minimal`). Scope: `gmail.readonly`."""
+}
+fn
+(id: Str): Map {
+  get-thread(id, {})
+},
+(id: Str, opts: Map): Map {
+  params ::gmail/query-params({format: "full"}, opts)
+  ::gmail/json(::gmail/READ_SCOPE, "GET", ::gmail/url(`/threads/${::gmail/encode-id(id)}`, params), "", opts)
+}
+
+thread-emails
+meta {
+    doc: """A thread's messages as `Email` records, oldest first (`get-thread` + `::google::gmail::parse/to-email`). Scope: `gmail.readonly`."""
+}
+fn
+(id: Str): Vec {
+  thread-emails(id, {})
+},
+(id: Str, opts: Map): Vec {
+  thread get-thread(id, {...opts, format: "full"})
+  if(is-err(thread), thread, map(or(thread.messages, []), ::parse/to-email))
+}
+
+modify-thread
+meta {
+    doc: """POST /users/me/threads/{id}/modify - add and remove label ids on every message in a thread. Returns the thread. Scope: `gmail.modify`."""
+}
+fn
+(id: Str, add-label-ids: Vec, remove-label-ids: Vec): Map {
+  modify-thread(id, add-label-ids, remove-label-ids, {})
+},
+(id: Str, add-label-ids: Vec, remove-label-ids: Vec, opts: Map): Map {
+  ::gmail/json(::gmail/MODIFY_SCOPE, "POST", ::gmail/url(`/threads/${::gmail/encode-id(id)}/modify`),
+    ::messages/label-changes(add-label-ids, remove-label-ids), opts)
+}
+
+trash-thread
+meta {
+    doc: """POST /users/me/threads/{id}/trash - move a whole thread to the trash (recoverable for 30 days). Scope: `gmail.modify`."""
+}
+fn
+(id: Str): Map {
+  trash-thread(id, {})
+},
+(id: Str, opts: Map): Map {
+  ::gmail/json(::gmail/MODIFY_SCOPE, "POST", ::gmail/url(`/threads/${::gmail/encode-id(id)}/trash`), "", opts)
+}
+
+untrash-thread
+meta {
+    doc: """POST /users/me/threads/{id}/untrash - restore a thread from the trash. Scope: `gmail.modify`."""
+}
+fn
+(id: Str): Map {
+  untrash-thread(id, {})
+},
+(id: Str, opts: Map): Map {
+  ::gmail/json(::gmail/MODIFY_SCOPE, "POST", ::gmail/url(`/threads/${::gmail/encode-id(id)}/untrash`), "", opts)
+}

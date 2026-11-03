@@ -1,4 +1,7 @@
 ::whatsapp::webhooks ns
+meta {
+    doc: """Meta webhook handling: `X-Hub-Signature-256` payload verification (HMAC-SHA256 over the raw body with your App Secret), the GET subscription challenge, and helpers that pull messages and delivery statuses out of a notification payload."""
+}
 
 ::ctx ::hot::ctx
 ::hmac ::hot::hmac
@@ -11,9 +14,9 @@ verify-request
 meta {
     ctx: {"whatsapp.app.secret": {required: false}},
     doc: """
-Verify a WhatsApp webhook request using HMAC-SHA256 signature. Meta signs webhook payloads with your App Secret and includes the signature in the `X-Hub-Signature-256` header as `sha256={hex}`.
+Verify a WhatsApp webhook request using its HMAC-SHA256 signature. Meta signs the raw payload with your App Secret and sends `X-Hub-Signature-256: sha256={hex}`. The digest is computed over `::hot::http/raw-body(request)` and compared in constant time.
 
-Uses the `whatsapp.app.secret` context variable by default, or accepts an explicit secret.
+Uses the `whatsapp.app.secret` context variable by default (failing when it is unset), or accepts an explicit secret; an empty explicit secret never verifies. Meta does not sign a timestamp, so there is no replay window: deduplicate on message `id`.
 
 **Example**
 
@@ -46,7 +49,7 @@ fn
     => {
       signature slice(header, 7)
       raw-body ::hot::http/raw-body(request)
-      ::hmac/hmac-verify-hex(app-secret, raw-body, signature, "sha256")
+      ::hmac/hmac-verify-hex(::ctx/mark-secret(app-secret), raw-body, signature, "sha256")
     }
   }
 }
@@ -59,9 +62,9 @@ verify-challenge
 meta {
     ctx: {"whatsapp.verify.token": {required: false}},
     doc: """
-Verify a webhook subscription challenge. When you configure a webhook URL in Meta's App Dashboard, Meta sends a GET request with `hub.mode`, `hub.verify_token`, and `hub.challenge` query parameters. Return the `hub.challenge` value if the token matches.
+Verify a webhook subscription challenge. When you configure a webhook URL in Meta's App Dashboard, Meta sends a GET request with `hub.mode`, `hub.verify_token`, and `hub.challenge` query parameters. Returns the `hub.challenge` value when the mode is `subscribe` and the token matches (constant-time comparison), otherwise an Err.
 
-Uses the `whatsapp.verify.token` context variable by default, or accepts an explicit token.
+Uses the `whatsapp.verify.token` context variable by default (failing when it is unset), or accepts an explicit token; an empty explicit token never matches.
 
 **Example**
 
@@ -70,7 +73,8 @@ Uses the `whatsapp.verify.token` context variable by default, or accepts an expl
 
 // In a webhook handler for GET requests:
 result ::webhooks/verify-challenge(request.query)
-// Returns the challenge string on success, or an error on failure
+// Returns the challenge string on success, or an Err on failure:
+// reply 200 with the challenge as the plain-text body, else 403.
 ```
 """
 }
@@ -89,8 +93,66 @@ fn
 
   cond {
     ne(mode, "subscribe") => { err("Invalid hub.mode") }
-    ne(token, verify-token) => { err("Invalid verify token") }
+    // An empty configured token would accept an empty hub.verify_token.
+    is-empty(verify-token) => { err("Invalid verify token") }
+    not(secure-compare(Str(token), ::ctx/mark-secret(verify-token))) => { err("Invalid verify token") }
     is-empty(challenge) => { err("Missing hub.challenge") }
     => { challenge }
   }
+}
+
+// ============================================================================
+// Notification payload helpers
+// ============================================================================
+
+change-values
+meta {
+    doc: """The `value` objects of every `messages`-field change in a notification payload (`entry[].changes[].value`). Exposed for testing."""
+}
+fn (payload: Any): Vec {
+  entries if(is-map(payload), or(get(payload, "entry"), []), [])
+  changes mapcat(entries, (entry) { or(get(entry, "changes"), []) })
+  values map(filter(changes, (change) { eq(get(change, "field"), "messages") }), (change) { get(change, "value") })
+  filter(values, is-map)
+}
+
+extract-messages
+meta {
+    doc: """
+    The inbound messages in a webhook notification payload, flattened across entries and changes. Each message is Meta's message object (`from`, `id`, `timestamp`, `type`, and the type's object such as `text.body`, `image.id`, `interactive.button_reply`, `location`) plus `phone_number_id` (the business number that received it) and `contact` (the sender's `{profile: {name}, wa_id}` entry, when present). Returns `[]` for payloads without messages, such as status updates.
+
+    **Example**
+
+    ```hot
+    messages ::whatsapp::webhooks/extract-messages(request.body)
+    map(messages, (m) {
+      if(eq(m.type, "text"), println(`${m.from}: ${m.text.body}`), null)
+    })
+    ```
+    """
+}
+fn (payload: Any): Vec {
+  mapcat(change-values(payload), (value) {
+    metadata or(get(value, "metadata"), {})
+    contacts or(get(value, "contacts"), [])
+    map(or(get(value, "messages"), []), (message) {
+      contact find-first(contacts, (c) { eq(get(c, "wa_id"), get(message, "from")) })
+      message
+        |> assoc-some("phone_number_id", get(metadata, "phone_number_id"))
+        |> assoc-some("contact", contact)
+    })
+  })
+}
+
+extract-statuses
+meta {
+    doc: """The outbound message status updates in a webhook notification payload (`sent`, `delivered`, `read`, `failed`), flattened across entries and changes, each with `phone_number_id` added. Each status carries `id` (the `wamid` you sent), `status`, `timestamp`, `recipient_id`, and `errors` on failure."""
+}
+fn (payload: Any): Vec {
+  mapcat(change-values(payload), (value) {
+    metadata or(get(value, "metadata"), {})
+    map(or(get(value, "statuses"), []), (status) {
+      status |> assoc-some("phone_number_id", get(metadata, "phone_number_id"))
+    })
+  })
 }

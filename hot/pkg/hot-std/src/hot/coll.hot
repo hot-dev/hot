@@ -22,10 +22,10 @@ meta {
     """
 }
 fn
-(coll: Str | Vec | Map, func: Fn): Str | Vec | Map {
+(coll: Str | Vec | Map | ::hot::iter/Iter, func: Fn): Str | Vec | Map | ::hot::iter/Iter {
     call-lib(::hot::coll/map, [coll, func])
 },
-(coll: Str | Vec | Map, func: Fn, on-err: OnErr): Str | Vec | Map {
+(coll: Str | Vec | Map | ::hot::iter/Iter, func: Fn, on-err: OnErr): Str | Vec | Map | ::hot::iter/Iter {
     call-lib(::hot::coll/map, [coll, func, on-err])
 }
 
@@ -94,7 +94,7 @@ meta {
     ```
     """
 }
-fn (coll: Str | Vec | Map, predicate: Fn): Str | Vec | Map {
+fn (coll: Str | Vec | Map | ::hot::iter/Iter, predicate: Fn): Str | Vec | Map | ::hot::iter/Iter {
     call-lib(::hot::coll/filter, [coll, predicate])
 }
 
@@ -164,7 +164,7 @@ meta {
     ```
     """
 }
-fn (coll: Str | Vec | Map, reducer: Fn, initial: Any): Any {
+fn (coll: Str | Vec | Map | ::hot::iter/Iter, reducer: Fn, initial: Any): Any {
     call-lib(::hot::coll/reduce, [coll, reducer, initial])
 }
 
@@ -188,7 +188,7 @@ fn
 (a: Vec, b: Vec, ...rest: Vec): Vec {
     call-lib(::hot::coll/concat, [a, b, ...rest])
 },
-(a: Str, b: Str, ...rest: Str): Str {
+(a: Any, b: Any, ...rest: Any): Str {
     call-lib(::hot::coll/concat, [a, b, ...rest])
 },
 (a: Bytes, b: Bytes, ...rest: Bytes): Bytes {
@@ -200,13 +200,17 @@ length
 meta {
     core: true,
     doc: """
-    Return the number of elements in `coll`.
+    Return the number of elements in `coll`: a Vec's items, a Map's entries,
+    a Str's characters (Unicode code points, the unit `slice` and `get` use),
+    or a Bytes value's bytes. For a Str's encoded size, use `length(Bytes(s))`.
 
     **Example**
 
     ```hot
     length([1, 2, 3])        // 3
     length("hello")          // 5
+    length("héllo")          // 5
+    length(Bytes("héllo"))   // 6
     length({a: 1, b: 2}) // 2
     length(Bytes([1, 2, 3])) // 3
     ```
@@ -650,7 +654,7 @@ meta {
     ```
     """
 }
-fn (coll: Str | Vec | Map): Bool {
+fn (coll: Str | Vec | Map | Null): Bool {
     call-lib(::hot::coll/is-empty, [coll])
 }
 
@@ -995,7 +999,7 @@ meta {
     ```
     """
 }
-fn (coll: Str | Vec | Map, predicate: Fn): Bool {
+fn (coll: Str | Vec | Map | ::hot::iter/Iter, predicate: Fn): Bool {
     call-lib(::hot::coll/some, [coll, predicate])
 }
 
@@ -1015,7 +1019,7 @@ meta {
     ```
     """
 }
-fn (coll: Str | Vec | Map, predicate: Fn): Bool {
+fn (coll: Str | Vec | Map | ::hot::iter/Iter, predicate: Fn): Bool {
     call-lib(::hot::coll/all, [coll, predicate])
 }
 
@@ -1046,7 +1050,7 @@ meta {
     ```
     """
 }
-fn (coll: Vec, predicate: Fn): Any {
+fn (coll: Vec | ::hot::iter/Iter, predicate: Fn): Any {
     call-lib(::hot::coll/find_first, [coll, predicate])
 }
 

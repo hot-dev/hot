@@ -83,7 +83,7 @@ fn request_with_policy(
 
         headers = match map.get(&Val::from("headers")) {
             Some(Val::Map(m)) => m.clone(),
-            Some(Val::Null) | None => Box::new(IndexMap::new()),
+            Some(Val::Null) | None => std::sync::Arc::new(IndexMap::new()),
             _ => {
                 return HotResult::Err(err_val(
                     "::hot::http/request: headers must be a map".to_string(),
@@ -186,7 +186,7 @@ fn is_textual_content_type(content_type: &str) -> bool {
 
 fn response_body_val(bytes: Vec<u8>, content_type: Option<&str>) -> Val {
     if content_type.is_some_and(|ct| !is_textual_content_type(ct)) {
-        return Val::Bytes(bytes);
+        return Val::bytes(bytes);
     }
 
     match String::from_utf8(bytes) {
@@ -194,7 +194,7 @@ fn response_body_val(bytes: Vec<u8>, content_type: Option<&str>) -> Val {
             Ok(json) => serde_json::from_value(json).unwrap_or(Val::from(text)),
             Err(_) => Val::from(text),
         },
-        Err(err) => Val::Bytes(err.into_bytes()),
+        Err(err) => Val::bytes(err.into_bytes()),
     }
 }
 
@@ -216,6 +216,7 @@ async fn send_with_redirect_validation(
             | reqwest::Method::DELETE
             | reqwest::Method::PATCH
             | reqwest::Method::HEAD
+            | reqwest::Method::OPTIONS
     ) {
         return Err(err_val(format!(
             "::hot::http/request: unsupported method: {method}"
@@ -231,7 +232,7 @@ async fn send_with_redirect_validation(
 
     let (mut body_bytes, body_is_json) = match body {
         Val::Str(s) if !s.is_empty() => (Some(s.as_bytes().to_vec()), false),
-        Val::Bytes(bytes) if !bytes.is_empty() => (Some(bytes.clone()), false),
+        Val::Bytes(bytes) if !bytes.is_empty() => (Some(bytes.to_vec()), false),
         Val::Map(_) | Val::Vec(_) => {
             let json_value: JsonValue = body.into();
             (Some(json_value.to_string().into_bytes()), true)
@@ -278,7 +279,12 @@ async fn send_with_redirect_validation(
             .send()
             .await
             .map_err(|e| err_val(format!("::hot::http/request: request failed: {e}")))?;
-        if !response.status().is_redirection() {
+        // A 3xx without a `Location` is a final response, not a redirect:
+        // `304 Not Modified`, or `308 Resume Incomplete` from resumable
+        // upload APIs (Google Drive), which carries `Range` instead.
+        if !response.status().is_redirection()
+            || !response.headers().contains_key(reqwest::header::LOCATION)
+        {
             return Ok(response);
         }
         if redirect_count == MAX_REDIRECTS {
@@ -379,17 +385,17 @@ async fn make_http_request(
         body_bytes.extend_from_slice(&chunk);
     }
 
-    let body_bytes_val = Val::Bytes(body_bytes.clone());
+    let body_bytes_val = Val::bytes(body_bytes.clone());
     let body_val = response_body_val(body_bytes, content_type.as_deref());
 
     // Build response map
     let mut response_map: IndexMap<Val, Val> = IndexMap::new();
     response_map.insert(Val::from("status"), Val::Int(status));
-    response_map.insert(Val::from("headers"), Val::Map(Box::new(response_headers)));
+    response_map.insert(Val::from("headers"), Val::map(response_headers));
     response_map.insert(Val::from("body"), body_val);
     response_map.insert(Val::from("body-bytes"), body_bytes_val);
 
-    HotResult::Ok(Val::Map(Box::new(response_map)))
+    HotResult::Ok(Val::constructed("::hot::http/HttpResponse", response_map))
 }
 
 /// Make an HTTP GET request
@@ -577,7 +583,7 @@ impl HotIterator for HttpStreamIterator {
                         // Raw bytes as string
                         match String::from_utf8(bytes.to_vec()) {
                             Ok(s) => Val::from(s),
-                            Err(_) => Val::Bytes(bytes.to_vec()),
+                            Err(_) => Val::bytes(bytes.to_vec()),
                         }
                     }
                 };
@@ -677,7 +683,7 @@ impl HttpStreamIterator {
             event_map.insert(Val::from("id"), Val::from(id_str));
         }
 
-        Some(Val::Map(Box::new(event_map)))
+        Some(Val::map(event_map))
     }
 
     /// Parse NDJSON (newline-delimited JSON) chunk
@@ -710,7 +716,7 @@ impl HttpStreamIterator {
         } else if objects.len() == 1 {
             objects.pop().unwrap()
         } else {
-            Val::Vec(objects)
+            Val::vec(objects)
         }
     }
 }
@@ -806,7 +812,7 @@ fn request_stream_with_policy(
 
         headers = match map.get(&Val::from("headers")) {
             Some(Val::Map(m)) => m.clone(),
-            Some(Val::Null) | None => Box::new(IndexMap::new()),
+            Some(Val::Null) | None => std::sync::Arc::new(IndexMap::new()),
             _ => {
                 return HotResult::Err(err_val(
                     "::hot::http/request-stream: headers must be a map".to_string(),
@@ -973,10 +979,13 @@ async fn make_streaming_request(
     // Build response map with iterator as body
     let mut response_map: IndexMap<Val, Val> = IndexMap::new();
     response_map.insert(Val::from("status"), Val::Int(status));
-    response_map.insert(Val::from("headers"), Val::Map(Box::new(response_headers)));
+    response_map.insert(Val::from("headers"), Val::map(response_headers));
     response_map.insert(Val::from("body"), Val::Box(Box::new(iter_box)));
 
-    HotResult::Ok(Val::Map(Box::new(response_map)))
+    HotResult::Ok(Val::constructed(
+        "::hot::http/StreamingHttpResponse",
+        response_map,
+    ))
 }
 
 #[cfg(test)]
@@ -1008,10 +1017,10 @@ mod tests {
         url
     }
 
-    /// Helper to unwrap HotResult
+    /// Helper to unwrap HotResult, down to a response's fields
     fn unwrap_result(result: HotResult<Val>) -> Val {
         match result {
-            HotResult::Ok(v) => v,
+            HotResult::Ok(v) => crate::val::as_fields(&v).clone(),
             HotResult::Err(e) => panic!("Expected Ok, got Err: {:?}", e),
         }
     }
@@ -1089,11 +1098,11 @@ mod tests {
 
         if let Val::Map(map) = response {
             let body = map.get(&Val::from("body")).unwrap();
-            assert_eq!(body, &Val::Bytes(vec![0x1a, 0x45, 0xdf, 0xa3, 0x81, 0x42]));
+            assert_eq!(body, &Val::bytes(vec![0x1a, 0x45, 0xdf, 0xa3, 0x81, 0x42]));
             let body_bytes = map.get(&Val::from("body-bytes")).unwrap();
             assert_eq!(
                 body_bytes,
-                &Val::Bytes(vec![0x1a, 0x45, 0xdf, 0xa3, 0x81, 0x42])
+                &Val::bytes(vec![0x1a, 0x45, 0xdf, 0xa3, 0x81, 0x42])
             );
         } else {
             panic!("Expected response to be a map");
@@ -1117,6 +1126,185 @@ mod tests {
         )
         .await;
         assert!(matches!(result, HotResult::Err(_)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn redirect_status_without_location_is_returned_as_response() {
+        // Google Drive resumable uploads answer `308 Resume Incomplete`
+        // with a `Range` header and no `Location`.
+        let app = Router::new().route(
+            "/upload",
+            axum::routing::put(|| async {
+                (
+                    StatusCode::PERMANENT_REDIRECT,
+                    [(header::RANGE, "bytes=0-524287")],
+                    "partial",
+                )
+            }),
+        );
+        let url = format!("{}/upload", start_mock_server(app).await);
+        let response = unwrap_result(
+            make_http_request(
+                "PUT",
+                &url,
+                &IndexMap::new(),
+                &Val::from("chunk"),
+                DestinationPolicy::AllowPrivate,
+                DEFAULT_MAX_RESPONSE_BYTES,
+            )
+            .await,
+        );
+        assert_eq!(response.get("status"), Some(Val::Int(308)));
+        let headers = response.get("headers").unwrap();
+        assert_eq!(headers.get("range"), Some(Val::from("bytes=0-524287")));
+        assert_eq!(response.get("body"), Some(Val::from("partial")));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn redirect_with_location_is_followed() {
+        let app = Router::new()
+            .route(
+                "/old",
+                axum::routing::get(|| async {
+                    (StatusCode::PERMANENT_REDIRECT, [(header::LOCATION, "/new")])
+                }),
+            )
+            .route("/new", axum::routing::get(|| async { "moved here" }));
+        let url = format!("{}/old", start_mock_server(app).await);
+        let response = unwrap_result(
+            make_http_request(
+                "GET",
+                &url,
+                &IndexMap::new(),
+                &Val::Null,
+                DestinationPolicy::AllowPrivate,
+                DEFAULT_MAX_RESPONSE_BYTES,
+            )
+            .await,
+        );
+        assert_eq!(response.get("status"), Some(Val::Int(200)));
+        assert_eq!(response.get("body"), Some(Val::from("moved here")));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn options_request_is_sent_and_follows_validated_redirects() {
+        // Box's upload preflight and events long-poll use OPTIONS. A 308
+        // keeps the method, so the redirected hop is OPTIONS too.
+        let app = Router::new()
+            .route(
+                "/files/content",
+                axum::routing::options(|| async {
+                    (
+                        StatusCode::PERMANENT_REDIRECT,
+                        [(header::LOCATION, "/preflight")],
+                    )
+                }),
+            )
+            .route(
+                "/preflight",
+                axum::routing::options(|| async { ([(header::ALLOW, "OPTIONS, POST")], "ok") }),
+            );
+        let url = format!("{}/files/content", start_mock_server(app).await);
+        let response = unwrap_result(
+            make_http_request(
+                "options",
+                &url,
+                &IndexMap::new(),
+                &Val::Null,
+                DestinationPolicy::AllowPrivate,
+                DEFAULT_MAX_RESPONSE_BYTES,
+            )
+            .await,
+        );
+        assert_eq!(response.get("status"), Some(Val::Int(200)));
+        let headers = response.get("headers").unwrap();
+        assert_eq!(headers.get("allow"), Some(Val::from("OPTIONS, POST")));
+    }
+
+    #[tokio::test]
+    async fn public_only_policy_rejects_local_options_destination() {
+        let app = Router::new().route("/", axum::routing::options(|| async { "nope" }));
+        let url = start_mock_server(app).await;
+        let result = make_http_request(
+            "OPTIONS",
+            &url,
+            &IndexMap::new(),
+            &Val::Null,
+            DestinationPolicy::PublicOnly,
+            DEFAULT_MAX_RESPONSE_BYTES,
+        )
+        .await;
+        let HotResult::Err(error) = result else {
+            panic!("a private OPTIONS destination must be refused: {result:?}");
+        };
+        assert!(!error.to_string().contains("unsupported method"), "{error}");
+    }
+
+    #[test]
+    fn unsupported_method_is_still_refused() {
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(make_http_request(
+                "TRACE",
+                "http://127.0.0.1:1/",
+                &IndexMap::new(),
+                &Val::Null,
+                DestinationPolicy::AllowPrivate,
+                DEFAULT_MAX_RESPONSE_BYTES,
+            ));
+        let HotResult::Err(error) = result else {
+            panic!("TRACE must be refused: {result:?}");
+        };
+        assert!(error.to_string().contains("unsupported method"), "{error}");
+    }
+
+    // A response carries its declared type, so a `HttpResponse -> T` arrow
+    // applies to it (`T(response)`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn responses_are_tagged_with_their_declared_type() {
+        let app = Router::new().route("/", axum::routing::get(|| async { "ok" }));
+        let url = start_mock_server(app).await;
+        let result = make_http_request(
+            "GET",
+            &url,
+            &IndexMap::new(),
+            &Val::Null,
+            DestinationPolicy::AllowPrivate,
+            DEFAULT_MAX_RESPONSE_BYTES,
+        )
+        .await;
+        let HotResult::Ok(Val::Map(response)) = result else {
+            panic!("expected a response: {result:?}");
+        };
+        assert_eq!(
+            crate::val::tagged_type_name(&response),
+            Some("::hot::http/HttpResponse")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn streaming_responses_are_tagged_with_their_declared_type() {
+        let app = Router::new().route("/", axum::routing::get(|| async { "ok" }));
+        let url = start_mock_server(app).await;
+        let response = tokio::task::spawn_blocking(move || {
+            request_stream(&[
+                Val::from("GET"),
+                Val::from(url),
+                Val::map_empty(),
+                Val::from(""),
+                Val::from("raw"),
+            ])
+        })
+        .await
+        .unwrap();
+        let HotResult::Ok(response) = response else {
+            panic!("expected a response: {response:?}");
+        };
+        assert!(response.is_type("::hot::http/StreamingHttpResponse"));
+        assert!(matches!(
+            crate::val::as_fields(&response).get("status"),
+            Some(Val::Int(200))
+        ));
     }
 
     #[tokio::test]
@@ -1359,7 +1547,9 @@ mod tests {
                         // Handle both single values and vectors (multiple lines in one chunk)
                         match value {
                             Val::Null => continue,
-                            Val::Vec(items) => objects.extend(items),
+                            Val::Vec(items) => {
+                                objects.extend(std::sync::Arc::unwrap_or_clone(items))
+                            }
                             other => objects.push(other),
                         }
                     }
@@ -1408,7 +1598,7 @@ mod tests {
                 Val::from("PUT"),
                 Val::from(url),
                 Val::map_empty(),
-                Val::Bytes(payload),
+                Val::bytes(payload),
             ]);
             unwrap_result(result)
         })
@@ -1417,7 +1607,7 @@ mod tests {
 
         if let Val::Map(map) = response {
             let body = map.get(&Val::from("body")).unwrap();
-            assert_eq!(body, &Val::Bytes(expected));
+            assert_eq!(body, &Val::bytes(expected));
         } else {
             panic!("Expected response to be a map");
         }
@@ -1447,7 +1637,7 @@ mod tests {
                 Val::from("POST"),
                 Val::from(url),
                 Val::map_empty(),
-                Val::Map(Box::new(body_map)),
+                Val::map(body_map),
             ]);
             unwrap_result(result)
         })
@@ -1489,11 +1679,11 @@ mod tests {
 
         let mut body_map: IndexMap<Val, Val> = IndexMap::new();
         body_map.insert(Val::from("greeting"), Val::from("hello"));
-        req_map.insert(Val::from("body"), Val::Map(Box::new(body_map)));
+        req_map.insert(Val::from("body"), Val::map(body_map));
         // headers omitted — should default to empty
 
         let response = tokio::task::spawn_blocking(move || {
-            let result = request(&[Val::Map(Box::new(req_map))]);
+            let result = request(&[Val::map(req_map)]);
             unwrap_result(result)
         })
         .await
@@ -1535,14 +1725,14 @@ mod tests {
 
         let mut headers_map: IndexMap<Val, Val> = IndexMap::new();
         headers_map.insert(Val::from("x-custom-header"), Val::from("test-value"));
-        req_map.insert(Val::from("headers"), Val::Map(Box::new(headers_map)));
+        req_map.insert(Val::from("headers"), Val::map(headers_map));
 
         let mut body_map: IndexMap<Val, Val> = IndexMap::new();
         body_map.insert(Val::from("data"), Val::from("test"));
-        req_map.insert(Val::from("body"), Val::Map(Box::new(body_map)));
+        req_map.insert(Val::from("body"), Val::map(body_map));
 
         let response = tokio::task::spawn_blocking(move || {
-            let result = request(&[Val::Map(Box::new(req_map))]);
+            let result = request(&[Val::map(req_map)]);
             unwrap_result(result)
         })
         .await
@@ -1585,14 +1775,14 @@ mod tests {
 
         let mut body_map: IndexMap<Val, Val> = IndexMap::new();
         body_map.insert(Val::from("msg"), Val::from("wrapped"));
-        inner_map.insert(Val::from("body"), Val::Map(Box::new(body_map)));
+        inner_map.insert(Val::from("body"), Val::map(body_map));
 
         let mut req_map: IndexMap<Val, Val> = IndexMap::new();
         req_map.insert(Val::from("$type"), Val::from("::hot::http/HttpRequest"));
-        req_map.insert(Val::from("$val"), Val::Map(Box::new(inner_map)));
+        req_map.insert(Val::from("$val"), Val::map(inner_map));
 
         let response = tokio::task::spawn_blocking(move || {
-            let result = request(&[Val::Map(Box::new(req_map))]);
+            let result = request(&[Val::map(req_map)]);
             unwrap_result(result)
         })
         .await

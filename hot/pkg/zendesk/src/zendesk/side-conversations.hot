@@ -1,0 +1,121 @@
+::zendesk::side-conversations ns
+meta {
+    ctx: {"zendesk.subdomain": {required: false, secret: false}},
+    doc: """
+    Side conversations: threads on a ticket with people outside the
+    requester conversation, such as a vendor by email, a Slack channel,
+    or a child ticket for another group. The account must have side
+    conversations enabled (the Collaboration add-on, or a plan that
+    includes it).
+
+    Participants (`to`) are one kind per message: `[{email, name?}]`,
+    `[{user_id}]`, `[{slack_workspace_id, slack_channel_id}]`,
+    `[{support_group_id, support_agent_id?}]` (child ticket) or
+    `[{msteams_channel_id}]`.
+    """
+}
+
+::api ::zendesk::api
+
+base-path fn (ticket-id: Any): Str {
+  `/tickets/${::api/path-segment(ticket-id)}/side_conversations`
+}
+
+list-side-conversations
+meta {
+    doc: """GET /tickets/{id}/side_conversations - A ticket's side conversations: `{side_conversations}`."""
+}
+fn
+(ticket-id: Any): Any {
+  list-side-conversations(ticket-id, {})
+},
+(ticket-id: Any, opts: Map): Any {
+  ::api/request("GET", base-path(ticket-id), "", opts)
+}
+
+get-side-conversation
+meta {
+    doc: """GET /tickets/{id}/side_conversations/{side_conversation_id} - One side conversation."""
+}
+fn
+(ticket-id: Any, side-conversation-id: Str): Any {
+  get-side-conversation(ticket-id, side-conversation-id, {})
+},
+(ticket-id: Any, side-conversation-id: Str, opts: Map): Any {
+  ::api/request("GET", `${base-path(ticket-id)}/${::api/path-segment(side-conversation-id)}`, "", opts)
+}
+
+build-message
+meta {
+    doc: """Build a `{message: {subject?, body, to?, ...options}}` body; `options` may add `html_body`, `attachment_ids`, `external_ids`. Unset parts are omitted. Exposed for testing."""
+}
+fn (subject: Str?, body: Str, to: Vec?, options: Map): Map {
+  {message: ::api/compact({...options, subject: subject, body: body, to: to})}
+}
+
+create-side-conversation
+meta {
+    doc: """
+    POST /tickets/{id}/side_conversations - Start a side conversation.
+
+    **Example**
+
+    ```hot
+    ::zendesk::side-conversations/create-side-conversation(ticket-id,
+      "Order 1042: shipping address",
+      "Can you confirm the address on file for this order?",
+      [{email: "fulfilment@vendor.example", name: "Vendor fulfilment"}])
+    ```
+    """
+}
+fn
+(ticket-id: Any, subject: Str, body: Str, to: Vec): Any {
+  create-side-conversation(ticket-id, subject, body, to, {})
+},
+(ticket-id: Any, subject: Str, body: Str, to: Vec, options: Map): Any {
+  create-side-conversation(ticket-id, subject, body, to, options, {})
+},
+(ticket-id: Any, subject: Str, body: Str, to: Vec, options: Map, opts: Map): Any {
+  ::api/request("POST", base-path(ticket-id), build-message(subject, body, to, options), opts)
+}
+
+reply-to-side-conversation
+meta {
+    doc: """POST /tickets/{id}/side_conversations/{side_conversation_id}/reply - Add a message to a side conversation. `options`: `to` (participants to add), `html_body`, `attachment_ids`."""
+}
+fn
+(ticket-id: Any, side-conversation-id: Str, body: Str): Any {
+  reply-to-side-conversation(ticket-id, side-conversation-id, body, {})
+},
+(ticket-id: Any, side-conversation-id: Str, body: Str, options: Map): Any {
+  reply-to-side-conversation(ticket-id, side-conversation-id, body, options, {})
+},
+(ticket-id: Any, side-conversation-id: Str, body: Str, options: Map, opts: Map): Any {
+  to get(options, "to")
+  ::api/request("POST", `${base-path(ticket-id)}/${::api/path-segment(side-conversation-id)}/reply`,
+    build-message(null, body, to, delete(options, "to")), opts)
+}
+
+update-side-conversation
+meta {
+    doc: """PUT /tickets/{id}/side_conversations/{side_conversation_id} - Change `state` ("open"/"closed") or `subject`."""
+}
+fn
+(ticket-id: Any, side-conversation-id: Str, changes: Map): Any {
+  update-side-conversation(ticket-id, side-conversation-id, changes, {})
+},
+(ticket-id: Any, side-conversation-id: Str, changes: Map, opts: Map): Any {
+  ::api/request("PUT", `${base-path(ticket-id)}/${::api/path-segment(side-conversation-id)}`, {side_conversation: ::api/compact(changes)}, opts)
+}
+
+close-side-conversation
+meta {
+    doc: """Close a side conversation (`state: "closed"`)."""
+}
+fn
+(ticket-id: Any, side-conversation-id: Str): Any {
+  close-side-conversation(ticket-id, side-conversation-id, {})
+},
+(ticket-id: Any, side-conversation-id: Str, opts: Map): Any {
+  update-side-conversation(ticket-id, side-conversation-id, {state: "closed"}, opts)
+}

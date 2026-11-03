@@ -30,6 +30,20 @@ fn initial_await_lookup_budget(
     }
 }
 
+/// The ceiling for writing `size` bytes inline. A large value takes the database
+/// longer, but cancellation must still regain control before the worker's hard
+/// timeout, so it's never past the run's deadline, or below the usual ceiling.
+fn inline_write_timeout(
+    context: &crate::lang::event::ExecutionContext,
+    size: usize,
+) -> std::time::Duration {
+    let wanted = crate::blob::timeout_for_size(TASK_NATIVE_IO_TIMEOUT, size);
+    context
+        .cap_wait_to_deadline(wanted, PARENT_COMPLETION_RESERVE)
+        .unwrap_or(TASK_NATIVE_IO_TIMEOUT)
+        .max(TASK_NATIVE_IO_TIMEOUT)
+}
+
 fn err_val(msg: String) -> Val {
     Val::err(Val::from(msg))
 }
@@ -186,10 +200,10 @@ pub fn start(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         .unwrap_or_default()
         .as_millis() as u64;
 
-    let request = TaskRequest {
+    let mut request = TaskRequest {
         task_id: task_id.to_string(),
         function_name: function_name.clone(),
-        args: args_json.clone(),
+        args: serde_json::Value::Null,
         stream_id: stream_id.to_string(),
         env_id: env_id.to_string(),
         build_id: build_id.to_string(),
@@ -206,6 +220,7 @@ pub fn start(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     // Insert task row into database and enqueue to task queue
     let db = vm.get_database_pool();
     let task_queue = vm.get_task_queue();
+    let vm_conf = vm.get_conf();
 
     let start_result = tokio::runtime::Handle::current().block_on(async {
         let db =
@@ -246,13 +261,54 @@ pub fn start(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
             }
         }
 
+        // Too large to store inline: both the row and the queue message hold a
+        // reference, which the task worker reads back. Not bound by the
+        // timeout, as it's as long as the value takes to write.
+        let might_spill = crate::blob::estimate_val_size(&task_args)
+            > crate::blob::BlobConfig::from_conf(vm_conf).max_inline_bytes
+            || crate::blob::is_blob_ref_val(&task_args);
+        let blob_store = match ctx.org_id.filter(|_| might_spill) {
+            Some(org_id) => crate::blob::blob_store_from_conf(std::sync::Arc::clone(&db), vm_conf)
+                .await
+                .map(|store| (store, org_id)),
+            None => None,
+        };
+        let args_scope = |org_id| crate::blob::BlobScope {
+            org_id,
+            env_id: Some(env_id),
+            run_id: Some(ctx.run_id),
+        };
+        let args_json = match &blob_store {
+            Some((store, org_id)) => store
+                .spill_whole_if_large(
+                    args_json,
+                    args_scope(*org_id),
+                    crate::blob::SpillSource::TaskArgs,
+                    Some(&task_id.to_string()),
+                )
+                .await
+                .map_err(|e| {
+                    err_val(format!(
+                        "::hot::task/start: failed to store arguments in blob storage: {}",
+                        e
+                    ))
+                })?,
+            None => args_json,
+        };
+        request.args = args_json.clone();
+        let inline_size = if crate::store::spill::is_spilled(&args_json) {
+            0
+        } else {
+            crate::blob::estimate_val_size(&task_args)
+        };
+        let write_timeout = inline_write_timeout(&ctx, inline_size);
         let args_json_opt = if args_json.is_null() {
             None
         } else {
             Some(&args_json)
         };
         match tokio::time::timeout(
-            TASK_NATIVE_IO_TIMEOUT,
+            write_timeout,
             crate::db::Task::insert(
                 &db,
                 &task_id,
@@ -272,6 +328,23 @@ pub fn start(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
+                // Unless the row made it anyway, as when a connection fails
+                // after a commit, nothing will read the arguments.
+                if let Some((store, org_id)) = &blob_store
+                    && matches!(
+                        crate::db::Task::get(&db, &task_id).await,
+                        Err(crate::db::TaskError::NotFound)
+                    )
+                    && let Err(e) = store
+                        .release_source(
+                            args_scope(*org_id),
+                            crate::blob::SpillSource::TaskArgs,
+                            &task_id.to_string(),
+                        )
+                        .await
+                {
+                    tracing::warn!(task_id = %task_id, error = %e, "failed to release an unstored task's arguments");
+                }
                 return Err(err_val(format!(
                     "::hot::task/start: failed to insert task: {}",
                     e
@@ -280,12 +353,12 @@ pub fn start(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
             Err(_) => {
                 return Err(err_val(format!(
                     "::hot::task/start: task insert timed out after {}s",
-                    TASK_NATIVE_IO_TIMEOUT.as_secs()
+                    write_timeout.as_secs()
                 )));
             }
         }
 
-        match tokio::time::timeout(TASK_NATIVE_IO_TIMEOUT, queue.enqueue(request)).await {
+        match tokio::time::timeout(write_timeout, queue.enqueue(request)).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(e)) => {
                 let failure = serde_json::json!({
@@ -320,7 +393,7 @@ pub fn start(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
                 .await;
                 Err(err_val(format!(
                     "::hot::task/start: queue write timed out after {}s",
-                    TASK_NATIVE_IO_TIMEOUT.as_secs()
+                    write_timeout.as_secs()
                 )))
             }
         }
@@ -382,6 +455,31 @@ pub fn start(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     });
 
     HotResult::Ok(result)
+}
+
+/// A task's result stored in blob storage, for the caller's org and the task's
+/// environment.
+fn read_blob_result(vm: &VirtualMachine, result: Val, env_id: Uuid) -> Result<Val, String> {
+    let db = vm
+        .get_database_pool()
+        .ok_or_else(|| "no database configured".to_string())?;
+    let org_id = vm
+        .get_execution_context()
+        .as_ref()
+        .and_then(|ctx| ctx.org_id)
+        .ok_or_else(|| "no org_id in execution context".to_string())?;
+    let conf = vm.get_conf();
+    tokio::runtime::Handle::current().block_on(async {
+        let store = crate::blob::blob_store_from_conf(db, conf).await;
+        let scope = crate::blob::BlobScope {
+            org_id,
+            env_id: Some(env_id),
+            run_id: None,
+        };
+        crate::blob::rehydrate_whole(store.as_deref(), result, scope)
+            .await
+            .map_err(|e| e.to_string())
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -855,6 +953,19 @@ pub fn await_task(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
             .map(|j: &serde_json::Value| serde_json::from_value(j.clone()).unwrap_or(Val::Null))
             .unwrap_or(Val::Null)
     };
+    let result_val = if crate::blob::is_blob_ref_val(&result_val) {
+        match read_blob_result(vm, result_val, task.env_id) {
+            Ok(val) => val,
+            Err(e) => {
+                return HotResult::Err(err_val(format!(
+                    "::hot::task/await: failed to read the result of task {}: {}",
+                    task_id, e
+                )));
+            }
+        }
+    } else {
+        result_val
+    };
 
     let exit_code_val = if is_container {
         get_int("exit-code").map(Val::from).unwrap_or(Val::Null)
@@ -908,8 +1019,8 @@ pub fn await_task(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
 
     let mut result_map = IndexMap::new();
     result_map.insert(Val::from("$type"), Val::from("::hot::task/TaskResult"));
-    result_map.insert(Val::from("$val"), Val::Map(Box::new(val_map)));
-    let result = Val::Map(Box::new(result_map));
+    result_map.insert(Val::from("$val"), Val::map(val_map));
+    let result = Val::map(result_map);
 
     HotResult::Ok(result)
 }

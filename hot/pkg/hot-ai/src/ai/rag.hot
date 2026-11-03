@@ -279,7 +279,7 @@ fn (mem: AgentMemory, question: Str, chat-opts: ChatOptions, opts: Map?): Map {
 ask-with-context fn (mem: AgentMemory, question: Str, chat-opts: ChatOptions, opts: Map?, context: Str): Map {
     prompt build-rag-prompt("", context, question)
     system or(chat-opts.system, DEFAULT_SYSTEM)
-    answer chat-opts.chat-fn(chat-opts.model, prompt, system)
+    answer ::ai::chat/complete-prompt(chat-opts, prompt, system)
     sources ::ai::memory/recall(mem, question, opts)
     {answer: answer, sources: sources}
 }
@@ -294,7 +294,7 @@ fn (mem: AgentMemory, t: Thread, question: Str, chat-opts: ChatOptions, opts: Ma
     history-text format-thread-lines(history)
     prompt build-rag-prompt(history-text, context, question)
     system or(chat-opts.system, DEFAULT_SYSTEM_THREAD)
-    answer chat-opts.chat-fn(chat-opts.model, prompt, system)
+    answer ::ai::chat/complete-prompt(chat-opts, prompt, system)
 
     ::ai::memory/thread-add(t, Role.User, question)
     ::ai::memory/thread-add(t, Role.Assistant, answer)
@@ -326,7 +326,7 @@ fn (mem: AgentMemory, chat-opts: ChatOptions, opts: Map?): Str {
             ${instruction}
             ```
             system or(chat-opts.system, DEFAULT_SUMMARY_SYSTEM)
-            chat-opts.chat-fn(chat-opts.model, prompt, system)
+            ::ai::chat/complete-prompt(chat-opts, prompt, system)
         }
     }
 }

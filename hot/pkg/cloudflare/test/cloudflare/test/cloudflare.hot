@@ -1,7 +1,357 @@
 ::cloudflare::test ns
 meta ["test"]
 
+::api ::cloudflare::api
+::kv ::cloudflare::kv
+::workers ::cloudflare::workers
+::r2 ::cloudflare::r2
+::d1 ::cloudflare::d1
+::pages ::cloudflare::pages
+::turnstile ::cloudflare::turnstile
+
+HttpResponse ::hot::http/HttpResponse
+
 test-base-url
 meta ["test"] fn () {
     assert-eq("https://api.cloudflare.com/client/v4", ::cloudflare/BASE_URL)
+}
+
+// ============================================================================
+// Auth and configuration
+// ============================================================================
+
+test-auth-token-wins
+meta ["test"] fn () {
+    headers ::api/auth-headers("tok_123", "global", "ops@example.com")
+    assert-eq({Authorization: "Bearer tok_123"}, headers)
+}
+
+test-auth-global-key-pair
+meta ["test"] fn () {
+    headers ::api/auth-headers(null, "global", "ops@example.com")
+    assert-eq("global", headers.X-Auth-Key)
+    assert-eq("ops@example.com", headers.X-Auth-Email)
+    assert(not(in("Authorization", keys(headers))), "no bearer header without a token")
+}
+
+test-auth-missing-is-config-error
+meta ["test"] fn () {
+    out ::api/auth-headers(null, "global", null)
+    assert(is-err(out), "a key without an email is not enough")
+    message if-err(out, (e) { e.message })
+    assert(contains(message, "cloudflare.token"), "error names the context variable")
+}
+
+test-account-id-missing-errors-clearly
+meta ["test"] fn () {
+    ::hot::ctx/set("cloudflare.account.id", "")
+    out ::api/account-path("/storage/kv/namespaces")
+    assert(is-err(out), "an unset account id must not build /accounts//...")
+    message if-err(out, (e) { e.message })
+    assert(contains(message, "cloudflare.account.id"))
+}
+
+test-account-path
+meta ["test"] fn () {
+    ::hot::ctx/set("cloudflare.account.id", "acc123")
+    assert-eq("/accounts/acc123/r2/buckets", ::api/account-path("/r2/buckets"))
+    ::hot::ctx/set("cloudflare.account.id", "")
+}
+
+// ============================================================================
+// Query strings and paths
+// ============================================================================
+
+test-query-omits-nulls
+meta ["test"] fn () {
+    assert-eq("", ::api/query({}))
+    assert-eq("", ::api/query({page: null, name: null}))
+    assert-eq("?page=2&per_page=50", ::api/query({page: 2, cursor: null, per_page: 50}))
+}
+
+test-query-nested-and-repeated
+meta ["test"] fn () {
+    q ::api/query({name: {contains: "api"}, type: "A", tag: ["a:1", "b:2"]})
+    assert-eq("?name.contains=api&type=A&tag=a%3A1&tag=b%3A2", q)
+}
+
+test-query-encodes-values
+meta ["test"] fn () {
+    assert-eq("?prefix=user%3A%2042%2F", ::api/query({prefix: "user: 42/"}))
+    assert-eq("?force=true", ::api/query({force: true}))
+}
+
+test-seg-encodes-kv-keys
+meta ["test"] fn () {
+    assert-eq("session%3Aabc%2F1", ::api/seg("session:abc/1"))
+}
+
+// ============================================================================
+// Errors
+// ============================================================================
+
+test-error-message-joins-errors-and-chain
+meta ["test"] fn () {
+    body {
+        success: false,
+        errors: [{code: 6003, message: "Invalid request headers", error_chain: [{code: 6111, message: "Invalid format for Authorization header"}]}],
+        messages: [],
+        result: null
+    }
+
+    assert-eq("6003: Invalid request headers (6111: Invalid format for Authorization header)", ::api/error-message(400, body))
+}
+
+test-error-message-fallbacks
+meta ["test"] fn () {
+    assert-eq("Bad gateway", ::api/error-message(502, "Bad gateway"))
+    assert-eq("HTTP 500", ::api/error-message(500, ""))
+    assert-eq("HTTP 404", ::api/error-message(404, {success: false, errors: []}))
+}
+
+test-check-response-non-2xx
+meta ["test"] fn () {
+    response HttpResponse({status: 403, headers: {}, body: {success: false, errors: [{code: 10000, message: "Authentication error"}]}})
+    out ::api/check-response(response)
+    assert(is-err(out))
+    e if-err(out, (x) { x })
+    assert-eq(403, e.status)
+    assert-eq("10000: Authentication error", e.message)
+    assert-eq(1, length(e.errors))
+}
+
+test-check-response-2xx-success-false
+meta ["test"] fn () {
+    response HttpResponse({status: 200, headers: {}, body: {success: false, errors: [{code: 1092, message: "purge_everything must be alone"}]}})
+    assert(is-err(::api/check-response(response)), "a success:false envelope is an Err even on 200")
+}
+
+test-check-response-ok
+meta ["test"] fn () {
+    response HttpResponse({status: 200, headers: {}, body: {success: true, result: {id: "z1"}}})
+    out ::api/check-response(response)
+    assert(not(is-err(out)))
+    assert-eq("z1", out.body.result.id)
+}
+
+// ============================================================================
+// Pagination
+// ============================================================================
+
+test-to-page
+meta ["test"] fn () {
+    page ::api/to-page({result: [{id: 1}], result_info: {page: 1, total_pages: 3}}, "")
+    assert-eq([{id: 1}], page.result)
+    assert-eq(3, page.result_info.total_pages)
+
+    r2 ::api/to-page({result: {buckets: [{name: "a"}]}, result_info: {cursor: "c1"}}, "buckets")
+    assert-eq([{name: "a"}], r2.result)
+
+    empty ::api/to-page({result: null}, "")
+    assert-eq([], empty.result)
+    assert-eq({}, empty.result_info)
+}
+
+test-has-next-page
+meta ["test"] fn () {
+    assert(::api/has-next-page({total_pages: 3}, 1, 20, 20))
+    assert(not(::api/has-next-page({total_pages: 3}, 3, 20, 60)))
+    assert(::api/has-next-page({total_count: 45}, 2, 20, 40), "total_count without total_pages")
+    assert(not(::api/has-next-page({total_count: 40}, 2, 20, 40)))
+    assert(::api/has-next-page({per_page: 20}, 1, 20, 20), "a full page may have more")
+    assert(not(::api/has-next-page({per_page: 20}, 1, 7, 7)), "a short page is the last")
+    assert(not(::api/has-next-page({total_pages: 9}, 1, 0, 0)), "an empty page ends the walk")
+}
+
+test-next-cursor
+meta ["test"] fn () {
+    assert-eq("abc", ::api/next-cursor({cursor: "abc", count: 1000}))
+    assert-eq(null, ::api/next-cursor({cursor: "", count: 3}))
+    assert-eq(null, ::api/next-cursor({}))
+}
+
+fake-pages fn (params: Map): Map {
+    page params.page
+    items cond {
+        eq(page, 1) => { [1, 2] }
+        eq(page, 2) => { [3, 4] }
+        => { [5] }
+    }
+    {result: items, result_info: {page: page, per_page: 2, total_pages: 3, total_count: 5}}
+}
+
+test-collect-pages
+meta ["test"] fn () {
+    assert-eq([1, 2, 3, 4, 5], ::api/collect-pages(fake-pages, {}, 100))
+    assert-eq([1, 2, 3], ::api/collect-pages(fake-pages, {}, 3), "stops at the limit")
+}
+
+fake-cursor fn (params: Map): Map {
+    cursor get(params, "cursor")
+    cond {
+        is-null(cursor) => { {result: ["a", "b"], result_info: {cursor: "c2"}} }
+        eq(cursor, "c2") => { {result: ["c"], result_info: {cursor: ""}} }
+        => { {result: ["never"], result_info: {}} }
+    }
+}
+
+test-collect-cursor
+meta ["test"] fn () {
+    assert-eq(["a", "b", "c"], ::api/collect-cursor(fake-cursor, {prefix: "x"}, 100))
+    assert-eq(["a"], ::api/collect-cursor(fake-cursor, {}, 1))
+}
+
+// ============================================================================
+// Multipart
+// ============================================================================
+
+test-multipart-body
+meta ["test"] fn () {
+    body ::api/multipart-body("B", [
+        {name: "metadata", value: "{}", content_type: "application/json"},
+        {name: "worker.js", filename: "worker.js", value: Bytes("x"), content_type: "application/javascript+module"}
+    ])
+    expected "--B\r\nContent-Disposition: form-data; name=\"metadata\"\r\nContent-Type: application/json\r\n\r\n{}\r\n--B\r\nContent-Disposition: form-data; name=\"worker.js\"; filename=\"worker.js\"\r\nContent-Type: application/javascript+module\r\n\r\nx\r\n--B--\r\n"
+    assert(is-bytes(body))
+    assert-eq(expected, Str(body))
+}
+
+test-multipart-plain-field
+meta ["test"] fn () {
+    body ::api/multipart-body("B", [{name: "branch", value: "main"}])
+    assert-eq("--B\r\nContent-Disposition: form-data; name=\"branch\"\r\n\r\nmain\r\n--B--\r\n", Str(body))
+}
+
+// ============================================================================
+// KV
+// ============================================================================
+
+test-kv-write-query
+meta ["test"] fn () {
+    assert-eq("", ::kv/write-query({}))
+    assert-eq("?expiration_ttl=3600", ::kv/write-query({expiration_ttl: 3600, metadata: {a: 1}}))
+    assert-eq("?expiration=1900000000", ::kv/write-query({expiration: 1900000000}))
+}
+
+test-kv-write-parts
+meta ["test"] fn () {
+    parts ::kv/write-parts(Bytes([0, 1]), {owner: "team-a"})
+    assert-eq("value", parts[0].name)
+    assert-eq(Bytes([0, 1]), parts[0].value)
+    assert-eq("metadata", parts[1].name)
+    assert-eq("application/json", parts[1].content_type)
+    assert-eq({owner: "team-a"}, ::hot::json/from-json(parts[1].value))
+}
+
+test-kv-is-not-found
+meta ["test"] fn () {
+    missing err(::api/HttpError({status: 404, headers: {}, body: "", errors: [], message: "HTTP 404"}))
+    denied err(::api/HttpError({status: 403, headers: {}, body: "", errors: [], message: "HTTP 403"}))
+    assert(::kv/is-not-found(missing))
+    assert(not(::kv/is-not-found(denied)))
+    assert(not(::kv/is-not-found(ok(Bytes("v")))))
+    assert(not(::kv/is-not-found(err("transport failure"))))
+}
+
+// ============================================================================
+// Workers
+// ============================================================================
+
+test-workers-metadata-omits-unset
+meta ["test"] fn () {
+    meta-map ::workers/script-metadata("worker.js", {})
+    assert-eq("worker.js", meta-map.main_module)
+    assert-eq(::workers/DEFAULT_COMPATIBILITY_DATE, meta-map.compatibility_date)
+    assert-eq(["compatibility_date", "main_module"], sort(keys(meta-map)), "unset options are omitted, not null")
+
+    full ::workers/script-metadata("index.mjs", {
+        compatibility_date: "2026-01-15",
+        bindings: [{type: "plain_text", name: "GREETING", text: "hi"}]
+    })
+    assert-eq("2026-01-15", full.compatibility_date)
+    assert-eq("GREETING", first(full.bindings).name)
+}
+
+test-workers-deploy-parts
+meta ["test"] fn () {
+    parts ::workers/deploy-parts("worker.js", "export default {}", {})
+    assert-eq("metadata", parts[0].name)
+    assert-eq("worker.js", ::hot::json/from-json(parts[0].value).main_module)
+    assert-eq("worker.js", parts[1].name)
+    assert-eq("worker.js", parts[1].filename)
+    assert-eq("application/javascript+module", parts[1].content_type)
+}
+
+// ============================================================================
+// R2, D1, Pages
+// ============================================================================
+
+test-r2-jurisdiction-headers
+meta ["test"] fn () {
+    assert-eq({}, ::r2/jurisdiction-headers(null))
+    assert-eq({}, ::r2/jurisdiction-headers("default"))
+    assert-eq({cf-r2-jurisdiction: "eu"}, ::r2/jurisdiction-headers("eu"))
+}
+
+test-r2-create-body
+meta ["test"] fn () {
+    assert-eq({name: "exports"}, ::r2/create-bucket-body("exports", {}))
+    assert-eq({name: "exports", locationHint: "enam", storageClass: "InfrequentAccess"},
+        ::r2/create-bucket-body("exports", {location_hint: "enam", storage_class: "InfrequentAccess"}))
+}
+
+test-r2-s3-endpoint
+meta ["test"] fn () {
+    assert-eq("https://abc.r2.cloudflarestorage.com", ::r2/s3-endpoint("abc"))
+    assert-eq("https://abc.eu.r2.cloudflarestorage.com", ::r2/s3-endpoint("abc", "eu"))
+}
+
+test-d1-query-body
+meta ["test"] fn () {
+    assert-eq({sql: "SELECT 1"}, ::d1/query-body("SELECT 1", []))
+    body ::d1/query-body("SELECT * FROM t WHERE id = ? AND plan = ?", [42, "pro"])
+    assert-eq(["42", "pro"], body.params)
+}
+
+test-pages-deployment-parts
+meta ["test"] fn () {
+    assert-eq([], ::pages/deployment-parts({}))
+    parts ::pages/deployment-parts({branch: "preview/x", commit_dirty: true, commit_hash: null})
+    assert-eq([{name: "branch", value: "preview/x"}, {name: "commit_dirty", value: "true"}], parts)
+}
+
+// ============================================================================
+// Turnstile
+// ============================================================================
+
+test-turnstile-body-omits-unset
+meta ["test"] fn () {
+    assert-eq({secret: "s", response: "t"}, ::turnstile/siteverify-body("s", "t", {}))
+    body ::turnstile/siteverify-body("s", "t", {remoteip: "203.0.113.9", idempotency_key: null})
+    assert-eq({secret: "s", response: "t", remoteip: "203.0.113.9"}, body)
+}
+
+test-turnstile-check-result
+meta ["test"] fn () {
+    good {success: true, hostname: "example.com", action: "signup", "error-codes": []}
+    assert(::turnstile/check-result(good, {}))
+    assert(::turnstile/check-result(good, {expected_action: "signup", expected_hostname: "example.com"}))
+    assert(not(::turnstile/check-result(good, {expected_action: "login"})), "wrong action")
+    assert(not(::turnstile/check-result(good, {expected_hostname: "evil.example"})), "wrong hostname")
+    assert(not(::turnstile/check-result({success: false, "error-codes": ["timeout-or-duplicate"]}, {})))
+    assert(not(::turnstile/check-result({}, {})), "missing success fails closed")
+}
+
+test-turnstile-rejects-empty-token-locally
+meta ["test"] fn () {
+    assert(not(::turnstile/is-valid("", {secret-key: "1x0000000000000000000000000000000AA"})))
+}
+
+test-turnstile-missing-secret-is-err
+meta ["test"] fn () {
+    ::hot::ctx/set("cloudflare.turnstile.secret", "")
+    out ::turnstile/siteverify("token")
+    assert(is-err(out), "no secret: an Err, never a verdict")
+    message if-err(out, (e) { e.message })
+    assert(contains(message, "cloudflare.turnstile.secret"))
 }

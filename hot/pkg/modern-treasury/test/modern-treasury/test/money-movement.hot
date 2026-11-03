@@ -1,0 +1,98 @@
+::modern-treasury::test::money-movement ns
+meta ["test"]
+
+// Every check here fails before a request is built, so these tests never
+// touch the network (no credentials are configured for unit tests).
+
+::po ::modern-treasury::payment-orders
+::ledgers ::modern-treasury::ledgers
+
+
+order fn (): Map {
+    {type: "ach", direction: "credit", amount: 10000, originating_account_id: "ia_1", receiving_account_id: "ea_1"}
+}
+
+test-payment-orders-require-an-idempotency-key
+meta ["test"] fn () {
+    none {}
+    create ::po/create-payment-order(order(), none)
+    async ::po/create-payment-order-async(order(), none)
+    reversal ::po/create-reversal("po_1", "duplicate", {}, none)
+    ret ::modern-treasury::returns/create-return({returnable_id: "ipd_1", returnable_type: "incoming_payment_detail"}, none)
+    verify ::modern-treasury::external-accounts/verify-external-account("ea_1", {originating_account_id: "ia_1", payment_type: "ach"}, none)
+    assert(is-err(create), "create")
+    assert(is-err(async), "create async")
+    assert(is-err(reversal), "reversal")
+    assert(is-err(ret), "return")
+    assert(is-err(verify), "micro-deposits")
+    assert(contains(err-message(create), "idempotency-key"))
+}
+
+test-payment-order-required-fields
+meta ["test"] fn () {
+    out ::po/create-payment-order({type: "ach", amount: 100}, {idempotency-key: "k1"})
+    assert(is-err(out))
+    assert(contains(err-message(out), "direction"))
+    assert(contains(err-message(out), "originating_account_id"))
+}
+
+test-payment-order-with-key-reaches-the-transport
+meta ["test"] fn () {
+    out ::po/create-payment-order(order(), {idempotency-key: "invoice-42"})
+    assert(is-err(out))
+    assert(contains(err-message(out), "modern-treasury.api.key"), "fails on credentials, after the money-movement checks")
+}
+
+test-simulation-is-sandbox-only
+meta ["test"] fn () {
+    blocked ::modern-treasury::simulations/create-incoming-payment-detail({type: "ach", amount: 100})
+    ::hot::ctx/set({"modern-treasury.environment": "production"})
+    prod ::modern-treasury::simulations/create-incoming-payment-detail({type: "ach", amount: 100})
+    ::hot::ctx/set({"modern-treasury.environment": "sandbox"})
+    sandbox ::modern-treasury::simulations/create-incoming-payment-detail({type: "ach", amount: 100})
+    ::hot::ctx/set({"modern-treasury.environment": ""})
+    via-opts ::modern-treasury::simulations/create-incoming-payment-detail({type: "ach", amount: 100}, {environment: "sandbox"})
+    assert(contains(err-message(via-opts), "modern-treasury.api.key"), "environment in opts passes the guard too")
+    assert(is-err(blocked), "unset environment blocks simulations")
+    assert(contains(err-message(blocked), "sandbox"))
+    assert(is-err(prod), "production blocks simulations")
+    assert(contains(err-message(sandbox), "modern-treasury.api.key"), "sandbox passes the guard and stops at credentials")
+}
+
+// ============================================================================
+// Ledger transactions
+// ============================================================================
+
+test-is-balanced
+meta ["test"] fn () {
+    assert(::ledgers/is-balanced([
+        {ledger_account_id: "a", direction: "debit", amount: 1000},
+        {ledger_account_id: "b", direction: "credit", amount: 600},
+        {ledger_account_id: "c", direction: "credit", amount: 400}
+    ]))
+    assert(not(::ledgers/is-balanced([
+        {ledger_account_id: "a", direction: "debit", amount: 1000},
+        {ledger_account_id: "b", direction: "credit", amount: 999}
+    ])))
+}
+
+test-invalid-entries
+meta ["test"] fn () {
+    assert-eq([], ::ledgers/invalid-entries([{ledger_account_id: "a", direction: "debit", amount: 1}, {ledger_account_id: "b", direction: "credit", amount_string: "1"}]))
+    assert-eq([1, 2], ::ledgers/invalid-entries([
+        {ledger_account_id: "a", direction: "debit", amount: 1},
+        {ledger_account_id: "b", direction: "sideways", amount: 1},
+        {direction: "credit", amount: 1}
+    ]))
+}
+
+test-create-ledger-transaction-validates-entries
+meta ["test"] fn () {
+    one ::ledgers/create-ledger-transaction({ledger_entries: [{ledger_account_id: "a", direction: "debit", amount: 1}]})
+    assert(is-err(one), "a single entry can't balance")
+    bad ::ledgers/create-ledger-transaction({ledger_entries: [{ledger_account_id: "a", direction: "debit", amount: 1}, {ledger_account_id: "b", amount: 1}]})
+    assert(is-err(bad))
+    assert(contains(err-message(bad), "1"), "names the bad entry")
+    none ::ledgers/create-ledger-transaction({description: "x"})
+    assert(is-err(none))
+}

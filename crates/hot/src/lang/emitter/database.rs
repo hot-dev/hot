@@ -1,9 +1,10 @@
 use super::database_writer::{DatabaseWrite, DatabaseWriter};
 use super::postgres_safety::{sanitize_json_for_jsonb, sanitize_text_for_postgres};
 use super::{EngineEvent, EngineEventEmitter};
-use crate::blob::{BlobScope, BlobStore, SpillSource};
+use crate::blob::{BlobScope, BlobStore, MAX_INLINE_HARD_LIMIT_BYTES, SpillSource, omitted_val};
 use crate::db::DatabasePool;
 use crate::lang::event::ExecutionContext;
+use crate::lang::masking::RecordMask;
 use crate::val::Val;
 use ahash::{AHashMap, AHashSet};
 use indexmap::IndexMap;
@@ -62,6 +63,13 @@ struct RunCallBudget {
 struct DatabaseEngineEventEmitterProcessor {
     writer: DatabaseWriter,
     pending_calls: IndexMap<(Uuid, Uuid), CallEngineEventBatch>,
+    /// Calls written before they stopped, as the run passed their args: a
+    /// secret the call registers later must still mask its row.
+    open_calls: AHashMap<(Uuid, Uuid), OpenCall>,
+    /// Runs that ended: nothing more will stop their open calls.
+    ended_runs: Vec<Uuid>,
+    /// Runs with rows written, and how far those rows are masked.
+    written_runs: AHashMap<Uuid, WrittenRun>,
     /// When present, large call/run payload leaves are spilled to blob storage
     /// (after secret masking) before JSON serialization.
     blob_store: Option<Arc<BlobStore>>,
@@ -73,6 +81,23 @@ struct DatabaseEngineEventEmitterProcessor {
 struct ProcessorFlushRequest {
     run_id: Option<Uuid>,
     completion: oneshot::Sender<Result<(), String>>,
+}
+
+/// A run's call rows hold nothing of what it registered after `generation`,
+/// unless a later generation is on its way to the writer.
+struct WrittenRun {
+    execution_context: ExecutionContext,
+    generation: u64,
+    /// A run may register secrets in a loop, and each pass reads all its rows.
+    remask_after: Instant,
+    remask_interval: Duration,
+    last_written: Instant,
+}
+
+/// A call whose row has args masked as of `generation` of its run's secrets.
+struct OpenCall {
+    batch: CallEngineEventBatch,
+    generation: u64,
 }
 
 /// Represents a batched call event that can be start-only, stop-only, or combined
@@ -99,6 +124,7 @@ struct CallEngineEventBatch {
 }
 
 const BATCH_INTERVAL: Duration = Duration::from_millis(500);
+const MAX_REMASK_INTERVAL: Duration = Duration::from_secs(30);
 
 impl DatabaseEngineEventEmitter {
     /// Creates a new DatabaseEngineEventEmitter with an existing database pool (preferred)
@@ -377,6 +403,9 @@ impl DatabaseEngineEventEmitterProcessor {
         Self {
             writer,
             pending_calls: IndexMap::new(),
+            open_calls: AHashMap::new(),
+            ended_runs: Vec::new(),
+            written_runs: AHashMap::new(),
             blob_store,
             max_calls_per_run,
             call_budgets: AHashMap::new(),
@@ -436,6 +465,7 @@ impl DatabaseEngineEventEmitterProcessor {
 
     /// Once a run ends, record how many of its calls it didn't.
     fn finish_call_budget(&mut self, run_id: Uuid) {
+        self.ended_runs.push(run_id);
         let Some(budget) = self.call_budgets.get_mut(&run_id) else {
             return;
         };
@@ -455,6 +485,8 @@ impl DatabaseEngineEventEmitterProcessor {
             return;
         }
         self.last_budget_prune = Instant::now();
+        self.written_runs
+            .retain(|_, run| run.last_written.elapsed() < IDLE_CALL_BUDGET_TTL);
         self.call_budgets.retain(|_, budget| {
             let ttl = if budget.finished {
                 FINISHED_CALL_BUDGET_TTL
@@ -502,10 +534,7 @@ impl DatabaseEngineEventEmitterProcessor {
                 // Critical - send immediately to writer
                 let result = if let Some(r) = event.event_data.get("result") {
                     // Mask any secret values in the result before storing
-                    Self::mask_secrets_in_val(
-                        r.clone(),
-                        &event.execution_context.secret_value_hashes,
-                    )
+                    Self::mask_run_val(&r, &event.execution_context)
                 } else {
                     Val::Null
                 };
@@ -523,10 +552,7 @@ impl DatabaseEngineEventEmitterProcessor {
                 // Critical - send immediately to writer
                 let failure = if let Some(f) = event.event_data.get("failure") {
                     // Mask any secret values in the failure before storing
-                    Self::mask_secrets_in_val(
-                        f.clone(),
-                        &event.execution_context.secret_value_hashes,
-                    )
+                    Self::mask_run_val(&f, &event.execution_context)
                 } else {
                     Val::Null
                 };
@@ -543,10 +569,7 @@ impl DatabaseEngineEventEmitterProcessor {
                 // Critical - send immediately to writer
                 let cancellation = if let Some(c) = event.event_data.get("cancellation") {
                     // Mask any secret values in the cancellation before storing
-                    Self::mask_secrets_in_val(
-                        c.clone(),
-                        &event.execution_context.secret_value_hashes,
-                    )
+                    Self::mask_run_val(&c, &event.execution_context)
                 } else {
                     Val::Null
                 };
@@ -575,36 +598,58 @@ impl DatabaseEngineEventEmitterProcessor {
         }
     }
 
-    /// Spill large leaves of an already-masked run value to blob storage.
-    /// Observability path: on spill failure, fall back to the inline value.
+    /// Store an already-masked run value's large parts in blob storage: its
+    /// large leaves, or all of it if that wouldn't leave little enough inline.
+    /// Observability path: on spill failure, fall back to the inline value,
+    /// unless it's too large to store at all.
     async fn maybe_spill_run_val(
         &self,
         val: Val,
         ctx: &ExecutionContext,
         source: SpillSource,
     ) -> Val {
-        let Some(store) = &self.blob_store else {
-            return val;
+        let size = crate::blob::estimate_val_size(&val);
+        let inline = |val| {
+            if size > MAX_INLINE_HARD_LIMIT_BYTES {
+                omitted_val(size)
+            } else {
+                val
+            }
         };
-        if !store.config().enabled() {
-            return val;
+        let Some(store) = self.blob_store.as_ref().filter(|s| s.config().enabled()) else {
+            return inline(val);
+        };
+        let threshold = store.config().spill_threshold_bytes;
+        if size < threshold {
+            return inline(val);
         }
         let Some(org_id) = ctx.org_id else {
-            return val;
+            return inline(val);
         };
-        if crate::blob::estimate_val_size(&val) < store.config().spill_threshold_bytes {
-            return val;
-        }
         let scope = BlobScope {
             org_id,
             env_id: ctx.env_id,
             run_id: Some(ctx.run_id),
         };
         let source_id = ctx.run_id.to_string();
-        match store
-            .spill_large_val(val.clone(), scope, source, Some(&source_id))
-            .await
+        let spilled = if crate::blob::val_bytes_outside_large_leaves(&val, threshold)
+            > store.config().max_inline_bytes
         {
+            let json = serde_json::to_string(&val).unwrap_or_default();
+            store
+                .spill_whole_json(
+                    &sanitize_json_for_jsonb(&json),
+                    scope,
+                    source,
+                    Some(&source_id),
+                )
+                .await
+        } else {
+            store
+                .spill_large_val(val.clone(), scope, source, Some(&source_id))
+                .await
+        };
+        match spilled {
             Ok(spilled) => spilled,
             Err(e) => {
                 tracing::warn!(
@@ -613,51 +658,60 @@ impl DatabaseEngineEventEmitterProcessor {
                     error = %e,
                     "blob spill failed for run value; storing inline"
                 );
-                val
+                inline(val)
             }
         }
     }
 
-    /// Mask secrets and then spill large leaves in a serialized call payload.
-    /// Masking MUST precede spill so secret bytes never reach blob storage.
-    /// Observability path: on spill failure, fall back to the masked inline
-    /// JSON.
+    /// Mask a serialized call payload, then store its large parts in blob
+    /// storage: its large leaves, or all of it if that wouldn't leave little
+    /// enough inline. Masking MUST precede spill so secret bytes never reach
+    /// blob storage. Observability path: on spill failure, fall back to the
+    /// masked inline JSON, unless it's too large to store at all.
     async fn finalize_call_payload(
         blob_store: &Option<Arc<BlobStore>>,
         json_value: Option<String>,
-        secret_value_hashes: &AHashSet<u64>,
         ctx: &ExecutionContext,
         source: SpillSource,
         source_id: &str,
     ) -> Option<String> {
-        let masked = Self::maybe_mask_secret_value(json_value, secret_value_hashes);
-
-        let Some(store) = blob_store else {
-            return masked;
+        let masked = Self::mask_call_payload(json_value, ctx)?;
+        let Some(store) = blob_store.as_ref().filter(|s| s.config().enabled()) else {
+            return Some(Self::inline_call_payload(masked));
         };
-        let masked = masked?;
-        if !store.config().enabled() || masked.len() < store.config().spill_threshold_bytes {
-            return Some(masked);
+        let threshold = store.config().spill_threshold_bytes;
+        if masked.len() < threshold {
+            return Some(Self::inline_call_payload(masked));
         }
         let Some(org_id) = ctx.org_id else {
-            return Some(masked);
-        };
-        let Ok(val) = serde_json::from_str::<Val>(&masked) else {
-            return Some(masked);
+            return Some(Self::inline_call_payload(masked));
         };
         let scope = BlobScope {
             org_id,
             env_id: ctx.env_id,
             run_id: Some(ctx.run_id),
         };
-        match store
-            .spill_large_val(val, scope, source, Some(source_id))
-            .await
+        let spilled = if crate::blob::json_bytes_outside_large_strings(&masked, threshold)
+            > store.config().max_inline_bytes
         {
-            Ok(spilled) => match serde_json::to_string(&spilled) {
-                Ok(json) => Some(sanitize_json_for_jsonb(&json).into_owned()),
-                Err(_) => Some(masked),
-            },
+            store
+                .spill_whole_json(&masked, scope, source, Some(source_id))
+                .await
+        } else {
+            match serde_json::from_str::<Val>(&masked) {
+                Ok(val) => {
+                    store
+                        .spill_large_val(val, scope, source, Some(source_id))
+                        .await
+                }
+                Err(_) => return Some(Self::inline_call_payload(masked)),
+            }
+        };
+        match spilled.map(|spilled| serde_json::to_string(&spilled)) {
+            Ok(Ok(json)) => Some(Self::inline_call_payload(
+                sanitize_json_for_jsonb(&json).into_owned(),
+            )),
+            Ok(Err(_)) => Some(Self::inline_call_payload(masked)),
             Err(e) => {
                 tracing::warn!(
                     source = source.as_str(),
@@ -665,8 +719,17 @@ impl DatabaseEngineEventEmitterProcessor {
                     error = %e,
                     "blob spill failed for call payload; storing inline"
                 );
-                Some(masked)
+                Some(Self::inline_call_payload(masked))
             }
+        }
+    }
+
+    /// `json`, unless it's too large to store, which would fail the run's writes.
+    fn inline_call_payload(json: String) -> String {
+        if json.len() > MAX_INLINE_HARD_LIMIT_BYTES {
+            serde_json::to_string(&omitted_val(json.len())).unwrap_or_default()
+        } else {
+            json
         }
     }
 
@@ -676,16 +739,48 @@ impl DatabaseEngineEventEmitterProcessor {
         self.prune_call_budgets();
     }
 
+    /// Put back the calls whose rows were masked before their run registered
+    /// a secret, as their args were passed, to be masked and written again.
+    /// Writing `args` and `flow` again replaces them: see the writer's UPSERT.
+    fn reopen_stale_calls(&mut self) {
+        let mut done = Vec::new();
+        for (key, open) in &self.open_calls {
+            let pending = self.pending_calls.get_mut(key);
+            let stopped = pending.as_ref().is_some_and(|b| b.stop_time.is_some());
+            let stale = open.batch.execution_context.secret_values.generation() != open.generation;
+            if stale {
+                match pending {
+                    Some(batch) => {
+                        batch.args = open.batch.args.clone();
+                        batch.flow = open.batch.flow.clone();
+                    }
+                    None => {
+                        self.pending_calls.insert(*key, open.batch.clone());
+                    }
+                }
+            }
+            if stopped {
+                done.push(*key);
+            }
+        }
+        for key in done {
+            self.open_calls.remove(&key);
+        }
+    }
+
     /// Flush all pending call events
     /// Uses UPSERT to handle INSERT (on start) and UPDATE (on stop) seamlessly
     /// Sorts by call_depth to ensure parent calls are written before children
     ///
-    /// Spill happens here (not at batch-insert time) on purpose: secret value
-    /// hashes are only complete after `call:stop` merges them into the batch's
-    /// execution context, and masking must precede spill so secret bytes never
-    /// reach blob storage. Payloads therefore sit inline in `pending_calls`
-    /// for at most one BATCH_INTERVAL before being spilled.
+    /// Spill happens here (not at batch-insert time) on purpose: a call's
+    /// secrets are only complete once it stops, and masking must precede spill
+    /// so secret bytes never reach blob storage. Payloads therefore sit inline
+    /// in `pending_calls` for at most one BATCH_INTERVAL before being spilled.
+    ///
+    /// Masking reads the run's registry now, not a snapshot from the event, so
+    /// every record in this flush sees every secret registered so far.
     async fn flush_pending_calls(&mut self) {
+        self.reopen_stale_calls();
         let pending = std::mem::take(&mut self.pending_calls);
 
         // CRITICAL: Sort calls by call_depth to ensure parent calls are written before children
@@ -696,11 +791,34 @@ impl DatabaseEngineEventEmitterProcessor {
         for batch in sorted_batches {
             let call_id_str = batch.call_id.to_string();
 
+            // Read before masking, like the generation below.
+            self.written_runs
+                .entry(batch.execution_context.run_id)
+                .or_insert_with(|| WrittenRun {
+                    execution_context: batch.execution_context.clone(),
+                    generation: batch.execution_context.secret_values.generation(),
+                    remask_after: Instant::now(),
+                    remask_interval: BATCH_INTERVAL,
+                    last_written: Instant::now(),
+                })
+                .last_written = Instant::now();
+
+            // Read before masking: a secret registered during this write makes
+            // the row stale, and writing it again is harmless.
+            if batch.stop_time.is_none() {
+                self.open_calls.insert(
+                    (batch.execution_context.run_id, batch.call_id),
+                    OpenCall {
+                        batch: batch.clone(),
+                        generation: batch.execution_context.secret_values.generation(),
+                    },
+                );
+            }
+
             // Mask secrets, then spill large leaves (mask-before-spill)
             let args = Self::finalize_call_payload(
                 &self.blob_store,
                 batch.args,
-                &batch.execution_context.secret_value_hashes,
                 &batch.execution_context,
                 SpillSource::CallArgs,
                 &call_id_str,
@@ -710,7 +828,6 @@ impl DatabaseEngineEventEmitterProcessor {
             let return_value = Self::finalize_call_payload(
                 &self.blob_store,
                 batch.return_value,
-                &batch.execution_context.secret_value_hashes,
                 &batch.execution_context,
                 SpillSource::CallReturn,
                 &call_id_str,
@@ -720,12 +837,20 @@ impl DatabaseEngineEventEmitterProcessor {
             let flow = Self::finalize_call_payload(
                 &self.blob_store,
                 batch.flow,
-                &batch.execution_context.secret_value_hashes,
                 &batch.execution_context,
                 SpillSource::CallFlow,
                 &call_id_str,
             )
             .await;
+
+            let error = batch.error.map(|error| {
+                let mask = RecordMask::new(
+                    &batch.execution_context.secret_values,
+                    &batch.execution_context.secret_value_hashes,
+                );
+                let masked = mask.mask_text(&error).into_owned();
+                sanitize_text_for_postgres(&masked).into_owned()
+            });
 
             self.writer.write(DatabaseWrite::Call {
                 execution_context: Box::new(batch.execution_context),
@@ -737,7 +862,7 @@ impl DatabaseEngineEventEmitterProcessor {
                 call_depth: batch.call_depth,
                 args,
                 return_value,
-                error: batch.error,
+                error,
                 flow,
                 file: batch.file,
                 line: batch.line,
@@ -748,6 +873,36 @@ impl DatabaseEngineEventEmitterProcessor {
                 duration_us: batch.duration_us,
             });
         }
+
+        let ended = std::mem::take(&mut self.ended_runs);
+        self.remask_written_runs(&ended);
+
+        // After the writes above, for calls of a run that ended without their
+        // stop: they had this last chance, and hold what the run did.
+        if !ended.is_empty() {
+            self.open_calls
+                .retain(|(run_id, _), _| !ended.contains(run_id));
+        }
+    }
+
+    /// Have the rows of runs that registered a secret since they were written
+    /// masked again, after the writes already queued. A run that ended doesn't
+    /// wait its turn, as this is its last chance.
+    fn remask_written_runs(&mut self, ended: &[Uuid]) {
+        let now = Instant::now();
+        for (run_id, run) in &mut self.written_runs {
+            let generation = run.execution_context.secret_values.generation();
+            if generation != run.generation && (run.remask_after <= now || ended.contains(run_id)) {
+                run.generation = generation;
+                run.remask_after = now + run.remask_interval;
+                run.remask_interval = (run.remask_interval * 2).min(MAX_REMASK_INTERVAL);
+                self.writer.write(DatabaseWrite::RemaskCalls {
+                    execution_context: Box::new(run.execution_context.clone()),
+                });
+            }
+        }
+        self.written_runs
+            .retain(|run_id, _| !ended.contains(run_id));
     }
 
     /// Serialize a `Val` to JSON for storage in a Postgres `jsonb` column,
@@ -762,75 +917,27 @@ impl DatabaseEngineEventEmitterProcessor {
         sanitize_json_for_jsonb(&raw).into_owned()
     }
 
-    /// Check if a JSON value contains any secret values (deep scan)
-    /// Uses hash-based matching for efficiency and to handle any Val type
-    /// Recursively scans through Maps and Vecs to find and mask secrets
-    fn maybe_mask_secret_value(
-        json_value: Option<String>,
-        secret_value_hashes: &AHashSet<u64>,
-    ) -> Option<String> {
-        // If no value or no secrets to check, nothing to mask
-        let json_str = match &json_value {
-            Some(v) => v,
-            None => return json_value,
-        };
-
-        // If value is null or no secrets registered, nothing to mask
-        if json_str == "null" || secret_value_hashes.is_empty() {
+    /// Mask a serialized call payload. See [`crate::lang::masking`].
+    fn mask_call_payload(json_value: Option<String>, ctx: &ExecutionContext) -> Option<String> {
+        let json_str = json_value.as_deref()?;
+        if json_str == "null" {
             return json_value;
         }
-
-        // Parse the JSON value into a Val
-        let val: Val = match serde_json::from_str(json_str) {
-            Ok(v) => v,
-            Err(_) => return json_value, // Can't parse, return as-is
-        };
-
-        // Recursively mask secrets in the value
-        let masked_val = Self::mask_secrets_in_val(val, secret_value_hashes);
-
-        // Re-serialize to JSON. Run through the Postgres-jsonb scrubber
-        // again so any NUL/lone-surrogate that was introduced by the
-        // mask pass (or that survived an upstream path that didn't
-        // sanitize) doesn't sneak through.
-        match serde_json::to_string(&masked_val) {
-            Ok(json) => Some(sanitize_json_for_jsonb(&json).into_owned()),
-            Err(_) => json_value, // Serialization failed, return original
+        let mask = RecordMask::new(&ctx.secret_values, &ctx.secret_value_hashes);
+        // Re-serialized, so run through the Postgres-jsonb scrubber again:
+        // nothing NUL or lone-surrogate may survive from the mask pass or from
+        // an upstream path that didn't sanitize.
+        match mask.mask_json(json_str) {
+            Some(masked) => Some(sanitize_json_for_jsonb(&masked).into_owned()),
+            None => json_value,
         }
     }
 
-    /// Recursively scan a Val and replace any values matching secret hashes with "<secret>"
-    fn mask_secrets_in_val(val: Val, secret_hashes: &AHashSet<u64>) -> Val {
-        use std::hash::{Hash, Hasher};
-
-        // First check if this entire value is a secret
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        val.hash(&mut hasher);
-        let hash = hasher.finish();
-
-        if secret_hashes.contains(&hash) {
-            return Val::from("<secret>");
-        }
-
-        // If not a direct match, recursively scan compound types
-        match val {
-            Val::Map(map) => {
-                let masked_map: indexmap::IndexMap<Val, Val> = map
-                    .into_iter()
-                    .map(|(k, v)| (k, Self::mask_secrets_in_val(v, secret_hashes)))
-                    .collect();
-                Val::Map(Box::new(masked_map))
-            }
-            Val::Vec(vec) => {
-                let masked_vec: Vec<Val> = vec
-                    .into_iter()
-                    .map(|v| Self::mask_secrets_in_val(v, secret_hashes))
-                    .collect();
-                Val::Vec(masked_vec)
-            }
-            // Leaf values that weren't a direct match - return as-is
-            other => other,
-        }
+    /// Mask a value recorded on a run. Masks its storage form, so that values
+    /// inside a closure's captures, say, aren't missed.
+    fn mask_run_val(val: &Val, ctx: &ExecutionContext) -> Val {
+        RecordMask::new(&ctx.secret_values, &ctx.secret_value_hashes)
+            .mask_val(val.to_hot_data_repr())
     }
 
     fn handle_call_start_batch(&mut self, event: &EngineEvent) {
@@ -1037,14 +1144,6 @@ impl DatabaseEngineEventEmitterProcessor {
                 batch.return_value = return_value;
                 batch.error = error;
                 batch.duration_us = duration_us;
-
-                // CRITICAL: Merge secret_value_hashes from call:stop's execution_context
-                // The call:start event is emitted BEFORE the function runs, so it doesn't
-                // have secret hashes from ctx/get calls made during the function.
-                // The call:stop event is emitted AFTER, so it has the updated hashes.
-                for hash in &event.execution_context.secret_value_hashes {
-                    batch.execution_context.secret_value_hashes.insert(*hash);
-                }
             }
         }
     }
@@ -1170,7 +1269,7 @@ mod tests {
             result_params: Vec::new(),
         };
 
-        let args = Val::Vec(vec![
+        let args = Val::vec(vec![
             Val::Box(Box::new(FunctionRef::new("::hot::math/add".to_string()))),
             Val::Box(Box::new(lazy_thunk)),
         ]);
@@ -1432,6 +1531,248 @@ mod tests {
         );
     }
 
+    /// Rows of small cells: nothing in them is large enough to spill alone.
+    fn many_small_rows(rows: usize, cell: &str) -> Val {
+        Val::vec(
+            (0..rows)
+                .map(|i| crate::val!({"id": (i as i64), "note": cell, "zip": "02134"}))
+                .collect(),
+        )
+    }
+
+    /// Run one call returning `returned`, and read back its stored value.
+    async fn record_return(
+        db: &crate::db::DatabasePool,
+        blob_store: Option<Arc<BlobStore>>,
+        execution_context: &ExecutionContext,
+        returned: Val,
+    ) -> Val {
+        let emitter =
+            DatabaseEngineEventEmitter::new_with_pool_and_blob_store(db.clone(), blob_store);
+        let call_id = Uuid::now_v7();
+        emitter.emit(EngineEvent::call_start(
+            execution_context,
+            call_id,
+            None,
+            "::hot::test/rows".to_string(),
+            "::hot::test/rows".to_string(),
+            "run/test".to_string(),
+            0,
+            vec![],
+            None,
+            chrono::Utc::now(),
+            None,
+        ));
+        emitter.emit(EngineEvent::call_stop(
+            execution_context,
+            call_id,
+            Some(returned),
+            None,
+            chrono::Utc::now(),
+            10,
+        ));
+        emitter.shutdown().await.unwrap();
+        let crate::db::DatabasePool::Sqlite(pool) = db else {
+            panic!("test_db should return SQLite");
+        };
+        let stored: String = sqlx::query_scalar("SELECT return_value FROM call WHERE call_id = ?")
+            .bind(call_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        serde_json::from_str(&stored).unwrap()
+    }
+
+    #[tokio::test]
+    async fn many_small_values_are_stored_whole_in_a_blob() {
+        let db = crate::db::test_db().await;
+        let (blob_store, _tmp) = test_blob_store(&db);
+        let execution_context = persisted_execution_context(&db).await;
+        let rows = many_small_rows(40_000, "a small cell");
+        let stored = record_return(
+            &db,
+            Some(blob_store.clone()),
+            &execution_context,
+            rows.clone(),
+        )
+        .await;
+
+        let blob_ref = crate::blob::BlobRefVal::from_val(&stored)
+            .unwrap()
+            .expect("the record should hold one reference");
+        assert_eq!(blob_ref.encoding, crate::blob::ENCODING_JSON);
+
+        let scope = BlobScope {
+            org_id: execution_context.org_id.unwrap(),
+            env_id: execution_context.env_id,
+            run_id: Some(execution_context.run_id),
+        };
+        let budget = crate::blob::RehydrateBudget::from_config(blob_store.config());
+        let restored = blob_store
+            .rehydrate_blob_refs(stored, scope, budget)
+            .await
+            .unwrap();
+        assert_eq!(restored, rows);
+    }
+
+    #[tokio::test]
+    async fn secrets_are_masked_before_a_whole_value_is_stored() {
+        const SECRET: &str = "SENTINEL-WHOLE-VALUE-SECRET";
+        let db = crate::db::test_db().await;
+        let (blob_store, tmp) = test_blob_store(&db);
+        let execution_context = persisted_execution_context(&db).await;
+        execution_context.secret_values.register(&Val::from(SECRET));
+        let stored = record_return(
+            &db,
+            Some(blob_store.clone()),
+            &execution_context,
+            many_small_rows(40_000, SECRET),
+        )
+        .await;
+
+        let scope = BlobScope {
+            org_id: execution_context.org_id.unwrap(),
+            env_id: execution_context.env_id,
+            run_id: Some(execution_context.run_id),
+        };
+        let budget = crate::blob::RehydrateBudget::from_config(blob_store.config());
+        let restored = blob_store
+            .rehydrate_blob_refs(stored, scope, budget)
+            .await
+            .unwrap();
+        let text = serde_json::to_string(&restored).unwrap();
+        assert!(!text.contains(SECRET));
+        assert!(text.contains(crate::lang::masking::MASK));
+
+        // And nothing with it reached storage.
+        for entry in walkdir_files(tmp.path()) {
+            let bytes = std::fs::read(&entry).unwrap();
+            assert!(
+                !bytes.windows(SECRET.len()).any(|w| w == SECRET.as_bytes()),
+                "{} holds the secret",
+                entry.display()
+            );
+        }
+    }
+
+    fn walkdir_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut files = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                files.extend(walkdir_files(&path));
+            } else {
+                files.push(path);
+            }
+        }
+        files
+    }
+
+    #[tokio::test]
+    async fn one_large_leaf_is_still_spilled_alone() {
+        let db = crate::db::test_db().await;
+        let (blob_store, _tmp) = test_blob_store(&db);
+        let execution_context = persisted_execution_context(&db).await;
+        let value = crate::val!({"kept": "inline", "text": ("x".repeat(3_000_000))});
+        let stored = record_return(&db, Some(blob_store), &execution_context, value).await;
+        let Val::Map(map) = &stored else {
+            panic!("expected the Map inline: {stored:?}");
+        };
+        assert_eq!(map.get(&Val::from("kept")), Some(&Val::from("inline")));
+        assert!(crate::blob::is_blob_ref_val(
+            map.get(&Val::from("text")).unwrap()
+        ));
+    }
+
+    #[tokio::test]
+    async fn without_blob_storage_a_value_over_the_limit_is_left_out() {
+        let db = crate::db::test_db().await;
+        let execution_context = persisted_execution_context(&db).await;
+        let cell = "x".repeat(1024);
+        let stored = record_return(
+            &db,
+            None,
+            &execution_context,
+            many_small_rows(40_000, &cell),
+        )
+        .await;
+        let Val::Map(map) = &stored else {
+            panic!("expected a marker: {stored:?}");
+        };
+        assert_eq!(
+            map.get(&Val::from("$type")),
+            Some(&Val::from(crate::blob::OMITTED_TYPE))
+        );
+    }
+
+    #[tokio::test]
+    async fn without_blob_storage_a_smaller_value_stays_inline() {
+        let db = crate::db::test_db().await;
+        let execution_context = persisted_execution_context(&db).await;
+        let rows = many_small_rows(40_000, "a small cell");
+        let stored = record_return(&db, None, &execution_context, rows.clone()).await;
+        assert_eq!(stored, rows);
+    }
+
+    #[tokio::test]
+    async fn run_results_are_stored_the_same_way() {
+        let db = crate::db::test_db().await;
+        let (blob_store, _tmp) = test_blob_store(&db);
+        let execution_context = persisted_execution_context(&db).await;
+        let rows = many_small_rows(40_000, "a small cell");
+        let emitter = DatabaseEngineEventEmitter::new_with_pool_and_blob_store(
+            db.clone(),
+            Some(blob_store.clone()),
+        );
+        emitter.emit(EngineEvent::run_start(&execution_context));
+        emitter.emit(EngineEvent::run_stop(&execution_context, rows.clone()));
+        emitter.shutdown().await.unwrap();
+        let crate::db::DatabasePool::Sqlite(pool) = &db else {
+            panic!("test_db should return SQLite");
+        };
+        let stored: String = sqlx::query_scalar("SELECT result FROM run WHERE run_id = ?")
+            .bind(execution_context.run_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        let stored: Val = serde_json::from_str(&stored).unwrap();
+        assert!(crate::blob::is_blob_ref_val(&stored), "{stored:?}");
+        let scope = BlobScope {
+            org_id: execution_context.org_id.unwrap(),
+            env_id: execution_context.env_id,
+            run_id: Some(execution_context.run_id),
+        };
+        let budget = crate::blob::RehydrateBudget::from_config(blob_store.config());
+        let restored = blob_store
+            .rehydrate_blob_refs(stored, scope, budget)
+            .await
+            .unwrap();
+        assert_eq!(restored, rows);
+    }
+
+    #[tokio::test]
+    async fn without_blob_storage_a_run_result_over_the_limit_is_left_out() {
+        let db = crate::db::test_db().await;
+        let execution_context = persisted_execution_context(&db).await;
+        let cell = "x".repeat(1024);
+        let emitter = DatabaseEngineEventEmitter::new_with_pool_and_blob_store(db.clone(), None);
+        emitter.emit(EngineEvent::run_start(&execution_context));
+        emitter.emit(EngineEvent::run_stop(
+            &execution_context,
+            many_small_rows(40_000, &cell),
+        ));
+        emitter.shutdown().await.unwrap();
+        let crate::db::DatabasePool::Sqlite(pool) = &db else {
+            panic!("test_db should return SQLite");
+        };
+        let stored: String = sqlx::query_scalar("SELECT result FROM run WHERE run_id = ?")
+            .bind(execution_context.run_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert!(stored.contains(crate::blob::OMITTED_TYPE), "{stored:.200}");
+    }
+
     #[tokio::test]
     async fn test_database_emitter_spills_large_call_args_to_blob() {
         let db = crate::db::test_db().await;
@@ -1450,7 +1791,7 @@ mod tests {
             "::hot::test/big".to_string(),
             "run/test".to_string(),
             0,
-            vec![Val::Bytes(big_bytes.clone())],
+            vec![Val::bytes(big_bytes.clone())],
             None,
             chrono::Utc::now(),
             None,
@@ -1513,7 +1854,7 @@ mod tests {
         emitter.emit(EngineEvent::run_start(&execution_context));
         emitter.emit(EngineEvent::run_stop(
             &execution_context,
-            Val::Bytes(vec![9u8; 8192]),
+            Val::bytes(vec![9u8; 8192]),
         ));
         emitter.shutdown().await.unwrap();
 
@@ -1611,5 +1952,369 @@ mod tests {
             "secret bytes must never reach blob storage"
         );
         drop(tmp);
+    }
+
+    async fn stored_call(
+        db: &crate::db::DatabasePool,
+        call_id: Uuid,
+    ) -> (Option<String>, Option<String>, Option<String>) {
+        let crate::db::DatabasePool::Sqlite(pool) = db.clone() else {
+            panic!("test_db should return SQLite");
+        };
+        let row = sqlx::query("SELECT args, return_value, error FROM call WHERE call_id = ?")
+            .bind(call_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        (row.get("args"), row.get("return_value"), row.get("error"))
+    }
+
+    fn start_event(
+        ctx: &ExecutionContext,
+        call_id: Uuid,
+        parent: Option<Uuid>,
+        arg: &str,
+    ) -> EngineEvent {
+        EngineEvent::call_start(
+            ctx,
+            call_id,
+            parent,
+            "::hot::test/call".to_string(),
+            "::hot::test/call".to_string(),
+            "run/test".to_string(),
+            usize::from(parent.is_some()),
+            vec![Val::from(arg)],
+            None,
+            chrono::Utc::now(),
+            None,
+        )
+    }
+
+    fn stop_event(
+        ctx: &ExecutionContext,
+        call_id: Uuid,
+        result: &str,
+        error: Option<&str>,
+    ) -> EngineEvent {
+        EngineEvent::call_stop(
+            ctx,
+            call_id,
+            Some(Val::from(result)),
+            error.map(str::to_string),
+            chrono::Utc::now(),
+            10,
+        )
+    }
+
+    const LATE_SECRET: &str = "registered-late-secret";
+
+    /// A secret registered during a call masks that call's row and its
+    /// parents', though both were written before it existed, in earlier
+    /// batches, and neither has stopped.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_secret_registered_later_masks_open_calls_already_written() {
+        let db = crate::db::test_db().await;
+        let execution_context = persisted_execution_context(&db).await;
+        let emitter = DatabaseEngineEventEmitter::new_with_pool(db.clone());
+        let bearer = format!("Bearer {LATE_SECRET}");
+
+        emitter.emit(EngineEvent::run_start(&execution_context));
+        let parent = Uuid::now_v7();
+        let child = Uuid::now_v7();
+        emitter.emit(start_event(&execution_context, parent, None, &bearer));
+        emitter.flush_async().await.unwrap();
+        emitter.emit(start_event(
+            &execution_context,
+            child,
+            Some(parent),
+            &bearer,
+        ));
+        emitter.flush_async().await.unwrap();
+        let written = stored_call(&db, parent).await.0.unwrap();
+        assert!(written.contains(LATE_SECRET), "{written}");
+
+        execution_context
+            .secret_values
+            .register(&Val::from(LATE_SECRET));
+
+        // Neither call has stopped: the next flush masks them all the same.
+        emitter.flush_async().await.unwrap();
+        for call in [parent, child] {
+            let args = stored_call(&db, call).await.0.unwrap();
+            assert!(!args.contains(LATE_SECRET), "{args}");
+            assert!(args.contains("Bearer <secret>"), "{args}");
+        }
+
+        emitter.emit(stop_event(&execution_context, child, LATE_SECRET, None));
+        emitter.emit(stop_event(&execution_context, parent, "done", None));
+        emitter.emit(EngineEvent::run_stop(&execution_context, Val::Null));
+        emitter.shutdown().await.unwrap();
+        let (args, return_value, _) = stored_call(&db, child).await;
+        assert!(args.unwrap().contains("Bearer <secret>"));
+        assert_eq!(return_value.unwrap(), "\"<secret>\"");
+        let args = stored_call(&db, parent).await.0.unwrap();
+        assert!(args.contains("Bearer <secret>"), "{args}");
+    }
+
+    /// A call that stops after the secret was registered masks its args as it
+    /// stops, even when no flush came between.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_secret_registered_just_before_a_stop_masks_the_args_written_earlier() {
+        let db = crate::db::test_db().await;
+        let execution_context = persisted_execution_context(&db).await;
+        let emitter = DatabaseEngineEventEmitter::new_with_pool(db.clone());
+        emitter.emit(EngineEvent::run_start(&execution_context));
+        let call = Uuid::now_v7();
+        emitter.emit(start_event(&execution_context, call, None, LATE_SECRET));
+        emitter.flush_async().await.unwrap();
+
+        execution_context
+            .secret_values
+            .register(&Val::from(LATE_SECRET));
+        emitter.emit(stop_event(&execution_context, call, "done", None));
+        emitter.emit(EngineEvent::run_stop(&execution_context, Val::Null));
+        emitter.shutdown().await.unwrap();
+
+        let (args, return_value, _) = stored_call(&db, call).await;
+        assert!(!args.unwrap().contains(LATE_SECRET));
+        assert_eq!(return_value.unwrap(), "\"done\"");
+    }
+
+    /// Records in the same flush as the registration are covered, but a call
+    /// that stopped and was written before it keeps what it had: the limit
+    /// `resources/docs/language/meta.md` documents.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_secret_registered_later_masks_finished_calls_already_written() {
+        let db = crate::db::test_db().await;
+        let execution_context = persisted_execution_context(&db).await;
+        let emitter = DatabaseEngineEventEmitter::new_with_pool(db.clone());
+        emitter.emit(EngineEvent::run_start(&execution_context));
+
+        let written = Uuid::now_v7();
+        emitter.emit(start_event(&execution_context, written, None, LATE_SECRET));
+        emitter.emit(stop_event(&execution_context, written, "done", None));
+        emitter.flush_async().await.unwrap();
+
+        let pending = Uuid::now_v7();
+        emitter.emit(start_event(&execution_context, pending, None, LATE_SECRET));
+        emitter.emit(stop_event(&execution_context, pending, "done", None));
+        execution_context
+            .secret_values
+            .register(&Val::from(LATE_SECRET));
+        emitter.emit(EngineEvent::run_stop(&execution_context, Val::Null));
+        emitter.shutdown().await.unwrap();
+
+        for call_id in [written, pending] {
+            let args = stored_call(&db, call_id).await.0.unwrap();
+            assert!(!args.contains(LATE_SECRET), "{args}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_running_run_masks_rows_it_wrote_before_a_secret() {
+        let db = crate::db::test_db().await;
+        let execution_context = persisted_execution_context(&db).await;
+        let emitter = DatabaseEngineEventEmitter::new_with_pool(db.clone());
+        emitter.emit(EngineEvent::run_start(&execution_context));
+
+        let written = Uuid::now_v7();
+        emitter.emit(start_event(&execution_context, written, None, LATE_SECRET));
+        emitter.emit(stop_event(&execution_context, written, LATE_SECRET, None));
+        emitter.flush_async().await.unwrap();
+        let stored = stored_call(&db, written).await;
+        assert!(stored.1.unwrap().contains(LATE_SECRET));
+
+        execution_context
+            .secret_values
+            .register(&Val::from(LATE_SECRET));
+        emitter.flush_async().await.unwrap();
+        let (args, return_value, _) = stored_call(&db, written).await;
+        assert!(!args.unwrap().contains(LATE_SECRET));
+        assert!(!return_value.unwrap().contains(LATE_SECRET));
+        emitter.shutdown().await.unwrap();
+    }
+
+    /// Calls can't be updated until this trigger is dropped.
+    async fn block_call_updates(db: &crate::db::DatabasePool) {
+        let crate::db::DatabasePool::Sqlite(pool) = db else {
+            panic!("test_db should return SQLite");
+        };
+        sqlx::query(
+            "CREATE TRIGGER block_call_updates BEFORE UPDATE ON call \
+             BEGIN SELECT RAISE(ABORT, 'blocked'); END",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn unblock_call_updates(db: &crate::db::DatabasePool) {
+        let crate::db::DatabasePool::Sqlite(pool) = db else {
+            panic!("test_db should return SQLite");
+        };
+        sqlx::query("DROP TRIGGER block_call_updates")
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn masking_written_calls_survives_a_brief_failure() {
+        let db = crate::db::test_db().await;
+        let execution_context = persisted_execution_context(&db).await;
+        let emitter = DatabaseEngineEventEmitter::new_with_pool(db.clone());
+        emitter.emit(EngineEvent::run_start(&execution_context));
+        let written = Uuid::now_v7();
+        emitter.emit(start_event(&execution_context, written, None, LATE_SECRET));
+        emitter.emit(stop_event(&execution_context, written, "done", None));
+        emitter.flush_async().await.unwrap();
+
+        block_call_updates(&db).await;
+        execution_context
+            .secret_values
+            .register(&Val::from(LATE_SECRET));
+        let unblocking = {
+            let db = db.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                unblock_call_updates(&db).await;
+            })
+        };
+        emitter.flush_async().await.unwrap();
+        unblocking.await.unwrap();
+
+        let args = stored_call(&db, written).await.0.unwrap();
+        assert!(!args.contains(LATE_SECRET), "{args}");
+        emitter.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_reports_written_calls_it_could_not_mask() {
+        let db = crate::db::test_db().await;
+        let execution_context = persisted_execution_context(&db).await;
+        let emitter = DatabaseEngineEventEmitter::new_with_pool(db.clone());
+        emitter.emit(EngineEvent::run_start(&execution_context));
+        let written = Uuid::now_v7();
+        emitter.emit(start_event(&execution_context, written, None, LATE_SECRET));
+        emitter.emit(stop_event(&execution_context, written, "done", None));
+        emitter.flush_async().await.unwrap();
+
+        block_call_updates(&db).await;
+        execution_context
+            .secret_values
+            .register(&Val::from(LATE_SECRET));
+        assert!(emitter.flush_async().await.is_err());
+        assert!(emitter.shutdown().await.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_that_keeps_registering_is_not_read_again_each_flush() {
+        let db = crate::db::test_db().await;
+        let execution_context = persisted_execution_context(&db).await;
+        let emitter = DatabaseEngineEventEmitter::new_with_pool(db.clone());
+        emitter.emit(EngineEvent::run_start(&execution_context));
+        let written = Uuid::now_v7();
+        emitter.emit(start_event(&execution_context, written, None, LATE_SECRET));
+        emitter.emit(stop_event(&execution_context, written, "done", None));
+        emitter.flush_async().await.unwrap();
+
+        // The first registration masks at once, the next waits its turn, and
+        // the end of the run doesn't wait.
+        execution_context
+            .secret_values
+            .register(&Val::from("first-registered-secret"));
+        emitter.flush_async().await.unwrap();
+        execution_context
+            .secret_values
+            .register(&Val::from(LATE_SECRET));
+        emitter.flush_async().await.unwrap();
+        let args = stored_call(&db, written).await.0.unwrap();
+        assert!(args.contains(LATE_SECRET), "{args}");
+
+        emitter.emit(EngineEvent::run_stop(&execution_context, Val::Null));
+        emitter.shutdown().await.unwrap();
+        let args = stored_call(&db, written).await.0.unwrap();
+        assert!(!args.contains(LATE_SECRET), "{args}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn masks_call_errors_and_run_failures() {
+        let db = crate::db::test_db().await;
+        let execution_context = persisted_execution_context(&db).await;
+        execution_context
+            .secret_values
+            .register(&Val::from(LATE_SECRET));
+        let emitter = DatabaseEngineEventEmitter::new_with_pool(db.clone());
+        emitter.emit(EngineEvent::run_start(&execution_context));
+        let call = Uuid::now_v7();
+        emitter.emit(start_event(&execution_context, call, None, "input"));
+        emitter.emit(stop_event(
+            &execution_context,
+            call,
+            "x",
+            Some(&format!("rejected {LATE_SECRET}, password=hunter2")),
+        ));
+        emitter.emit(EngineEvent::run_fail(
+            &execution_context,
+            Val::from(format!("failed with {LATE_SECRET}")),
+        ));
+        emitter.shutdown().await.unwrap();
+
+        assert_eq!(
+            stored_call(&db, call).await.2.unwrap(),
+            "rejected <secret>, password=<secret>"
+        );
+        let crate::db::DatabasePool::Sqlite(pool) = db.clone() else {
+            panic!("test_db should return SQLite");
+        };
+        let result: String = sqlx::query("SELECT result FROM run WHERE run_id = ?")
+            .bind(execution_context.run_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get("result");
+        assert!(!result.contains(LATE_SECRET), "{result}");
+    }
+
+    /// Without any secret registered, credential fields go and the rest of a
+    /// record is written as it was.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn redacts_credential_fields_and_preserves_the_rest() {
+        let db = crate::db::test_db().await;
+        let execution_context = persisted_execution_context(&db).await;
+        let emitter = DatabaseEngineEventEmitter::new_with_pool(db.clone());
+        emitter.emit(EngineEvent::run_start(&execution_context));
+        let call = Uuid::now_v7();
+        emitter.emit(EngineEvent::call_start(
+            &execution_context,
+            call,
+            None,
+            "::hot::test/call".to_string(),
+            "::hot::test/call".to_string(),
+            "run/test".to_string(),
+            0,
+            vec![
+                crate::val!({
+                    "$type": "::hot::http/HttpRequest",
+                    "$val": {
+                        "headers": {"Authorization": "Bearer unregistered", "Accept": "text/plain"},
+                        "body": "client_secret=unregistered&page=2",
+                    },
+                }),
+                Val::Int(7),
+            ],
+            None,
+            chrono::Utc::now(),
+            None,
+        ));
+        emitter.emit(EngineEvent::run_stop(&execution_context, Val::Null));
+        emitter.shutdown().await.unwrap();
+
+        let args = stored_call(&db, call).await.0.unwrap();
+        assert!(!args.contains("unregistered"), "{args}");
+        assert!(args.contains("::hot::http/HttpRequest"), "{args}");
+        assert!(args.contains("\"Accept\":\"text/plain\""), "{args}");
+        assert!(args.contains("client_secret=<secret>&page=2"), "{args}");
+        assert!(args.contains(",7]"), "{args}");
     }
 }

@@ -1,0 +1,58 @@
+::microsoft::sharepoint ns
+meta {
+    doc: """
+    SharePoint Online over Microsoft Graph: sites, document libraries,
+    lists and list items, and per-site app grants. Credentials, clouds,
+    retries and errors come from `microsoft-graph`; files in document
+    libraries go through `microsoft-onedrive` (a library is a drive:
+    pass its id as `opts.drive`).
+
+    **Namespaces**
+
+    - `::microsoft::sharepoint::sites` - root site, site by URL or path, search, subsites, libraries
+    - `::microsoft::sharepoint::lists` - lists, list items with field selection, create/update/delete, subscriptions
+    - `::microsoft::sharepoint::permissions` - `Sites.Selected` / `Lists.SelectedOperations.Selected` app grants
+
+    **Site ids** look like `contoso.sharepoint.com,{site-collection-guid},{web-guid}`.
+    Get one from `sites/get-site-by-url`, `sites/search-sites` or
+    `sites/get-root-site`, and keep it.
+
+    **Quick start**
+
+    ```hot
+    ::sites ::microsoft::sharepoint::sites
+    ::items ::microsoft::onedrive::items
+    ::content ::microsoft::onedrive::content
+
+    site ::sites/get-site-by-url("https://contoso.sharepoint.com/sites/engineering")
+    lib ::sites/find-drive(site.id, "Documents")
+    files ::items/list-all-children("root", {drive: lib.id}, 100)
+    doc ::content/read-document(first(files), "pdf")
+    ```
+    """
+}
+
+::api ::microsoft::graph::api
+
+site-path
+meta {
+    doc: """The Graph path of a site by id: `/sites/{encoded id}` (pure). Site ids contain commas, which are encoded."""
+}
+fn (site-id: Str): Str {
+  `/sites/${::api/encode-segment(site-id)}`
+}
+
+list-path
+meta {
+    doc: """The Graph path of a list by id or display name under a site: `/sites/{site}/lists/{list}` (pure)."""
+}
+fn (site-id: Str, list: Str): Str {
+  `${site-path(site-id)}/lists/${::api/encode-segment(list)}`
+}
+
+// Shortcuts to the most used functions.
+get-site-by-url ::microsoft::sharepoint::sites/get-site-by-url
+search-sites ::microsoft::sharepoint::sites/search-sites
+list-drives ::microsoft::sharepoint::sites/list-drives
+list-items ::microsoft::sharepoint::lists/list-items
+grant-site ::microsoft::sharepoint::permissions/grant-site

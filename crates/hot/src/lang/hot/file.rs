@@ -5,13 +5,16 @@
 // - "service": Managed storage with database tracking, org isolation (default for projects)
 
 use crate::file_storage::{FileRunProvenance, FileStorage, FileStorageContext};
+use crate::lang::hot::iter::{HotIterator, IteratorBox};
 use crate::lang::hot::r#type::HotResult;
 use crate::lang::runtime::vm::VirtualMachine;
 use crate::val::Val;
-use crate::validate_args;
+use crate::{validate_args, validate_args_range};
 use indexmap::IndexMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// Get the file mode from VM configuration
 /// Returns "direct" (default) or "service"
@@ -169,7 +172,7 @@ fn create_direct_file_meta(path: &str, metadata: &std::fs::Metadata) -> Val {
     map.insert(Val::from("created-at"), Val::Int(created_at));
     map.insert(Val::from("updated-at"), Val::Int(updated_at));
 
-    Val::Map(Box::new(map))
+    Val::constructed("::hot::file/FileMeta", map)
 }
 
 // ============================================================================
@@ -195,7 +198,7 @@ fn read_file_bytes_direct(path: &str) -> HotResult<Val> {
     };
 
     match std::fs::read(&normalized) {
-        Ok(bytes) => HotResult::Ok(Val::Bytes(bytes)),
+        Ok(bytes) => HotResult::Ok(Val::bytes(bytes)),
         Err(e) => HotResult::Err(Val::from(format!("Failed to read file: {}", e))),
     }
 }
@@ -230,7 +233,7 @@ fn write_file_direct(path: &str, contents: &str) -> HotResult<Val> {
                     map.insert(Val::from("path"), Val::from(path.to_string()));
                     map.insert(Val::from("size"), Val::Int(contents.len() as i64));
                     map.insert(Val::from("storage-backend"), Val::from("direct"));
-                    HotResult::Ok(Val::Map(Box::new(map)))
+                    HotResult::Ok(Val::constructed("::hot::file/FileMeta", map))
                 }
             }
         }
@@ -268,7 +271,7 @@ fn write_file_bytes_direct(path: &str, contents: &[u8]) -> HotResult<Val> {
                     map.insert(Val::from("path"), Val::from(path.to_string()));
                     map.insert(Val::from("size"), Val::Int(contents.len() as i64));
                     map.insert(Val::from("storage-backend"), Val::from("direct"));
-                    HotResult::Ok(Val::Map(Box::new(map)))
+                    HotResult::Ok(Val::constructed("::hot::file/FileMeta", map))
                 }
             }
         }
@@ -332,7 +335,7 @@ fn list_files_direct(prefix: &str) -> HotResult<Val> {
     };
 
     if !search_dir.exists() {
-        return HotResult::Ok(Val::Vec(vec![]));
+        return HotResult::Ok(Val::vec(vec![]));
     }
 
     let mut files = Vec::new();
@@ -375,7 +378,7 @@ fn list_files_direct(prefix: &str) -> HotResult<Val> {
         return HotResult::Err(Val::from(format!("Failed to list files: {}", e)));
     }
 
-    HotResult::Ok(Val::Vec(files))
+    HotResult::Ok(Val::vec(files))
 }
 
 // ============================================================================
@@ -436,6 +439,152 @@ pub fn read_file_bytes(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> 
     };
 
     read_file_bytes_internal(args, &file_storage, &ctx)
+}
+
+/// Bytes a stream reads at a time unless told otherwise.
+const DEFAULT_STREAM_CHUNK_BYTES: usize = 64 * 1024;
+
+/// Where a [`FileChunks`] reads from.
+enum ChunkSource {
+    Direct(std::fs::File),
+    Service {
+        // A Mutex because a reader is Send but not Sync, as an iterator must be.
+        reader: Mutex<Pin<Box<dyn AsyncRead + Send>>>,
+        runtime: tokio::runtime::Handle,
+    },
+    /// A storage backend that can only read a file whole.
+    Whole {
+        bytes: Vec<u8>,
+        position: usize,
+    },
+}
+
+/// A file's bytes, a chunk at a time.
+struct FileChunks {
+    source: ChunkSource,
+    chunk_bytes: usize,
+    done: bool,
+}
+
+impl std::fmt::Debug for FileChunks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileChunks")
+            .field("chunk_bytes", &self.chunk_bytes)
+            .field("done", &self.done)
+            .finish_non_exhaustive()
+    }
+}
+
+impl HotIterator for FileChunks {
+    fn next(&mut self) -> Result<(Val, bool), String> {
+        if self.done {
+            return Ok((Val::Null, true));
+        }
+        let mut chunk = vec![0u8; self.chunk_bytes];
+        let read = match &mut self.source {
+            ChunkSource::Direct(file) => {
+                std::io::Read::read(file, &mut chunk).map_err(|e| e.to_string())
+            }
+            ChunkSource::Service { reader, runtime } => {
+                let reader = reader.get_mut().map_err(|e| e.to_string())?;
+                runtime
+                    .block_on(reader.read(&mut chunk))
+                    .map_err(|e| e.to_string())
+            }
+            ChunkSource::Whole { bytes, position } => {
+                let read = (bytes.len() - *position).min(chunk.len());
+                chunk[..read].copy_from_slice(&bytes[*position..*position + read]);
+                *position += read;
+                Ok(read)
+            }
+        }
+        .map_err(|e| format!("Failed to read file: {e}"))?;
+        if read == 0 {
+            self.done = true;
+            return Ok((Val::Null, true));
+        }
+        chunk.truncate(read);
+        Ok((Val::bytes(chunk), false))
+    }
+}
+
+/// Open a file as an iterator of Bytes chunks (VM-aware wrapper)
+pub fn read_file_stream(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
+    validate_args_range!("::hot::file/read-file-stream", args, 1, 2);
+
+    let path = match &args[0] {
+        Val::Str(s) => &**s,
+        _ => return HotResult::Err(Val::from("Path must be a string")),
+    };
+    let chunk_bytes = match stream_chunk_bytes(args.get(1)) {
+        Ok(n) => n,
+        Err(e) => return HotResult::Err(e),
+    };
+
+    let source = if get_file_mode(vm) == "direct" {
+        match normalize_direct_path(path)
+            .and_then(|p| std::fs::File::open(p).map_err(|e| format!("Failed to read file: {}", e)))
+        {
+            Ok(file) => ChunkSource::Direct(file),
+            Err(e) => return HotResult::Err(Val::from(e)),
+        }
+    } else {
+        // Service mode
+        let file_storage = match vm.get_file_storage() {
+            Some(fs) => fs,
+            None => return HotResult::Err(Val::from("File storage not configured")),
+        };
+        let ctx = match get_file_context(vm) {
+            Ok(c) => c,
+            Err(e) => return HotResult::Err(Val::from(e)),
+        };
+        match block_on_file_op(file_storage.open_file_stream(path, &ctx)) {
+            Ok(Some(stream)) => ChunkSource::Service {
+                reader: Mutex::new(stream.reader),
+                runtime: tokio::runtime::Handle::current(),
+            },
+            Ok(None) => match block_on_file_op(file_storage.read_file(path, &ctx)) {
+                Ok(bytes) => ChunkSource::Whole { bytes, position: 0 },
+                Err(e) => return HotResult::Err(Val::from(e)),
+            },
+            Err(e) => return HotResult::Err(Val::from(e)),
+        }
+    };
+
+    let chunks = FileChunks {
+        source,
+        chunk_bytes,
+        done: false,
+    };
+    HotResult::Ok(Val::Box(Box::new(IteratorBox::new(Box::new(chunks)))))
+}
+
+fn stream_chunk_bytes(opts: Option<&Val>) -> Result<usize, Val> {
+    let Some(opts) = opts else {
+        return Ok(DEFAULT_STREAM_CHUNK_BYTES);
+    };
+    let Val::Map(map) = opts else {
+        return Err(Val::from("read-file-stream options must be a Map"));
+    };
+    for key in map.keys() {
+        if !matches!(key, Val::Str(name) if &**name == "chunk-size") {
+            return Err(Val::from(format!(
+                "read-file-stream: unknown option {}",
+                key
+            )));
+        }
+    }
+    match map.get(&Val::from("chunk-size")) {
+        None | Some(Val::Null) => Ok(DEFAULT_STREAM_CHUNK_BYTES),
+        Some(Val::Int(n)) if *n > 0 => {
+            let n = *n as usize;
+            crate::lang::runtime::limits::check_alloc_bytes("read-file-stream", n)?;
+            Ok(n)
+        }
+        Some(_) => Err(Val::from(
+            "read-file-stream: chunk-size must be a positive Int",
+        )),
+    }
 }
 
 /// Write file contents from string (VM-aware wrapper)
@@ -648,7 +797,7 @@ fn read_file_bytes_internal(
     };
 
     match block_on_file_op(file_storage.read_file(path, ctx)) {
-        Ok(bytes) => HotResult::Ok(Val::Bytes(bytes)),
+        Ok(bytes) => HotResult::Ok(Val::bytes(bytes)),
         Err(e) => HotResult::Err(Val::from(e)),
     }
 }
@@ -768,7 +917,7 @@ fn list_files_internal(
     match block_on_file_op(file_storage.list_files(prefix, ctx)) {
         Ok(files) => {
             let vals: Vec<Val> = files.iter().map(|f| f.to_val()).collect();
-            HotResult::Ok(Val::Vec(vals))
+            HotResult::Ok(Val::vec(vals))
         }
         Err(e) => HotResult::Err(Val::from(e)),
     }
@@ -912,7 +1061,7 @@ mod tests {
         match result {
             HotResult::Ok(val) => {
                 // Check metadata returned
-                if let Val::Map(map) = val {
+                if let Val::Map(map) = crate::val::as_fields(&val) {
                     assert!(map.contains_key(&Val::from("path")));
                     assert!(map.contains_key(&Val::from("size")));
                     assert!(map.contains_key(&Val::from("storage-backend")));
@@ -1006,7 +1155,10 @@ mod tests {
 
         let result = file_info_direct(file_path.to_str().unwrap());
         match result {
-            HotResult::Ok(Val::Map(map)) => {
+            HotResult::Ok(value) => {
+                let Val::Map(map) = crate::val::as_fields(&value) else {
+                    panic!("Expected a FileMeta, got {value:?}");
+                };
                 // Check size
                 if let Some(Val::Int(size)) = map.get(&Val::from("size")) {
                     assert_eq!(*size, content.len() as i64);
@@ -1026,7 +1178,6 @@ mod tests {
                     assert!(ct.to_string().contains("text/plain"));
                 }
             }
-            HotResult::Ok(other) => panic!("Expected Map, got {:?}", other),
             HotResult::Err(e) => panic!("Expected success, got error: {:?}", e),
         }
     }
@@ -1066,7 +1217,7 @@ mod tests {
         let result = read_file_bytes_direct(file_path.to_str().unwrap());
         match result {
             HotResult::Ok(Val::Bytes(bytes)) => {
-                assert_eq!(bytes, content);
+                assert_eq!(*bytes, content);
             }
             HotResult::Ok(other) => panic!("Expected Bytes, got {:?}", other),
             HotResult::Err(e) => panic!("Expected success, got error: {:?}", e),
@@ -1081,7 +1232,10 @@ mod tests {
 
         let result = write_file_bytes_direct(file_path.to_str().unwrap(), &content);
         match result {
-            HotResult::Ok(Val::Map(map)) => {
+            HotResult::Ok(value) => {
+                let Val::Map(map) = crate::val::as_fields(&value) else {
+                    panic!("Expected a FileMeta, got {value:?}");
+                };
                 // Verify size
                 if let Some(Val::Int(size)) = map.get(&Val::from("size")) {
                     assert_eq!(*size, content.len() as i64);
@@ -1091,7 +1245,6 @@ mod tests {
                 let written = fs::read(&file_path).unwrap();
                 assert_eq!(written, content);
             }
-            HotResult::Ok(other) => panic!("Expected Map, got {:?}", other),
             HotResult::Err(e) => panic!("Expected success, got error: {:?}", e),
         }
     }
@@ -1108,8 +1261,9 @@ mod tests {
 
         let metadata = fs::metadata(&file_path).unwrap();
         let result = create_direct_file_meta("meta_test.json", &metadata);
+        assert!(result.is_type("::hot::file/FileMeta"));
 
-        if let Val::Map(map) = result {
+        if let Val::Map(map) = crate::val::as_fields(&result) {
             // Check file-id equals path
             if let Some(Val::Str(id)) = map.get(&Val::from("file-id")) {
                 assert_eq!(&**id, "meta_test.json");

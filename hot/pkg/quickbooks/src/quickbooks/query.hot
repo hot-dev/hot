@@ -1,0 +1,341 @@
+::quickbooks::query ns
+meta {
+    doc: """
+    The QuickBooks query endpoint: a SQL-like `select` over one entity.
+
+    ```
+    select * from Invoice where Balance > '0' and TxnDate >= '2026-01-01' orderby TxnDate desc
+    ```
+
+    The language has no joins, no `or` (use `in`), and no functions
+    except `count(*)`. String values are single-quoted: build them with
+    `literal`, which escapes quotes and backslashes, so a customer called
+    `O'Brien` cannot break (or inject into) the query. Field names are
+    checked with `field`.
+
+    **Paging.** Pages are `STARTPOSITION` (1-based) and `MAXRESULTS`
+    (at most 1000). `query` fetches one page; `query-all` follows pages
+    until a short page or `limit`. Do not put STARTPOSITION or
+    MAXRESULTS in a query passed to `query-all`.
+
+    ```hot
+    ::q ::quickbooks::query
+
+    name "O'Brien Supplies"
+    vendor first(::q/query(`select * from Vendor where DisplayName = ${::q/literal(name)}`).items)
+
+    overdue ::q/query-all(::q/select-from("Invoice", [
+      ["Balance", ">", 0],
+      ["DueDate", "<", "2026-11-01"]
+    ], "DueDate"), 5000)
+
+    open-count ::q/count-rows("Invoice", [["Balance", ">", 0]])
+    ```
+
+    Queries are sent as a POST body (`Content-Type: application/text`),
+    so long `in (...)` lists are not limited by URL length.
+    """
+}
+
+::api ::quickbooks::api
+::re ::hot::regex
+
+OPERATORS ["=", "<", ">", "<=", ">=", "!=", "in", "like"]
+MAX_PAGES 10000
+
+// ---------------------------------------------------------------------------
+// Building (pure)
+// ---------------------------------------------------------------------------
+
+escape-string
+meta {
+    doc: """Escape a string for a single-quoted query literal: `\` becomes `\\` and `'` becomes `\'`."""
+}
+fn (value: Str): Str {
+  replace(replace(value, "\\", "\\\\"), "'", "\\'")
+}
+
+literal
+meta {
+    doc: """
+    A query literal for a value: Strs are single-quoted and escaped
+    (`"O'Brien"` gives `'O\'Brien'`); Ints and Decs are written as
+    quoted numbers, which QuickBooks compares numerically; Bools are
+    `true` / `false`; a Vec gives an `in` list `('a', 'b')`. Null is an
+    Err.
+    """
+}
+fn (value: Any): Str {
+  cond {
+    is-null(value) => { err("quickbooks: a query literal cannot be null") }
+    is-bool(value) => { if(value, "true", "false") }
+    is-vec(value) => {
+      cond {
+        is-empty(value) => { err("quickbooks: an in (...) list needs at least one value") }
+        some(value, (v) { or(is-null(v), is-vec(v)) }) => { err("quickbooks: an in (...) list holds non-null scalar values only") }
+        => { `(${join(map(value, literal), ", ")})` }
+      }
+    }
+
+    is-str(value) => { `'${escape-string(value)}'` }
+    => { `'${Str(value)}'` }
+  }
+}
+
+field
+meta {
+    doc: """Check a field name (`DisplayName`, `MetaData.LastUpdatedTime`, `CustomerRef`): letters, digits, `_` and dots only. Returns it, or an Err."""
+}
+fn (name: Str): Str {
+  cond {
+    ::re/is-match(name, "^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)*$") => { name }
+    => { err(`quickbooks: invalid query field name '${name}'`) }
+  }
+}
+
+condition
+meta {
+    doc: """
+    One `where` condition from a field, an operator (`=`, `<`, `>`,
+    `<=`, `>=`, `!=`, `in`, `like`) and a value (escaped with `literal`).
+    `like` supports `%` wildcards inside the value.
+
+    ```hot
+    ::quickbooks::query/condition("DisplayName", "like", "Acme%")   // "DisplayName like 'Acme%'"
+    ::quickbooks::query/condition("Id", "in", ["1", "2"])           // "Id in ('1', '2')"
+    ```
+    """
+}
+fn (name: Str, op: Str, value: Any): Str {
+  checked field(name)
+  operator lowercase(trim(op))
+  lit literal(value)
+  cond {
+    is-err(checked) => { checked }
+    not(in(operator, OPERATORS)) => { err(`quickbooks: unsupported query operator '${op}'`) }
+    is-err(lit) => { lit }
+    and(eq(operator, "in"), not(is-vec(value))) => { err("quickbooks: the in operator needs a Vec of values") }
+    => { `${checked} ${operator} ${lit}` }
+  }
+}
+
+select-from
+meta {
+    doc: """
+    Build `select * from {entity} [where c1 and c2 ...] [orderby ...]`.
+    Each condition is a `[field, operator, value]` Vec (escaped with
+    `condition`) or a clause Str you have escaped yourself; `order-by`
+    is a field optionally followed by `asc` / `desc`, or null. Errs on
+    an invalid field, operator, value or orderby.
+
+    ```hot
+    ::quickbooks::query/select-from("Invoice", [["Balance", ">", 0], ["CustomerRef", "=", "58"]], "DueDate")
+    // "select * from Invoice where Balance > '0' and CustomerRef = '58' orderby DueDate"
+    ```
+    """
+}
+fn
+(entity: Str): Str {
+  select-from(entity, [], null)
+},
+(entity: Str, conditions: Vec): Str {
+  select-from(entity, conditions, null)
+},
+(entity: Str, conditions: Vec, order-by: Str?): Str {
+  select-clause("*", entity, conditions, order-by)
+}
+
+clause
+meta {
+    doc: """One condition for `select-from`: a `[field, op, value]` Vec becomes `condition(field, op, value)`; a Str passes through. Anything else is an Err."""
+}
+fn (c: Any): Str {
+  cond {
+    is-str(c) => { c }
+    and(is-vec(c), eq(length(c), 3)) => { condition(Str(c[0]), Str(c[1]), c[2]) }
+    => { err("quickbooks: a condition is a [field, operator, value] Vec or a clause Str") }
+  }
+}
+
+select-clause fn (columns: Str, entity: Str, conditions: Vec, order-by: Str?): Str {
+  checked field(entity)
+  bad find-first(conditions, (c) { is-err(clause(c)) })
+  order-ok or(is-null(order-by), ::re/is-match(trim(or(order-by, "")), "^[A-Za-z][A-Za-z0-9_.]*( (?i:asc|desc))?$"))
+  cond {
+    is-err(checked) => { checked }
+    is-some(bad) => { clause(bad) }
+    not(order-ok) => { err(`quickbooks: invalid orderby '${order-by}'`) }
+    => {
+      where-part if(is-empty(conditions), "", ` where ${join(map(conditions, clause), " and ")}`)
+      order-part if(is-null(order-by), "", ` orderby ${trim(or(order-by, ""))}`)
+      `select ${columns} from ${checked}${where-part}${order-part}`
+    }
+  }
+}
+
+has-paging
+meta {
+    doc: """True when a query already has STARTPOSITION or MAXRESULTS (case-insensitive)."""
+}
+fn (query: Str): Bool {
+  ::re/is-match(query, "(?i)\\b(startposition|maxresults)\\b")
+}
+
+with-paging
+meta {
+    doc: """Append `STARTPOSITION {start} MAXRESULTS {max}` to a query (pure). `max` is clamped to 1..1000."""
+}
+fn (query: Str, start: Int, max-results: Int): Str {
+  size min(max(max-results, 1), ::quickbooks/MAX_RESULTS)
+  `${trim(query)} STARTPOSITION ${max(start, 1)} MAXRESULTS ${size}`
+}
+
+entity-of
+meta {
+    doc: """The entity a query selects from (`select * from Invoice where ...` gives `"Invoice"`), or null."""
+}
+fn (query: Str): Str? {
+  m ::re/capture(query, "(?i)\\bfrom\\s+([A-Za-z][A-Za-z0-9_]*)")
+  groups if(is-map(m), or(get(m, "groups"), []), [])
+  if(is-empty(groups), null, first(groups))
+}
+
+Page
+meta {
+    doc: """One page of query results: `items` (the entity rows, `[]` when none), `entity`, `start-position`, `max-results` (rows returned), `total-count` (from `count(*)` queries) and the raw `response`."""
+}
+type {
+    items: Vec,
+    entity: Str?,
+    start-position: Int?,
+    max-results: Int?,
+    total-count: Int?,
+    response: Map
+}
+
+to-page
+meta {
+    doc: """Turn a query response body into a `Page` (pure). Finds the rows under `QueryResponse` whatever the key's case."""
+}
+fn (body: Map, entity: Str?): Page {
+  qr or(get(body, "QueryResponse"), {})
+  row-key cond {
+    and(is-some(entity), is-some(get(qr, entity))) => { entity }
+    => { find-first(keys(qr), (k) { is-vec(get(qr, k)) }) }
+  }
+
+  Page({
+    items: if(is-some(row-key), get(qr, row-key), []),
+    entity: or(row-key, entity),
+    start-position: ::quickbooks::oauth/int-or-null(get(qr, "startPosition")),
+    max-results: ::quickbooks::oauth/int-or-null(get(qr, "maxResults")),
+    total-count: ::quickbooks::oauth/int-or-null(get(qr, "totalCount")),
+    response: body
+  })
+}
+
+next-start
+meta {
+    doc: """The STARTPOSITION after a page of `count` rows fetched from `start` with page size `size`, or null when that page was the last (short or empty). Pure."""
+}
+fn (start: Int, size: Int, count: Int): Int? {
+  if(or(eq(count, 0), lt(count, size)), null, add(start, count))
+}
+
+// ---------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------
+
+query
+meta {
+    doc: """
+    Run a query and return one `Page`. Add STARTPOSITION / MAXRESULTS to
+    the query yourself, or use `query-page` / `query-all`. Without
+    MAXRESULTS QuickBooks returns at most 100 rows.
+    """
+}
+fn
+(q: Str): Page {
+  query(q, {})
+},
+(q: Str, opts: Map): Page {
+  body ::api/json("POST", "/query", {}, q, {Content-Type: "application/text"}, {...opts, idempotent: true})
+  if(is-err(body), body, to-page(body, entity-of(q)))
+}
+
+query-page
+meta {
+    doc: """Run `q` for one page from `start` (1-based) of up to `max-results` rows (at most 1000)."""
+}
+fn
+(q: Str, start: Int, max-results: Int): Page {
+  query-page(q, start, max-results, {})
+},
+(q: Str, start: Int, max-results: Int, opts: Map): Page {
+  cond {
+    has-paging(q) => { err("quickbooks: remove STARTPOSITION/MAXRESULTS from the query; query-page adds them") }
+    => { query(with-paging(q, start, max-results), opts) }
+  }
+}
+
+collect-loop fn (q: Str, start: Int, size: Int, limit: Int?, acc: Vec, pages: Int, opts: Map): Vec {
+  page query-page(q, start, size, opts)
+  cond {
+    is-err(page) => { page }
+    => {
+      all concat(acc, page.items)
+      next next-start(start, size, length(page.items))
+      cond {
+        and(is-some(limit), gte(length(all), or(limit, 0))) => { slice(all, 0, limit) }
+        is-null(next) => { all }
+        gte(pages, MAX_PAGES) => { all }
+        => { collect-loop(q, or(next, 1), size, limit, all, add(pages, 1), opts) }
+      }
+    }
+  }
+}
+
+query-all
+meta {
+    doc: """
+    Run `q` across pages of 1000 and return every row, or at most `limit`
+    (null for no limit). The first failing page's Err is returned. Each
+    page is one API call (and, under the Intuit App Partner Program, one
+    metered CorePlus call), so narrow the query with a `where` clause.
+    """
+}
+fn
+(q: Str): Vec {
+  query-all(q, null, {})
+},
+(q: Str, limit: Int?): Vec {
+  query-all(q, limit, {})
+},
+(q: Str, limit: Int?, opts: Map): Vec {
+  cond {
+    has-paging(q) => { err("quickbooks: remove STARTPOSITION/MAXRESULTS from the query; query-all adds them") }
+    => {
+      size if(is-some(limit), min(max(or(limit, 1), 1), ::quickbooks/MAX_RESULTS), ::quickbooks/MAX_RESULTS)
+      collect-loop(q, 1, size, limit, [], 1, opts)
+    }
+  }
+}
+
+count-rows
+meta {
+    doc: """`select count(*) from {entity} where ...`: the number of matching rows (`totalCount`)."""
+}
+fn
+(entity: Str, conditions: Vec): Int {
+  count-rows(entity, conditions, {})
+},
+(entity: Str, conditions: Vec, opts: Map): Int {
+  q select-clause("count(*)", entity, conditions, null)
+  cond {
+    is-err(q) => { q }
+    => {
+      page query(q, opts)
+      if(is-err(page), page, or(page.total-count, 0))
+    }
+  }
+}

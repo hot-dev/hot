@@ -87,6 +87,10 @@ shadows a function, and `hot test` warns about a test with no assertions.
   variant and exposes its payload inside the selected arm.
 - Hot is gradually typed: known records are checked structurally, while
   constructed types and enum variants retain nominal runtime tags.
+- A parameter annotated with a built-in type is checked at the call. Another
+  value returns `Err` before the body runs, including null unless the annotation
+  has `?`. An `Int` becomes a `Dec` at `x: Dec`, and a whole `Dec` an `Int` at
+  `x: Int`. User types, `Any` and `Fn` aren't checked.
 - Values have immutable semantics. Name reuse and deep-path assignment create
   later bindings rather than shared-object mutation.
 - Parameters marked `lazy` hold their argument expressions as non-memoized
@@ -484,8 +488,18 @@ children fn (node: Map, name: Str): Vec<Map>
 text fn (node: Map): Str
 attr fn (node: Map, name: Str): Str
 
+// CSV and TSV (values stay Str; `types` converts named columns)
+from-csv fn (text: Str | Bytes): Vec<Map>
+from-csv fn (text: Str | Bytes, opts: Map): Vec
+to-csv fn (rows: Vec): Str
+to-csv fn (rows: Vec, opts: Map): Str
+iter-csv fn (source: Iter | Str | Bytes): Iter           // One row at a time; use for large files
+iter-csv fn (source: Iter | Str | Bytes, opts: Map): Iter
+// from-tsv, to-tsv and iter-tsv take the same arguments
+
 // File I/O
 read-file fn (path: Str): Str
+read-file-stream fn (path: Str): Iter                    // Bytes chunks, without loading the file
 write-file fn (path: Str, content: Str): Bool
 delete-file fn (path: Str): Bool
 file-exists fn (path: Str): Bool
@@ -543,7 +557,7 @@ hash ::hot::hash/sha256("data")
 - `::hot::env` — `get(name, default)`, `get-all`
 - `::hot::ctx` — `get(key)`, `set(key, value)`, `set(map)`, `set-secret(key, value)`
 - `::hot::hash` — `sha256`, `blake3`, `sha384`, `sha512`
-- `::hot::hmac` — `hmac-sha512`, `hmac-sha1`
+- `::hot::hmac` — `hmac-sha256`, `hmac-sha256-bytes`, `hmac-sha512`, `hmac-sha1`, `hmac-verify`, `hmac-verify-hex`, `hmac-verify-base64`
 - `::hot::time` — `now`, `now-zoned`, `parse`, `format`, `add`, `subtract`, `year`, `month`, `day`, `days`, `hours`, `minutes`, `seconds`, `with-timezone`, `to-plain-date-time`, `to-plain-date`, `to-plain-time`, `to-instant`
 - `::hot::base64` — `encode`, `decode`, `encode-url`, `decode-url`
 - `::hot::uri` — `Uri` type, `encode`, `decode`, `encode-query`, `decode-query`, `parse`, `build`, `join`, `is-valid`

@@ -1,0 +1,323 @@
+::box::folders ns
+meta {
+    doc: """
+    Box folders: list a folder's items (marker or offset paging, `fields`,
+    sort), get folder info, create, update, rename, move, copy, trash and
+    restore. The root folder of every account is `"0"`.
+
+    Every function has an options arity taking an `opts` Map: Box query
+    parameters by their Box names (`fields`, `limit`, `marker`,
+    `offset`, `sort`, `direction`, ...), `if-match` (an etag) for safe
+    writes, and the credential keys handled by `::box::auth`.
+    """
+}
+
+::api ::box::api
+DocFile ::box/DocFile
+
+MAX_LIMIT 1000
+LOCAL_KEYS ["if-match", "if-none-match", "boxapi", "paging", "name", "parent-id", "recursive"]
+
+// ---------------------------------------------------------------------------
+// Listing
+// ---------------------------------------------------------------------------
+
+items-params
+meta {
+    doc: """
+    The query parameters `list-items` sends for `opts` (pure): `fields` =
+    `::box/ITEM_FIELDS`, `limit` 1000, and `usemarker=true` unless `opts`
+    asks for offset paging (by passing `offset`), then your parameters
+    (`fields`, `limit`, `marker`, `offset`, `sort` (`id`, `name`, `date`,
+    `size`), `direction` (`ASC`, `DESC`)). Nulls are dropped.
+    """
+}
+fn (opts: Map): Map {
+  offset-paging is-some(get(opts, "offset"))
+  ::box/query-params({
+    fields: ::box/ITEM_FIELDS,
+    limit: MAX_LIMIT,
+    usemarker: if(offset-paging, null, true)
+  }, opts, LOCAL_KEYS)
+}
+
+list-items
+meta {
+    doc: """
+    GET /folders/{id}/items - one page of a folder's files, folders and
+    web links. Marker paging by default: Box returns `{entries,
+    next_marker, limit}`; pass `{marker: page.next_marker}` for the next
+    page, or use `list-all-items`. Pass `offset` instead for offset paging
+    (`{entries, total_count, offset, limit}`; Box caps offset paging at
+    10,000 items, marker paging has no cap).
+
+    ```hot
+    page ::box::folders/list-items("0", {fields: "id,type,name,size,modified_at", sort: "date", direction: "DESC"})
+    page.entries
+    ```
+    """
+}
+fn
+(folder-id: Str): Map {
+  list-items(folder-id, {})
+},
+(folder-id: Str, opts: Map): Map {
+  ::box/json-with("GET", ::box/url(`/folders/${::box/encode-id(folder-id)}/items`, items-params(opts)), ::box/condition-headers(opts), "", opts)
+}
+
+list-all-items
+meta {
+    doc: """
+    Every item in a folder (all pages, or at most `limit`), following
+    `next_marker` (or offsets with `{paging: "offset"}`). Takes the same
+    `opts` as `list-items`. Items are not recursive: list sub-folders
+    yourself, or use `::box::search/search` with `ancestor_folder_ids`.
+
+    ```hot
+    files ::box::folders/list-all-items("12345", {fields: "id,type,name,sha1"}, 5000)
+    ```
+    """
+}
+fn
+(folder-id: Str): Vec {
+  list-all-items(folder-id, {}, null)
+},
+(folder-id: Str, opts: Map): Vec {
+  list-all-items(folder-id, opts, null)
+},
+(folder-id: Str, opts: Map, limit: Int?): Vec {
+  size if(is-some(limit), min(MAX_LIMIT, max(or(limit, 1), 1)), MAX_LIMIT)
+  sized if(is-some(get(opts, "limit")), opts, {...opts, limit: size})
+  page-size or(::box/to-int(get(sized, "limit")), MAX_LIMIT)
+  cond {
+    eq(get(opts, "paging"), "offset") => {
+      ::api/collect-offset((offset) { list-items(folder-id, {...sized, offset: offset}) }, page-size, limit)
+    }
+    => {
+      ::api/collect-marker((marker) { list-items(folder-id, {...sized, marker: marker}) }, limit)
+    }
+  }
+}
+
+list-all-doc-files
+meta {doc: """`list-all-items` normalised to `::box/DocFile`s."""}
+fn
+(folder-id: Str): Vec {
+  list-all-doc-files(folder-id, {}, null)
+},
+(folder-id: Str, opts: Map, limit: Int?): Vec {
+  items list-all-items(folder-id, opts, limit)
+  if(is-err(items), items, ::box/to-doc-files(items))
+}
+
+// ---------------------------------------------------------------------------
+// Reading
+// ---------------------------------------------------------------------------
+
+get-folder
+meta {
+    doc: """GET /folders/{id} - folder information. `fields` defaults to `::box/FOLDER_FIELDS`. The response also carries the first page of `item_collection` when you ask for that field."""
+}
+fn
+(folder-id: Str): Map {
+  get-folder(folder-id, {})
+},
+(folder-id: Str, opts: Map): Map {
+  params ::box/query-params({fields: ::box/FOLDER_FIELDS}, opts, LOCAL_KEYS)
+  ::box/json-with("GET", ::box/url(`/folders/${::box/encode-id(folder-id)}`, params), ::box/condition-headers(opts), "", opts)
+}
+
+get-doc-file
+meta {doc: """`get-folder` normalised to a `::box/DocFile`."""}
+fn
+(folder-id: Str): DocFile {
+  get-doc-file(folder-id, {})
+},
+(folder-id: Str, opts: Map): DocFile {
+  folder get-folder(folder-id, opts)
+  if(is-err(folder), folder, ::box/to-doc-file(folder))
+}
+
+// ---------------------------------------------------------------------------
+// Creating and updating
+// ---------------------------------------------------------------------------
+
+create-body
+meta {
+    doc: """The `POST /folders` body (pure): `name`, `parent: {id}`, plus extra fields from `opts.metadata` (e.g. `sync_state`, `folder_upload_email`)."""
+}
+fn (name: Str, parent-id: Str, opts: Map): Map {
+  ::box/compact({name: name, parent: ::box/parent-ref(parent-id), ...or(get(opts, "metadata"), {})})
+}
+
+create-folder
+meta {
+    doc: """
+    POST /folders - create a folder in `parent-id` (default the root,
+    `"0"`). Fails with 409 `item_name_in_use` when the name is taken; see
+    `ensure-folder`.
+
+    ```hot
+    folder ::box::folders/create-folder("Reports", "0")
+    folder.id
+    ```
+    """
+}
+fn
+(name: Str): Map {
+  create-folder(name, ::box/ROOT_FOLDER_ID, {})
+},
+(name: Str, parent-id: Str): Map {
+  create-folder(name, parent-id, {})
+},
+(name: Str, parent-id: Str, opts: Map): Map {
+  params ::box/query-params({fields: ::box/FOLDER_FIELDS}, opts, concat(["metadata"], LOCAL_KEYS))
+  ::box/json("POST", ::box/url("/folders", params), create-body(name, parent-id, opts), opts)
+}
+
+conflict-item
+meta {
+    doc: """The existing item a 409 `item_name_in_use` error points at (`context_info.conflicts`, a Map or the first of a Vec), or null (pure)."""
+}
+fn (error: Result): Map? {
+  payload ::api/plain-payload(error)
+  info if(is-map(payload), get(payload, "context-info"), null)
+  conflicts if(is-map(info), info.conflicts, null)
+  cond {
+    is-vec(conflicts) => { if(is-empty(conflicts), null, first(conflicts)) }
+    is-map(conflicts) => { conflicts }
+    => { null }
+  }
+}
+
+ensure-folder
+meta {
+    doc: """Create a folder named `name` in `parent-id`, or return the existing one when Box answers 409 `item_name_in_use` with a folder conflict. One API call either way; handy for idempotent workflow output folders."""
+}
+fn
+(name: Str, parent-id: Str): Map {
+  ensure-folder(name, parent-id, {})
+},
+(name: Str, parent-id: Str, opts: Map): Map {
+  created create-folder(name, parent-id, opts)
+  existing if(::api/has-code(created, "item_name_in_use"), conflict-item(created), null)
+  cond {
+    not(is-err(created)) => { created }
+    and(is-map(existing), eq(existing.type, "folder")) => { existing }
+    => { created }
+  }
+}
+
+update-folder
+meta {
+    doc: """
+    PUT /folders/{id} - update a folder: `name`, `description`, `parent`
+    (`{id}`, to move), `tags`, `shared_link`, `folder_upload_email`,
+    `sync_state`, ... Null values in `changes` are dropped. `opts.if-match`
+    (an etag) makes the write fail with 412 when the folder changed.
+    """
+}
+fn
+(folder-id: Str, changes: Map): Map {
+  update-folder(folder-id, changes, {})
+},
+(folder-id: Str, changes: Map, opts: Map): Map {
+  params ::box/query-params({fields: ::box/FOLDER_FIELDS}, opts, LOCAL_KEYS)
+  ::box/json-with("PUT", ::box/url(`/folders/${::box/encode-id(folder-id)}`, params), ::box/condition-headers(opts), ::box/compact(changes), opts)
+}
+
+rename-folder
+meta {doc: """Rename a folder."""}
+fn
+(folder-id: Str, name: Str): Map {
+  rename-folder(folder-id, name, {})
+},
+(folder-id: Str, name: Str, opts: Map): Map {
+  update-folder(folder-id, {name: name}, opts)
+}
+
+move-folder
+meta {doc: """Move a folder (and its contents) into `parent-id`."""}
+fn
+(folder-id: Str, parent-id: Str): Map {
+  move-folder(folder-id, parent-id, {})
+},
+(folder-id: Str, parent-id: Str, opts: Map): Map {
+  update-folder(folder-id, {parent: ::box/parent-ref(parent-id)}, opts)
+}
+
+copy-body
+meta {doc: """The copy body (pure): `parent: {id}` and an optional new `name`."""}
+fn (parent-id: Str, name: Str?): Map {
+  ::box/compact({parent: ::box/parent-ref(parent-id), name: name})
+}
+
+copy-folder
+meta {
+    doc: """POST /folders/{id}/copy - copy a folder and its contents into `parent-id`; `opts.name` renames the copy. Large folders copy asynchronously on Box's side."""
+}
+fn
+(folder-id: Str, parent-id: Str): Map {
+  copy-folder(folder-id, parent-id, {})
+},
+(folder-id: Str, parent-id: Str, opts: Map): Map {
+  params ::box/query-params({fields: ::box/FOLDER_FIELDS}, opts, LOCAL_KEYS)
+  ::box/json("POST", ::box/url(`/folders/${::box/encode-id(folder-id)}/copy`, params), copy-body(parent-id, get(opts, "name")), opts)
+}
+
+// ---------------------------------------------------------------------------
+// Trash
+// ---------------------------------------------------------------------------
+
+trash-folder
+meta {
+    doc: """
+    DELETE /folders/{id} - move a folder to the trash (recoverable until
+    the enterprise's trash retention, 30 days by default). A non-empty
+    folder needs `{recursive: true}`. `opts.if-match` guards against
+    concurrent changes. Returns true.
+    """
+}
+fn
+(folder-id: Str): Bool {
+  trash-folder(folder-id, {})
+},
+(folder-id: Str, opts: Map): Bool {
+  params filter-vals({recursive: if(eq(get(opts, "recursive"), true), true, null)}, is-some)
+  result ::box/json-with("DELETE", ::box/url(`/folders/${::box/encode-id(folder-id)}`, params), ::box/condition-headers(opts), "", opts)
+  if(is-err(result), result, true)
+}
+
+restore-body
+meta {
+    doc: """The restore body (pure): an optional new `name` and `parent: {id}`, for when the original name or location is taken."""
+}
+fn (opts: Map): Map {
+  ::box/compact({name: get(opts, "name"), parent: ::box/parent-ref(get(opts, "parent-id"))})
+}
+
+restore-folder
+meta {
+    doc: """POST /folders/{id} - restore a trashed folder. `opts.name` / `opts.parent-id` restore it under a new name or into another folder when the original is taken or gone."""
+}
+fn
+(folder-id: Str): Map {
+  restore-folder(folder-id, {})
+},
+(folder-id: Str, opts: Map): Map {
+  params ::box/query-params({fields: ::box/FOLDER_FIELDS}, opts, LOCAL_KEYS)
+  ::box/json("POST", ::box/url(`/folders/${::box/encode-id(folder-id)}`, params), restore-body(opts), opts)
+}
+
+get-trashed-folder
+meta {
+    doc: """GET /folders/{id}/trash - a trashed folder's information (404 when it is not in the trash)."""
+}
+fn
+(folder-id: Str): Map {
+  get-trashed-folder(folder-id, {})
+},
+(folder-id: Str, opts: Map): Map {
+  params ::box/query-params({}, opts, LOCAL_KEYS)
+  ::box/json("GET", ::box/url(`/folders/${::box/encode-id(folder-id)}/trash`, params), "", opts)
+}

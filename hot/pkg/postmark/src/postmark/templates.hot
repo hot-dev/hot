@@ -54,7 +54,15 @@ meta {
     ```
     """
 }
-fn (request: POSTTemplatesRequest): POSTTemplatesResponse {
-  response api-request("POST", `${::postmark/BASE_URL}/templates`, {}, request)
-  if(is-ok-response(response), POSTTemplatesResponse(response.body), err(HttpError(response)))
+fn
+(request: POSTTemplatesRequest): POSTTemplatesResponse {
+  create-template(request, {})
+},
+(request: POSTTemplatesRequest, opts: Map): POSTTemplatesResponse {
+  response api-request("POST", `${::postmark/BASE_URL}/templates`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { POSTTemplatesResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }

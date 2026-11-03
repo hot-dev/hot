@@ -1,0 +1,267 @@
+::quickbooks::webhooks ns
+meta {
+    ctx: {"quickbooks.webhook.verifier": {required: false}},
+    doc: """
+    QuickBooks Online webhooks: signature verification and event parsing.
+
+    **Signature.** Intuit signs each delivery with the app's *verifier
+    token* (Developer portal, your app, Webhooks): the `intuit-signature`
+    header is the base64 HMAC-SHA256 of the raw request body keyed with
+    that token. `verify-request` recomputes it over
+    `::hot::http/raw-body` and compares in constant time. An unset or
+    empty verifier never verifies.
+
+    **Replay.** Intuit signs no timestamp, so a captured delivery can be
+    replayed. Treat events as hints: dedupe on the event id (CloudEvents)
+    or entity id + `last-updated`, and re-read the entity before acting.
+
+    **Payload formats.** Intuit moved webhooks to the CloudEvents format
+    in 2026 (migration deadline May 2026): a JSON array of events with
+    `type: "qbo.invoice.created.v1"`, `intuitaccountid` (the realm id) and
+    `intuitentityid`. The legacy format is `{eventNotifications:
+    [{realmId, dataChangeEvent: {entities: [{name, id, operation,
+    lastUpdated}]}}]}`. `parse-events` reads both and returns the same
+    record shape, so a handler works across the switch.
+
+    Respond within a few seconds with a 2xx; Intuit retries failed
+    deliveries. Do the work after acknowledging (send a Hot event), and
+    use `::quickbooks::cdc` to catch up on anything missed.
+
+    ```hot
+    quickbooks-webhook
+    meta {webhook: {service: "quickbooks", path: "/quickbooks/webhook"}}
+    fn (request) {
+      received ::quickbooks::webhooks/receive(request)
+      if(received.verified,
+        for-each(received.events, (e) { ::hot::event/send("quickbooks:changed", e) }),
+        null)
+      received.response
+    }
+    ```
+    """
+}
+
+::ctx ::hot::ctx
+::hmac ::hot::hmac
+::entities ::quickbooks::entities
+
+HttpResponse ::hot::http/HttpResponse
+
+// CloudEvents entity names that this package's entity table does not list.
+EXTRA_ENTITY_NAMES {
+  purchaseorder: "PurchaseOrder",
+  refundreceipt: "RefundReceipt",
+  vendorcredit: "VendorCredit",
+  timeactivity: "TimeActivity",
+  budget: "Budget",
+  currency: "Currency",
+  paymentmethod: "PaymentMethod",
+  term: "Term",
+  attachable: "Attachable"
+}
+
+OPERATIONS {
+  created: "Create",
+  updated: "Update",
+  deleted: "Delete",
+  merged: "Merge",
+  voided: "Void",
+  emailed: "Emailed"
+}
+
+// ---------------------------------------------------------------------------
+// Verification
+// ---------------------------------------------------------------------------
+
+signature-header fn (request: Map): Str {
+  trim(Str(or(get(or(get(request, "headers"), {}), "intuit-signature"), "")))
+}
+
+verify-request
+meta {
+    ctx: {"quickbooks.webhook.verifier": {required: false}},
+    doc: """
+    True when the request's `intuit-signature` is the base64 HMAC-SHA256
+    of its raw body under the verifier token (constant-time compare).
+    The 1-arity form reads `quickbooks.webhook.verifier` and fails the
+    run when it is unset; an explicit empty verifier returns false.
+    """
+}
+fn
+(request: Map): Bool {
+  verifier or(::ctx/get("quickbooks.webhook.verifier"), "")
+  if(is-empty(trim(Str(verifier))),
+    fail("quickbooks.webhook.verifier is not set. Add the app's webhook verifier token in Context Variables to verify webhooks.")
+  )
+  verify-request(request, Str(verifier))
+},
+(request: Map, verifier: Str): Bool {
+  ::ctx/mark-secret(verifier)
+  signature signature-header(request)
+  cond {
+    // An empty key would make every signature forgeable: fail closed.
+    is-empty(trim(verifier)) => { false }
+    is-empty(signature) => { false }
+    => { ::hmac/hmac-verify-base64(verifier, ::hot::http/raw-body(request), signature, "sha256") }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Parsing (pure)
+// ---------------------------------------------------------------------------
+
+entity-name
+meta {
+    doc: """The canonical entity name for a webhook's entity (`"invoice"` or `"Invoice"` gives `"Invoice"`); unknown names pass through unchanged."""
+}
+fn (name: Str): Str {
+  canonical ::entities/canonical-name(name)
+  extra get(EXTRA_ENTITY_NAMES, lowercase(name))
+  cond {
+    not(is-err(canonical)) => { canonical }
+    is-some(extra) => { extra }
+    => { name }
+  }
+}
+
+operation-name
+meta {
+    doc: """The legacy-style operation for a CloudEvents verb: `created` gives `Create`, `updated` `Update`, `deleted` `Delete`, `merged` `Merge`, `voided` `Void`, `emailed` `Emailed`."""
+}
+fn (verb: Str): Str {
+  hit get(OPERATIONS, lowercase(verb))
+  cond {
+    is-some(hit) => { hit }
+    is-empty(verb) => { verb }
+    => { concat(uppercase(slice(verb, 0, 1)), slice(verb, 1, length(verb))) }
+  }
+}
+
+from-cloud-event
+meta {doc: """Normalise one CloudEvents event (`type: "qbo.{entity}.{verb}.v1"`)."""}
+fn (e: Map): Map {
+  parts split(Str(or(get(e, "type"), "")), ".")
+  entity if(gte(length(parts), 3), entity-name(parts[1]), null)
+  verb if(gte(length(parts), 3), parts[2], "")
+  filter-vals({
+    format: "cloudevents",
+    event-id: get(e, "id"),
+    type: get(e, "type"),
+    realm-id: get(e, "intuitaccountid"),
+    entity: entity,
+    id: get(e, "intuitentityid"),
+    operation: operation-name(verb),
+    last-updated: get(e, "time"),
+    data: get(e, "data")
+  }, is-some)
+}
+
+from-legacy
+meta {
+    doc: """Normalise a legacy `eventNotifications` payload into one record per changed entity."""
+}
+fn (body: Map): Vec {
+  mapcat(filter(or(get(body, "eventNotifications"), []), is-map), (n) {
+    realm get(n, "realmId")
+    entities or(get(or(get(n, "dataChangeEvent"), {}), "entities"), [])
+    map(filter(entities, is-map), (x) {
+      filter-vals({
+        format: "legacy",
+        realm-id: realm,
+        entity: if(is-some(get(x, "name")), entity-name(Str(get(x, "name"))), null),
+        id: get(x, "id"),
+        operation: get(x, "operation"),
+        last-updated: get(x, "lastUpdated"),
+        deleted-id: get(x, "deletedId")
+      }, is-some)
+    })
+  })
+}
+
+parse-events
+meta {
+    doc: """
+    Parse a webhook body (a decoded Map/Vec, or the raw Str/Bytes) in
+    either format into records:
+
+    - `format` - `"cloudevents"` or `"legacy"`
+    - `realm-id` - the company
+    - `entity` - canonical entity name (`"Invoice"`)
+    - `id` - the entity id
+    - `operation` - `Create`, `Update`, `Delete`, `Merge`, `Void`, `Emailed`
+    - `last-updated` - the change time
+    - `event-id`, `type`, `data` - CloudEvents only; `deleted-id` - legacy merges
+
+    Returns `[]` for an empty or unrecognised body, and an Err for
+    invalid JSON.
+    """
+}
+fn (body: Any): Vec {
+  decoded cond {
+    or(is-str(body), is-bytes(body)) => {
+      text trim(Str(body))
+      if(is-empty(text), [], from-json(text))
+    }
+
+    is-null(body) => { [] }
+    => { untype(body) }
+  }
+
+  cond {
+    is-err(decoded) => { err("quickbooks: the webhook body is not valid JSON") }
+    is-vec(decoded) => { map(filter(decoded, is-map), from-cloud-event) }
+    and(is-map(decoded), is-some(get(decoded, "eventNotifications"))) => { from-legacy(decoded) }
+    // A single CloudEvent object (not wrapped in an array).
+    and(is-map(decoded), is-some(get(decoded, "specversion"))) => { [from-cloud-event(decoded)] }
+    => { [] }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Handler helpers
+// ---------------------------------------------------------------------------
+
+construct-events
+meta {
+    doc: """Verify the request (see `verify-request`) and return its parsed events, or an Err when the signature is invalid."""
+}
+fn
+(request: Map): Vec {
+  verifier or(::ctx/get("quickbooks.webhook.verifier"), "")
+  if(is-empty(trim(Str(verifier))),
+    fail("quickbooks.webhook.verifier is not set. Add the app's webhook verifier token in Context Variables to verify webhooks.")
+  )
+  construct-events(request, Str(verifier))
+},
+(request: Map, verifier: Str): Vec {
+  cond {
+    not(verify-request(request, verifier)) => { err("quickbooks: webhook signature verification failed") }
+    => { parse-events(::hot::http/raw-body(request)) }
+  }
+}
+
+receive
+meta {
+    doc: """
+    Verify and parse a delivery in one step: `{verified, events,
+    response}`. `response` is the `HttpResponse` to return: 200 when the
+    signature is valid, 401 when it is not (events are then `[]`).
+    """
+}
+fn
+(request: Map): Map {
+  verifier or(::ctx/get("quickbooks.webhook.verifier"), "")
+  if(is-empty(trim(Str(verifier))),
+    fail("quickbooks.webhook.verifier is not set. Add the app's webhook verifier token in Context Variables to verify webhooks.")
+  )
+  receive(request, Str(verifier))
+},
+(request: Map, verifier: Str): Map {
+  cond {
+    not(verify-request(request, verifier)) => { {verified: false, events: [], response: HttpResponse({status: 401, body: ""})} }
+    => {
+      events parse-events(::hot::http/raw-body(request))
+      {verified: true, events: if(is-err(events), [], events), response: HttpResponse({status: 200, body: ""})}
+    }
+  }
+}

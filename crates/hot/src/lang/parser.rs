@@ -188,7 +188,7 @@ fn merge_trailing_meta(var: &mut Var, trailing: Val) {
             val: Val::Map(mut existing),
         }) => {
             if let Val::Map(trailing_map) = trailing {
-                existing.extend(*trailing_map);
+                Arc::make_mut(&mut existing).extend(Arc::unwrap_or_clone(trailing_map));
             }
             var.meta = Some(Meta {
                 val: Val::Map(existing),
@@ -364,22 +364,7 @@ impl Parser {
             self.expect_identifier()?
         };
 
-        // Optional dotted variant suffix: `Shape.Tri` (single segment only;
-        // multi-level `Shape.A.B` is not a valid variant reference).
-        if self.check(&TokenType::Dot) {
-            // Only consume the dot if the next token is an identifier — the
-            // dot might also belong to whatever follows (e.g. trailing meta).
-            // We require an immediate identifier here for the variant suffix.
-            if let Some(next) = self.peek_n(1)
-                && let TokenType::Identifier(_) = &next.token_type
-            {
-                self.next(); // consume `.`
-                let variant = self.expect_identifier()?;
-                return Ok(format!("{base}.{variant}"));
-            }
-        }
-
-        Ok(base)
+        Ok(self.with_variant_suffix(base))
     }
 
     /// Synthesize the trivial wrap function for a bodyless coercion arrow
@@ -421,7 +406,20 @@ impl Parser {
         // a Var ref `Shape` with deep_path `["Tri"]`, mirroring how
         // `Shape.Tri(...)` would be parsed in user code. For plain
         // targets, we just reference the type by name.
-        let function_value: Value = if let Some((base, variant)) = target_type.split_once('.') {
+        let function_value: Value = if let Some((ns, name)) = target_type
+            .starts_with("::")
+            .then(|| target_type.rsplit_once('/'))
+            .flatten()
+        {
+            // A qualified target (`::ai-chat/Provider.Compat`) is the
+            // reference `::ai-chat/Provider.Compat(...)` would parse to, so
+            // the namespace goes through alias resolution like user code.
+            Value::Ref(Ref::Ns(NsRef {
+                ns: NsPath::from(ns),
+                src: None,
+                function_name: Some(name.to_string()),
+            }))
+        } else if let Some((base, variant)) = target_type.split_once('.') {
             Value::Ref(Ref::Var(VarRef {
                 var: Var {
                     sym: Sym::String(base.to_string()),
@@ -4014,7 +4012,7 @@ impl Parser {
         self.expect_token(&TokenType::RightBrace)?;
 
         if spread_entries.is_empty() {
-            Ok(Value::Val(Val::Map(Box::new(map)), Some("Map".to_string())))
+            Ok(Value::Val(Val::map(map), Some("Map".to_string())))
         } else {
             // Map with spread entries needs special AST representation
             Ok(Value::MapWithSpread {
@@ -4137,7 +4135,7 @@ impl Parser {
 
         self.expect_token(&TokenType::RightBracket)?;
 
-        Ok(Value::Val(Val::Vec(elements), Some("Vec".to_string())))
+        Ok(Value::Val(Val::vec(elements), Some("Vec".to_string())))
     }
 
     /// Parse block expression - handles { value } or { statement1 statement2 }
@@ -7543,13 +7541,13 @@ impl Parser {
                     "true" => Ok(TypeExpr::Literal(LiteralType::Bool(true))),
                     "false" => Ok(TypeExpr::Literal(LiteralType::Bool(false))),
                     "null" => Ok(TypeExpr::Literal(LiteralType::Null)),
-                    _ => Ok(TypeExpr::Named(name)),
+                    _ => Ok(TypeExpr::Named(self.with_variant_suffix(name))),
                 }
             }
             TokenType::DoubleColon => {
                 // Parse namespaced type reference like ::hot::time/Instant
                 let qualified_name = self.parse_namespaced_type_name()?;
-                Ok(TypeExpr::Named(qualified_name))
+                Ok(TypeExpr::Named(self.with_variant_suffix(qualified_name)))
             }
             // Literal types for enum-style unions (e.g., "apple" | "banana" | "orange")
             TokenType::String(s) => {
@@ -7588,6 +7586,23 @@ impl Parser {
                 source_context: self.source_content.clone(),
             }),
         }
+    }
+
+    /// `name`, with the variant if a dotted one follows: `Shape.Tri` (single
+    /// segment only; multi-level `Shape.A.B` is not a valid variant reference).
+    /// The dot might also belong to whatever follows (e.g. trailing meta), so
+    /// it's only consumed with an identifier after it.
+    fn with_variant_suffix(&mut self, name: String) -> String {
+        if self.check(&TokenType::Dot)
+            && let Some(next) = self.peek_n(1)
+            && let TokenType::Identifier(variant) = &next.token_type
+        {
+            let variant = variant.clone();
+            self.next(); // consume "."
+            self.next(); // consume variant
+            return format!("{name}.{variant}");
+        }
+        name
     }
 
     /// Parse a namespaced type name like ::hot::time/Instant
@@ -7955,13 +7970,18 @@ fn val_replace_placeholders(v: Val) -> Val {
             }
         }
         Val::Map(m) => {
-            let new_map = m
+            let new_map = Arc::unwrap_or_clone(m)
                 .into_iter()
                 .map(|(k, v)| (k, val_replace_placeholders(v)))
                 .collect();
-            Val::Map(Box::new(new_map))
+            Val::map(new_map)
         }
-        Val::Vec(v) => Val::Vec(v.into_iter().map(val_replace_placeholders).collect()),
+        Val::Vec(v) => Val::vec(
+            Arc::unwrap_or_clone(v)
+                .into_iter()
+                .map(val_replace_placeholders)
+                .collect(),
+        ),
         other => other,
     }
 }

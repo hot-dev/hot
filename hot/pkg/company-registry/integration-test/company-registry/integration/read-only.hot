@@ -1,0 +1,62 @@
+::company-registry::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration smoke tests (live, read-only)
+// =============================================================================
+// GLEIF: COMPANY_REGISTRY_LIVE=1 (no key). SEC EDGAR: SEC_USER_AGENT, e.g.
+// "Acme Corp ops@acme.com". Companies House: COMPANIES_HOUSE_API_KEY (and
+// optionally COMPANIES_HOUSE_BASE_URL for the sandbox). Every test only
+// reads; without settings each records a skip and passes.
+// Run with: hot test -p pkg-integration-company-registry
+
+::ctx ::company-registry::integration::ctx
+
+test-gleif-search-and-parent
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured("gleif")) => { ::ctx/skip("COMPANY_REGISTRY_LIVE is not 1") }
+        => {
+            page ::company-registry::gleif/search("apple inc", {page-size: 2})
+            assert(gt(length(page.data), 0), "full-text search finds records")
+            assert(is-some(::company-registry::gleif/next-page(page)), "there is a second page")
+            c ::company-registry/from-gleif(first(page.data))
+            assert(::company-registry::gleif/is-lei(c.identifiers.lei), "a valid LEI")
+            parent ::company-registry::gleif/direct-parent("549300G81RQKP7XW2N18")
+            assert-eq("HWUPKR0MPOU8FGXBT394", parent.id, "Apple Operations International's parent is Apple Inc.")
+            assert-eq(null, ::company-registry::gleif/direct-parent("HWUPKR0MPOU8FGXBT394"), "Apple Inc. reports no parent")
+        }
+    }
+}
+
+test-sec-tickers-and-submissions
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured("sec")) => { ::ctx/skip("SEC_USER_AGENT is not set") }
+        => {
+            tickers ::company-registry::sec/company-tickers()
+            aapl ::company-registry::sec/find-ticker(tickers, "AAPL")
+            assert-eq("0000320193", aapl.cik)
+            subs ::company-registry::sec/submissions(aapl.cik)
+            assert-eq("Apple Inc.", subs.name)
+            filings ::company-registry::sec/recent-filings(subs, 5, {})
+            assert(gt(length(filings), 0), "recent filings")
+        }
+    }
+}
+
+test-companies-house-search-and-profile
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured("companies-house")) => { ::ctx/skip("COMPANIES_HOUSE_API_KEY is not set") }
+        => {
+            found ::company-registry::companies-house/search-companies("tesco", {items-per-page: 3})
+            assert(gt(length(found.items), 0), "search finds companies")
+            number first(found.items).company_number
+            profile ::company-registry::companies-house/company(number)
+            assert-eq(number, profile.company_number)
+            c ::company-registry/from-companies-house(profile)
+            assert-eq(number, c.identifiers.uk-company-number)
+        }
+    }
+}

@@ -1,0 +1,114 @@
+::middesk::orders ns
+meta {
+    doc: """
+    Orders: products run on a business. Add one to an existing business
+    to go deeper, e.g. liens, litigations, bankruptcies, website and
+    industry classification, KYC on the owners, documents or adverse
+    media. Most products need a `business_verification_verify` (or
+    `identity`) order first.
+
+    Products: `business_verification_verify`,
+    `business_verification_qualify`, `identity`, `tin`, `website`,
+    `liens`, `ucc_liens`, `tax_liens`, `litigations`, `bankruptcies`,
+    `adverse_media`, `enhanced_screenings`, `documents`, `kyc`,
+    `kyc_doc_v`, `people_litigations`, `people_bankruptcies`,
+    `people_ucc_liens`, `people_tax_liens`, `people_criminal_history`,
+    `business_enrichment`, `email_risk`, `risk`,
+    `international_business_verification`.
+
+    Order statuses: `created`, `pending`, `audited`, `completed`,
+    `approved`, `rejected`.
+    """
+}
+
+::api ::middesk::api
+
+seg ::middesk::api/seg
+
+order-body
+meta {
+    doc: """The body for `create-order`: `{product, subproducts?, options?}` with unset parts dropped. Exposed for testing."""
+}
+fn (product: Str, opts: Map): Map {
+  subproducts get(opts, "subproducts")
+  ::api/compact({
+    product: product,
+    subproducts: if(and(is-vec(subproducts), not(is-empty(or(subproducts, [])))), subproducts, null),
+    options: get(opts, "options")
+  })
+}
+
+create-order
+meta {
+    doc: """
+    POST /businesses/{id}/orders - Order a product on a business. `opts`:
+    `subproducts` (e.g. `["industry_classification"]` with `website`, or
+    `["certificate_of_good_standing"]` with `documents`), `options`
+    (e.g. `{person_match: true}` with `tin`).
+
+    **Example**
+
+    ```hot
+    ::middesk::orders/create-order("biz_...", "liens")
+    ::middesk::orders/create-order("biz_...", "website", {subproducts: ["industry_classification"]})
+    ```
+    """
+}
+fn
+(business-id: Str, product: Str): Map {
+  create-order(business-id, product, {}, {})
+},
+(business-id: Str, product: Str, opts: Map): Map {
+  create-order(business-id, product, opts, {})
+},
+(business-id: Str, product: Str, opts: Map, options: Map): Map {
+  ::api/send("POST", `/businesses/${seg(business-id)}/orders`, {}, order-body(product, opts), options)
+}
+
+list-orders
+meta {
+    doc: """GET /businesses/{id}/orders - A business's orders. `params`: `page`, `per_page`, `packages` (Vec of products, comma joined)."""
+}
+fn
+(business-id: Str): Map {
+  list-orders(business-id, {}, {})
+},
+(business-id: Str, params: Map): Map {
+  list-orders(business-id, params, {})
+},
+(business-id: Str, params: Map, options: Map): Map {
+  ::api/list-page(`/businesses/${seg(business-id)}/orders`, params, options)
+}
+
+get-order
+meta {
+    doc: """GET /orders/{id} - Retrieve an order by id."""
+}
+fn
+(order-id: Str): Map {
+  get-order(order-id, {})
+},
+(order-id: Str, options: Map): Map {
+  ::api/send("GET", `/orders/${seg(order-id)}`, {}, null, options)
+}
+
+update-order
+meta {
+    doc: """PUT /orders/{id} - Set an order's `assignee_id` or `status`."""
+}
+fn
+(order-id: Str, params: Map): Map {
+  update-order(order-id, params, {})
+},
+(order-id: Str, params: Map, options: Map): Map {
+  ::api/send("PUT", `/orders/${seg(order-id)}`, {}, ::api/compact(untype(params)), options)
+}
+
+is-done
+meta {
+    doc: """True when an order has finished: status `completed`, `audited`, `approved` or `rejected`."""
+}
+fn (order: Any): Bool {
+  status if(is-map(order), get(order, "status"), null)
+  in(or(status, ""), ["completed", "audited", "approved", "rejected"])
+}

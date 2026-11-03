@@ -1,6 +1,7 @@
 use super::{Event, EventPublisher, ExecutionContext};
 use crate::blob::{BlobScope, BlobStore, SpillSource};
 use crate::db::DatabasePool;
+use crate::val::Val;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{RwLock, mpsc, oneshot};
@@ -10,6 +11,7 @@ type EventWrite = (ExecutionContext, Event, Option<EventWriteAck>);
 
 pub struct DatabaseEventPublisher {
     db: Arc<RwLock<Option<DatabasePool>>>,
+    blob_store: Option<Arc<BlobStore>>,
     event_sender: mpsc::UnboundedSender<EventWrite>,
     shutdown_sender: mpsc::UnboundedSender<oneshot::Sender<()>>,
     /// Flag to suppress errors during shutdown (when channel is expected to be closed)
@@ -36,12 +38,13 @@ impl DatabaseEventPublisher {
 
         let db = Arc::new(RwLock::new(Some(db_pool)));
         let db_for_processor = Arc::clone(&db);
+        let blob_store_for_processor = blob_store.clone();
 
         // Start event processing task
         tokio::spawn(async move {
             let mut processor = DatabaseEventProcessor {
                 db: db_for_processor,
-                blob_store,
+                blob_store: blob_store_for_processor,
             };
 
             loop {
@@ -78,6 +81,7 @@ impl DatabaseEventPublisher {
         // Return the publisher
         Self {
             db,
+            blob_store,
             event_sender,
             shutdown_sender,
             shutdown_initiated: Arc::new(AtomicBool::new(false)),
@@ -159,6 +163,7 @@ impl DatabaseEventPublisher {
         // Return the publisher
         Self {
             db,
+            blob_store: None,
             event_sender,
             shutdown_sender,
             shutdown_initiated: Arc::new(AtomicBool::new(false)),
@@ -240,38 +245,13 @@ impl DatabaseEventProcessor {
                 (crate::db::DatabasePool::Sqlite(_), _) => db,
             };
 
-            // Spill large payload leaves before serialization. Event data is
-            // executable payload: fail closed on spill errors rather than
-            // silently persisting a partially-spilled value.
-            let event_data_val = match (&self.blob_store, ctx.org_id) {
-                (Some(store), Some(org_id))
-                    if store.config().enabled()
-                        && crate::blob::estimate_val_size(&event.event_data)
-                            >= store.config().spill_threshold_bytes =>
-                {
-                    let scope = BlobScope {
-                        org_id,
-                        env_id: ctx.env_id,
-                        run_id: Some(ctx.run_id),
-                    };
-                    let source_id = event.event_id.to_string();
-                    store
-                        .spill_large_val(
-                            event.event_data.clone(),
-                            scope,
-                            SpillSource::EventData,
-                            Some(&source_id),
-                        )
-                        .await
-                        .map_err(|e| format!("Failed to spill event data to blob storage: {}", e))?
-                }
-                _ => event.event_data.clone(),
-            };
+            let event_data_val =
+                event_data_to_store(self.blob_store.as_deref(), ctx, event).await?;
 
             let event_data = serde_json::to_value(&event_data_val)
                 .map_err(|e| format!("Failed to serialize event data: {}", e))?;
 
-            crate::db::event::Event::insert_event(
+            let inserted = crate::db::event::Event::insert_event(
                 db,
                 &event.event_id,
                 &env_id,
@@ -282,14 +262,99 @@ impl DatabaseEventProcessor {
                 &user_id,
                 None,
             )
-            .await
-            .map_err(|e| format!("Database error: {}", e))?;
+            .await;
+            if let Err(e) = inserted {
+                self.release_unstored_event(db, ctx, event).await;
+                return Err(format!("Database error: {}", e));
+            }
 
             Ok(())
         } else {
             Err("Database not initialized".to_string())
         }
     }
+}
+
+impl DatabaseEventProcessor {
+    /// Release the blobs written for an event whose insert failed, unless the
+    /// row made it anyway, as when a connection fails after a commit.
+    async fn release_unstored_event(
+        &self,
+        db: &DatabasePool,
+        ctx: &ExecutionContext,
+        event: &Event,
+    ) {
+        let (Some(store), Some(org_id)) = (self.blob_store.as_ref(), ctx.org_id) else {
+            return;
+        };
+        if !matches!(
+            crate::db::event::Event::get_event(db, &event.event_id).await,
+            Err(crate::db::event::EventError::NotFound)
+        ) {
+            return;
+        }
+        let scope = BlobScope {
+            org_id,
+            env_id: ctx.env_id,
+            run_id: None,
+        };
+        let source_id = event.event_id.to_string();
+        if let Err(e) = store
+            .release_source(scope, SpillSource::EventData, &source_id)
+            .await
+        {
+            tracing::warn!(event_id = %event.event_id, error = %e, "failed to release an unstored event's blobs");
+        }
+    }
+}
+
+/// Event data as it's stored: its large leaves in blob storage, or all of it if
+/// spilling them would leave too much inline or too many references to read
+/// back. Event data is executable payload: fail closed on spill errors rather
+/// than silently persisting a partially-spilled value.
+async fn event_data_to_store(
+    blob_store: Option<&BlobStore>,
+    ctx: &ExecutionContext,
+    event: &Event,
+) -> Result<Val, String> {
+    let data = &event.event_data;
+    let (Some(store), Some(org_id)) = (blob_store.filter(|s| s.config().enabled()), ctx.org_id)
+    else {
+        return Ok(data.clone());
+    };
+    let config = store.config();
+    let threshold = config.spill_threshold_bytes;
+    let size = crate::blob::estimate_val_size(data);
+    if size < threshold {
+        return Ok(data.clone());
+    }
+    let scope = BlobScope {
+        org_id,
+        env_id: ctx.env_id,
+        run_id: Some(ctx.run_id),
+    };
+    let source_id = event.event_id.to_string();
+    let spill_failed = |e| format!("Failed to spill event data to blob storage: {}", e);
+    store.check_readable(size).map_err(spill_failed)?;
+    if crate::blob::val_bytes_outside_large_leaves(data, threshold) > config.max_inline_bytes
+        || crate::blob::count_large_leaves(data, threshold) > config.rehydrate_max_refs
+    {
+        let json = serde_json::to_string(data)
+            .map_err(|e| format!("Failed to serialize event data: {}", e))?;
+        store
+            .spill_readable_json(&json, scope, SpillSource::EventData, Some(&source_id))
+            .await
+    } else {
+        store
+            .spill_large_val(
+                data.clone(),
+                scope,
+                SpillSource::EventData,
+                Some(&source_id),
+            )
+            .await
+    }
+    .map_err(spill_failed)
 }
 
 /// Maximum time a publisher will wait for the serial database processor to
@@ -321,6 +386,21 @@ impl DatabaseEventPublisher {
             return Err("Cannot publish event - missing user_id in ExecutionContext".to_string());
         }
 
+        // Store large parts here, not in the processor: that can take longer
+        // than the timeout below, and would hold up every event behind this one.
+        let event_data = tokio::runtime::Handle::current().block_on(event_data_to_store(
+            self.blob_store.as_deref(),
+            ctx,
+            &event,
+        ))?;
+        // What's still inline takes the writer longer the larger it is.
+        let timeout =
+            crate::blob::timeout_for_size(timeout, crate::blob::estimate_val_size(&event_data));
+        let event = Event {
+            event_data,
+            ..event
+        };
+
         // Create oneshot channel for acknowledgment
         let (ack_sender, ack_receiver) = oneshot::channel();
 
@@ -349,6 +429,10 @@ impl DatabaseEventPublisher {
 }
 
 impl EventPublisher for DatabaseEventPublisher {
+    fn publish_checked(&self, ctx: &ExecutionContext, event: Event) -> Result<(), String> {
+        self.publish_and_wait(ctx, event)
+    }
+
     fn publish(&self, ctx: &ExecutionContext, event: Event) {
         // Validate that ExecutionContext has required fields before sending to processor
         if ctx.env_id.is_none() {
@@ -388,6 +472,7 @@ impl Clone for DatabaseEventPublisher {
     fn clone(&self) -> Self {
         Self {
             db: Arc::clone(&self.db),
+            blob_store: self.blob_store.clone(),
             event_sender: self.event_sender.clone(),
             shutdown_sender: self.shutdown_sender.clone(),
             shutdown_initiated: Arc::clone(&self.shutdown_initiated),
@@ -424,6 +509,156 @@ mod tests {
 
         // This should not panic
         publisher.publish(&ctx, event);
+    }
+
+    /// A processor over a test database, and what it takes to store with it.
+    async fn spilling_processor(
+        configure: impl FnOnce(&mut crate::blob::BlobConfig),
+    ) -> (
+        DatabaseEventProcessor,
+        Arc<BlobStore>,
+        crate::db::TestData,
+        ExecutionContext,
+        tempfile::TempDir,
+    ) {
+        let db = Arc::new(crate::db::test_db().await);
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(crate::file_storage::LocalFileStorage::new(
+            temp_dir.path().to_path_buf(),
+        ));
+        let mut config = crate::blob::BlobConfig {
+            mode: crate::blob::BlobMode::Service,
+            ..Default::default()
+        };
+        configure(&mut config);
+        let blob_store = Arc::new(BlobStore::new(db.clone(), storage, config));
+        let processor = DatabaseEventProcessor {
+            db: Arc::new(RwLock::new(Some((*db).clone()))),
+            blob_store: Some(blob_store.clone()),
+        };
+        let ctx = ExecutionContext::new(
+            data.run_id,
+            data.stream_id,
+            crate::db::run::RunType::Run.as_id(),
+            Some(data.env_id),
+            Some(data.user_id),
+            Some(data.org_id),
+            Some(data.build_id),
+        );
+        (processor, blob_store, data, ctx, temp_dir)
+    }
+
+    /// Store `event_data`, and check that it's one reference that reads back.
+    async fn assert_stored_whole(
+        processor: &DatabaseEventProcessor,
+        blob_store: &BlobStore,
+        data: &crate::db::TestData,
+        ctx: &ExecutionContext,
+        event_data: Val,
+    ) {
+        let event = Event::new(
+            data.env_id,
+            data.stream_id,
+            "test_event".to_string(),
+            event_data.clone(),
+        );
+        processor.insert_event(ctx, &event).await.unwrap();
+        let db = processor.db.read().await;
+        let stored = crate::db::event::Event::get_event(db.as_ref().unwrap(), &event.event_id)
+            .await
+            .unwrap();
+        let stored: Val = serde_json::from_value(stored.event_data).unwrap();
+        assert!(crate::blob::is_blob_ref_val(&stored), "{stored:.200?}");
+        let scope = BlobScope {
+            org_id: data.org_id,
+            env_id: Some(data.env_id),
+            run_id: None,
+        };
+        let budget = crate::blob::RehydrateBudget::from_config(blob_store.config());
+        let restored = blob_store
+            .rehydrate_blob_refs(stored, scope, budget)
+            .await
+            .unwrap();
+        assert_eq!(restored, event_data);
+    }
+
+    #[tokio::test]
+    async fn an_event_that_cant_be_inserted_releases_its_blob() {
+        let (processor, _blob_store, data, ctx, _dir) = spilling_processor(|_| {}).await;
+        let rows = (0..40_000i64)
+            .map(|i| crate::val!({"id": i, "note": "a small cell"}))
+            .collect();
+        let event = Event::new(
+            data.env_id,
+            data.stream_id,
+            "test_event".to_string(),
+            Val::vec(rows),
+        );
+        let db = processor.db.read().await;
+        let Some(DatabasePool::Sqlite(pool)) = db.as_ref() else {
+            panic!("test_db should return SQLite");
+        };
+        sqlx::query(
+            "CREATE TRIGGER refuse_events BEFORE INSERT ON event BEGIN SELECT RAISE(ABORT, 'refused'); END",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+
+        assert!(processor.insert_event(&ctx, &event).await.is_err());
+
+        let (total, active): (i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*), COALESCE(SUM(active), 0) FROM blob_ref WHERE source_kind = 'event_data'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!((total, active), (1, 0));
+    }
+
+    #[tokio::test]
+    async fn event_data_of_many_small_values_is_stored_whole() {
+        let (processor, blob_store, data, ctx, _dir) = spilling_processor(|_| {}).await;
+        let rows = (0..40_000i64)
+            .map(|i| crate::val!({"id": i, "note": "a small cell"}))
+            .collect();
+        assert_stored_whole(&processor, &blob_store, &data, &ctx, Val::vec(rows)).await;
+    }
+
+    #[tokio::test]
+    async fn event_data_with_more_large_leaves_than_can_be_read_back_is_stored_whole() {
+        let (processor, blob_store, data, ctx, _dir) = spilling_processor(|config| {
+            config.spill_threshold_bytes = 16;
+            config.rehydrate_max_refs = 10;
+        })
+        .await;
+        let leaves = (0..11)
+            .map(|i| Val::from(format!("a large enough leaf {i}")))
+            .collect();
+        assert_stored_whole(&processor, &blob_store, &data, &ctx, Val::vec(leaves)).await;
+    }
+
+    #[tokio::test]
+    async fn event_data_too_large_to_read_back_is_refused_when_sent() {
+        let (processor, _blob_store, data, ctx, _dir) = spilling_processor(|config| {
+            config.spill_threshold_bytes = 1024;
+            config.rehydrate_max_total_bytes = 2048;
+        })
+        .await;
+        for event_data in [
+            Val::from("x".repeat(4096)),
+            Val::vec(vec![Val::Int(0); 200_000]),
+        ] {
+            let event = Event::new(
+                data.env_id,
+                data.stream_id,
+                "test_event".to_string(),
+                event_data,
+            );
+            let error = processor.insert_event(&ctx, &event).await.unwrap_err();
+            assert!(error.contains("max-total-bytes"), "{error}");
+        }
     }
 
     #[tokio::test]
@@ -508,6 +743,7 @@ mod tests {
         // No processor task drains the channel: simulates a stuck insert.
         let publisher = DatabaseEventPublisher {
             db: Arc::new(RwLock::new(None)),
+            blob_store: None,
             event_sender,
             shutdown_sender,
             shutdown_initiated: Arc::new(AtomicBool::new(false)),

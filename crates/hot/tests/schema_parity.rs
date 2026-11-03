@@ -31,8 +31,14 @@ const POSTGRES_ONLY_INDEXES: &[&str] =
 
 /// Columns PostgreSQL has and SQLite need not: the text of string store keys,
 /// kept by a trigger, that the prefix index orders (SQLite compares the JSON
-/// key text itself).
-const POSTGRES_ONLY_COLUMNS: &[&str] = &["store_map_entry.key_text"];
+/// key text itself), and the task changes counted during a period recount
+/// (SQLite holds its writer lock across the recount, so there are none).
+const POSTGRES_ONLY_COLUMNS: &[&str] = &[
+    "store_map_entry.key_text",
+    "usage_task.rollover_period",
+    "usage_task.rollover_compute_units",
+    "usage_task.rollover_duration_ms",
+];
 
 /// Indexes both have whose definitions only differ in engine syntax:
 /// PostgreSQL's UNIQUE NULLS NOT DISTINCT is SQLite's zero-sentinel COALESCE.
@@ -404,8 +410,10 @@ async fn sqlite_schema(pool: &SqlitePool) -> TestResult<Schema> {
     .await?;
     for table in &tables {
         let mut primary = BTreeMap::new();
+        // Unlike pragma_table_info, this lists generated columns. A virtual
+        // table's own hidden columns are 1.
         for row in sqlx::query(sqlx::AssertSqlSafe(format!(
-            "SELECT name, \"notnull\", pk, dflt_value FROM pragma_table_info('{table}')"
+            "SELECT name, \"notnull\", pk, dflt_value FROM pragma_table_xinfo('{table}') WHERE hidden <> 1"
         )))
         .fetch_all(pool)
         .await?

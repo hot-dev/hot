@@ -1,0 +1,53 @@
+::increase::test::webhooks ns
+meta ["test"]
+
+::webhooks ::increase::webhooks
+::sw ::increase::standard-webhooks
+
+// Computed independently with Python's hmac/base64 (and checked with the
+// `standardwebhooks` package as `Webhook("whsec_" + b64(secret))`, which
+// is how Increase's SDKs verify): HMAC-SHA256 keyed with the raw secret.
+SECRET "increase_shared_secret_for_tests"
+EVENT_ID "event_001dzz0r20rzr4zrhrr1364hy80"
+TIMESTAMP "1767225600"
+BODY """{"associated_object_id":"account_in71c4amph0vgo2qllky","associated_object_type":"account","category":"account.created","created_at":"2020-01-31T23:59:59Z","id":"event_001dzz0r20rzr4zrhrr1364hy80","type":"event"}"""
+SIGNATURE "v1,dk1YeulIU3LkzS7V9eiBfj7CQ/0bmyctVUN9b8Eucj8="
+
+fresh-request fn (secret: Str, body: Str): Map {
+    ts `${::hot::time/epoch-seconds()}`
+    sig ::sw/sign(::webhooks/signing-key(secret), EVENT_ID, ts, body)
+    {headers: {webhook-id: EVENT_ID, webhook-timestamp: ts, webhook-signature: sig}, body-raw: body}
+}
+
+test-increase-vector
+meta ["test"] fn () {
+    key ::webhooks/signing-key(SECRET)
+    assert-eq(SIGNATURE, ::sw/sign(key, EVENT_ID, TIMESTAMP, BODY))
+    hdrs {webhook-id: EVENT_ID, webhook-timestamp: TIMESTAMP, webhook-signature: SIGNATURE}
+    assert(::sw/verify-at(hdrs, BODY, key, 300, 1767225600), "the Python vector verifies with the raw-secret key")
+    assert(not(::sw/verify-at(hdrs, BODY, key, 300, 1767225901)), "and is stale five minutes later")
+}
+
+test-verify-request-valid
+meta ["test"] fn () {
+    assert(::webhooks/verify-request(fresh-request(SECRET, BODY), SECRET))
+}
+
+test-verify-request-rejects
+meta ["test"] fn () {
+    good fresh-request(SECRET, BODY)
+    assert(not(::webhooks/verify-request(good, "another_secret")), "wrong secret")
+    assert(not(::webhooks/verify-request({...good, body-raw: `${BODY} `}, SECRET)), "tampered body")
+    assert(not(::webhooks/verify-request({body-raw: BODY}, SECRET)), "no headers")
+    assert(not(::webhooks/verify-request(good, "")), "an empty secret never verifies")
+    stale {...good, headers: {webhook-id: EVENT_ID, webhook-timestamp: TIMESTAMP, webhook-signature: SIGNATURE}}
+    assert(not(::webhooks/verify-request(stale, SECRET)), "a validly signed but stale delivery")
+}
+
+test-construct-event
+meta ["test"] fn () {
+    e ::webhooks/construct-event(fresh-request(SECRET, BODY), SECRET)
+    assert-eq("account.created", e.category)
+    assert-eq("account_in71c4amph0vgo2qllky", e.associated_object_id)
+    assert(is-err(::webhooks/construct-event(fresh-request(SECRET, BODY), "wrong")), "an unverified delivery is an Err")
+}

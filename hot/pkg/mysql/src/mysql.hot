@@ -150,6 +150,7 @@ meta {
     """
 }
 fn (options: MySqlOptions | Map): Any {
+    ::hot::ctx/mark-secret(get(options, "password"))
     host or(get(options, "host"), "localhost")
     port or(get(options, "port"), 3306)
     user get(options, "user")

@@ -182,7 +182,7 @@ pub fn build_registry_from_manifest(
     let mut entries: IndexMap<String, ResourceEntry> = IndexMap::new();
 
     if let Val::Vec(items) = manifest_resources {
-        for item in items {
+        for item in items.iter() {
             let Val::Map(map) = item else {
                 tracing::warn!("resource: manifest entry is not a Map: {:?}", item);
                 continue;
@@ -433,7 +433,7 @@ pub fn load(args: &[Val]) -> HotResult<Val> {
         Some(entry) => match resource_path_for_read(&registry, entry)
             .and_then(|path| std::fs::read(path).map_err(|error| error.to_string()))
         {
-            Ok(bytes) => HotResult::Ok(Val::Bytes(bytes)),
+            Ok(bytes) => HotResult::Ok(Val::bytes(bytes)),
             Err(e) => HotResult::Err(Val::from(format!(
                 "::hot::resource/load: failed to read '{}': {}",
                 rel, e
@@ -509,7 +509,7 @@ pub fn list(args: &[Val]) -> HotResult<Val> {
     }
     let registry = get_registry();
     let entries: Vec<Val> = registry.entries.values().map(entry_to_val).collect();
-    HotResult::Ok(Val::Vec(entries))
+    HotResult::Ok(Val::vec(entries))
 }
 
 /// `::hot::resource/list-matching(glob: Str): Vec<{path, hash, size}>`
@@ -543,7 +543,7 @@ pub fn list_matching(args: &[Val]) -> HotResult<Val> {
             out.push(entry_to_val(entry));
         }
     }
-    HotResult::Ok(Val::Vec(out))
+    HotResult::Ok(Val::vec(out))
 }
 
 #[cfg(test)]
@@ -654,7 +654,7 @@ mod tests {
 
         let bytes = load(&[Val::from("hello.txt")]);
         match bytes {
-            HotResult::Ok(Val::Bytes(b)) => assert_eq!(b, b"world".to_vec()),
+            HotResult::Ok(Val::Bytes(b)) => assert_eq!(*b, b"world".to_vec()),
             other => panic!("unexpected: {:?}", other),
         }
 
@@ -761,7 +761,7 @@ mod tests {
 
         let _guard = ThreadRegistryGuard::install(registry.clone());
         match load(&[Val::from("hello.txt")]) {
-            HotResult::Ok(Val::Bytes(b)) => assert_eq!(b, b"world".to_vec()),
+            HotResult::Ok(Val::Bytes(b)) => assert_eq!(*b, b"world".to_vec()),
             other => panic!("expected ok via thread-local, got: {:?}", other),
         }
         drop(_guard);

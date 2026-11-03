@@ -263,6 +263,10 @@ async fn copy_user_data(db_path: &Path, backup_path: &Path) -> Result<PortReport
                 .await?
                 .iter()
                 .any(|c| c == "env_id");
+        // Two v1 accounts can differ only in capitals. Both stay, by migration
+        // 028's rule: the oldest active one keeps the lowered address.
+        let keeps_duplicate_emails =
+            table == "user" && v2_only_columns.iter().any(|c| c == "email_exact_only");
         let copy_sql = if derives_call_env {
             v2_only_columns.retain(|c| c != "env_id");
             let orphaned: i64 = sqlx::query_scalar(
@@ -284,6 +288,13 @@ async fn copy_user_data(db_path: &Path, backup_path: &Path) -> Result<PortReport
             format!(
                 "INSERT INTO main.\"call\" ({cols_sql}, \"env_id\") SELECT {source_cols}, r.\"env_id\" \
                  FROM v1.\"call\" c JOIN v1.\"run\" r ON r.\"run_id\" = c.\"run_id\""
+            )
+        } else if keeps_duplicate_emails {
+            v2_only_columns.retain(|c| c != "email_exact_only");
+            format!(
+                "INSERT INTO main.\"user\" ({cols_sql}, \"email_exact_only\") SELECT {cols_sql}, \
+                 row_number() OVER (PARTITION BY lower(\"email\") ORDER BY COALESCE(\"active\", 0) DESC, \
+                 \"created_at\" IS NULL, \"created_at\", \"user_id\") > 1 FROM v1.\"user\""
             )
         } else {
             format!(
@@ -836,6 +847,61 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(counted, 70, "ported trace bytes are counted");
+    }
+
+    /// A v1 database can hold accounts that differ only in capitals. The port
+    /// keeps both, by migration 028's rule, rather than failing on its index.
+    #[tokio::test]
+    async fn test_port_keeps_accounts_that_differ_only_in_capitals() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("hot.sqlite.db");
+        let (_, user_id, _) = build_v1_fixture(&db_path).await;
+        let mut v1 = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .connect()
+            .await
+            .unwrap();
+        let newer = Uuid::now_v7();
+        sqlx::query("INSERT INTO user (user_id, email, created_at, created_by_user_id) VALUES (?, 'DEV@example.com', '2999-01-01 00:00:00', ?)")
+            .bind(newer.as_bytes().as_slice())
+            .bind(newer.as_bytes().as_slice())
+            .execute(&mut v1)
+            .await
+            .unwrap();
+        v1.close().await.unwrap();
+
+        let report = port_v1_sqlite_to_v2(&conf_for_path(&db_path))
+            .await
+            .expect("port should succeed");
+        let copied = report
+            .copied_tables
+            .iter()
+            .find(|t| t.table == "user")
+            .unwrap();
+        assert!(
+            !copied
+                .v2_only_columns
+                .iter()
+                .any(|c| c == "email_exact_only")
+        );
+
+        let mut v2 = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .connect()
+            .await
+            .unwrap();
+        for (user, exact_only, lowered) in [
+            (user_id, false, Some("dev@example.com")),
+            (newer, true, None),
+        ] {
+            let row: (bool, Option<String>) =
+                sqlx::query_as("SELECT email_exact_only, email_lower FROM user WHERE user_id = ?")
+                    .bind(user.as_bytes().as_slice())
+                    .fetch_one(&mut v2)
+                    .await
+                    .unwrap();
+            assert_eq!(row, (exact_only, lowered.map(str::to_string)));
+        }
     }
 
     #[tokio::test]

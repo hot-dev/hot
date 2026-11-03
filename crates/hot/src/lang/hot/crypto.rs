@@ -5,6 +5,7 @@
 // SCRAM authentication handshake.
 
 use crate::lang::hot::r#type::HotResult;
+use crate::lang::runtime::vm::VirtualMachine;
 use crate::val::Val;
 use aws_lc_rs::pbkdf2;
 use std::num::NonZeroU32;
@@ -17,12 +18,20 @@ const MAX_ITERATIONS: i64 = 100_000_000;
 fn get_bytes_from_arg(fn_name: &str, arg_name: &str, arg: &Val) -> Result<Vec<u8>, Val> {
     match arg {
         Val::Str(s) => Ok(s.as_bytes().to_vec()),
-        Val::Bytes(b) => Ok(b.clone()),
+        Val::Bytes(b) => Ok(b.to_vec()),
         _ => Err(Val::from(format!(
             "{}: {} must be Str or Bytes",
             fn_name, arg_name
         ))),
     }
+}
+
+pub fn pbkdf2_hmac_sha256_secret(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
+    crate::lang::hot::ctx::with_secret_key(vm, args, pbkdf2_hmac_sha256)
+}
+
+pub fn rsa_sha256_sign_secret(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
+    crate::lang::hot::ctx::with_secret_key(vm, args, rsa_sha256_sign)
 }
 
 /// PBKDF2 key derivation with HMAC-SHA256 (the SCRAM-SHA-256 `Hi()` function).
@@ -89,7 +98,7 @@ pub fn pbkdf2_hmac_sha256(args: &[Val]) -> HotResult<Val> {
         &mut out,
     );
 
-    HotResult::Ok(Val::Bytes(out))
+    HotResult::Ok(Val::bytes(out))
 }
 
 /// Decode a PEM body: strip the BEGIN/END lines and base64-decode the rest.
@@ -166,7 +175,7 @@ pub fn rsa_sha256_sign(args: &[Val]) -> HotResult<Val> {
     let rng = SystemRandom::new();
     let mut signature = vec![0u8; key_pair.public_modulus_len()];
     match key_pair.sign(&RSA_PKCS1_SHA256, &rng, &message, &mut signature) {
-        Ok(()) => HotResult::Ok(Val::Bytes(signature)),
+        Ok(()) => HotResult::Ok(Val::bytes(signature)),
         Err(e) => HotResult::Err(Val::from(format!("{}: signing failed: {}", FN, e))),
     }
 }
@@ -206,6 +215,59 @@ pub fn rsa_sha256_verify(args: &[Val]) -> HotResult<Val> {
     ))
 }
 
+/// Byte length of one P-256 field element (a coordinate, `r` or `s`)
+const P256_COORDINATE_LEN: usize = 32;
+
+/// ECDSA P-256 with SHA-256 verification from public key coordinates.
+/// ecdsa-p256-sha256-verify(x, y, message, signature) -> Bool
+/// `x` and `y` are the 32-byte big-endian affine coordinates — the JWK
+/// `x`/`y` fields after base64url decoding. `signature` is the 64-byte
+/// fixed-width `r || s` encoding JWS (`ES256`) uses, not DER. Returns false
+/// for a bad signature, including one of the wrong length.
+pub fn ecdsa_p256_sha256_verify(args: &[Val]) -> HotResult<Val> {
+    use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED, UnparsedPublicKey};
+
+    const FN: &str = "::hot::crypto/ecdsa-p256-sha256-verify";
+    crate::validate_args!(FN, args, 4);
+
+    let x = match get_bytes_from_arg(FN, "x", &args[0]) {
+        Ok(bytes) => bytes,
+        Err(e) => return HotResult::Err(e),
+    };
+    let y = match get_bytes_from_arg(FN, "y", &args[1]) {
+        Ok(bytes) => bytes,
+        Err(e) => return HotResult::Err(e),
+    };
+    let message = match get_bytes_from_arg(FN, "message", &args[2]) {
+        Ok(bytes) => bytes,
+        Err(e) => return HotResult::Err(e),
+    };
+    let signature = match get_bytes_from_arg(FN, "signature", &args[3]) {
+        Ok(bytes) => bytes,
+        Err(e) => return HotResult::Err(e),
+    };
+
+    if x.len() != P256_COORDINATE_LEN || y.len() != P256_COORDINATE_LEN {
+        return HotResult::Err(Val::from(format!(
+            "{}: x and y must each be {} bytes, got {} and {}",
+            FN,
+            P256_COORDINATE_LEN,
+            x.len(),
+            y.len()
+        )));
+    }
+
+    // SEC 1 uncompressed point: 0x04 || x || y. Off-curve points fail
+    // verification rather than erroring, like a bad signature.
+    let mut point = Vec::with_capacity(1 + 2 * P256_COORDINATE_LEN);
+    point.push(0x04);
+    point.extend_from_slice(&x);
+    point.extend_from_slice(&y);
+
+    let public_key = UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, &point);
+    HotResult::Ok(Val::Bool(public_key.verify(&message, &signature).is_ok()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,7 +276,7 @@ mod tests {
         let result =
             pbkdf2_hmac_sha256(&[Val::from(password), Val::from(salt), Val::Int(iterations)]);
         match result {
-            HotResult::Ok(Val::Bytes(b)) => hex::encode(b),
+            HotResult::Ok(Val::Bytes(b)) => hex::encode(b.as_slice()),
             other => panic!("Expected bytes, got {:?}", other),
         }
     }
@@ -252,10 +314,10 @@ mod tests {
         let salt = base64::engine::general_purpose::STANDARD
             .decode("W22ZaJ0SNY7soEsUEjb6gQ==")
             .unwrap();
-        let result = pbkdf2_hmac_sha256(&[Val::from("pencil"), Val::Bytes(salt), Val::Int(4096)]);
+        let result = pbkdf2_hmac_sha256(&[Val::from("pencil"), Val::bytes(salt), Val::Int(4096)]);
         match result {
             HotResult::Ok(Val::Bytes(b)) => assert_eq!(
-                hex::encode(b),
+                hex::encode(b.as_slice()),
                 "c4a49510323ab4f952cac1fa99441939e78ea74d6be81ddf7096e87513dc615d"
             ),
             other => panic!("Expected bytes, got {:?}", other),
@@ -347,7 +409,7 @@ QXhWy10d3WpWR4Z0MjiJ0/Pm+gRizor9Zqvdd6HVd4K4yWaB+M5J
 
     fn sign_with(pem: &str) -> Vec<u8> {
         match rsa_sha256_sign(&[Val::from(pem), Val::from(RSA_TEST_MESSAGE)]) {
-            HotResult::Ok(Val::Bytes(b)) => b,
+            HotResult::Ok(Val::Bytes(b)) => b.to_vec(),
             other => panic!("Expected signature bytes, got {:?}", other),
         }
     }
@@ -356,10 +418,10 @@ QXhWy10d3WpWR4Z0MjiJ0/Pm+gRizor9Zqvdd6HVd4K4yWaB+M5J
         let n = hex::decode(RSA_MODULUS_HEX.to_lowercase()).unwrap();
         let e = vec![0x01, 0x00, 0x01];
         match rsa_sha256_verify(&[
-            Val::Bytes(n),
-            Val::Bytes(e),
+            Val::bytes(n),
+            Val::bytes(e),
             Val::from(message),
-            Val::Bytes(signature),
+            Val::bytes(signature),
         ]) {
             HotResult::Ok(Val::Bool(ok)) => ok,
             other => panic!("Expected bool, got {:?}", other),
@@ -393,5 +455,93 @@ QXhWy10d3WpWR4Z0MjiJ0/Pm+gRizor9Zqvdd6HVd4K4yWaB+M5J
     fn test_rsa_sign_rejects_non_pem() {
         let result = rsa_sha256_sign(&[Val::from("not a key"), Val::from("m")]);
         assert!(matches!(result, HotResult::Err(_)));
+    }
+
+    // RFC 7515 Appendix A.3: the ES256 JWS example and its public JWK.
+    const ES256_JWK_X: &str = "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU";
+    const ES256_JWK_Y: &str = "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0";
+    const ES256_SIGNING_INPUT: &str = "eyJhbGciOiJFUzI1NiJ9.eyJpc3MiOiJqb2UiLA0KICJleHAiOjEzMDA4MTkzODAsDQogImh0dHA6Ly9leGFtcGxlLmNvbS9pc19yb290Ijp0cnVlfQ";
+    const ES256_SIGNATURE: &str =
+        "DtEhU3ljbEg8L38VWAfUAqOyKAM6-Xx-F4GawxaepmXFCgfTjDxw5djxLa8ISlSApmWQxfKTUJqPP3-Kg6NU1Q";
+
+    fn b64url(s: &str) -> Vec<u8> {
+        use base64::Engine;
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(s)
+            .unwrap()
+    }
+
+    fn ecdsa_verify(x: Vec<u8>, y: Vec<u8>, message: &str, signature: Vec<u8>) -> HotResult<Val> {
+        ecdsa_p256_sha256_verify(&[
+            Val::bytes(x),
+            Val::bytes(y),
+            Val::from(message),
+            Val::bytes(signature),
+        ])
+    }
+
+    fn rfc7515_verify(message: &str, signature: Vec<u8>) -> bool {
+        match ecdsa_verify(b64url(ES256_JWK_X), b64url(ES256_JWK_Y), message, signature) {
+            HotResult::Ok(Val::Bool(ok)) => ok,
+            other => panic!("Expected bool, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_ecdsa_verify_rfc7515_vector() {
+        assert!(rfc7515_verify(ES256_SIGNING_INPUT, b64url(ES256_SIGNATURE)));
+    }
+
+    #[test]
+    fn test_ecdsa_verify_rejects_tampered_message() {
+        assert!(!rfc7515_verify(
+            "eyJhbGciOiJFUzI1NiJ9.e30",
+            b64url(ES256_SIGNATURE)
+        ));
+    }
+
+    #[test]
+    fn test_ecdsa_verify_rejects_tampered_signature() {
+        let mut signature = b64url(ES256_SIGNATURE);
+        signature[10] ^= 0x01;
+        assert!(!rfc7515_verify(ES256_SIGNING_INPUT, signature));
+    }
+
+    #[test]
+    fn test_ecdsa_verify_wrong_length_signature_is_false() {
+        let mut signature = b64url(ES256_SIGNATURE);
+        signature.truncate(63);
+        assert!(!rfc7515_verify(ES256_SIGNING_INPUT, signature));
+    }
+
+    #[test]
+    fn test_ecdsa_verify_generated_key_roundtrip() {
+        use aws_lc_rs::rand::SystemRandom;
+        use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair};
+
+        let key_pair = EcdsaKeyPair::generate(&ECDSA_P256_SHA256_FIXED_SIGNING).unwrap();
+        let signature = key_pair
+            .sign(&SystemRandom::new(), b"generated key message")
+            .unwrap();
+        // Uncompressed SEC 1 point: 0x04 || x || y
+        let point = key_pair.public_key().as_ref();
+        let x = point[1..33].to_vec();
+        let y = point[33..65].to_vec();
+        match ecdsa_verify(x, y, "generated key message", signature.as_ref().to_vec()) {
+            HotResult::Ok(Val::Bool(ok)) => assert!(ok),
+            other => panic!("Expected bool, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_ecdsa_verify_rejects_short_coordinates() {
+        let result = ecdsa_verify(vec![1; 31], vec![1; 32], "m", vec![0; 64]);
+        assert!(matches!(result, HotResult::Err(_)));
+    }
+
+    #[test]
+    fn test_ecdsa_verify_off_curve_point_is_false() {
+        let result = ecdsa_verify(vec![1; 32], vec![2; 32], "m", vec![0; 64]);
+        assert!(matches!(result, HotResult::Ok(Val::Bool(false))));
     }
 }

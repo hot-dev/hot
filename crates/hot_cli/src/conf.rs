@@ -1776,7 +1776,7 @@ fn redact_sensitive_config_at_path(value: &Val, path: &str, sources: &Val) -> Va
             });
             Val::map_from_iter(entries)
         }
-        Val::Vec(items) => Val::Vec(
+        Val::Vec(items) => Val::vec(
             items
                 .iter()
                 .map(|item| redact_sensitive_config_at_path(item, path, sources))

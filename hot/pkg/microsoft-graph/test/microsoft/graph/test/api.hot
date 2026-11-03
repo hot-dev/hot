@@ -1,0 +1,251 @@
+::microsoft::graph::test::api ns
+meta ["test"]
+
+::api ::microsoft::graph::api
+
+http-err fn (response: Map): Any {
+  ::api/HttpError(::hot::http/HttpResponse(response))
+}
+
+test-odata-params
+meta ["test"] fn () {
+    p ::api/odata-params({select: ["id", "displayName"], top: 50, filter: null, expand: "children", count: true, token: "secret", headers: {a: "b"}})
+    assert-eq({"$select": "id,displayName", "$top": "50", "$expand": "children", "$count": "true"}, p, "short names, joined Vecs, nulls and credential keys dropped")
+    assert-eq({"$orderby": "name desc"}, ::api/odata-params({order-by: "name desc"}))
+    assert-eq({"$filter": "a eq 1", format: "pdf"}, ::api/odata-params({"$filter": "a eq 1", format: "pdf"}), "$ keys and API parameters pass through")
+    assert-eq({}, ::api/odata-params({}))
+}
+
+test-search-is-quoted
+meta ["test"] fn () {
+    assert-eq("\"displayName:alex\"", ::api/quote-search("displayName:alex"))
+    assert-eq("\"already\"", ::api/quote-search("\"already\""))
+    assert-eq("\"say \\\"hi\\\"\"", ::api/quote-search("say \"hi\""))
+}
+
+test-query-string-encoding
+meta ["test"] fn () {
+    qs ::api/query-string({filter: "startswith(displayName,'A b')", select: "id,mail", top: 10})
+    assert-eq("$filter=startswith%28displayName%2C%27A%20b%27%29&$select=id%2Cmail&$top=10", qs, "RFC 3986 encoding, literal $, %20 not +")
+    assert-eq("", ::api/query-string({filter: null}))
+    assert-eq("/users", ::api/with-query("/users", {}))
+    assert-eq("/users?$top=5", ::api/with-query("/users", {top: 5}))
+    assert-eq("/x?a=1&$top=5", ::api/with-query("/x?a=1", {top: 5}))
+    assert-eq("format=pdf", ::api/query-string({format: "pdf", token: "secret-access-token"}), "API parameters keep their name; credential keys never reach the URL")
+}
+
+test-consistency-level
+meta ["test"] fn () {
+    assert(::api/needs-eventual-consistency({search: "displayName:a"}))
+    assert(::api/needs-eventual-consistency({count: true}))
+    assert(not(::api/needs-eventual-consistency({filter: "x"})))
+    assert-eq({ConsistencyLevel: "eventual"}, ::api/query-headers({"$search": "\"a\""}))
+    assert-eq({}, ::api/query-headers({top: 1}))
+}
+
+test-resolve-url
+meta ["test"] fn () {
+    g "https://graph.microsoft.com"
+    assert-eq("https://graph.microsoft.com/v1.0/me/drive", ::api/resolve-url("/me/drive", g, {}))
+    assert-eq("https://graph.microsoft.com/v1.0/me", ::api/resolve-url("me", g, {}))
+    assert-eq("https://graph.microsoft.com/beta/me", ::api/resolve-url("/me", g, {api-version: "beta"}))
+    next "https://graph.microsoft.com/v1.0/users?$skiptoken=abc"
+    assert-eq(next, ::api/resolve-url(next, g, {}), "nextLinks pass through")
+    assert-eq("https://graph.microsoft.us/v1.0/me", ::api/resolve-url("/me", "https://graph.microsoft.us", {}))
+}
+
+test-encode-segment
+meta ["test"] fn () {
+    assert-eq("contoso.sharepoint.com%2C1111%2C2222", ::api/encode-segment("contoso.sharepoint.com,1111,2222"))
+    assert-eq("alex%40contoso.com", ::api/encode-segment("alex@contoso.com"))
+    assert-eq("a%2Fb%23c", ::api/encode-segment("a/b#c"))
+}
+
+test-build-http-request
+meta ["test"] fn () {
+    r ::api/build-http-request("POST", "https://graph.microsoft.com/v1.0/x", {Prefer: "respond-async"}, {name: "n"}, "tok", "rid-1")
+    assert-eq("Bearer tok", r.headers.Authorization)
+    assert-eq("application/json", get(r.headers, "Content-Type"))
+    assert-eq("rid-1", get(r.headers, "client-request-id"))
+    assert-eq("true", get(r.headers, "return-client-request-id"))
+    assert-eq("respond-async", r.headers.Prefer)
+    assert-eq("{\"name\":\"n\"}", r.body)
+    raw ::api/build-http-request("PUT", "u", {Content-Type: "text/plain"}, Bytes([0, 255]), null, null)
+    assert-eq(Bytes([0, 255]), raw.body, "Bytes bodies are sent verbatim")
+    assert(not(in("Authorization", keys(raw.headers))))
+    assert(not(in("client-request-id", keys(raw.headers))))
+    empty ::api/build-http-request("GET", "u", {}, "", "t", null)
+    assert-eq("", empty.body)
+    assert(not(in("Content-Type", keys(empty.headers))))
+}
+
+test-client-request-id
+meta ["test"] fn () {
+    assert-eq("mine", ::api/client-request-id({client-request-id: "mine"}))
+    assert(is-null(::api/client-request-id({client-request-id: false})))
+    assert-eq(36, length(::api/client-request-id({})))
+}
+
+test-http-error-graph-shape
+meta ["test"] fn () {
+    e http-err({status: 404, headers: {"request-id": "hdr-req"}, body: {error: {
+        code: "itemNotFound",
+        message: "The resource could not be found.",
+        innerError: {date: "2026-11-01T10:00:00", "request-id": "req-1", "client-request-id": "cli-1"}
+    }}})
+    assert-eq(404, e.status)
+    assert-eq("itemNotFound", e.code)
+    assert-eq("microsoft-graph: HTTP 404 itemNotFound: The resource could not be found.", e.message)
+    assert-eq("req-1", e.request-id, "innerError wins over the header")
+    assert-eq("cli-1", e.client-request-id)
+    assert(::api/has-code(err(e), "itemNotFound"))
+    assert(not(::api/has-code(err(e), "accessDenied")))
+}
+
+test-http-error-inner-code-and-bytes
+meta ["test"] fn () {
+    nested http-err({status: 400, headers: {}, body: {error: {code: "invalidRequest", message: "Bad", innererror: {code: "outer", innererror: {code: "fileTooLarge"}}}}})
+    assert-eq("fileTooLarge", nested.inner-code, "innermost innererror code")
+    assert(::api/has-code(nested, "fileTooLarge"))
+    bytes http-err({status: 403, headers: {}, body: Bytes("{\"error\":{\"code\":\"accessDenied\",\"message\":\"Access denied\"}}")})
+    assert-eq("accessDenied", bytes.code, "a Bytes body (downloads) is decoded")
+    oauth http-err({status: 401, headers: {}, body: {error: "invalid_token", error_description: "Token expired\nmore"}})
+    assert-eq("microsoft-graph: HTTP 401 invalid_token: Token expired", oauth.message)
+    html http-err({status: 502, headers: {}, body: "<html>Bad Gateway</html>"})
+    assert-eq("microsoft-graph: HTTP 502: <html>Bad Gateway</html>", html.message)
+    assert(is-null(html.code))
+}
+
+test-retry-after
+meta ["test"] fn () {
+    e http-err({status: 429, headers: {"Retry-After": "12"}, body: {error: {code: "TooManyRequests", message: "Slow down"}}})
+    assert-eq(12, e.retry-after)
+    assert-eq(30, ::api/retry-after-seconds({"retry-after": "30"}))
+    assert(is-null(::api/retry-after-seconds({"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"})), "HTTP dates are not parsed")
+    assert(is-null(::api/retry-after-seconds({})))
+    assert(is-null(::api/retry-after-seconds(null)))
+}
+
+test-is-retryable
+meta ["test"] fn () {
+    assert(::api/is-retryable(err(http-err({status: 429, headers: {}, body: ""}))))
+    assert(::api/is-retryable(err(http-err({status: 503, headers: {}, body: ""}))))
+    assert(::api/is-retryable(http-err({status: 504, headers: {}, body: ""})))
+    assert(::api/is-retryable({status: 500, headers: {}, body: ""}), "a raw response")
+    assert(not(::api/is-retryable(err(http-err({status: 404, headers: {}, body: ""})))))
+    assert(not(::api/is-retryable(err(http-err({status: 410, headers: {}, body: ""})))), "410 resync is not a retry")
+    assert(not(::api/is-retryable(err(http-err({status: 403, headers: {}, body: ""})))))
+    assert(::api/is-retryable(err("::hot::http/request: request failed: connection reset")))
+    assert(not(::api/is-retryable(err("::hot::http/request: response body exceeds http.max-response-bytes"))))
+    assert(::api/is-retryable(err(::microsoft::graph::auth/token-error("p", {status: 503, body: "busy"}))), "token endpoint outage")
+    assert(not(::api/is-retryable(err(::microsoft::graph::auth/token-error("p", {status: 400, body: {error: "invalid_grant"}})))))
+    assert(not(::api/is-retryable({status: 200, headers: {}, body: {}})))
+}
+
+test-retry-policy-and-transport
+meta ["test"] fn () {
+    assert-eq({max-retries: 1}, ::api/retry-policy({}))
+    assert-eq({max-retries: 0}, ::api/retry-policy({retry: false}))
+    assert-eq({max-retries: 1}, ::api/retry-policy({retry: 5}), "never more than one immediate retry")
+    assert(::api/is-retryable-transport("GET", "request failed: reset"))
+    assert(::api/is-retryable-transport("put", "failed to read body"))
+    assert(not(::api/is-retryable-transport("POST", "request failed: reset")), "POST may have reached Graph")
+}
+
+test-unwrap
+meta ["test"] fn () {
+    assert-eq({id: "1"}, ::api/unwrap(::hot::http/HttpResponse({status: 200, headers: {}, body: {id: "1"}})))
+    assert-eq({}, ::api/unwrap(::hot::http/HttpResponse({status: 204, headers: {}, body: ""})), "204 No Content")
+    bad ::api/unwrap(::hot::http/HttpResponse({status: 409, headers: {}, body: {error: {code: "nameAlreadyExists", message: "x"}}}))
+    assert(is-err(bad))
+    assert(::api/has-code(bad, "nameAlreadyExists"))
+}
+
+test-to-page
+meta ["test"] fn () {
+    p ::api/to-page({value: [{id: "a"}], "@odata.nextLink": "https://graph.microsoft.com/v1.0/x?$skiptoken=1", "@odata.count": 7})
+    assert-eq([{id: "a"}], p.items)
+    assert-eq("https://graph.microsoft.com/v1.0/x?$skiptoken=1", p.next-link)
+    assert(is-null(p.delta-link))
+    assert-eq(7, p.count)
+    last ::api/to-page({value: [], "@odata.deltaLink": "https://graph.microsoft.com/v1.0/d?token=t"})
+    assert(is-null(last.next-link))
+    assert-eq("https://graph.microsoft.com/v1.0/d?token=t", last.delta-link)
+    assert-eq([], ::api/to-page({}).items)
+}
+
+test-collect-with-follows-links-and-limit
+meta ["test"] fn () {
+    pages {
+        start: ::api/to-page({value: [1, 2], "@odata.nextLink": "p2"}),
+        p2: ::api/to-page({value: [3, 4], "@odata.nextLink": "p3"}),
+        p3: ::api/to-page({value: [5]})
+    }
+
+    fetch (link) { get(pages, or(link, "start")) }
+    assert-eq([1, 2, 3, 4, 5], ::api/collect-with(fetch, null))
+    assert-eq([1, 2, 3], ::api/collect-with(fetch, 3), "stops at the limit")
+    failing (link) { if(is-null(link), ::api/to-page({value: [1], "@odata.nextLink": "boom"}), err("page failed")) }
+    assert(is-err(::api/collect-with(failing, null)))
+}
+
+test-relative-url
+meta ["test"] fn () {
+    assert-eq("/me/drive?$select=id", ::api/relative-url("https://graph.microsoft.com/v1.0/me/drive?$select=id"))
+    assert-eq("/users", ::api/relative-url("https://graph.microsoft.us/beta/users"))
+    assert-eq("/me", ::api/relative-url("/me"))
+    assert-eq("/me", ::api/relative-url("me"))
+}
+
+test-build-batch
+meta ["test"] fn () {
+    b ::api/build-batch([
+        {method: "get", url: "/me"},
+        {id: "upd", method: "PATCH", url: "https://graph.microsoft.com/v1.0/me/drive/items/1", body: {name: "x"}, depends-on: [1]},
+        {method: "PUT", url: "/me/drive/root:/a.bin:/content", headers: {Content-Type: "application/octet-stream"}, body: Bytes([1, 2, 3])}
+    ])
+    r b.requests
+    assert-eq({id: "1", method: "GET", url: "/me"}, first(r), "defaults: id by position, no headers or body")
+    upd get(r, 1)
+    assert-eq("upd", upd.id)
+    assert-eq("/me/drive/items/1", upd.url)
+    assert-eq({Content-Type: "application/json"}, upd.headers)
+    assert-eq({name: "x"}, upd.body)
+    assert-eq(["1"], upd.dependsOn)
+    bin get(r, 2)
+    assert-eq("AQID", bin.body, "binary bodies are base64")
+    assert-eq({Content-Type: "application/octet-stream"}, bin.headers)
+}
+
+test-build-batch-limits
+meta ["test"] fn () {
+    assert(is-err(::api/build-batch([])))
+    many map(range(0, 21), (i) { {method: "GET", url: `/users/${i}`} })
+    over ::api/build-batch(many)
+    assert(is-err(over))
+    assert(contains(err-message(over), "at most 20"))
+    assert(not(is-err(::api/build-batch(slice(many, 0, 20)))))
+    assert(is-err(::api/build-batch([{id: "a", url: "/x"}, {id: "A", url: "/y"}])), "ids are case-insensitive")
+    chunks ::api/batch-chunks(many)
+    assert-eq(2, length(chunks))
+    assert-eq(20, length(first(chunks)))
+    assert-eq(1, length(last(chunks)))
+}
+
+test-order-responses
+meta ["test"] fn () {
+    requests [{id: "1"}, {id: "2"}, {id: "3"}]
+    reply {responses: [
+        {id: "3", status: 429, headers: {"Retry-After": "5"}, body: {error: {code: "TooManyRequests", message: "slow"}}},
+        {id: "1", status: 200, headers: {}, body: {id: "me"}},
+        {id: "2", status: 404, headers: {}, body: {error: {code: "itemNotFound", message: "gone"}}}
+    ]}
+    out ::api/order-responses(requests, reply)
+    assert-eq(["1", "2", "3"], map(out.responses, (r) { r.id }), "back in request order")
+    assert(first(out.responses).ok)
+    assert-eq({id: "me"}, get(out.by-id, "1").body)
+    assert-eq(["2", "3"], out.failed)
+    assert-eq(["3"], out.retryable)
+    assert-eq(5, get(out.by-id, "3").retry-after)
+    assert-eq("itemNotFound", get(out.by-id, "2").error.code)
+}

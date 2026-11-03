@@ -1,0 +1,66 @@
+::modern-treasury ns
+meta {
+    doc: """
+    Modern Treasury API bindings: payment operations on top of your own
+    bank accounts, plus a double-entry ledger.
+
+    - `::modern-treasury::counterparties` and
+      `::modern-treasury::external-accounts`: who you pay, their bank
+      accounts, and micro-deposit verification
+    - `::modern-treasury::internal-accounts`: your bank accounts and
+      their balance reports
+    - `::modern-treasury::payment-orders`: send (`credit`) or pull
+      (`debit`) money over ACH, wire, RTP, check, book and other rails;
+      approve, cancel and reverse
+    - `::modern-treasury::expected-payments`: payments you expect to
+      receive, for reconciliation
+    - `::modern-treasury::transactions`: bank transactions as reported
+      by the bank
+    - `::modern-treasury::ledgers`: ledgers, ledger accounts, ledger
+      transactions, ledger entries and balances
+    - `::modern-treasury::returns` and
+      `::modern-treasury::incoming-payment-details`
+    - `::modern-treasury::events`, `::modern-treasury::webhooks`
+      (`X-Signature` verification) and `::modern-treasury::simulations`
+      (sandbox only)
+    - `::modern-treasury::api`: transport, errors, pagination and the
+      `call` escape hatch
+
+    **Setup**: context variables
+    - `modern-treasury.organization.id` and `modern-treasury.api.key`
+      (Developers → API Keys); they are the Basic auth user and password
+    - `modern-treasury.environment`: `"sandbox"` or `"production"`. Both
+      use the same host; it only unlocks the sandbox simulations
+    - `modern-treasury.webhook.key`: the webhook key from Developers →
+      Webhooks
+
+    **Money movement.** Creating a payment order, a reversal or a return
+    needs an `idempotency-key` in its trailing `opts` Map and errs locally
+    without one. Nothing in this package retries a request. Agents should
+    leave approval to a person: configure approval rules in Modern
+    Treasury so agent-created orders wait in `needs_approval`.
+
+    **Quick start**
+
+    ```hot
+    ::api ::modern-treasury::api
+    ::po ::modern-treasury::payment-orders
+
+    accounts ::modern-treasury::internal-accounts/list-internal-accounts({per_page: 10})
+
+    order ::po/create-payment-order({
+      type: "ach",
+      direction: "credit",
+      amount: 10000,
+      originating_account_id: "0f8e3719-3dfd-4613-9bbf-c0333781b59f",
+      receiving_account_id: "5acec2ef-987b-4260-aa97-b719eeb0a8d5",
+      description: "Invoice 42"
+    }, {idempotency-key: "invoice-42-payout"})
+    ```
+    """
+}
+
+BASE_URL "https://app.moderntreasury.com"
+
+// The default and maximum `per_page` of Modern Treasury list endpoints.
+MAX_PAGE_SIZE 100

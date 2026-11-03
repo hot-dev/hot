@@ -1,0 +1,379 @@
+::google::calendar::sync ns
+meta {
+    doc: """
+    Keep a copy of a calendar current: incremental sync with sync
+    tokens (including the 410 Gone full resync), push notifications
+    (`events.watch`, `channels.stop`), and parsing/verifying the webhook
+    Google calls.
+
+    **Sync loop**
+
+    1. First run: `set ::sync/sync-events("primary", null)` lists every
+       event (deleted ones included) and returns `set.next-sync-token`.
+    2. Later runs: `sync-events("primary", saved-token)` returns only
+       what changed: apply `set.changed`, drop `set.cancelled-ids`, store
+       the new `set.next-sync-token`.
+    3. When Google expires the token (HTTP 410), `sync-events` does a full
+       sync and sets `full-sync: true`: replace your copy rather than
+       merging. Pass `{resync: false}` to get the 410 Err instead.
+
+    Filters that cannot be combined with a sync token (`q`, `timeMin`,
+    `timeMax`, `orderBy`, `updatedMin`, `iCalUID`, extended properties)
+    are dropped on incremental calls; keep the other options the same
+    across runs.
+
+    **Push.** `watch-events` registers an HTTPS webhook. Notifications
+    carry only headers: treat one as "run `sync-events` now". Channels
+    expire (a week by default; `channel-params: {ttl: "<seconds>"}` to
+    ask for a lifetime) and are not renewed automatically: renew from a
+    Hot schedule with `renew-watch`. Set a `channel-token` and check it
+    with `verify-notification`.
+
+    **Scopes.** `calendar.events.readonly`.
+    """
+}
+
+::cal ::google::calendar
+::api ::google::api
+::ctx ::hot::ctx
+::time ::hot::time
+
+// Parameters the API refuses together with syncToken.
+SYNC_EXCLUDED ["iCalUID", "orderBy", "privateExtendedProperty", "q", "sharedExtendedProperty", "timeMin", "timeMax", "updatedMin"]
+WATCH_LOCAL_KEYS ["channel-id", "channel-token", "expiration", "expires-in-ms", "channel-params", "resync"]
+
+// ---------------------------------------------------------------------------
+// Incremental sync
+// ---------------------------------------------------------------------------
+
+sync-params
+meta {
+    doc: """The list parameters for a sync page (pure): `maxResults: 2500` unless set, `syncToken` when given (with the filters it cannot be combined with removed), else `showDeleted: true` for a full sync, plus `pageToken`."""
+}
+fn (sync-token: Str?, page-token: Str?, opts: Map): Map {
+  base filter-keys(opts, (k) { not(in(k, WATCH_LOCAL_KEYS)) })
+  incremental is-some(sync-token)
+  cleaned if(incremental, filter-keys(base, (k) { not(in(k, SYNC_EXCLUDED)) }), base)
+  ::cal/query-params({
+    maxResults: 2500,
+    showDeleted: if(incremental, null, true),
+    syncToken: sync-token,
+    pageToken: page-token
+  }, cleaned)
+}
+
+is-sync-token-expired
+meta {
+    doc: """True when a result is the 410 Gone Google returns for an expired sync token."""
+}
+fn (result: Result): Bool {
+  payload if(is-err(result), err-value(result), null)
+  data if(or(is-null(payload), is-str(payload)), null, untype(payload))
+  and(is-map(data), eq(get(data, "status"), 410))
+}
+
+EventSet
+meta {
+    doc: """
+    The result of `sync-events`.
+
+    - `events` - every event returned, in order
+    - `changed` - events created or updated (status not `cancelled`)
+    - `cancelled-ids` - ids of deleted or cancelled events
+    - `next-sync-token` - store it for the next sync
+    - `full-sync` - true when this was a full listing (first sync or a
+      410 resync): replace your copy
+    - `pages` - how many pages were read
+    """
+}
+type {
+    events: Vec,
+    changed: Vec,
+    cancelled-ids: Vec,
+    next-sync-token: Str?,
+    full-sync: Bool,
+    pages: Int
+}
+
+summarize-events
+meta {doc: """Build an `EventSet` from the events of a sync (pure)."""}
+fn (events: Vec, next-sync-token: Str?, full-sync: Bool, pages: Int): EventSet {
+  cancelled filter(events, (e) { eq(get(e, "status"), "cancelled") })
+  EventSet({
+    events: events,
+    changed: filter(events, (e) { ne(get(e, "status"), "cancelled") }),
+    cancelled-ids: distinct(map(cancelled, (e) { e.id })),
+    next-sync-token: next-sync-token,
+    full-sync: full-sync,
+    pages: pages
+  })
+}
+
+sync-loop fn (calendar-id: Str, sync-token: Str?, page-token: Str?, opts: Map, acc: Vec, pages: Int): EventSet {
+  page ::cal/json(::cal/EVENTS_READ_SCOPE, "GET",
+    ::cal/url(::cal/calendar-path(calendar-id, "/events"), sync-params(sync-token, page-token, opts)), "", opts)
+  cond {
+    is-err(page) => { page }
+    => {
+      all concat(acc, or(page.items, []))
+      next page.nextPageToken
+      cond {
+        and(is-some(next), not(eq(next, ""))) => { sync-loop(calendar-id, sync-token, next, opts, all, add(pages, 1)) }
+        => { summarize-events(all, page.nextSyncToken, is-null(sync-token), add(pages, 1)) }
+      }
+    }
+  }
+}
+
+sync-events
+meta {
+    doc: """
+    Everything that changed in a calendar since `sync-token` (null for a
+    first, full sync), as an `EventSet`. An expired token (410) triggers
+    a full sync unless `opts.resync` is false. Other options are
+    `list-events` options (e.g. `singleEvents: true`). Scope:
+    `calendar.events.readonly`.
+
+    ```hot
+    ::sync ::google::calendar::sync
+    ::store ::hot::store
+
+    state ::store/Map({name: "calendar-sync"})
+
+    calendar-sync
+    meta {schedule: "every 10 minutes"}
+    fn (event) {
+      set ::sync/sync-events("primary", ::store/get(state, "sync-token"))
+      // set.full-sync: replace the local copy; else apply set.changed and drop set.cancelled-ids
+      ::store/put(state, "sync-token", set.next-sync-token)
+    }
+    ```
+    """
+}
+fn
+(calendar-id: Str, sync-token: Str?): EventSet {
+  sync-events(calendar-id, sync-token, {})
+},
+(calendar-id: Str, sync-token: Str?, opts: Map): EventSet {
+  result sync-loop(calendar-id, sync-token, null, opts, [], 0)
+  cond {
+    and(is-sync-token-expired(result), is-some(sync-token), ne(get(opts, "resync"), false)) => {
+      sync-loop(calendar-id, null, null, opts, [], 0)
+    }
+    => { result }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Watch channels
+// ---------------------------------------------------------------------------
+
+build-channel
+meta {
+    doc: """
+    Build a watch channel body (pure): `{id, type: "web_hook", address,
+    token?, expiration?, params?}`. Options: `channel-id` (default a new
+    UUID; at most 64 chars), `channel-token` (echoed back as
+    `X-Goog-Channel-Token`; at most 256 chars; masked in call records),
+    `expiration` (epoch ms) or
+    `expires-in-ms` (from `now-ms`), `channel-params` (e.g. `{ttl:
+    "86400"}`). `address` must be HTTPS with a valid certificate.
+    """
+}
+fn (address: Str, opts: Map, now-ms: Int): Map {
+  in-ms get(opts, "expires-in-ms")
+  expiration or(get(opts, "expiration"), if(is-some(in-ms), add(now-ms, in-ms), null))
+  token get(opts, "channel-token")
+  if(is-str(token), ::ctx/mark-secret(token))
+  cond {
+    not(starts-with(address, "https://")) => { err("google-calendar: watch channel addresses must be https:// URLs") }
+    and(is-some(token), gt(length(or(token, "")), 256)) => { err("google-calendar: channel-token is limited to 256 characters") }
+    => {
+      ::cal/compact({
+        id: or(get(opts, "channel-id"), Str(Uuid())),
+        type: "web_hook",
+        address: address,
+        token: token,
+        expiration: if(is-some(expiration), Str(expiration), null),
+        params: get(opts, "channel-params")
+      })
+    }
+  }
+}
+
+now-ms fn (): Int {
+  ::time/epoch-millis(::time/now())
+}
+
+watch-events
+meta {
+    doc: """
+    POST /calendars/{id}/events/watch - get notified at `address` when
+    events in the calendar change. Returns the channel (`id`,
+    `resourceId`, `expiration`): keep `id` and `resourceId` to stop it.
+    See `build-channel` for the channel options. Scope:
+    `calendar.events.readonly`.
+
+    ```hot
+    channel ::google::calendar::sync/watch-events("primary", "https://api.example.com/calendar/hook", {
+      channel-token: ::hot::ctx/get("google.calendar.channel.token")
+    })
+    ```
+    """
+}
+fn
+(calendar-id: Str, address: Str): Map {
+  watch-events(calendar-id, address, {})
+},
+(calendar-id: Str, address: Str, opts: Map): Map {
+  channel build-channel(address, opts, now-ms())
+  params ::cal/query-params({}, opts, WATCH_LOCAL_KEYS)
+  cond {
+    is-err(channel) => { channel }
+    => { ::cal/json(::cal/EVENTS_READ_SCOPE, "POST", ::cal/url(::cal/calendar-path(calendar-id, "/events/watch"), params), channel, opts) }
+  }
+}
+
+stop-channel
+meta {
+    doc: """POST /channels/stop - stop notifications for a channel (`id` and `resourceId` from the watch response). Returns true. Scope: `calendar.events.readonly`."""
+}
+fn
+(channel-id: Str, resource-id: Str): Bool {
+  stop-channel(channel-id, resource-id, {})
+},
+(channel-id: Str, resource-id: Str, opts: Map): Bool {
+  ::cal/done(::cal/json(::cal/EVENTS_READ_SCOPE, "POST", ::cal/url("/channels/stop"), {id: channel-id, resourceId: resource-id}, opts))
+}
+
+renew-watch
+meta {
+    doc: """Replace a channel before it expires: open a new one first, then stop `old` (a watch response or `{id, resourceId}`; null to skip). Returns the new channel. Scope: `calendar.events.readonly`."""
+}
+fn
+(old: Map?, calendar-id: Str, address: Str): Map {
+  renew-watch(old, calendar-id, address, {})
+},
+(old: Map?, calendar-id: Str, address: Str, opts: Map): Map {
+  fresh watch-events(calendar-id, address, opts)
+  cond {
+    is-err(fresh) => { fresh }
+    or(is-null(old), is-null(get(or(old, {}), "id")), is-null(get(or(old, {}), "resourceId"))) => { fresh }
+    => {
+      // A failed stop (already expired) must not lose the new channel.
+      stop-channel(old.id, old.resourceId, ::cal/creds(opts))
+      fresh
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Webhook notifications
+// ---------------------------------------------------------------------------
+
+Notification
+meta {
+    doc: """
+    A Calendar push notification, parsed from its headers (the body is
+    empty).
+
+    - `channel-id`, `channel-token`, `channel-expiration`
+    - `resource-id` (stable), `resource-uri` (version specific)
+    - `resource-state` - `sync` (first message on a new channel),
+      `exists` (something changed), `not_exists`
+    - `message-number` - increasing per channel
+    - `is-sync`
+    """
+}
+type {
+    channel-id: Str?,
+    channel-token: Str?,
+    channel-expiration: Str?,
+    resource-id: Str?,
+    resource-uri: Str?,
+    resource-state: Str?,
+    message-number: Int?,
+    is-sync: Bool
+}
+
+header fn (headers: Map, name: Str): Str? {
+  value get(headers, name)
+  if(or(is-null(value), eq(value, "")), null, Str(value))
+}
+
+parse-notification
+meta {
+    doc: """Parse a webhook `request` into a `Notification` (pure). Header names are matched case-insensitively. Does not check the channel token: use `verify-notification`."""
+}
+fn (request: Map): Notification {
+  headers map-keys(or(get(request, "headers"), {}), lowercase)
+  state header(headers, "x-goog-resource-state")
+  Notification({
+    channel-id: header(headers, "x-goog-channel-id"),
+    channel-token: header(headers, "x-goog-channel-token"),
+    channel-expiration: header(headers, "x-goog-channel-expiration"),
+    resource-id: header(headers, "x-goog-resource-id"),
+    resource-uri: header(headers, "x-goog-resource-uri"),
+    resource-state: state,
+    message-number: ::api/parse-int(header(headers, "x-goog-message-number")),
+    is-sync: eq(state, "sync")
+  })
+}
+
+verify-channel-token
+meta {
+    doc: """True when the request's `X-Goog-Channel-Token` equals `expected` (constant-time compare). Fails closed: an empty `expected` or a missing header is false. `expected` is masked in call records."""
+}
+fn (request: Map, expected: Str?): Bool {
+  headers map-keys(or(get(request, "headers"), {}), lowercase)
+  got header(headers, "x-goog-channel-token")
+  blank or(is-null(expected), eq(trim(or(expected, "")), ""))
+  if(not(blank), ::ctx/mark-secret(expected))
+  cond {
+    blank => { false }
+    is-null(got) => { false }
+    => { ::hot::random/secure-compare(got, expected) }
+  }
+}
+
+verify-notification
+meta {
+    ctx: {"google.calendar.channel.token": {required: false}},
+    doc: """
+    Verify and parse a Calendar webhook: returns the `Notification`, or
+    an Err when the channel token is missing or wrong. The 1-arity form
+    checks against the `google.calendar.channel.token` context variable
+    and fails (halts) when it is unset, so an unconfigured endpoint never
+    accepts traffic.
+
+    ```hot
+    calendar-hook
+    meta {webhook: {service: "calendar", path: "/hook"}, secret-headers: ["x-goog-channel-token"]}
+    fn (request) {
+      note ::google::calendar::sync/verify-notification(request)
+      cond {
+        is-err(note) => { ::hot::http/HttpResponse({status: 401, body: "bad channel token"}) }
+        note.is-sync => { ::hot::http/HttpResponse({status: 200, body: ""}) }
+        => {
+          send("calendar:changed", {resource-id: note.resource-id})
+          ::hot::http/HttpResponse({status: 200, body: ""})
+        }
+      }
+    }
+    ```
+    """
+}
+fn
+(request: Map): Notification {
+  expected or(::ctx/get("google.calendar.channel.token"), "")
+  if(eq(trim(Str(expected)), ""),
+    fail("google.calendar.channel.token is not set. Add it in Context Variables (and pass it as channel-token when watching) to verify Calendar notifications.")
+  )
+  verify-notification(request, Str(expected))
+},
+(request: Map, expected: Str): Notification {
+  cond {
+    not(verify-channel-token(request, expected)) => { err("google-calendar: invalid or missing X-Goog-Channel-Token") }
+    => { parse-notification(request) }
+  }
+}

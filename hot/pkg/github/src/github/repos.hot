@@ -15,8 +15,12 @@ get-repo
 meta {
     doc: """GET /repos/{owner}/{repo} - Repository metadata (default branch, visibility, topics, counts)."""
 }
-fn (owner: Str, repo: Str): Map {
-  ::api/json("GET", `/repos/${owner}/${repo}`)
+fn
+(owner: Str, repo: Str): Map {
+  get-repo(owner, repo, {})
+},
+(owner: Str, repo: Str, opts: Map): Map {
+  ::api/json("GET", `/repos/${owner}/${repo}`, {}, "", opts)
 }
 
 list-repos
@@ -34,7 +38,10 @@ fn
   ::api/json("GET", `/users/${owner}/repos`)
 },
 (owner: Str, params: Map): Vec {
-  ::api/json("GET", `/users/${owner}/repos${query-string(params)}`)
+  list-repos(owner, params, {})
+},
+(owner: Str, params: Map, opts: Map): Vec {
+  ::api/json("GET", `/users/${owner}/repos${query-string(params)}`, {}, "", opts)
 }
 
 list-org-repos
@@ -51,7 +58,10 @@ fn
   ::api/json("GET", `/orgs/${org}/repos`)
 },
 (org: Str, params: Map): Vec {
-  ::api/json("GET", `/orgs/${org}/repos${query-string(params)}`)
+  list-org-repos(org, params, {})
+},
+(org: Str, params: Map, opts: Map): Vec {
+  ::api/json("GET", `/orgs/${org}/repos${query-string(params)}`, {}, "", opts)
 }
 
 list-branches
@@ -63,7 +73,10 @@ fn
   ::api/json("GET", `/repos/${owner}/${repo}/branches`)
 },
 (owner: Str, repo: Str, params: Map): Vec {
-  ::api/json("GET", `/repos/${owner}/${repo}/branches${query-string(params)}`)
+  list-branches(owner, repo, params, {})
+},
+(owner: Str, repo: Str, params: Map, opts: Map): Vec {
+  ::api/json("GET", `/repos/${owner}/${repo}/branches${query-string(params)}`, {}, "", opts)
 }
 
 list-commits
@@ -75,7 +88,10 @@ fn
   ::api/json("GET", `/repos/${owner}/${repo}/commits`)
 },
 (owner: Str, repo: Str, params: Map): Vec {
-  ::api/json("GET", `/repos/${owner}/${repo}/commits${query-string(params)}`)
+  list-commits(owner, repo, params, {})
+},
+(owner: Str, repo: Str, params: Map, opts: Map): Vec {
+  ::api/json("GET", `/repos/${owner}/${repo}/commits${query-string(params)}`, {}, "", opts)
 }
 
 decode-content
@@ -92,8 +108,12 @@ fn (resource: Map): Str {
 }
 
 // Shared body of get-content: `query` is "" or an encoded "?ref=..." suffix.
-fetch-content fn (owner: Str, repo: Str, path: Str, query: Str): Map {
-  resource ::api/json("GET", `/repos/${owner}/${repo}/contents/${encode-path(path)}${query}`)
+fetch-content fn
+(owner: Str, repo: Str, path: Str, query: Str): Map {
+  fetch-content(owner, repo, path, query, {})
+},
+(owner: Str, repo: Str, path: Str, query: Str, opts: Map): Map {
+  resource ::api/json("GET", `/repos/${owner}/${repo}/contents/${encode-path(path)}${query}`, {}, "", opts)
   cond {
     // Already an Err from the transport — pass it through as-is (feeding
     // an Err back into err() would trip the strict-argument halt).
@@ -112,16 +132,22 @@ meta {
     GET /repos/{owner}/{repo}/contents/{path} - Fetch a file and decode
     its content. Returns `{path, sha, content}` where `content` is the
     decoded text — the `sha` is what `put-content` needs to update it.
-    Pass a `ref` (branch/tag/sha) with the 4-arity form. Errs when `path`
-    is a directory.
+    Pass a `ref` (branch/tag/sha) with the 4-arity Str form. Errs when
+    `path` is a directory.
     """
 }
 fn
 (owner: Str, repo: Str, path: Str): Map {
   fetch-content(owner, repo, path, "")
 },
+(owner: Str, repo: Str, path: Str, opts: Map): Map {
+  fetch-content(owner, repo, path, "", opts)
+},
 (owner: Str, repo: Str, path: Str, ref: Str): Map {
-  fetch-content(owner, repo, path, `?ref=${::uri/encode(ref)}`)
+  get-content(owner, repo, path, ref, {})
+},
+(owner: Str, repo: Str, path: Str, ref: Str, opts: Map): Map {
+  fetch-content(owner, repo, path, `?ref=${::uri/encode(ref)}`, opts)
 }
 
 put-content
@@ -144,7 +170,11 @@ meta {
     ```
     """
 }
-fn (owner: Str, repo: Str, path: Str, options: Map): Map {
+fn
+(owner: Str, repo: Str, path: Str, options: Map): Map {
+  put-content(owner, repo, path, options, {})
+},
+(owner: Str, repo: Str, path: Str, options: Map, opts: Map): Map {
   body filter-vals({
     message: options.message,
     // base64/encode takes Bytes; content arrives as text
@@ -152,5 +182,5 @@ fn (owner: Str, repo: Str, path: Str, options: Map): Map {
     sha: get(options, "sha"),
     branch: get(options, "branch")
   }, is-some)
-  ::api/json("PUT", `/repos/${owner}/${repo}/contents/${encode-path(path)}`, {}, body)
+  ::api/json("PUT", `/repos/${owner}/${repo}/contents/${encode-path(path)}`, {}, body, opts)
 }

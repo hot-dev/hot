@@ -1,0 +1,101 @@
+::aws::s3::api ns
+meta {
+    doc: """
+    Where S3 requests go. AWS uses virtual-hosted URLs on the regional endpoint,
+    `https://<bucket>.s3.<region>.amazonaws.com/<key>`, or path-style for a bucket that
+    can't be a hostname label: dots (the TLS wildcard certificate doesn't match those)
+    and legacy uppercase names.
+
+    `opts.endpoint` points at an S3-compatible store (Cloudflare R2, MinIO, ...), which
+    defaults to path-style: `<endpoint>/<bucket>/<key>`. Pass `path-style: false` for
+    `https://<bucket>.<endpoint host>/<key>`, or `path-style: true` to force path-style on AWS.
+
+    A bucket goes into a URL, so `resolve` checks it with `::aws::core/check-bucket` and
+    a bad name is an Err before anything is signed.
+    """
+}
+
+uri-encode ::aws::core/uri-encode
+uri-encode-path ::aws::core/uri-encode-path
+service-url ::aws::core/service-url
+
+// The one way into an S3 call that names a bucket
+resolve
+meta {
+    doc: """`::aws::core/resolve(opts)`, or an Err when a bucket isn't a valid name. Credentials in `opts` are masked first, whatever else is wrong."""
+}
+fn
+(opts: Map, bucket: Str): Map {
+    if-ok(::aws::core/resolve(opts), (resolved) {
+        if-ok(::aws::core/check-bucket(bucket), (checked) { resolved })
+    })
+},
+(opts: Map, bucket: Str, other-bucket: Str): Map {
+    if-ok(resolve(opts, bucket), (resolved) {
+        if-ok(::aws::core/check-bucket(other-bucket), (checked) { resolved })
+    })
+}
+
+// Base URL of the service itself, for requests that aren't about one bucket
+base-url
+meta {
+    doc: """The S3 service URL (no trailing slash): `resolved.endpoint`, else `https://s3.<region>.amazonaws.com`."""
+}
+fn (resolved: Map): Str {
+    service-url(resolved, "s3")
+}
+
+// Put the bucket at the front of the endpoint's host
+virtual-host-url fn (endpoint: Str, bucket: Str): Str {
+    scheme if(starts-with(endpoint, "http://"), "http://", "https://")
+    `${scheme}${bucket}.${slice(endpoint, length(scheme), length(endpoint))}`
+}
+
+bucket-url
+meta {
+    doc: """The URL of a bucket (no trailing slash) for resolved settings: see the namespace doc for the forms."""
+}
+fn (bucket: Str, resolved: Map): Str {
+    endpoint get(resolved, "endpoint")
+    path-style get(resolved, "path-style")
+    if-ok(::aws::core/check-bucket(bucket), (checked) {
+        cond {
+            is-some(endpoint) => {
+                // The hostname form only for a name that can be a hostname label
+                if(and(eq(path-style, false), ::aws::core/is-virtual-host-bucket(checked)), virtual-host-url(endpoint, checked), `${endpoint}/${uri-encode(checked)}`)
+            }
+
+            eq(path-style, true) => { `${base-url(resolved)}/${uri-encode(checked)}` }
+            => { ::aws::core/s3-endpoint(checked, resolved.region) }
+        }
+    })
+}
+
+object-url
+meta {
+    doc: """The URL of an object: `bucket-url` plus the key with each path segment encoded. `/` in the key stays a path separator."""
+}
+fn (bucket: Str, key: Str, resolved: Map): Str {
+    if-ok(bucket-url(bucket, resolved), (base) { `${base}/${uri-encode-path(key)}` })
+}
+
+// S3 lists keys URL-encoded on request, with spaces as "+"
+decode-listed
+meta {
+    doc: """Decode a value from a listing made with `encoding-type=url`: `+` is a space and `%XX` an escape. Null stays null."""
+}
+fn (value: Str?): Str? {
+    cond {
+        is-null(value) => { null }
+        => { ::hot::uri/decode(::aws::core/replace-all-char(value, "+", " ")) }
+    }
+}
+
+// Text of a response body. XML is textual, but a store may label it otherwise.
+body-text
+meta {
+    doc: """A response body as a Str, decoding Bytes."""
+}
+fn (body: Any): Str {
+    if(is-bytes(body), Str(body), body)
+}

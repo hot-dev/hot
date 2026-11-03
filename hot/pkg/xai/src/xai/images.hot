@@ -5,7 +5,7 @@
 // https://docs.x.ai/api
 // ============================================================================
 
-api-request ::xai::api/request
+api-call ::xai::api/call
 HttpError ::xai::api/HttpError
 is-ok-response ::hot::http/is-ok-response
 FileMeta ::hot::file/FileMeta
@@ -94,14 +94,21 @@ meta {
     """
 }
 fn (request: CreateImageRequest): CreateImageResponse | HttpError {
+    generate(request, {})
+},
+(request: CreateImageRequest, opts: Map): CreateImageResponse | HttpError {
     // Default to grok-imagine-image model if not specified
     final-request cond {
         is-null(request.model) => { {...untype(request), model: "grok-imagine-image"} }
         => { request }
     }
 
-    response api-request("POST", `${::xai/BASE_URL}/images/generations`, {}, final-request)
-    if(is-ok-response(response), CreateImageResponse(response.body), err(HttpError(response)))
+    response api-call("POST", `/images/generations`, {}, final-request, opts)
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { CreateImageResponse(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 // ============================================================================
@@ -149,11 +156,20 @@ fn
     generate-to-file(path, CreateImageRequest({prompt: prompt}))
 },
 (path: Str, request: CreateImageRequest): AIMedia | HttpError {
+    generate-to-file(path, request, {})
+},
+(path: Str, prompt: Str, opts: Map): AIMedia | HttpError {
+    generate-to-file(path, CreateImageRequest({prompt: prompt}), opts)
+},
+(path: Str, request: CreateImageRequest, opts: Map): AIMedia | HttpError {
     // Force base64 response format for file writing
     final-request {...untype(request), response_format: "b64_json"}
 
-    response generate(CreateImageRequest(final-request))
+    response generate(CreateImageRequest(final-request), opts)
 
+    cond {
+        is-err(response) => { response }
+        => {
     match response {
         HttpError => { response }
         CreateImageResponse => {
@@ -199,6 +215,8 @@ fn
             }
         }
     }
+        }
+    }
 }
 
 generate-batch-to-files
@@ -223,14 +241,21 @@ meta {
     ```
     """
 }
-fn (path-template: Str, prompt: Str, count: Int): AIMediaBatch {
+fn
+(path-template: Str, prompt: Str, count: Int): AIMediaBatch {
+    generate-batch-to-files(path-template, prompt, count, {})
+},
+(path-template: Str, prompt: Str, count: Int, opts: Map): AIMediaBatch {
     // Generate all images in one request
     response generate(CreateImageRequest({
         prompt: prompt,
         n: count,
         response_format: "b64_json"
-    }))
+    }), opts)
 
+    cond {
+        is-err(response) => { response }
+        => {
     match response {
         HttpError => {
             AIMediaBatch({
@@ -290,6 +315,8 @@ fn (path-template: Str, prompt: Str, count: Int): AIMediaBatch {
             })
         }
     }
+        }
+    }
 }
 
 // ============================================================================
@@ -317,7 +344,13 @@ meta {
 fn (prompt: Str): Str | HttpError {
     create-image(prompt, null)
 },
-(prompt: Str, size: Str): Str | HttpError {
+(prompt: Str, size: Str?): Str | HttpError {
+    create-image(prompt, size, {})
+},
+(prompt: Str, opts: Map): Str | HttpError {
+    create-image(prompt, null, opts)
+},
+(prompt: Str, size: Str?, opts: Map): Str | HttpError {
     request {
         prompt: prompt,
         response_format: "url"
@@ -328,8 +361,11 @@ fn (prompt: Str): Str | HttpError {
         => { {...request, size: size} }
     }
 
-    response generate(CreateImageRequest(final-request))
+    response generate(CreateImageRequest(final-request), opts)
 
+    cond {
+        is-err(response) => { response }
+        => {
     match response {
         HttpError => { response }
         CreateImageResponse => {
@@ -338,6 +374,8 @@ fn (prompt: Str): Str | HttpError {
                 or(is-null(data), is-zero(length(data))) => { "" }
                 => { or(data[0].url, "") }
             }
+        }
+    }
         }
     }
 }

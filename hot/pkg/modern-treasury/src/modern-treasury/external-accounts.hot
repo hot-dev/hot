@@ -1,0 +1,115 @@
+::modern-treasury::external-accounts ns
+meta {
+    doc: """
+    External accounts: counterparties' bank accounts, with micro-deposit
+    verification (`verify-external-account`, then
+    `complete-verification` with the amounts the counterparty sees) and a
+    routing-number lookup. Create bodies carry account and routing
+    numbers: don't log them.
+    """
+}
+
+::api ::modern-treasury::api
+seg ::modern-treasury::api/seg
+
+create-external-account
+meta {
+    doc: """POST /api/external_accounts: add a bank account to a counterparty. `params` needs `counterparty_id`; usually `account_details: [{account_number}]`, `routing_details: [{routing_number, routing_number_type}]`, `account_type`, `party_name`, `party_type`; optional `name`, `metadata`, `party_address`, `plaid_processor_token`, `ledger_account`."""
+}
+fn
+(params: Map): Map {
+  create-external-account(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/create("/api/external_accounts", params, ["counterparty_id"], opts, "create-external-account")
+}
+
+get-external-account
+meta {
+    doc: """GET /api/external_accounts/{id}: retrieve an external account (its `verification_status` among the fields)."""
+}
+fn
+(external-account-id: Str): Map {
+  get-external-account(external-account-id, {})
+},
+(external-account-id: Str, opts: Map): Map {
+  ::api/call("GET", `/api/external_accounts/${seg(external-account-id)}`, {}, opts)
+}
+
+list-external-accounts
+meta {
+    doc: """GET /api/external_accounts: one page. Filters: `counterparty_id`, `party_name`, `external_id`, `metadata`, `per_page`, `after_cursor`."""
+}
+fn
+(): Map {
+  list-external-accounts({})
+},
+(params: Map): Map {
+  list-external-accounts(params, {})
+},
+(params: Map, opts: Map): Map {
+  ::api/list-page("/api/external_accounts", params, opts)
+}
+
+update-external-account
+meta {
+    doc: """PATCH /api/external_accounts/{id}: change `name`, `party_name`, `party_type`, `party_address`, `account_type`, `counterparty_id` or `metadata`. Account and routing numbers can't be changed; create a new external account instead."""
+}
+fn
+(external-account-id: Str, params: Map): Map {
+  update-external-account(external-account-id, params, {})
+},
+(external-account-id: Str, params: Map, opts: Map): Map {
+  ::api/call("PATCH", `/api/external_accounts/${seg(external-account-id)}`, params, opts)
+}
+
+delete-external-account
+meta {
+    doc: """DELETE /api/external_accounts/{id}: delete an external account. Returns null (204)."""
+}
+fn
+(external-account-id: Str): Any {
+  delete-external-account(external-account-id, {})
+},
+(external-account-id: Str, opts: Map): Any {
+  ::api/call("DELETE", `/api/external_accounts/${seg(external-account-id)}`, {}, opts)
+}
+
+verify-external-account
+meta {
+    doc: """
+    POST /api/external_accounts/{id}/verify: start micro-deposit
+    verification. `params` needs `originating_account_id` (the internal
+    account that sends the deposits) and `payment_type` (e.g. `"ach"`,
+    `"rtp"`); optional `currency`, `priority`, `fallback_type`. This
+    sends small deposits from your account, so it needs an
+    `idempotency-key`.
+    """
+}
+fn (external-account-id: Str, params: Map, opts: Map): Map {
+  ::api/move-money(`/api/external_accounts/${seg(external-account-id)}/verify`, params, ["originating_account_id", "payment_type"], opts, "verify-external-account")
+}
+
+complete-verification
+meta {
+    doc: """POST /api/external_accounts/{id}/complete_verification: finish micro-deposit verification with the two `amounts` (in cents) the counterparty saw, e.g. `[2, 4]`."""
+}
+fn
+(external-account-id: Str, amounts: Vec<Int>): Map {
+  complete-verification(external-account-id, amounts, {})
+},
+(external-account-id: Str, amounts: Vec<Int>, opts: Map): Map {
+  ::api/call("POST", `/api/external_accounts/${seg(external-account-id)}/complete_verification`, {amounts: amounts}, opts)
+}
+
+validate-routing-number
+meta {
+    doc: """GET /api/validations/routing_numbers: look up a routing number (`routing-number-type` e.g. `"aba"`, `"swift"`), returning the bank name, address and supported payment types, or a 422 `HttpError` when it is invalid."""
+}
+fn
+(routing-number: Str, routing-number-type: Str): Map {
+  validate-routing-number(routing-number, routing-number-type, {})
+},
+(routing-number: Str, routing-number-type: Str, opts: Map): Map {
+  ::api/call("GET", "/api/validations/routing_numbers", {routing_number: routing-number, routing_number_type: routing-number-type}, opts)
+}

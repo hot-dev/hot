@@ -1,0 +1,144 @@
+::box::search ns
+meta {
+    doc: """
+    Box search (`GET /search`): full-text and metadata search over names,
+    descriptions, file content, comments and tags, with filters.
+
+    **Rate limits.** Box allows 6 searches per second and 60 per minute
+    per user, and 12 per second per enterprise, on top of the general
+    1,000 calls per minute per user. A 429 comes back as an `HttpError`
+    with `retry-after`; `::box::api/is-retryable` is true for it.
+    `search-all` makes one call per page, so cap it with a `limit`.
+
+    **Indexing.** New and changed files take a few minutes to appear in
+    results (content is indexed after upload), and offset paging stops at
+    10,000 results.
+    """
+}
+
+::api ::box::api
+
+MAX_LIMIT 200
+DEFAULT_LIMIT 100
+MAX_OFFSET 10000
+
+as-vec fn (value: Any): Vec {
+  cond {
+    is-null(value) => { [] }
+    is-vec(value) => { value }
+    => { [value] }
+  }
+}
+
+md-filter
+meta {
+    doc: """
+    One metadata filter for `mdfilters` (pure): `{scope, templateKey,
+    filters}`. `scope` is `"enterprise"` (or `"enterprise_<id>"`) or
+    `"global"`; `filters` maps template field keys to a value, a
+    `{gt, lt}` range for numbers and dates, or a Vec for multi-select
+    (any of).
+
+    ```hot
+    ::box::search/md-filter("enterprise", "contract", {status: "signed", amount: {gt: 10000}})
+    ```
+    """
+}
+fn (scope: Str, template-key: Str, filters: Map): Map {
+  {scope: scope, templateKey: template-key, filters: filters}
+}
+
+encode-mdfilters
+meta {
+    doc: """The `mdfilters` query value (pure): a JSON array of filters. Accepts one filter Map or a Vec (Box allows exactly one)."""
+}
+fn (value: Any): Str? {
+  filters as-vec(value)
+  if(is-empty(filters), null, to-json(map(filters, untype)))
+}
+
+search-params
+meta {
+    doc: """
+    The query parameters `search` sends (pure). `query` may be null when
+    `opts.mdfilters` is set. Defaults: `limit` 100, `fields` =
+    `::box/ITEM_FIELDS`. Array filters take a Vec or a comma-separated
+    Str: `file_extensions` (`["pdf", "docx"]`, no dots),
+    `ancestor_folder_ids`, `content_types` (`name`, `description`,
+    `file_content`, `comments`, `tags`), `owner_user_ids`,
+    `created_at_range` / `updated_at_range` (`[from, to]` RFC 3339; either
+    may be `""`), `size_range` (`[min, max]` bytes). Scalars: `type`
+    (`file`, `folder`, `web_link`), `scope` (`user_content`;
+    `enterprise_content` must be enabled by Box support), `trash_content`,
+    `sort` (`relevance`, `modified_at`), `direction`, `offset`,
+    `include_recent_shared_links`. `mdfilters` takes a `md-filter` Map.
+    """
+}
+fn (query: Str?, opts: Map): Map {
+  params ::box/query-params({
+    query: if(::box/is-blank(query), null, query),
+    limit: DEFAULT_LIMIT,
+    fields: ::box/ITEM_FIELDS
+  }, opts, ["mdfilters"])
+  md encode-mdfilters(get(opts, "mdfilters"))
+  if(is-null(md), params, {...params, mdfilters: md})
+}
+
+search
+meta {
+    doc: """
+    GET /search - one page of results: `{entries, total_count, offset,
+    limit}`. Pass a query Str, or an opts Map (with `query` and/or
+    `mdfilters`), or both. Box needs a `query` or `mdfilters`.
+
+    ```hot
+    page ::box::search/search("quarterly report", {
+      file_extensions: ["pdf", "docx"],
+      ancestor_folder_ids: ["12345"],
+      content_types: ["name", "file_content"],
+      updated_at_range: ["2026-01-01T00:00:00Z", ""],
+      limit: 50
+    })
+    page.entries
+    ```
+    """
+}
+fn
+(query: Str): Map {
+  search(query, {})
+},
+(opts: Map): Map {
+  search(get(opts, "query"), filter-keys(opts, (k) { ne(k, "query") }))
+},
+(query: Str?, opts: Map): Map {
+  params search-params(query, opts)
+  cond {
+    and(is-null(get(params, "query")), is-null(get(params, "mdfilters"))) => {
+      err("box: search needs a query or mdfilters")
+    }
+    => { ::box/json("GET", ::box/url("/search", params), "", opts) }
+  }
+}
+
+search-all
+meta {
+    doc: """
+    Every search result (offset paging, `limit` 200 per call), or at most
+    `limit`, stopping at Box's 10,000-offset cap. Each page is one search
+    call against the 6-per-second / 60-per-minute per-user limit, so pass
+    a `limit`.
+
+    ```hot
+    hits ::box::search/search-all("invoice", {type: "file", file_extensions: ["pdf"]}, 400)
+    ```
+    """
+}
+fn
+(query: Str?, opts: Map): Vec {
+  search-all(query, opts, null)
+},
+(query: Str?, opts: Map, limit: Int?): Vec {
+  size if(is-some(limit), min(MAX_LIMIT, max(or(limit, 1), 1)), MAX_LIMIT)
+  page-size or(::box/to-int(get(opts, "limit")), size)
+  ::api/collect-offset((offset) { search(query, {...opts, limit: page-size, offset: offset}) }, page-size, limit, MAX_OFFSET)
+}

@@ -288,3 +288,43 @@ fn () {
         "modern per-request metadata is not added to legacy requests"
     )
 }
+
+test-connect-to-a-closed-port-is-an-err
+meta ["test"] fn () {
+    info ::types/ClientInfo({name: "c", version: "1"})
+    assert(is-err(::mcp::client/connect("http://127.0.0.1:9/mcp", info, null)), "auto mode")
+    assert(is-err(::mcp::client/connect("http://127.0.0.1:9/mcp", info, null, ::types/ConnectionOptions({mode: "legacy"}))), "legacy mode")
+}
+
+test-response-result-returns-a-json-rpc-error-as-an-err
+meta ["test"]
+fn () {
+    response ::rpc/parse-response({
+        jsonrpc: "2.0",
+        id: "call-1",
+        error: {code: -32000, message: "the order system is down"}
+    })
+    legacy ::client/response-result(legacy-session(), response)
+    assert(is-err(legacy), "legacy: the Err comes back as a value")
+    assert-eq("the order system is down", err-message(legacy))
+    modern ::client/response-result(modern-session(), response)
+    assert(is-err(modern), "modern: the Err comes back as a value")
+    assert-eq("the order system is down", err-message(modern))
+}
+
+test-response-result-returns-the-result
+meta ["test"]
+fn () {
+    complete ::rpc/parse-response({
+        jsonrpc: "2.0",
+        id: "call-1",
+        result: {resultType: "complete", content: []}
+    })
+    assert-eq({resultType: "complete", content: []}, ::client/response-result(modern-session(), complete))
+    untagged ::rpc/parse-response({jsonrpc: "2.0", id: "call-1", result: {content: []}})
+    assert-eq({content: []}, ::client/response-result(legacy-session(), untagged))
+    assert(
+        is-err(::client/response-result(modern-session(), untagged)),
+        "a modern result without a resultType is still an Err"
+    )
+}

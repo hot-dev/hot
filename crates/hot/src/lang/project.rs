@@ -230,53 +230,16 @@ impl DependencyResolver {
         }
     }
 
-    /// Create a default resolver using a default HOT_STD_PATH
-    ///
-    /// Resolution order:
-    /// 1. HOT_HOME environment variable: $HOT_HOME/pkg/hot-std
-    /// 2. Development/local: ./hot/pkg/hot-std (checked early for development workflows)
-    /// 3. Executable-relative: <exe_dir>/resources/pkg/hot-std (Windows/bundled installs)
-    /// 4. macOS package install: /usr/local/share/hot/pkg/hot-std
-    /// 5. Linux package install: /usr/share/hot/pkg/hot-std
+    /// Create a default resolver using a default HOT_STD_PATH: the first
+    /// `hot-std` in [`crate::resources::bundled_pkg_dirs`].
     pub fn new_default() -> Self {
-        // Check HOT_HOME first
-        if let Ok(home) = std::env::var("HOT_HOME") {
-            let path = PathBuf::from(home).join("pkg").join("hot-std");
-            if path.exists() {
-                return Self::new(path);
-            }
-        }
-
-        // Check development/local path (prioritized for development workflows)
-        let dev_path = PathBuf::from("./hot/pkg/hot-std");
-        if dev_path.exists() {
-            return Self::new(dev_path);
-        }
-
-        // Check executable-relative path (Windows install and bundled CLI)
-        if let Ok(exe_path) = std::env::current_exe()
-            && let Some(exe_dir) = exe_path.parent()
-        {
-            let exe_relative_path = exe_dir.join("resources").join("pkg").join("hot-std");
-            if exe_relative_path.exists() {
-                return Self::new(exe_relative_path);
-            }
-        }
-
-        // Check macOS package installation location
-        let macos_path = PathBuf::from("/usr/local/share/hot/pkg/hot-std");
-        if macos_path.exists() {
-            return Self::new(macos_path);
-        }
-
-        // Check Linux package installation location
-        let linux_path = PathBuf::from("/usr/share/hot/pkg/hot-std");
-        if linux_path.exists() {
-            return Self::new(linux_path);
-        }
-
-        // Final fallback (will fail gracefully if doesn't exist)
-        Self::new(PathBuf::from("./hot/pkg/hot-std"))
+        let path = crate::resources::bundled_pkg_dirs()
+            .into_iter()
+            .map(|dir| dir.join("hot-std"))
+            .find(|path| path.exists())
+            // Final fallback (will fail gracefully if doesn't exist)
+            .unwrap_or_else(|| PathBuf::from("./hot/pkg/hot-std"));
+        Self::new(path)
     }
 
     /// Resolve a project dependency to its actual location
@@ -434,66 +397,21 @@ impl DependencyResolver {
             }
         };
 
-        // Check HOT_HOME
-        if let Ok(home) = std::env::var("HOT_HOME") {
-            let path = PathBuf::from(&home).join("pkg").join(pkg_name);
-            if path.exists() {
-                return Ok(ResolvedDependency {
-                    name: name.to_string(),
-                    spec: DependencySpec::local(&path.to_string_lossy()),
-                    resolved_path: path,
-                });
-            }
-        }
-
-        // Check development/local path
-        let dev_path = PathBuf::from("./hot/pkg").join(pkg_name);
-        if dev_path.exists() {
-            return Ok(ResolvedDependency {
+        crate::resources::bundled_pkg_dirs()
+            .into_iter()
+            .map(|dir| dir.join(pkg_name))
+            .find(|path| path.exists())
+            .map(|path| ResolvedDependency {
                 name: name.to_string(),
-                spec: DependencySpec::local(&dev_path.to_string_lossy()),
-                resolved_path: dev_path,
-            });
-        }
-
-        // Check executable-relative path
-        if let Ok(exe_path) = std::env::current_exe()
-            && let Some(exe_dir) = exe_path.parent()
-        {
-            let exe_relative = exe_dir.join("resources").join("pkg").join(pkg_name);
-            if exe_relative.exists() {
-                return Ok(ResolvedDependency {
-                    name: name.to_string(),
-                    spec: DependencySpec::local(&exe_relative.to_string_lossy()),
-                    resolved_path: exe_relative,
-                });
-            }
-        }
-
-        // Check macOS installation
-        let macos_path = PathBuf::from("/usr/local/share/hot/pkg").join(pkg_name);
-        if macos_path.exists() {
-            return Ok(ResolvedDependency {
-                name: name.to_string(),
-                spec: DependencySpec::local(&macos_path.to_string_lossy()),
-                resolved_path: macos_path,
-            });
-        }
-
-        // Check Linux installation
-        let linux_path = PathBuf::from("/usr/share/hot/pkg").join(pkg_name);
-        if linux_path.exists() {
-            return Ok(ResolvedDependency {
-                name: name.to_string(),
-                spec: DependencySpec::local(&linux_path.to_string_lossy()),
-                resolved_path: linux_path,
-            });
-        }
-
-        Err(format!(
-            "Could not resolve dependency '{}' from default locations",
-            name
-        ))
+                spec: DependencySpec::local(&path.to_string_lossy()),
+                resolved_path: path,
+            })
+            .ok_or_else(|| {
+                format!(
+                    "Could not resolve dependency '{}' from default locations",
+                    name
+                )
+            })
     }
 
     /// Resolve all project dependencies including hot-std (which is always first)

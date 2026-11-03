@@ -1,0 +1,122 @@
+::persona::documents ns
+meta {
+    doc: """
+    Documents: files a user submitted (government ID images, proof of
+    address, business documents) and what Persona extracted from them.
+
+    Responses carry file metadata, not bytes: `{filename, url,
+    byte-size}`, where `url` is a signed link (valid 6 hours by default)
+    that needs no API key. The signed URL is itself a credential for the
+    image: never log it or put it in errors. `download-file` fetches the
+    bytes; its errors carry only the HTTP status.
+    """
+}
+
+::api ::persona::api
+
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+
+seg ::persona::api/seg
+
+FILE_KEYS ["files", "files-normalized", "front-photo", "back-photo", "selfie-photo"]
+
+get-document
+meta {
+    doc: """
+    GET /documents/{id} - Retrieve a document (`doc_...`): status
+    (`initiated`, `submitted`, `processed`, `errored`), type, extracted
+    fields and file metadata.
+
+    **Example**
+
+    ```hot
+    doc ::persona::documents/get-document("doc_...")
+    ::persona::documents/files(doc)  // [{key: "files", filename: "front.jpg", byte-size: 81234, has-url: true}]
+    ```
+    """
+}
+fn
+(document-id: Str): Map {
+  get-document(document-id, {})
+},
+(document-id: Str, options: Map): Map {
+  ::api/send("GET", `/documents/${seg(document-id)}`, {}, null, options)
+}
+
+file-entry fn (key: Str, file: Any): Map? {
+  cond {
+    not(is-map(file)) => { null }
+    => {
+      url or(get(file, "url"), null)
+      {
+        key: key,
+        filename: get(file, "filename"),
+        byte-size: or(get(file, "byte-size"), or(get(file, "byte_size"), get(file, "byteSize"))),
+        has-url: is-str(url)
+      }
+    }
+  }
+}
+
+files
+meta {
+    doc: """The file metadata on a document, one entry per file: `{key, filename, byte-size, has-url}`. Signed URLs are deliberately left out so the result is safe to log or hand to an LLM; read a URL with `file-url` when you need to download. Exposed for testing."""
+}
+fn (doc: Any): Vec {
+  entries reduce(FILE_KEYS, (acc, key) {
+    v ::api/attr(doc, key)
+    cond {
+      is-vec(v) => { concat(acc, map(v, (f) { file-entry(key, f) })) }
+      is-map(v) => { concat(acc, [file-entry(key, v)]) }
+      => { acc }
+    }
+  }, [])
+  filter(entries, is-some)
+}
+
+file-url
+meta {
+    doc: """The signed URL of a document's file: `key` is `"files"`, `"files-normalized"`, `"front-photo"`, `"back-photo"` or `"selfie-photo"`, and `index` picks within a list (0 for single files). Null when absent. Treat the result as a secret."""
+}
+fn (doc: Any, key: Str, index: Int): Str? {
+  v ::api/attr(doc, key)
+  file cond {
+    and(is-vec(v), lt(index, length(v))) => { v[index] }
+    is-map(v) => { v }
+    => { null }
+  }
+
+  if(is-map(file), get(file, "url"), null)
+}
+
+download-file
+meta {
+    doc: """
+    Download a signed Persona file URL and return its `Bytes`. Only
+    `https://files.withpersona.com/` URLs (or other `withpersona.com`
+    hosts) are fetched, and no API key is sent. On failure the Err says
+    only the HTTP status: never the URL or the bytes.
+    """
+}
+fn (url: Str): Bytes {
+  cond {
+    not(is-persona-file-url(url)) => { err("persona: download-file only fetches https://*.withpersona.com file URLs") }
+    => {
+      response ::hot::http/request(HttpRequest({method: "GET", url: url, headers: {User-Agent: ::persona::api/USER_AGENT}}))
+      cond {
+        is-err(response) => { err("persona: file download failed (connection error)") }
+        is-ok-response(response) => { or(response.body-bytes, Bytes("")) }
+        => { err(`persona: file download failed: HTTP ${response.status}`) }
+      }
+    }
+  }
+}
+
+is-persona-file-url
+meta {
+    doc: """True for an `https://` URL on `withpersona.com` or a subdomain. Exposed for testing."""
+}
+fn (url: Any): Bool {
+  and(is-str(url), ::hot::regex/is-match(or(url, ""), "^https://([a-z0-9-]+\\.)*withpersona\\.com/"))
+}

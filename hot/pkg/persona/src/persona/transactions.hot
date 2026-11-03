@@ -1,0 +1,133 @@
+::persona::transactions ns
+meta {
+    doc: """
+    Transactions: Persona's API-first object for KYB and other
+    server-side checks. You create a transaction of a transaction type
+    configured in the dashboard (e.g. a KYB type), with the business and
+    its associated people in `fields`; Persona workflows then run the
+    business reports, verify owners and open a case, and move the
+    transaction's status (by default `created`, `approved`, `declined`,
+    `needs_review`, `errored`; statuses are configurable per type).
+    """
+}
+
+::api ::persona::api
+
+seg ::persona::api/seg
+
+create-transaction
+meta {
+    doc: """
+    POST /transactions - Create a transaction of type `transaction-type-id`
+    (`txntp_...`). `fields` holds the inputs configured on the type, e.g.
+    for KYB `{business_name, business_tax_identification_number,
+    business_registered_address: {street_1, city, subdivision, postal_code,
+    country_code}, associated_people: [...]}`. `opts`: `reference-id`,
+    `tags`. In sandbox, `fields.debug: "passed" | "failed"` forces the
+    outcome.
+
+    **Example**
+
+    ```hot
+    txn ::persona::transactions/create-transaction("txntp_...", {
+      business_name: "Acme Robotics LLC",
+      business_registered_address: {street_1: "1 Main St", city: "Austin", subdivision: "TX", postal_code: "78701", country_code: "US"}
+    }, {reference-id: "biz-42"}, {idempotency-key: "biz-42-kyb"})
+    ```
+    """
+}
+fn
+(transaction-type-id: Str, fields: Map): Map {
+  create-transaction(transaction-type-id, fields, {}, {})
+},
+(transaction-type-id: Str, fields: Map, opts: Map): Map {
+  create-transaction(transaction-type-id, fields, opts, opts)
+},
+(transaction-type-id: Str, fields: Map, opts: Map, options: Map): Map {
+  body ::api/document(null, {
+    transaction-type-id: transaction-type-id,
+    fields: if(is-empty(fields), null, fields),
+    reference-id: get(opts, "reference-id"),
+    tags: get(opts, "tags")
+  }, {})
+  ::api/send("POST", "/transactions", {}, body, options)
+}
+
+get-transaction
+meta {
+    doc: """GET /transactions/{id} - Retrieve a transaction. `opts` takes `include` (e.g. `["related-objects"]`) and `fields`."""
+}
+fn
+(transaction-id: Str): Map {
+  get-transaction(transaction-id, {}, {})
+},
+(transaction-id: Str, opts: Map): Map {
+  get-transaction(transaction-id, opts, opts)
+},
+(transaction-id: Str, opts: Map, options: Map): Map {
+  ::api/send("GET", `/transactions/${seg(transaction-id)}`, ::api/read-query(opts), null, options)
+}
+
+list-transactions
+meta {
+    doc: """GET /transactions - One page of transactions. Filters: `reference-id`, `transaction-type-id`. `opts` takes `page-size`, `after`, `before`."""
+}
+fn
+(filters: Map): Map {
+  list-transactions(filters, {}, {})
+},
+(filters: Map, opts: Map): Map {
+  list-transactions(filters, opts, opts)
+},
+(filters: Map, opts: Map, options: Map): Map {
+  ::api/list-page("/transactions", filters, opts, options)
+}
+
+update-transaction
+meta {
+    doc: """PATCH /transactions/{id} - Update `fields`, `status` (one configured on the type), `reference-id` or `tags`. Send field and status changes one after another, not in parallel (Persona returns 409)."""
+}
+fn
+(transaction-id: Str, attributes: Map): Map {
+  update-transaction(transaction-id, attributes, {})
+},
+(transaction-id: Str, attributes: Map, options: Map): Map {
+  ::api/send("PATCH", `/transactions/${seg(transaction-id)}`, {}, ::api/document(null, attributes, {}), options)
+}
+
+label-transaction
+meta {
+    doc: """POST /transactions/{id}/label - Record a label (e.g. `"fraud"`, `"legitimate"`), with optional `score` and `model-version` in `opts`."""
+}
+fn
+(transaction-id: Str, label: Str): Map {
+  label-transaction(transaction-id, label, {}, {})
+},
+(transaction-id: Str, label: Str, opts: Map): Map {
+  label-transaction(transaction-id, label, opts, opts)
+},
+(transaction-id: Str, label: Str, opts: Map, options: Map): Map {
+  body ::api/meta-document({label: label, score: get(opts, "score"), model-version: get(opts, "model-version")})
+  ::api/send("POST", `/transactions/${seg(transaction-id)}/label`, {}, body, options)
+}
+
+redact-transaction
+meta {
+    doc: """DELETE /transactions/{id} - Permanently remove a transaction's PII."""
+}
+fn
+(transaction-id: Str): Map {
+  redact-transaction(transaction-id, {})
+},
+(transaction-id: Str, options: Map): Map {
+  ::api/send("DELETE", `/transactions/${seg(transaction-id)}`, {}, null, options)
+}
+
+is-done
+meta {
+    doc: """True when a transaction left `created`/`pending`: Persona's workflows have set a decision or an error."""
+}
+fn (doc: Any): Bool {
+  s or(::api/attr(doc, "status"), "")
+  not(in(s, ["", "created", "pending"]))
+}

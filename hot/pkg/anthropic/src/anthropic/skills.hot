@@ -1,7 +1,7 @@
 ::anthropic::skills ns
 meta {doc: """Anthropic Skills API (Beta) - Create and manage custom agent skills."""}
 
-api-request ::anthropic::api/request
+api-call ::anthropic::api/call
 HttpError ::anthropic::api/HttpError
 is-ok-response ::hot::http/is-ok-response
 
@@ -75,12 +75,26 @@ meta {
 }
 fn
 (): SkillsListResponse {
-    response api-request("GET", `${::anthropic/BASE_URL}/v1/skills`, {anthropic-beta: BETA_HEADER})
-    if(is-ok-response(response), SkillsListResponse(response.body), err(HttpError(response)))
+    list({})
+},
+(opts: Map): SkillsListResponse {
+    response api-call("GET", `/v1/skills`, {anthropic-beta: BETA_HEADER}, "", opts)
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { SkillsListResponse(response.body) }
+      => { err(HttpError(response)) }
+    }
 },
 (limit: Int): SkillsListResponse {
-    response api-request("GET", `${::anthropic/BASE_URL}/v1/skills?limit=${limit}`, {anthropic-beta: BETA_HEADER})
-    if(is-ok-response(response), SkillsListResponse(response.body), err(HttpError(response)))
+    list(limit, {})
+},
+(limit: Int, opts: Map): SkillsListResponse {
+    response api-call("GET", `/v1/skills?limit=${limit}`, {anthropic-beta: BETA_HEADER}, "", opts)
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { SkillsListResponse(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 get
@@ -99,8 +113,15 @@ meta {
     """
 }
 fn (skill_id: Str): Skill {
-    response api-request("GET", `${::anthropic/BASE_URL}/v1/skills/${skill_id}`, {anthropic-beta: BETA_HEADER})
-    if(is-ok-response(response), Skill(response.body), err(HttpError(response)))
+    get(skill_id, {})
+},
+(skill_id: Str, opts: Map): Skill {
+    response api-call("GET", `/v1/skills/${skill_id}`, {anthropic-beta: BETA_HEADER}, "", opts)
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { Skill(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 create
@@ -124,8 +145,15 @@ meta {
     """
 }
 fn (request: CreateSkillRequest): Skill {
-    response api-request("POST", `${::anthropic/BASE_URL}/v1/skills`, {anthropic-beta: BETA_HEADER}, request)
-    if(is-ok-response(response), Skill(response.body), err(HttpError(response)))
+    create(request, {})
+},
+(request: CreateSkillRequest, opts: Map): Skill {
+    response api-call("POST", `/v1/skills`, {anthropic-beta: BETA_HEADER}, request, opts)
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { Skill(response.body) }
+      => { err(HttpError(response)) }
+    }
 }
 
 delete
@@ -143,6 +171,13 @@ meta {
     """
 }
 fn (skill_id: Str): Map {
-    response api-request("DELETE", `${::anthropic/BASE_URL}/v1/skills/${skill_id}`, {anthropic-beta: BETA_HEADER})
-    if(is-ok-response(response), response.body, err(HttpError(response)))
+    delete(skill_id, {})
+},
+(skill_id: Str, opts: Map): Map {
+    response api-call("DELETE", `/v1/skills/${skill_id}`, {anthropic-beta: BETA_HEADER}, "", opts)
+    cond {
+      is-err(response) => { response }
+      is-ok-response(response) => { response.body }
+      => { err(HttpError(response)) }
+    }
 }

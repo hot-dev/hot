@@ -60,7 +60,7 @@ pub(crate) fn str_internal(args: &[Val]) -> HotResult<Val> {
         Val::Vec(v) => HotResult::Ok(Val::from(format_vec_for_string(v))),
         Val::Bytes(bytes) => {
             // Convert bytes to UTF-8 string (lossy - replaces invalid UTF-8 with replacement char)
-            match String::from_utf8(bytes.clone()) {
+            match String::from_utf8(bytes.to_vec()) {
                 Ok(s) => HotResult::Ok(Val::from(s)),
                 Err(_) => {
                     // Fall back to lossy conversion if not valid UTF-8
@@ -123,8 +123,8 @@ pub fn str_constructor(
                 .next()
                 .unwrap_or(type_name_full)
                 .to_string();
-            let key = (source_short.clone(), "Str".to_string());
-            let key_full = (type_name_full.to_owned(), "Str".to_string());
+            let key = (source_short.clone(), "::hot::type/Str".to_string());
+            let key_full = (type_name_full.to_owned(), "::hot::type/Str".to_string());
 
             tracing::debug!(
                 "Type dispatch: Looking for implementation for type '{}' (short: '{}') -> Str",
@@ -139,8 +139,8 @@ pub fn str_constructor(
 
             // Use scope-aware type implementation resolution
             if let Some(impl_fn_name) = vm
-                .resolve_type_implementation(type_name_full, "Str")
-                .or_else(|| vm.resolve_type_implementation(&source_short, "Str"))
+                .resolve_type_implementation(type_name_full, "::hot::type/Str")
+                .or_else(|| vm.resolve_type_implementation(&source_short, "::hot::type/Str"))
             {
                 // Check type-dispatch recursion depth before calling the
                 // implementation. This catches buggy T -> Str implementations
@@ -168,7 +168,7 @@ pub fn str_constructor(
                     // Create a new typed object with the inner data and the type
                     if let Val::Map(inner_map) = inner_val {
                         let mut typed_inner = inner_map.clone();
-                        typed_inner
+                        std::sync::Arc::make_mut(&mut typed_inner)
                             .insert(Val::from("$type"), Val::from(type_name_full.to_owned()));
                         Val::Map(typed_inner)
                     } else {
@@ -177,7 +177,7 @@ pub fn str_constructor(
                         typed_wrapper
                             .insert(Val::from("$type"), Val::from(type_name_full.to_owned()));
                         typed_wrapper.insert(Val::from("$val"), inner_val.clone());
-                        Val::Map(Box::new(typed_wrapper))
+                        Val::map(typed_wrapper)
                     }
                 } else {
                     // No $val field, use the object as-is
@@ -306,8 +306,8 @@ pub fn int_constructor(
 
         // Use scope-aware type implementation resolution
         if let Some(impl_fn_name) = vm
-            .resolve_type_implementation(type_name_full, "Int")
-            .or_else(|| vm.resolve_type_implementation(&source_short, "Int"))
+            .resolve_type_implementation(type_name_full, "::hot::type/Int")
+            .or_else(|| vm.resolve_type_implementation(&source_short, "::hot::type/Int"))
         {
             let qualified = if impl_fn_name.starts_with("::") {
                 // The registry stores namespace-qualified impl names; use
@@ -379,8 +379,8 @@ pub fn dec_constructor(
 
         // Use scope-aware type implementation resolution (same as str_constructor)
         if let Some(impl_fn_name) = vm
-            .resolve_type_implementation(type_name_full, "Dec")
-            .or_else(|| vm.resolve_type_implementation(&source_short, "Dec"))
+            .resolve_type_implementation(type_name_full, "::hot::type/Dec")
+            .or_else(|| vm.resolve_type_implementation(&source_short, "::hot::type/Dec"))
         {
             let qualified = if impl_fn_name.starts_with("::") {
                 // The registry stores namespace-qualified impl names; use
@@ -444,8 +444,8 @@ pub fn bool_constructor(
 
         // Use scope-aware type implementation resolution
         if let Some(impl_fn_name) = vm
-            .resolve_type_implementation(type_name_full, "Bool")
-            .or_else(|| vm.resolve_type_implementation(&source_short, "Bool"))
+            .resolve_type_implementation(type_name_full, "::hot::type/Bool")
+            .or_else(|| vm.resolve_type_implementation(&source_short, "::hot::type/Bool"))
         {
             let qualified = if impl_fn_name.starts_with("::") {
                 // The registry stores namespace-qualified impl names; use
@@ -499,7 +499,7 @@ pub fn bytes_constructor(args: &[Val]) -> HotResult<Val> {
         Val::Vec(v) => {
             // Convert Vec of Ints to Bytes
             let mut bytes = Vec::new();
-            for val in v {
+            for val in v.iter() {
                 match val {
                     Val::Int(i) => {
                         if *i >= 0 && *i <= 255 {
@@ -519,11 +519,11 @@ pub fn bytes_constructor(args: &[Val]) -> HotResult<Val> {
                     }
                 }
             }
-            HotResult::Ok(Val::Bytes(bytes))
+            HotResult::Ok(Val::bytes(bytes))
         }
         Val::Str(s) => {
             // Convert string to UTF-8 bytes
-            HotResult::Ok(Val::Bytes(s.as_bytes().to_vec()))
+            HotResult::Ok(Val::bytes(s.as_bytes().to_vec()))
         }
         _ => HotResult::Err(Val::from(format!("Cannot convert {:?} to Bytes", args[0]))),
     }
@@ -546,7 +546,7 @@ pub fn user_type_constructor(type_name: &str, args: &[Val]) -> HotResult<Val> {
     result_map.insert(Val::from("$type"), Val::from(type_name.to_string()));
     result_map.insert(Val::from("$val"), args[0].clone());
 
-    HotResult::Ok(Val::Map(Box::new(result_map)))
+    HotResult::Ok(Val::map(result_map))
 }
 
 /// The text of a map: `{a: 1}`, or for a typed value `::ns/Type({…})`, or
@@ -561,14 +561,19 @@ fn format_map_for_string(map: &IndexMap<Val, Val>) -> String {
         return (**val).to_owned();
     }
     if type_name.starts_with("::hot::time/") {
-        let value = Val::Map(Box::new(map.clone()));
+        let value = Val::map(map.clone());
         if let HotResult::Ok(Val::Str(text)) =
             crate::lang::hot::time::to_string(std::slice::from_ref(&value))
         {
             return (*text).to_owned();
         }
     }
-    format!("{}({})", type_name, format_map_contents(map))
+    // The fields live under `$val`; the wrapper's own keys are metadata.
+    let contents = match map.get(&Val::from("$val")) {
+        Some(val) => format_val_for_string(val),
+        None => format_map_contents(map),
+    };
+    format!("{}({})", type_name, contents)
 }
 
 /// The text of a vector: `[1, "a", [2]]`.
@@ -704,18 +709,18 @@ pub fn null_constructor(args: &[Val]) -> HotResult<Val> {
 pub fn vec_constructor(args: &[Val]) -> HotResult<Val> {
     if args.len() == 1 {
         let coerced = match &args[0] {
-            Val::Vec(v) => v.clone(),
+            Val::Vec(v) => v.to_vec(),
             Val::Str(s) => s.chars().map(|c| Val::from(c.to_string())).collect(),
             Val::Map(m) => m
                 .iter()
-                .map(|(k, v)| Val::Vec(vec![k.clone(), v.clone()]))
+                .map(|(k, v)| Val::vec(vec![k.clone(), v.clone()]))
                 .collect(),
             Val::Bytes(b) => b.iter().map(|byte| Val::Int(*byte as i64)).collect(),
             other => vec![other.clone()],
         };
-        return HotResult::Ok(Val::Vec(coerced));
+        return HotResult::Ok(Val::vec(coerced));
     }
-    HotResult::Ok(Val::Vec(args.to_vec()))
+    HotResult::Ok(Val::vec(args.to_vec()))
 }
 
 /// Core Map constructor.
@@ -728,7 +733,7 @@ pub fn map_constructor(args: &[Val]) -> HotResult<Val> {
             Val::Map(m) => return HotResult::Ok(Val::Map(m.clone())),
             Val::Vec(entries) => {
                 let mut map = IndexMap::new();
-                for entry in entries {
+                for entry in entries.iter() {
                     match entry {
                         Val::Vec(pair) if pair.len() == 2 => {
                             map.insert(pair[0].clone(), pair[1].clone());
@@ -746,7 +751,7 @@ pub fn map_constructor(args: &[Val]) -> HotResult<Val> {
                         }
                     }
                 }
-                return HotResult::Ok(Val::Map(Box::new(map)));
+                return HotResult::Ok(Val::map(map));
             }
             _ => {
                 return HotResult::Err(Val::from(
@@ -769,7 +774,7 @@ pub fn map_constructor(args: &[Val]) -> HotResult<Val> {
         map.insert(chunk[0].clone(), chunk[1].clone());
     }
 
-    HotResult::Ok(Val::Map(Box::new(map)))
+    HotResult::Ok(Val::map(map))
 }
 
 /// Core Namespace constructor
@@ -1120,7 +1125,7 @@ pub fn untype_recursive(form: &Val) -> HotResult<Val> {
                     };
                     new_map.insert(key.clone(), untyped_value);
                 }
-                HotResult::Ok(Val::Map(Box::new(new_map)))
+                HotResult::Ok(Val::map(new_map))
             } else {
                 // Regular map: recursively untype values (keys remain as-is)
                 let mut new_map = IndexMap::new();
@@ -1131,19 +1136,19 @@ pub fn untype_recursive(form: &Val) -> HotResult<Val> {
                     };
                     new_map.insert(key.clone(), untyped_value);
                 }
-                HotResult::Ok(Val::Map(Box::new(new_map)))
+                HotResult::Ok(Val::map(new_map))
             }
         }
         Val::Vec(vec) => {
             // Recursively untype all vector elements
             let mut new_vec = Vec::new();
-            for item in vec {
+            for item in vec.iter() {
                 match untype_recursive(item) {
                     HotResult::Ok(untyped_item) => new_vec.push(untyped_item),
                     HotResult::Err(err) => return HotResult::Err(err),
                 }
             }
-            HotResult::Ok(Val::Vec(new_vec))
+            HotResult::Ok(Val::vec(new_vec))
         }
         _ => HotResult::Ok(form.clone()),
     }
@@ -1534,7 +1539,7 @@ mod constructor_tests {
         // Str splits into characters
         assert_eq!(
             vec_constructor(&[Val::from("abc")]),
-            HotResult::Ok(Val::Vec(vec![
+            HotResult::Ok(Val::vec(vec![
                 Val::from("a"),
                 Val::from("b"),
                 Val::from("c")
@@ -1542,25 +1547,25 @@ mod constructor_tests {
         );
         // Vec stays itself (no wrapping)
         assert_eq!(
-            vec_constructor(&[Val::Vec(vec![Val::Int(1), Val::Int(2)])]),
-            HotResult::Ok(Val::Vec(vec![Val::Int(1), Val::Int(2)]))
+            vec_constructor(&[Val::vec(vec![Val::Int(1), Val::Int(2)])]),
+            HotResult::Ok(Val::vec(vec![Val::Int(1), Val::Int(2)]))
         );
         // Map becomes [key, value] pairs
         let mut m = IndexMap::new();
         m.insert(Val::from("a"), Val::Int(1));
         assert_eq!(
-            vec_constructor(&[Val::Map(Box::new(m))]),
-            HotResult::Ok(Val::Vec(vec![Val::Vec(vec![Val::from("a"), Val::Int(1)])]))
+            vec_constructor(&[Val::map(m)]),
+            HotResult::Ok(Val::vec(vec![Val::vec(vec![Val::from("a"), Val::Int(1)])]))
         );
         // Bytes become ints
         assert_eq!(
-            vec_constructor(&[Val::Bytes(vec![7, 8])]),
-            HotResult::Ok(Val::Vec(vec![Val::Int(7), Val::Int(8)]))
+            vec_constructor(&[Val::bytes(vec![7, 8])]),
+            HotResult::Ok(Val::vec(vec![Val::Int(7), Val::Int(8)]))
         );
         // Scalars wrap
         assert_eq!(
             vec_constructor(&[Val::Int(5)]),
-            HotResult::Ok(Val::Vec(vec![Val::Int(5)]))
+            HotResult::Ok(Val::vec(vec![Val::Int(5)]))
         );
     }
 
@@ -1568,20 +1573,20 @@ mod constructor_tests {
     fn test_vec_multi_arg_collects() {
         assert_eq!(
             vec_constructor(&[Val::Int(1), Val::Int(2), Val::Int(3)]),
-            HotResult::Ok(Val::Vec(vec![Val::Int(1), Val::Int(2), Val::Int(3)]))
+            HotResult::Ok(Val::vec(vec![Val::Int(1), Val::Int(2), Val::Int(3)]))
         );
         assert_eq!(
             vec_constructor(&[Val::from("a"), Val::from("b")]),
-            HotResult::Ok(Val::Vec(vec![Val::from("a"), Val::from("b")]))
+            HotResult::Ok(Val::vec(vec![Val::from("a"), Val::from("b")]))
         );
     }
 
     #[test]
     fn test_map_from_pairs_and_entry_maps() {
         // Vec of [key, value] pairs
-        let pairs = Val::Vec(vec![
-            Val::Vec(vec![Val::from("a"), Val::Int(1)]),
-            Val::Vec(vec![Val::from("b"), Val::Int(2)]),
+        let pairs = Val::vec(vec![
+            Val::vec(vec![Val::from("a"), Val::Int(1)]),
+            Val::vec(vec![Val::from("b"), Val::Int(2)]),
         ]);
         let result = map_constructor(&[pairs]);
         match result {
@@ -1597,7 +1602,7 @@ mod constructor_tests {
         e1.insert(Val::from("x"), Val::Int(10));
         let mut e2 = IndexMap::new();
         e2.insert(Val::from("y"), Val::Int(20));
-        let entries = Val::Vec(vec![Val::Map(Box::new(e1)), Val::Map(Box::new(e2))]);
+        let entries = Val::vec(vec![Val::map(e1), Val::map(e2)]);
         let result = map_constructor(&[entries]);
         match result {
             HotResult::Ok(Val::Map(m)) => {
@@ -1608,13 +1613,13 @@ mod constructor_tests {
         }
 
         // Invalid entry errors
-        let bad = Val::Vec(vec![Val::Int(1)]);
+        let bad = Val::vec(vec![Val::Int(1)]);
         assert!(matches!(map_constructor(&[bad]), HotResult::Err(_)));
 
         // Map identity coercion
         let mut m = IndexMap::new();
         m.insert(Val::from("k"), Val::Int(9));
-        let result = map_constructor(&[Val::Map(Box::new(m))]);
+        let result = map_constructor(&[Val::map(m)]);
         match result {
             HotResult::Ok(Val::Map(out)) => {
                 assert_eq!(out.get(&Val::from("k")), Some(&Val::Int(9)));
@@ -1651,30 +1656,64 @@ mod constructor_tests {
         let map = |entries: Vec<(Val, Val)>| Val::map_from_iter(entries);
 
         assert_eq!(
-            text(map(vec![(Val::from("k"), Val::Vec(vec![Val::Int(1)]))])),
+            text(map(vec![(Val::from("k"), Val::vec(vec![Val::Int(1)]))])),
             "{k: [1]}"
         );
         assert_eq!(text(map(vec![(Val::Int(6), Val::Int(2))])), "{6: 2}");
         assert_eq!(
-            text(Val::Vec(vec![
+            text(Val::vec(vec![
                 map(vec![
                     (Val::from("a"), Val::Int(10)),
                     (Val::from("b"), Val::Null)
                 ]),
-                Val::Vec(vec![Val::from("x"), Val::Bool(true)]),
+                Val::vec(vec![Val::from("x"), Val::Bool(true)]),
             ])),
             r#"[{a: 10, b: }, ["x", true]]"#
         );
         assert_eq!(
-            text(Val::Vec(vec![map(vec![
+            text(Val::vec(vec![map(vec![
                 (Val::from("$type"), Val::from("::hot::type/Fn")),
                 (Val::from("$val"), Val::from("::app/handler"))
             ])])),
             "[::app/handler]"
         );
         assert_eq!(
-            text(Val::Vec(vec![Val::Byte(7), Val::Bytes(vec![1, 2])])),
+            text(Val::vec(vec![Val::Byte(7), Val::bytes(vec![1, 2])])),
             "[Byte(7), Bytes([1, 2])]"
+        );
+    }
+
+    // A typed value shows its fields, which live under `$val`.
+    #[test]
+    fn test_str_formats_typed_value_contents() {
+        let text = |value: Val| match str_internal(&[value]) {
+            HotResult::Ok(Val::Str(s)) => (*s).to_owned(),
+            other => panic!("Expected a Str, got {:?}", other),
+        };
+        let typed = |name: &str, val: Val| {
+            Val::map_from_iter(vec![
+                (Val::from("$type"), Val::from(name)),
+                (Val::from("$val"), val),
+            ])
+        };
+        let fields = Val::map_from_iter(vec![
+            (Val::from("status"), Val::Int(404)),
+            (Val::from("body"), Val::from("nope")),
+        ]);
+        assert_eq!(
+            text(typed("::app/HttpError", fields.clone())),
+            r#"::app/HttpError({status: 404, body: "nope"})"#
+        );
+        assert_eq!(
+            text(Val::vec(vec![typed(
+                "::app/Wrapper",
+                typed("::app/Inner", fields)
+            )])),
+            r#"[::app/Wrapper(::app/Inner({status: 404, body: "nope"}))]"#
+        );
+        assert_eq!(
+            text(typed("::app/Email", Val::from("a@b.c"))),
+            r#"::app/Email("a@b.c")"#
         );
     }
 }

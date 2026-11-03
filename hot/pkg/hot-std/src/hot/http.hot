@@ -93,7 +93,12 @@ fn (request: Map): Str | Bytes {
 HttpResponse
 meta {
     doc: """
-    HTTP response returned from request functions or webhook handlers.
+    HTTP response returned from request functions or webhook handlers. A
+    response from `request`, `get` and the other request functions is a
+    constructed `HttpResponse`: fields read as usual, a declared
+    `HttpResponse -> T` arrow runs for `T(response)`, and `to-json` gives
+    tagged JSON. Use `untype(response)` for a plain Map, which also makes
+    `is-map` true.
 
     **Example**
 

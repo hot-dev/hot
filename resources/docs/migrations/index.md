@@ -36,6 +36,42 @@ $env:HOT_VERSION = "2.3.0"; irm https://get.hot.dev/install.ps1 | iex
 
 Pinned installs are useful when you need to finish database migrations with an older release line before moving to a newer major version.
 
+## Upgrading from Hot 3.0.1 to 3.0.2 {#upgrading-from-3-0-1-to-3-0-2}
+
+Hot 3.0.2 masks more secrets in call and run records. See [Secret Masking](/docs/language/meta#secret-masking) for what it covers and what it doesn't.
+
+**Records written before you upgrade aren't changed.** On earlier versions, call records could hold secrets composed into longer strings (such as an `Authorization: Bearer` header), values passed to `::hot::ctx/set-secret`, tokens returned by API calls, and credentials passed as arguments. If your project made API calls that way:
+
+1. **Rotate** the keys it used, if anyone you wouldn't give them to can read your call records.
+2. **Purge** the call records you no longer need: `DELETE /v1/runs/{run_id}/calls`, `/v1/streams/{stream_id}/calls` or `/v1/env/calls` with an environment key, or `DELETE /v1/orgs/{org}/calls` with an org key. Repeat each request until `complete` is `true`. See the [API docs](/docs/api). Purges cover call records only: a run's stored result and failure, and event data, stay.
+
+**Behaviour changes:**
+
+- A stored `run.result` no longer holds credential fields or registered secrets. Code that reads a run's result back through the API to get a credential now sees `<secret>`. A webhook or MCP caller waiting on the run still receives the real result.
+- A value is masked inside longer strings once registered, so a secret key holding a short, common value can hide more of a record than before. Declare `secret: false` on configuration values. Declared defaults aren't masked inside strings.
+- Named functions now run implicit arrows in `map` and other callbacks, in `call`, and through a variable, as direct calls do. A callback that relied on receiving the unconverted value now gets the converted one.
+
+**Packages** that call `::hot::ctx/mark-secret` need `hot-min-version: "3.0.2"`.
+
+**On PostgreSQL, the upgrade builds an index on `call`.** Migration 025 replaces `call_env_start_time_idx` with an index that also holds each call's size, so hourly usage reconciliation no longer reads the whole table. Trace writes keep running during the build, though they slow down if they share a disk with it. It reads all of `call` and then waits for every older transaction to finish, so give your migration job room: a 2.4 GB table took about 20 s on a 125 MB/s disk. If the job is interrupted, run `hot db migrate` again.
+
+**Email addresses now identify one account, whatever their capitals.** `DANA@corp.com` and `dana@corp.com` are the same address for sign-up, sign-in, verification, invitations and OAuth, and a second account can't be created under other capitals. Mail still goes to the address as it was typed. Only the letters A to Z fold: other letters, dots and `+` suffixes still make a different address.
+
+**Accounts that already differ only in capitals are kept.** Migration 028 merges and deletes nothing, because it can't tell whether two accounts belong to one person, which password to keep, or which role wins in an organization they share. In each such set:
+
+- The oldest active account answers to any spelling.
+- Each of the others answers only to its exact spelling, with its own password, memberships and history.
+
+To list those accounts, run this as a superuser or a `BYPASSRLS` role, because row-level security hides the rows from every other login, the schema owner included. On SQLite, drop the `hot.` prefix.
+
+```sql
+SELECT user_id, email, active FROM hot."user" WHERE email_exact_only ORDER BY lower(email), created_at;
+```
+
+To change which account answers to any spelling, set `email_exact_only` to true on the current one, then to false on the other, in that order.
+
+**On PostgreSQL, migration 028 rewrites `user` and `email_verification`,** blocking reads and writes to them while it runs. Both are small, so this is usually brief.
+
 ## Upgrading from Hot 3.0.0 to 3.0.1 {#upgrading-from-3-0-0-to-3-0-1}
 
 Hot 3.0.1 fixes the issues found in a full review of everything merged after

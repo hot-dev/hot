@@ -185,7 +185,7 @@ impl McpTool {
             tool_map.insert(Val::from("position"), Val::Null);
         }
 
-        let mcp_tool = Val::Map(Box::new(tool_map));
+        let mcp_tool = Val::map(tool_map);
 
         McpTool {
             service,
@@ -343,7 +343,7 @@ impl Webhook {
             endpoint_map.insert(Val::from("position"), Val::Null);
         }
 
-        let webhook = Val::Map(Box::new(endpoint_map));
+        let webhook = Val::map(endpoint_map);
 
         Webhook {
             service,
@@ -492,7 +492,7 @@ impl AgentDef {
                     Val::from(field.type_annotation.clone()),
                 );
             }
-            Val::Map(Box::new(fields_map))
+            Val::map(fields_map)
         });
 
         // Full meta from the variable
@@ -539,7 +539,7 @@ impl AgentDef {
         AgentDef {
             type_name,
             namespace: namespace.to_string(),
-            agent_val: Val::Map(Box::new(agent_map)),
+            agent_val: Val::map(agent_map),
         }
     }
 
@@ -562,10 +562,10 @@ impl AgentDef {
             return None;
         };
         let mut out: Vec<Val> = Vec::with_capacity(items.len());
-        for item in items {
+        for item in items.iter() {
             out.push(Self::summarize_mcp_entry(item));
         }
-        Some(Val::Vec(out))
+        Some(Val::vec(out))
     }
 
     fn summarize_mcp_entry(entry: &Val) -> Val {
@@ -589,7 +589,7 @@ impl AgentDef {
                         summary.insert(Val::from("kind"), Val::from("named"));
                         summary.insert(Val::from("name"), Val::from(name_str));
                         summary.insert(Val::from("inner"), Self::summarize_mcp_entry(inner_val));
-                        return Val::Map(Box::new(summary));
+                        return Val::map(summary);
                     }
                 }
                 // Bare config map: surface url if present.
@@ -602,7 +602,7 @@ impl AgentDef {
                 if let Some(u) = url {
                     summary.insert(Val::from("url"), u);
                 }
-                Val::Map(Box::new(summary))
+                Val::map(summary)
             }
             other if Self::val_is_fn_or_var_ref(other) => {
                 let mut summary = indexmap::IndexMap::new();
@@ -610,7 +610,7 @@ impl AgentDef {
                 if let Some(target) = Self::extract_ref_target(other) {
                     summary.insert(Val::from("target"), Val::from(target));
                 }
-                Val::Map(Box::new(summary))
+                Val::map(summary)
             }
             other => {
                 tracing::warn!(
@@ -619,7 +619,7 @@ impl AgentDef {
                 );
                 let mut summary = indexmap::IndexMap::new();
                 summary.insert(Val::from("kind"), Val::from("unknown"));
-                Val::Map(Box::new(summary))
+                Val::map(summary)
             }
         }
     }
@@ -760,7 +760,7 @@ impl WorkflowDef {
         WorkflowDef {
             type_name,
             namespace: namespace.to_string(),
-            workflow_val: Val::Map(Box::new(workflow_map)),
+            workflow_val: Val::map(workflow_map),
         }
     }
 }

@@ -51,7 +51,8 @@ impl Drop for TestRoleCleanup {
 /// barrier, so each admission check and scheduler poll that joins on one
 /// reads the whole org table.
 #[tokio::test]
-async fn root_org_joins_probe_the_org_key_under_rls() -> Result<(), Box<dyn std::error::Error>> {
+async fn hot_path_statements_keep_their_plans_under_rls() -> Result<(), Box<dyn std::error::Error>>
+{
     let Ok(admin_uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
         eprintln!("skipping PostgreSQL RLS test: HOT_TEST_POSTGRES_URI not set");
         return Ok(());
@@ -132,6 +133,79 @@ async fn root_org_joins_probe_the_org_key_under_rls() -> Result<(), Box<dyn std:
     assert!(
         unbounded_org_scans(&coalesce) > 0,
         "COALESCE is bounded under RLS now; this test no longer guards anything:\n{coalesce}"
+    );
+    // Counting an account's traces reads the environment index alone, never
+    // the trace heap, which is most of a large database.
+    let lines: Vec<String> = sqlx::query_scalar(
+        "EXPLAIN SELECT COUNT(*)::bigint, MIN(c.start_time) FROM call c \
+         WHERE c.env_id = ANY($1) AND c.start_time > NOW() - ($2 || ' days')::interval",
+    )
+    .bind(vec![Uuid::new_v4()])
+    .bind("30")
+    .fetch_all(&scheduler)
+    .await?;
+    let call_plan = lines.join("\n");
+    assert!(
+        call_plan.contains("Index Only Scan using call_env_start_time_size_idx"),
+        "{call_plan}"
+    );
+    // So does reconciliation, which also sums each call's size. The index holds
+    // every column this and the row policy read.
+    let lines: Vec<String> = sqlx::query_scalar(
+        "EXPLAIN SELECT CAST(COALESCE(SUM(CASE WHEN size<0 THEN 0 ELSE size END),0) AS BIGINT) \
+         FROM call WHERE env_id = $1",
+    )
+    .bind(Uuid::new_v4())
+    .fetch_all(&scheduler)
+    .await?;
+    let size_plan = lines.join("\n");
+    assert!(
+        size_plan.contains("Index Only Scan using call_env_start_time_size_idx"),
+        "{size_plan}"
+    );
+    // Its store sum reaches the row through the key, so its cost follows the
+    // environment's entries, not the number of organizations or the whole table.
+    let lines: Vec<String> = sqlx::query_scalar(
+        "EXPLAIN SELECT CAST(COALESCE(SUM(CASE WHEN size<0 THEN 0 ELSE size END),0) AS BIGINT) \
+         FROM store_map_entry WHERE org_id = $2 AND env_id = $1",
+    )
+    .bind(Uuid::new_v4())
+    .bind(Uuid::new_v4())
+    .fetch_all(&scheduler)
+    .await?;
+    let store_plan = lines.join("\n");
+    assert!(
+        store_plan.contains("Index Cond") && store_plan.contains("org_id ="),
+        "{store_plan}"
+    );
+    // Sign-in finds an account through its lowered address, a plain text
+    // comparison the policies leave open to an index. A condition on
+    // lower(email) would run them over every account instead.
+    let authentication = ScopedPgPool::new(raw.clone()).with_scope(DatabaseScope::Bootstrap(
+        db::BootstrapOperation::Authentication,
+    ));
+    let lines: Vec<String> = sqlx::query_scalar(
+        r#"EXPLAIN SELECT user_id FROM "user" WHERE email = $1 OR email_lower = lower($1 COLLATE "C") ORDER BY email = $1 DESC LIMIT 1"#,
+    )
+    .bind("Dana@corp.example")
+    .fetch_all(&authentication)
+    .await?;
+    let user_plan = lines.join("\n");
+    assert!(
+        user_plan.contains("Index Cond: (email_lower =")
+            && user_plan.contains("Index Cond: (email ="),
+        "{user_plan}"
+    );
+    let lines: Vec<String> = sqlx::query_scalar(
+        r#"EXPLAIN SELECT verification_id FROM email_verification WHERE email_lower = lower($1 COLLATE "C") AND status_id = 1 ORDER BY created_at DESC LIMIT 1"#,
+    )
+    .bind("Dana@corp.example")
+    .fetch_all(&authentication)
+    .await?;
+    let verification_plan = lines.join("\n");
+    assert!(
+        verification_plan.contains("Index Cond: (email_lower ="),
+        "{verification_plan}"
     );
     raw.close().await;
     admin.close().await;

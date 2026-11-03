@@ -1,0 +1,273 @@
+::middesk::businesses ns
+meta {
+    doc: """
+    Businesses: the core Middesk object. Creating one starts the orders
+    you ask for (a Business Verification report by default); the report
+    fills in asynchronously and Middesk sends `business.updated` when the
+    status changes.
+
+    Statuses: `open`, `pending` (orders running), `in_audit` (Middesk
+    analysts are checking), `in_review` (ready for your decision),
+    `approved`, `rejected`. Approve or reject with `set-status`.
+    """
+}
+
+::api ::middesk::api
+
+seg ::middesk::api/seg
+
+// Statuses after which the report will not change on its own.
+DONE_STATUSES ["in_review", "approved", "rejected"]
+
+validate-create
+meta {
+    doc: """`params` (compacted) when it has a `name` and at least one address, otherwise an Err naming the missing fields (never their values). Exposed for testing."""
+}
+fn (params: Map): Map {
+  body ::api/compact(untype(params))
+  name get(body, "name")
+  addresses get(body, "addresses")
+  missing filter([
+    if(or(not(is-str(name)), is-empty(trim(or(name, "")))), "name", null),
+    if(or(not(is-vec(addresses)), is-empty(or(addresses, []))), "addresses", null)
+  ], is-some)
+  if(is-empty(missing), body, err(`middesk: create-business needs ${join(missing, " and ")}; nothing was sent`))
+}
+
+create-business
+meta {
+    doc: """
+    POST /businesses - Create a business and start its orders. `params`:
+
+    - `name` (required) and `addresses` (required): `[{address_line1,
+      address_line2, city, state, postal_code}]` or `[{full_address}]`
+      (use `address_line1`, not `address_line_1`, which Middesk ignores)
+    - `tin`: `{tin: "123410000"}` (9 digits, no dash)
+    - `website`: `{url}`; `phone_numbers`: `[{phone_number}]`
+    - `people`: `[{name}]` or `[{first_name, last_name, title}]`; for KYC
+      also `dob`, `ssn`, address fields (PII: sent in the body only)
+    - `external_id`, `unique_external_id` (Middesk refuses a duplicate, so
+      a retried create can't make a second business), `tags`
+    - `orders`: `[{product: "business_verification_verify"}, {product:
+      "liens"}, ...]`; omitted means a Business Verification report
+
+    Missing `name` or `addresses` is an Err and nothing is sent.
+
+    **Example**
+
+    ```hot
+    biz ::middesk::businesses/create-business({
+      name: "Acme Robotics LLC",
+      tin: {tin: "123410000"},
+      addresses: [{address_line1: "123 Main St", city: "Austin", state: "TX", postal_code: "78701"}],
+      people: [{name: "Jane Doe", title: "CEO"}],
+      unique_external_id: "acct-42",
+      orders: [{product: "business_verification_verify"}, {product: "website"}]
+    })
+    biz.status  // "pending"
+    ```
+    """
+}
+fn
+(params: Map): Map {
+  create-business(params, {})
+},
+(params: Map, options: Map): Map {
+  body validate-create(params)
+  if(is-err(body), body, ::api/send("POST", "/businesses", {}, body, options))
+}
+
+verify-tin
+meta {
+    doc: """Create a business that runs only a TIN match (`orders: [{product: "tin"}]`): the IRS name/TIN check. `address` is required by Middesk; pass `{full_address: ...}` or the line fields. Read the result from `tin` on the business once the `business.updated` webhook arrives."""
+}
+fn
+(name: Str, tin: Str, address: Map): Map {
+  verify-tin(name, tin, address, {})
+},
+(name: Str, tin: Str, address: Map, options: Map): Map {
+  digits replace(trim(tin), "-", "")
+  create-business({name: name, tin: {tin: digits}, addresses: [address], orders: [{product: "tin"}]}, options)
+}
+
+get-business
+meta {
+    doc: """
+    GET /businesses/{id} - The full business report: `status`, `review`
+    (with `tasks`), `registrations`, `tin`, `watchlist`, `liens`,
+    `litigations`, `bankruptcies`, `people`, `names`, `addresses`,
+    `website`, `formation`, `industry_classification`, `orders`,
+    `documents`, `policy_results` and more. Summarize it with
+    `::middesk::decisions/summarize`.
+    """
+}
+fn
+(business-id: Str): Map {
+  get-business(business-id, {})
+},
+(business-id: Str, options: Map): Map {
+  ::api/send("GET", `/businesses/${seg(business-id)}`, {}, null, options)
+}
+
+list-businesses
+meta {
+    doc: """
+    GET /businesses - One page of businesses (slim items, not full
+    reports). `params`: `page` (from 1), `per_page`, and filters such as
+    `status`, `external_id`, `unique_external_id`, `tags` (Vec, comma
+    joined), `start_date`, `end_date`. Middesk's current spec lists no
+    filters, so treat them as best effort.
+
+    **Example**
+
+    ```hot
+    ::middesk::businesses/list-businesses({per_page: 10, status: "in_review"})
+    ```
+    """
+}
+fn
+(params: Map): Map {
+  list-businesses(params, {})
+},
+(params: Map, options: Map): Map {
+  ::api/list-page("/businesses", params, options)
+}
+
+collect-businesses
+meta {
+    doc: """Up to `limit` businesses matching `params` (see `list-businesses`), following `has_more`."""
+}
+fn
+(params: Map, limit: Int): Vec {
+  ::api/collect("/businesses", params, limit, {})
+},
+(params: Map, limit: Int, options: Map): Vec {
+  ::api/collect("/businesses", params, limit, options)
+}
+
+find-by-external-id
+meta {
+    doc: """The business (list item) with this `external_id`, or null. Fetch the full report with `get-business`."""
+}
+fn
+(external-id: Str): Map? {
+  find-by-external-id(external-id, {})
+},
+(external-id: Str, options: Map): Map? {
+  page list-businesses({external_id: external-id, per_page: 1}, options)
+  cond {
+    is-err(page) => { page }
+    => {
+      data or(get(page, "data"), [])
+      if(is-empty(data), null, first(data))
+    }
+  }
+}
+
+update-business
+meta {
+    doc: """PATCH /businesses/{id} - Update `name`, `tin`, `addresses`, `website`, `phone_numbers`, `people`, `external_id`, `unique_external_id`, `tags` or `status`. Middesk allows 5 updates per 15 seconds per business."""
+}
+fn
+(business-id: Str, params: Map): Map {
+  update-business(business-id, params, {})
+},
+(business-id: Str, params: Map, options: Map): Map {
+  ::api/send("PATCH", `/businesses/${seg(business-id)}`, {}, ::api/compact(untype(params)), options)
+}
+
+SETTABLE_STATUSES ["in_review", "approved", "rejected"]
+
+set-status
+meta {
+    doc: """
+    Record your decision on a business: `"approved"`, `"rejected"`, or
+    `"in_review"` to reopen it. Any other value is an Err and nothing is
+    sent.
+
+    **Example**
+
+    ```hot
+    ::middesk::businesses/set-status("biz_...", "approved")
+    ```
+    """
+}
+fn
+(business-id: Str, status: Str): Map {
+  set-status(business-id, status, {})
+},
+(business-id: Str, status: Str, options: Map): Map {
+  cond {
+    not(in(status, SETTABLE_STATUSES)) => { err(`middesk: status must be approved, rejected or in_review (got '${status}'); nothing was sent`) }
+    => { update-business(business-id, {status: status}, options) }
+  }
+}
+
+get-review
+meta {
+    doc: """GET /businesses/{id}/review - The review: `tasks` (`{key, category, label, sub_label, status: success|failure|warning|neutral, message, sources}`), `completed_at`, `assignee`."""
+}
+fn
+(business-id: Str): Map {
+  get-review(business-id, {})
+},
+(business-id: Str, options: Map): Map {
+  ::api/send("GET", `/businesses/${seg(business-id)}/review`, {}, null, options)
+}
+
+get-policy-results
+meta {
+    doc: """GET /businesses/{id}/policy_results - Results of your enabled Middesk policies for this business."""
+}
+fn
+(business-id: Str): Map {
+  get-policy-results(business-id, {})
+},
+(business-id: Str, options: Map): Map {
+  ::api/send("GET", `/businesses/${seg(business-id)}/policy_results`, {}, null, options)
+}
+
+get-timeline
+meta {
+    doc: """GET /businesses/{id}/timeline - The business's audit timeline. `params`: `page`, `per_page` (max 100), `start_date`, `end_date`, `event_types`."""
+}
+fn
+(business-id: Str, params: Map): Map {
+  get-timeline(business-id, params, {})
+},
+(business-id: Str, params: Map, options: Map): Map {
+  ::api/send("GET", `/businesses/${seg(business-id)}/timeline`, params, null, options)
+}
+
+get-latest-risk-assessment
+meta {
+    doc: """GET /businesses/{id}/risk_assessments/latest - The newest risk assessment (requires the `risk` product)."""
+}
+fn
+(business-id: Str): Map {
+  get-latest-risk-assessment(business-id, {})
+},
+(business-id: Str, options: Map): Map {
+  ::api/send("GET", `/businesses/${seg(business-id)}/risk_assessments/latest`, {}, null, options)
+}
+
+get-pdf
+meta {
+    doc: """GET /businesses/{id}/pdf - The business report as a PDF (`Bytes`). It can contain TINs and people's details: store it like the report, never log it."""
+}
+fn
+(business-id: Str): Bytes {
+  get-pdf(business-id, {})
+},
+(business-id: Str, options: Map): Bytes {
+  ::api/get-bytes(`/businesses/${seg(business-id)}/pdf`, options)
+}
+
+is-done
+meta {
+    doc: """True when the report is complete: status `in_review`, `approved` or `rejected`. Use it from a webhook handler or a schedule instead of waiting in a run."""
+}
+fn (business: Any): Bool {
+  status if(is-map(business), get(business, "status"), null)
+  in(or(status, ""), DONE_STATUSES)
+}

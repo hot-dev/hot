@@ -14,6 +14,10 @@ ListObjectsResponse ::aws::s3::objects/ListObjectsResponse
 PutObjectResponse ::aws::s3::objects/PutObjectResponse
 GetObjectResponse ::aws::s3::objects/GetObjectResponse
 CopyObjectResponse ::aws::s3::objects/CopyObjectResponse
+CreateMultipartUploadResponse ::aws::s3::objects/CreateMultipartUploadResponse
+UploadPartResponse ::aws::s3::objects/UploadPartResponse
+CompleteMultipartUploadResponse ::aws::s3::objects/CompleteMultipartUploadResponse
+DocFile ::aws::s3::objects/DocFile
 
 // Re-export S3 operations
 put-object ::aws::s3::objects/put-object
@@ -22,6 +26,16 @@ delete-object ::aws::s3::objects/delete-object
 list-objects ::aws::s3::objects/list-objects
 head-object ::aws::s3::objects/head-object
 copy-object ::aws::s3::objects/copy-object
+
+// Multipart upload
+create-multipart-upload ::aws::s3::objects/create-multipart-upload
+upload-part ::aws::s3::objects/upload-part
+complete-multipart-upload ::aws::s3::objects/complete-multipart-upload
+abort-multipart-upload ::aws::s3::objects/abort-multipart-upload
+
+// Provider-neutral file metadata
+to-doc-file ::aws::s3::objects/to-doc-file
+to-doc-files ::aws::s3::objects/to-doc-files
 
 list-buckets ::aws::s3::buckets/list-buckets
 create-bucket ::aws::s3::buckets/create-bucket

@@ -1,0 +1,61 @@
+::middesk::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration tests (live Middesk sandbox, read-only)
+// =============================================================================
+// Requires ctx: middesk.api.key (MIDDESK_API_KEY, an mk_test_ key).
+// Optional: middesk.env (MIDDESK_ENV). Every test only reads. Without
+// credentials each test records a skip and passes.
+// Run with: hot test -p pkg-integration-middesk
+
+configured fn (): Bool {
+    is-some(::hot::ctx/get("middesk.api.key"))
+}
+
+skip fn (): Bool {
+    println("MIDDESK_API_KEY not set - skipping")
+    assert(true, "skipped: no Middesk credentials")
+}
+
+test-list-businesses
+meta ["test"] fn () {
+    cond {
+        not(configured()) => { skip() }
+        => {
+            page ::middesk::businesses/list-businesses({per_page: 2})
+            assert(is-vec(page.data), "should return a data array")
+            assert(is-some(page.has_more), "list pages carry has_more")
+        }
+    }
+}
+
+test-summarize-latest-business
+meta ["test"] fn () {
+    cond {
+        not(configured()) => { skip() }
+        => {
+            page ::middesk::businesses/list-businesses({per_page: 1})
+            cond {
+                is-empty(page.data) => { skip() }
+                => {
+                    business ::middesk::businesses/get-business(first(page.data).id)
+                    s ::middesk::decisions/summarize(business)
+                    assert(in(s.decision, ["approved", "declined", "needs-review", "pending", "failed"]), "decision normalizes")
+                    assert(is-some(s.needs-review), "needs-review is set")
+                }
+            }
+        }
+    }
+}
+
+test-list-webhooks
+meta ["test"] fn () {
+    cond {
+        not(configured()) => { skip() }
+        => {
+            out ::middesk::webhooks/list-webhooks({per_page: 5})
+            assert(is-map(out), "webhooks list returns an object")
+        }
+    }
+}

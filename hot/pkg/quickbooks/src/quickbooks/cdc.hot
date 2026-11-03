@@ -1,0 +1,100 @@
+::quickbooks::cdc ns
+meta {
+    doc: """
+    Change data capture: every entity of the given types created,
+    updated or deleted since a timestamp, in one call. The basis of an
+    incremental sync: store the response `time`, and ask for changes
+    since it on the next run.
+
+    Limits (Intuit): the look-back is at most 30 days, and each entity
+    type returns at most 1000 changes per call; when a type hits 1000,
+    narrow the window. Deleted entities come back with only `Id`,
+    `status: "Deleted"` and `MetaData`.
+
+    ```hot
+    ::cdc ::quickbooks::cdc
+
+    changes ::cdc/changes-since(["Invoice", "Payment", "Customer"], "2026-10-31T00:00:00Z")
+    changes.changed.Invoice   // Vec of invoices created or updated
+    changes.deleted.Invoice   // Vec of deleted invoice Ids
+    changes.time              // save as the next changedSince
+    ```
+
+    Pair it with webhooks: a webhook tells you something changed now,
+    CDC catches up on anything a missed delivery left out.
+    """
+}
+
+::api ::quickbooks::api
+::entities ::quickbooks::entities
+
+build-params
+meta {
+    doc: """The CDC query params `{entities: "A,B", changedSince}` (pure). Entity names are checked and canonicalised; `changed-since` must be an ISO 8601 timestamp or date."""
+}
+fn (entities: Str | Vec, changed-since: Str): Map {
+  raw if(is-vec(entities), entities, split(Str(entities), ","))
+  names filter(map(raw, (n) { trim(Str(n)) }), (n) { not(is-empty(n)) })
+  unknown find-first(names, (n) { is-err(::entities/canonical-name(n)) })
+  since trim(changed-since)
+  cond {
+    is-some(unknown) => { ::entities/canonical-name(unknown) }
+    is-empty(names) => { err("quickbooks: CDC needs at least one entity name") }
+    not(::hot::regex/is-match(since, "^[0-9]{4}-[0-9]{2}-[0-9]{2}([T ][0-9:.]+(Z|[+-][0-9]{2}:?[0-9]{2})?)?$")) => {
+      err(`quickbooks: changedSince must be an ISO 8601 date or timestamp (got '${changed-since}')`)
+    }
+    => { {entities: join(distinct(map(names, ::entities/canonical-name)), ","), changedSince: since} }
+  }
+}
+
+is-deleted
+meta {doc: """True for a CDC row that reports a deletion (`status: "Deleted"`)."""}
+fn (row: Any): Bool {
+  and(is-map(row), eq(get(row, "status"), "Deleted"))
+}
+
+parse-changes
+meta {
+    doc: """
+    Parse a CDC response body (pure) into `{changed, deleted, time}`:
+    `changed` maps each entity name to its created or updated rows,
+    `deleted` maps each name to the deleted Ids, and `time` is the
+    server time to use as the next `changedSince`.
+    """
+}
+fn (body: Map): Map {
+  cdc-list or(get(body, "CDCResponse"), [])
+  responses mapcat(filter(cdc-list, is-map), (c) { or(get(c, "QueryResponse"), []) })
+  groups mapcat(filter(responses, is-map), (qr) {
+    names filter(keys(qr), (k) { is-vec(get(qr, k)) })
+    map(names, (k) { {name: k, rows: get(qr, k)} })
+  })
+  changed reduce(groups, (acc, g) {
+    rows filter(g.rows, (r) { not(is-deleted(r)) })
+    assoc(acc, g.name, concat(or(get(acc, g.name), []), rows))
+  }, {})
+  deleted reduce(groups, (acc, g) {
+    ids map(filter(g.rows, is-deleted), (r) { get(r, "Id") })
+    if(is-empty(ids), acc, assoc(acc, g.name, concat(or(get(acc, g.name), []), ids)))
+  }, {})
+  {changed: changed, deleted: deleted, time: get(body, "time")}
+}
+
+changes-since
+meta {
+    doc: """GET /cdc: changes to `entities` (Vec or comma-separated Str) since `changed-since`. Returns `parse-changes` output."""
+}
+fn
+(entities: Str | Vec, changed-since: Str): Map {
+  changes-since(entities, changed-since, {})
+},
+(entities: Str | Vec, changed-since: Str, opts: Map): Map {
+  params build-params(entities, changed-since)
+  cond {
+    is-err(params) => { params }
+    => {
+      body ::api/json("GET", "/cdc", params, "", opts)
+      if(is-err(body), body, parse-changes(body))
+    }
+  }
+}

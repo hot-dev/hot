@@ -25,7 +25,7 @@ pub fn split(args: &[Val]) -> HotResult<Val> {
         };
 
         let parts: Vec<Val> = string.split(&**delimiter).map(Val::from).collect();
-        HotResult::Ok(Val::Vec(parts))
+        HotResult::Ok(Val::vec(parts))
     }
 }
 
@@ -294,25 +294,22 @@ pub fn pad_start(args: &[Val]) -> HotResult<Val> {
     let pad_pattern: String = if args.len() == 3 {
         match &args[2] {
             Val::Str(s) => (**s).to_owned(),
+            Val::Null => return HotResult::Err(Val::from("pad-start pad must be a string")),
             other => other.to_string().trim_matches('"').to_string(),
         }
     } else {
         " ".to_string()
     };
-    if text.len() >= target_len || pad_pattern.is_empty() {
+    let text_len = text.chars().count();
+    if text_len >= target_len || pad_pattern.is_empty() {
         return HotResult::Ok(Val::from(text));
     }
 
-    let padding_needed = target_len - text.len();
-    let mut padding = String::with_capacity(padding_needed);
-    while padding.len() < padding_needed {
-        let remaining = padding_needed - padding.len();
-        if pad_pattern.len() <= remaining {
-            padding.push_str(&pad_pattern);
-        } else {
-            padding.push_str(&pad_pattern[..remaining]);
-        }
-    }
+    let padding: String = pad_pattern
+        .chars()
+        .cycle()
+        .take(target_len - text_len)
+        .collect();
 
     HotResult::Ok(Val::from(format!("{}{}", padding, text)))
 }
@@ -341,25 +338,22 @@ pub fn pad_end(args: &[Val]) -> HotResult<Val> {
     let pad_pattern: String = if args.len() == 3 {
         match &args[2] {
             Val::Str(s) => (**s).to_owned(),
+            Val::Null => return HotResult::Err(Val::from("pad-end pad must be a string")),
             other => other.to_string().trim_matches('"').to_string(),
         }
     } else {
         " ".to_string()
     };
-    if text.len() >= target_len || pad_pattern.is_empty() {
+    let text_len = text.chars().count();
+    if text_len >= target_len || pad_pattern.is_empty() {
         return HotResult::Ok(Val::from(text));
     }
 
-    let padding_needed = target_len - text.len();
-    let mut padding = String::with_capacity(padding_needed);
-    while padding.len() < padding_needed {
-        let remaining = padding_needed - padding.len();
-        if pad_pattern.len() <= remaining {
-            padding.push_str(&pad_pattern);
-        } else {
-            padding.push_str(&pad_pattern[..remaining]);
-        }
-    }
+    let padding: String = pad_pattern
+        .chars()
+        .cycle()
+        .take(target_len - text_len)
+        .collect();
 
     HotResult::Ok(Val::from(format!("{}{}", text, padding)))
 }
@@ -367,6 +361,32 @@ pub fn pad_end(args: &[Val]) -> HotResult<Val> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Padding counts characters, as `length` does, and a multi-byte pad
+    // pattern is cut between characters, not inside one.
+    #[test]
+    fn pad_counts_characters() {
+        let pad = |f: fn(&[Val]) -> HotResult<Val>, text: &str, n: i64, pattern: &str| {
+            f(&[Val::from(text), Val::Int(n), Val::from(pattern)])
+        };
+        assert_eq!(
+            pad(pad_start, "héllo", 7, "*"),
+            HotResult::Ok(Val::from("**héllo"))
+        );
+        assert_eq!(
+            pad(pad_end, "héllo", 7, "*"),
+            HotResult::Ok(Val::from("héllo**"))
+        );
+        assert_eq!(
+            pad(pad_start, "héllo", 5, "*"),
+            HotResult::Ok(Val::from("héllo"))
+        );
+        assert_eq!(
+            pad(pad_start, "x", 4, "é·"),
+            HotResult::Ok(Val::from("é·éx"))
+        );
+        assert_eq!(pad(pad_end, "x", 4, "é·"), HotResult::Ok(Val::from("xé·é")));
+    }
 
     #[test]
     fn test_replace_all_occurrences() {

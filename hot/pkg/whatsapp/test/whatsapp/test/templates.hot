@@ -1,0 +1,41 @@
+::whatsapp::test::templates ns
+meta ["test"]
+
+::t ::whatsapp::templates
+url ::whatsapp::api/url
+
+test-list-url-without-filters
+meta ["test"] fn () {
+    assert-eq(url("102938/message_templates"), ::t/list-templates-url(::t/ListTemplatesRequest({waba_id: "102938"})))
+}
+
+test-list-url-pagination-and-encoding
+meta ["test"] fn () {
+    u ::t/list-templates-url(::t/ListTemplatesRequest({
+        waba_id: "102938", limit: 25, after: "QVFI=abc&x", name: "order update", fields: ["name", "status"]
+    }))
+    assert(starts-with(u, url("102938/message_templates?")))
+    assert(contains(u, "limit=25"))
+    assert(contains(u, "after=QVFI%3Dabc%26x"), "cursor is encoded")
+    assert(contains(u, "name=order+update"), "name is encoded")
+    assert(contains(u, "fields=name%2Cstatus"))
+    assert(not(contains(u, "status=")), "unset status omitted")
+    assert(not(contains(u, "before=")), "unset before omitted")
+}
+
+test-delete-url
+meta ["test"] fn () {
+    by-name ::t/delete-templates-url(::t/DeleteTemplateRequest({waba_id: "1", name: "a&b"}))
+    assert-eq(url("1/message_templates?name=a%26b"), by-name)
+    by-id ::t/delete-templates-url(::t/DeleteTemplateRequest({waba_id: "1", name: "n", hsm_id: "99"}))
+    assert(contains(by-id, "hsm_id=99"))
+}
+
+test-next-cursor
+meta ["test"] fn () {
+    more {data: [], paging: {cursors: {before: "B", after: "A"}, next: "https://graph.facebook.com/..."}}
+    last-page {data: [], paging: {cursors: {before: "B", after: "A"}}}
+    assert-eq("A", ::t/next-cursor(more))
+    assert(is-null(::t/next-cursor(last-page)), "no paging.next means last page")
+    assert(is-null(::t/next-cursor({data: []})))
+}

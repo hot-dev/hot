@@ -90,7 +90,18 @@ edit-server-configuration
 meta {
     doc: """Update the current server configuration including name, color, webhook URLs, and tracking settings."""
 }
-fn (request: EditCurrentServerConfigurationRequest): EditCurrentServerConfigurationResponse {
-  response api-request("PUT", `${::postmark/BASE_URL}/server`, {}, request)
-  if(is-ok-response(response), EditCurrentServerConfigurationResponse(response.body), err(HttpError(response)))
+fn
+(request: EditCurrentServerConfigurationRequest): EditCurrentServerConfigurationResponse {
+  edit-server-configuration(request, {})
+},
+(request: EditCurrentServerConfigurationRequest, opts: Map): EditCurrentServerConfigurationResponse {
+  response api-request("PUT", `${::postmark/BASE_URL}/server`, {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => {
+      ::hot::ctx/mark-secret(response.body.ApiTokens)
+      EditCurrentServerConfigurationResponse(response.body)
+    }
+    => { err(HttpError(response)) }
+  }
 }

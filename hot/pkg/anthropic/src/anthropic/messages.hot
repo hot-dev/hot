@@ -1,6 +1,6 @@
 ::anthropic::messages ns
 
-api-request ::anthropic::api/request
+api-call ::anthropic::api/call
 HttpError ::anthropic::api/HttpError
 is-ok-response ::hot::http/is-ok-response
 
@@ -179,8 +179,15 @@ meta {
     """
 }
 fn (request: MessagesPostRequest): MessagesPostResponse {
-  response api-request("POST", `${::anthropic/BASE_URL}/v1/messages`, {}, request)
-  if(is-ok-response(response), MessagesPostResponse(response.body), err(HttpError(response)))
+  post(request, {})
+},
+(request: MessagesPostRequest, opts: Map): MessagesPostResponse {
+  response api-call("POST", "/v1/messages", {}, request, opts)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { MessagesPostResponse(response.body) }
+    => { err(HttpError(response)) }
+  }
 }
 
 // ============================================================================
@@ -199,6 +206,9 @@ meta {
 
     // With system prompt
     response ::anthropic::messages/chat("claude-sonnet-4-20250514", "Hello!", "You are a helpful assistant.")
+
+    // With a per-call API key
+    response ::anthropic::messages/chat("claude-sonnet-4-20250514", "Hello!", {api-key: "tenant-key"})
     ```
     """
 }
@@ -209,17 +219,25 @@ fn
 (model: Str, message: Str, system: Str): Str {
     chat(model, message, system, null)
 },
-(model: Str, message: Str, system: Str, max-tokens: Int): Str {
+(model: Str, message: Str, system: Str?, max-tokens: Int?): Str {
+    chat(model, message, system, max-tokens, {})
+},
+(model: Str, message: Str, opts: Map): Str {
+    chat(model, message, null, null, opts)
+},
+(model: Str, message: Str, system: Str?, opts: Map): Str {
+    chat(model, message, system, null, opts)
+},
+(model: Str, message: Str, system: Str?, max-tokens: Int?, opts: Map): Str {
     messages [InputMessage({role: "user", content: message})]
 
-    request {
+    request assoc-some({
         model: model,
         messages: messages,
-        max_tokens: or(max-tokens, 1024),
-        system: system
-    }
+        max_tokens: or(max-tokens, 1024)
+    }, "system", system)
 
-    result post(MessagesPostRequest(request))
+    result post(MessagesPostRequest(request), opts)
 
     match result {
         Result.Err => { err(result) }
@@ -234,7 +252,7 @@ fn
 // Streaming Support
 // ============================================================================
 
-api-request-stream ::anthropic::api/request-stream
+api-call-stream ::anthropic::api/call-stream
 StreamingHttpResponse ::anthropic::api/StreamingHttpResponse
 
 // SSE Event Types for streaming responses
@@ -300,7 +318,10 @@ meta {
     """
 }
 fn (request: MessagesPostRequest): StreamingMessagesResponse {
+  post-stream(request, {})
+},
+(request: MessagesPostRequest, opts: Map): StreamingMessagesResponse {
   // Force stream: true in the request
   streaming-request {...untype(request), stream: true}
-  api-request-stream("POST", `${::anthropic/BASE_URL}/v1/messages`, {}, streaming-request, "sse")
+  api-call-stream("POST", "/v1/messages", {}, streaming-request, "sse", opts)
 }

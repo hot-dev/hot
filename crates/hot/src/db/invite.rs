@@ -227,7 +227,7 @@ impl Invite {
             }
             crate::db::DatabasePool::Postgres(db) => {
                 let rows = sqlx::query_as::<_, Invite>(
-                    "SELECT invite_id, invite_code, email, org_id, invite_status_id, intended_org_user_role_id, active, created_at, created_by_user_id, updated_at, updated_by_user_id, expires_at, used_at FROM invite WHERE lower(email) = lower($1) AND active = true ORDER BY created_at DESC",
+                    "SELECT invite_id, invite_code, email, org_id, invite_status_id, intended_org_user_role_id, active, created_at, created_by_user_id, updated_at, updated_by_user_id, expires_at, used_at FROM invite WHERE lower(email COLLATE \"C\") = lower($1 COLLATE \"C\") AND active = true ORDER BY created_at DESC",
                 )
                 .bind(email)
                 .fetch_all(db)

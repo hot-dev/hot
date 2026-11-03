@@ -87,6 +87,16 @@ fn pos(n: usize) -> Val {
     Val::Int(i64::try_from(n).unwrap_or(i64::MAX))
 }
 
+/// A match's `start` and `end` as character positions, the unit `slice` and
+/// `length` use: `slice(s, m.start, m.end)` is the match. `regex` reports byte
+/// offsets. `from` continues a count from an earlier (byte, char) position,
+/// so a scan over many matches stays linear.
+fn char_span(val: &str, m: &regex::Match<'_>, from: (usize, usize)) -> (usize, usize) {
+    let (byte, chars) = from;
+    let start = chars + val[byte..m.start()].chars().count();
+    (start, start + m.as_str().chars().count())
+}
+
 /// Test if a pattern matches a string (returns boolean)
 pub fn is_match(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::regex/is-match", args, 2);
@@ -148,9 +158,10 @@ pub fn find(args: &[Val]) -> HotResult<Val> {
                 Some(m) => {
                     let mut map = IndexMap::new();
                     map.insert(Val::from("match"), Val::from(m.as_str()));
-                    map.insert(Val::from("start"), pos(m.start()));
-                    map.insert(Val::from("end"), pos(m.end()));
-                    HotResult::Ok(Val::Map(Box::new(map)))
+                    let (start, end) = char_span(val, &m, (0, 0));
+                    map.insert(Val::from("start"), pos(start));
+                    map.insert(Val::from("end"), pos(end));
+                    HotResult::Ok(Val::map(map))
                 }
                 None => HotResult::Ok(Val::Null),
             }
@@ -178,6 +189,7 @@ pub fn find_all(args: &[Val]) -> HotResult<Val> {
             // size. We fail fast as soon as we'd exceed it.
             let max_matches = limits::max_collection_size();
             let mut matches: Vec<Val> = Vec::new();
+            let mut scanned = (0, 0);
             for m in re.find_iter(val) {
                 if matches.len() >= max_matches {
                     return HotResult::Err(Val::from(format!(
@@ -187,11 +199,13 @@ pub fn find_all(args: &[Val]) -> HotResult<Val> {
                 }
                 let mut map = IndexMap::new();
                 map.insert(Val::from("match"), Val::from(m.as_str()));
-                map.insert(Val::from("start"), pos(m.start()));
-                map.insert(Val::from("end"), pos(m.end()));
-                matches.push(Val::Map(Box::new(map)));
+                let (start, end) = char_span(val, &m, scanned);
+                scanned = (m.end(), end);
+                map.insert(Val::from("start"), pos(start));
+                map.insert(Val::from("end"), pos(end));
+                matches.push(Val::map(map));
             }
-            HotResult::Ok(Val::Vec(matches))
+            HotResult::Ok(Val::vec(matches))
         }
         (Val::Str(_), _) => HotResult::Err(Val::from("find-all pattern must be a string")),
         _ => HotResult::Err(Val::from("find-all value must be a string")),
@@ -274,7 +288,7 @@ pub fn split(args: &[Val]) -> HotResult<Val> {
                 }
                 parts.push(Val::from(p.to_string()));
             }
-            HotResult::Ok(Val::Vec(parts))
+            HotResult::Ok(Val::vec(parts))
         }
         (Val::Str(_), _) => HotResult::Err(Val::from("split pattern must be a string")),
         _ => HotResult::Err(Val::from("split value must be a string")),
@@ -308,8 +322,8 @@ pub fn capture(args: &[Val]) -> HotResult<Val> {
                             None => Val::Null,
                         })
                         .collect();
-                    map.insert(Val::from("groups"), Val::Vec(groups));
-                    HotResult::Ok(Val::Map(Box::new(map)))
+                    map.insert(Val::from("groups"), Val::vec(groups));
+                    HotResult::Ok(Val::map(map))
                 }
                 None => HotResult::Ok(Val::Null),
             }
@@ -353,10 +367,10 @@ pub fn capture_all(args: &[Val]) -> HotResult<Val> {
                         None => Val::Null,
                     })
                     .collect();
-                map.insert(Val::from("groups"), Val::Vec(groups));
-                matches.push(Val::Map(Box::new(map)));
+                map.insert(Val::from("groups"), Val::vec(groups));
+                matches.push(Val::map(map));
             }
-            HotResult::Ok(Val::Vec(matches))
+            HotResult::Ok(Val::vec(matches))
         }
         (Val::Str(_), _) => HotResult::Err(Val::from("capture-all pattern must be a string")),
         _ => HotResult::Err(Val::from("capture-all value must be a string")),

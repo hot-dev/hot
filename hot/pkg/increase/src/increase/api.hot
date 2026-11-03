@@ -1,0 +1,799 @@
+::increase::api ns
+meta {
+    ctx: {
+        "increase.api.key": {required: false},
+        "increase.environment": {required: false, secret: false},
+        "increase.transfers.require-approval": {required: false, secret: false}
+    },
+    doc: """
+    Transport for the Increase API: environment selection, Bearer auth,
+    the `Idempotency-Key` header, JSON bodies with unset fields dropped,
+    query strings in Increase's `status.in=a,b` style, cursor pagination,
+    and errors parsed into `HttpError` with account and routing numbers
+    redacted.
+
+    **No retries.** Nothing here retries a request. A transport failure
+    or a 5xx on a write may still have reached Increase: look the object
+    up with `find-by-idempotency-key`, then resend the same call with the
+    same idempotency key if it isn't there. Increase returns the original
+    object for a repeated key, so a resend can't move money twice.
+
+    **Per-call credentials.** Every function that calls the API takes an
+    optional trailing `opts` Map, resolved by `resolve`: `opts` first,
+    then context, then defaults. Nothing from `opts` is written to ctx,
+    and per-call credentials are masked in call records. An `api-key`
+    present but blank or null is an Err, never a fallback to context. A
+    per-call `environment` that differs from `increase.environment` needs
+    an `api-key` in the same `opts`: a context key never goes to another
+    environment's host.
+    """
+}
+
+::ctx ::hot::ctx
+::uri ::hot::uri
+::re ::hot::regex
+
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+USER_AGENT "hot-dev-increase/0.1.0"
+
+// Increase rejects idempotency keys longer than this.
+MAX_IDEMPOTENCY_KEY_LENGTH 200
+
+// Safety stop for `collect-all` when no item limit is given.
+MAX_PAGES 1000
+
+// Keys whose values are never kept in an `HttpError`: account and routing
+// numbers, card numbers and codes, tax ids and birth dates, secrets.
+SENSITIVE_KEYS [
+  "account_number",
+  "routing_number",
+  "updated_account_number",
+  "updated_routing_number",
+  "debtor_account_number",
+  "debtor_routing_number",
+  "creditor_account_number",
+  "originator_routing_number",
+  "receiver_id_number",
+  "individual_id",
+  "primary_account_number",
+  "card_verification_code",
+  "verification_code",
+  "pin",
+  "expiration_month",
+  "expiration_year",
+  "tax_identifier",
+  "date_of_birth",
+  "number",
+  "shared_secret",
+  "secret"
+]
+
+// ---------------------------------------------------------------------------
+// Redaction
+// ---------------------------------------------------------------------------
+
+redact-text
+meta {
+    doc: """Mask every run of 8 or more digits in `text` down to its last four (`"acct 123456789"` becomes `"acct ****6789"`), so an account or routing number echoed in an error detail is never kept whole. Exposed for testing."""
+}
+fn (text: Str): Str {
+  ::re/replace-all(text, "[0-9]{4,}([0-9]{4})", "****$1")
+}
+
+redact
+meta {
+    doc: """
+    Remove sensitive data from a decoded response body: values under
+    `SENSITIVE_KEYS` (account and routing numbers, card numbers, tax ids,
+    secrets) become `"[redacted]"`, and long digit runs in every other
+    string are masked by `redact-text`. Applied to every `HttpError`.
+    Exposed for testing.
+    """
+}
+fn (value: Any): Any {
+  cond {
+    is-map(value) => {
+      reduce(keys(value), (acc, k) {
+        v get(value, k)
+        assoc(acc, k, if(and(in(k, SENSITIVE_KEYS), is-some(v)), "[redacted]", redact(v)))
+      }, {})
+    }
+
+    is-vec(value) => { map(value, (item) { redact(item) }) }
+    is-str(value) => { redact-text(value) }
+    => { value }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+HttpError
+meta {
+    doc: """
+    A non-2xx Increase response. Increase errors are `application/problem+json`
+    objects; their fields are lifted to the top:
+
+    - `status`: the HTTP status
+    - `type`: e.g. `"invalid_parameters_error"`, `"invalid_operation_error"`,
+      `"idempotency_key_already_used_error"`, `"object_not_found_error"`,
+      `"insufficient_permissions_error"`, `"rate_limited_error"`,
+      `"invalid_api_key_error"`, `"environment_mismatch_error"`
+    - `title` and `detail`: human-readable text
+    - `reason`: for `invalid_api_key_error`, e.g. `"wrong_environment"`
+    - `resource_id`: for `idempotency_key_already_used_error`, the object
+      the key already created
+    - `errors`: for `invalid_parameters_error`, the per-field problems
+    - `retry_after`: seconds, for `rate_limited_error`
+    - `message`: one readable line, e.g.
+      `"increase: HTTP 409 invalid_operation_error: The action you specified can't be performed on the object in its current state."`
+
+    `body` is the decoded error body. Account and routing numbers and
+    other sensitive values are redacted from `body`, `detail` and
+    `message` (see `redact`), so an `HttpError` is safe to log.
+    """
+}
+type {
+    status: Int,
+    headers: Map,
+    body: Any,
+    message: Str,
+    type: Str?,
+    title: Str?,
+    detail: Str?,
+    reason: Str?,
+    resource_id: Str?,
+    errors: Vec?,
+    retry_after: Int?
+}
+
+parse-int
+meta {
+    doc: """An Int from an Int or a decimal-digit Str; null for anything else. Never errs on bad input. Exposed for testing."""
+}
+fn (value: Any): Int? {
+  cond {
+    is-int(value) => { value }
+    not(is-str(value)) => { null }
+    // Int("abc") is an Err that halts when consumed; match the digits first.
+    ::re/is-match(trim(value), "^-?[0-9]{1,15}$") => { Int(trim(value)) }
+    => { null }
+  }
+}
+
+field fn (body: Any, key: Str): Any {
+  if(is-map(body), get(body, key), null)
+}
+
+str-field fn (body: Any, key: Str): Str? {
+  v field(body, key)
+  if(is-str(v), v, null)
+}
+
+body-excerpt fn (body: Any): Str {
+  text cond {
+    is-null(body) => { "" }
+    is-str(body) => { body }
+    is-bytes(body) => { Str(body) }
+    => { to-json(untype(body)) }
+  }
+
+  if(gt(length(text), 300), `${slice(text, 0, 300)}...`, text)
+}
+
+decode-body fn (body: Any): Any {
+  cond {
+    is-bytes(body) => {
+      parsed from-json(Str(body))
+      if(is-err(parsed), Str(body), parsed)
+    }
+
+    is-str(body) => {
+      trimmed trim(body)
+      cond {
+        or(starts-with(trimmed, "{"), starts-with(trimmed, "[")) => {
+          parsed from-json(trimmed)
+          if(is-err(parsed), body, parsed)
+        }
+        => { body }
+      }
+    }
+    => { body }
+  }
+}
+
+error-message
+meta {
+    doc: """The readable `message` line for an error body (already redacted): `increase: HTTP {status} {type}: {title} {detail}`, or a body excerpt when the body isn't an Increase error object. Exposed for testing."""
+}
+fn (status: Int, body: Any): Str {
+  type-name str-field(body, "type")
+  title str-field(body, "title")
+  detail str-field(body, "detail")
+  type-part if(is-some(type-name), ` ${type-name}`, "")
+  text-parts filter([title, if(eq(detail, title), null, detail)], (p) { and(is-some(p), not(is-empty(p))) })
+  text if(is-empty(text-parts), body-excerpt(body), join(text-parts, " "))
+  redact-text(`increase: HTTP ${status}${type-part}: ${text}`)
+}
+
+// Decode and redact the body, lift Increase's problem fields, and read
+// `retry_after` from the body or the `Retry-After` header.
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
+  headers or(response.headers, {})
+  body redact(decode-body(response.body))
+  errors field(body, "errors")
+  retry-body parse-int(field(body, "retry_after"))
+  HttpError({
+    status: response.status,
+    headers: headers,
+    body: body,
+    message: error-message(response.status, body),
+    type: str-field(body, "type"),
+    title: str-field(body, "title"),
+    detail: str-field(body, "detail"),
+    reason: str-field(body, "reason"),
+    resource_id: str-field(body, "resource_id"),
+    errors: if(is-vec(errors), errors, null),
+    retry_after: if(is-some(retry-body), retry-body, parse-int(get(headers, "retry-after")))
+  })
+}
+
+plain-error fn (error: Result): Any {
+  payload if(is-err(error), err-value(error), error)
+  if(or(is-null(payload), is-str(payload)), payload, untype(payload))
+}
+
+is-error-type
+meta {
+    doc: """True when `error` (an `HttpError`, or a `Result.Err` holding one) has this Increase error `type`, e.g. `"idempotency_key_already_used_error"`."""
+}
+fn (error: Result, type-name: Str): Bool {
+  payload plain-error(error)
+  and(is-map(payload), eq(get(payload, "type"), type-name))
+}
+
+// ---------------------------------------------------------------------------
+// Environment and credentials
+// ---------------------------------------------------------------------------
+
+environment-base-url
+meta {
+    doc: """The base URL for an environment name: `"sandbox"` is `https://sandbox.increase.com` and `"production"` is `https://api.increase.com`. Surrounding whitespace and case are ignored; anything else errs, so a typo can never send requests to an unintended host. Exposed for testing."""
+}
+fn (environment: Str): Str {
+  name lowercase(trim(environment))
+  cond {
+    eq(name, "sandbox") => { ::increase/SANDBOX_URL }
+    eq(name, "production") => { ::increase/PRODUCTION_URL }
+    => { err(`increase: unknown environment '${environment}'; set increase.environment to "sandbox" or "production"`) }
+  }
+}
+
+normalize-environment
+meta {
+    doc: """`"sandbox"` or `"production"` for an environment name (case and whitespace ignored), or an Err for anything else. Exposed for testing."""
+}
+fn (environment: Str): Str {
+  checked environment-base-url(environment)
+  if(is-err(checked), checked, lowercase(trim(environment)))
+}
+
+current-environment
+meta {
+    doc: """The configured environment: `increase.environment` normalized to `"sandbox"` or `"production"`, `"sandbox"` when unset or empty, and an Err for any other value."""
+}
+fn (): Str {
+  configured trim(Str(or(::ctx/get("increase.environment"), "")))
+  name if(is-empty(configured), ::increase/DEFAULT_ENVIRONMENT, lowercase(configured))
+  checked environment-base-url(name)
+  if(is-err(checked), checked, name)
+}
+
+is-sandbox
+meta {
+    doc: """True when the configured environment is `"sandbox"`; false for `"production"` and for an invalid value."""
+}
+fn (): Bool {
+  env current-environment()
+  and(not(is-err(env)), eq(env, "sandbox"))
+}
+
+require-sandbox
+meta {
+    doc: """`true` when `environment` is `"sandbox"`, otherwise an Err naming `operation`. Simulation endpoints check the environment their call would use, so they never reach production. Exposed for testing."""
+}
+fn (environment: Str, operation: Str): Bool {
+  cond {
+    eq(lowercase(trim(environment)), "sandbox") => { true }
+    => { err(`increase: ${operation} is a sandbox simulation; it only runs when increase.environment is "sandbox" (current: "${environment}")`) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Request options
+// ---------------------------------------------------------------------------
+
+// Per-call options. Every function that calls the API takes an optional
+// trailing `opts` Map:
+// - `api-key`: replaces `increase.api.key` for this call
+// - `environment`: `"sandbox"` or `"production"` for this call; one that
+//   differs from `increase.environment` needs an `api-key` as well
+// - `idempotency-key`: sent as `Idempotency-Key` (at most 200
+//   characters); required by every call that moves money
+// `resolve` applies them: opts first, then context, then defaults.
+
+option-headers
+meta {
+    doc: """The headers `opts` adds: `Idempotency-Key` when `opts` has an `idempotency-key`. Exposed for testing."""
+}
+fn (opts: Map): Map {
+  key get(opts, "idempotency-key")
+  if(and(is-str(key), not(is-empty(key))), {Idempotency-Key: key}, {})
+}
+
+require-idempotency-key
+meta {
+    doc: """`opts` when it carries a non-empty `idempotency-key` of at most 200 characters, otherwise an Err. Every money-movement function checks this before sending anything."""
+}
+fn (opts: Map, operation: Str): Map {
+  key get(opts, "idempotency-key")
+  cond {
+    or(not(is-str(key)), is-empty(trim(or(key, "")))) => {
+      err(`increase: ${operation} moves money and needs an idempotency-key in opts, e.g. {idempotency-key: "invoice-42-payout"}; nothing was sent`)
+    }
+
+    gt(length(key), MAX_IDEMPOTENCY_KEY_LENGTH) => {
+      err(`increase: idempotency-key is longer than ${MAX_IDEMPOTENCY_KEY_LENGTH} characters; nothing was sent`)
+    }
+    => { opts }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Bodies and query strings
+// ---------------------------------------------------------------------------
+
+compact
+meta {
+    doc: """Drop null values from a request body, recursively through nested maps and the maps inside vectors, so unset optionals are omitted rather than sent as JSON `null`. `false`, `0` and `""` are kept. Exposed for testing."""
+}
+fn (value: Any): Any {
+  cond {
+    is-map(value) => {
+      reduce(keys(value), (acc, k) {
+        v get(value, k)
+        if(is-null(v), acc, assoc(acc, k, compact(v)))
+      }, {})
+    }
+
+    is-vec(value) => { map(filter(value, is-some), (item) { compact(item) }) }
+    => { value }
+  }
+}
+
+missing-fields
+meta {
+    doc: """The names in `fields` that are null or absent in `params`. Exposed for testing."""
+}
+fn (params: Map, fields: Vec): Vec {
+  filter(fields, (f) { is-null(get(params, f)) })
+}
+
+require-fields
+meta {
+    doc: """`params` when every name in `fields` is set, otherwise an Err listing the missing names (never their values). Exposed for testing."""
+}
+fn (params: Map, fields: Vec, operation: Str): Map {
+  missing missing-fields(params, fields)
+  if(is-empty(missing), params, err(`increase: ${operation} needs ${join(missing, ", ")}; nothing was sent`))
+}
+
+query-value fn (value: Any): Str {
+  cond {
+    is-vec(value) => { join(map(filter(value, is-some), (v) { Str(v) }), ",") }
+    => { Str(value) }
+  }
+}
+
+query-pairs
+meta {
+    doc: """
+    Flatten query params the way Increase reads them: nested maps join
+    their keys with dots (`{created_at: {after: "2026-01-01T00:00:00Z"}}`
+    gives `created_at.after=...`), vectors become comma-delimited lists
+    (`{"status.in": ["open", "closed"]}` gives `status.in=open,closed`),
+    and null values and empty vectors are dropped. Keys and values are
+    percent-encoded. Exposed for testing.
+    """
+}
+fn (params: Map, prefix: Str): Vec<Str> {
+  reduce(keys(params), (acc, k) {
+    v get(params, k)
+    name if(is-empty(prefix), Str(k), `${prefix}.${k}`)
+    cond {
+      is-null(v) => { acc }
+      is-map(v) => { concat(acc, query-pairs(v, name)) }
+      and(is-vec(v), is-empty(filter(v, is-some))) => { acc }
+      => { concat(acc, [`${::uri/encode(name)}=${::uri/encode(query-value(v))}`]) }
+    }
+  }, [])
+}
+
+query-string
+meta {
+    doc: """`?a=1&b=2` from `params` (see `query-pairs`), or `""` when nothing remains."""
+}
+fn (params: Map): Str {
+  pairs query-pairs(params, "")
+  if(is-empty(pairs), "", `?${join(pairs, "&")}`)
+}
+
+seg
+meta {
+    doc: """Percent-encode one path segment (an object id), so an id from user input can't change which endpoint is called."""
+}
+fn (id: Any): Str {
+  ::uri/encode(Str(id))
+}
+
+// ---------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------
+
+build-request
+meta {
+    doc: """
+    Build (without sending) the `HttpRequest` for an Increase call. `url`
+    is the full URL including any query string. A non-empty Map `body` is
+    compacted and JSON-encoded with `Content-Type: application/json`;
+    otherwise no body is sent. `headers` (e.g. from `option-headers`) are
+    merged last. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    req ::increase::api/build-request("POST", "https://sandbox.increase.com/account_transfers", {amount: 100}, {Idempotency-Key: "k1"}, "test_key")
+    req.headers.Authorization   // => "Bearer test_key"
+    req.body                    // => "{\\"amount\\":100}"
+    ```
+    """
+}
+fn (method: Str, url: Str, body: Any, headers: Map, api-key: Str): HttpRequest {
+  payload if(is-map(body), compact(body), null)
+  has-body and(is-map(payload), not(is-empty(payload)))
+  base {
+    Authorization: `Bearer ${api-key}`,
+    Accept: "application/json",
+    User-Agent: USER_AGENT
+  }
+
+  HttpRequest({
+    method: uppercase(method),
+    url: url,
+    headers: {...if(has-body, {...base, Content-Type: "application/json"}, base), ...headers},
+    body: if(has-body, to-json(untype(payload)), "")
+  })
+}
+
+response-body
+meta {
+    doc: """Normalize a 2xx body: empty text becomes null; anything else passes through. Exposed for testing."""
+}
+fn (body: Any): Any {
+  cond {
+    and(is-str(body), is-empty(trim(or(body, "")))) => { null }
+    => { body }
+  }
+}
+
+present fn (value: Any): Bool {
+  and(is-some(value), not(is-empty(trim(Str(or(value, ""))))))
+}
+
+non-blank fn (value: Any): Str? {
+  if(is-str(value), if(is-empty(trim(value)), null, trim(value)), null)
+}
+
+blank-option
+meta {
+    doc: """The first of `names` that `opts` has but with a blank or null value, else null. Such a key is an Err, never a fallback to context: a tenant whose key or environment is missing must not run on the project's. Exposed for testing."""
+}
+fn (opts: Map, names: Vec): Str? {
+  find-first(names, (name) { and(in(name, keys(opts)), is-null(non-blank(get(opts, name)))) })
+}
+
+resolve
+meta {
+    doc: """
+    The settings for one call: `{api-key, environment, base-url,
+    idempotency-key}`. Each comes from `opts` first, then context
+    (`increase.api.key`, `increase.environment`), then the default
+    (`"sandbox"`). Never writes to context, so parallel calls for
+    different tenants can't see each other's keys, and marks a per-call
+    `api-key` so it is masked in call records.
+
+    Errs when no API key is available, when the environment is invalid,
+    when `api-key` or `environment` is in `opts` but blank or null (that
+    never falls back to context), and when `environment` in `opts` differs
+    from `increase.environment` without an `api-key` in the same `opts`:
+    sandbox and production keys differ, so a context key is never sent to
+    the other environment's host.
+
+    **Example**
+
+    ```hot
+    settings ::increase::api/resolve({api-key: "tenant_b_key", environment: "production"})
+    settings.base-url   // => "https://api.increase.com"
+    ```
+    """
+}
+fn (opts: Map): Map {
+  explicit-key non-blank(::ctx/mark-secret(get(opts, "api-key")))
+  blank blank-option(opts, ["api-key", "environment"])
+  api-key or(explicit-key, non-blank(::ctx/get("increase.api.key")))
+  configured current-environment()
+  environment environment-of(opts)
+  cond {
+    is-some(blank) => {
+      err(`increase: ${blank} is in the call's opts but is blank or null. Pass a value, or leave ${blank} out to use context.`)
+    }
+
+    is-err(environment) => { environment }
+    is-null(api-key) => { err("increase: no API key. Set increase.api.key in Context Variables or pass {api-key: ...} in opts.") }
+    and(is-null(explicit-key), is-err(configured)) => { configured }
+    and(is-null(explicit-key), ne(environment, configured)) => {
+      err(`increase: environment "${environment}" is in the call's opts but increase.environment is "${configured}", and opts has no api-key. Pass api-key with it: a context key never goes to another environment's host.`)
+    }
+    => {
+      {
+        api-key: api-key,
+        environment: environment,
+        base-url: environment-base-url(environment),
+        idempotency-key: get(opts, "idempotency-key")
+      }
+    }
+  }
+}
+
+call
+meta {
+    doc: """
+    Call an Increase endpoint by path and return the decoded JSON body,
+    or an Err: `HttpError` for a non-2xx response, or the transport
+    error. `params` become the query string for GET and the JSON body
+    otherwise; null values are omitted. `opts` takes `api-key`,
+    `environment` and `idempotency-key` (see `resolve`). The call is made
+    exactly once.
+
+    Prefer the typed functions; this is the escape hatch for endpoints
+    they don't cover.
+
+    **Example**
+
+    ```hot
+    programs ::increase::api/call("GET", "/programs", {limit: 10})
+    ```
+    """
+}
+fn
+(method: Str, path: Str): Any {
+  call(method, path, {}, {})
+},
+(method: Str, path: Str, params: Map): Any {
+  call(method, path, params, {})
+},
+(method: Str, path: Str, params: Map, opts: Map): Any {
+  settings resolve(opts)
+  cond {
+    is-err(settings) => { settings }
+    => {
+      is-get eq(uppercase(method), "GET")
+      url if(is-get, `${settings.base-url}${path}${query-string(params)}`, `${settings.base-url}${path}`)
+      response ::hot::http/request(build-request(method, url, if(is-get, {}, params), option-headers(opts), settings.api-key))
+      cond {
+        is-err(response) => { response }
+        is-ok-response(response) => { response-body(response.body) }
+        => { err(HttpError(response)) }
+      }
+    }
+  }
+}
+
+environment-of
+meta {
+    doc: """The environment a call with `opts` would use: its `environment`, else `increase.environment` (`"sandbox"` when unset). An Err for an invalid value."""
+}
+fn (opts: Map): Str {
+  explicit get(opts, "environment")
+  if(present(explicit), normalize-environment(Str(explicit)), current-environment())
+}
+
+// ---------------------------------------------------------------------------
+// Typed-call helpers used by the resource namespaces
+// ---------------------------------------------------------------------------
+
+approval-required-by-default
+meta {
+    doc: """True when the `increase.transfers.require-approval` context variable is `true` (or `"true"`)."""
+}
+fn (): Bool {
+  v ::ctx/get("increase.transfers.require-approval")
+  eq(lowercase(trim(Str(or(v, "")))), "true")
+}
+
+apply-approval-default
+meta {
+    doc: """`params` with `require_approval: true` added when `required` is true and the caller didn't set `require_approval` either way. Exposed for testing."""
+}
+fn (params: Map, required: Bool): Map {
+  if(and(required, is-null(get(params, "require_approval"))), {...params, require_approval: true}, params)
+}
+
+move-money
+meta {
+    doc: """
+    POST a money-movement request: check that `opts` has an
+    `idempotency-key` and that `params` has every `required` field, apply
+    the `increase.transfers.require-approval` default when `approval` is
+    true, then send it once. Any failed check is an Err and nothing is
+    sent. The transfer and return functions are built on it.
+    """
+}
+fn (path: Str, params: Map, required: Vec, approval: Bool, opts: Map, operation: Str): Map {
+  checked-options require-idempotency-key(opts, operation)
+  body require-fields(compact(params), required, operation)
+  cond {
+    is-err(checked-options) => { checked-options }
+    is-err(body) => { body }
+    approval => { call("POST", path, apply-approval-default(body, approval-required-by-default()), opts) }
+    => { call("POST", path, body, opts) }
+  }
+}
+
+create
+meta {
+    doc: """POST a create request after checking that `params` has every `required` field. The idempotency key is optional here (it is required by `move-money`)."""
+}
+fn (path: Str, params: Map, required: Vec, opts: Map, operation: Str): Map {
+  body require-fields(compact(params), required, operation)
+  if(is-err(body), body, call("POST", path, body, opts))
+}
+
+// ---------------------------------------------------------------------------
+// Pagination
+// ---------------------------------------------------------------------------
+
+next-cursor
+meta {
+    doc: """The `next_cursor` of a list page, or null on the last page."""
+}
+fn (page: Any): Str? {
+  c field(page, "next_cursor")
+  if(and(is-str(c), not(is-empty(or(c, "")))), c, null)
+}
+
+next-page-params
+meta {
+    doc: """
+    The params for the page after `page`: the original filters plus
+    `cursor` (Increase requires the same filters on every page), or null
+    when there is no next page.
+
+    **Example**
+
+    ```hot
+    ::increase::api/next-page-params({account_id: "account_1", limit: 2}, {data: [{id: "t1"}, {id: "t2"}], next_cursor: "djE6"})
+    // => {account_id: "account_1", limit: 2, cursor: "djE6"}
+    ```
+    """
+}
+fn (params: Map, page: Any): Map? {
+  cursor next-cursor(page)
+  if(is-null(cursor), null, {...params, cursor: cursor})
+}
+
+list-page
+meta {
+    doc: """
+    GET one page of a list endpoint: `{data: [...], next_cursor}`.
+    `params` are the endpoint's filters plus `limit` (1-100, default 100)
+    and `cursor` (the previous page's `next_cursor`).
+
+    **Example**
+
+    ```hot
+    page ::increase::api/list-page("/transactions", {account_id: "account_in71c4amph0vgo2qllky", limit: 50})
+    more ::increase::api/list-page("/transactions", ::increase::api/next-page-params({account_id: "account_in71c4amph0vgo2qllky", limit: 50}, page))
+    ```
+    """
+}
+fn
+(path: Str, params: Map): Map {
+  list-page(path, params, {})
+},
+(path: Str, params: Map, opts: Map): Map {
+  call("GET", path, params, opts)
+}
+
+collect-pages
+meta {
+    doc: """Follow `next_cursor` from `params`, concatenating each page's `data`, until `limit` items (0 means no limit), the last page, or `MAX_PAGES` pages. `fetch` takes the params for one page and returns it. An Err from any page is returned as is. Exposed for testing; `collect-all` uses it."""
+}
+fn (fetch: Fn, params: Map, limit: Int, acc: Vec, pages: Int): Vec {
+  page fetch(params)
+  cond {
+    is-err(page) => { page }
+    => {
+      items concat(acc, or(field(page, "data"), []))
+      next next-page-params(params, page)
+      cond {
+        and(gt(limit, 0), gte(length(items), limit)) => { slice(items, 0, limit) }
+        is-null(next) => { items }
+        gte(add(pages, 1), MAX_PAGES) => { items }
+        => { collect-pages(fetch, next, limit, items, add(pages, 1)) }
+      }
+    }
+  }
+}
+
+collect-all
+meta {
+    doc: """
+    Every object from a list endpoint, following cursors: up to `limit`
+    objects (default 1000; 0 means all, stopping after `MAX_PAGES`
+    pages). Pages are fetched 100 at a time. An Err on any page is
+    returned as is.
+
+    **Example**
+
+    ```hot
+    open ::increase::api/collect-all("/accounts", {"status.in": ["open"]})
+    ```
+    """
+}
+fn
+(path: Str): Vec {
+  collect-all(path, {}, 1000)
+},
+(path: Str, params: Map): Vec {
+  collect-all(path, params, 1000)
+},
+(path: Str, params: Map, limit: Int): Vec {
+  collect-all(path, params, limit, {})
+},
+(path: Str, params: Map, limit: Int, opts: Map): Vec {
+  size if(and(gt(limit, 0), lt(limit, ::increase/MAX_PAGE_SIZE)), limit, ::increase/MAX_PAGE_SIZE)
+  collect-pages((p) { list-page(path, p, opts) }, {...params, limit: or(get(params, "limit"), size)}, limit, [], 0)
+}
+
+find-by-idempotency-key
+meta {
+    doc: """
+    The object a list endpoint holds for `idempotency-key`, or null when
+    the key was never used. Increase's list endpoints filter on
+    `idempotency_key`. Use it after a create call failed in transit to
+    learn whether the transfer was made before deciding to resend.
+
+    **Example**
+
+    ```hot
+    existing ::increase::api/find-by-idempotency-key("/ach_transfers", "invoice-42-payout")
+    ```
+    """
+}
+fn
+(path: Str, idempotency-key: Str): Map? {
+  find-by-idempotency-key(path, idempotency-key, {})
+},
+(path: Str, idempotency-key: Str, opts: Map): Map? {
+  page list-page(path, {idempotency_key: idempotency-key, limit: 1}, opts)
+  cond {
+    is-err(page) => { page }
+    is-empty(or(field(page, "data"), [])) => { null }
+    => { first(page.data) }
+  }
+}
