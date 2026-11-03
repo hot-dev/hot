@@ -145,7 +145,12 @@ pub fn send_event(
                     let event_env_id = env_id;
                     let event_env_name = ctx.env_name.clone();
 
-                    publisher.publish(ctx, event);
+                    if let Err(e) = publisher.publish_checked(ctx, event) {
+                        return HotResult::Err(Val::from(format!(
+                            "::hot::event/send: failed to store event: {}",
+                            e
+                        )));
+                    }
 
                     HotResult::Ok(Val::ok(event_info(
                         event_id,

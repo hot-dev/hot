@@ -267,3 +267,86 @@ async fn rerun_run_without_event_returns_bad_request() {
         resp.body
     );
 }
+
+/// Retrying a run whose event is in blob storage stores the new event the same
+/// way, since it's as large as the original, with its retry context inside.
+#[tokio::test]
+async fn retry_of_a_large_event_stores_it_in_blob_storage() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let conf = hot::val!({
+        "app": {"host": "localhost", "port": 4680},
+        "blob": {"mode": "service"},
+        "file": {"storage": {"path": (temp_dir.path().to_str().unwrap())}},
+    });
+    let mut client = TestClient::new_with_conf(conf.clone()).await;
+    let td = insert_test_data(client.db()).await.expect("test data");
+    client.login_as(&td.user_id);
+    let blob_store = hot::blob::blob_store_from_conf(client.db().clone(), &conf)
+        .await
+        .expect("blob store enabled by conf");
+    let scope = hot::blob::BlobScope {
+        org_id: td.org_id,
+        env_id: Some(td.env_id),
+        run_id: None,
+    };
+    let rows = vec![json!({"id": 1, "note": "a small cell"}); 40_000];
+
+    let event_id = Uuid::now_v7();
+    let stored = blob_store
+        .spill_whole_if_large(
+            json!({ "rows": rows }),
+            scope,
+            hot::blob::SpillSource::EventData,
+            Some(&event_id.to_string()),
+        )
+        .await
+        .expect("spill event data");
+    assert!(hot::blob::json_contains_blob_ref(&stored));
+    Event::insert_event(
+        client.db(),
+        &event_id,
+        &td.env_id,
+        &td.stream_id,
+        "data:analyze",
+        &stored,
+        chrono::Utc::now(),
+        &td.user_id,
+        None,
+    )
+    .await
+    .expect("insert data:analyze event");
+    link_event_and_set_status(client.db(), &td.run_id, &event_id, RunStatus::Failed).await;
+
+    let resp = client
+        .post_form(
+            &format!(
+                "/runs/{}/retry?org_id={}&env_id={}",
+                td.run_id, td.org_id, td.env_id
+            ),
+            &[],
+        )
+        .await;
+
+    resp.assert_status(axum::http::StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_str(&resp.body).expect("json response");
+    let new_event_id =
+        Uuid::parse_str(body["event_id"].as_str().expect("event_id string")).expect("uuid");
+    let new_event = Event::get_event(client.db(), &new_event_id)
+        .await
+        .expect("new event exists");
+    assert!(hot::blob::json_contains_blob_ref(&new_event.event_data));
+    let restored = blob_store
+        .rehydrate_json(
+            new_event.event_data,
+            scope,
+            hot::blob::RehydrateBudget::from_config(blob_store.config()),
+        )
+        .await
+        .expect("rehydrate the new event");
+    assert_eq!(restored["rows"], json!(rows));
+    assert!(
+        restored["retry"]["origin-run-id"].is_string(),
+        "{:.200}",
+        restored["retry"]
+    );
+}

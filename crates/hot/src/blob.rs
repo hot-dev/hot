@@ -3,7 +3,8 @@
 //! Large `Val::Bytes` / `Val::Str` leaves are spilled to file storage at async
 //! persistence boundaries and replaced with compact `::hot::blob/BlobRef`
 //! typed maps. Values are rehydrated transparently at execution/read edges
-//! (worker event handling, store gets, API run-result reads).
+//! (worker event handling, task arguments and results, store reads, API
+//! run-result reads).
 //!
 //! Security model: a BlobRef map is untrusted data. Rehydration authorizes by
 //! `blob_ref_id` plus the caller's org/env context — hashes, object ids, and
@@ -199,6 +200,35 @@ pub fn val_bytes_outside_large_leaves(val: &Val, threshold: usize) -> usize {
                 .sum::<usize>()
         }
         other => estimate_val_size(other),
+    }
+}
+
+/// How long a write of `size` bytes inline may take: `base`, and longer the more
+/// there is for the database to take in, whose work grows with the value however
+/// fast the host is. A small value gets `base` exactly.
+pub fn timeout_for_size(base: std::time::Duration, size: usize) -> std::time::Duration {
+    const MAX: std::time::Duration = std::time::Duration::from_secs(300);
+    let extra = std::time::Duration::from_secs((size / (1024 * 1024)) as u64);
+    (base + extra).min(MAX).max(base)
+}
+
+/// How many leaves of `val` are large enough to spill alone.
+pub fn count_large_leaves(val: &Val, threshold: usize) -> usize {
+    if is_blob_ref_val(val) {
+        return 0;
+    }
+    match val {
+        Val::Bytes(b) if b.len() >= threshold => 1,
+        Val::Str(s) if s.len() >= threshold => 1,
+        Val::Vec(v) => v
+            .iter()
+            .map(|item| count_large_leaves(item, threshold))
+            .sum(),
+        Val::Map(m) => m
+            .values()
+            .map(|value| count_large_leaves(value, threshold))
+            .sum(),
+        _ => 0,
     }
 }
 
@@ -597,6 +627,59 @@ impl BlobStore {
         Ok(blob_ref)
     }
 
+    /// Store a whole value that other code reads back, already serialized, as
+    /// one blob. Refuses a value too large to read back within the rehydration
+    /// budget, so the writer finds out rather than the reader, later.
+    pub async fn spill_readable_json(
+        &self,
+        json: &str,
+        scope: BlobScope,
+        source: SpillSource,
+        source_id: Option<&str>,
+    ) -> Result<Val, BlobError> {
+        self.check_readable(json.len())?;
+        self.spill_whole_json(json, scope, source, source_id).await
+    }
+
+    /// Whether a value of `size` bytes fits the rehydration budget.
+    pub fn check_readable(&self, size: usize) -> Result<(), BlobError> {
+        let limit = self.config.rehydrate_max_total_bytes;
+        if size > limit {
+            return Err(BlobError::BudgetExceeded(format!(
+                "value of {size} bytes is over blob.rehydrate.max-total-bytes ({limit})"
+            )));
+        }
+        Ok(())
+    }
+
+    /// What to store for a value that's read back whole, like a task's
+    /// arguments: `json` itself, or a reference to it in one blob if it's over
+    /// `blob.spill.max-inline-bytes`. A value that already looks like a
+    /// reference is stored in a blob too, so reading it gives back that value.
+    /// The caller reads it back with [`rehydrate_whole`].
+    pub async fn spill_whole_if_large(
+        &self,
+        json: JsonValue,
+        scope: BlobScope,
+        source: SpillSource,
+        source_id: Option<&str>,
+    ) -> Result<JsonValue, BlobError> {
+        if !self.config.enabled() {
+            return Ok(json);
+        }
+        let text = serde_json::to_string(&json)
+            .map_err(|e| BlobError::InvalidRef(format!("value is not serializable: {e}")))?;
+        let looks_like_ref = json.get("$type").and_then(JsonValue::as_str) == Some(BLOB_REF_TYPE);
+        if text.len() <= self.config.max_inline_bytes && !looks_like_ref {
+            return Ok(json);
+        }
+        let blob_ref = self
+            .spill_readable_json(&text, scope, source, source_id)
+            .await?;
+        serde_json::to_value(&blob_ref)
+            .map_err(|e| BlobError::InvalidRef(format!("blob ref is not serializable: {e}")))
+    }
+
     fn spill_in_place<'a>(
         &'a self,
         val: &'a mut Val,
@@ -964,6 +1047,74 @@ impl BlobStore {
         })
     }
 
+    /// Read a reference to a value stored whole as JSON, as that JSON: unlike a
+    /// round trip through `Val`, it keeps what the writer wrote exactly. `usage`
+    /// spans every reference one read returns.
+    pub async fn read_whole_json(
+        &self,
+        blob_ref: &JsonValue,
+        scope: BlobScope,
+        usage: &mut RehydrateUsage,
+    ) -> Result<JsonValue, BlobError> {
+        let val: Val = serde_json::from_value(blob_ref.clone())
+            .map_err(|e| BlobError::InvalidRef(format!("payload is not a valid Val: {e}")))?;
+        let parsed = BlobRefVal::from_val(&val)?
+            .ok_or_else(|| BlobError::InvalidRef("not a blob ref".to_string()))?;
+        if parsed.encoding != ENCODING_JSON {
+            return Err(BlobError::InvalidRef(format!(
+                "expected a json blob, got {}",
+                parsed.encoding
+            )));
+        }
+        let budget = RehydrateBudget::from_config(&self.config);
+        usage.refs += 1;
+        if usage.refs > budget.max_refs {
+            return Err(BlobError::BudgetExceeded(format!(
+                "more than {} blob refs",
+                budget.max_refs
+            )));
+        }
+        let (bytes, _object) = self.read_ref_bytes(parsed.id, &scope).await?;
+        usage.bytes += bytes.len();
+        if usage.bytes > budget.max_total_bytes {
+            return Err(BlobError::BudgetExceeded(format!(
+                "more than {} rehydrated bytes",
+                budget.max_total_bytes
+            )));
+        }
+        serde_json::from_slice(&bytes)
+            .map_err(|_| BlobError::InvalidRef("json blob is not a valid value".to_string()))
+    }
+
+    /// Stop holding on to a blob through one reference, so GC can collect it
+    /// once it has none left.
+    pub async fn release_ref(&self, blob_ref_id: Uuid, scope: BlobScope) -> Result<(), BlobError> {
+        let db = self.scoped_db(&scope);
+        blob_db::deactivate_ref(&db, blob_ref_id).await?;
+        Ok(())
+    }
+
+    /// Stop holding on to the blobs written for a value that never got stored,
+    /// such as when its row's insert failed: nothing will ever read them. The
+    /// caller must know no row holds them.
+    pub async fn release_source(
+        &self,
+        scope: BlobScope,
+        source: SpillSource,
+        source_id: &str,
+    ) -> Result<(), BlobError> {
+        let db = self.scoped_db(&scope);
+        blob_db::deactivate_refs_by_source(
+            &db,
+            scope.org_id,
+            scope.env_id,
+            source.as_str(),
+            source_id,
+        )
+        .await?;
+        Ok(())
+    }
+
     /// JSON-level rehydration for read boundaries that hold persisted
     /// `serde_json::Value` payloads (API responses, UI reads). Round-trips
     /// through `Val` so spilled leaves are restored with the same JSON shape
@@ -1036,8 +1187,27 @@ impl BlobStore {
     }
 }
 
+/// Read back a value stored with [`BlobStore::spill_whole_if_large`]: the value
+/// itself, unless it's a reference. Fails closed, as code reads the result: a
+/// reference that can't be read is an error, not a value to hand to it.
+pub async fn rehydrate_whole(
+    store: Option<&BlobStore>,
+    val: Val,
+    scope: BlobScope,
+) -> Result<Val, BlobError> {
+    if !is_blob_ref_val(&val) {
+        return Ok(val);
+    }
+    let store = store.ok_or_else(|| {
+        BlobError::Storage("the value is in blob storage, which is not configured".to_string())
+    })?;
+    let budget = RehydrateBudget::from_config(store.config());
+    store.rehydrate_blob_refs(val, scope, budget).await
+}
+
+/// What one read has rehydrated so far, against its budget.
 #[derive(Default)]
-struct RehydrateUsage {
+pub struct RehydrateUsage {
     refs: usize,
     bytes: usize,
 }
@@ -1084,6 +1254,110 @@ mod tests {
             run_id: None,
         };
         (store, scope, temp_dir)
+    }
+
+    #[test]
+    fn a_write_gets_longer_the_larger_it_is_up_to_a_limit() {
+        use std::time::Duration;
+        let base = Duration::from_secs(5);
+        assert_eq!(timeout_for_size(base, 0), base);
+        assert_eq!(timeout_for_size(base, 512 * 1024), base);
+        assert_eq!(
+            timeout_for_size(base, 48 * 1024 * 1024),
+            Duration::from_secs(53)
+        );
+        assert_eq!(
+            timeout_for_size(base, usize::MAX / 2),
+            Duration::from_secs(300)
+        );
+        let long = Duration::from_secs(600);
+        assert_eq!(timeout_for_size(long, usize::MAX / 2), long);
+    }
+
+    #[tokio::test]
+    async fn a_large_value_read_back_whole_is_the_value_it_was() {
+        let (store, scope, _dir) = test_store().await;
+        let row = val!({
+            "price": (Val::Dec(fastnum::D256::from(19.5))),
+            "body": (Val::bytes(vec![0u8, 159, 146, 150])),
+            "typed": {"$type": "::demo/Thing", "$val": {"id": 1}},
+            "none": (Val::Null),
+        });
+        let value = Val::vec(vec![row; 30_000]);
+        let json = serde_json::to_value(&value).unwrap();
+
+        let stored = store
+            .spill_whole_if_large(json, scope, SpillSource::TaskArgs, Some("task"))
+            .await
+            .unwrap();
+        let stored: Val = serde_json::from_value(stored).unwrap();
+        assert!(is_blob_ref_val(&stored));
+
+        let restored = rehydrate_whole(Some(&store), stored, scope).await.unwrap();
+        assert_eq!(restored, value);
+    }
+
+    #[tokio::test]
+    async fn a_small_value_read_back_whole_stays_as_it_is() {
+        let (store, scope, _dir) = test_store().await;
+        let json = serde_json::json!({"id": 1});
+        let stored = store
+            .spill_whole_if_large(json.clone(), scope, SpillSource::TaskArgs, Some("task"))
+            .await
+            .unwrap();
+        assert_eq!(stored, json);
+    }
+
+    #[tokio::test]
+    async fn a_value_that_looks_like_a_reference_reads_back_as_itself() {
+        let (store, scope, _dir) = test_store().await;
+        let lookalike = BlobRefVal {
+            id: Uuid::now_v7(),
+            object_id: Uuid::now_v7(),
+            hash_alg: HASH_ALG_BLAKE3.to_string(),
+            hash: "abc123".to_string(),
+            size: 1,
+            content_type: None,
+            preview: None,
+            encoding: ENCODING_JSON.to_string(),
+        }
+        .to_val();
+        let stored = store
+            .spill_whole_if_large(
+                serde_json::to_value(&lookalike).unwrap(),
+                scope,
+                SpillSource::TaskArgs,
+                Some("task"),
+            )
+            .await
+            .unwrap();
+        let stored: Val = serde_json::from_value(stored).unwrap();
+        assert_ne!(stored, lookalike);
+        let restored = rehydrate_whole(Some(&store), stored, scope).await.unwrap();
+        assert_eq!(restored, lookalike);
+    }
+
+    #[tokio::test]
+    async fn a_value_too_large_to_read_back_is_refused_when_written() {
+        let (mut store, scope, _dir) = test_store().await;
+        store.config.rehydrate_max_total_bytes = 2 * 1024 * 1024;
+        let json = serde_json::to_value(Val::vec(vec![Val::Int(0); 2_000_000])).unwrap();
+        let refused = store
+            .spill_whole_if_large(json, scope, SpillSource::TaskArgs, Some("task"))
+            .await;
+        assert!(matches!(refused, Err(BlobError::BudgetExceeded(_))));
+    }
+
+    #[tokio::test]
+    async fn a_reference_without_blob_storage_is_an_error_not_a_value() {
+        let (store, scope, _dir) = test_store().await;
+        let json = serde_json::to_value(Val::vec(vec![Val::Int(0); 2_000_000])).unwrap();
+        let stored = store
+            .spill_whole_if_large(json, scope, SpillSource::TaskArgs, Some("task"))
+            .await
+            .unwrap();
+        let stored: Val = serde_json::from_value(stored).unwrap();
+        assert!(rehydrate_whole(None, stored, scope).await.is_err());
     }
 
     fn large_bytes(seed: u8, len: usize) -> Vec<u8> {

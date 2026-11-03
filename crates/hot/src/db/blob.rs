@@ -469,6 +469,35 @@ pub async fn deactivate_refs_by_source(
     }
 }
 
+/// Deactivate one ref (e.g. when the store entry holding it is overwritten).
+pub async fn deactivate_ref(db: &DatabasePool, blob_ref_id: Uuid) -> Result<u64, BlobDbError> {
+    let now = Utc::now();
+    match db {
+        DatabasePool::Postgres(pool) => {
+            let result = sqlx::query(
+                "UPDATE blob_ref SET active = false, deactivated_at = $1 \
+                 WHERE blob_ref_id = $2 AND active = true",
+            )
+            .bind(now)
+            .bind(blob_ref_id)
+            .execute(pool)
+            .await?;
+            Ok(result.rows_affected())
+        }
+        DatabasePool::Sqlite(pool) => {
+            let result = sqlx::query(
+                "UPDATE blob_ref SET active = 0, deactivated_at = ? \
+                 WHERE blob_ref_id = ? AND active = 1",
+            )
+            .bind(now)
+            .bind(blob_ref_id)
+            .execute(pool)
+            .await?;
+            Ok(result.rows_affected())
+        }
+    }
+}
+
 /// Deactivate observability refs created before a cutoff for the given
 /// source kinds. Used by retention cleanup (e.g. call retention) to release
 /// blob refs when their source rows age out. Never pass `store_value` or

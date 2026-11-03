@@ -212,6 +212,10 @@ task-specific waiter when it only needs one task's terminal result.
 See [SDKs](/docs/api/sdks#wait-for-a-background-task) for timeout examples and
 language-specific failure types.
 
+### Large Arguments and Results
+
+A code task's arguments or result over 1 MB as JSON are stored in [blob storage](/docs/configuration/storage), and the task and `await` receive the value itself. They must fit `blob.rehydrate.max-total-bytes`, 512 MB as JSON by default. `::hot::task/start` returns an `Err` for arguments it can't store. A task whose result can't be stored fails, and `await` returns the reason. Without blob storage, PostgreSQL refuses a `jsonb` value over 256 MB.
+
 ## Cancellation
 
 Cancel a queued or running task with `::hot::task/cancel`:
