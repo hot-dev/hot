@@ -913,22 +913,36 @@ mod tests {
         assert_eq!(signin.admitted_by.as_deref(), Some("carol-code"));
 
         // The address need not match the invitation's capitals either, with
-        // no link to name the invitation.
+        // no link to name the invitation. Another spelling then reaches the
+        // same account, which needs no invitation.
         invited_org(&db, "ccme", "Dana@Corp.com", "dana-code").await;
-        for (email, provider_id) in [("dana@corp.com", "lower"), ("DANA@CORP.COM", "upper")] {
-            let signin = handle_oauth_user(
-                &db,
-                &conf,
-                email,
-                "google",
-                &format!("google-dana-{provider_id}"),
-                None,
-                None,
-            )
-            .await
-            .unwrap();
-            assert_eq!(signin.admitted_by.as_deref(), Some("dana-code"), "{email}");
-        }
+        let dana = handle_oauth_user(
+            &db,
+            &conf,
+            "DANA@CORP.COM",
+            "google",
+            "google-dana-upper",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(dana.is_new_user);
+        assert_eq!(dana.admitted_by.as_deref(), Some("dana-code"));
+        let again = handle_oauth_user(
+            &db,
+            &conf,
+            "dana@corp.com",
+            "google",
+            "google-dana-lower",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!again.is_new_user);
+        assert_eq!(again.user.user_id, dana.user.user_id);
+        assert_eq!(again.admitted_by, None);
 
         // Someone else's invitation admits nobody.
         assert!(
