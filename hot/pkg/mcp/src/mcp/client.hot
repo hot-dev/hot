@@ -520,16 +520,19 @@ fn (session: ::types/Session, method: Str, params: Map?, tool: ::types/Tool?): M
   }
 }
 
-session-request-with-tool
+response-result
 meta {
-    doc: """Send an MCP request, optionally using a Tool definition for `x-mcp-header` mirroring."""
+    doc: """
+Return the MCP result carried by a JSON-RPC response.
+
+A JSON-RPC error response is returned as the same Err, so callers can test it
+with `is-err` and read the server's message with `err-message`.
+"""
 }
-fn (session: ::types/Session, method: Str, params: Map?, tool: ::types/Tool?): Map {
-  context request-context(session, method, params, tool)
-  req ::rpc/request(method, context.params)
-  response ::rpc/send(session.url, context.headers, req)
-  result or(response.result, {})
+fn (session: ::types/Session, response: Result): Map {
+  result if(is-err(response), response, or(response.result, {}))
   cond {
+    is-err(result) => { result }
     and(
       eq(session-era(session), "modern"),
       not(in(get(result, "resultType", null), ["complete", "input_required"]))
@@ -544,8 +547,28 @@ fn (session: ::types/Session, method: Str, params: Map?, tool: ::types/Tool?): M
   }
 }
 
+session-request-with-tool
+meta {
+    doc: """
+Send an MCP request, optionally using a Tool definition for `x-mcp-header` mirroring.
+
+Returns err() when the server answers with a JSON-RPC error.
+"""
+}
+fn (session: ::types/Session, method: Str, params: Map?, tool: ::types/Tool?): Map {
+  context request-context(session, method, params, tool)
+  req ::rpc/request(method, context.params)
+  response-result(session, ::rpc/send(session.url, context.headers, req))
+}
+
 session-request
-meta {doc: """Send a request over an active MCP connection and return its result."""}
+meta {
+    doc: """
+Send a request over an active MCP connection and return its result.
+
+Returns err() when the server answers with a JSON-RPC error.
+"""
+}
 fn (session: ::types/Session, method: Str, params: Map?): Map {
   session-request-with-tool(session, method, params, null)
 }
@@ -601,6 +624,7 @@ fn cond (session: ::types/Session, method: Str, params: Map?, handler: Fn, max-r
   => {
     result session-request(session, method, params)
     cond {
+      is-err(result) => { result }
       eq(get(result, "resultType", "complete"), "input_required") => {
         requests get(result, "inputRequests", null)
         responses if(
@@ -637,6 +661,7 @@ fn cond (session: ::types/Session, method: Str, params: Map?, tool: ::types/Tool
   => {
     result session-request-with-tool(session, method, params, tool)
     cond {
+      is-err(result) => { result }
       eq(get(result, "resultType", "complete"), "input_required") => {
         requests get(result, "inputRequests", null)
         responses if(
@@ -661,13 +686,17 @@ fn cond (session: ::types/Session, method: Str, params: Map?, tool: ::types/Tool
 
 ping
 meta {
-    doc: """Check server connectivity using discovery for modern MCP or ping for legacy MCP."""
+    doc: """
+Check server connectivity using discovery for modern MCP or ping for legacy MCP.
+
+Returns err() when the server answers with a JSON-RPC error.
+"""
 }
 fn (session: ::types/Session): Bool {
-  if(
+  result if(
     eq(session-era(session), "modern"),
     session-request(session, "server/discover", {}),
     session-request(session, "ping", null)
   )
-  true
+  if(is-err(result), result, true)
 }

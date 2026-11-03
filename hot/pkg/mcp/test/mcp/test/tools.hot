@@ -1,0 +1,59 @@
+::mcp::test::tools ns
+meta {
+    doc: """
+Pure-Hot tests for turning a tools/call response into a ToolResult.
+Network calls are covered by the integration suite.
+"""
+}
+
+::tools ::mcp::tools
+::types ::mcp::types
+::rpc ::json-rpc::client
+
+server-down fn (): Map {
+    {
+        jsonrpc: "2.0",
+        id: "call-1",
+        error: {code: -32000, message: "the order system is down"}
+    }
+}
+
+test-tool-result-returns-a-json-rpc-error-as-an-err
+meta ["test"]
+fn () {
+    result ::tools/tool-result(::rpc/parse-response(server-down()))
+    assert(is-err(result), "a JSON-RPC error is an Err the caller can test")
+    assert-eq("the order system is down", err-message(result))
+}
+
+test-tool-result-keeps-a-successful-result
+meta ["test"]
+fn () {
+    result ::tools/tool-result({
+        content: [{type: "text", text: "Sunny"}],
+        structuredContent: {temp: 72}
+    })
+    assert-eq(
+        ::types/ToolResult({
+            content: [::types/ToolContent({type: "text", text: "Sunny"})],
+            is-error: false,
+            structured-content: {temp: 72},
+            result-type: "complete",
+            input-requests: null,
+            request-state: null
+        }),
+        result
+    )
+}
+
+test-tool-result-keeps-a-tool-error-as-a-result
+meta ["test"]
+fn () {
+    result ::tools/tool-result({
+        content: [{type: "text", text: "no such order"}],
+        isError: true
+    })
+    assert(is-ok(result), "isError: true is a successful JSON-RPC call")
+    assert-eq(true, result.is-error)
+    assert-eq("no such order", first(result.content).text)
+}
