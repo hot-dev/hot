@@ -1715,6 +1715,94 @@ via-any("warm")
         );
     }
 
+    /// A call by a name that reaches a value passes its arguments as values,
+    /// even when a function of that name has lazy parameters: a parameter or
+    /// local, a field of either, a piped call, and the namespace's own value.
+    #[test]
+    fn a_value_named_like_a_lazy_function_gets_values_with_and_without_jit() {
+        let src = r#"::t ns
+deferred fn (lazy x: Any): Any { "deferred" }
+param-source fn (source): Any { source(null) }
+param-assert fn (assert): Any { assert(null) }
+param-assert-eq fn (assert-eq): Any { assert-eq(null, null) }
+param-and fn (and): Any { and(null, null) }
+param-or fn (or): Any { or(null, null) }
+param-if fn (if): Any { if(null, null) }
+param-deferred fn (deferred): Any { deferred(null) }
+local-source fn (): Any {
+    source (x: Str?) { "hit" }
+    source(null)
+}
+field-of-param fn (source): Any { source.list(null) }
+field-of-local fn (): Any {
+    source {list: (x: Str?) { "hit" }}
+    source.list(null)
+}
+piped fn (source): Any { null |> source() }
+eager fn (source): Any {
+    seen source(sub(1, 1))
+    [seen]
+}
+one (x: Str?) { "hit" }
+two (a: Str?, b: Str?) { "hit" }
+int-arg (n: Int) { n }
+[
+    param-source(one), param-assert(one), param-assert-eq(two), param-and(two), param-or(two),
+    param-if(two), param-deferred(one), local-source(), field-of-param({list: one}), field-of-local(),
+    piped(one), eager(int-arg)
+]"#;
+        let mut expected = vec![Val::from("hit"); 11];
+        expected.push(Val::vec(vec![Val::Int(0)]));
+        assert_same_with_and_without_jit(src, &Val::vec(expected));
+    }
+
+    /// A namespace's own value or function of a lazy core function's name
+    /// takes its arguments as values too.
+    #[test]
+    fn a_namespace_binding_named_like_a_lazy_core_function_gets_values() {
+        let src = r#"::t ns
+source (x: Str?) { "value" }
+assert {check: (x: Str?) { "field" }}
+assert-eq fn (a: Str?, b: Str?): Any { "function" }
+[source(null), assert.check(null), assert-eq(null, null)]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &Val::vec(vec![
+                Val::from("value"),
+                Val::from("field"),
+                Val::from("function"),
+            ]),
+        );
+    }
+
+    /// Functions with lazy parameters still defer: the core ones, a
+    /// namespace's own, an import, and one defined in the body, which a local
+    /// binding of the name doesn't hide.
+    #[test]
+    fn functions_with_lazy_parameters_still_defer_with_and_without_jit() {
+        let src = r#"::t ns
+deferred fn (lazy x: Any): Any { "deferred" }
+imported ::t/deferred
+in-body fn (): Any {
+    local-lazy fn (lazy x: Any): Any { "local" }
+    local-lazy(fail("never runs"))
+}
+[
+    deferred(fail("never runs")), imported(fail("never runs")), in-body(),
+    or("first", fail("never runs")), and(false, fail("never runs"))
+]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &Val::vec(vec![
+                Val::from("deferred"),
+                Val::from("deferred"),
+                Val::from("local"),
+                Val::from("first"),
+                Val::Bool(false),
+            ]),
+        );
+    }
+
     /// A primitive parameter rejects a value of another type at the call, in
     /// both tiers, whether or not the JIT has seen a good value first.
     #[test]
@@ -1993,7 +2081,7 @@ run()"#;
                 Val::from("tri"),
                 Val::from("tri"),
                 Val::from("tri"),
-                strs(&["other"]),
+                strs(&["tri"]),
                 Val::from("tri"),
             ]),
         );
@@ -2849,6 +2937,314 @@ run()"#;
             "str", "str", "str", "str", "str", "str", "str",
             "kept", "kept",
             "arrow",
+        ]);
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            let out = compile_and_run_project_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("run failed: {e}"));
+            assert_eq!(out, expected);
+        }
+    }
+
+    /// A parameter type can name one variant, as `Kind.Plain` or `::a/Kind.Plain`,
+    /// through an alias or a re-export too. Overloads dispatch on it, a sibling
+    /// declaring the enum takes the other variants, and an arrow to the variant
+    /// runs. Same-named enums in two namespaces stay apart.
+    #[test]
+    fn parameter_types_can_name_an_enum_variant() {
+        let src = r#"::a ns
+Inner type { text: Str }
+Kind enum open { Plain, Other, Wrapped(Inner) }
+Source type { text: Str }
+Source -> Kind.Sourced fn (s: Source): Kind { Kind.Wrapped({text: `from ${s.text}`}) }
+short fn
+(x: Kind.Plain): Any { "plain" },
+(x: Kind.Wrapped): Any { `wrapped ${x.text}` },
+(x: Kind): Any { "kind" }
+returns fn (): Kind.Plain { Kind.Plain }
+Holder type { kind: Kind.Plain }
+
+::b ns
+Kind enum { Plain, Other }
+
+::reexport ns
+Kind ::a/Kind
+
+::c ns
+::alias ::a
+::other ::b
+qualified fn
+(x: ::a/Kind.Plain): Any { "a plain" },
+(x: ::b/Kind.Plain): Any { "b plain" },
+(x: ::alias/Kind.Wrapped): Any { `a wrapped ${x.text}` },
+(x: ::reexport/Kind.Other): Any { "a other" },
+(x: ::other/Kind.Other): Any { "b other" }
+variant-first fn
+(x: ::a/Kind.Plain): Any { "plain" },
+(x: ::a/Kind): Any { "kind" }
+enum-first fn
+(x: ::alias/Kind): Any { "kind" },
+(x: ::alias/Kind.Plain): Any { "plain" }
+nullable fn (x: ::a/Kind.Plain?): Any { if(is-null(x), "none", "plain") }
+either fn (x: ::a/Kind.Plain | ::a/Kind.Other): Any { "either" }
+lone fn (x: ::a/Kind.Plain): Any { "lone" }
+arrow-target fn (x: ::a/Kind.Sourced): Any { `sourced ${x.text}` }
+hold fn (x: Any): Any { x }
+
+::t ns
+run fn (): Vec {
+    plain ::c/hold(::a/Kind.Plain)
+    wrapped ::c/hold(::a/Kind.Wrapped({text: "w"}))
+    other ::c/hold(::a/Kind.Other)
+    [
+        ::a/short(plain), ::a/short(wrapped), ::a/short(other),
+        ::c/qualified(plain), ::c/qualified(::c/hold(::b/Kind.Plain)),
+        ::c/qualified(wrapped), ::c/qualified(other),
+        ::c/qualified(::c/hold(::b/Kind.Other)),
+        ::c/qualified(::a/Kind.Plain), ::c/qualified(::b/Kind.Other), ::a/short(::a/Kind.Other),
+        ::c/variant-first(plain), ::c/variant-first(other),
+        ::c/enum-first(plain), ::c/enum-first(other),
+        ::c/nullable(plain), ::c/nullable(null), ::c/either(other), ::c/lone(plain),
+        ::c/arrow-target(::c/hold(::a/Source({text: "s"}))),
+        first(map([wrapped], ::a/short)), first(map([plain], ::c/qualified)),
+        is-type(::a/returns(), ::a/Kind),
+        is-type(::a/Holder(kind: ::a/Kind.Plain).kind, ::a/Kind)
+    ]
+}
+run()
+run()
+run()"#;
+        let expected = Val::vec(vec![
+            Val::from("plain"),
+            Val::from("wrapped w"),
+            Val::from("kind"),
+            Val::from("a plain"),
+            Val::from("b plain"),
+            Val::from("a wrapped w"),
+            Val::from("a other"),
+            Val::from("b other"),
+            Val::from("a plain"),
+            Val::from("b other"),
+            Val::from("kind"),
+            Val::from("plain"),
+            Val::from("kind"),
+            Val::from("plain"),
+            Val::from("kind"),
+            Val::from("plain"),
+            Val::from("none"),
+            Val::from("either"),
+            Val::from("lone"),
+            Val::from("sourced from s"),
+            Val::from("wrapped w"),
+            Val::from("a plain"),
+            Val::Bool(true),
+            Val::Bool(true),
+        ]);
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            let out = compile_and_run_project_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("run failed: {e}"));
+            assert_eq!(out, expected);
+        }
+    }
+
+    /// A namespace offers what it imports under its own name: its type's
+    /// constructor, a variant, a function, and a function reference, through an
+    /// alias or another re-export too. Its own definition of a name still wins.
+    #[test]
+    fn calls_reach_types_and_functions_through_a_reexport() {
+        let src = r#"::b::api ns
+E1 type { from: Str }
+Kind enum { Plain, Wrapped(E1) }
+describe fn (e: E1): Any { `described ${e.from}` }
+own fn (): Any { "api" }
+
+::reexport ns
+E1 ::b::api/E1
+Kind ::b::api/Kind
+describe ::b::api/describe
+
+::again ns
+::up ::reexport
+E1 ::up/E1
+Kind ::up/Kind
+describe ::up/describe
+
+::shadowing ns
+own fn (): Any { "shadowing" }
+
+::t ns
+::alias ::again
+E1 ::again/E1
+take fn (x: ::reexport/E1): Any { x.from }
+run fn (): Vec {
+    direct ::reexport/E1({from: "direct"})
+    named E1(from: "named")
+    chained ::again/E1(from: "chained")
+    aliased ::alias/E1({from: "aliased"})
+    [
+        direct.from, named.from, chained.from, aliased.from,
+        is-type(direct, ::b::api/E1),
+        eq(::reexport/Kind.Plain, ::b::api/Kind.Plain),
+        ::alias/Kind.Wrapped({from: "wrapped"}).from,
+        ::reexport/describe(direct), ::alias/describe(chained),
+        first(map([{from: "mapped"}], ::reexport/E1)).from,
+        first(map([direct], ::alias/describe)),
+        take(chained),
+        ::shadowing/own()
+    ]
+}
+run()
+run()
+run()"#;
+        let expected = Val::vec(vec![
+            Val::from("direct"),
+            Val::from("named"),
+            Val::from("chained"),
+            Val::from("aliased"),
+            Val::Bool(true),
+            Val::Bool(true),
+            Val::from("wrapped"),
+            Val::from("described direct"),
+            Val::from("described chained"),
+            Val::from("mapped"),
+            Val::from("described direct"),
+            Val::from("chained"),
+            Val::from("shadowing"),
+        ]);
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            let out = compile_and_run_project_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("run failed: {e}"));
+            assert_eq!(out, expected);
+        }
+    }
+
+    /// An overload set routes a tagged argument to the overload it has an arrow
+    /// to, built-in parameter types included, whichever overload is declared
+    /// last. Overloads that take the argument as it is still win, and an
+    /// unrelated custom type doesn't get in the way. Calls and `map` callbacks
+    /// dispatch alike.
+    #[test]
+    fn overload_dispatch_routes_through_arrows() {
+        let src = r#"::a ns
+Label type { text: Str }
+Other type { n: Int }
+Point type { x: Int }
+Tag type { name: Str }
+Label -> Str fn (l: Label): Str { l.text }
+Point -> Vec fn (p: Point): Vec { [p.x] }
+Label -> Tag fn (l: Label): Tag { Tag({name: l.text}) }
+str-first fn
+(s: Str): Any { `str ${s}` },
+(v: Vec): Any { "vec" }
+str-last fn
+(v: Vec): Any { "vec" },
+(s: Str): Any { `str ${s}` }
+past-others fn
+(i: Int): Any { "int" },
+(s: Str): Any { `str ${s}` },
+(v: Vec): Any { "vec" },
+(b: Bool): Any { "bool" }
+two-args fn
+(n: Int, s: Str): Any { `${n} ${s}` },
+(n: Int, v: Vec): Any { "vec" }
+past-custom fn
+(s: Str): Any { `str ${s}` },
+(o: Other): Any { "other" }
+custom-target fn
+(t: Tag): Any { `tag ${t.name}` },
+(o: Other): Any { "other" }
+own-type fn
+(s: Str): Any { `str ${s}` },
+(l: Label): Any { "own" },
+(v: Vec): Any { "vec" }
+any-sibling fn
+(s: Str): Any { `str ${s}` },
+(x: Any): Any { "any" },
+(v: Vec): Any { "vec" }
+union-sibling fn
+(u: Label | Int): Any { "union" },
+(s: Str): Any { `str ${s}` }
+lone fn (s: Str): Any { `str ${s}` }
+
+::t ns
+l ::a/Label({text: "l"})
+hold fn (x: Any): Any { x }
+run fn (): Vec {
+    label hold(l)
+    point hold(::a/Point({x: 1}))
+    by-value ::a/str-first
+    callbacks flatten([
+        map([label], ::a/str-first), map([label], ::a/str-last),
+        map([label], ::a/past-custom), map(["s", label], ::a/past-others),
+        map([label], ::a/lone), [by-value(label)], [call("::a/str-last", [label])]
+    ])
+    [
+        ::a/str-first(label), ::a/str-last(label), ::a/past-others(label),
+        ::a/two-args(1, label), ::a/past-custom(label), ::a/custom-target(label),
+        ::a/own-type(label), ::a/any-sibling(label), ::a/union-sibling(label),
+        ::a/str-first(point), ::a/str-first("s"), ::a/str-last([1]),
+        ...callbacks
+    ]
+}
+run()
+run()
+run()"#;
+        let expected = strs(&[
+            "str l", "str l", "str l", "1 l", "str l", "tag l", "own", "any", "union",
+            "vec", "str s", "vec",
+            "str l", "str l", "str l", "str s", "str l", "str l", "str l", "str l",
+        ]);
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            let out = compile_and_run_project_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("run failed: {e}"));
+            assert_eq!(out, expected);
+        }
+    }
+
+    /// Arrows that reach two overloads don't choose between them: the call stays
+    /// on the overload it resolved to, whose parameter check then reports the
+    /// mismatch. Neither does an argument route where its arrow can't run: at a
+    /// nullable type, or a built-in value to a built-in type.
+    #[test]
+    fn overload_dispatch_does_not_guess_between_arrows() {
+        let src = r#"::a ns
+Label type { text: Str }
+Label -> Str fn (l: Label): Str { l.text }
+Label -> Vec fn (l: Label): Vec { [l.text] }
+two fn
+(s: Str): Any { "str" },
+(v: Vec): Any { "vec" },
+(i: Int): Any { "int" }
+keeps-resolved fn
+(s: Str): Any { "str" },
+(v: Vec): Any { "vec" }
+nullable fn
+(s: Str?): Any { "str" },
+(i: Int): Any { "int" }
+builtin-value fn
+(s: Str): Any { "str" },
+(v: Vec): Any { "vec" }
+
+::t ns
+l ::a/Label({text: "l"})
+hold fn (x: Any): Any { x }
+describe fn (r: Result): Any { if-err(r, (e) { e.message }) }
+run fn (): Vec {
+    label hold(l)
+    [
+        describe(::a/two(label)),
+        ::a/keeps-resolved(label),
+        describe(::a/nullable(label)),
+        describe(::a/builtin-value(hold(1)))
+    ]
+}
+run()
+run()
+run()"#;
+        let expected = strs(&[
+            "parameter `i` of `::a/two` expected Int, got Label",
+            "vec",
+            "parameter `i` of `::a/nullable` expected Int, got Label",
+            "parameter `v` of `::a/builtin-value` expected Vec, got Int",
         ]);
         for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
             let out = compile_and_run_project_with_std_conf(src, conf)
