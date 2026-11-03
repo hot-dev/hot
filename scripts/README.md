@@ -33,6 +33,13 @@ package documentation, and local integration tests.
   `check-sdk-doc-pins.mjs` checks that the SDK version
   `resources/docs/api/sdks.md` pins is published on npm, PyPI, crates.io,
   Maven Central and the Go proxy (networked; nightly and release only).
+  `check-pkg-pins.py` checks that each package in `hot/pkg` pins its siblings
+  at their versions here (or at a version in its `ALLOWED_PINS`), by version
+  rather than local or git path. `check-pkg-pins.py smoke` runs `hot check` on
+  a project for each package in `pkg-publish.txt` with the package's real
+  pins: pins at a version here load this checkout's copy, and any other pin
+  downloads from pkg.hot.dev (exit 2 when only downloads failed). The repo's
+  own projects load packages by local path, so they never compile these pins.
   `install-tailwind.sh VERSION DIR` installs the Tailwind CLI for this
   platform after checking its pinned SHA-256; add a release's digests there
   before moving `TAILWIND_VERSION`.

@@ -72,6 +72,9 @@ jobs:
       - name: Versions are in sync
         run: ./scripts/check-version-sync.sh
 
+      - name: Package pins match the repo versions
+        run: python3 scripts/check-pkg-pins.py
+
       # Unit tests for the self-host bundle renderer. The container checks
       # skip here; the nightly workflow runs them against real images.
       - name: Self-host bundle tests
@@ -106,6 +109,33 @@ jobs:
       # examples/tests, and checks the ```hot blocks in the AI docs.
       - name: Hot static checks
         run: ./scripts/hot-static-checks.sh check
+
+      # The projects above load packages by local path, which replaces the
+      # versions packages pin. On pull requests the real-pin smoke test runs
+      # only when a package or hot-std's native functions change, since that
+      # is what can break a pin.
+      - name: Check whether packages or hot-std changed
+        id: pkg-changes
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch --quiet --depth=1 origin "$BASE_SHA"
+          changed="$(git diff --name-only "$BASE_SHA" HEAD)"
+          if grep -qE '^(hot/pkg/|crates/hot/src/lang/hot/|scripts/check-pkg-pins\.py$|\.github/workflows/hot\.yml$)' <<<"$changed"; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Exit 2 means only pkg.hot.dev downloads failed.
+      - name: Packages compile with their real pins
+        if: github.event_name != 'pull_request' || steps.pkg-changes.outputs.run == 'true'
+        run: |
+          status=0
+          python3 scripts/check-pkg-pins.py smoke || status=$?
+          if [[ $status -eq 2 ]]; then
+            echo "::error::Downloads from pkg.hot.dev failed, so some pins weren't checked. This is not a code failure; rerun the job."
+          fi
+          exit "$status"
 
       - name: sccache stats
         run: sccache --show-stats || true
