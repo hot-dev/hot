@@ -1867,7 +1867,7 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         // WebSocket functions
         map.insert(
             "::hot::ws/connect".to_string(),
-            HotLibFn::LibFn(ws::connect),
+            HotLibFn::VmAwareFn(ws::connect_vm),
         );
         map.insert("::hot::ws/send".to_string(), HotLibFn::LibFn(ws::send));
         map.insert(

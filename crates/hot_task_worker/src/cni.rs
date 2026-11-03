@@ -220,20 +220,6 @@ pub async fn write_resolv_conf() -> Result<(), String> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn task_chains_are_stable_and_isolated() {
-        let first = task_chain("0123456789abcdef01234567");
-        let second = task_chain("0123456789abcdef89abcdef");
-        assert_eq!(first, task_chain("0123456789abcdef01234567"));
-        assert_ne!(first, second);
-        assert!(first.len() <= 28);
-    }
-}
-
 fn task_chain(container_id: &str) -> String {
     let suffix: String = container_id
         .chars()
@@ -283,12 +269,13 @@ async fn guest_ipv4(container_id: &str) -> Result<String, String> {
 async fn install_task_policy(container_id: &str) -> Result<(), String> {
     let chain = task_chain(container_id);
     let source = format!("{}/32", guest_ipv4(container_id).await?);
+    let proxy = guest_policy().proxy_addresses().await?;
 
     // Rebuild the task chain so retries are idempotent and cannot retain a
     // partially-installed allow policy.
     remove_task_policy(container_id).await;
     run_iptables(&["-N", &chain]).await?;
-    for rule in guest_policy().chain_rules(&chain) {
+    for rule in guest_policy().chain_rules(&chain, &proxy) {
         let rule: Vec<&str> = rule.iter().map(String::as_str).collect();
         run_iptables(&rule).await?;
     }
@@ -334,8 +321,8 @@ async fn remove_policy_chain(chain: &str) {
             break;
         }
     }
-    let _ = run_iptables(&["-F", &chain]).await;
-    let _ = run_iptables(&["-X", &chain]).await;
+    let _ = run_iptables(&["-F", chain]).await;
+    let _ = run_iptables(&["-X", chain]).await;
 }
 
 async fn iptables_rule_exists(args: &[&str]) -> bool {
@@ -636,4 +623,18 @@ async fn write_stdin_and_wait(
         .wait_with_output()
         .await
         .map_err(|e| format!("failed to wait for CNI plugin: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn task_chains_are_stable_and_isolated() {
+        let first = task_chain("0123456789abcdef01234567");
+        let second = task_chain("0123456789abcdef89abcdef");
+        assert_eq!(first, task_chain("0123456789abcdef01234567"));
+        assert_ne!(first, second);
+        assert!(first.len() <= 28);
+    }
 }

@@ -4,7 +4,7 @@
 
 use hot::val::Val;
 use ipnet::Ipv4Net;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::OnceLock;
 
 /// The Kata guest bridge network.
@@ -41,14 +41,19 @@ const ALWAYS_BLOCKED: &[&str] = &[
     "240.0.0.0/4",
 ];
 
-/// Operator rules for box guests: the same `network.allow-cidrs` and
-/// `network.deny-cidrs` that govern normal user code (IPv4 entries only;
-/// guests have no IPv6), plus `box.guest-dns` resolvers.
+/// Operator rules for box guests: the same `network.allow-cidrs`,
+/// `network.deny-cidrs`, and `network.egress-proxy` that govern normal user
+/// code (IPv4 entries only; guests have no IPv6), plus `box.guest-dns`
+/// resolvers. Only the Kata backend applies them; Docker box tasks use plain
+/// bridge networking, so a task worker on Docker refuses `network.egress-proxy`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuestNetworkPolicy {
     allow: Vec<Ipv4Net>,
     deny: Vec<Ipv4Net>,
     dns: Vec<Ipv4Addr>,
+    /// The egress proxy's host and port. With a proxy, Kata guests reach
+    /// nothing past their resolvers but the proxy.
+    proxy: Option<(String, u16)>,
 }
 
 impl Default for GuestNetworkPolicy {
@@ -59,25 +64,38 @@ impl Default for GuestNetworkPolicy {
             allow: Vec::new(),
             deny: Vec::new(),
             dns: vec![Ipv4Addr::new(1, 1, 1, 1), Ipv4Addr::new(8, 8, 8, 8)],
+            proxy: None,
         }
     }
 }
 
 impl GuestNetworkPolicy {
     pub fn from_conf(conf: &Val) -> Result<Self, String> {
+        let proxy = hot::outbound::egress_proxy_setting(conf)?.and_then(|url| {
+            let host = url.host_str()?.trim_matches(['[', ']']).to_string();
+            Some((host, url.port_or_known_default()?))
+        });
         let mut policy = Self {
             allow: ipv4_nets(conf, "network.allow-cidrs")?,
             deny: ipv4_nets(conf, "network.deny-cidrs")?,
+            proxy,
             ..Self::default()
         };
-        let dns = list(conf, "box.guest-dns");
+        let dns = hot::outbound::conf_list(conf, "box.guest-dns");
         if !dns.is_empty() {
             policy.dns = dns
                 .iter()
                 .map(|entry| {
-                    entry.parse().map_err(|_| {
+                    let resolver = entry.parse().map_err(|_| {
                         format!("box.guest-dns entry {entry:?} is not an IPv4 address")
-                    })
+                    })?;
+                    if is_always_blocked(resolver) {
+                        return Err(format!(
+                            "box.guest-dns entry {entry:?} is in a range box guests can never \
+                             reach, such as loopback, link-local, or the guest network"
+                        ));
+                    }
+                    Ok(resolver)
                 })
                 .collect::<Result<_, _>>()?;
         }
@@ -89,10 +107,62 @@ impl GuestNetworkPolicy {
         &self.dns
     }
 
-    /// The per-task chain, in order: resolvers on port 53, the fixed and
-    /// operator deny sets, the allowlist, the remaining private ranges, and
-    /// then public egress.
-    pub(crate) fn chain_rules(&self, chain: &str) -> Vec<Vec<String>> {
+    /// Why direct connections fail in box tasks under an egress proxy, for the
+    /// startup log. It names the proxy's host and port, never its credentials.
+    fn proxy_notice(&self) -> Option<String> {
+        let (host, port) = self.proxy.as_ref()?;
+        Some(format!(
+            "network.egress-proxy is set: box guests on the Kata backend can connect only to \
+             {host}:{port} and their resolvers. Guests do not use the proxy on their own and \
+             never get its credentials; a box task sets HTTP_PROXY and HTTPS_PROXY in its env to \
+             use it"
+        ))
+    }
+
+    /// Guests' DNS does not pass through the egress proxy, so the default
+    /// public resolvers are a way out the operator has no record of.
+    fn public_resolver_warning(&self) -> Option<String> {
+        if self.proxy.is_none() || self.dns != Self::default().dns {
+            return None;
+        }
+        let resolvers: Vec<String> = self.dns.iter().map(ToString::to_string).collect();
+        Some(format!(
+            "box guests on the Kata backend can query public resolvers ({}) directly, outside \
+             network.egress-proxy; set box.guest-dns to resolvers you can audit",
+            resolvers.join(", ")
+        ))
+    }
+
+    /// The egress proxy's addresses that guests may connect to, looked up now
+    /// so each task's chain follows the proxy's DNS. Empty without a proxy.
+    pub(crate) async fn proxy_addresses(&self) -> Result<Vec<Ipv4Addr>, String> {
+        let Some((host, port)) = &self.proxy else {
+            return Ok(Vec::new());
+        };
+        let mut addrs: Vec<Ipv4Addr> = tokio::net::lookup_host((host.as_str(), *port))
+            .await
+            .map_err(|e| format!("failed to resolve egress proxy {host}: {e}"))?
+            .filter_map(|addr| match addr.ip() {
+                IpAddr::V4(ip) => Some(ip),
+                IpAddr::V6(ip) => ip.to_ipv4_mapped(),
+            })
+            .filter(|ip| !is_always_blocked(*ip))
+            .collect();
+        addrs.sort_unstable();
+        addrs.dedup();
+        if addrs.is_empty() {
+            return Err(format!(
+                "egress proxy {host} has no IPv4 address box guests can reach"
+            ));
+        }
+        Ok(addrs)
+    }
+
+    /// The per-task chain, in order: the fixed deny set, resolvers on port
+    /// 53, and then either the egress proxy's `proxy` addresses and nothing
+    /// else, or the operator deny set, the allowlist, the remaining private
+    /// ranges, and public egress.
+    pub(crate) fn chain_rules(&self, chain: &str, proxy: &[Ipv4Addr]) -> Vec<Vec<String>> {
         let rule = |parts: &[&str]| -> Vec<String> {
             ["-A", chain]
                 .iter()
@@ -101,6 +171,9 @@ impl GuestNetworkPolicy {
                 .collect()
         };
         let mut rules = Vec::new();
+        for destination in ALWAYS_BLOCKED {
+            rules.push(rule(&["-d", destination, "-j", "REJECT"]));
+        }
         for resolver in &self.dns {
             let resolver = resolver.to_string();
             for protocol in ["udp", "tcp"] {
@@ -109,12 +182,26 @@ impl GuestNetworkPolicy {
                 ]));
             }
         }
-        let denied = ALWAYS_BLOCKED
-            .iter()
-            .map(|net| net.to_string())
-            .chain(self.deny.iter().map(Ipv4Net::to_string));
-        for destination in denied {
-            rules.push(rule(&["-d", &destination, "-j", "REJECT"]));
+        if let Some((_, port)) = &self.proxy {
+            // Guests reach the internet only through the operator's proxy.
+            let port = port.to_string();
+            for address in proxy {
+                rules.push(rule(&[
+                    "-d",
+                    &address.to_string(),
+                    "-p",
+                    "tcp",
+                    "--dport",
+                    &port,
+                    "-j",
+                    "ACCEPT",
+                ]));
+            }
+            rules.push(rule(&["-j", "REJECT"]));
+            return rules;
+        }
+        for destination in &self.deny {
+            rules.push(rule(&["-d", &destination.to_string(), "-j", "REJECT"]));
         }
         for destination in &self.allow {
             rules.push(rule(&["-d", &destination.to_string(), "-j", "ACCEPT"]));
@@ -131,6 +218,12 @@ static GUEST_POLICY: OnceLock<GuestNetworkPolicy> = OnceLock::new();
 
 /// Set the guest policy once at task-worker startup; later calls keep the first.
 pub fn configure(policy: GuestNetworkPolicy) {
+    if let Some(notice) = policy.proxy_notice() {
+        tracing::info!("{notice}");
+    }
+    if let Some(warning) = policy.public_resolver_warning() {
+        tracing::warn!("{warning}");
+    }
     let _ = GUEST_POLICY.set(policy);
 }
 
@@ -138,34 +231,22 @@ pub(crate) fn guest_policy() -> &'static GuestNetworkPolicy {
     GUEST_POLICY.get_or_init(GuestNetworkPolicy::default)
 }
 
-fn list(conf: &Val, key: &str) -> Vec<String> {
-    let entries: Vec<String> = match conf.get(key) {
-        Some(Val::Vec(items)) => items
-            .iter()
-            .map(|item| item.to_string().trim_matches('"').to_string())
-            .collect(),
-        Some(_) => conf.get_str(key).split(',').map(str::to_string).collect(),
-        None => Vec::new(),
-    };
-    entries
-        .into_iter()
-        .map(|entry| entry.trim().to_string())
-        .filter(|entry| !entry.is_empty())
-        .collect()
+fn is_always_blocked(ip: Ipv4Addr) -> bool {
+    ALWAYS_BLOCKED
+        .iter()
+        .any(|net| net.parse::<Ipv4Net>().is_ok_and(|net| net.contains(&ip)))
 }
 
+/// The IPv4 entries of an outbound CIDR setting, parsed as normal user code
+/// reads them.
 fn ipv4_nets(conf: &Val, key: &str) -> Result<Vec<Ipv4Net>, String> {
-    let mut nets = Vec::new();
-    for entry in list(conf, key) {
-        let net = entry
-            .parse::<ipnet::IpNet>()
-            .or_else(|_| entry.parse::<std::net::IpAddr>().map(ipnet::IpNet::from))
-            .map_err(|_| format!("{key} entry {entry:?} is not an IP address or CIDR"))?;
-        if let ipnet::IpNet::V4(net) = net {
-            nets.push(net.trunc());
-        }
-    }
-    Ok(nets)
+    Ok(hot::outbound::conf_cidrs(conf, key)?
+        .into_iter()
+        .filter_map(|net| match net {
+            ipnet::IpNet::V4(net) => Some(net),
+            ipnet::IpNet::V6(_) => None,
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -173,8 +254,12 @@ mod tests {
     use super::*;
 
     fn rules(policy: &GuestNetworkPolicy) -> Vec<String> {
+        proxied_rules(policy, &[])
+    }
+
+    fn proxied_rules(policy: &GuestNetworkPolicy, proxy: &[Ipv4Addr]) -> Vec<String> {
         policy
-            .chain_rules("HKT-test")
+            .chain_rules("HKT-test", proxy)
             .into_iter()
             .map(|rule| rule[2..].join(" "))
             .collect()
@@ -193,8 +278,105 @@ mod tests {
         let dns = position(&rules, "-d 1.1.1.1 -p udp --dport 53 -j ACCEPT");
         let metadata = position(&rules, "-d 169.254.0.0/16 -j REJECT");
         let private = position(&rules, "-d 10.0.0.0/8 -j REJECT");
-        assert!(dns < metadata && metadata < private);
+        // The fixed deny set comes first, so no later rule can open it.
+        assert!(metadata < dns && dns < private);
         assert_eq!(rules.last().unwrap(), "-j ACCEPT");
+    }
+
+    #[test]
+    fn resolvers_never_open_the_fixed_deny_set() {
+        for resolver in [
+            "169.254.169.254",
+            "169.254.169.253",
+            "127.0.0.53",
+            "10.88.0.1",
+        ] {
+            let conf = hot::val!({"box": {"guest-dns": resolver}});
+            let error = GuestNetworkPolicy::from_conf(&conf).unwrap_err();
+            assert!(error.contains("never"), "{resolver}: {error}");
+        }
+    }
+
+    #[test]
+    fn ipv6_written_ipv4_entries_apply_to_guests() {
+        let conf = hot::val!({"network": {"deny-cidrs": "::ffff:10.68.0.0/112"}});
+        let rules = rules(&GuestNetworkPolicy::from_conf(&conf).unwrap());
+        assert!(position(&rules, "-d 10.68.0.0/16 -j REJECT") > 0);
+    }
+
+    #[tokio::test]
+    async fn an_egress_proxy_is_the_only_way_out() {
+        let conf = hot::val!({
+            "network": {
+                "egress-proxy": "http://192.168.5.10:3128",
+                "allow-cidrs": "10.20.0.0/16",
+            },
+            "box": {"guest-dns": "10.68.0.2"},
+        });
+        let policy = GuestNetworkPolicy::from_conf(&conf).unwrap();
+        let proxy = policy.proxy_addresses().await.unwrap();
+        assert_eq!(proxy, [Ipv4Addr::new(192, 168, 5, 10)]);
+        let rules = proxied_rules(&policy, &proxy);
+        let accept = position(&rules, "-d 192.168.5.10 -p tcp --dport 3128 -j ACCEPT");
+        assert!(position(&rules, "-d 169.254.0.0/16 -j REJECT") < accept);
+        assert!(position(&rules, "-d 10.68.0.2 -p udp --dport 53 -j ACCEPT") < accept);
+        assert_eq!(rules.last().unwrap(), "-j REJECT");
+        assert_eq!(
+            rules.iter().filter(|r| r.ends_with("ACCEPT")).count(),
+            3,
+            "the resolver over UDP and TCP, and the proxy: {rules:#?}"
+        );
+        assert!(
+            !rules.iter().any(|r| r.contains("10.20.0.0/16")),
+            "{rules:#?}"
+        );
+
+        // A proxy guests could never reach leaves them no way out.
+        for proxy in ["http://127.0.0.1:3128", "http://[::1]:3128"] {
+            let conf = hot::val!({"network": {"egress-proxy": proxy}});
+            let policy = GuestNetworkPolicy::from_conf(&conf).unwrap();
+            assert!(policy.proxy_addresses().await.is_err(), "{proxy}");
+        }
+        assert!(
+            GuestNetworkPolicy::default()
+                .proxy_addresses()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn startup_log_explains_proxied_guests_without_credentials() {
+        let conf = hot::val!({
+            "network": {"egress-proxy": "http://user:hunter2@proxy.internal:3128"},
+        });
+        let policy = GuestNetworkPolicy::from_conf(&conf).unwrap();
+        let notice = policy.proxy_notice().unwrap();
+        assert!(notice.contains("proxy.internal:3128"), "{notice}");
+        assert!(notice.contains("HTTP_PROXY"), "{notice}");
+        // Only Kata installs the chain, so the restriction must not read as
+        // holding for every backend.
+        assert!(
+            notice.contains("box guests on the Kata backend can connect only to"),
+            "{notice}"
+        );
+        let warning = policy.public_resolver_warning().unwrap();
+        assert!(warning.contains("on the Kata backend"), "{warning}");
+        assert!(warning.contains("1.1.1.1, 8.8.8.8"), "{warning}");
+        assert!(warning.contains("box.guest-dns"), "{warning}");
+        assert!(!format!("{notice}{warning}").contains("hunter2"));
+
+        // The operator's own resolvers can record what guests look up.
+        let own_dns = conf.merge(&hot::val!({"box": {"guest-dns": "10.68.0.2"}}));
+        let policy = GuestNetworkPolicy::from_conf(&own_dns).unwrap();
+        assert!(policy.proxy_notice().is_some());
+        assert!(policy.public_resolver_warning().is_none());
+
+        // Without a proxy, guests connect directly and nothing needs explaining.
+        let policy = GuestNetworkPolicy::default();
+        assert!(policy.proxy_notice().is_none());
+        assert!(policy.public_resolver_warning().is_none());
     }
 
     #[test]
@@ -223,10 +405,11 @@ mod tests {
             );
         }
         assert!(position(&rules, "-d 10.0.0.0/8 -j REJECT") > allow);
-        // A private resolver is reachable on port 53 only.
-        assert_eq!(
-            position(&rules, "-d 10.68.0.2 -p udp --dport 53 -j ACCEPT"),
-            0
+        // A private resolver is reachable on port 53 only, even inside the
+        // operator's deny set.
+        assert!(
+            position(&rules, "-d 10.68.0.2 -p udp --dport 53 -j ACCEPT")
+                < position(&rules, "-d 10.68.0.0/16 -j REJECT")
         );
         assert!(
             !rules.iter().any(|r| r.contains("fd00")),
