@@ -2763,7 +2763,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
             case 'expired':
                 return `<div class="${textSize} text-gray-500 dark:text-gray-400 text-center ${py}">
                     <p>Execution trace data is no longer available</p>
-                    <p class="text-xs mt-2">Your plan retains execution trace data for ${retentionDays} day${retentionDays !== 1 ? 's' : ''}</p>
+                    <p class="text-xs mt-2">Execution trace data is kept for ${retentionDays} day${retentionDays !== 1 ? 's' : ''}</p>
                 </div>`;
             case 'not_included':
                 return `<div class="${textSize} text-gray-500 dark:text-gray-400 text-center ${py}">

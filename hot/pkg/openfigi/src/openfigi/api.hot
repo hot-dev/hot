@@ -1,0 +1,240 @@
+::openfigi::api ns
+meta {
+    ctx: {
+        "openfigi.api-key": {required: false},
+        "openfigi.base-url": {required: false, secret: false}
+    },
+    doc: """
+    Shared transport for the OpenFIGI API: the settings resolver
+    (per-call `opts` first, then context variables, then defaults), a
+    typed `HttpError`, and the JSON request helper.
+
+    | opts key | Context variable | Default |
+    |---|---|---|
+    | `api-key` | `openfigi.api-key` | none: the API works without a key, at lower limits |
+    | `base-url` | `openfigi.base-url` | `https://api.openfigi.com/v3` |
+
+    **Per-call credentials.** An `api-key` in `opts` is masked in call
+    records and never written to context. Present but blank or null, it
+    is an error, never a fallback to context. A per-call `base-url` only
+    ever gets the per-call `api-key`: the context key is never sent to a
+    per-call URL, and without a per-call key the request goes unkeyed.
+    """
+}
+
+::ctx ::hot::ctx
+::uri ::hot::uri
+::re ::hot::regex
+
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+BASE_URL "https://api.openfigi.com/v3"
+PACKAGE_AGENT "hot-dev-openfigi-pkg/0.1 (+https://hot.dev)"
+KEY_HEADER "X-OPENFIGI-APIKEY"
+
+LIMITS
+meta {
+    doc: """
+    OpenFIGI's published limits, per 60-second window, per key (or per
+    IP without one). `jobs-per-request` caps one `/mapping` call;
+    `mapping-per-minute` counts `/mapping` and `/mapping/values` calls;
+    `search-per-minute` counts `/search` and `/filter` calls.
+    """
+}
+{
+  keyed: {jobs-per-request: 100, mapping-per-minute: 250, search-per-minute: 20},
+  anonymous: {jobs-per-request: 10, mapping-per-minute: 25, search-per-minute: 5}
+}
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+given
+meta {
+    doc: """True for a non-null value that is not a blank string."""
+}
+fn (v: Any): Bool {
+  match v {
+    Null => { false }
+    Str => { not(is-empty(trim(v))) }
+    _ => { true }
+  }
+}
+
+pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
+  from-opts get(opts, key)
+  from-ctx ::ctx/get(ctx-key)
+  cond {
+    given(from-opts) => { from-opts }
+    given(from-ctx) => { from-ctx }
+    => { default }
+  }
+}
+
+strip-slash fn (url: Str): Str {
+  ::re/replace-all(url, "/+$", "")
+}
+
+resolve
+meta {
+    doc: """
+    Resolve settings for one call: `{api-key, base-url, limits}`, where
+    `limits` is `LIMITS.keyed` or `LIMITS.anonymous`. Values in `opts`
+    win over context. An Err when `api-key` is in `opts` but blank or
+    null.
+
+    **Example**
+
+    ```hot
+    cfg ::openfigi::api/resolve({api-key: tenant.figi-key})
+    cfg.limits.jobs-per-request   // 100
+    ```
+    """
+}
+fn (opts: Map): Map {
+  per-call-key get(opts, "api-key")
+  ::ctx/mark-secret(filter([per-call-key], given))
+  per-call-url given(get(opts, "base-url"))
+  key cond {
+    given(per-call-key) => { per-call-key }
+    per-call-url => { null }
+    => { ::ctx/get("openfigi.api-key") }
+  }
+
+  cond {
+    and(in("api-key", keys(opts)), not(given(per-call-key))) => {
+      err("openfigi: api-key is in the call's opts but is blank or null. Pass a value, or leave api-key out to use the context variable.")
+    }
+    => {
+      {
+        api-key: key,
+        base-url: strip-slash(pick(opts, "base-url", "openfigi.base-url", BASE_URL)),
+        limits: if(given(key), LIMITS.keyed, LIMITS.anonymous)
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+HttpError
+meta {
+    doc: """
+    A non-2xx OpenFIGI response. `url` is the requested URL (the key goes
+    in a header, never the URL); `retry-after` the seconds until the rate
+    limit window resets on 429s (from `Retry-After` or `ratelimit-reset`);
+    `message` a one-line summary that never includes the key. OpenFIGI's
+    error bodies are short text, e.g. `"Invalid API key."` or `"Request
+    may only contain 10 mapping jobs."`.
+    """
+}
+type {
+    status: Int,
+    url: Str,
+    headers: Map,
+    body: Any,
+    retry-after: Int?,
+    message: Str
+}
+
+body-detail fn (body: Any): Str? {
+  cond {
+    is-str(body) => {
+      text trim(body)
+      cond {
+        is-empty(text) => { null }
+        gt(length(text), 200) => { `${slice(text, 0, 200)}…` }
+        => { text }
+      }
+    }
+
+    is-map(body) => { or(get(body, "error"), get(body, "message")) }
+    => { null }
+  }
+}
+
+header-seconds fn (headers: Map, name: Str): Int? {
+  v get(headers, name)
+  cond {
+    is-null(v) => { null }
+    ::re/is-match(trim(Str(v)), "^\\d+$") => { Int(trim(Str(v))) }
+    => { null }
+  }
+}
+
+http-error
+meta {
+    doc: """Build an `HttpError` from a non-2xx response. Exposed for testing; every request uses it."""
+}
+fn (response: HttpResponse, url: Str): HttpError {
+  headers or(response.headers, {})
+  detail body-detail(response.body)
+  wait or(header-seconds(headers, "retry-after"), if(eq(response.status, 429), header-seconds(headers, "ratelimit-reset"), null))
+  HttpError({
+    status: response.status,
+    url: url,
+    headers: headers,
+    body: response.body,
+    retry-after: wait,
+    message: if(is-some(detail), `openfigi: HTTP ${response.status}: ${detail}`, `openfigi: HTTP ${response.status} for ${url}`)
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------
+
+auth-headers
+meta {
+    doc: """`{X-OPENFIGI-APIKEY: key}` when resolved settings carry a key, else `{}` (pure)."""
+}
+fn (cfg: Map): Map {
+  if(given(cfg.api-key), {"X-OPENFIGI-APIKEY": cfg.api-key}, {})
+}
+
+path-segment
+meta {
+    doc: """Percent-encode one path segment."""
+}
+fn (value: Any): Str {
+  ::uri/encode(Str(value))
+}
+
+decode fn (body: Any): Any {
+  cond {
+    is-str(body) => {
+      text trim(body)
+      if(or(::hot::str/starts-with(text, "{"), ::hot::str/starts-with(text, "[")), from-json(text), body)
+    }
+    => { body }
+  }
+}
+
+request
+meta {
+    doc: """
+    Send `method` to `${cfg.base-url}${path}` and return the decoded JSON
+    body on 2xx, or an Err carrying `HttpError`. A non-null `body` is
+    sent as JSON. A transport failure passes through as its own Err.
+    """
+}
+fn (cfg: Map, method: Str, path: Str, body: Any): Any {
+  url `${cfg.base-url}${path}`
+  json-headers if(is-null(body), {}, {"Content-Type": "application/json"})
+  response ::hot::http/request(HttpRequest({
+    method,
+    url,
+    headers: {User-Agent: PACKAGE_AGENT, Accept: "application/json", ...json-headers, ...auth-headers(cfg)},
+    body: if(is-null(body), "", to-json(body))
+  }))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { decode(response.body) }
+    => { err(http-error(response, url)) }
+  }
+}

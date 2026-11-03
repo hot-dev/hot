@@ -111,6 +111,7 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/oauth2/test",
     "./hot/pkg/openai-compatible/test",
     "./hot/pkg/openai/test",
+    "./hot/pkg/openfigi/test",
     "./hot/pkg/pandoc/test",
     "./hot/pkg/persona/test",
     "./hot/pkg/pg/test",
@@ -207,6 +208,7 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" },
     "hot.dev/openai": { "local": "./hot/pkg/openai" },
     "hot.dev/openai-compatible": { "local": "./hot/pkg/openai-compatible" },
+    "hot.dev/openfigi": { "local": "./hot/pkg/openfigi" },
     "hot.dev/pandoc": { "local": "./hot/pkg/pandoc" },
     "hot.dev/persona": { "local": "./hot/pkg/persona" },
     "hot.dev/pg": { "local": "./hot/pkg/pg" },
@@ -643,6 +645,18 @@ hot.project.pkg-integration-company-registry.src.paths ["./hot/pkg/company-regis
 hot.project.pkg-integration-company-registry.test.paths ["./hot/pkg/company-registry/integration-test"]
 hot.project.pkg-integration-company-registry.test.capture true
 hot.project.pkg-integration-company-registry.deps {}
+
+// OpenFIGI symbology unit tests (hermetic)
+hot.project.pkg-test-openfigi.src.paths ["./hot/pkg/openfigi/src"]
+hot.project.pkg-test-openfigi.test.paths ["./hot/pkg/openfigi/test"]
+hot.project.pkg-test-openfigi.test.capture true
+hot.project.pkg-test-openfigi.deps {}
+
+// OpenFIGI symbology integration tests (live, read-only; OPENFIGI_LIVE=1, optional OPENFIGI_API_KEY)
+hot.project.pkg-integration-openfigi.src.paths ["./hot/pkg/openfigi/src"]
+hot.project.pkg-integration-openfigi.test.paths ["./hot/pkg/openfigi/integration-test"]
+hot.project.pkg-integration-openfigi.test.capture true
+hot.project.pkg-integration-openfigi.deps {}
 
 // Increase banking unit tests (hermetic)
 hot.project.pkg-test-increase.src.paths ["./hot/pkg/increase/src"]

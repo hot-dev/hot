@@ -1,0 +1,266 @@
+::openfigi::test::openfigi ns
+meta ["test"]
+
+::fx ::openfigi::test::fixtures
+::api ::openfigi::api
+::figi ::openfigi
+
+HttpResponse ::hot::http/HttpResponse
+
+// ============================================================================
+// Settings resolver
+// ============================================================================
+
+test-resolve-defaults
+meta ["test"]
+fn () {
+    cfg ::api/resolve({})
+    assert-eq("https://api.openfigi.com/v3", cfg.base-url)
+    assert-eq(null, cfg.api-key)
+    assert-eq(10, cfg.limits.jobs-per-request, "anonymous limit without a key")
+    assert-eq({}, ::api/auth-headers(cfg), "no key header without a key")
+}
+
+test-resolve-opts-override
+meta ["test"]
+fn () {
+    cfg ::api/resolve({api-key: "k-test", base-url: "https://figi.example/v3/"})
+    assert-eq("k-test", cfg.api-key)
+    assert-eq("https://figi.example/v3", cfg.base-url)
+    assert-eq(100, cfg.limits.jobs-per-request, "keyed limit")
+    assert-eq({"X-OPENFIGI-APIKEY": "k-test"}, ::api/auth-headers(cfg))
+    assert-eq(null, ::hot::ctx/get("openfigi.api-key"), "per-call keys are never written to ctx")
+}
+
+test-resolve-context-key
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"openfigi.api-key": "ctx-key"})
+    assert-eq("ctx-key", ::api/resolve({}).api-key)
+    assert-eq("call-key", ::api/resolve({api-key: "call-key"}).api-key, "opts win over context")
+    ::hot::ctx/set({"openfigi.api-key": null})
+}
+
+test-per-call-url-never-gets-the-context-key
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"openfigi.api-key": "ctx-key"})
+    cfg ::api/resolve({base-url: "https://proxy.example"})
+    assert-eq(null, cfg.api-key, "the context key stays home")
+    assert-eq(10, cfg.limits.jobs-per-request, "so the anonymous limits apply")
+    assert-eq("t", ::api/resolve({base-url: "https://proxy.example", api-key: "t"}).api-key, "a per-call key goes with it")
+    ::hot::ctx/set({"openfigi.api-key": null})
+}
+
+test-blank-key-is-an-err
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"openfigi.api-key": "ctx-key"})
+    for-each(["", "  ", null], (v) {
+      out ::api/resolve({api-key: v})
+      assert(is-err(out), "a blank key never falls back to context")
+      assert(::hot::str/contains(err-message(out), "api-key"), "the Err names api-key")
+    })
+    ::hot::ctx/set({"openfigi.api-key": null})
+}
+
+test-blank-key-reaches-every-caller-as-an-err
+meta ["test"]
+fn () {
+    bad {api-key: ""}
+    assert(is-err(::figi/map-jobs([{idType: "TICKER", idValue: "IBM"}], bad)), "map-jobs")
+    assert(is-err(::figi/map-all([{idType: "TICKER", idValue: "IBM"}], bad)), "map-all")
+    assert(is-err(::figi/by-isin("US0378331005", bad)), "by-isin")
+    assert(is-err(::figi/by-figi("BBG000B9XRY4", bad)), "by-figi")
+    assert(is-err(::figi/search("apple", bad)), "search")
+    assert(is-err(::figi/filter-figis({...bad, filters: {exchCode: "US"}})), "filter-figis")
+    assert(is-err(::figi/values("idType", bad)), "values")
+}
+
+// ============================================================================
+// Errors
+// ============================================================================
+
+test-http-error-text-body
+meta ["test"]
+fn () {
+    e ::api/http-error(HttpResponse({status: 413, headers: {}, body: ::fx/TOO_MANY_JOBS_BODY}), "https://api.openfigi.com/v3/mapping")
+    assert-eq(413, e.status)
+    assert-eq("openfigi: HTTP 413: Request may only contain 10 mapping jobs.", e.message)
+    assert-eq(null, e.retry-after)
+}
+
+test-http-error-bad-key-hides-nothing-secret
+meta ["test"]
+fn () {
+    e ::api/http-error(HttpResponse({status: 401, headers: {}, body: ::fx/BAD_KEY_BODY}), "https://api.openfigi.com/v3/mapping")
+    assert-eq("openfigi: HTTP 401: Invalid API key.", e.message)
+    assert-eq("https://api.openfigi.com/v3/mapping", e.url, "the key travels in a header, never the URL")
+}
+
+test-http-error-rate-limit
+meta ["test"]
+fn () {
+    headers {"ratelimit-limit": "25", "ratelimit-remaining": "0", "ratelimit-reset": "42"}
+    e ::api/http-error(HttpResponse({status: 429, headers: headers, body: "Rate limit reached. Please back off your requests."}), "https://api.openfigi.com/v3/search")
+    assert-eq(42, e.retry-after, "ratelimit-reset on a 429")
+    e2 ::api/http-error(HttpResponse({status: 429, headers: {...headers, "retry-after": "7"}, body: ""}), "u")
+    assert-eq(7, e2.retry-after, "Retry-After wins")
+    assert-eq("openfigi: HTTP 429 for u", e2.message, "an empty body falls back to the URL")
+    e3 ::api/http-error(HttpResponse({status: 500, headers: headers, body: ""}), "u")
+    assert-eq(null, e3.retry-after, "ratelimit-reset only counts on a 429")
+}
+
+// ============================================================================
+// Mapping
+// ============================================================================
+
+test-job-drops-nulls
+meta ["test"]
+fn () {
+    assert-eq({idType: "TICKER", idValue: "IBM", exchCode: "US"}, ::figi/job("TICKER", "IBM", {exchCode: "US", currency: null}))
+    assert-eq({idType: "ID_CUSIP", idValue: "037833100"}, ::figi/job("ID_CUSIP", "037833100"))
+    assert-eq({idType: "ID_ISIN", idValue: "US0378331005"}, ::figi/job("ID_ISIN", "US0378331005", null))
+}
+
+test-mapping-results-pairs-jobs
+meta ["test"]
+fn () {
+    out ::figi/mapping-results(::fx/MAPPING_JOBS, ::fx/MAPPING_RESULTS)
+    assert-eq(4, length(out))
+    assert-eq("US0378331005", out[0].job.idValue)
+    assert-eq("BBG000B9XRY4", first(out[0].figis).figi)
+    assert-eq("BBG000BLNNH6", first(out[1].figis).figi)
+    assert-eq([], out[2].figis, "no match")
+    assert-eq("No identifier found.", out[2].warning)
+    assert-eq(null, out[2].error)
+    assert-eq([], out[3].figis, "rejected job")
+    assert-eq("Invalid idValue format.", out[3].error)
+}
+
+test-mapping-results-short-response
+meta ["test"]
+fn () {
+    out ::figi/mapping-results(::fx/MAPPING_JOBS, slice(::fx/MAPPING_RESULTS, 0, 1))
+    assert-eq(4, length(out), "one entry per job")
+    assert(is-some(out[3].error), "a missing result is an error")
+}
+
+test-map-jobs-checks-the-batch-limit-first
+meta ["test"]
+fn () {
+    jobs map(range(0, 11), (i) { {idType: "TICKER", idValue: "IBM"} })
+    out ::figi/map-jobs(jobs, {base-url: "http://127.0.0.1:9"})
+    assert(is-err(out), "11 jobs without a key")
+    assert(::hot::str/contains(err-message(out), "map-all"), "points to map-all")
+    assert-eq([], ::figi/map-jobs([], {base-url: "http://127.0.0.1:9"}), "no jobs, no request")
+    assert-eq([], ::figi/map-all([], {base-url: "http://127.0.0.1:9"}), "map-all too")
+}
+
+// ============================================================================
+// Search and filter
+// ============================================================================
+
+test-search-body
+meta ["test"]
+fn () {
+    assert-eq({query: "apple", exchCode: "US"}, ::figi/search-body("apple", {filters: {exchCode: "US", currency: null}}))
+    assert-eq({exchCode: "US", start: "tok"}, ::figi/search-body(null, {filters: {exchCode: "US"}, start: "tok"}))
+    assert-eq({}, ::figi/search-body("  ", {}))
+}
+
+test-empty-search-fails-before-any-request
+meta ["test"]
+fn () {
+    out ::figi/filter-figis({base-url: "http://127.0.0.1:9"})
+    assert(is-err(out), "no query and no filters")
+    assert(::hot::str/contains(err-message(out), "query"), "says what is missing")
+    assert(is-err(::figi/search("", {base-url: "http://127.0.0.1:9"})), "a blank query alone")
+}
+
+test-collect-follows-next
+meta ["test"]
+fn () {
+    pages {
+      first: {data: [{figi: "A"}, {figi: "B"}], next: "p2"},
+      p2: {data: [{figi: "C"}], next: "p3"},
+      p3: {data: [{figi: "D"}]}
+    }
+
+    fetch (o) { get(pages, or(get(o, "start"), "first")) }
+    assert-eq(["A", "B", "C", "D"], map(::figi/collect(fetch, {}, 100), (f) { f.figi }))
+    assert-eq(["A", "B", "C"], map(::figi/collect(fetch, {}, 3), (f) { f.figi }), "stops at the limit")
+    assert-eq(1, length(::figi/collect(fetch, {}, 1)))
+}
+
+test-collect-passes-errors-through
+meta ["test"]
+fn () {
+    fetch (o) { if(is-some(get(o, "start")), err("openfigi: HTTP 429"), {data: [{figi: "A"}], next: "p2"}) }
+    assert(is-err(::figi/collect(fetch, {}, 10)))
+}
+
+test-filter-page-shape
+meta ["test"]
+fn () {
+    // collect reads the real /filter page shape: data, next and total
+    out ::figi/collect((o) { if(is-some(get(o, "start")), {data: []}, ::fx/FILTER_PAGE) }, {}, 10)
+    assert-eq(["BBG0002LH0C8"], map(out, (f) { f.figi }))
+}
+
+// ============================================================================
+// Field values
+// ============================================================================
+
+test-values-rejects-unknown-keys
+meta ["test"]
+fn () {
+    out ::figi/values("ticker", {base-url: "http://127.0.0.1:9"})
+    assert(is-err(out))
+    assert(::hot::str/contains(err-message(out), "securityType2"), "lists the valid keys")
+}
+
+// ============================================================================
+// FIGI syntax
+// ============================================================================
+
+test-is-figi-accepts-real-figis
+meta ["test"]
+fn () {
+    for-each(::fx/KNOWN_FIGIS, (f) {
+      assert(::figi/is-figi(f), `${f} is valid`)
+      assert(::figi/is-figi(lowercase(f)), "case-insensitive")
+    })
+}
+
+test-is-figi-rejects-bad-input
+meta ["test"]
+fn () {
+    assert(not(::figi/is-figi("BBG000B9XRY5")), "wrong check digit")
+    assert(not(::figi/is-figi("BBG000B9XRY")), "too short")
+    assert(not(::figi/is-figi("BBA000B9XRY4")), "third character is not G")
+    assert(not(::figi/is-figi("BAG000B9XRY4")), "vowel in the prefix")
+    assert(not(::figi/is-figi("BBG000A9XRY4")), "vowel in the body")
+    assert(not(::figi/is-figi("US0378331005")), "an ISIN")
+    assert(not(::figi/is-figi(null)), "null")
+    assert(not(::figi/is-figi(42)), "not a string")
+}
+
+test-is-figi-rejects-reserved-prefixes
+meta ["test"]
+fn () {
+    // Same body and a correct check digit, but BS, GB etc. are ISIN country codes.
+    for-each(["BS", "BM", "GG", "GB", "GH", "KY", "VG"], (p) {
+      body `${p}G000B9XRY`
+      candidate `${body}${::figi/check-digit(body)}`
+      assert(not(::figi/is-figi(candidate)), `${p} is reserved`)
+    })
+}
+
+test-check-digit
+meta ["test"]
+fn () {
+    assert-eq(4, ::figi/check-digit("BBG000B9XRY"))
+    assert-eq(8, ::figi/check-digit("BBG001S5N8V"))
+    assert-eq(6, ::figi/check-digit("BBG000BLNNH"))
+}

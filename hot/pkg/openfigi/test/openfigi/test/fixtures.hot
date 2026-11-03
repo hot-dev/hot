@@ -1,0 +1,73 @@
+::openfigi::test::fixtures ns
+
+// Real responses from https://api.openfigi.com/v3, retrieved 3 Nov 2026
+// without an API key.
+
+// Results of POST /mapping for these jobs, from two calls: a match by
+// ISIN, a match by ticker, an unknown ticker (warning), and an ISIN that
+// fails OpenFIGI's format check (error)
+MAPPING_JOBS [
+  {idType: "ID_ISIN", idValue: "US0378331005", exchCode: "US"},
+  {idType: "TICKER", idValue: "IBM", exchCode: "US"},
+  {idType: "TICKER", idValue: "ZZQXQZ", exchCode: "US"},
+  {idType: "ID_ISIN", idValue: "XX0000000000"}
+]
+
+MAPPING_RESULTS [
+  {data: [{
+    figi: "BBG000B9XRY4",
+    name: "APPLE INC",
+    ticker: "AAPL",
+    exchCode: "US",
+    compositeFIGI: "BBG000B9XRY4",
+    securityType: "Common Stock",
+    marketSector: "Equity",
+    shareClassFIGI: "BBG001S5N8V8",
+    securityType2: "Common Stock",
+    securityDescription: "AAPL"
+  }]},
+  {data: [{
+    figi: "BBG000BLNNH6",
+    name: "INTL BUSINESS MACHINES CORP",
+    ticker: "IBM",
+    exchCode: "US",
+    compositeFIGI: "BBG000BLNNH6",
+    securityType: "Common Stock",
+    marketSector: "Equity",
+    shareClassFIGI: "BBG001S5S399",
+    securityType2: "Common Stock",
+    securityDescription: "IBM"
+  }]},
+  {warning: "No identifier found."},
+  {error: "Invalid idValue format."}
+]
+
+// POST /filter {"query": "IBM", "exchCode": "US"} (data trimmed to one)
+FILTER_PAGE {
+  data: [{
+    figi: "BBG0002LH0C8",
+    name: "January 09 Calls on TSBX",
+    ticker: "TSB 01/17/09 C110",
+    exchCode: "US",
+    compositeFIGI: "BBG0002LH0C8",
+    securityType: "Index Option",
+    marketSector: "Index",
+    shareClassFIGI: null,
+    securityType2: "Option",
+    securityDescription: "TSB US 01/17/09 C110"
+  }],
+  next: "QW9Fc1FrSkhNREF3TWt4SU0wc3ogMQ==.RYTGmx5ZVmAIyYnF0JtW5qZnYi/hdHQm3xt1OdItbm0=",
+  total: 84704
+}
+
+// POST /search {} answers 200 with an error body
+EMPTY_SEARCH {error: "query must contain at least one parameter"}
+
+// POST /mapping with 11 jobs and no key: 413, text body
+TOO_MANY_JOBS_BODY "Request may only contain 10 mapping jobs."
+
+// POST /mapping with a bad key: 401, text body
+BAD_KEY_BODY "Invalid API key."
+
+// FIGIs seen in the responses above (composite, share class and option)
+KNOWN_FIGIS ["BBG000B9XRY4", "BBG001S5N8V8", "BBG000BLNNH6", "BBG001S5S399", "BBG000TKJLW1", "BBG0002LH0C8", "BBG000B9XVV8"]

@@ -9,6 +9,16 @@
 // Re-export core email types for convenience
 pub use hot::email::{Email, EmailConfig, EmailError, EmailProvider, EmailSender, current_year};
 
+/// Escape text for an HTML email body. Names come from users (an org name,
+/// a sign-up name), and the operator's own relay sends these emails.
+fn html_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
+}
+
 /// Extension trait for app-specific email sending methods
 #[allow(async_fn_in_trait)]
 pub trait AppEmailSender {
@@ -83,7 +93,7 @@ pub trait AppEmailSender {
     </div>
 </body>
 </html>"#,
-            greeting = greeting,
+            greeting = html_escape(&greeting),
             verification_url = verification_url,
             web_url = web_url,
             logo_url = logo_url,
@@ -174,8 +184,8 @@ If you didn't create an account with Hot Dev, you can safely ignore this email.
     </div>
 </body>
 </html>"#,
-            org_name = org_name,
-            destination_name = destination_name,
+            org_name = html_escape(org_name),
+            destination_name = html_escape(destination_name),
             verification_url = verification_url,
             web_url = web_url,
             logo_url = logo_url,
@@ -265,8 +275,8 @@ If you didn't expect this email, you can safely ignore it. No alerts will be sen
     </div>
 </body>
 </html>"#,
-            org_name = org_name,
-            inviter_name = inviter_name,
+            org_name = html_escape(org_name),
+            inviter_name = html_escape(inviter_name),
             invite_url = invite_url,
             web_url = web_url,
             logo_url = logo_url,
@@ -360,9 +370,9 @@ If you weren't expecting this invitation, you can safely ignore this email.
     </div>
 </body>
 </html>"#,
-            greeting = greeting,
-            plan_name = plan_name,
-            org_name = org_name,
+            greeting = html_escape(&greeting),
+            plan_name = html_escape(plan_name),
+            org_name = html_escape(org_name),
             docs_url = docs_url,
             web_url = web_url,
             logo_url = logo_url,
@@ -462,10 +472,10 @@ Read the Hot Docs: {docs_url}
     </div>
 </body>
 </html>"#,
-            greeting = greeting,
-            plan_name = plan_name,
-            org_name = org_name,
-            period_end = period_end,
+            greeting = html_escape(&greeting),
+            plan_name = html_escape(plan_name),
+            org_name = html_escape(org_name),
+            period_end = html_escape(period_end),
             billing_url = billing_url,
             docs_url = docs_url,
             web_url = web_url,
@@ -561,9 +571,9 @@ Manage your subscription: {billing_url}
     </div>
 </body>
 </html>"#,
-            greeting = greeting,
-            plan_name = plan_name,
-            org_name = org_name,
+            greeting = html_escape(&greeting),
+            plan_name = html_escape(plan_name),
+            org_name = html_escape(org_name),
             billing_url = billing_url,
             docs_url = docs_url,
             web_url = web_url,
@@ -617,22 +627,34 @@ impl AppEmailSender for EmailSender {
 pub struct AppEmailEnqueuer {
     config: EmailConfig,
     db: std::sync::Arc<hot::db::DatabasePool>,
+    /// Why mail written with `config` must not be queued.
+    refusal: Option<String>,
 }
 
 impl AppEmailEnqueuer {
-    /// Create a new email enqueuer
+    /// Create a new email enqueuer that queues what `config` writes.
     pub fn new(db: std::sync::Arc<hot::db::DatabasePool>, config: EmailConfig) -> Self {
-        Self { config, db }
+        Self {
+            config,
+            db,
+            refusal: None,
+        }
     }
 
     /// Create from environment and existing database pool
     pub fn from_env(db: std::sync::Arc<hot::db::DatabasePool>) -> Self {
-        Self::new(db, EmailConfig::from_env())
+        Self::from_conf(db, &hot::val!({}))
     }
 
-    /// Create from resolved Hot config and existing database pool.
+    /// Create from resolved Hot config and existing database pool. Mail that
+    /// config would send from the wrong sender, or with links that lead off this
+    /// installation, is refused here: nothing later can tell what it holds.
     pub fn from_conf(db: std::sync::Arc<hot::db::DatabasePool>, conf: &hot::val::Val) -> Self {
-        Self::new(db, EmailConfig::from_conf(conf))
+        Self {
+            config: EmailConfig::from_conf(conf),
+            db,
+            refusal: hot::email::email_render_status(conf).err(),
+        }
     }
 }
 
@@ -642,6 +664,9 @@ impl AppEmailSender for AppEmailEnqueuer {
     }
 
     async fn send_email(&self, email: &Email) -> Result<(), EmailError> {
+        if let Some(reason) = &self.refusal {
+            return Err(EmailError::SendFailed(reason.clone()));
+        }
         let from_address = self.config.from_address();
 
         // 1. Write audit record to email_queue table
@@ -934,6 +959,60 @@ mod tests {
                 text.contains("Acme Corp"),
                 "Text should contain the org name"
             );
+        }
+    }
+
+    /// Records the emails it is asked to send.
+    struct CapturingSender {
+        config: EmailConfig,
+        sent: std::sync::Mutex<Vec<Email>>,
+    }
+
+    impl AppEmailSender for CapturingSender {
+        fn config(&self) -> &EmailConfig {
+            &self.config
+        }
+
+        async fn send_email(&self, email: &Email) -> Result<(), EmailError> {
+            self.sent.lock().unwrap().push(email.clone());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn user_supplied_names_are_escaped_in_html_bodies() {
+        let sender = CapturingSender {
+            config: EmailConfig::from_conf(&hot::val!({})),
+            sent: std::sync::Mutex::new(Vec::new()),
+        };
+        // An org name, inviter name or sign-up name is any text a user types.
+        let name = r#"<a href="https://evil.example/login">Reset your password</a>"#;
+        let escaped =
+            "&lt;a href=&quot;https://evil.example/login&quot;&gt;Reset your password&lt;/a&gt;";
+        sender
+            .send_invitation_email("x@example.com", name, name, "code")
+            .await
+            .unwrap();
+        sender
+            .send_verification_email("x@example.com", Some(name), "token")
+            .await
+            .unwrap();
+        sender
+            .send_destination_verification_email("x@example.com", name, name, "token")
+            .await
+            .unwrap();
+        sender
+            .send_cancellation_email("x@example.com", Some(name), name, name, name)
+            .await
+            .unwrap();
+        let sent = sender.sent.lock().unwrap();
+        assert_eq!(sent.len(), 4);
+        for email in sent.iter() {
+            let html = email.html.as_deref().unwrap();
+            assert!(!html.contains("evil.example/login\""), "{html}");
+            assert!(html.contains(escaped), "{html}");
+            // Plain text has no markup to inject.
+            assert!(email.text.as_deref().unwrap().contains(name));
         }
     }
 }

@@ -1,0 +1,23 @@
+::openfigi::integration::ctx ns
+
+::env ::hot::env
+
+// Settings for the openfigi integration suite. OpenFIGI needs no key, so
+// the suite only runs with OPENFIGI_LIVE=1, keeping CI without network
+// hermetic. OPENFIGI_API_KEY raises the limits when set.
+::hot::ctx/set(filter-vals({
+    "openfigi.api-key": ::env/get("OPENFIGI_API_KEY", ""),
+}, (v) { not(is-empty(v)) }))
+
+live
+meta {doc: """True when OPENFIGI_LIVE=1."""}
+fn (): Bool {
+    eq(::env/get("OPENFIGI_LIVE", ""), "1")
+}
+
+skip
+meta {doc: """Record a skip and pass."""}
+fn (why: Str): Bool {
+    println(`openfigi integration: ${why} - skipping`)
+    assert(true, `skipped: ${why}`)
+}

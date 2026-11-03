@@ -42,7 +42,8 @@ eager fn (): Int {
 }
 
 streamed fn (): Int {
-    ::hot::file/write-file("rows.csv", "id,note\n1,ROW-MARKER-44444\n2,ROW-MARKER-44444\n")
+    written ::hot::file/write-file("rows.csv", "id,note\n1,ROW-MARKER-44444\n2,ROW-MARKER-44444\n")
+    if(is-err(written), fail("write-file failed", written), null)
     rows iter-csv(::hot::file/read-file-stream("rows.csv"))
     reduce(rows, (count, row) { add(count, length(row.id)) }, 0)
 }

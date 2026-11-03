@@ -225,6 +225,119 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_organization_without_a_plan_follows_the_installation_retention() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let days = |no_plan| {
+            crate::db::subscription::call_deletion_days_for_org_or(&db, &data.org_id, no_plan)
+        };
+        assert_eq!(days(90).await, 90);
+        assert_eq!(days(-1).await, -1);
+        assert_eq!(
+            crate::db::subscription::call_deletion_days_for_org(&db, &data.org_id).await,
+            -1
+        );
+        let unknown = Uuid::new_v4();
+        assert_eq!(
+            crate::db::subscription::call_deletion_days_for_org_or(&db, &unknown, 90).await,
+            -1,
+            "an unresolved account keeps its data"
+        );
+    }
+
+    #[test]
+    fn installation_retention_needs_at_least_a_day() {
+        use crate::val::val;
+        let days = |conf| crate::db::get_call_retention_days(&conf);
+        assert_eq!(days(val!({})), -1);
+        assert_eq!(
+            days(val!({"db": {"retention": {"call": {"days": 30}}}})),
+            30
+        );
+        assert_eq!(
+            days(val!({"db": {"retention": {"call": {"days": 0}}}})),
+            -1,
+            "zero would delete every call"
+        );
+    }
+
+    #[test]
+    fn an_unusable_retention_setting_says_what_it_refused() {
+        use crate::val::val;
+        let setting = |value| {
+            crate::db::call_retention_setting(
+                &val!({"db": {"retention": {"call": {"days": value}}}}),
+            )
+        };
+        assert_eq!(setting(val!(30)), Ok(30));
+        assert_eq!(setting(val!("30")), Ok(30));
+        assert_eq!(setting(val!(" 30\n")), Ok(30));
+        assert_eq!(setting(val!(36500)), Ok(36500));
+        assert_eq!(setting(val!(-1)), Ok(-1));
+        assert_eq!(setting(val!("-1")), Ok(-1));
+        assert_eq!(setting(val!("")), Ok(-1));
+        assert_eq!(setting(crate::val::Val::Null), Ok(-1));
+
+        for (refused, named) in [
+            (val!("30d"), "30d"),
+            (val!("0"), "0"),
+            (val!(0), "0"),
+            (val!(-7), "-7"),
+            (val!(40000), "40000"),
+            (val!(true), "true"),
+        ] {
+            let conf = val!({"db": {"retention": {"call": {"days": refused}}}});
+            let problem = crate::db::call_retention_setting(&conf).unwrap_err();
+            assert!(problem.contains(named), "{problem}");
+            assert_eq!(crate::db::get_call_retention_days(&conf), -1);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_organization_is_told_the_retention_that_applies_to_it() {
+        use crate::db::Features;
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let features = Features::resolve_for_org(&db, &data.org_id).await;
+        let told = |features, no_plan| {
+            crate::db::subscription::call_retention_days_for_org(
+                &db,
+                &data.org_id,
+                features,
+                no_plan,
+            )
+        };
+        assert_eq!(features.call_retention_days(), -1);
+        assert_eq!(told(&features, 30).await, 30, "follows the installation");
+        assert_eq!(
+            told(&features, -1).await,
+            -1,
+            "the installation keeps calls"
+        );
+
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        // An override applies whatever the installation does.
+        sqlx::query("UPDATE org SET features = ? WHERE org_id = ?")
+            .bind(serde_json::json!({"call_retention_days": 7}).to_string())
+            .bind(data.org_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        let features = Features::resolve_for_org(&db, &data.org_id).await;
+        assert_eq!(told(&features, 30).await, 7);
+        sqlx::query("UPDATE org SET features = ? WHERE org_id = ?")
+            .bind(serde_json::json!({"call_retention_days": -1}).to_string())
+            .bind(data.org_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        let features = Features::resolve_for_org(&db, &data.org_id).await;
+        assert_eq!(told(&features, 30).await, -1, "kept forever by override");
+    }
+
+    #[tokio::test]
     async fn retention_keeps_data_when_override_or_next_plan_cannot_be_read() {
         let db = crate::db::test_db().await;
         let data = crate::db::insert_test_data(&db).await.unwrap();

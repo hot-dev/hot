@@ -38,4 +38,6 @@ sqlx = { workspace = true }
 [dev-dependencies]
 hot = { workspace = true, features = ["s3-storage", "test-utils"] }
 tower = { workspace = true, features = ["util"] }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 async-trait = { workspace = true }
+redis = { workspace = true }

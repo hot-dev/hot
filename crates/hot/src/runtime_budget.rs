@@ -541,6 +541,49 @@ mod tests {
         assert!(!budget.explicit);
     }
 
+    /// The self-host small size: a 1536 MB task worker with no container
+    /// reserve and no code share, so a default box's 512 MB of memory and
+    /// 500 MB of /tmp fit the budget and the code VM floor still holds.
+    #[test]
+    fn task_budget_with_zero_reserve_and_code_share_fits_one_box_and_one_code_vm() {
+        let conf = val!({
+            "task": {
+                "worker-memory-mb": 1536i64,
+                "code-vm-memory-mb": 256i64,
+                "code-memory-percent": 0i64,
+                "container-reserved-memory-mb": 0i64,
+                "recovery-reserved-slots": 1i64,
+            },
+            "worker": {
+                "shared-process": false,
+            },
+        });
+
+        let boxes =
+            derive_task_container_concurrency(&conf, 1, 1536, 20_480, 512, 5_120, 500, "kata");
+        // ceiling - process reserve (512), all of it for containers.
+        let ceiling = detected_memory_limit_mb()
+            .map(|limit| limit.min(1536))
+            .unwrap_or(1536);
+        let expected_memory_budget = ceiling.saturating_sub(512).max(1);
+
+        assert_eq!(boxes.memory_budget_mb, expected_memory_budget);
+        assert_eq!(
+            boxes.memory_limit,
+            (expected_memory_budget / 1012).max(1) as usize
+        );
+        if ceiling == 1536 {
+            assert_eq!(boxes.memory_budget_mb, 1024);
+            assert_eq!(boxes.memory_limit, 1);
+        }
+        assert_eq!(boxes.resolved, 1);
+
+        // A share of 0 still runs one code VM.
+        let code = derive_task_code_concurrency(&conf, 2);
+        assert_eq!(code.memory_limit, Some(1));
+        assert_eq!(code.resolved, 1);
+    }
+
     #[test]
     fn task_container_concurrency_explicit_limit_still_respects_resources() {
         let conf = val!({

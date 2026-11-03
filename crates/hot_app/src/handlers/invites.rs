@@ -212,7 +212,7 @@ pub async fn invite_accept_post_handler(
         .into_response();
     }
 
-    // Verify email matches
+    // Verify email matches, in any case, as accepting the invite does
     if !user.email.eq_ignore_ascii_case(&invite.email) {
         return Html(format!(
             r#"<html><head><title>Email Mismatch</title></head>

@@ -131,11 +131,24 @@ pub struct ResolvedDomain {
 const KNOWN_HOSTS: &[&str] = &["api.hot.dev", "api.hot-stg.dev", "localhost", "127.0.0.1"];
 
 fn configured_known_hosts() -> Vec<String> {
-    std::env::var("HOT_API_KNOWN_HOSTS")
-        .unwrap_or_default()
+    known_hosts_from(
+        &std::env::var("HOT_API_KNOWN_HOSTS").unwrap_or_default(),
+        &hot::env::get_api_url(),
+    )
+}
+
+/// `HOT_API_KNOWN_HOSTS`, plus the host of the API's own URL. Taking that name
+/// for a custom domain would answer 404 on every route of the API, `/status`
+/// included. An API URL without a host adds nothing.
+fn known_hosts_from(configured: &str, api_url: &str) -> Vec<String> {
+    let api_host = url::Url::parse(api_url.trim())
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_lowercase));
+    configured
         .split(',')
         .map(|host| host.trim().to_lowercase())
         .filter(|host| !host.is_empty())
+        .chain(api_host)
         .collect()
 }
 
@@ -409,6 +422,28 @@ mod tests {
 
         assert!(!is_known_host("mcp.example.com"));
         assert!(!is_known_host("webhook.example.io"));
+    }
+
+    #[test]
+    fn test_the_api_url_names_a_known_host() {
+        // An installation that only sets HOT_API_URL still answers on that name.
+        assert_eq!(
+            known_hosts_from("", "https://api.acme.com"),
+            ["api.acme.com"]
+        );
+        assert_eq!(
+            known_hosts_from("", " https://API.Acme.com:8443/base/ "),
+            ["api.acme.com"]
+        );
+        assert_eq!(
+            known_hosts_from(" A.acme.com, ,b.acme.com ", "https://api.acme.com"),
+            ["a.acme.com", "b.acme.com", "api.acme.com"]
+        );
+
+        // Nothing here names a host, so nothing more is known.
+        assert!(known_hosts_from("", "").is_empty());
+        assert!(known_hosts_from("", "api.acme.com").is_empty());
+        assert_eq!(known_hosts_from("a.acme.com", "/v1"), ["a.acme.com"]);
     }
 
     #[test]

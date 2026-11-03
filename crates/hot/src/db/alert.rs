@@ -2460,7 +2460,7 @@ pub async fn process_pending_deliveries(
         let result = process_delivery(
             &info,
             http_client,
-            destination_policy,
+            destination_policy.clone(),
             email_sender,
             email_config,
             db,
@@ -2540,7 +2540,7 @@ async fn process_delivery(
         DestinationType::Slack => {
             process_slack_delivery(info, http_client, destination_policy).await
         }
-        DestinationType::PagerDuty => process_pagerduty_delivery(info, http_client).await,
+        DestinationType::PagerDuty => process_pagerduty_delivery(info, destination_policy).await,
         DestinationType::Webhook => {
             process_webhook_delivery(info, http_client, destination_policy).await
         }
@@ -2702,10 +2702,12 @@ async fn process_slack_delivery(
     }
 }
 
+const PAGERDUTY_EVENTS_URL: &str = "https://events.pagerduty.com/v2/enqueue";
+
 /// Process PagerDuty event delivery
 async fn process_pagerduty_delivery(
     info: &DeliveryInfo,
-    http_client: &reqwest::Client,
+    destination_policy: crate::outbound::DestinationPolicy,
 ) -> DeliveryResult {
     let config: PagerDutyDestinationConfig =
         match serde_json::from_value(info.destination.config.clone()) {
@@ -2733,12 +2735,26 @@ async fn process_pagerduty_delivery(
         }
     });
 
-    match http_client
-        .post("https://events.pagerduty.com/v2/enqueue")
-        .json(&payload)
-        .send()
+    let url = match url::Url::parse(PAGERDUTY_EVENTS_URL) {
+        Ok(url) => url,
+        Err(e) => return DeliveryResult::PermanentFailure(format!("Invalid PagerDuty URL: {e}")),
+    };
+    // Through the egress proxy like other alert deliveries. Unlike theirs this
+    // destination isn't the customer's to get wrong, so a failure here (a DNS
+    // outage, say) is retried rather than ending the page.
+    let client = match destination_policy
+        .pinned_http_client(
+            &url,
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(5),
+        )
         .await
     {
+        Ok(client) => client,
+        Err(e) => return DeliveryResult::Retry(format!("PagerDuty request failed: {e}")),
+    };
+
+    match client.post(url).json(&payload).send().await {
         Ok(resp) => {
             if resp.status().is_success() {
                 DeliveryResult::Success
@@ -3057,6 +3073,88 @@ mod tests {
             panic!("an over-long pattern was accepted");
         };
         assert!(message.contains("limit"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn pagerduty_deliveries_go_through_the_egress_proxy() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let conf = crate::val!({
+            "network": {
+                "egress-proxy": format!("http://{}", proxy.local_addr().unwrap())
+            }
+        });
+        let saw_request = tokio::spawn(async move {
+            let (mut stream, _) = proxy.accept().await.unwrap();
+            let mut request = vec![0; 1024];
+            let read = stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(b"HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\n\r\n")
+                .await
+                .unwrap();
+            String::from_utf8_lossy(&request[..read]).into_owned()
+        });
+
+        let now = Utc::now();
+        let id = Uuid::now_v7();
+        let info = DeliveryInfo {
+            delivery: AlertDelivery {
+                alert_delivery_id: id,
+                alert_id: id,
+                subscription_id: id,
+                destination_id: id,
+                resolved_user_id: None,
+                status_id: 0,
+                attempts: 0,
+                max_attempts: 3,
+                next_retry_at: None,
+                last_error: None,
+                sent_at: None,
+                created_at: now,
+            },
+            alert: Alert {
+                alert_id: id,
+                org_id: id,
+                env_id: id,
+                channel: "run:failed".to_string(),
+                data: serde_json::json!({}),
+                created_at: now,
+            },
+            destination: AlertDestination {
+                alert_destination_id: id,
+                org_id: id,
+                name: "Paging".to_string(),
+                destination_type_id: DestinationType::PagerDuty as i16,
+                config: serde_json::json!({"routing_key": "test-routing-key"}),
+                enabled: true,
+                verified: true,
+                verification_token: None,
+                verification_expires_at: None,
+                verification_attempts: 0,
+                created_at: now,
+                updated_at: now,
+                created_by_user_id: id,
+                updated_by_user_id: None,
+            },
+        };
+
+        let result = process_pagerduty_delivery(
+            &info,
+            crate::outbound::DestinationPolicy::for_alert_delivery(&conf),
+        )
+        .await;
+
+        assert!(
+            saw_request
+                .await
+                .unwrap()
+                .starts_with("CONNECT events.pagerduty.com:443 ")
+        );
+        assert!(
+            matches!(&result, DeliveryResult::Retry(error) if error.contains("PagerDuty")),
+            "{result:?}"
+        );
     }
 
     async fn delivery_targets(

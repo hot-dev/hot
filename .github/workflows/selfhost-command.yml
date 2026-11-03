@@ -1,0 +1,167 @@
+name: selfhost-command
+
+# Reusable: run one host agent command on a self-host installation and show
+# its report in the job summary: status, diagnostics, a service's logs, a
+# backup, restarting a service, draining and stopping a single machine, rolling
+# back a failed upgrade, or deploying the current release pointer again
+# (deploy-now, which retries a failed deploy or migration). Like the release
+# workflow it uses only cloud control-plane APIs and the release identity: no
+# SSH, shell, or network access to the host. It runs infra/operator/selfhost.py,
+# which operators can also run by hand.
+#
+#   uses: hot-dev/hot/.github/workflows/selfhost-command.yml@vX.Y.Z
+#
+# Diagnostics and logs are redacted on the host (secrets, credentials, tokens,
+# email addresses), but logs can still contain other user data. Anyone who can
+# read the calling repository's Actions runs can read the summary.
+on:
+  workflow_call:
+    inputs:
+      operation:
+        description: status, diagnostics, logs, backup, restart-service, drain-and-stop, roll-back, test-alert, or deploy-now. backup, drain-and-stop, and roll-back are for single-machine installations, and a scalable one refuses them
+        type: string
+        required: true
+      service:
+        description: The service for logs or restart-service; a scalable installation's hosts do not run postgres or valkey
+        type: string
+        default: ''
+      installation:
+        type: string
+        required: true
+      cloud:
+        type: string
+        required: true
+      hot_version:
+        description: Hot tag whose operator helper to use, such as v3.0.1
+        type: string
+        required: true
+      environment:
+        type: string
+        default: production
+      timeout_minutes:
+        description: How long to wait for the agent; 0 means 30 for deploy-now, which can need as long as a release, and for roll-back and backup, which grow with a local database, and 15 for the rest. On AWS it can be at most 240, and more than 60 needs a release role whose maximum session duration allows it, as the state bootstrap's does
+        type: number
+        default: 0
+      preset:
+        description: The installation's preset, single-machine or scalable. It decides which hosts a command waits for and which commands are refused, so every caller names it
+        type: string
+        required: true
+      gcp_zone:
+        description: The installation's zone; scalable GCP installations run their scheduler there
+        type: string
+        default: ''
+      aws_region:
+        type: string
+        default: ''
+      aws_release_role:
+        type: string
+        default: ''
+      gcp_project:
+        type: string
+        default: ''
+      gcp_workload_identity_provider:
+        type: string
+        default: ''
+      gcp_release_service_account:
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  command:
+    name: ${{ inputs.operation }} on ${{ inputs.installation }}
+    runs-on: ubuntu-24.04
+    environment: ${{ inputs.environment }}
+    timeout-minutes: ${{ inputs.timeout_minutes || (contains(fromJSON('["deploy-now", "roll-back", "backup"]'), inputs.operation) && 30 || 15) }}
+    # No concurrency group, on purpose. GitHub keeps one pending job per group and
+    # cancels the one a newer job replaces, which only shows as cancelled, and a
+    # job it held would go out after a stop or roll-back sent later: a deploy-now
+    # would then start Hot again. So each command goes out when its job starts, and
+    # the agent's lock takes them one at a time on the host, in about the order
+    # sent (neither the lock nor Pub/Sub promises it). One that waits past the
+    # job's limit (timeout_minutes) fails the run, and the agent reports it expired
+    # rather than run it later. A job waiting for the environment's approval has
+    # not gone out yet, so reject one that should no longer run.
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      NAME: ${{ inputs.installation }}
+      OPERATION: ${{ inputs.operation }}
+      SERVICE: ${{ inputs.service }}
+    steps:
+      - name: Check inputs
+        id: check
+        env:
+          CLOUD: ${{ inputs.cloud }}
+          PRESET: ${{ inputs.preset }}
+          REGION: ${{ inputs.aws_region }}
+          ROLE: ${{ inputs.aws_release_role }}
+          PROJECT: ${{ inputs.gcp_project }}
+          PROVIDER: ${{ inputs.gcp_workload_identity_provider }}
+          SERVICE_ACCOUNT: ${{ inputs.gcp_release_service_account }}
+          TIMEOUT: ${{ inputs.timeout_minutes || (contains(fromJSON('["deploy-now", "roll-back", "backup"]'), inputs.operation) && 30 || 15) }}
+        run: |
+          [[ "$NAME" =~ ^[a-z][a-z0-9-]{2,23}$ ]] || { echo "::error::invalid installation name"; exit 1; }
+          [[ "$CLOUD" =~ ^(aws|gcp)$ ]] || { echo "::error::cloud must be aws or gcp"; exit 1; }
+          # The helper takes anything but scalable for a single machine.
+          [[ "$PRESET" =~ ^(single-machine|scalable)$ ]] || { echo "::error::preset must be single-machine or scalable"; exit 1; }
+          [[ "$OPERATION" =~ ^(status|diagnostics|logs|backup|restart-service|drain-and-stop|roll-back|test-alert|deploy-now)$ ]] ||
+            { echo "::error::unsupported operation; new releases use the selfhost-release workflow"; exit 1; }
+          [[ "$SERVICE" =~ ^[a-z-]{0,16}$ ]] || { echo "::error::invalid service"; exit 1; }
+          [[ "$CLOUD" != aws || ( -n "$REGION" && -n "$ROLE" ) ]] ||
+            { echo "::error::an AWS installation needs aws_region and aws_release_role"; exit 1; }
+          [[ "$CLOUD" != gcp || ( -n "$PROJECT" && -n "$PROVIDER" && -n "$SERVICE_ACCOUNT" ) ]] ||
+            { echo "::error::a Google Cloud installation needs gcp_project, gcp_workload_identity_provider, and gcp_release_service_account"; exit 1; }
+          [[ "$TIMEOUT" =~ ^[0-9]+$ ]] || { echo "::error::timeout_minutes must be a whole number"; exit 1; }
+          # AWS refuses a session longer than the role allows, and the state
+          # bootstrap's role allows four hours.
+          [[ "$CLOUD" != aws || "$TIMEOUT" -le 240 ]] ||
+            { echo "::error::on AWS timeout_minutes can be at most 240, the longest session the state bootstrap's release role allows"; exit 1; }
+          # Credentials last their session, whatever the job's limit. They are
+          # issued after the job starts, so this outlasts the job. It stays at
+          # AWS's default until the limit needs more, because a role allows an
+          # hour unless it says otherwise, and AWS refuses to issue any longer.
+          echo "aws_session_seconds=$(( TIMEOUT > 60 ? TIMEOUT * 60 : 3600 ))" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the operator helper
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          repository: hot-dev/hot
+          ref: ${{ inputs.hot_version }}
+          path: hot
+          sparse-checkout: infra/operator
+
+      - name: Authenticate to AWS
+        if: inputs.cloud == 'aws'
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ inputs.aws_release_role }}
+          aws-region: ${{ inputs.aws_region }}
+          role-duration-seconds: ${{ steps.check.outputs.aws_session_seconds }}
+
+      - name: Authenticate to Google Cloud
+        if: inputs.cloud == 'gcp'
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ inputs.gcp_workload_identity_provider }}
+          service_account: ${{ inputs.gcp_release_service_account }}
+
+      - name: Run ${{ inputs.operation }}
+        env:
+          CLOUD: ${{ inputs.cloud }}
+          REGION: ${{ inputs.aws_region }}
+          PROJECT: ${{ inputs.gcp_project }}
+          ZONE: ${{ inputs.gcp_zone }}
+          PRESET: ${{ inputs.preset }}
+          TIMEOUT: ${{ inputs.timeout_minutes || (contains(fromJSON('["deploy-now", "roll-back", "backup"]'), inputs.operation) && 30 || 15) }}
+        run: |
+          set -euo pipefail
+          # Unique per call: every call in a caller's run shares its run ID.
+          request_id="gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(openssl rand -hex 4)"
+          echo "Request ID: $request_id"
+          jq -n '{installation: {name: env.NAME, cloud: env.CLOUD, region: env.REGION, project: env.PROJECT, zone: env.ZONE, preset: env.PRESET}}' > installation.json
+          python3 hot/infra/operator/selfhost.py installation.json --request-id "$request_id" \
+            --timeout $(( TIMEOUT * 54 )) --summary "$GITHUB_STEP_SUMMARY" command "$OPERATION" --service "$SERVICE"
