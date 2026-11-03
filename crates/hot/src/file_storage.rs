@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use tokio::io::AsyncRead;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use uuid::Uuid;
 
 use crate::db::DatabasePool;
@@ -38,6 +38,9 @@ pub struct FileMetadata {
     pub created_by_user_id: Uuid,
     pub updated_by_user_id: Option<Uuid>,
 }
+
+/// A stored object's bytes, as they arrive from its backend.
+pub type ObjectReader = Pin<Box<dyn AsyncRead + Send>>;
 
 /// An authorized file body that can be forwarded without materializing it.
 pub struct FileReadStream {
@@ -424,6 +427,42 @@ pub trait FileStorage: Send + Sync {
     async fn delete_storage_object(&self, _storage_path: &str) -> Result<(), String> {
         Err("Object collection is not supported by this storage backend".to_string())
     }
+
+    /// Stream an object for `hot db move-storage`, with no access control:
+    /// the caller has already read its record. `storage_path` is the location
+    /// the record names, which is authoritative as it is for file reads;
+    /// without one the object is at `key` under this storage's root. Backends
+    /// should override this: the default reads the whole object into memory.
+    async fn open_object(
+        &self,
+        _storage_path: Option<&str>,
+        key: &str,
+        ctx: &FileStorageContext,
+    ) -> Result<ObjectReader, String> {
+        let bytes = self.read_blob_bytes(key, ctx).await?;
+        Ok(Box::pin(std::io::Cursor::new(bytes)))
+    }
+
+    /// Store everything `reader` yields at `key`, replacing an earlier attempt
+    /// at the same key, without creating a `file` row. Returns the location to
+    /// record. A key comes from a record rather than a user, so see
+    /// [`validate_object_key`]. Backends should override this: the default
+    /// reads the whole object into memory.
+    async fn write_object(
+        &self,
+        key: &str,
+        reader: &mut (dyn AsyncRead + Send + Unpin),
+        content_type: Option<&str>,
+        ctx: &FileStorageContext,
+    ) -> Result<String, String> {
+        let mut content = Vec::new();
+        reader
+            .read_to_end(&mut content)
+            .await
+            .map_err(|e| format!("Failed to read the object: {}", e))?;
+        self.write_blob_bytes(key, &content, content_type, ctx)
+            .await
+    }
 }
 
 /// How long a retired file object stays readable before collection deletes
@@ -528,6 +567,47 @@ fn suffixed_rel_path(normalized_path: &str, suffix: &str, name_max: usize) -> St
         Some(dir) => format!("{dir}/{name}{suffix}"),
         None => format!("{name}{suffix}"),
     }
+}
+
+/// `key` with every segment a local filesystem can't hold shortened. Object
+/// stores bound whole keys, not their segments, so an object moved from one
+/// can have longer names than a local write would have kept. A digest of the
+/// segment keeps the name unique and the same on a retry; the record names the
+/// result, so nothing has to derive it again.
+fn local_object_key(key: &str) -> String {
+    key.split('/')
+        .map(|segment| {
+            if segment.len() <= LOCAL_NAME_MAX {
+                return segment.to_string();
+            }
+            let digest = blake3::hash(segment.as_bytes()).to_hex();
+            let suffix = format!(".k-{}", &digest.as_str()[..32]);
+            suffixed_rel_path(segment, &suffix, LOCAL_NAME_MAX)
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// How much of an object `write_object` holds in memory and sends in one
+/// request. At [`MAX_UPLOAD_PARTS`] parts this is far more than the largest
+/// file Hot accepts.
+#[cfg(any(feature = "s3-storage", feature = "gcs-storage"))]
+const OBJECT_PART_SIZE: usize = if cfg!(test) {
+    1024 * 1024
+} else {
+    DEFAULT_PART_SIZE as usize
+};
+
+/// The next [`OBJECT_PART_SIZE`] bytes of an object, or fewer at its end.
+#[cfg(any(feature = "s3-storage", feature = "gcs-storage"))]
+async fn read_object_part(reader: &mut (dyn AsyncRead + Send + Unpin)) -> Result<Vec<u8>, String> {
+    let mut part = Vec::new();
+    (&mut *reader)
+        .take(OBJECT_PART_SIZE as u64)
+        .read_to_end(&mut part)
+        .await
+        .map_err(|e| format!("Failed to read the object: {}", e))?;
+    Ok(part)
 }
 
 /// Unique per-attempt relative storage location for a conditional write.
@@ -987,6 +1067,23 @@ pub fn validate_path_security(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Validate a key taken from a record, for `open_object` and `write_object`.
+/// Unlike a user's path it can hold `..` inside a name: a write appends
+/// `.v-{id}` to a name that ends in a dot. Only a whole segment can leave the
+/// root, so whole segments are what is refused.
+pub fn validate_object_key(key: &str) -> Result<(), String> {
+    if key.contains('\0') {
+        return Err("Object key contains null bytes".to_string());
+    }
+    if key
+        .split('/')
+        .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    {
+        return Err(format!("Object key '{key}' has an unsafe path segment"));
+    }
+    Ok(())
+}
+
 /// Content identity used for multipart retries, independent of backend ETags.
 pub fn compute_part_hash(content: &[u8]) -> String {
     blake3::hash(content).to_hex().to_string()
@@ -1066,15 +1163,135 @@ pub fn validate_part_number(part_number: i32) -> Result<(), String> {
 // Local Filesystem Storage
 // ============================================================================
 
+/// Who ends up owning what this process creates under the base directory.
+/// One directory can serve several services: the single-machine bundle binds
+/// it into services that run as uid 10001 and into the task worker, which runs
+/// as root. A directory the task worker created first, as root, would lock the
+/// others out of everything beneath it.
+#[derive(Clone)]
+enum OwnerHandover {
+    /// Not root: what this process creates is its own to share.
+    Off,
+    /// Root: everything goes to whoever owns the base directory, unless that
+    /// is root too.
+    #[cfg(unix)]
+    ToBaseOwner,
+    /// `ToBaseOwner` with a chosen owner and each change only noted (by
+    /// inode), since unit tests do not run as root.
+    #[cfg(all(unix, test))]
+    Noted {
+        owner: (u32, u32),
+        changed: std::sync::Arc<std::sync::Mutex<Vec<u64>>>,
+    },
+}
+
+impl OwnerHandover {
+    fn for_this_process() -> Self {
+        #[cfg(unix)]
+        // SAFETY: geteuid has no preconditions and does not mutate state.
+        if unsafe { libc::geteuid() } == 0 {
+            return Self::ToBaseOwner;
+        }
+        Self::Off
+    }
+
+    #[cfg_attr(not(unix), allow(unused_variables))]
+    fn apply(&self, base: &Path, path: &Path) -> std::io::Result<()> {
+        match self {
+            Self::Off => Ok(()),
+            #[cfg(unix)]
+            Self::ToBaseOwner => {
+                use std::os::unix::fs::MetadataExt;
+
+                let base_dir = std::fs::File::open(base)?;
+                let meta = base_dir.metadata()?;
+                let (uid, gid) = (meta.uid(), meta.gid());
+                if uid == 0 {
+                    return Ok(());
+                }
+                hand_to_owner(base_dir, base, path, (uid, gid), |file| {
+                    std::os::unix::fs::fchown(file, Some(uid), Some(gid))
+                })
+            }
+            #[cfg(all(unix, test))]
+            Self::Noted { owner, changed } => {
+                use std::os::unix::fs::MetadataExt;
+
+                let base_dir = std::fs::File::open(base)?;
+                hand_to_owner(base_dir, base, path, *owner, |file| {
+                    changed.lock().unwrap().push(file.metadata()?.ino());
+                    Ok(())
+                })
+            }
+        }
+    }
+}
+
+/// Give `path`, and each directory leading to it below `base`, to `owner`.
+/// Directories an earlier root write left behind are put right on the way.
+///
+/// This runs as root over a directory that other services can write to, so
+/// each name is opened relative to the last one and never through a symlink:
+/// a link planted in the tree fails the write instead of turning this into a
+/// chown of something outside it.
+#[cfg(unix)]
+fn hand_to_owner(
+    base_dir: std::fs::File,
+    base: &Path,
+    path: &Path,
+    owner: (u32, u32),
+    change: impl Fn(&std::fs::File) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+
+    let relative = path.strip_prefix(base).map_err(std::io::Error::other)?;
+    let mut current = base_dir;
+    for part in relative.components() {
+        let std::path::Component::Normal(name) = part else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "the path leaves the storage directory",
+            ));
+        };
+        let name = std::ffi::CString::new(name.as_bytes())?;
+        // SAFETY: `current` is an open descriptor and `name` a NUL-terminated
+        // string, and both outlive the call. Without O_CREAT, openat reads no
+        // mode argument. O_NONBLOCK keeps a planted FIFO from blocking the open.
+        let fd = unsafe {
+            libc::openat(
+                current.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: openat just returned this descriptor, and nothing else owns it.
+        current = unsafe { std::fs::File::from_raw_fd(fd) };
+        let meta = current.metadata()?;
+        if (meta.uid(), meta.gid()) != owner {
+            change(&current)?;
+        }
+    }
+    Ok(())
+}
+
 /// Local filesystem storage for files
 pub struct LocalFileStorage {
     base_path: PathBuf,
+    owner_handover: OwnerHandover,
 }
 
 impl LocalFileStorage {
     /// Create a new local file storage with the specified directory
     pub fn new(base_path: PathBuf) -> Self {
-        Self { base_path }
+        Self {
+            base_path,
+            owner_handover: OwnerHandover::for_this_process(),
+        }
     }
 
     /// Create from environment or use default
@@ -1084,6 +1301,42 @@ impl LocalFileStorage {
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| crate::lang::cache::paths::get_file_storage_dir()),
         )
+    }
+
+    /// See `OwnerHandover`. A failure fails the write: the bytes would be fine,
+    /// but what they sit in would lock the other services out. Every write
+    /// calls this before its bytes are renamed into place or committed.
+    async fn hand_over(&self, path: &Path) -> std::io::Result<()> {
+        if matches!(self.owner_handover, OwnerHandover::Off) {
+            return Ok(());
+        }
+        let handover = self.owner_handover.clone();
+        let base = self.base_path.clone();
+        let target = path.to_path_buf();
+        tokio::task::spawn_blocking(move || handover.apply(&base, &target))
+            .await
+            .map_err(std::io::Error::other)?
+            .map_err(|e| {
+                tracing::error!(
+                    path = %path.display(),
+                    error = %e,
+                    "Could not give a local file storage path to the storage directory's owner"
+                );
+                std::io::Error::new(
+                    e.kind(),
+                    format!("could not give it to the storage directory's owner: {e}"),
+                )
+            })
+    }
+
+    async fn create_dirs(&self, dir: &Path) -> std::io::Result<()> {
+        tokio::fs::create_dir_all(dir).await?;
+        self.hand_over(dir).await
+    }
+
+    async fn write_bytes(&self, path: &Path, content: &[u8]) -> std::io::Result<()> {
+        tokio::fs::write(path, content).await?;
+        self.hand_over(path).await
     }
 
     /// Get the full filesystem path for a relative file path with multi-tenant isolation
@@ -1219,11 +1472,11 @@ impl FileStorage for LocalFileStorage {
             ctx,
         );
         if let Some(parent) = staged_path.parent() {
-            tokio::fs::create_dir_all(parent)
+            self.create_dirs(parent)
                 .await
                 .map_err(|e| format!("Failed to create parent directories: {}", e))?;
         }
-        if let Err(e) = tokio::fs::write(&staged_path, content).await {
+        if let Err(e) = self.write_bytes(&staged_path, content).await {
             let _ = tokio::fs::remove_file(&staged_path).await;
             return Err(format!("Failed to write file to storage: {}", e));
         }
@@ -1286,11 +1539,11 @@ impl FileStorage for LocalFileStorage {
         let staged_path = self.full_path(&cas_blob_rel_path(&normalized_path, LOCAL_NAME_MAX), ctx);
         let storage_path = staged_path.to_string_lossy().to_string();
         if let Some(parent) = staged_path.parent() {
-            tokio::fs::create_dir_all(parent)
+            self.create_dirs(parent)
                 .await
                 .map_err(|e| format!("Failed to create parent directories: {}", e))?;
         }
-        if let Err(e) = tokio::fs::write(&staged_path, content).await {
+        if let Err(e) = self.write_bytes(&staged_path, content).await {
             let _ = tokio::fs::remove_file(&staged_path).await;
             return Err(format!("Failed to write file to storage: {}", e));
         }
@@ -1402,10 +1655,12 @@ impl FileStorage for LocalFileStorage {
 
     async fn delete_storage_object(&self, storage_path: &str) -> Result<(), String> {
         let path = Path::new(storage_path);
-        let inside = path.starts_with(&self.base_path)
-            && path
-                .components()
-                .all(|part| !matches!(part, std::path::Component::ParentDir));
+        // Only what follows the base directory can leave it: the base is
+        // configuration, and may itself name a `..`.
+        let inside = path.strip_prefix(&self.base_path).is_ok_and(|rest| {
+            rest.components()
+                .all(|part| !matches!(part, std::path::Component::ParentDir))
+        });
         if !inside {
             tracing::warn!(
                 storage_path,
@@ -1495,7 +1750,7 @@ impl FileStorage for LocalFileStorage {
     ) -> Result<String, String> {
         let backend_upload_id = Uuid::new_v4().to_string();
         let upload_dir = self.base_path.join(".uploads").join(&backend_upload_id);
-        tokio::fs::create_dir_all(&upload_dir)
+        self.create_dirs(&upload_dir)
             .await
             .map_err(|e| format!("Failed to create multipart upload directory: {}", e))?;
         Ok(backend_upload_id)
@@ -1522,7 +1777,7 @@ impl FileStorage for LocalFileStorage {
             part_number,
             Uuid::new_v4().simple()
         ));
-        let written = match tokio::fs::write(&tmp, content).await {
+        let written = match self.write_bytes(&tmp, content).await {
             Ok(()) => tokio::fs::rename(&tmp, &part_path).await,
             Err(e) => Err(e),
         };
@@ -1570,7 +1825,7 @@ impl FileStorage for LocalFileStorage {
         // failed assembly or commit leaves the current file and its metadata
         // untouched, and the destination only ever holds a whole file.
         if let Some(parent) = dest.parent() {
-            tokio::fs::create_dir_all(parent)
+            self.create_dirs(parent)
                 .await
                 .map_err(|e| format!("Failed to create parent directories: {}", e))?;
         }
@@ -1592,7 +1847,11 @@ impl FileStorage for LocalFileStorage {
                 actual_size, total_size
             ));
         }
-        if let Err(e) = tokio::fs::rename(&tmp, &dest).await {
+        let moved = match self.hand_over(&tmp).await {
+            Ok(()) => tokio::fs::rename(&tmp, &dest).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = moved {
             let _ = tokio::fs::remove_file(&tmp).await;
             return Err(format!("Failed to move assembled file into place: {}", e));
         }
@@ -1677,11 +1936,11 @@ impl FileStorage for LocalFileStorage {
 
         let full_path = self.full_path(&normalized, ctx);
         if let Some(parent) = full_path.parent() {
-            tokio::fs::create_dir_all(parent)
+            self.create_dirs(parent)
                 .await
                 .map_err(|e| format!("Failed to create blob directories: {}", e))?;
         }
-        tokio::fs::write(&full_path, content)
+        self.write_bytes(&full_path, content)
             .await
             .map_err(|e| format!("Failed to write blob to storage: {}", e))?;
 
@@ -1720,6 +1979,71 @@ impl FileStorage for LocalFileStorage {
                 .map_err(|e| format!("Failed to delete blob: {}", e))?;
         }
         Ok(())
+    }
+
+    async fn open_object(
+        &self,
+        storage_path: Option<&str>,
+        key: &str,
+        ctx: &FileStorageContext,
+    ) -> Result<ObjectReader, String> {
+        validate_object_key(key)?;
+        // As for a file read: the recorded location if it is there, or else
+        // where this storage would keep the object.
+        let location = storage_path
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .filter(|path| path.exists())
+            .unwrap_or_else(|| self.full_path(&local_object_key(key), ctx));
+        match tokio::fs::File::open(&location).await {
+            Ok(file) => Ok(Box::pin(file)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err(format!("Object not found in storage: {}", key))
+            }
+            Err(e) => Err(format!(
+                "Failed to open {}: {}",
+                location.to_string_lossy(),
+                e
+            )),
+        }
+    }
+
+    async fn write_object(
+        &self,
+        key: &str,
+        reader: &mut (dyn AsyncRead + Send + Unpin),
+        _content_type: Option<&str>,
+        ctx: &FileStorageContext,
+    ) -> Result<String, String> {
+        use tokio::io::AsyncWriteExt;
+
+        validate_object_key(key)?;
+        let full_path = self.full_path(&local_object_key(key), ctx);
+        let parent = full_path
+            .parent()
+            .ok_or_else(|| format!("Object key '{key}' has no directory"))?;
+        self.create_dirs(parent)
+            .await
+            .map_err(|e| format!("Failed to create object directories: {}", e))?;
+        // Whole or not at all: a copy cut short never sits at the location.
+        let staged = parent.join(format!(".staged-{}", Uuid::new_v4().simple()));
+        let written = async {
+            let mut file = tokio::fs::File::create(&staged).await?;
+            let mut buffered = tokio::io::BufReader::with_capacity(1024 * 1024, reader);
+            tokio::io::copy_buf(&mut buffered, &mut file).await?;
+            // tokio completes writes on a blocking thread: `flush` surfaces an
+            // error from the last one, which `sync_all` would silently drop.
+            file.flush().await?;
+            file.sync_all().await?;
+            self.hand_over(&staged).await?;
+            tokio::fs::rename(&staged, &full_path).await
+        }
+        .await;
+        if let Err(e) = written {
+            let _ = tokio::fs::remove_file(&staged).await;
+            return Err(format!("Failed to write object to storage: {}", e));
+        }
+        Ok(full_path.to_string_lossy().to_string())
     }
 }
 
@@ -1930,6 +2254,47 @@ pub mod s3 {
                     backend_upload_id.to_string(),
                 )
             }
+        }
+
+        /// Upload `first` and the rest of `reader` as the parts of an open
+        /// multipart upload, holding one part in memory at a time.
+        async fn upload_object_parts(
+            &self,
+            object: &str,
+            upload_id: &str,
+            first: Vec<u8>,
+            reader: &mut (dyn AsyncRead + Send + Unpin),
+        ) -> Result<Vec<CompletedPart>, String> {
+            let mut parts = Vec::new();
+            let mut part = first;
+            let mut part_number = 1;
+            while !part.is_empty() {
+                validate_part_number(part_number)
+                    .map_err(|e| format!("The object has too many parts: {}", e))?;
+                let uploaded = self
+                    .client
+                    .upload_part()
+                    .bucket(&self.bucket)
+                    .key(object)
+                    .upload_id(upload_id)
+                    .part_number(part_number)
+                    .body(ByteStream::from(part))
+                    .send()
+                    .await
+                    .map_err(|e| format!("Failed to upload part {}: {}", part_number, e))?;
+                let etag = uploaded
+                    .e_tag()
+                    .ok_or_else(|| format!("S3 did not return ETag for part {}", part_number))?;
+                parts.push(
+                    CompletedPart::builder()
+                        .part_number(part_number)
+                        .e_tag(etag)
+                        .build(),
+                );
+                part_number += 1;
+                part = read_object_part(reader).await?;
+            }
+            Ok(parts)
         }
     }
 
@@ -2639,6 +3004,119 @@ pub mod s3 {
                 })?;
             Ok(())
         }
+
+        async fn open_object(
+            &self,
+            storage_path: Option<&str>,
+            key: &str,
+            ctx: &FileStorageContext,
+        ) -> Result<ObjectReader, String> {
+            validate_object_key(key)?;
+            // As for a file read: the recorded bucket and key win, which can
+            // differ from today's bucket and prefix.
+            let (bucket, object) = storage_path
+                .and_then(|path| self.parse_storage_path(path))
+                .unwrap_or_else(|| (self.bucket.clone(), self.s3_key(key, ctx)));
+            let response = self
+                .client
+                .get_object()
+                .bucket(&bucket)
+                .key(&object)
+                .send()
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Failed to retrieve object from S3 (bucket: {}, key: {}): {}",
+                        bucket, object, e
+                    )
+                })?;
+            Ok(Box::pin(response.body.into_async_read()))
+        }
+
+        async fn write_object(
+            &self,
+            key: &str,
+            reader: &mut (dyn AsyncRead + Send + Unpin),
+            content_type: Option<&str>,
+            ctx: &FileStorageContext,
+        ) -> Result<String, String> {
+            validate_object_key(key)?;
+            let object = self.s3_key(key, ctx);
+            let location = format!("s3://{}/{}", self.bucket, object);
+            let first = read_object_part(reader).await?;
+            if first.len() < OBJECT_PART_SIZE {
+                let mut put_request = self
+                    .client
+                    .put_object()
+                    .bucket(&self.bucket)
+                    .key(&object)
+                    .body(ByteStream::from(first));
+                if let Some(ct) = content_type {
+                    put_request = put_request.content_type(ct);
+                }
+                put_request.send().await.map_err(|e| {
+                    format!(
+                        "Failed to upload object to S3 (bucket: {}, key: {}): {}",
+                        self.bucket, object, e
+                    )
+                })?;
+                return Ok(location);
+            }
+
+            // A single PUT stops at 5 GiB, so anything larger than one part
+            // goes up in parts. Nothing appears at the key until completion.
+            let mut create = self
+                .client
+                .create_multipart_upload()
+                .bucket(&self.bucket)
+                .key(&object);
+            if let Some(ct) = content_type {
+                create = create.content_type(ct);
+            }
+            let upload_id = create
+                .send()
+                .await
+                .map_err(|e| format!("Failed to initiate multipart upload: {}", e))?
+                .upload_id()
+                .map(str::to_string)
+                .ok_or_else(|| "S3 did not return an upload ID".to_string())?;
+            let parts = self
+                .upload_object_parts(&object, &upload_id, first, reader)
+                .await;
+            let completed = match parts {
+                Ok(parts) => self
+                    .client
+                    .complete_multipart_upload()
+                    .bucket(&self.bucket)
+                    .key(&object)
+                    .upload_id(&upload_id)
+                    .multipart_upload(
+                        CompletedMultipartUpload::builder()
+                            .set_parts(Some(parts))
+                            .build(),
+                    )
+                    .send()
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| format!("Failed to complete multipart upload: {}", e)),
+                Err(e) => Err(e),
+            };
+            if let Err(e) = completed {
+                if let Err(abort) = self
+                    .client
+                    .abort_multipart_upload()
+                    .bucket(&self.bucket)
+                    .key(&object)
+                    .upload_id(&upload_id)
+                    .send()
+                    .await
+                {
+                    tracing::warn!(error = %abort, "Failed to abort a multipart upload");
+                }
+                return Err(e);
+            }
+            Ok(location)
+        }
     }
 }
 
@@ -2809,6 +3287,7 @@ pub mod gcs {
             mut sources: Vec<(String, i64)>,
             content_type: Option<&str>,
             metadata: &[(&str, &str)],
+            dest_generation: i64,
         ) -> Result<(String, i64), GcsError> {
             let attempt = Uuid::new_v4().simple().to_string();
             for (level, groups) in plan_compose_levels(sources.len()).into_iter().enumerate() {
@@ -2838,7 +3317,13 @@ pub mod gcs {
             }
             let obj = self
                 .client
-                .compose(dest, &sources, content_type, Some(0), metadata)
+                .compose(
+                    dest,
+                    &sources,
+                    content_type,
+                    Some(dest_generation),
+                    metadata,
+                )
                 .await?;
             Ok((obj.name, obj.generation))
         }
@@ -3238,6 +3723,7 @@ pub mod gcs {
                             sources,
                             content_type_final.as_deref(),
                             &metadata,
+                            0,
                         )
                         .await
                     };
@@ -3411,6 +3897,91 @@ pub mod gcs {
                 .map(|_| ())
                 .map_err(|e| format!("Failed to delete blob from GCS: {}", e))
         }
+
+        async fn open_object(
+            &self,
+            storage_path: Option<&str>,
+            key: &str,
+            ctx: &FileStorageContext,
+        ) -> Result<ObjectReader, String> {
+            validate_object_key(key)?;
+            // As for a file read: the record names the object, and another
+            // bucket is refused rather than guessed at.
+            let object = match storage_path.filter(|path| !path.is_empty()) {
+                Some(path) => self.client.key_from_uri(path)?,
+                None => self.object_key(key, ctx),
+            };
+            let (reader, _) = self
+                .client
+                .open_reader(&object)
+                .await
+                .map_err(|e| match e {
+                    GcsError::NotFound(_) => format!("Object not found in storage: {}", key),
+                    e => format!("Failed to read object from GCS: {}", e),
+                })?;
+            Ok(reader)
+        }
+
+        async fn write_object(
+            &self,
+            key: &str,
+            reader: &mut (dyn AsyncRead + Send + Unpin),
+            content_type: Option<&str>,
+            ctx: &FileStorageContext,
+        ) -> Result<String, String> {
+            validate_object_key(key)?;
+            let dest = self.object_key(key, ctx);
+            let fail = |e: GcsError| format!("Failed to upload object to GCS: {}", e);
+            // A retried copy replaces its earlier attempt, and nothing else:
+            // the write is pinned to the generation seen here.
+            let generation = self
+                .client
+                .head(&dest)
+                .await
+                .map_err(fail)?
+                .map_or(0, |obj| obj.generation);
+            let first = read_object_part(reader).await?;
+            if first.len() < OBJECT_PART_SIZE {
+                self.client
+                    .put_bytes(
+                        &dest,
+                        Bytes::from(first),
+                        content_type,
+                        Some(generation),
+                        &[],
+                    )
+                    .await
+                    .map_err(fail)?;
+                return Ok(self.client.uri(&dest));
+            }
+
+            // Larger objects are staged as parts and composed, the same way a
+            // multipart upload is finished.
+            let upload = Uuid::new_v4().simple().to_string();
+            let staging = self.staging_prefix(&upload, ctx);
+            let composed = async {
+                let mut sources = Vec::new();
+                let mut part = first;
+                let mut number = 1;
+                while !part.is_empty() {
+                    let part_key = Self::part_key(&staging, number, &upload);
+                    let (_, part_generation) = self
+                        .put_unique(&part_key, Bytes::from(part), None, &[])
+                        .await
+                        .map_err(fail)?;
+                    sources.push((part_key, part_generation));
+                    number += 1;
+                    part = read_object_part(reader).await?;
+                }
+                self.compose_staged(&staging, &dest, sources, content_type, &[], generation)
+                    .await
+                    .map_err(fail)
+            }
+            .await;
+            self.cleanup_staging(&staging).await;
+            composed?;
+            Ok(self.client.uri(&dest))
+        }
     }
 
     #[cfg(test)]
@@ -3549,6 +4120,34 @@ pub async fn file_storage_from_config(conf: &Val) -> Result<Box<dyn FileStorage>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn collection_deletes_only_what_is_under_the_base_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("work")).unwrap();
+        // A base directory configured with a `..`, as its records then are.
+        let base = dir.path().join("work/../files");
+        let object = base.join("org/env/a.txt.v-1");
+        std::fs::create_dir_all(object.parent().unwrap()).unwrap();
+        std::fs::write(&object, b"retired").unwrap();
+        let outside = dir.path().join("outside.txt");
+        std::fs::write(&outside, b"kept").unwrap();
+        let storage = LocalFileStorage::new(base.clone());
+
+        storage
+            .delete_storage_object(&object.to_string_lossy())
+            .await
+            .unwrap();
+        assert!(!object.exists());
+
+        for elsewhere in [outside.clone(), base.join("../outside.txt")] {
+            storage
+                .delete_storage_object(&elsewhere.to_string_lossy())
+                .await
+                .unwrap();
+            assert!(outside.exists(), "{elsewhere:?}");
+        }
+    }
 
     #[cfg(feature = "s3-storage")]
     #[tokio::test]
@@ -3747,6 +4346,621 @@ mod tests {
         };
 
         (storage, ctx, temp_dir)
+    }
+
+    /// Everything below `dir`, not following symlinks, with its inode.
+    #[cfg(unix)]
+    fn entries_below(dir: &Path) -> Vec<(PathBuf, std::fs::Metadata)> {
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let meta = std::fs::symlink_metadata(entry.path()).unwrap();
+            if meta.is_dir() {
+                found.extend(entries_below(&entry.path()));
+            }
+            found.push((entry.path(), meta));
+        }
+        found
+    }
+
+    /// A handover that pretends this process is root and the base directory
+    /// belongs to someone else.
+    #[cfg(unix)]
+    fn noted_handover(
+        owner: (u32, u32),
+    ) -> (OwnerHandover, std::sync::Arc<std::sync::Mutex<Vec<u64>>>) {
+        let changed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let handover = OwnerHandover::Noted {
+            owner,
+            changed: changed.clone(),
+        };
+        (handover, changed)
+    }
+
+    #[cfg(unix)]
+    fn someone_else() -> (u32, u32) {
+        // SAFETY: geteuid and getegid have no preconditions and do not mutate
+        // state.
+        unsafe { (libc::geteuid() + 1, libc::getegid() + 1) }
+    }
+
+    #[cfg(unix)]
+    fn assert_all_handed_over(
+        base: &Path,
+        changed: &std::sync::Mutex<Vec<u64>>,
+        write: &str,
+    ) -> usize {
+        use std::os::unix::fs::MetadataExt;
+        let changed = changed.lock().unwrap();
+        let entries = entries_below(base);
+        for (path, meta) in &entries {
+            assert!(
+                changed.contains(&meta.ino()),
+                "{write} left {} with its creator",
+                path.display()
+            );
+        }
+        assert!(
+            !changed.contains(&std::fs::metadata(base).unwrap().ino()),
+            "the base directory is not the storage's to change"
+        );
+        entries.len()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn every_local_write_hands_what_it_creates_to_the_base_owner() {
+        let (mut storage, ctx, dir) = setup_test_storage().await;
+        let (handover, changed) = noted_handover(someone_else());
+        storage.owner_handover = handover;
+        let base = dir.path();
+
+        storage
+            .write_file("a/b/file.txt", b"file", None, &ctx)
+            .await
+            .unwrap();
+        let after_file = assert_all_handed_over(base, &changed, "write_file");
+        assert!(after_file >= 5, "org, env, a, b and the file");
+
+        storage
+            .write_file_if("c/d/cas.txt", b"cas", None, None, &ctx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_all_handed_over(base, &changed, "write_file_if");
+
+        let upload = storage
+            .initiate_multipart_upload("e/f/big.bin", None, &ctx)
+            .await
+            .unwrap();
+        assert!(base.join(".uploads").join(&upload).is_dir());
+        assert_all_handed_over(base, &changed, "initiate_multipart_upload");
+        let etag = storage
+            .upload_part(&upload, "e/f/big.bin", 1, b"part", &ctx)
+            .await
+            .unwrap();
+        assert_all_handed_over(base, &changed, "upload_part");
+        storage
+            .complete_multipart_upload(
+                &upload,
+                "e/f/big.bin",
+                &[(1, etag)],
+                4,
+                None,
+                &CommitBase::Any,
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_all_handed_over(base, &changed, "complete_multipart_upload");
+
+        storage
+            .write_blob_bytes("g/h/blob.bin", b"blob", None, &ctx)
+            .await
+            .unwrap();
+        assert_all_handed_over(base, &changed, "write_blob_bytes");
+
+        let mut reader = std::io::Cursor::new(b"object".to_vec());
+        storage
+            .write_object("i/j/object.bin.v-1", &mut reader, None, &ctx)
+            .await
+            .unwrap();
+        assert_all_handed_over(base, &changed, "write_object");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handover_leaves_alone_what_the_owner_already_holds() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a/b/file.txt");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"kept").unwrap();
+        let meta = std::fs::metadata(&file).unwrap();
+
+        let (handover, changed) = noted_handover((meta.uid(), meta.gid()));
+        handover.apply(dir.path(), &file).unwrap();
+        assert!(changed.lock().unwrap().is_empty());
+
+        // A different group alone is reason enough.
+        let (handover, changed) = noted_handover((meta.uid(), meta.gid() + 1));
+        handover.apply(dir.path(), &file).unwrap();
+        assert_eq!(changed.lock().unwrap().len(), 3, "a, b and the file");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handover_never_goes_through_a_symlink() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_dir = outside.path().join("dir");
+        let outside_file = outside_dir.join("file");
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        std::fs::write(&outside_file, b"not the storage's").unwrap();
+        let base = dir.path();
+        std::fs::create_dir(base.join("a")).unwrap();
+        std::os::unix::fs::symlink(&outside_dir, base.join("a/through")).unwrap();
+        std::os::unix::fs::symlink(&outside_file, base.join("a/last")).unwrap();
+
+        for path in ["a/through/file", "a/through", "a/last"] {
+            let (handover, changed) = noted_handover(someone_else());
+            handover
+                .apply(base, &base.join(path))
+                .expect_err("a symlink in the tree must fail the handover");
+            let changed = changed.lock().unwrap();
+            assert_eq!(
+                changed.as_slice(),
+                [std::fs::metadata(base.join("a")).unwrap().ino()],
+                "{path}: only the real directory before the link"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handover_refuses_a_path_outside_the_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let (handover, changed) = noted_handover(someone_else());
+        for path in [
+            outside.path().to_path_buf(),
+            dir.path().join("../elsewhere"),
+        ] {
+            assert!(handover.apply(dir.path(), &path).is_err());
+        }
+        assert!(changed.lock().unwrap().is_empty());
+    }
+
+    /// A link planted in the tree fails the write rather than the write going
+    /// on through it as root.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_handover_fails_the_write_and_leaves_no_bytes() {
+        let (mut storage, ctx, _dir) = setup_test_storage().await;
+        let outside = tempfile::tempdir().unwrap();
+        let (handover, _changed) = noted_handover(someone_else());
+        storage.owner_handover = handover;
+
+        let env_dir = storage.full_path("placeholder", &ctx);
+        let env_dir = env_dir.parent().unwrap();
+        std::fs::create_dir_all(env_dir).unwrap();
+        std::os::unix::fs::symlink(outside.path(), env_dir.join("planted")).unwrap();
+
+        let refused = storage
+            .write_file("planted/file.txt", b"secret", None, &ctx)
+            .await
+            .unwrap_err();
+        assert!(refused.contains("storage directory's owner"), "{refused}");
+        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+        assert!(
+            !storage.file_exists("planted/file.txt", &ctx).await.unwrap(),
+            "no record for a failed write"
+        );
+        let mut reader = std::io::Cursor::new(b"secret".to_vec());
+        storage
+            .write_object("planted/object.bin.v-1", &mut reader, None, &ctx)
+            .await
+            .unwrap_err();
+        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+    }
+
+    /// The real thing, for a test run that has root: a Linux container in CI
+    /// usually does, and otherwise this has nothing to prove.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn as_root_a_write_goes_to_the_owner_of_the_base_directory() {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid has no preconditions and does not mutate state.
+        if unsafe { libc::geteuid() } != 0 {
+            return;
+        }
+        let (storage, ctx, dir) = setup_test_storage().await;
+        let base = dir.path();
+
+        // A base directory root owns has nobody else to hand anything to.
+        storage
+            .write_blob_bytes("rootly/blob.bin", b"blob", None, &ctx)
+            .await
+            .unwrap();
+        for (path, meta) in entries_below(base) {
+            assert_eq!(meta.uid(), 0, "{}", path.display());
+        }
+
+        // What that left behind is put right by the next write through it.
+        std::os::unix::fs::chown(base, Some(10001), Some(10002)).unwrap();
+        storage
+            .write_file("rootly/file.txt", b"file", None, &ctx)
+            .await
+            .unwrap();
+        storage
+            .write_file("a/b/file.txt", b"file", None, &ctx)
+            .await
+            .unwrap();
+        let upload = storage
+            .initiate_multipart_upload("c/big.bin", None, &ctx)
+            .await
+            .unwrap();
+        let etag = storage
+            .upload_part(&upload, "c/big.bin", 1, b"part", &ctx)
+            .await
+            .unwrap();
+        storage
+            .complete_multipart_upload(
+                &upload,
+                "c/big.bin",
+                &[(1, etag)],
+                4,
+                None,
+                &CommitBase::Any,
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let mut reader = std::io::Cursor::new(b"object".to_vec());
+        storage
+            .write_object("d/object.bin.v-1", &mut reader, None, &ctx)
+            .await
+            .unwrap();
+        storage
+            .write_blob_bytes("e/blob.bin", b"blob", None, &ctx)
+            .await
+            .unwrap();
+        let old_blob = storage.full_path("rootly/blob.bin", &ctx);
+        for (path, meta) in entries_below(base) {
+            // Only that one old blob: a file is not on the way to any other.
+            if path != old_blob {
+                assert_eq!(
+                    (meta.uid(), meta.gid()),
+                    (10001, 10002),
+                    "{}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    /// Yields `good` bytes, then fails, as a source that breaks mid-copy does.
+    struct BreaksAfter {
+        good: usize,
+    }
+
+    impl AsyncRead for BreaksAfter {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            if self.good == 0 {
+                return std::task::Poll::Ready(Err(std::io::Error::other("the source broke")));
+            }
+            let n = self.good.min(buf.remaining()).min(64 * 1024);
+            buf.put_slice(&vec![7; n]);
+            self.good -= n;
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn local_objects_are_written_whole_or_not_at_all() {
+        let (storage, ctx, dir) = setup_test_storage().await;
+        let key = "objects/a.txt.v-1";
+        let mut reader = std::io::Cursor::new(b"first".to_vec());
+        let location = storage
+            .write_object(key, &mut reader, None, &ctx)
+            .await
+            .unwrap();
+        let mut broken = BreaksAfter { good: 100_000 };
+        let error = storage
+            .write_object(key, &mut broken, None, &ctx)
+            .await
+            .unwrap_err();
+        assert!(error.contains("the source broke"), "{error}");
+        assert_eq!(std::fs::read(&location).unwrap(), b"first");
+        let parent = Path::new(&location).parent().unwrap();
+        assert_eq!(
+            std::fs::read_dir(parent).unwrap().count(),
+            1,
+            "nothing staged is left next to the object"
+        );
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn local_objects_are_read_from_their_recorded_location() {
+        let (storage, ctx, dir) = setup_test_storage().await;
+        let elsewhere = dir.path().join("an-earlier-base-directory-object");
+        std::fs::write(&elsewhere, b"recorded").unwrap();
+        let mut read = Vec::new();
+        storage
+            .open_object(elsewhere.to_str(), "a.txt", &ctx)
+            .await
+            .unwrap()
+            .read_to_end(&mut read)
+            .await
+            .unwrap();
+        assert_eq!(read, b"recorded");
+        // A recorded location that is gone falls back to the key, like a read.
+        let mut reader = std::io::Cursor::new(b"at the key".to_vec());
+        storage
+            .write_object("a.txt", &mut reader, None, &ctx)
+            .await
+            .unwrap();
+        let mut read = Vec::new();
+        storage
+            .open_object(Some("/no/such/object"), "a.txt", &ctx)
+            .await
+            .unwrap()
+            .read_to_end(&mut read)
+            .await
+            .unwrap();
+        assert_eq!(read, b"at the key");
+    }
+
+    #[test]
+    fn object_keys_keep_names_a_local_filesystem_can_hold() {
+        assert_eq!(local_object_key("a/b.txt.v-1"), "a/b.txt.v-1");
+        let exact = "n".repeat(LOCAL_NAME_MAX);
+        assert_eq!(local_object_key(&exact), exact);
+
+        let long = |name: &str| format!("{}{name}", "é".repeat(150));
+        let shortened = local_object_key(&format!("{}/{}.v-1", long("dir"), long("file")));
+        for segment in shortened.split('/') {
+            assert!(segment.len() <= LOCAL_NAME_MAX, "{segment}");
+        }
+        // Stays the same on a retry, and stays apart from similar names.
+        assert_eq!(
+            shortened,
+            local_object_key(&format!("{}/{}.v-1", long("dir"), long("file")))
+        );
+        assert_ne!(
+            shortened,
+            local_object_key(&format!("{}/{}.v-2", long("dir"), long("file")))
+        );
+    }
+
+    #[test]
+    fn object_keys_refuse_only_segments_that_leave_the_root() {
+        assert!(validate_object_key("exports/report..v-1").is_ok());
+        assert!(validate_object_key("a..b/c").is_ok());
+        for bad in [
+            "", "..", "../a", "a/..", "a/../b", "./a", "/a", "a//b", "a\0b",
+        ] {
+            assert!(validate_object_key(bad).is_err(), "{bad}");
+        }
+    }
+
+    /// A stand-in for S3 that keeps objects and parts in memory.
+    #[cfg(feature = "s3-storage")]
+    #[derive(Default)]
+    struct FakeS3 {
+        objects: std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
+        parts: std::sync::Mutex<std::collections::BTreeMap<i32, Vec<u8>>>,
+        puts: std::sync::atomic::AtomicUsize,
+        aborted: std::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg(feature = "s3-storage")]
+    async fn fake_s3_request(
+        axum::extract::State(s3): axum::extract::State<std::sync::Arc<FakeS3>>,
+        method: axum::http::Method,
+        uri: axum::http::Uri,
+        body: bytes::Bytes,
+    ) -> axum::response::Response {
+        use axum::http::{Method, StatusCode, header};
+        use axum::response::IntoResponse;
+        use std::sync::atomic::Ordering;
+
+        let object = uri.path().trim_start_matches('/').to_string();
+        let query = uri.query().unwrap_or_default().to_string();
+        let param = |name: &str| {
+            query.split('&').find_map(|pair| {
+                let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+                (key == name).then(|| value.to_string())
+            })
+        };
+        let etag = [(header::ETAG, "\"etag\"")];
+        match method {
+            Method::POST if param("uploads").is_some() => (
+                StatusCode::OK,
+                "<InitiateMultipartUploadResult><UploadId>upload-1</UploadId></InitiateMultipartUploadResult>",
+            )
+                .into_response(),
+            Method::POST => {
+                let whole: Vec<u8> = s3.parts.lock().unwrap().values().flatten().copied().collect();
+                s3.parts.lock().unwrap().clear();
+                s3.objects.lock().unwrap().insert(object, whole);
+                (
+                    StatusCode::OK,
+                    "<CompleteMultipartUploadResult><ETag>etag</ETag></CompleteMultipartUploadResult>",
+                )
+                    .into_response()
+            }
+            Method::PUT => {
+                match param("partNumber") {
+                    Some(number) => {
+                        s3.parts
+                            .lock()
+                            .unwrap()
+                            .insert(number.parse().unwrap(), body.to_vec());
+                    }
+                    None => {
+                        s3.puts.fetch_add(1, Ordering::SeqCst);
+                        s3.objects.lock().unwrap().insert(object, body.to_vec());
+                    }
+                }
+                (StatusCode::OK, etag).into_response()
+            }
+            Method::GET => match s3.objects.lock().unwrap().get(&object) {
+                Some(bytes) => (StatusCode::OK, etag, bytes.clone()).into_response(),
+                None => (
+                    StatusCode::NOT_FOUND,
+                    "<Error><Code>NoSuchKey</Code><Message>missing</Message></Error>",
+                )
+                    .into_response(),
+            },
+            Method::DELETE => {
+                s3.aborted.fetch_add(1, Ordering::SeqCst);
+                s3.parts.lock().unwrap().clear();
+                StatusCode::NO_CONTENT.into_response()
+            }
+            _ => StatusCode::METHOD_NOT_ALLOWED.into_response(),
+        }
+    }
+
+    /// An `S3FileStorage` for `bucket`, talking to a [`FakeS3`] on a local port.
+    #[cfg(feature = "s3-storage")]
+    async fn fake_s3_storage(bucket: &str) -> (s3::S3FileStorage, std::sync::Arc<FakeS3>) {
+        use aws_sdk_s3::config::{
+            BehaviorVersion, Credentials, Region, RequestChecksumCalculation,
+            ResponseChecksumValidation,
+        };
+
+        let fake = std::sync::Arc::new(FakeS3::default());
+        let app = axum::Router::new()
+            .fallback(fake_s3_request)
+            .with_state(fake.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        let config = aws_sdk_s3::Config::builder()
+            .behavior_version(BehaviorVersion::latest())
+            .region(Region::new("us-east-1"))
+            .credentials_provider(Credentials::new("key", "secret", None, None, "test"))
+            .endpoint_url(format!("http://{address}"))
+            .force_path_style(true)
+            .request_checksum_calculation(RequestChecksumCalculation::WhenRequired)
+            .response_checksum_validation(ResponseChecksumValidation::WhenRequired)
+            .build();
+        let client = aws_sdk_s3::Client::from_conf(config);
+        (
+            s3::S3FileStorage::new(client, bucket.to_string(), Some("files".to_string())),
+            fake,
+        )
+    }
+
+    #[cfg(feature = "s3-storage")]
+    #[tokio::test]
+    async fn s3_objects_up_to_a_part_go_up_in_one_put() {
+        use std::sync::atomic::Ordering;
+
+        let (_local, ctx, _dir) = setup_test_storage().await;
+        let (storage, fake) = fake_s3_storage("acme").await;
+        let mut reader = std::io::Cursor::new(b"small".to_vec());
+        let location = storage
+            .write_object("report..v-1", &mut reader, None, &ctx)
+            .await
+            .unwrap();
+        let (org, env) = (ctx.org_id.simple(), ctx.env_id.unwrap().simple());
+        assert_eq!(location, format!("s3://acme/files/{org}/{env}/report..v-1"));
+        assert_eq!(fake.puts.load(Ordering::SeqCst), 1);
+        let stored = fake.objects.lock().unwrap();
+        assert_eq!(
+            stored[&format!("acme/files/{org}/{env}/report..v-1")],
+            b"small"
+        );
+    }
+
+    #[cfg(feature = "s3-storage")]
+    #[tokio::test]
+    async fn s3_objects_over_a_part_go_up_in_parts_and_stream_back() {
+        use std::sync::atomic::Ordering;
+
+        let (_local, ctx, _dir) = setup_test_storage().await;
+        let (storage, fake) = fake_s3_storage("acme").await;
+        let content: Vec<u8> = (0..OBJECT_PART_SIZE * 3 + 17)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let mut reader = std::io::Cursor::new(content.clone());
+        let location = storage
+            .write_object("big.bin.v-1", &mut reader, Some("text/plain"), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(fake.puts.load(Ordering::SeqCst), 0, "no single PUT");
+        for recorded in [Some(location.as_str()), None] {
+            let mut read = Vec::new();
+            storage
+                .open_object(recorded, "big.bin.v-1", &ctx)
+                .await
+                .unwrap()
+                .read_to_end(&mut read)
+                .await
+                .unwrap();
+            assert!(read == content, "read from {recorded:?}");
+        }
+
+        // Exactly one part's worth still completes, with no empty last part.
+        let mut reader = std::io::Cursor::new(vec![9; OBJECT_PART_SIZE]);
+        storage
+            .write_object("exact.bin.v-1", &mut reader, None, &ctx)
+            .await
+            .unwrap();
+        let objects = fake.objects.lock().unwrap();
+        let exact = objects
+            .iter()
+            .find(|(key, _)| key.ends_with("exact.bin.v-1"))
+            .unwrap();
+        assert_eq!(exact.1.len(), OBJECT_PART_SIZE);
+    }
+
+    #[cfg(feature = "s3-storage")]
+    #[tokio::test]
+    async fn s3_uploads_are_aborted_when_the_source_breaks() {
+        use std::sync::atomic::Ordering;
+
+        let (_local, ctx, _dir) = setup_test_storage().await;
+        let (storage, fake) = fake_s3_storage("acme").await;
+        let mut broken = BreaksAfter {
+            good: OBJECT_PART_SIZE + OBJECT_PART_SIZE / 2,
+        };
+        let error = storage
+            .write_object("big.bin.v-1", &mut broken, None, &ctx)
+            .await
+            .unwrap_err();
+        assert!(error.contains("the source broke"), "{error}");
+        assert_eq!(fake.aborted.load(Ordering::SeqCst), 1);
+        assert!(fake.objects.lock().unwrap().is_empty());
+    }
+
+    #[cfg(feature = "s3-storage")]
+    #[tokio::test]
+    async fn s3_objects_are_read_from_their_recorded_bucket_and_key() {
+        let (_local, ctx, _dir) = setup_test_storage().await;
+        let (storage, fake) = fake_s3_storage("today").await;
+        fake.objects
+            .lock()
+            .unwrap()
+            .insert("earlier/old/a.txt".to_string(), b"recorded".to_vec());
+        let mut read = Vec::new();
+        storage
+            .open_object(Some("s3://earlier/old/a.txt"), "a.txt", &ctx)
+            .await
+            .unwrap()
+            .read_to_end(&mut read)
+            .await
+            .unwrap();
+        assert_eq!(read, b"recorded");
+        assert!(storage.open_object(None, "a.txt", &ctx).await.is_err());
     }
 
     /// Collect every retired object, as if its grace period had passed.
@@ -4884,6 +6098,53 @@ mod tests {
             assert!(storage.read_blob_bytes(&key, ctx).await.is_err());
         }
 
+        /// Objects written from a reader, in one piece and in many, come back
+        /// whole from the location the write returned, and replace an earlier
+        /// attempt at the same key. Keys hold what a write can leave in a
+        /// name, which a user's path can't: `..` from `report.` plus `.v-{id}`.
+        async fn assert_object_streams(storage: &dyn FileStorage, ctx: &FileStorageContext) {
+            for size in [5, 3 * 1024 * 1024 + 17] {
+                let key = format!("objects/report..v-{}", Uuid::new_v4().simple());
+                let content: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+                let mut first_attempt = std::io::Cursor::new(b"an earlier attempt".to_vec());
+                storage
+                    .write_object(&key, &mut first_attempt, None, ctx)
+                    .await
+                    .unwrap();
+                let mut reader = std::io::Cursor::new(content.clone());
+                let location = storage
+                    .write_object(&key, &mut reader, Some("text/plain"), ctx)
+                    .await
+                    .unwrap();
+                for recorded in [Some(location.as_str()), None] {
+                    let mut stored = Vec::new();
+                    storage
+                        .open_object(recorded, &key, ctx)
+                        .await
+                        .unwrap()
+                        .read_to_end(&mut stored)
+                        .await
+                        .unwrap();
+                    assert!(stored == content, "{size} bytes from {recorded:?}");
+                }
+                // Objects never create user-visible file records.
+                assert!(storage.list_files("objects", ctx).await.unwrap().is_empty());
+                storage.delete_storage_object(&location).await.unwrap();
+                assert!(storage.open_object(None, &key, ctx).await.is_err());
+            }
+            for unsafe_key in ["../escape", "a/../../escape", "/etc/passwd", "a//b", ""] {
+                let mut reader = std::io::Cursor::new(b"x".to_vec());
+                assert!(
+                    storage
+                        .write_object(unsafe_key, &mut reader, None, ctx)
+                        .await
+                        .is_err(),
+                    "{unsafe_key}"
+                );
+                assert!(storage.open_object(None, unsafe_key, ctx).await.is_err());
+            }
+        }
+
         async fn assert_multipart(storage: &dyn FileStorage, ctx: &FileStorageContext, parts: i32) {
             let path = format!("mp/{}.bin", Uuid::new_v4().simple());
             let id = storage
@@ -4963,6 +6224,7 @@ mod tests {
             assert_env_isolation(&storage, &ctx).await;
             assert_conditional_writes(&storage, &ctx).await;
             assert_blob_bytes(&storage, &ctx).await;
+            assert_object_streams(&storage, &ctx).await;
             assert_multipart(&storage, &ctx, 3).await;
             assert_multipart_abort(&storage, &ctx).await;
         }
@@ -5014,6 +6276,7 @@ mod tests {
             assert_env_isolation(&storage, &ctx).await;
             assert_conditional_writes(&storage, &ctx).await;
             assert_blob_bytes(&storage, &ctx).await;
+            assert_object_streams(&storage, &ctx).await;
             // More than 32 parts exercises staged composition.
             assert_multipart(&storage, &ctx, 70).await;
             assert_multipart_abort(&storage, &ctx).await;
