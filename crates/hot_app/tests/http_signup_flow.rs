@@ -1267,6 +1267,10 @@ fn self_host_conf(extra: hot::val::Val) -> hot::val::Val {
     val!({"product": {"experience": "self-host"}}).merge(&extra)
 }
 
+fn smtp_conf() -> hot::val::Val {
+    val!({"email": {"provider": "smtp", "from": "hot@example.com", "smtp": {"host": "smtp.example.com"}}})
+}
+
 async fn assert_signup_needs_invitation(client: &mut TestClient, email: &str) {
     let form = submit_signup(email, client.prime_csrf());
     let resp = client.post_form("/signup", &as_form_slice(&form)).await;
@@ -1289,8 +1293,7 @@ async fn self_hosted_signup_without_email_requires_an_invitation() {
 
 #[tokio::test]
 async fn self_hosted_signup_with_email_delivery_is_open() {
-    let mut client =
-        TestClient::new_with_conf(self_host_conf(val!({"email": {"provider": "smtp"}}))).await;
+    let mut client = TestClient::new_with_conf(self_host_conf(smtp_conf())).await;
     let form = submit_signup("alice@example.com", client.prime_csrf());
     let resp = client.post_form("/signup", &as_form_slice(&form)).await;
     resp.assert_status(axum::http::StatusCode::OK);
@@ -1401,8 +1404,7 @@ async fn admins_share_invitation_links_when_email_is_unavailable() {
 
 #[tokio::test]
 async fn invitations_are_emailed_when_email_is_configured() {
-    let mut client =
-        TestClient::new_with_conf(self_host_conf(val!({"email": {"provider": "smtp"}}))).await;
+    let mut client = TestClient::new_with_conf(self_host_conf(smtp_conf())).await;
     let resp = invite_as_admin(&mut client, "dave@example.com").await;
     assert!(
         resp.status.is_redirection(),
@@ -1410,5 +1412,29 @@ async fn invitations_are_emailed_when_email_is_configured() {
         resp.status,
         resp.body
     );
-    assert!(!resp.body.contains("/invite?code="));
+
+    // The worker sends what the outbox holds, so the invitation must be there.
+    let invite = hot::db::Invite::get_invites_by_email(client.db(), "dave@example.com")
+        .await
+        .unwrap()
+        .pop()
+        .expect("the invitation is stored");
+    let DatabasePool::Sqlite(pool) = client.db().as_ref() else {
+        panic!("these tests use SQLite");
+    };
+    let (from_address, text_body): (String, Option<String>) =
+        sqlx::query_as("SELECT from_address, text_body FROM email_queue WHERE to_address = ?")
+            .bind("dave@example.com")
+            .fetch_optional(pool)
+            .await
+            .unwrap()
+            .expect("the invitation email is queued");
+    assert!(from_address.contains("hot@example.com"), "{from_address}");
+    let link = format!("/invite?code={}", invite.invite_code);
+    assert!(
+        text_body
+            .as_deref()
+            .is_some_and(|text| text.contains(&link)),
+        "the email carries the invitation link, got {text_body:?}"
+    );
 }

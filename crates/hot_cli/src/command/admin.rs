@@ -59,11 +59,18 @@ pub(crate) async fn run_admin_bootstrap(
     )
     .await
     .map_err(|e| format!("Failed to store the password for {email}: {e}"))?;
-    eprintln!(
-        "{email} can now sign in at {}/signin.",
-        hot::env::get_app_url()
-    );
+    eprintln!("{}", sign_in_notice(&email, conf));
     Ok(())
+}
+
+/// Tell the operator where the new administrator signs in. An install that
+/// names no address of its own falls back to Hot Cloud's app in production, and
+/// following that would put this installation's password into another service.
+fn sign_in_notice(email: &str, conf: &Val) -> String {
+    match hot::email::own_app_address(conf) {
+        Some(address) => format!("{email} can now sign in at {address}/signin."),
+        None => format!("{email} can now sign in at /signin on this installation's app address."),
+    }
 }
 
 /// Replace the password of an existing password sign-in.
@@ -198,6 +205,26 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(auth.user_id, user_id);
+    }
+
+    #[test]
+    fn the_sign_in_notice_names_only_this_installations_address() {
+        let notice = |app_url: &str| {
+            sign_in_notice(
+                "admin@example.com",
+                &hot::val!({"email": {"app-url": app_url}}),
+            )
+        };
+        assert_eq!(
+            notice("https://hot.acme.com/"),
+            "admin@example.com can now sign in at https://hot.acme.com/signin."
+        );
+        for hot_cloud in ["https://app.hot.dev", "https://app.hot-stg.dev/"] {
+            assert_eq!(
+                notice(hot_cloud),
+                "admin@example.com can now sign in at /signin on this installation's app address."
+            );
+        }
     }
 
     #[tokio::test]

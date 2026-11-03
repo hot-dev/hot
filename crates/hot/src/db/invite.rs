@@ -208,7 +208,8 @@ impl Invite {
         }
     }
 
-    /// Get invites by email
+    /// Get invites by email, in any case: as when one is accepted, and as
+    /// `insert_invite` treats duplicates.
     pub async fn get_invites_by_email(
         db: &crate::db::DatabasePool,
         email: &str,
@@ -216,7 +217,7 @@ impl Invite {
         match db {
             crate::db::DatabasePool::Sqlite(db) => {
                 let rows = sqlx::query_as::<_, Invite>(
-                    "SELECT invite_id, invite_code, email, org_id, invite_status_id, intended_org_user_role_id, active, created_at, created_by_user_id, updated_at, updated_by_user_id, expires_at, used_at FROM invite WHERE email = ? AND active = 1 ORDER BY created_at DESC",
+                    "SELECT invite_id, invite_code, email, org_id, invite_status_id, intended_org_user_role_id, active, created_at, created_by_user_id, updated_at, updated_by_user_id, expires_at, used_at FROM invite WHERE lower(email) = lower(?) AND active = 1 ORDER BY created_at DESC",
                 )
                 .bind(email)
                 .fetch_all(db)
@@ -226,7 +227,7 @@ impl Invite {
             }
             crate::db::DatabasePool::Postgres(db) => {
                 let rows = sqlx::query_as::<_, Invite>(
-                    "SELECT invite_id, invite_code, email, org_id, invite_status_id, intended_org_user_role_id, active, created_at, created_by_user_id, updated_at, updated_by_user_id, expires_at, used_at FROM invite WHERE email = $1 AND active = true ORDER BY created_at DESC",
+                    "SELECT invite_id, invite_code, email, org_id, invite_status_id, intended_org_user_role_id, active, created_at, created_by_user_id, updated_at, updated_by_user_id, expires_at, used_at FROM invite WHERE lower(email) = lower($1) AND active = true ORDER BY created_at DESC",
                 )
                 .bind(email)
                 .fetch_all(db)
@@ -536,6 +537,36 @@ mod tests {
         // Ensure it's different each time
         let code2 = Invite::generate_invite_code();
         assert_ne!(code, code2);
+    }
+
+    #[tokio::test]
+    async fn invites_are_found_by_address_in_any_case() {
+        let db = crate::db::test_db().await;
+        let (root, admin, _) = crate::db::insert_default_data(&db).await.unwrap();
+        let expiry = Utc::now() + chrono::Duration::days(1);
+        Invite::insert_invite(
+            &db,
+            &Uuid::now_v7(),
+            "mixed-case",
+            "Bob@Example.test",
+            &root,
+            1,
+            &admin,
+            expiry,
+        )
+        .await
+        .unwrap();
+        for address in ["Bob@Example.test", "bob@example.test", "BOB@EXAMPLE.TEST"] {
+            let found = Invite::get_invites_by_email(&db, address).await.unwrap();
+            assert_eq!(found.len(), 1, "{address}");
+            assert_eq!(found[0].invite_code, "mixed-case");
+        }
+        assert!(
+            Invite::get_invites_by_email(&db, "bobby@example.test")
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }
 

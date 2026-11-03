@@ -437,6 +437,12 @@ async fn setup_db() -> DatabasePool {
     db
 }
 
+/// Record the host the App listens on, as it does at startup. This holds for
+/// the whole process, so a test binary that calls it should hold a single test.
+pub fn set_listen_host(host: &str) {
+    crate::auth::set_listen_host(host);
+}
+
 fn minimal_conf() -> Val {
     // The router only reads a few keys off `conf`; supply just those so
     // handlers get sensible defaults.

@@ -1493,6 +1493,9 @@ pub struct PublicPageContext {
     pub is_production: bool,
     /// Whether the sign-up form admits people without an invitation.
     pub open_signup: bool,
+    /// Whether sign-in with Google or GitHub is configured.
+    pub google_signin: bool,
+    pub github_signin: bool,
 }
 
 impl PublicPageContext {
@@ -1509,6 +1512,20 @@ impl PublicPageContext {
     }
 
     pub fn new_with_conf(current_page: &str, conf: &hot::val::Val) -> Self {
+        // Local development signs in automatically. Without that the default
+        // experience has sign-in pages too, and they offer what is configured.
+        let oauth = (!(hot::product::is_local_dev_experience(conf)
+            && crate::auth::local_dev_conveniences()))
+        .then(|| {
+            // The app refuses to start with these broken, but a secret file
+            // can go missing later. Say why the buttons went away.
+            crate::oauth::OAuthConfig::from_env()
+                .inspect_err(|error| {
+                    tracing::error!("hot.dev: APP OAuth configuration failed: {error}")
+                })
+                .ok()
+        })
+        .flatten();
         Self {
             current_page: current_page.to_string(),
             assets_prefix: get_assets_prefix(),
@@ -1524,6 +1541,8 @@ impl PublicPageContext {
             web_url: hot::product::web_url(conf),
             is_production: hot::env::get_env() == "production",
             open_signup: crate::signup::open_signup_available(conf),
+            google_signin: oauth.as_ref().is_some_and(|oauth| oauth.google.is_some()),
+            github_signin: oauth.as_ref().is_some_and(|oauth| oauth.github.is_some()),
         }
     }
 
@@ -2066,6 +2085,10 @@ pub struct CheckEmail<'a> {
     pub is_free_plan: bool,
     /// When true, hide the resend form and explain the resend cap.
     pub resend_capped: bool,
+    /// When true, send invited people to their invitation link instead of
+    /// saying an email went out, which it may not have. The text then doesn't
+    /// depend on the address, so `is_free_plan` adds nothing.
+    pub invite_only: bool,
 }
 
 #[derive(Template)]
@@ -2508,7 +2531,8 @@ pub struct OrgUsersInvite<'a> {
     pub org: hot::db::org::Org,
     pub error_message: &'a str,
     pub success_message: &'a str,
-    /// Shown when the installation cannot email the invitation itself.
+    /// The invitation's path, shown as a link on this page's origin when
+    /// the installation cannot email the invitation itself.
     pub invite_link: &'a str,
     pub email: &'a str,
     pub role_id: i16,
@@ -4224,6 +4248,37 @@ mod tests {
         };
 
         RunDisplay::from_with_timezone(&run, "UTC", "UTC")
+    }
+
+    #[test]
+    fn sign_in_offers_the_configured_oauth_providers() {
+        let render = |google_signin: bool, github_signin: bool| {
+            let mut page_context = PublicPageContext::new_with_conf(
+                "signin",
+                &hot::val!({"product": {"experience": "self-host"}}),
+            );
+            page_context.google_signin = google_signin;
+            page_context.github_signin = github_signin;
+            SignIn {
+                title: "Sign In",
+                page_context,
+                error_message: "",
+                invite_code: "code",
+                next: "",
+                plan: "",
+                billing: "",
+                form_token: "token",
+            }
+            .render()
+            .unwrap()
+        };
+        let neither = render(false, false);
+        assert!(!neither.contains("/auth/google") && !neither.contains("/auth/github"));
+        let google = render(true, false);
+        assert!(google.contains("/auth/google?invite_code=code"));
+        assert!(!google.contains("/auth/github"));
+        let both = render(true, true);
+        assert!(both.contains("/auth/google") && both.contains("/auth/github"));
     }
 
     #[test]

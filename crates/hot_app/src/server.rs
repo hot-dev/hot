@@ -2,7 +2,6 @@ use crate::routes;
 use crate::templates;
 use axum::http::header;
 use hot::db::{check_default_data_exists, create_db_pool, insert_default_data, run_migrations};
-use hot::log;
 use hot::stream::{StreamPubSub, StreamPubSubType};
 use hot::val;
 use hot::val::Val;
@@ -65,10 +64,19 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
         .unwrap_or_else(|error| panic!("hot.dev: APP OAuth configuration failed: {error}"));
     crate::signup::SignupPolicy::from_conf(&conf)
         .unwrap_or_else(|error| panic!("hot.dev: APP sign-up configuration failed: {error}"));
+    let email_purpose = hot::email::EmailPurpose::App;
+    if !matches!(
+        hot::email::configured_email_provider(&conf, email_purpose).as_str(),
+        "" | "none"
+    ) && let Err(reason) = hot::email::email_delivery_status(&conf, email_purpose)
+    {
+        warn!(
+            "hot.dev: APP cannot send email: {reason}. Admins share invitation links instead, \
+             and a self-hosted installation admits only invited users."
+        );
+    }
 
     let port = resolved_conf.get_int_or_default("port", DEFAULT_APP_PORT as i64) as u16;
-    let log_level_str = resolved_conf.get_str_or_default("log.level", "info");
-    let log_level = log::string_to_level(&log_level_str);
 
     // Initialize the assets URL prefix for templates
     templates::init_assets_prefix(ASSETS_URL_PREFIX.to_string());
@@ -286,40 +294,7 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
         .nest_service(ASSETS_URL_PREFIX, cached_assets)
         .layer(
             TraceLayer::new_for_http()
-                .make_span_with(move |request: &axum::http::Request<axum::body::Body>| {
-                    match log_level {
-                        tracing::Level::ERROR => tracing::error_span!(
-                            "http_request",
-                            method = %request.method(),
-                            path = %request.uri().path(),
-                            request_id = %hot::request_id::of(request),
-                        ),
-                        tracing::Level::WARN => tracing::warn_span!(
-                            "http_request",
-                            method = %request.method(),
-                            path = %request.uri().path(),
-                            request_id = %hot::request_id::of(request),
-                        ),
-                        tracing::Level::INFO => tracing::info_span!(
-                            "http_request",
-                            method = %request.method(),
-                            path = %request.uri().path(),
-                            request_id = %hot::request_id::of(request),
-                        ),
-                        tracing::Level::DEBUG => tracing::debug_span!(
-                            "http_request",
-                            method = %request.method(),
-                            path = %request.uri().path(),
-                            request_id = %hot::request_id::of(request),
-                        ),
-                        tracing::Level::TRACE => tracing::trace_span!(
-                            "http_request",
-                            method = %request.method(),
-                            path = %request.uri().path(),
-                            request_id = %hot::request_id::of(request),
-                        ),
-                    }
-                })
+                .make_span_with(request_span)
                 .on_request(trace::DefaultOnRequest::new().level(tracing::Level::DEBUG))
                 .on_response(trace::DefaultOnResponse::new().level(tracing::Level::DEBUG)),
         )
@@ -364,4 +339,32 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
     }
 
     info!("hot.dev: APP shutdown complete");
+}
+
+/// The span that gives a request's log lines its ID. At ERROR so it exists at
+/// every log level: below the filter's level no line logged inside it would
+/// carry the ID. A span's level only decides that; the span logs nothing itself.
+fn request_span<B>(request: &axum::http::Request<B>) -> tracing::Span {
+    tracing::error_span!(
+        "http_request",
+        method = %request.method(),
+        path = %request.uri().path(),
+        request_id = %hot::request_id::of(request),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_requests_span_exists_at_every_log_level() {
+        let request = axum::http::Request::get("/runs").body(()).unwrap();
+        let span = request_span(&request);
+        let metadata = span.metadata().expect("the span's callsite");
+        assert_eq!(*metadata.level(), tracing::Level::ERROR);
+        for field in ["method", "path", "request_id"] {
+            assert!(metadata.fields().field(field).is_some(), "{field}");
+        }
+    }
 }

@@ -892,12 +892,14 @@ pub async fn org_users_invite_post_handler(
         ));
     }
 
-    // Check if there's already a pending invite for this email
+    // Check if there's already a pending invite for this email. An expired
+    // invite no longer counts, so the person can be invited again.
     if let Ok(existing_invites) =
         hot::db::invite::Invite::get_invites_by_email(&db, &form.email).await
         && existing_invites.iter().any(|invite| {
             invite.org_id == org.org_id
                 && invite.get_status() == hot::db::invite::InviteStatus::Invited
+                && invite.is_valid().is_ok()
         })
     {
         return Err(render_org_users_invite_with_error(
@@ -959,13 +961,11 @@ pub async fn org_users_invite_post_handler(
         Ok(_) => {
             // Without an email provider the queued email would only fail, so
             // the inviting admin delivers the link instead. (The Err arm is
-            // this handler's "render a page" path.)
+            // this handler's "render a page" path.) The page completes the
+            // link with the address the admin reached the app at, as the
+            // users list's copy button does.
             if !hot::email::email_delivery_configured(&conf, hot::email::EmailPurpose::App) {
-                let invite_link = format!(
-                    "{}/invite?code={}",
-                    hot::email::EmailConfig::from_conf(&conf).app_base_url,
-                    invite_code
-                );
+                let invite_link = format!("/invite?code={}", invite_code);
                 return Err(render_org_users_invite(
                     &session,
                     &org,
