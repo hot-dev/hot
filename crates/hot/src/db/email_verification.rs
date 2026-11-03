@@ -149,7 +149,7 @@ impl EmailVerification {
         }
     }
 
-    /// Get pending verification by email (most recent)
+    /// Get pending verification by email, whatever its capitals (most recent)
     pub async fn get_pending_by_email(
         db: &crate::db::DatabasePool,
         email: &str,
@@ -157,7 +157,7 @@ impl EmailVerification {
         match db {
             crate::db::DatabasePool::Sqlite(pool) => {
                 let row = sqlx::query_as::<_, EmailVerification>(
-                    "SELECT verification_id, email, name, password_hash, verification_token, status_id, invite_code, plan, billing, created_at, expires_at, verified_at, attempts FROM email_verification WHERE email = ? AND status_id = 1 ORDER BY created_at DESC LIMIT 1",
+                    "SELECT verification_id, email, name, password_hash, verification_token, status_id, invite_code, plan, billing, created_at, expires_at, verified_at, attempts FROM email_verification WHERE email_lower = lower(?) AND status_id = 1 ORDER BY created_at DESC LIMIT 1",
                 )
                 .bind(email)
                 .fetch_optional(pool)
@@ -167,7 +167,7 @@ impl EmailVerification {
             }
             crate::db::DatabasePool::Postgres(pool) => {
                 let row = sqlx::query_as::<_, EmailVerification>(
-                    "SELECT verification_id, email, name, password_hash, verification_token, status_id, invite_code, plan, billing, created_at, expires_at, verified_at, attempts FROM email_verification WHERE email = $1 AND status_id = 1 ORDER BY created_at DESC LIMIT 1",
+                    "SELECT verification_id, email, name, password_hash, verification_token, status_id, invite_code, plan, billing, created_at, expires_at, verified_at, attempts FROM email_verification WHERE email_lower = lower($1 COLLATE \"C\") AND status_id = 1 ORDER BY created_at DESC LIMIT 1",
                 )
                 .bind(email)
                 .fetch_optional(pool)
@@ -178,7 +178,8 @@ impl EmailVerification {
         }
     }
 
-    /// Get the most recent verification record for an email, regardless of status.
+    /// Get the most recent verification record for an email, whatever its
+    /// capitals, regardless of status.
     ///
     /// Used by the org-recovery path: if a user lands on `/claim-handle` (or
     /// `/billing/create-checkout-form`) authenticated but with no org, we can
@@ -192,7 +193,7 @@ impl EmailVerification {
         match db {
             crate::db::DatabasePool::Sqlite(pool) => {
                 let row = sqlx::query_as::<_, EmailVerification>(
-                    "SELECT verification_id, email, name, password_hash, verification_token, status_id, invite_code, plan, billing, created_at, expires_at, verified_at, attempts FROM email_verification WHERE email = ? ORDER BY created_at DESC LIMIT 1",
+                    "SELECT verification_id, email, name, password_hash, verification_token, status_id, invite_code, plan, billing, created_at, expires_at, verified_at, attempts FROM email_verification WHERE email_lower = lower(?) ORDER BY created_at DESC LIMIT 1",
                 )
                 .bind(email)
                 .fetch_optional(pool)
@@ -202,7 +203,7 @@ impl EmailVerification {
             }
             crate::db::DatabasePool::Postgres(pool) => {
                 let row = sqlx::query_as::<_, EmailVerification>(
-                    "SELECT verification_id, email, name, password_hash, verification_token, status_id, invite_code, plan, billing, created_at, expires_at, verified_at, attempts FROM email_verification WHERE email = $1 ORDER BY created_at DESC LIMIT 1",
+                    "SELECT verification_id, email, name, password_hash, verification_token, status_id, invite_code, plan, billing, created_at, expires_at, verified_at, attempts FROM email_verification WHERE email_lower = lower($1 COLLATE \"C\") ORDER BY created_at DESC LIMIT 1",
                 )
                 .bind(email)
                 .fetch_optional(pool)

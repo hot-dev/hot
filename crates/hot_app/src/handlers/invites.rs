@@ -83,7 +83,7 @@ pub async fn invite_accept_handler(
     let is_authenticated = if let Some(user_id) = get_user_id_from_cookies(&cookies) {
         match hot::db::user::User::get_user(&db, &user_id).await {
             Ok(user) => {
-                if user.email == invite.email {
+                if user.email.eq_ignore_ascii_case(&invite.email) {
                     true
                 } else {
                     // Email doesn't match, show error
@@ -213,7 +213,7 @@ pub async fn invite_accept_post_handler(
     }
 
     // Verify email matches
-    if user.email != invite.email {
+    if !user.email.eq_ignore_ascii_case(&invite.email) {
         return Html(format!(
             r#"<html><head><title>Email Mismatch</title></head>
             <body><h1>Email Mismatch</h1>

@@ -547,8 +547,16 @@ pub async fn authenticate_user(
         return Err("Invalid email or password".to_string());
     }
 
-    // Get user authentication record
-    let user_auth = match UserAuth::get_user_auth(db, "email_password", email).await {
+    // The address finds the account, whatever its capitals, and the account
+    // finds its password.
+    let user = match User::get_user_by_email(db, email).await {
+        Ok(user) => user,
+        Err(e) => {
+            tracing::warn!("No account found for {}: {:?}", email, e);
+            return Err("Invalid email or password".to_string());
+        }
+    };
+    let user_auth = match UserAuth::get_user_auth(db, &user.user_id, "email_password").await {
         Ok(auth) => {
             tracing::debug!("Found user_auth record for {}", email);
             tracing::debug!("user_auth.user_id: {}", auth.user_id);
@@ -594,18 +602,6 @@ pub async fn authenticate_user(
     }
 
     tracing::debug!("Password verified for email: {}", email);
-
-    // Get the user record
-    let user = match User::get_user(db, &user_auth.user_id).await {
-        Ok(user) => {
-            tracing::debug!("Found user record for {}: {}", email, user.user_id);
-            user
-        }
-        Err(e) => {
-            tracing::error!("Failed to get user record for {}: {:?}", email, e);
-            return Err("Authentication error".to_string());
-        }
-    };
 
     tracing::debug!("Authentication successful for email: {}", email);
     Ok(user)

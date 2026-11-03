@@ -1657,8 +1657,9 @@ mod tests {
     async fn sqlite_local_identity_has_no_password() {
         let db = test_db().await;
         insert_default_data(&db).await.unwrap();
+        let local = User::get_user_by_email(&db, "local@hot.dev").await.unwrap();
         assert!(matches!(
-            UserAuth::get_user_auth(&db, "email_password", "local@hot.dev").await,
+            UserAuth::get_user_auth(&db, &local.user_id, "email_password").await,
             Err(UserError::Database(sqlx::Error::RowNotFound))
         ));
     }
@@ -1676,8 +1677,9 @@ mod tests {
         if User::get_user_by_email(&db, "local@hot.dev").await.is_err() {
             insert_default_data(&db).await.unwrap();
         }
+        let local = User::get_user_by_email(&db, "local@hot.dev").await.unwrap();
         assert!(matches!(
-            UserAuth::get_user_auth(&db, "email_password", "local@hot.dev").await,
+            UserAuth::get_user_auth(&db, &local.user_id, "email_password").await,
             Err(UserError::Database(sqlx::Error::RowNotFound))
         ));
     }

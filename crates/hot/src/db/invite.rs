@@ -208,7 +208,7 @@ impl Invite {
         }
     }
 
-    /// Get invites by email
+    /// Get invites by email, whatever its capitals
     pub async fn get_invites_by_email(
         db: &crate::db::DatabasePool,
         email: &str,
@@ -216,7 +216,7 @@ impl Invite {
         match db {
             crate::db::DatabasePool::Sqlite(db) => {
                 let rows = sqlx::query_as::<_, Invite>(
-                    "SELECT invite_id, invite_code, email, org_id, invite_status_id, intended_org_user_role_id, active, created_at, created_by_user_id, updated_at, updated_by_user_id, expires_at, used_at FROM invite WHERE email = ? AND active = 1 ORDER BY created_at DESC",
+                    "SELECT invite_id, invite_code, email, org_id, invite_status_id, intended_org_user_role_id, active, created_at, created_by_user_id, updated_at, updated_by_user_id, expires_at, used_at FROM invite WHERE lower(email) = lower(?) AND active = 1 ORDER BY created_at DESC",
                 )
                 .bind(email)
                 .fetch_all(db)
@@ -226,7 +226,7 @@ impl Invite {
             }
             crate::db::DatabasePool::Postgres(db) => {
                 let rows = sqlx::query_as::<_, Invite>(
-                    "SELECT invite_id, invite_code, email, org_id, invite_status_id, intended_org_user_role_id, active, created_at, created_by_user_id, updated_at, updated_by_user_id, expires_at, used_at FROM invite WHERE email = $1 AND active = true ORDER BY created_at DESC",
+                    "SELECT invite_id, invite_code, email, org_id, invite_status_id, intended_org_user_role_id, active, created_at, created_by_user_id, updated_at, updated_by_user_id, expires_at, used_at FROM invite WHERE lower(email COLLATE \"C\") = lower($1 COLLATE \"C\") AND active = true ORDER BY created_at DESC",
                 )
                 .bind(email)
                 .fetch_all(db)
