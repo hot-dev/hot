@@ -90,10 +90,14 @@ fn fall_back_from_fallocate(
 /// as root and can take those too, and then PostgreSQL, which doesn't run as
 /// root, finds the disk full.
 ///
-/// A real disk must hold all that admission counts for the box, not just its
-/// volume: the image and writable rootfs come next, from a thin pool in a sparse
-/// file on the same disk, and a box that only just fits would leave PostgreSQL
-/// next to nothing for as long as it runs.
+/// A real disk must have free all that admission counts for the box, not just
+/// its volume. Where PostgreSQL or Valkey share the disk, the thin pool's data
+/// file holds its blocks, so the box's image and writable rootfs take nothing
+/// more from the disk, and the rest is left for them: a box that only just fit
+/// its volume would leave PostgreSQL next to nothing for as long as it runs.
+/// Where the pool stays sparse, on a scalable task host whose disk holds no
+/// database, the rest is what the image and rootfs take from the disk as the
+/// box writes.
 ///
 /// tmpfs is exempt, and its backing file stays sparse. Its blocks are memory,
 /// which the box would hold at its full size for its whole lifetime, and its
@@ -112,7 +116,7 @@ fn ensure_disk_holds(
     let required_mb = crate::resource_budget::disk_admission_mb(size_mb);
     if available_bytes < required_mb.saturating_mul(MB) {
         return Err(DataVolumeError::Io(format!(
-            "the disk has {} MB available, less than the {} MB a box with a {} MB /data may use",
+            "the disk has {} MB available, less than the {} MB counted for a box with a {} MB /data",
             available_bytes / MB,
             required_mb,
             size_mb
@@ -649,15 +653,15 @@ mod tests {
     #[test]
     fn a_volume_must_fit_in_what_unprivileged_writers_have_free() {
         const MB: u64 = 1024 * 1024;
-        // A real disk holds what admission counts for the box: room to fit the
-        // volume alone isn't enough.
+        // A real disk has free what admission counts for the box, held pool or
+        // sparse: room to fit the volume alone isn't enough.
         assert!(ensure_disk_holds(8448 * MB, 5120, false).is_ok());
         assert!(ensure_disk_holds(5120 * MB, 5120, false).is_err());
         let error = ensure_disk_holds(8448 * MB - 1, 5120, false)
             .unwrap_err()
             .to_string();
         assert!(error.contains("8447 MB available"), "{error}");
-        assert!(error.contains("the 8448 MB a box"), "{error}");
+        assert!(error.contains("the 8448 MB counted for a box"), "{error}");
         assert!(error.contains("a 5120 MB /data"), "{error}");
 
         // tmpfs gets a sparse file, so its free space says nothing about the box.
