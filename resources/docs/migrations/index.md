@@ -49,6 +49,7 @@ Hot 3.0.2 masks more secrets in call and run records. See [Secret Masking](/docs
 
 - A stored `run.result` no longer holds credential fields or registered secrets. Code that reads a run's result back through the API to get a credential now sees `<secret>`. A webhook or MCP caller waiting on the run still receives the real result.
 - A value is masked inside longer strings once registered, so a secret key holding a short, common value can hide more of a record than before. Declare `secret: false` on configuration values. Declared defaults aren't masked inside strings.
+- Named functions now run implicit arrows in `map` and other callbacks, in `call`, and through a variable, as direct calls do. A callback that relied on receiving the unconverted value now gets the converted one.
 
 **Packages** that call `::hot::ctx/mark-secret` need `hot-min-version: "3.0.2"`.
 
