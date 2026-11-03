@@ -14,7 +14,10 @@ use hot_app::test_support::{TestClient, TestResponse};
 use sqlx::{Executor, PgPool};
 use uuid::Uuid;
 
-const PASSWORD: &str = "supersecret123";
+/// A password no other run shares.
+fn new_password() -> String {
+    Uuid::new_v4().simple().to_string()
+}
 
 /// One address in the three spellings the scenarios sign in with.
 struct Address {
@@ -34,14 +37,19 @@ impl Address {
     }
 }
 
-async fn sign_up(client: &mut TestClient, email: &str, query: &str) -> TestResponse {
+async fn sign_up(
+    client: &mut TestClient,
+    email: &str,
+    password: &str,
+    query: &str,
+) -> TestResponse {
     let form_token = client.prime_csrf();
     client
         .post_form(
             &format!("/signup{query}"),
             &[
                 ("email", email),
-                ("password", PASSWORD),
+                ("password", password),
                 ("name", "Test Person"),
                 ("website", ""),
                 ("form_token", &form_token),
@@ -100,9 +108,10 @@ async fn accounts_named(db: &DatabasePool, address: &Address) -> i64 {
 /// Form sign-up, verification, resend and sign-in all reach one account from
 /// any spelling, and mail goes to the address as it was typed.
 async fn form_sign_up_and_sign_in(client: &mut TestClient, db: &DatabasePool, run: &str) {
+    let password = new_password();
     let dana = Address::new("Dana", run);
 
-    let response = sign_up(client, &dana.typed, "").await;
+    let response = sign_up(client, &dana.typed, &password, "").await;
     assert!(response.status.is_success(), "{}", response.body);
     let pending = EmailVerification::get_pending_by_email(db, &dana.lower)
         .await
@@ -111,7 +120,7 @@ async fn form_sign_up_and_sign_in(client: &mut TestClient, db: &DatabasePool, ru
     assert_eq!(pending.email, dana.typed, "the address stays as typed");
 
     // Refreshing the form with other capitals starts nothing new.
-    let response = sign_up(client, &dana.upper, "").await;
+    let response = sign_up(client, &dana.upper, &password, "").await;
     assert!(response.status.is_success(), "{}", response.body);
     let again = EmailVerification::get_pending_by_email(db, &dana.upper)
         .await
@@ -163,7 +172,7 @@ async fn form_sign_up_and_sign_in(client: &mut TestClient, db: &DatabasePool, ru
     assert_eq!(found.verification_id, pending.verification_id);
 
     // A second spelling can't make a second account, through the form or below it.
-    let response = sign_up(client, &dana.lower, "").await;
+    let response = sign_up(client, &dana.lower, &password, "").await;
     assert!(
         response
             .body
@@ -181,9 +190,9 @@ async fn form_sign_up_and_sign_in(client: &mut TestClient, db: &DatabasePool, ru
     assert_eq!(accounts_named(db, &dana).await, 1);
 
     for spelling in [&dana.typed, &dana.lower, &dana.upper] {
-        assert!(signs_in(client, spelling, PASSWORD).await, "{spelling}");
+        assert!(signs_in(client, spelling, &password).await, "{spelling}");
     }
-    assert!(!signs_in(client, &dana.lower, "not-the-password").await);
+    assert!(!signs_in(client, &dana.lower, &new_password()).await);
 }
 
 /// OAuth reaches the same account from any spelling, links once, and creates
@@ -317,7 +326,13 @@ async fn invitations(client: &mut TestClient, db: &DatabasePool, run: &str) {
         1,
         "found under other capitals"
     );
-    let response = sign_up(client, &bob.upper, &format!("?invite_code=signup-{run}")).await;
+    let response = sign_up(
+        client,
+        &bob.upper,
+        &new_password(),
+        &format!("?invite_code=signup-{run}"),
+    )
+    .await;
     assert!(response.status.is_redirection(), "{}", response.body);
     assert!(
         client.cookies().get("hot_auth_token").is_some(),
@@ -400,10 +415,10 @@ async fn accounts_older_than_the_index(client: &mut TestClient, db: &DatabasePoo
                 .unwrap();
         }
     }
-    let other_password = "another-password";
+    let (keeper_password, other_password) = (new_password(), new_password());
     for (user, email, password) in [
-        (keeper, &fay.lower, PASSWORD),
-        (exact, &exact_spelling, other_password),
+        (keeper, &fay.lower, &keeper_password),
+        (exact, &exact_spelling, &other_password),
     ] {
         let hash = hot::auth::hash_password_with_random_salt(password).unwrap();
         let data: serde_json::Value = serde_json::from_str(&hash).unwrap();
@@ -428,11 +443,11 @@ async fn accounts_older_than_the_index(client: &mut TestClient, db: &DatabasePoo
         let user = User::get_user_by_email(db, spelling).await.unwrap();
         assert_eq!(user.user_id, expected, "{spelling}");
     }
-    assert!(signs_in(client, &fay.lower, PASSWORD).await);
-    assert!(signs_in(client, &exact_spelling, other_password).await);
-    assert!(signs_in(client, &fay.typed, PASSWORD).await);
-    assert!(!signs_in(client, &exact_spelling, PASSWORD).await);
-    assert!(!signs_in(client, &fay.typed, other_password).await);
+    assert!(signs_in(client, &fay.lower, &keeper_password).await);
+    assert!(signs_in(client, &exact_spelling, &other_password).await);
+    assert!(signs_in(client, &fay.typed, &keeper_password).await);
+    assert!(!signs_in(client, &exact_spelling, &keeper_password).await);
+    assert!(!signs_in(client, &fay.typed, &other_password).await);
 }
 
 async fn every_scenario(client: &mut TestClient, conf: &Val) {
