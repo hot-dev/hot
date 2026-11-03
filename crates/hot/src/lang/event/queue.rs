@@ -351,12 +351,22 @@ impl TryFrom<Message> for MaintenanceMessage {
     }
 }
 
+/// Message head key naming the one event handler (`ns/var`) a retry is for.
+pub const RETRIED_HANDLER_HEAD: &str = "retried_event_handler_fn";
+
 /// Message format for queue events
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventMessage {
     pub id: Uuid,
     pub head: AHashMap<String, String>,
     pub body: EventMessageBody,
+}
+
+impl EventMessage {
+    /// The handler a retry is for. Any other event runs all its handlers.
+    pub fn retried_handler(&self) -> Option<&str> {
+        self.head.get(RETRIED_HANDLER_HEAD).map(String::as_str)
+    }
 }
 
 /// Event message body containing the event and execution context
@@ -648,6 +658,7 @@ impl TryFrom<Message> for EventMessage {
                     None
                 }
             }),
+            event_handler_fn: None,
             deadline_at: None,
             trace_calls: true,
             queue_timing: None,

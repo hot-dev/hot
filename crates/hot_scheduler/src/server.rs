@@ -7,7 +7,9 @@ use hot::db::{
     SchedulerState,
 };
 use hot::env::is_local_dev;
-use hot::lang::event::{Event, EventMessage, EventMessageBody, ExecutionContext};
+use hot::lang::event::{
+    Event, EventMessage, EventMessageBody, ExecutionContext, RETRIED_HANDLER_HEAD,
+};
 use hot::queue::{Queue, QueueType, mem::MemQueue, sqlite::SqliteQueue, streams::RedisStreamQueue};
 use hot::val;
 use hot::val::Val;
@@ -1736,6 +1738,7 @@ async fn queue_schedule_execution(
         secret_values: Default::default(),
         access_id: None, // Scheduler-initiated, no API access log
         agent_type: None,
+        event_handler_fn: None,
         queue_timing: None,
         // Enqueue-only producer context; the worker stamps deadline_at at admission
         deadline_at: None,
@@ -2018,6 +2021,7 @@ async fn process_pending_retries(
             secret_values: Default::default(),
             access_id: run.access_id, // Propagate from original run if available
             agent_type: None,
+            event_handler_fn: None,
             queue_timing: None,
             // Enqueue-only producer context; the worker stamps deadline_at at admission
             deadline_at: None,
@@ -2043,6 +2047,10 @@ async fn process_pending_retries(
         head.insert("event_type".to_string(), original_event.event_type.clone());
         head.insert("retry_of_run_id".to_string(), run.run_id.to_string());
         head.insert("retry_attempt".to_string(), run.retry_attempt.to_string());
+        // The retry is this handler's alone, not the whole event's
+        if let Some(event_handler_fn) = &run.event_handler_fn {
+            head.insert(RETRIED_HANDLER_HEAD.to_string(), event_handler_fn.clone());
+        }
         head.insert("timestamp".to_string(), Utc::now().to_rfc3339());
 
         // Create the EventMessage
@@ -2859,11 +2867,12 @@ mod tests {
             panic!("test_db should be SQLite");
         };
         sqlx::query(
-            "UPDATE run SET status_id = ?, retry_attempt = 1, next_retry_at = ?, event_id = ? WHERE run_id = ?",
+            "UPDATE run SET status_id = ?, retry_attempt = 1, next_retry_at = ?, event_id = ?, event_handler_fn = ? WHERE run_id = ?",
         )
         .bind(hot::db::run::RunStatus::PendingRetry.as_id())
         .bind(Utc::now() - chrono::Duration::seconds(60))
         .bind(event_id)
+        .bind("::orders/on-created")
         .bind(data.run_id)
         .execute(pool)
         .await
@@ -2900,6 +2909,11 @@ mod tests {
             Some(data.run_id)
         );
         assert_eq!(event_message.body.execution_context.retry_attempt, 1);
+        assert_eq!(
+            event_message.retried_handler(),
+            Some("::orders/on-created"),
+            "a retry runs the failed run's handler alone"
+        );
     }
 
     /// The fixture run's status, retry attempt and info.
