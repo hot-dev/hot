@@ -23,7 +23,7 @@ fastnum = { workspace = true }
 serde_json = { workspace = true, features = ["preserve_order", "arbitrary_precision"] }
 postcard = { workspace = true }
 serde = { workspace = true }
-uuid = { workspace = true, features = ["serde", "v4", "v7"] }
+uuid = { workspace = true, features = ["serde", "v4", "v5", "v7"] }
 # Request IDs for the app and API (request_id.rs).
 axum = { workspace = true }
 ariadne.workspace = true

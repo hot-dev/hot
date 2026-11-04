@@ -5,6 +5,7 @@
 //! `HOT_TEST_POSTGRES_URI` adds a PostgreSQL pass, in its own database.
 #![cfg(unix)]
 
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -82,8 +83,17 @@ impl Drop for Dev {
     }
 }
 
-/// An event run: its id, environment and org, its failure, and its status.
-type EventRun = (Uuid, Uuid, Uuid, Option<String>, i64);
+#[derive(sqlx::FromRow)]
+struct EventRun {
+    run_id: Uuid,
+    origin_run_id: Option<Uuid>,
+    stream_id: Uuid,
+    env_id: Uuid,
+    org_id: Uuid,
+    failure: Option<String>,
+    status_id: i64,
+    info: Option<String>,
+}
 
 /// The event runs recorded so far.
 async fn event_runs(database: &Database, home: &Path) -> Vec<EventRun> {
@@ -92,7 +102,8 @@ async fn event_runs(database: &Database, home: &Path) -> Vec<EventRun> {
             let uri = format!("sqlite:{}?mode=ro", home.join("db/hot.sqlite.db").display());
             let pool = sqlx::SqlitePool::connect(&uri).await.unwrap();
             let runs = sqlx::query_as(
-                r#"SELECT run_id, r.env_id, org_id, json_extract(result, '$."$val".msg'), status_id
+                r#"SELECT run_id, origin_run_id, stream_id, r.env_id, org_id,
+                          json_extract(result, '$."$val".msg') AS failure, status_id, info
                    FROM run r JOIN env e ON e.env_id = r.env_id WHERE run_type_id = 2"#,
             )
             .fetch_all(&pool)
@@ -104,7 +115,9 @@ async fn event_runs(database: &Database, home: &Path) -> Vec<EventRun> {
         Database::Postgres(uri) => {
             let pool = sqlx::PgPool::connect(uri).await.unwrap();
             let runs = sqlx::query_as(
-                "SELECT run_id, r.env_id, org_id, result->'$val'->>'msg', status_id::bigint
+                "SELECT run_id, origin_run_id, stream_id, r.env_id, org_id,
+                        result->'$val'->>'msg' AS failure, status_id::bigint AS status_id,
+                        info::text AS info
                  FROM hot.run r JOIN hot.env e ON e.env_id = r.env_id WHERE run_type_id = 2",
             )
             .fetch_all(&pool)
@@ -120,11 +133,12 @@ async fn event_runs(database: &Database, home: &Path) -> Vec<EventRun> {
 async fn attempts(database: &Database, home: &Path) -> (BTreeMap<String, Vec<i64>>, usize) {
     let mut attempts: BTreeMap<String, Vec<i64>> = BTreeMap::new();
     let mut unsettled = 0;
-    for (_, _, _, failure, status_id) in event_runs(database, home).await {
-        if status_id != 3 {
+    for run in event_runs(database, home).await {
+        if run.status_id != 3 {
             unsettled += 1;
         }
-        if let Some((handler, attempt)) = failure.as_deref().and_then(|msg| msg.split_once(' ')) {
+        let failure = run.failure.as_deref();
+        if let Some((handler, attempt)) = failure.and_then(|msg| msg.split_once(' ')) {
             attempts
                 .entry(handler.to_string())
                 .or_default()
@@ -133,6 +147,56 @@ async fn attempts(database: &Database, home: &Path) -> (BTreeMap<String, Vec<i64
     }
     attempts.values_mut().for_each(|attempts| attempts.sort());
     (attempts, unsettled)
+}
+
+/// Each retried attempt's `info.retry_run_id`, by attempt.
+fn recorded_retries(runs: &[EventRun]) -> BTreeMap<Uuid, Uuid> {
+    runs.iter()
+        .filter_map(|run| {
+            let info: Value = serde_json::from_str(run.info.as_deref()?).ok()?;
+            let retry = info.get("retry_run_id")?.as_str()?.parse().ok()?;
+            Some((run.run_id, retry))
+        })
+        .collect()
+}
+
+/// The retries a stream's subscribers are told of, by attempt, once `count`
+/// have arrived.
+async fn streamed_retries(
+    api_port: u16,
+    key: &str,
+    stream_id: Uuid,
+    count: usize,
+) -> BTreeMap<Uuid, Uuid> {
+    let mut stream = reqwest::Client::new()
+        .get(format!(
+            "http://127.0.0.1:{api_port}/v1/streams/{stream_id}/subscribe"
+        ))
+        .bearer_auth(key)
+        .send()
+        .await
+        .unwrap();
+    assert!(stream.status().is_success(), "{stream:?}");
+    let mut body = String::new();
+    let mut retries = BTreeMap::new();
+    while retries.len() < count {
+        let chunk = tokio::time::timeout(Duration::from_secs(30), stream.chunk())
+            .await
+            .unwrap_or_else(|_| panic!("{} of {count} retries in {body}", retries.len()))
+            .unwrap()
+            .expect("the stream stays open");
+        body.push_str(&String::from_utf8_lossy(&chunk));
+        for event in body.lines().filter_map(|line| line.strip_prefix("data:")) {
+            let Ok(event) = serde_json::from_str::<Value>(event) else {
+                continue;
+            };
+            let run_id = event["run"]["run_id"].as_str();
+            if let (Some(run_id), Some(retry)) = (run_id, event["retry_run_id"].as_str()) {
+                retries.insert(run_id.parse().unwrap(), retry.parse().unwrap());
+            }
+        }
+    }
+    retries
 }
 
 /// Wait for the expected runs, then for any that shouldn't exist.
@@ -216,12 +280,40 @@ async fn failed_runs_retry_on_their_own_handler_alone(database: Database) {
     .into();
     settled_attempts(&database, &home, &expected).await;
 
-    // Retry in the app is for the run's handler alone too.
+    // Each attempt that retried names its retry, which names it back.
     let runs = event_runs(&database, &home).await;
-    let (run_id, env_id, org_id, ..) = runs
+    let recorded = recorded_retries(&runs);
+    let retried = expected.values().flatten().filter(|n| **n > 0).count();
+    assert_eq!(recorded.len(), retried, "one link per retry");
+    for (attempt, retry) in &recorded {
+        let retry = runs
+            .iter()
+            .find(|run| run.run_id == *retry)
+            .unwrap_or_else(|| panic!("run {attempt} names a retry that never ran: {retry}"));
+        assert_eq!(retry.origin_run_id, Some(*attempt));
+    }
+
+    // Subscribers are told the same.
+    let key = hot(project, &home)
+        .args(["key", "create"])
+        .output()
+        .expect("create an API key");
+    assert!(key.status.success(), "{key:?}");
+    let key = String::from_utf8(key.stdout).unwrap();
+    let key = key.trim().lines().last().unwrap().trim();
+    let stream_id = runs[0].stream_id;
+    assert!(runs.iter().all(|run| run.stream_id == stream_id));
+    assert_eq!(
+        streamed_retries(api_port, key, stream_id, retried).await,
+        recorded
+    );
+
+    // Retry in the app is for the run's handler alone too.
+    let run = runs
         .iter()
-        .find(|run| run.3.as_deref() == Some("once 1"))
+        .find(|run| run.failure.as_deref() == Some("once 1"))
         .expect("a run of `once` that used its retry");
+    let (run_id, env_id, org_id) = (run.run_id, run.env_id, run.org_id);
     let retry = reqwest::Client::new()
         .post(format!(
             "http://127.0.0.1:{app_port}/runs/{run_id}/retry?org_id={org_id}&env_id={env_id}"
@@ -230,8 +322,18 @@ async fn failed_runs_retry_on_their_own_handler_alone(database: Database) {
         .await
         .unwrap();
     assert!(retry.status().is_success(), "{retry:?}");
+    let retry: Value = retry.json().await.unwrap();
     expected.get_mut("once").unwrap().push(2);
     settled_attempts(&database, &home, &expected).await;
+
+    // The app goes on to the run it reports.
+    let retry: Uuid = retry["run_id"].as_str().unwrap().parse().unwrap();
+    let runs = event_runs(&database, &home).await;
+    let retry = runs
+        .iter()
+        .find(|run| run.run_id == retry)
+        .unwrap_or_else(|| panic!("the app reported a run that never ran: {retry}"));
+    assert_eq!(retry.origin_run_id, Some(run_id));
 }
 
 #[tokio::test(flavor = "multi_thread")]

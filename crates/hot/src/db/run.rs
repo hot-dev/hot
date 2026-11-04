@@ -137,6 +137,23 @@ pub struct UnstartedRun {
     pub event_handler_fn: String,
 }
 
+/// The run id of an event's handler (`ns/var`): the same for every delivery of
+/// the event, so a redelivery finds the runs earlier deliveries wrote, and what
+/// queues a retry can name the run it will be. It derives from what a redeploy
+/// keeps (the handler's project, namespace and name), not from the deployment's
+/// `event_handler_id`, which every deploy and live build refresh replaces.
+pub fn event_handler_run_id(
+    event_id: Uuid,
+    project_id: Uuid,
+    event_type: &str,
+    event_handler_fn: &str,
+    retry_attempt: i16,
+) -> Uuid {
+    let identity =
+        format!("{event_id}:{project_id}:{event_type}:{event_handler_fn}:{retry_attempt}");
+    Uuid::new_v5(&Uuid::NAMESPACE_OID, identity.as_bytes())
+}
+
 #[derive(Debug, FromRow)]
 pub struct RunStatusRecord {
     pub status_id: i16,
@@ -270,6 +287,24 @@ pub struct Run {
 }
 
 impl Run {
+    /// The run a retry of this run's handler will be, on the retry's event and
+    /// as its attempt. A run from before runs named their handler retries on
+    /// all the event's handlers, so no one run is its retry.
+    pub fn retry_run_id(
+        &self,
+        event_id: Uuid,
+        event_type: &str,
+        retry_attempt: i16,
+    ) -> Option<Uuid> {
+        Some(event_handler_run_id(
+            event_id,
+            self.project_id?,
+            event_type,
+            self.event_handler_fn.as_deref()?,
+            retry_attempt,
+        ))
+    }
+
     /// Get run by ID with status information
     pub async fn get_run_with_status(
         db: &crate::db::DatabasePool,

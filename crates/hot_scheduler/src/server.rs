@@ -1975,9 +1975,10 @@ async fn process_pending_retries(
             }
         };
 
-        // Create a new run_id for the retry
-        let new_run_id = Uuid::now_v7();
+        // The retry's run, which the attempt names once the retry is queued
         let new_event_id = Uuid::now_v7();
+        let retry_run_id =
+            run.retry_run_id(new_event_id, &original_event.event_type, run.retry_attempt);
 
         // Create a new event for this retry (same data, new ID)
         let event_data_val: Val =
@@ -2003,7 +2004,7 @@ async fn process_pending_retries(
 
         // Create the execution context for the retry
         let execution_context = ExecutionContext {
-            run_id: new_run_id,
+            run_id: retry_run_id.unwrap_or_else(Uuid::now_v7),
             stream_id: run.stream_id,
             run_type_id: run.run_type_id,
             env_id: Some(run.env_id),
@@ -2080,9 +2081,13 @@ async fn process_pending_retries(
 
                 // Mark the original run as failed now that we've queued a retry,
                 // naming the retry: a separate run linked via origin_run_id
-                if let Err(e) =
-                    hot::db::run::Run::mark_retry_queued(db, &run.run_id, &new_run_id).await
-                {
+                let marked = match &retry_run_id {
+                    Some(retry) => {
+                        hot::db::run::Run::mark_retry_queued(db, &run.run_id, retry).await
+                    }
+                    None => hot::db::run::Run::mark_retry_as_failed(db, &run.run_id).await,
+                };
+                if let Err(e) = marked {
                     error!(
                         "Failed to mark run {} as failed after queueing retry: {}",
                         run.run_id, e
@@ -2940,6 +2945,54 @@ mod tests {
 
     #[tokio::test]
     async fn a_queued_retry_is_named_on_its_attempt() {
+        let (db, data, queue) = queued_retry(Some("::orders/on-created")).await;
+
+        let message = queue
+            .dequeue()
+            .await
+            .unwrap()
+            .expect("retry should be enqueued");
+        let message = EventMessage::try_from(message).unwrap();
+        // The run the worker will derive for the retry's handler.
+        let retry_run_id = hot::db::run::event_handler_run_id(
+            message.body.event.event_id,
+            data.project_id,
+            "order:created",
+            "::orders/on-created",
+            1,
+        );
+        assert_eq!(message.body.execution_context.run_id, retry_run_id);
+        let (status, attempt, info) = run_state(&db, data.run_id).await;
+        assert_eq!(status, hot::db::run::RunStatus::Failed.as_id());
+        assert_eq!(attempt, 1, "a retried attempt keeps its raised attempt");
+        let info = info.expect("the attempt records its retry");
+        assert_eq!(info["retry_run_id"], retry_run_id.to_string());
+        assert_eq!(info["warnings"], serde_json::json!(["kept"]));
+    }
+
+    /// A run from before runs named their handler retries on every handler of
+    /// its event, so no one run is its retry.
+    #[tokio::test]
+    async fn a_retry_of_all_an_events_handlers_names_no_run() {
+        let (db, data, queue) = queued_retry(None).await;
+
+        assert!(queue.dequeue().await.unwrap().is_some());
+        let (status, attempt, info) = run_state(&db, data.run_id).await;
+        assert_eq!(status, hot::db::run::RunStatus::Failed.as_id());
+        assert_eq!(attempt, 1, "a retried attempt keeps its raised attempt");
+        let info = info.expect("the attempt keeps its info");
+        assert_eq!(info["warnings"], serde_json::json!(["kept"]));
+        assert!(info.get("retry_run_id").is_none());
+    }
+
+    /// Queue the retry of a failed attempt of `event_handler_fn`.
+    async fn queued_retry(
+        event_handler_fn: Option<&str>,
+    ) -> (
+        Arc<DatabasePool>,
+        hot::db::TestData,
+        Arc<dyn Queue<Message>>,
+    ) {
         let db = Arc::new(hot::db::test_db().await);
         let data = hot::db::insert_test_data(&db).await.unwrap();
         let event_id = Uuid::now_v7();
@@ -2960,12 +3013,13 @@ mod tests {
             panic!("test_db should be SQLite");
         };
         sqlx::query(
-            "UPDATE run SET status_id = ?, retry_attempt = 1, next_retry_at = ?, event_id = ?, info = ? WHERE run_id = ?",
+            "UPDATE run SET status_id = ?, retry_attempt = 1, next_retry_at = ?, event_id = ?, info = ?, event_handler_fn = ? WHERE run_id = ?",
         )
         .bind(hot::db::run::RunStatus::PendingRetry.as_id())
         .bind(Utc::now() - chrono::Duration::seconds(60))
         .bind(event_id)
         .bind(r#"{"warnings":["kept"]}"#)
+        .bind(event_handler_fn)
         .bind(data.run_id)
         .execute(pool)
         .await
@@ -2975,23 +3029,7 @@ mod tests {
         );
 
         process_pending_retries(&db, &queue, None).await.unwrap();
-
-        let message = queue
-            .dequeue()
-            .await
-            .unwrap()
-            .expect("retry should be enqueued");
-        let retry_run_id = EventMessage::try_from(message)
-            .unwrap()
-            .body
-            .execution_context
-            .run_id;
-        let (status, attempt, info) = run_state(&db, data.run_id).await;
-        assert_eq!(status, hot::db::run::RunStatus::Failed.as_id());
-        assert_eq!(attempt, 1, "a retried attempt keeps its raised attempt");
-        let info = info.expect("the attempt records its retry");
-        assert_eq!(info["retry_run_id"], retry_run_id.to_string());
-        assert_eq!(info["warnings"], serde_json::json!(["kept"]));
+        (db, data, queue)
     }
 
     #[tokio::test]
