@@ -13727,6 +13727,9 @@ handler fn () { initialized }
             process_email_message(0, Arc::clone(&db), Arc::clone(&senders), message)
                 .await
                 .unwrap();
+            // lettre returns a connection to its pool from a spawned task, so
+            // a send that starts first would open a second connection.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
 
         assert_eq!(messages.load(Ordering::SeqCst), 2);
