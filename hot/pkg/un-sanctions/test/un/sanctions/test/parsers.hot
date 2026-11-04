@@ -1,0 +1,115 @@
+::un::sanctions::test::parsers ns
+meta ["test"]
+
+::fx ::un::sanctions::test::fixtures
+::un ::un::sanctions
+::sx ::un::sanctions::xml
+::http ::un::sanctions::http
+
+by-id fn (entries: Vec, id: Str): Map {
+  untype(find-first(entries, (e) { eq(e.id, id) }))
+}
+
+// ============================================================================
+// UN
+// ============================================================================
+
+test-un-individuals-and-entity
+meta ["test"]
+fn () {
+    es ::un/parse(::fx/UN_XML)
+    assert-eq(3, length(es))
+    a by-id(es, "IQi.004")
+    assert-eq("ABID HAMID MAHMUD AL-TIKRITI", a.name)
+    assert-eq(["Abid Hamid Bid Hamid Mahmud", "Abed Mahmoud Hammud", "عابد حامد محمود التكريتي"], a.aliases)
+    assert-eq(["1957"], a.dobs)
+    assert-eq(["Iraq"], a.nationalities, "as published")
+    assert-eq(["Iraq"], a.list-types)
+    assert-eq(null, a.comments)
+    assert-eq("6908051", a.data-id)
+    assert-eq("2003-06-27", a.listed-on)
+    l by-id(es, "CDi.047")
+    assert-eq("MUHAMMED LUMISA", l.name, "trailing spaces trimmed")
+    assert-eq(["1959/1965"], l.dobs)
+    assert-eq(["Uganda"], l.nationalities)
+    assert-eq("Gender: Male. Commander of the Allied Democratic Forces & logistics.", l.comments)
+    f by-id(es, "CDe.005")
+    assert-eq("entity", f.kind)
+    assert-eq(["FDLR", "Combatant Force for the Liberation of Rwanda"], f.aliases)
+    assert-eq(["North Kivu, Democratic Republic of the Congo"], f.addresses)
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+test-iso-date-formats
+meta ["test"]
+fn () {
+    assert-eq("1948-12-10", ::un/iso-date("10 Dec 1948"))
+    assert-eq("1948-12-10", ::un/iso-date("1948-12-10"))
+    assert-eq("1948-12", ::un/iso-date("Dec 1948"))
+    assert-eq("1948", ::un/iso-date("circa 1948"))
+    assert-eq("1963", ::un/iso-date("dd/mm/1963"))
+    assert-eq("1972-01-30", ::un/iso-date("30/01/1972"))
+    assert-eq("1959/1962", ::un/iso-date("1959 to 1962"))
+    assert-eq("1960/1962", ::un/iso-date("01 Jan 1960 to 31 Dec 1962"))
+    assert-eq(null, ::un/iso-date("unknown"))
+    assert-eq(null, ::un/iso-date(null))
+}
+
+test-clean-list-and-other-names
+meta ["test"]
+fn () {
+    assert-eq(["Acme Two"], ::un/other-names(["acme", " Acme Two ", "", null, "Acme Two"], "ACME"), "blanks, duplicates and the primary name are dropped")
+    assert-eq(["a", "b"], ::un/clean-list([" a ", "b", "a", "  ", null]))
+}
+
+test-require-entries
+meta ["test"]
+fn () {
+    assert-eq(["a"], ::un/require-entries(["a"]))
+    out ::un/require-entries([])
+    assert(is-err(out), "an empty list must not pass for a list with nobody on it")
+    assert(contains(err-message(out), "no records"), err-message(out))
+}
+
+test-xml-decode-and-attributes
+meta ["test"]
+fn () {
+    assert-eq("Smith & Sons été", ::sx/decode("Smith &amp; Sons &#233;t&#xE9;"))
+    assert-eq("&lt;", ::sx/decode("&amp;lt;"), "&amp; is decoded last")
+    assert-eq("A \"B\" <C>", ::sx/decode("A &quot;B&quot; &lt;C&gt;"))
+    assert-eq("Müller & Söhne", ::sx/decode("M&#xFC;ller &amp; S&#246;hne"), "text around a reference stays in one piece")
+    assert-eq("AT&T", ::sx/decode("AT&T"), "text the parser refuses comes back as it was")
+    assert-eq("a&nbsp;b", ::sx/decode("a&nbsp;b"), "an undeclared entity stays as written")
+    assert-eq("no references", ::sx/decode("no references"))
+    assert-eq(["A & B", "C"], ::sx/texts("<n><v>A &amp; B</v><v/><v> C </v></n>", "v"))
+    assert-eq(["<r>1</r>", "<r a=\"x\">2</r>"], ::sx/records("<a><r>1</r><rs/><r a=\"x\">2</r></a>", "r"))
+    tag first(::sx/start-tags("<x><nameAlias wholeName=\"Abu Ali\" strong=\"true\" title=\"\"/></x>", "nameAlias"))
+    assert-eq("Abu Ali", ::sx/attr(tag, "wholeName"))
+    assert-eq(null, ::sx/attr(tag, "title"), "blank attributes are null")
+    assert-eq(null, ::sx/attr(tag, "missing"))
+}
+
+// ============================================================================
+// HTTP helpers
+// ============================================================================
+
+test-http-error
+meta ["test"]
+fn () {
+    e untype(::http/http-error(::hot::http/HttpResponse({status: 404, headers: {}, body: "not here"}), "https://example.test/x"))
+    assert-eq(404, e.status)
+    assert-eq("HTTP 404 from https://example.test/x: not here", e.message)
+    blank untype(::http/http-error(::hot::http/HttpResponse({status: 500, headers: {}, body: null}), "https://example.test/y"))
+    assert-eq("HTTP 500 from https://example.test/y", blank.message)
+}
+
+test-body-text
+meta ["test"]
+fn () {
+    assert-eq("a,b", ::http/body-text({body: "a,b"}))
+    assert-eq("Hi", ::http/body-text({body: Bytes("Hi"), body-bytes: Bytes("Hi")}))
+    assert-eq("[1,2]", ::http/body-text({body: [1, 2], body-bytes: Bytes("[1,2]")}), "prefers the raw bytes")
+}

@@ -734,6 +734,7 @@ async fn run_action_handler(
         secret_values: Default::default(),
         access_id: None, // Dashboard-initiated, no API access log
         agent_type: None,
+        event_handler_fn: None,
         queue_timing: None,
         // Enqueue-only producer context; the worker stamps deadline_at at admission
         deadline_at: None,
@@ -755,12 +756,25 @@ async fn run_action_handler(
         target_project_name: run.project_name.clone(),
     };
 
+    let mut head = AHashMap::from([
+        ("env_id".to_string(), run.env_id.to_string()),
+        ("event_type".to_string(), new_event_type.clone()),
+    ]);
+    // A retry of an event handler's run is that handler's alone. Function runs
+    // re-dispatch as a hot:call, through another handler.
+    if is_retry
+        && !is_function_call
+        && let Some(event_handler_fn) = &run.event_handler_fn
+    {
+        head.insert(
+            hot::lang::event::RETRIED_HANDLER_HEAD.to_string(),
+            event_handler_fn.clone(),
+        );
+    }
+
     let event_message = hot::lang::event::EventMessage {
         id: new_event_id,
-        head: AHashMap::from([
-            ("env_id".to_string(), run.env_id.to_string()),
-            ("event_type".to_string(), new_event_type.clone()),
-        ]),
+        head,
         body: hot::lang::event::EventMessageBody {
             event: hot_event,
             execution_context,

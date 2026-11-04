@@ -1,0 +1,135 @@
+::exa ns
+meta {
+    ctx: {"exa.api.key": {required: false}},
+    doc: """
+    Exa API bindings: neural web search with page contents
+    (https://docs.exa.ai), pages similar to a URL, and clean page text.
+
+    **Setup**: context variable `exa.api.key`, or a per-call `api-key` in
+    the trailing `opts` Map of any API-calling function (see
+    `::exa::api`). Sent as `x-api-key`.
+
+    **Quick start**
+
+    ```hot
+    out ::exa/search("startups building sql runtimes", {
+      numResults: 5,
+      contents: {text: {maxCharacters: 2000}}
+    })
+    map(out.results, (r) { `${r.title} - ${r.url}` })
+
+    similar ::exa/find-similar("https://hot.dev", {numResults: 5})
+    pages ::exa/get-contents(["https://hot.dev"])
+    ```
+
+    Options use Exa's own names, and functions return Exa's own response.
+    A failed call is an Err carrying `::exa::http/HttpError`.
+    """
+}
+
+::api ::exa::api
+::http ::exa::http
+
+HttpRequest ::hot::http/HttpRequest
+
+BASE_URL "https://api.exa.ai"
+
+build-request
+meta {
+    doc: """The outgoing `HttpRequest` for a key. Pure; exposed for testing."""
+}
+fn (path: Str, body: Map, api-key: Str): HttpRequest {
+  HttpRequest({
+    method: "POST",
+    url: `${BASE_URL}${path}`,
+    headers: {
+      x-api-key: api-key,
+      Content-Type: "application/json"
+    },
+    body: to-json(untype(filter-vals(body, is-some)))
+  })
+}
+
+post fn
+(path: Str, body: Map): Any {
+  post(path, body, {})
+},
+// 3-arity: explicit API key override
+(path: Str, body: Map, api-key: Str?): Any {
+  post(path, body, {api-key: api-key})
+},
+// 3-arity: per-call credentials (see `::exa::api`)
+(path: Str, body: Map, opts: Map): Any {
+  resolved ::api/resolve(opts)
+  cond {
+    is-err(resolved) => { resolved }
+    => { ::http/send(build-request(path, body, resolved.api-key)) }
+  }
+}
+
+search
+meta {
+    ctx: {"exa.api.key": {required: false}},
+    doc: """
+    POST /search - Exa search. `options`: `type` ("auto" default,
+    "lite", "deep-lite", "deep"), `numResults` (1-100), `category`
+    ("company", "news", "people", ...), `includeDomains`/
+    `excludeDomains`, `startPublishedDate`/`endPublishedDate` (ISO
+    8601), and `contents` (`{text: {maxCharacters: 2000}}`,
+    `{highlights: true}`, `{summary: {}}`) to return page content
+    inline. Null options are dropped. Returns
+    `{results: [{title, url, text?, highlights?, summary?}], ...}`.
+
+    **Example**
+
+    ```hot
+    out ::exa/search("startups building sql runtimes", {
+      numResults: 5,
+      contents: {text: {maxCharacters: 2000}}
+    })
+    map(out.results, (r) { r.url })
+    ```
+    """
+}
+fn
+(query: Str): Map {
+  search(query, {})
+},
+(query: Str, options: Map): Map {
+  search(query, options, {})
+},
+(query: Str, options: Map, opts: Map): Map {
+  post("/search", {...options, query: query}, opts)
+}
+
+get-contents
+meta {
+    ctx: {"exa.api.key": {required: false}},
+    doc: """POST /contents - Clean page text for URLs (or Exa result ids). The 2-arity form takes contents options such as `{text: {maxCharacters: 5000}, highlights: true, maxAgeHours: 0}`. Returns `{results: [{url, title, text}], statuses}`."""
+}
+fn
+(urls: Vec): Map {
+  get-contents(urls, {text: true})
+},
+(urls: Vec, options: Map): Map {
+  get-contents(urls, options, {})
+},
+(urls: Vec, options: Map, opts: Map): Map {
+  post("/contents", {...options, urls: urls}, opts)
+}
+
+find-similar
+meta {
+    ctx: {"exa.api.key": {required: false}},
+    doc: """POST /findSimilar - Pages similar to a URL. `options`: `numResults`, `includeDomains`/`excludeDomains`, `excludeSourceDomain`, `startPublishedDate`, `contents`."""
+}
+fn
+(url: Str): Map {
+  find-similar(url, {})
+},
+(url: Str, options: Map): Map {
+  find-similar(url, options, {})
+},
+(url: Str, options: Map, opts: Map): Map {
+  post("/findSimilar", {...options, url: url}, opts)
+}

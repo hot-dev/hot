@@ -122,6 +122,12 @@ pub struct ExecutionContext {
     /// handler belongs to an agent via `meta {agent: "TypeName"}`.
     #[serde(default)]
     pub agent_type: Option<String>,
+    /// The event handler (`ns/var`) a run executes, for its row. Queued events
+    /// don't carry it: what a run sends is published with the run's context,
+    /// and belongs to whichever handlers take the event. A retry names its
+    /// handler in the message head ([`EventMessage::retried_handler`]).
+    #[serde(default)]
+    pub event_handler_fn: Option<String>,
     /// Queue timestamps captured by the worker before tenant hydration and
     /// propagated to run:start for phase-level observability.
     #[serde(default)]
@@ -176,6 +182,7 @@ impl ExecutionContext {
             secret_values: Default::default(),
             access_id: None,
             agent_type: None,
+            event_handler_fn: None,
             queue_timing: None,
             deadline_at: None,
             trace_calls: true,
@@ -217,6 +224,7 @@ impl ExecutionContext {
             secret_values: Default::default(),
             access_id: None,
             agent_type: None,
+            event_handler_fn: None,
             queue_timing: None,
             deadline_at: None,
             trace_calls: true,
@@ -262,6 +270,7 @@ impl ExecutionContext {
             secret_values: Default::default(),
             access_id: None,
             agent_type: None,
+            event_handler_fn: None,
             queue_timing: None,
             deadline_at: None,
             trace_calls: true,
@@ -292,6 +301,7 @@ impl ExecutionContext {
             secret_values: Default::default(),
             access_id: None,
             agent_type: None,
+            event_handler_fn: None,
             queue_timing: None,
             deadline_at: None,
             trace_calls: true,
@@ -359,6 +369,12 @@ impl ExecutionContext {
         self
     }
 
+    /// Helper to name the event handler a run executes
+    pub fn with_event_handler_fn(mut self, event_handler_fn: String) -> Self {
+        self.event_handler_fn = Some(event_handler_fn);
+        self
+    }
+
     pub fn with_queue_timing(mut self, queue_timing: QueueExecutionTiming) -> Self {
         self.queue_timing = Some(queue_timing);
         self
@@ -414,7 +430,7 @@ pub use database::DatabaseEventPublisher;
 pub use queue::{
     DeploymentMessage, DeploymentMessageBody, EventMessage, EventMessageBody, MaintenanceMessage,
     MaintenanceMessageBody, QueueAndDatabaseEventPublisher, QueueEventPublisher,
-    enqueue_deployment_message, enqueue_redeploy_for_project_reactivation,
+    RETRIED_HANDLER_HEAD, enqueue_deployment_message, enqueue_redeploy_for_project_reactivation,
 };
 
 #[cfg(test)]

@@ -1,0 +1,114 @@
+::tavily ns
+meta {
+    ctx: {"tavily.api.key": {required: false}},
+    doc: """
+    Tavily API bindings: search built for LLM agents
+    (https://docs.tavily.com), plus clean page content from `extract`.
+
+    **Setup**: context variable `tavily.api.key` (`tvly-...`), or a
+    per-call `api-key` in the trailing `opts` Map of any API-calling
+    function (see `::tavily::api`). Sent as `Authorization: Bearer`.
+
+    **Quick start**
+
+    ```hot
+    out ::tavily/search("qdrant vs pinecone pricing", {include_answer: true, max_results: 5})
+    out.answer
+    map(out.results, (r) { `${r.title} - ${r.url}` })
+
+    pages ::tavily/extract(["https://example.com"], {format: "markdown"})
+    ```
+
+    Options use Tavily's own names, and functions return Tavily's own
+    response. A failed call is an Err carrying `::tavily::http/HttpError`.
+    """
+}
+
+::api ::tavily::api
+::http ::tavily::http
+
+HttpRequest ::hot::http/HttpRequest
+
+BASE_URL "https://api.tavily.com"
+
+build-request
+meta {
+    doc: """The outgoing `HttpRequest` for a key. Pure; exposed for testing."""
+}
+fn (path: Str, body: Map, api-key: Str): HttpRequest {
+  HttpRequest({
+    method: "POST",
+    url: `${BASE_URL}${path}`,
+    headers: {
+      Authorization: `Bearer ${api-key}`,
+      Content-Type: "application/json"
+    },
+    body: to-json(untype(filter-vals(body, is-some)))
+  })
+}
+
+post fn
+(path: Str, body: Map): Any {
+  post(path, body, {})
+},
+// 3-arity: explicit API key override
+(path: Str, body: Map, api-key: Str?): Any {
+  post(path, body, {api-key: api-key})
+},
+// 3-arity: per-call credentials (see `::tavily::api`)
+(path: Str, body: Map, opts: Map): Any {
+  resolved ::api/resolve(opts)
+  cond {
+    is-err(resolved) => { resolved }
+    => { ::http/send(build-request(path, body, resolved.api-key)) }
+  }
+}
+
+search
+meta {
+    ctx: {"tavily.api.key": {required: false}},
+    doc: """
+    POST /search - Tavily search. `options`: `search_depth` ("basic",
+    "advanced", "fast", "ultra-fast"), `topic` ("general", "news",
+    "finance"), `max_results` (0-20), `time_range` ("day", "week",
+    "month", "year"), `start_date`/`end_date` (YYYY-MM-DD),
+    `include_domains`/`exclude_domains`, `include_answer` (LLM-written
+    answer in `.answer`), `include_raw_content` ("markdown"/"text"),
+    `country`, `include_usage`. Null options are dropped. Returns
+    `{query, answer?, results: [{title, url, content, score}], ...}`.
+
+    **Example**
+
+    ```hot
+    out ::tavily/search("qdrant vs pinecone pricing", {include_answer: true, max_results: 5})
+    out.answer
+    map(out.results, (r) { r.url })
+    ```
+    """
+}
+fn
+(query: Str): Map {
+  search(query, {})
+},
+(query: Str, options: Map): Map {
+  search(query, options, {})
+},
+(query: Str, options: Map, opts: Map): Map {
+  post("/search", {...options, query: query}, opts)
+}
+
+extract
+meta {
+    ctx: {"tavily.api.key": {required: false}},
+    doc: """POST /extract - Fetch and clean page content for up to 20 URLs. `options`: `extract_depth` ("basic"/"advanced"), `format` ("markdown"/"text"), `query` (rerank chunks by relevance), `include_images`, `timeout` (seconds). Returns `{results: [{url, raw_content}], failed_results: [{url, error}]}`; check both."""
+}
+fn
+(urls: Vec): Map {
+  extract(urls, {})
+},
+(urls: Vec, options: Map): Map {
+  extract(urls, options, {})
+},
+(urls: Vec, options: Map, opts: Map): Map {
+  post("/extract", {...options, urls: urls}, opts)
+}

@@ -1,0 +1,42 @@
+::eu::sanctions::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration smoke tests (live, read-only)
+// =============================================================================
+// EU_SANCTIONS_LIVE=1 sends a HEAD request, then tries the whole file (about
+// 26 MB). Under the default cap that must give the clear size error. With
+// http.max-response-bytes raised to 32 MiB it must parse.
+// Run with: EU_SANCTIONS_LIVE=1 hot test -p pkg-integration-eu-sanctions
+
+::ctx ::eu::sanctions::integration::ctx
+
+test-eu-list-head
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("EU_SANCTIONS_LIVE is not 1") }
+        => {
+            info ::eu::sanctions::http/head(::eu::sanctions/URL)
+            assert(is-some(or(info.last-modified, info.etag)), "a version to compare")
+            assert(is-some(::eu::sanctions/current-version()), "the cheap check gives a version")
+        }
+    }
+}
+
+test-eu-list-fetches-or-says-how-far-to-raise-the-cap
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("EU_SANCTIONS_LIVE is not 1") }
+        => {
+            out ::eu::sanctions/fetch()
+            cond {
+                is-err(out) => {
+                    assert(contains(err-message(out), "at least 33554432 (32 MiB)"), err-message(out))
+                }
+                => {
+                    assert(gt(length(out.entries), 3000), "the list has about 6,300 entries")
+                }
+            }
+        }
+    }
+}

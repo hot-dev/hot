@@ -4244,6 +4244,7 @@ mod tests {
             next_retry_at: None,
             queued_at: None,
             access_id: None,
+            event_handler_fn: None,
             agent_type: None,
         };
 

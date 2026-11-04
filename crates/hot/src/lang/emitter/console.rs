@@ -21,7 +21,7 @@ impl EngineEventEmitter for ConsoleEngineEventEmitter {
             &event.execution_context.secret_values,
             &event.execution_context.secret_value_hashes,
         )
-        .mask_val(event.event_data.to_hot_data_repr());
+        .mask_val(event.event_data.to_record_repr());
         println!(
             "[{}] {:<15} {} - {}",
             event.event_id,

@@ -1,0 +1,28 @@
+::exa::integration::ctx ns
+
+::env ::hot::env
+
+// Credentials for the exa integration suite. Unset environment
+// variables are skipped entirely, so absent credentials behave exactly as
+// if never configured, and every test then skips (passes with a "skipped"
+// note) instead of calling Exa.
+::hot::ctx/set(filter-vals({
+    "exa.api.key": ::env/get("EXA_API_KEY", ""),
+}, (v) { not(is-empty(v)) }))
+
+configured
+meta {doc: """True when a Exa API key is configured."""}
+fn (): Bool {
+    not(is-empty(or(::hot::ctx/get("exa.api.key"), "")))
+}
+
+skip
+meta {
+    doc: """Record a skipped test: prints why and passes one assertion so the runner reports it cleanly."""
+}
+fn (reason: Str): Bool {
+    println(`skipped: ${reason}`)
+    assert(true, reason)
+}
+
+UNCONFIGURED "set EXA_API_KEY"

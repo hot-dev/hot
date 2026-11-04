@@ -1,0 +1,315 @@
+::opensanctions ns
+meta {
+    ctx: {
+        "opensanctions.api-key": {required: false},
+        "opensanctions.base-url": {required: false, secret: false},
+        "opensanctions.dataset": {required: false, secret: false}
+    },
+    doc: """
+    OpenSanctions, bring your own key: the hosted `yente` matching API
+    (`POST /match/{dataset}`), or a self-hosted yente via `base-url`. It
+    screens against OpenSanctions' merged dataset (hundreds of sources,
+    plus PEPs in `default`).
+
+    **Screening never decides.** A result is `"possible-match"` or
+    `"no-match"`, and a person must review every possible match.
+
+    **Licensing**: OpenSanctions data is published under CC BY-NC 4.0.
+    Non-commercial use is free; **commercial use needs a license** (the
+    hosted API is a paid service with a trial; bulk data for business
+    use needs a data license). See https://www.opensanctions.org/licensing/.
+
+    Results are `ScreenResult` records. `sources` names the dataset
+    searched.
+    """
+}
+
+::cfg ::opensanctions::config
+::http ::opensanctions::http
+
+REVIEW_NOTICE "Automated screening result. Every possible match must be reviewed by a person before any decision; a no-match only means no entry scored above the threshold on the dataset searched."
+
+Match
+meta {
+    doc: """
+    One possible match.
+
+    **Fields**
+    - `status` — always `"possible-match"`: review it
+    - `score` — OpenSanctions' score in [0, 1]
+    - `name-score` — the same score; OpenSanctions gives only one
+    - `matched-name` — OpenSanctions' caption for the entity
+    - `matched-field` — always `"name"`
+    - `matched-fields` — every field that contributed
+    - `explanation` — OpenSanctions' score and its feature explanations,
+      for the reviewer
+    - `entry` — the entity: `{source, list, id, kind, name, aliases,
+      dobs, nationalities, programs, addresses, remarks, url}`
+    """
+}
+type {
+    status: Str,
+    score: Dec,
+    name-score: Dec,
+    matched-name: Str,
+    matched-field: Str,
+    matched-fields: Vec<Str>,
+    explanation: Vec<Str>,
+    entry: Map
+}
+
+ScreenResult
+meta {
+    doc: """
+    The answer to a `screen` call. A person must review every match.
+
+    **Fields**
+    - `status` — `"possible-match"` when any match scored at or above
+      the threshold, else `"no-match"`; never a final decision
+    - `review-required` — true whenever `status` is `"possible-match"`
+    - `notice` — the human-review notice, ending with the dataset searched
+    - `query` — the name and options screened
+    - `threshold` — the threshold used
+    - `matches` — `Match` records, best first
+    - `sources` — what was searched: `{source, list, dataset}`. Nothing
+      else was searched
+    - `warnings` — always empty today
+    - `candidates` — how many results OpenSanctions returned
+    """
+}
+type {
+    status: Str,
+    review-required: Bool,
+    notice: Str,
+    query: Map,
+    threshold: Dec,
+    matches: Vec<Match>,
+    sources: Vec<Map>,
+    warnings: Vec<Str>,
+    candidates: Int
+}
+
+round4
+meta {
+    doc: """Round a number to four decimal places."""
+}
+fn (x: Any): Dec {
+  div(Dec(round(mul(x, 10000))), 10000)
+}
+
+notice-for
+meta {
+    doc: """`REVIEW_NOTICE` followed by what was searched, so the notice says what a `"no-match"` covers wherever it is read."""
+}
+fn (sources: Vec): Str {
+  `${REVIEW_NOTICE} Searched: ${join(map(sources, (s) { s.list }), ", ")}.`
+}
+
+SCHEMAS {
+  individual: "Person",
+  entity: "Organization",
+  vessel: "Vessel",
+  aircraft: "Airplane"
+}
+
+KINDS {
+  Person: "individual",
+  Organization: "entity",
+  Company: "entity",
+  LegalEntity: "entity",
+  PublicBody: "entity",
+  Vessel: "vessel",
+  Airplane: "aircraft"
+}
+
+match-body
+meta {
+    doc: """
+    The `/match` request body for one query (pure): `{queries: {q:
+    {schema, properties}}}`. `name` always; `birthDate` and
+    `nationality` (Person) or `country` (others) only when given.
+
+    **Example**
+
+    ```hot
+    ::opensanctions/match-body("John Doe", {dob: "1975-04-21", country: "US", kind: "individual"})
+    // {queries: {q: {schema: "Person", properties: {name: ["John Doe"], birthDate: ["1975-04-21"], nationality: ["us"]}}}}
+    ```
+    """
+}
+fn (name: Str, opts: Map): Map {
+  kind or(get(opts, "kind"), "entity-or-person")
+  schema or(get(SCHEMAS, kind), "LegalEntity")
+  country get(opts, "country")
+  code if(is-some(country), ::opensanctions::country/code(Str(country)), null)
+  country-value if(is-some(code), lowercase(code), country)
+  props filter-vals({
+    name: [name],
+    birthDate: if(and(eq(schema, "Person"), is-some(get(opts, "dob"))), [Str(get(opts, "dob"))], null),
+    nationality: if(and(eq(schema, "Person"), is-some(country-value)), [country-value], null),
+    country: if(and(ne(schema, "Person"), is-some(country-value)), [country-value], null)
+  }, is-some)
+  {queries: {q: {schema: schema, properties: props}}}
+}
+
+match-query
+meta {
+    doc: """The `/match` query string (pure): `threshold`, `limit`, `algorithm` and `topics` only when set in `opts`, and `include_dataset` from `opts.include-datasets`."""
+}
+fn (opts: Map): Str {
+  base ::hot::uri/query-string(filter-vals({
+    threshold: get(opts, "threshold"),
+    limit: get(opts, "limit"),
+    algorithm: get(opts, "algorithm")
+  }, is-some))
+  topics map(or(get(opts, "topics"), []), (t) { `topics=${::hot::uri/encode(Str(t))}` })
+  includes map(or(get(opts, "include-datasets"), []), (d) { `include_dataset=${::hot::uri/encode(Str(d))}` })
+  extra join(concat(topics, includes), "&")
+  cond {
+    is-empty(extra) => { base }
+    is-empty(base) => { `?${extra}` }
+    => { `${base}&${extra}` }
+  }
+}
+
+first-of fn (props: Map, key: Str): Vec<Str> {
+  v get(props, key)
+  if(is-vec(v), filter(map(v, (x) { if(is-str(x), x, null) }), is-some), [])
+}
+
+feature-line fn (name: Str, f: Any): Str {
+  cond {
+    is-map(f) => {
+      why get(f, "explanation")
+      if(is-some(why), `${name}: ${get(f, "score")} (${why})`, `${name}: ${get(f, "score")}`)
+    }
+    => { `${name}: ${f}` }
+  }
+}
+
+to-match
+meta {
+    doc: """Turn one OpenSanctions scored result into a `Match` (pure). The `entry` carries `source: "opensanctions"`, the OpenSanctions id, the datasets as `programs`, and the score explanations."""
+}
+fn (r: Map, base-url: Str): Match {
+  props or(get(r, "properties"), {})
+  caption or(get(r, "caption"), "")
+  names first-of(props, "name")
+  features or(get(r, "explanations"), get(r, "features"))
+  explanation concat(
+    [`OpenSanctions score ${get(r, "score")} (${if(eq(get(r, "match"), true), "above", "below")} its match threshold)`],
+    if(is-map(features), map(keys(features), (k) { feature-line(k, get(features, k)) }), [])
+  )
+  Match({
+    status: "possible-match",
+    score: round4(or(get(r, "score"), 0)),
+    name-score: round4(or(get(r, "score"), 0)),
+    matched-name: caption,
+    matched-field: "name",
+    matched-fields: ["name"],
+    explanation: explanation,
+    entry: {
+      source: "opensanctions",
+      list: "OpenSanctions",
+      id: get(r, "id"),
+      kind: or(get(KINDS, or(get(r, "schema"), "")), "entity"),
+      name: caption,
+      aliases: filter(concat(names, first-of(props, "alias")), (n) { ne(n, caption) }),
+      dobs: first-of(props, "birthDate"),
+      nationalities: concat(first-of(props, "nationality"), first-of(props, "country")),
+      programs: or(get(r, "datasets"), []),
+      addresses: first-of(props, "address"),
+      remarks: null,
+      url: `https://www.opensanctions.org/entities/${::hot::uri/encode(Str(get(r, "id")))}/`
+    }
+  })
+}
+
+parse-response
+meta {
+    doc: """Turn a `/match` response body into a `ScreenResult` (pure)."""
+}
+fn (body: Any, name: Str, opts: Map, base-url: Str): ScreenResult {
+  results or(get-in(or(body, {}), ["responses", "q", "results"]), [])
+  threshold or(get(opts, "threshold"), 0.7)
+  matches filter(map(results, (r) { to-match(r, base-url) }), (m) { gte(m.score, threshold) })
+  found not(is-empty(matches))
+  dataset or(get(opts, "dataset"), "default")
+  sources [{source: "opensanctions", list: `OpenSanctions (${dataset})`, dataset: dataset}]
+  ScreenResult({
+    status: if(found, "possible-match", "no-match"),
+    review-required: found,
+    notice: notice-for(sources),
+    query: filter-vals({name: name, dob: get(opts, "dob"), country: get(opts, "country"), kind: get(opts, "kind")}, is-some),
+    threshold: threshold,
+    matches: matches,
+    sources: sources,
+    warnings: [],
+    candidates: length(results)
+  })
+}
+
+match-url
+meta {
+    doc: """`{base-url}/match/{dataset}{query}` with the dataset path-encoded (pure)."""
+}
+fn (base-url: Str, dataset: Str, opts: Map): Str {
+  `${base-url}/match/${::hot::uri/encode(dataset)}${match-query(opts)}`
+}
+
+match-headers
+meta {
+    doc: """The `/match` request headers (pure): `Authorization: ApiKey ...` only when there is a key, since a self-hosted yente may need none."""
+}
+fn (key: Str?): Map {
+  filter-vals({
+    Authorization: if(is-some(key), `ApiKey ${key}`, null),
+    Content-Type: "application/json",
+    Accept: "application/json"
+  }, is-some)
+}
+
+screen
+meta {
+    doc: """
+    Screen a name with the OpenSanctions matching API. `opts`: `dob`,
+    `country`, `kind`, `threshold` (OpenSanctions' default 0.7),
+    `limit`, `algorithm`, `topics` (e.g. `["sanction"]`),
+    `include-datasets`, plus credentials and settings: `api-key`,
+    `base-url`, `dataset` (`"default"`, or `"sanctions"` for sanctions
+    only). The hosted API needs a key. A per-call `base-url` only uses an
+    `api-key` from the same `opts`; without one, no key is sent.
+
+    Sends the queried name, date of birth and country to OpenSanctions.
+
+    **Example**
+
+    ```hot
+    result ::opensanctions/screen("Aleksandr Lukashenko", {kind: "individual", dataset: "sanctions"})
+    ```
+    """
+}
+fn
+(name: Str): ScreenResult {
+  screen(name, {})
+},
+(name: Str, opts: Map): ScreenResult {
+  cfg ::cfg/resolve(opts)
+  cond {
+    is-err(cfg) => { cfg }
+    => {
+      key ::cfg/require-api-key(cfg)
+      cond {
+        is-err(key) => { key }
+        => {
+          url match-url(cfg.base-url, cfg.dataset, opts)
+          response ::http/request("POST", url, match-headers(key), to-json(match-body(name, opts)))
+          cond {
+            is-err(response) => { response }
+            => { parse-response(response.body, name, {...opts, dataset: cfg.dataset}, cfg.base-url) }
+          }
+        }
+      }
+    }
+  }
+}

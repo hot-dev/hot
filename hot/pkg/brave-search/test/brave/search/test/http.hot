@@ -1,0 +1,19 @@
+::brave::search::test::http ns
+meta ["test"]
+
+::http ::brave::search::http
+
+test-error-messages
+meta ["test"] fn () {
+    assert-eq("Brave API error 422: Unable to validate request parameter(s)",
+        ::http/error-message(422, {type: "ErrorResponse", error: {code: "VALIDATION", detail: "Unable to validate request parameter(s)", status: 422}}))
+    assert-eq("Brave API error 500: Server error", ::http/error-message(500, {message: "Server error"}))
+    assert-eq("Brave API error 503", ::http/error-message(503, null))
+}
+
+test-http-error-from-response
+meta ["test"] fn () {
+    e ::http/http-error(::hot::http/HttpResponse({status: 429, body: {error: {detail: "Rate limit exceeded"}}}))
+    assert-eq(429, e.status)
+    assert-eq("Brave API error 429: Rate limit exceeded", e.message)
+}

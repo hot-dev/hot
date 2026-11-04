@@ -1,0 +1,163 @@
+::sec::edgar::test::edgar ns
+meta ["test"]
+
+::fx ::sec::edgar::test::fixtures
+::api ::sec::edgar::api
+::edgar ::sec::edgar
+
+HttpResponse ::hot::http/HttpResponse
+
+// ============================================================================
+// Settings resolver
+// ============================================================================
+
+test-resolve-defaults
+meta ["test"]
+fn () {
+    assert-eq(null, ::api/resolve({}).user-agent)
+}
+
+test-resolve-opts-override
+meta ["test"]
+fn () {
+    assert-eq("Acme ops@acme.test", ::api/resolve({user-agent: "Acme ops@acme.test"}).user-agent)
+    assert-eq(null, ::hot::ctx/get("sec.edgar.user-agent"), "a per-call user-agent is never written to ctx")
+}
+
+test-resolve-reads-context
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"sec.edgar.user-agent": "Ctx ops@ctx.test"})
+    assert-eq("Ctx ops@ctx.test", ::api/resolve({}).user-agent)
+    assert-eq("Acme ops@acme.test", ::api/resolve({user-agent: "Acme ops@acme.test"}).user-agent, "opts win")
+    ::hot::ctx/set({"sec.edgar.user-agent": null})
+}
+
+test-blank-credential-is-an-err-naming-the-key
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"sec.edgar.user-agent": "Ctx ops@ctx.test"})
+    for-each(["", "  ", null], (v) {
+      out ::api/resolve({user-agent: v})
+      assert(is-err(out), "blank user-agent never falls back to context")
+      assert(::hot::str/contains(err-message(out), "user-agent"), "the Err names user-agent")
+    })
+    ::hot::ctx/set({"sec.edgar.user-agent": null})
+}
+
+test-blank-credential-reaches-every-caller-as-an-err
+meta ["test"]
+fn () {
+    assert(is-err(::edgar/submissions(320193, {user-agent: ""})), "submissions")
+    assert(is-err(::edgar/filing-document(320193, "0000320193-25-000079", "aapl-20250927.htm", {user-agent: ""})), "filing-document")
+}
+
+test-resolve-marks-and-returns-credentials-unchanged
+meta ["test"]
+fn () {
+    assert-eq("Marked Co marked@acme.test", ::api/resolve({user-agent: "Marked Co marked@acme.test"}).user-agent)
+}
+
+test-missing-credentials-are-errors
+meta ["test"]
+fn () {
+    ua ::api/require-user-agent(::api/resolve({}))
+    assert(is-err(ua), "SEC needs a user-agent")
+    assert(::hot::str/contains(err-message(ua), "sec.edgar.user-agent"), "names the ctx key")
+    assert(is-err(::edgar/submissions(320193, {})), "fails before any request")
+}
+
+// ============================================================================
+// Transport helpers
+// ============================================================================
+
+test-query-string-drops-unset
+meta ["test"]
+fn () {
+    assert-eq("?q=apple+inc", ::api/query-string({q: "apple inc", page: null, field: ""}))
+    assert-eq("", ::api/query-string({a: null}))
+}
+
+test-path-segment
+meta ["test"]
+fn () {
+    assert-eq("a%2Fb%20c", ::api/path-segment("a/b c"))
+    assert-eq("42", ::api/path-segment(42))
+}
+
+test-http-error
+meta ["test"]
+fn () {
+    bare untype(::api/http-error(HttpResponse({status: 403, headers: {retry-after: "soon"}, body: null}), "https://data.sec.gov/x"))
+    assert-eq("sec-edgar", bare.source)
+    assert-eq(null, bare.retry-after, "non-numeric Retry-After is ignored")
+    assert-eq("sec-edgar: HTTP 403 for https://data.sec.gov/x", bare.message)
+}
+
+test-columns-to-rows
+meta ["test"]
+fn () {
+    rows ::api/columns-to-rows({a: [1, 2, 3], b: ["x", "y", "z"], c: [true]}, 2)
+    assert-eq([{a: 1, b: "x", c: true}, {a: 2, b: "y", c: null}], rows)
+    assert-eq([], ::api/columns-to-rows({}, 5))
+}
+
+// ============================================================================
+// SEC EDGAR
+// ============================================================================
+
+test-cik
+meta ["test"]
+fn () {
+    assert-eq("0000320193", ::edgar/pad-cik(320193))
+    assert-eq("0000320193", ::edgar/pad-cik("CIK0000320193"))
+    assert-eq("0000320193", ::edgar/pad-cik(" 320193 "))
+    assert-eq("320193", ::edgar/cik-digits("0000320193"))
+    assert(is-err(::edgar/cik-digits("12345678901")), "more than ten digits")
+    assert(is-err(::edgar/cik-digits("AAPL")), "not a CIK")
+}
+
+test-urls
+meta ["test"]
+fn () {
+    assert-eq("https://data.sec.gov/submissions/CIK0000320193.json", ::edgar/submissions-url(320193))
+    assert-eq("https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json", ::edgar/company-facts-url("320193"))
+    assert-eq("https://data.sec.gov/api/xbrl/companyconcept/CIK0000320193/us-gaap/AccountsPayableCurrent.json", ::edgar/company-concept-url(320193, "us-gaap", "AccountsPayableCurrent"))
+    assert-eq("https://data.sec.gov/api/xbrl/frames/us-gaap/AccountsPayableCurrent/USD/CY2019Q1I.json", ::edgar/frames-url("us-gaap", "AccountsPayableCurrent", "USD", "CY2019Q1I"))
+    assert-eq("000032019324000123", ::edgar/accession-plain("0000320193-24-000123"))
+    assert-eq("https://www.sec.gov/Archives/edgar/data/320193/000032019324000123/aapl-20240928.htm", ::edgar/filing-document-url("0000320193", "0000320193-24-000123", "aapl-20240928.htm"))
+    assert-eq("https://www.sec.gov/Archives/edgar/data/320193/000114036126041201/xslF345X06/form4.xml", ::edgar/filing-document-url(320193, "0001140361-26-041201", "xslF345X06/form4.xml"), "sub-paths keep their slashes")
+    assert-eq("https://www.sec.gov/Archives/edgar/data/320193/000032019324000123/0000320193-24-000123-index.htm", ::edgar/filing-index-url(320193, "0000320193-24-000123"))
+}
+
+test-tickers
+meta ["test"]
+fn () {
+    rows ::edgar/parse-tickers(::fx/SEC_TICKERS)
+    assert-eq(4, length(rows))
+    assert-eq({cik: "0000320193", ticker: "AAPL", title: "Apple Inc."}, ::edgar/find-ticker(rows, "aapl"))
+    assert-eq(null, ::edgar/find-ticker(rows, "ZZZZ"))
+    assert-eq(["AAPL", "APLE"], map(::edgar/search-tickers(rows, "apple", 5), (r) { r.ticker }))
+    assert-eq(1, length(::edgar/search-tickers(rows, "apple", 1)))
+}
+
+test-recent-filings
+meta ["test"]
+fn () {
+    all ::edgar/recent-filings(::fx/SEC_SUBMISSIONS, 10, {})
+    assert-eq(3, length(all))
+    assert-eq("0001140361-26-041201", first(all).accessionNumber)
+    assert-eq("https://www.sec.gov/Archives/edgar/data/320193/000114036126041201/xslF345X06/form4.xml", first(all).url)
+    tenk ::edgar/recent-filings(::fx/SEC_SUBMISSIONS, 10, {forms: ["10-K"]})
+    assert-eq(1, length(tenk))
+    assert-eq("https://www.sec.gov/Archives/edgar/data/320193/000032019325000079/aapl-20250927.htm", first(tenk).url)
+    assert-eq(1, length(::edgar/recent-filings(::fx/SEC_SUBMISSIONS, 1, {})))
+}
+
+test-full-text-params
+meta ["test"]
+fn () {
+    p ::edgar/full-text-params("\"climate risk\"", {forms: ["10-K", "10-Q"], start-date: "2025-01-01", end-date: "2025-03-31", ciks: [320193]})
+    assert-eq("?q=%22climate+risk%22&forms=10-K%2C10-Q&ciks=0000320193&dateRange=custom&startdt=2025-01-01&enddt=2025-03-31", ::api/query-string(p))
+    assert-eq("?q=x", ::api/query-string(::edgar/full-text-params("x", {})), "unset options omitted")
+}

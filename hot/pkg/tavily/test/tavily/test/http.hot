@@ -1,0 +1,20 @@
+::tavily::test::http ns
+meta ["test"]
+
+::http ::tavily::http
+
+test-error-messages
+meta ["test"] fn () {
+    assert-eq("Tavily API error 401: Unauthorized: missing or invalid API key.",
+        ::http/error-message(401, {detail: {error: "Unauthorized: missing or invalid API key."}}))
+    assert-eq("Tavily API error 400: Bad query", ::http/error-message(400, {detail: "Bad query"}))
+    assert-eq("Tavily API error 500: Server error", ::http/error-message(500, {message: "Server error"}))
+    assert-eq("Tavily API error 503", ::http/error-message(503, null))
+}
+
+test-http-error-from-response
+meta ["test"] fn () {
+    e ::http/http-error(::hot::http/HttpResponse({status: 429, body: {detail: {error: "Rate limit exceeded"}}}))
+    assert-eq(429, e.status)
+    assert-eq("Tavily API error 429: Rate limit exceeded", e.message)
+}

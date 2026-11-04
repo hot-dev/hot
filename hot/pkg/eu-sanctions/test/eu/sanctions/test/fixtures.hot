@@ -1,0 +1,42 @@
+::eu::sanctions::test::fixtures ns
+
+// Small excerpts of the real published list (public data), trimmed to
+// the fields the parser reads. Retrieved 1 Nov 2026.
+
+// EU FSF XML 1.1: two sanctionEntity records (regulation summaries and
+// publication URLs removed), plus a name with &quot; in an attribute.
+EU_XML """
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<export xmlns="http://eu.europa.ec/fpi/fsd/export" generationDate="2026-10-23T17:05:43.888+02:00" globalFileId="185833">
+    <sanctionEntity designationDetails="" unitedNationId="" euReferenceNumber="EU.27.28" logicalId="13">
+        <remark>UNSC RESOLUTION 1483</remark>
+        <regulation regulationType="regulation" organisationType="commission" publicationDate="2003-07-08" entryIntoForceDate="2003-07-07" numberTitle="1210/2003 (OJ L169)" programme="IRQ" logicalId="348">
+        </regulation>
+        <subjectType code="person" classificationCode="P"/>
+        <nameAlias firstName="Saddam" middleName="" lastName="Hussein Al-Tikriti" wholeName="Saddam Hussein Al-Tikriti" function="" gender="M" title="" nameLanguage="" strong="true" regulationLanguage="en" logicalId="17">
+        </nameAlias>
+        <nameAlias firstName="" middleName="" lastName="" wholeName="Abu Ali" function="" title="" nameLanguage="" strong="true" regulationLanguage="en" logicalId="19">
+        </nameAlias>
+        <nameAlias firstName="" middleName="" lastName="" wholeName="Abou Ali" function="" title="" nameLanguage="FR" strong="true" regulationLanguage="en" logicalId="380">
+        </nameAlias>
+        <citizenship region="" countryIso2Code="IQ" countryDescription="IRAQ" regulationLanguage="en" logicalId="1">
+        </citizenship>
+        <birthdate circa="false" calendarType="GREGORIAN" city="al-Awja, near Tikrit" zipCode="" birthdate="1937-04-28" dayOfMonth="28" monthOfYear="4" year="1937" region="" place="" countryIso2Code="IQ" countryDescription="IRAQ" regulationLanguage="en" logicalId="14">
+        </birthdate>
+    </sanctionEntity>
+    <sanctionEntity designationDetails="" unitedNationId="" euReferenceNumber="EU.378.62" logicalId="382">
+        <regulation regulationType="amendment" organisationType="commission" publicationDate="2012-01-18" entryIntoForceDate="2012-01-17" numberTitle="34/2012 (OJ L15)" programme="TAQA" logicalId="1036">
+        </regulation>
+        <subjectType code="enterprise" classificationCode="E"/>
+        <nameAlias firstName="" middleName="" lastName="" wholeName="Asbat al-Ansar" function="" title="" nameLanguage="" strong="true" regulationLanguage="en" logicalId="994">
+        </nameAlias>
+        <address city="" street="Ein el-Hilweh camp" poBox="" zipCode="" region="" place="" asAtListingTime="false" countryIso2Code="LB" countryDescription="LEBANON" regulationLanguage="en" logicalId="1337">
+        </address>
+    </sanctionEntity>
+    <sanctionEntity designationDetails="" unitedNationId="" euReferenceNumber="EU.1.1" logicalId="9001">
+        <subjectType code="person" classificationCode="P"/>
+        <nameAlias firstName="" middleName="" lastName="" wholeName="Umar Muhammad &quot;Abdallah Ba&quot; Amar" function="" title="" nameLanguage="" strong="true" regulationLanguage="en" logicalId="9002">
+        </nameAlias>
+    </sanctionEntity>
+</export>
+"""
