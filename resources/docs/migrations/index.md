@@ -38,11 +38,21 @@ Pinned installs are useful when you need to finish database migrations with an o
 
 ## Upgrading from Hot 3.0.2 to 3.0.3 {#upgrading-from-3-0-2-to-3-0-3}
 
+**Migration 029** adds a nullable `event_handler_fn` column to `run`. Run `hot db migrate` with the 3.0.3 CLI.
+
+**Packages withdrawn:** `sanctions`, `company-registry`, `web-search`, `crm` and `documents` are gone, with no compatibility layer. Move to the per-service packages: `ofac`, `uk-sanctions`, `eu-sanctions`, `un-sanctions` and `opensanctions`; `gleif`, `sec-edgar` and `companies-house`; `tavily`, `brave-search`, `exa` and `firecrawl`; `hubspot`, `salesforce` and `attio`; and `google-drive`, `microsoft-onedrive`, `microsoft-sharepoint`, `dropbox`, `box` and `aws-s3`. The sanctions packages fetch and parse only, so storing lists and matching names are up to your project.
+
 **`from-xml`** returns an Err for text with more than one root element, such as `<p>a</p><p>b</p>`. It used to return the last root and drop the others. Wrap such text in one root element, or parse it with `::hot::html/from-html` if it is HTML.
 
 **Packages** that use `::hot::html`, or call `::hot::gzip`, `::hot::zip` or `::hot::bytes/to-str`, need `hot-min-version: "3.0.3"`.
 
 `::hot::gzip/decode` and `::hot::zip/read-entry` refuse output over 64 MiB. Raise that with `hot.compression.max-output-bytes` in `hot.hot`, or read larger data with `decode-stream` and `read-entry-stream`, which hold one chunk at a time.
+
+**Behaviour changes:**
+
+- A handler with no `retry` that shares an event with one that has it is no longer retried, and a retry no longer runs the event's other handlers. A handler that relied on either needs its own `retry`.
+- `info().run.max-retries` and `retry-delay` now report a run's retries, including in a task. Code that treated a null as "no retries" now sees the real count. Code written as `or(run.max-retries, 0)` keeps working.
+- A value nested over 120 levels, or one whose record would be over 32 MB and more than four times its size in memory, is recorded as `::hot::blob/Omitted`. The value itself is unchanged, and only its record differs.
 
 ## Upgrading from Hot 3.0.1 to 3.0.2 {#upgrading-from-3-0-1-to-3-0-2}
 
