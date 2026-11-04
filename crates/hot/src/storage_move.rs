@@ -1387,7 +1387,10 @@ mod tests {
         .unwrap();
         let path = relative.get_str("file.storage.path");
         assert!(std::path::Path::new(&path).is_absolute(), "{path}");
-        assert!(path.ends_with("data/files"), "{path}");
+        assert!(
+            std::path::Path::new(&path).ends_with("data/files"),
+            "{path}"
+        );
         // A record with a `..` in it would depend on that directory too, and
         // collection would not delete its object.
         let resolved = |path: &str| {
@@ -1415,7 +1418,11 @@ mod tests {
             ("/nonexistent/sub/../../../x", "/x"),
             ("/..", "/"),
         ] {
-            assert_eq!(resolved(given), wanted, "{given}");
+            assert_eq!(
+                std::path::Path::new(&resolved(given)),
+                std::path::absolute(wanted).unwrap(),
+                "{given}"
+            );
         }
         assert!(
             MoveTarget {
