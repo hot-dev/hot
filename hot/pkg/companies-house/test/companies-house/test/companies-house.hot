@@ -1,0 +1,176 @@
+::companies-house::test::companies-house ns
+meta ["test"]
+
+::api ::companies-house::api
+::ch ::companies-house
+
+HttpResponse ::hot::http/HttpResponse
+
+// ============================================================================
+// Settings resolver
+// ============================================================================
+
+test-resolve-defaults
+meta ["test"]
+fn () {
+    cfg ::api/resolve({})
+    assert-eq("https://api.company-information.service.gov.uk", cfg.base-url)
+    assert-eq("https://document-api.company-information.service.gov.uk", cfg.document-base-url)
+    assert-eq(null, cfg.api-key)
+}
+
+test-resolve-opts-override
+meta ["test"]
+fn () {
+    cfg ::api/resolve({api-key: "k-test", base-url: "https://api-sandbox.company-information.service.gov.uk/"})
+    assert-eq("k-test", cfg.api-key)
+    assert-eq("https://api-sandbox.company-information.service.gov.uk", cfg.base-url)
+    assert-eq(null, ::hot::ctx/get("companies-house.api-key"), "per-call keys are never written to ctx")
+}
+
+test-resolve-reads-context
+meta ["test"]
+fn () {
+    ::hot::ctx/set({
+      "companies-house.api-key": "ctx-key",
+      "companies-house.base-url": "https://ctx.example/",
+      "companies-house.document-base-url": "https://ctx-doc.example/"
+    })
+    cfg ::api/resolve({})
+    assert-eq("ctx-key", cfg.api-key)
+    assert-eq("https://ctx.example", cfg.base-url)
+    assert-eq("https://ctx-doc.example", cfg.document-base-url)
+    ::hot::ctx/set({
+      "companies-house.api-key": null,
+      "companies-house.base-url": null,
+      "companies-house.document-base-url": null
+    })
+}
+
+test-blank-credential-is-an-err-naming-the-key
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"companies-house.api-key": "ctx-key"})
+    for-each(["", "  ", null], (v) {
+      out ::api/resolve({api-key: v})
+      assert(is-err(out), "blank api-key never falls back to context")
+      assert(::hot::str/contains(err-message(out), "api-key"), "the Err names api-key")
+    })
+    ::hot::ctx/set({"companies-house.api-key": null})
+}
+
+test-blank-credential-reaches-every-caller-as-an-err
+meta ["test"]
+fn () {
+    assert(is-err(::ch/company("00445790", {api-key: ""})), "company")
+    assert(is-err(::ch/search-companies("tesco", {api-key: ""})), "search-companies")
+    assert(is-err(::ch/document-metadata("abc123", {api-key: ""})), "document-metadata")
+    assert(is-err(::ch/document-content("abc123", "application/pdf", {api-key: ""})), "document-content")
+}
+
+test-keyed-url-needs-a-per-call-key
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"companies-house.api-key": "ctx-key"})
+    for-each(["base-url", "document-base-url"], (k) {
+      out ::api/resolve(assoc({}, k, "https://proxy.example"))
+      assert(is-err(out), `the context key never goes to ${k}`)
+      assert(::hot::str/contains(err-message(out), k), `names ${k}`)
+      assert(::hot::str/contains(err-message(out), "api-key"), "names api-key")
+      assert(is-ok(::api/resolve(assoc({api-key: "t"}, k, "https://proxy.example"))), "fine with a per-call key")
+    })
+    ::hot::ctx/set({"companies-house.api-key": null})
+}
+
+test-resolve-marks-and-returns-credentials-unchanged
+meta ["test"]
+fn () {
+    assert-eq("marked-ch-key", ::api/resolve({api-key: "marked-ch-key"}).api-key)
+}
+
+test-missing-credentials-are-errors
+meta ["test"]
+fn () {
+    key ::api/require-api-key(::api/resolve({}))
+    assert(is-err(key), "Companies House needs a key")
+    assert(::hot::str/contains(err-message(key), "companies-house.api-key"), "names the ctx key")
+    assert(is-err(::ch/company("00445790", {})), "fails before any request")
+}
+
+// ============================================================================
+// Transport helpers
+// ============================================================================
+
+test-query-string-drops-unset
+meta ["test"]
+fn () {
+    assert-eq("?q=apple+inc", ::api/query-string({q: "apple inc", page: null, field: ""}))
+    assert-eq("", ::api/query-string({a: null}))
+}
+
+test-path-segment
+meta ["test"]
+fn () {
+    assert-eq("a%2Fb%20c", ::api/path-segment("a/b c"))
+    assert-eq("42", ::api/path-segment(42))
+}
+
+test-http-error-rate-limit
+meta ["test"]
+fn () {
+    response HttpResponse({status: 429, headers: {retry-after: "120"}, body: {errors: [{error: "rate-limit-exceeded", type: "ch:service"}]}})
+    e untype(::api/http-error(response, "https://api.company-information.service.gov.uk/search/companies"))
+    assert-eq("companies-house", e.source)
+    assert-eq(120, e.retry-after)
+    assert-eq("companies-house: HTTP 429: rate-limit-exceeded", e.message)
+    assert(not(::api/is-not-found(e)), "429")
+}
+
+// ============================================================================
+// Companies House
+// ============================================================================
+
+test-auth-header
+meta ["test"]
+fn () {
+    // python: base64.b64encode(b"my-ch-key:")
+    assert-eq("Basic bXktY2gta2V5Og==", ::ch/auth-header("my-ch-key"))
+}
+
+test-company-number
+meta ["test"]
+fn () {
+    assert-eq("00000006", ::ch/company-number("6"))
+    assert-eq("00445790", ::ch/company-number(" 445790 "))
+    assert-eq("SC123456", ::ch/company-number("sc123456"))
+    assert-eq("SC001234", ::ch/company-number("SC1234"))
+    assert-eq("OC301540", ::ch/company-number("OC301540"))
+    assert(is-err(::ch/company-number("../etc")), "rejected")
+}
+
+test-links-and-paging
+meta ["test"]
+fn () {
+    assert-eq("AbC123", ::ch/officer-id-from-link("/officers/AbC123/appointments"))
+    assert-eq(null, ::ch/officer-id-from-link(null))
+    assert-eq("abc-123_X", ::ch/document-id("https://frontend-doc-api.company-information.service.gov.uk/document/abc-123_X"))
+    assert-eq("abc123", ::ch/document-id("https://document-api.company-information.service.gov.uk/document/abc123/content"))
+    assert-eq("abc123", ::ch/document-id("abc123"))
+    assert-eq(null, ::ch/document-id("not a link"))
+    assert-eq({items_per_page: null, start_index: null}, ::ch/page-params({}))
+    assert-eq(35, ::ch/next-start({start_index: 0, items: range(0, 35), total_results: 80}))
+    assert-eq(null, ::ch/next-start({start_index: 70, items: range(0, 10), total_results: 80}))
+    assert-eq(null, ::ch/next-start({start_index: 0, items: [], total_results: 80}))
+}
+
+test-collect-follows-start-index
+meta ["test"]
+fn () {
+    fetch (o) {
+      s o.start-index
+      {start_index: s, items: [s, add(s, 1)], total_results: 5}
+    }
+
+    assert-eq([0, 1, 2, 3, 4, 5], ::ch/collect(fetch, {}, 100), "the last page may run past the total")
+    assert-eq([0, 1, 2], ::ch/collect(fetch, {}, 3))
+}

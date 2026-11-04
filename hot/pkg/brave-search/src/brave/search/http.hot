@@ -1,0 +1,76 @@
+::brave::search::http ns
+meta {
+    doc: """HTTP plumbing for Brave Search: one `HttpError` shape with a readable message, and `send`."""
+}
+
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+HttpError
+meta {
+    doc: """A non-2xx Brave response. `message` is readable text such as `Brave API error 422: Unable to validate request parameter(s)`; `body` keeps the raw response."""
+}
+type {
+    status: Int,
+    message: Str,
+    headers: Map,
+    body: Any
+}
+
+error-detail
+meta {
+    doc: """Brave's error text from a response body, or null. Understands `{error: {detail}}`, `{error: {message}}`, `{error}`, and plain `{message}` or string bodies. Exposed for testing."""
+}
+fn (body: Any): Any {
+  cond {
+    is-str(body) => { text-or-null(body) }
+    not(is-map(body)) => { null }
+    => {
+      error get(body, "error")
+      or(
+        if(is-map(error), or(text-or-null(get(error, "detail")), text-or-null(get(error, "message"))), text-or-null(error)),
+        text-or-null(get(body, "message"))
+      )
+    }
+  }
+}
+
+text-or-null fn (value: Any): Any {
+  if(and(is-str(value), not(is-blank(value))), value, null)
+}
+
+error-message
+meta {
+    doc: """`Brave API error <status>: <detail>`, or without the detail when the body has none. Exposed for testing."""
+}
+fn (status: Int, body: Any): Str {
+  detail error-detail(body)
+  if(is-some(detail), `Brave API error ${status}: ${detail}`, `Brave API error ${status}`)
+}
+
+http-error
+meta {
+    doc: """Build the `HttpError` for a non-2xx response. Exposed for testing."""
+}
+fn (response: HttpResponse): HttpError {
+  HttpError({
+    status: response.status,
+    message: error-message(response.status, response.body),
+    headers: or(response.headers, {}),
+    body: response.body
+  })
+}
+
+send
+meta {
+    doc: """Send `request` and unwrap: the decoded JSON body on 2xx, an Err carrying `HttpError` otherwise, or the transport Err."""
+}
+fn (request: HttpRequest): Any {
+  response ::hot::http/request(request)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response.body }
+    => { err(http-error(response)) }
+  }
+}

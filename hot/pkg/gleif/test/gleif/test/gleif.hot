@@ -1,0 +1,107 @@
+::gleif::test::gleif ns
+meta ["test"]
+
+::fx ::gleif::test::fixtures
+::api ::gleif::api
+
+HttpResponse ::hot::http/HttpResponse
+
+// ============================================================================
+// Settings resolver
+// ============================================================================
+
+test-resolve-defaults
+meta ["test"]
+fn () {
+    assert-eq("https://api.gleif.org/api/v1", ::api/resolve({}).base-url)
+}
+
+test-resolve-opts-override
+meta ["test"]
+fn () {
+    assert-eq("https://gleif.example", ::api/resolve({base-url: "https://gleif.example/"}).base-url, "GLEIF takes no credential")
+}
+
+test-resolve-reads-context
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"gleif.base-url": "https://ctx.example/api/"})
+    assert-eq("https://ctx.example/api", ::api/resolve({}).base-url)
+    assert-eq("https://opts.example", ::api/resolve({base-url: "https://opts.example"}).base-url, "opts win")
+    ::hot::ctx/set({"gleif.base-url": null})
+}
+
+// ============================================================================
+// Transport helpers
+// ============================================================================
+
+test-query-string-drops-unset
+meta ["test"]
+fn () {
+    assert-eq("?q=apple+inc", ::api/query-string({q: "apple inc", page: null, field: ""}))
+    assert-eq("", ::api/query-string({a: null}))
+    assert-eq("?filter%5Bfulltext%5D=a%26b", ::api/query-string({"filter[fulltext]": "a&b"}))
+}
+
+test-path-segment
+meta ["test"]
+fn () {
+    assert-eq("a%2Fb%20c", ::api/path-segment("a/b c"))
+    assert-eq("42", ::api/path-segment(42))
+}
+
+test-http-error
+meta ["test"]
+fn () {
+    response HttpResponse({status: 404, headers: {}, body: {errors: [{status: "404", title: "Resource not found", detail: "Related resource not found"}]}})
+    e untype(::api/http-error(response, "https://api.gleif.org/api/v1/x"))
+    assert-eq("gleif", e.source)
+    assert-eq("gleif: HTTP 404: Related resource not found", e.message)
+    assert(::api/is-not-found(e), "404")
+}
+
+// ============================================================================
+// GLEIF
+// ============================================================================
+
+test-params
+meta ["test"]
+fn () {
+    assert-eq({"page[size]": null, "page[number]": null}, ::gleif/page-params({}))
+    assert-eq({"page[size]": 200, "page[number]": 3}, ::gleif/page-params({page-size: 500, page: 3}), "page size capped at 200")
+    assert-eq({"filter[entity.status]": "ACTIVE"}, ::gleif/filter-params({"entity.status": "ACTIVE"}))
+    p ::gleif/search-params("apple inc", {page-size: 10, filters: {"entity.legalAddress.country": "US"}})
+    assert-eq("?filter%5Bfulltext%5D=apple+inc&filter%5Bentity.legalAddress.country%5D=US&page%5Bsize%5D=10", ::api/query-string(p))
+}
+
+test-lei
+meta ["test"]
+fn () {
+    assert-eq("/lei-records/HWUPKR0MPOU8FGXBT394", ::gleif/lei-path(" hwupkr0mpou8fgxbt394 "))
+    assert(::gleif/is-lei("HWUPKR0MPOU8FGXBT394"), "Apple Inc.")
+    assert(::gleif/is-lei("549300G81RQKP7XW2N18"), "Apple Operations International")
+    assert(not(::gleif/is-lei("HWUPKR0MPOU8FGXBT395")), "bad check digits")
+    assert(not(::gleif/is-lei("APPLE")), "too short")
+}
+
+test-completions-and-paging
+meta ["test"]
+fn () {
+    assert-eq([{name: "Apple Inc.", lei: "HWUPKR0MPOU8FGXBT394"}], ::gleif/completions(::fx/GLEIF_FUZZY))
+    assert-eq([], ::gleif/completions(null))
+    assert-eq(2, ::gleif/next-page(::fx/GLEIF_PAGE))
+    assert-eq(null, ::gleif/next-page(::fx/GLEIF_LAST_PAGE))
+    assert-eq(null, ::gleif/next-page({}))
+}
+
+test-collect-follows-pages
+meta ["test"]
+fn () {
+    fetch (o) {
+      n o.page
+      {data: [`p${n}-a`, `p${n}-b`], meta: {pagination: {currentPage: n, lastPage: 3}}}
+    }
+
+    assert-eq(["p1-a", "p1-b", "p2-a", "p2-b", "p3-a", "p3-b"], ::gleif/collect(fetch, {}, 100))
+    assert-eq(["p1-a", "p1-b", "p2-a"], ::gleif/collect(fetch, {}, 3))
+}

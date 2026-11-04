@@ -1,6 +1,6 @@
 # firecrawl
 
-Firecrawl v2 bindings for Hot: scrape any URL to clean markdown, search the web with optional page content, map a site's URLs, crawl whole sites, batch-scrape lists of URLs, and run LLM-structured extraction. Crawls, batch scrapes, and extractions are async jobs: start them, then pick up the results from a verified webhook or a later run. It is the read-the-web half of `web-search`.
+Firecrawl v2 bindings for Hot: scrape any URL to clean markdown, search the web with optional page content, map a site's URLs, crawl whole sites, batch-scrape lists of URLs, and run LLM-structured extraction. Crawls, batch scrapes, and extractions are async jobs: start them, then pick up the results from a verified webhook or a later run. Use it on its own, or to read the URLs that `tavily`, `brave-search`, or `exa` find.
 
 ## Installation
 

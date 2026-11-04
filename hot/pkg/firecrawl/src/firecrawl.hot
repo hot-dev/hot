@@ -2,9 +2,9 @@
 meta {
     doc: """
     Firecrawl v2 bindings: turn websites into clean, LLM-ready content.
-    Completes the browsing loop with `web-search`: search finds URLs,
-    Firecrawl reads them as single pages, batches, whole sites, or
-    structured extraction.
+    Completes the browsing loop: `search` (or the `tavily`, `brave-search`,
+    or `exa` package) finds URLs, and Firecrawl reads them as single pages,
+    batches, whole sites, or structured extraction.
 
     **Setup**: context variable `firecrawl.api.key` (`fc-...`), or a
     per-call `api-key` in the trailing `opts` Map of any API-calling

@@ -70,20 +70,22 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/aws-sns/test",
     "./hot/pkg/aws-sqs/test",
     "./hot/pkg/box/test",
+    "./hot/pkg/brave-search/test",
     "./hot/pkg/cal-com/test",
     "./hot/pkg/cipherowl/test",
     "./hot/pkg/cloudflare/test",
-    "./hot/pkg/company-registry/test",
-    "./hot/pkg/crm/test",
+    "./hot/pkg/companies-house/test",
     "./hot/pkg/deepgram/test",
     "./hot/pkg/discord/test",
-    "./hot/pkg/documents/test",
     "./hot/pkg/dropbox/test",
     "./hot/pkg/elevenlabs/test",
+    "./hot/pkg/eu-sanctions/test",
+    "./hot/pkg/exa/test",
     "./hot/pkg/ffmpeg/test",
     "./hot/pkg/firecrawl/test",
     "./hot/pkg/gemini/test",
     "./hot/pkg/github/test",
+    "./hot/pkg/gleif/test",
     "./hot/pkg/google-calendar/test",
     "./hot/pkg/google-core/test",
     "./hot/pkg/google-drive/test",
@@ -109,9 +111,11 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/mysql/test",
     "./hot/pkg/notion/test",
     "./hot/pkg/oauth2/test",
+    "./hot/pkg/ofac/test",
     "./hot/pkg/openai-compatible/test",
     "./hot/pkg/openai/test",
     "./hot/pkg/openfigi/test",
+    "./hot/pkg/opensanctions/test",
     "./hot/pkg/pandoc/test",
     "./hot/pkg/persona/test",
     "./hot/pkg/pg/test",
@@ -125,7 +129,7 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/redis/test",
     "./hot/pkg/resend/test",
     "./hot/pkg/salesforce/test",
-    "./hot/pkg/sanctions/test",
+    "./hot/pkg/sec-edgar/test",
     "./hot/pkg/sentry/test",
     "./hot/pkg/shopify/test",
     "./hot/pkg/slack-admin/test",
@@ -138,10 +142,12 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/sumsub/test",
     "./hot/pkg/supabase-admin/test",
     "./hot/pkg/supabase/test",
+    "./hot/pkg/tavily/test",
     "./hot/pkg/telegram/test",
     "./hot/pkg/tesseract/test",
     "./hot/pkg/twilio/test",
-    "./hot/pkg/web-search/test",
+    "./hot/pkg/uk-sanctions/test",
+    "./hot/pkg/un-sanctions/test",
     "./hot/pkg/whatsapp/test",
     "./hot/pkg/whisper/test",
     "./hot/pkg/xai/test",
@@ -168,20 +174,22 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/aws-sns": { "local": "./hot/pkg/aws-sns" },
     "hot.dev/aws-sqs": { "local": "./hot/pkg/aws-sqs" },
     "hot.dev/box": { "local": "./hot/pkg/box" },
+    "hot.dev/brave-search": { "local": "./hot/pkg/brave-search" },
     "hot.dev/cal-com": { "local": "./hot/pkg/cal-com" },
     "hot.dev/cipherowl": { "local": "./hot/pkg/cipherowl" },
     "hot.dev/cloudflare": { "local": "./hot/pkg/cloudflare" },
-    "hot.dev/company-registry": { "local": "./hot/pkg/company-registry" },
-    "hot.dev/crm": { "local": "./hot/pkg/crm" },
+    "hot.dev/companies-house": { "local": "./hot/pkg/companies-house" },
     "hot.dev/deepgram": { "local": "./hot/pkg/deepgram" },
     "hot.dev/discord": { "local": "./hot/pkg/discord" },
-    "hot.dev/documents": { "local": "./hot/pkg/documents" },
     "hot.dev/dropbox": { "local": "./hot/pkg/dropbox" },
     "hot.dev/elevenlabs": { "local": "./hot/pkg/elevenlabs" },
+    "hot.dev/eu-sanctions": { "local": "./hot/pkg/eu-sanctions" },
+    "hot.dev/exa": { "local": "./hot/pkg/exa" },
     "hot.dev/ffmpeg": { "local": "./hot/pkg/ffmpeg" },
     "hot.dev/firecrawl": { "local": "./hot/pkg/firecrawl" },
     "hot.dev/gemini": { "local": "./hot/pkg/gemini" },
     "hot.dev/github": { "local": "./hot/pkg/github" },
+    "hot.dev/gleif": { "local": "./hot/pkg/gleif" },
     "hot.dev/google-calendar": { "local": "./hot/pkg/google-calendar" },
     "hot.dev/google-core": { "local": "./hot/pkg/google-core" },
     "hot.dev/google-drive": { "local": "./hot/pkg/google-drive" },
@@ -206,9 +214,11 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/mysql": { "local": "./hot/pkg/mysql" },
     "hot.dev/notion": { "local": "./hot/pkg/notion" },
     "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" },
+    "hot.dev/ofac": { "local": "./hot/pkg/ofac" },
     "hot.dev/openai": { "local": "./hot/pkg/openai" },
     "hot.dev/openai-compatible": { "local": "./hot/pkg/openai-compatible" },
     "hot.dev/openfigi": { "local": "./hot/pkg/openfigi" },
+    "hot.dev/opensanctions": { "local": "./hot/pkg/opensanctions" },
     "hot.dev/pandoc": { "local": "./hot/pkg/pandoc" },
     "hot.dev/persona": { "local": "./hot/pkg/persona" },
     "hot.dev/pg": { "local": "./hot/pkg/pg" },
@@ -222,7 +232,7 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/redis": { "local": "./hot/pkg/redis" },
     "hot.dev/resend": { "local": "./hot/pkg/resend" },
     "hot.dev/salesforce": { "local": "./hot/pkg/salesforce" },
-    "hot.dev/sanctions": { "local": "./hot/pkg/sanctions" },
+    "hot.dev/sec-edgar": { "local": "./hot/pkg/sec-edgar" },
     "hot.dev/sentry": { "local": "./hot/pkg/sentry" },
     "hot.dev/shopify": { "local": "./hot/pkg/shopify" },
     "hot.dev/slack": { "local": "./hot/pkg/slack" },
@@ -236,10 +246,12 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/sumsub": { "local": "./hot/pkg/sumsub" },
     "hot.dev/supabase": { "local": "./hot/pkg/supabase" },
     "hot.dev/supabase-admin": { "local": "./hot/pkg/supabase-admin" },
+    "hot.dev/tavily": { "local": "./hot/pkg/tavily" },
     "hot.dev/telegram": { "local": "./hot/pkg/telegram" },
     "hot.dev/tesseract": { "local": "./hot/pkg/tesseract" },
     "hot.dev/twilio": { "local": "./hot/pkg/twilio" },
-    "hot.dev/web-search": { "local": "./hot/pkg/web-search" },
+    "hot.dev/uk-sanctions": { "local": "./hot/pkg/uk-sanctions" },
+    "hot.dev/un-sanctions": { "local": "./hot/pkg/un-sanctions" },
     "hot.dev/whatsapp": { "local": "./hot/pkg/whatsapp" },
     "hot.dev/whisper": { "local": "./hot/pkg/whisper" },
     "hot.dev/xai": { "local": "./hot/pkg/xai" },
@@ -622,29 +634,137 @@ hot.project.pkg-integration-cipherowl.test.paths ["./hot/pkg/cipherowl/integrati
 hot.project.pkg-integration-cipherowl.test.capture true
 hot.project.pkg-integration-cipherowl.deps {}
 
-// sanctions list screening (OFAC, UK, EU, UN) unit tests (hermetic)
-hot.project.pkg-test-sanctions.src.paths ["./hot/pkg/sanctions/src"]
-hot.project.pkg-test-sanctions.test.paths ["./hot/pkg/sanctions/test"]
-hot.project.pkg-test-sanctions.test.capture true
-hot.project.pkg-test-sanctions.deps {}
+// GLEIF LEI API unit tests (hermetic)
+hot.project.pkg-test-gleif.src.paths ["./hot/pkg/gleif/src"]
+hot.project.pkg-test-gleif.test.paths ["./hot/pkg/gleif/test"]
+hot.project.pkg-test-gleif.test.capture true
+hot.project.pkg-test-gleif.deps {}
 
-// sanctions list screening (OFAC, UK, EU, UN) integration tests (requires sandbox credentials)
-hot.project.pkg-integration-sanctions.src.paths ["./hot/pkg/sanctions/src"]
-hot.project.pkg-integration-sanctions.test.paths ["./hot/pkg/sanctions/integration-test"]
-hot.project.pkg-integration-sanctions.test.capture true
-hot.project.pkg-integration-sanctions.deps {}
+// GLEIF LEI API integration tests (live; read-only)
+hot.project.pkg-integration-gleif.src.paths ["./hot/pkg/gleif/src"]
+hot.project.pkg-integration-gleif.test.paths ["./hot/pkg/gleif/integration-test"]
+hot.project.pkg-integration-gleif.test.capture true
+hot.project.pkg-integration-gleif.deps {}
 
-// company registries (GLEIF, SEC EDGAR, UK Companies House) unit tests (hermetic)
-hot.project.pkg-test-company-registry.src.paths ["./hot/pkg/company-registry/src"]
-hot.project.pkg-test-company-registry.test.paths ["./hot/pkg/company-registry/test"]
-hot.project.pkg-test-company-registry.test.capture true
-hot.project.pkg-test-company-registry.deps {}
+// SEC EDGAR unit tests (hermetic)
+hot.project.pkg-test-sec-edgar.src.paths ["./hot/pkg/sec-edgar/src"]
+hot.project.pkg-test-sec-edgar.test.paths ["./hot/pkg/sec-edgar/test"]
+hot.project.pkg-test-sec-edgar.test.capture true
+hot.project.pkg-test-sec-edgar.deps {}
 
-// company registries (GLEIF, SEC EDGAR, UK Companies House) integration tests (requires sandbox credentials)
-hot.project.pkg-integration-company-registry.src.paths ["./hot/pkg/company-registry/src"]
-hot.project.pkg-integration-company-registry.test.paths ["./hot/pkg/company-registry/integration-test"]
-hot.project.pkg-integration-company-registry.test.capture true
-hot.project.pkg-integration-company-registry.deps {}
+// SEC EDGAR integration tests (live; read-only)
+hot.project.pkg-integration-sec-edgar.src.paths ["./hot/pkg/sec-edgar/src"]
+hot.project.pkg-integration-sec-edgar.test.paths ["./hot/pkg/sec-edgar/integration-test"]
+hot.project.pkg-integration-sec-edgar.test.capture true
+hot.project.pkg-integration-sec-edgar.deps {}
+
+// UK Companies House unit tests (hermetic)
+hot.project.pkg-test-companies-house.src.paths ["./hot/pkg/companies-house/src"]
+hot.project.pkg-test-companies-house.test.paths ["./hot/pkg/companies-house/test"]
+hot.project.pkg-test-companies-house.test.capture true
+hot.project.pkg-test-companies-house.deps {}
+
+// UK Companies House integration tests (live; read-only)
+hot.project.pkg-integration-companies-house.src.paths ["./hot/pkg/companies-house/src"]
+hot.project.pkg-integration-companies-house.test.paths ["./hot/pkg/companies-house/integration-test"]
+hot.project.pkg-integration-companies-house.test.capture true
+hot.project.pkg-integration-companies-house.deps {}
+
+// Tavily search unit tests (hermetic)
+hot.project.pkg-test-tavily.src.paths ["./hot/pkg/tavily/src"]
+hot.project.pkg-test-tavily.test.paths ["./hot/pkg/tavily/test"]
+hot.project.pkg-test-tavily.test.capture true
+hot.project.pkg-test-tavily.deps {}
+
+// Tavily search integration tests (live; read-only)
+hot.project.pkg-integration-tavily.src.paths ["./hot/pkg/tavily/src"]
+hot.project.pkg-integration-tavily.test.paths ["./hot/pkg/tavily/integration-test"]
+hot.project.pkg-integration-tavily.test.capture true
+hot.project.pkg-integration-tavily.deps {}
+
+// Brave Search API unit tests (hermetic)
+hot.project.pkg-test-brave-search.src.paths ["./hot/pkg/brave-search/src"]
+hot.project.pkg-test-brave-search.test.paths ["./hot/pkg/brave-search/test"]
+hot.project.pkg-test-brave-search.test.capture true
+hot.project.pkg-test-brave-search.deps {}
+
+// Brave Search API integration tests (live; read-only)
+hot.project.pkg-integration-brave-search.src.paths ["./hot/pkg/brave-search/src"]
+hot.project.pkg-integration-brave-search.test.paths ["./hot/pkg/brave-search/integration-test"]
+hot.project.pkg-integration-brave-search.test.capture true
+hot.project.pkg-integration-brave-search.deps {}
+
+// Exa search unit tests (hermetic)
+hot.project.pkg-test-exa.src.paths ["./hot/pkg/exa/src"]
+hot.project.pkg-test-exa.test.paths ["./hot/pkg/exa/test"]
+hot.project.pkg-test-exa.test.capture true
+hot.project.pkg-test-exa.deps {}
+
+// Exa search integration tests (live; read-only)
+hot.project.pkg-integration-exa.src.paths ["./hot/pkg/exa/src"]
+hot.project.pkg-integration-exa.test.paths ["./hot/pkg/exa/integration-test"]
+hot.project.pkg-integration-exa.test.capture true
+hot.project.pkg-integration-exa.deps {}
+
+// OFAC sanctions lists unit tests (hermetic)
+hot.project.pkg-test-ofac.src.paths ["./hot/pkg/ofac/src"]
+hot.project.pkg-test-ofac.test.paths ["./hot/pkg/ofac/test"]
+hot.project.pkg-test-ofac.test.capture true
+hot.project.pkg-test-ofac.deps {}
+
+// OFAC sanctions lists integration tests (live; read-only)
+hot.project.pkg-integration-ofac.src.paths ["./hot/pkg/ofac/src"]
+hot.project.pkg-integration-ofac.test.paths ["./hot/pkg/ofac/integration-test"]
+hot.project.pkg-integration-ofac.test.capture true
+hot.project.pkg-integration-ofac.deps {}
+
+// UK Sanctions List unit tests (hermetic)
+hot.project.pkg-test-uk-sanctions.src.paths ["./hot/pkg/uk-sanctions/src"]
+hot.project.pkg-test-uk-sanctions.test.paths ["./hot/pkg/uk-sanctions/test"]
+hot.project.pkg-test-uk-sanctions.test.capture true
+hot.project.pkg-test-uk-sanctions.deps {}
+
+// UK Sanctions List integration tests (live; read-only)
+hot.project.pkg-integration-uk-sanctions.src.paths ["./hot/pkg/uk-sanctions/src"]
+hot.project.pkg-integration-uk-sanctions.test.paths ["./hot/pkg/uk-sanctions/integration-test"]
+hot.project.pkg-integration-uk-sanctions.test.capture true
+hot.project.pkg-integration-uk-sanctions.deps {}
+
+// EU Consolidated Financial Sanctions List unit tests (hermetic)
+hot.project.pkg-test-eu-sanctions.src.paths ["./hot/pkg/eu-sanctions/src"]
+hot.project.pkg-test-eu-sanctions.test.paths ["./hot/pkg/eu-sanctions/test"]
+hot.project.pkg-test-eu-sanctions.test.capture true
+hot.project.pkg-test-eu-sanctions.deps {}
+
+// EU Consolidated Financial Sanctions List integration tests (live; read-only)
+hot.project.pkg-integration-eu-sanctions.src.paths ["./hot/pkg/eu-sanctions/src"]
+hot.project.pkg-integration-eu-sanctions.test.paths ["./hot/pkg/eu-sanctions/integration-test"]
+hot.project.pkg-integration-eu-sanctions.test.capture true
+hot.project.pkg-integration-eu-sanctions.deps {}
+
+// UN Security Council Consolidated List unit tests (hermetic)
+hot.project.pkg-test-un-sanctions.src.paths ["./hot/pkg/un-sanctions/src"]
+hot.project.pkg-test-un-sanctions.test.paths ["./hot/pkg/un-sanctions/test"]
+hot.project.pkg-test-un-sanctions.test.capture true
+hot.project.pkg-test-un-sanctions.deps {}
+
+// UN Security Council Consolidated List integration tests (live; read-only)
+hot.project.pkg-integration-un-sanctions.src.paths ["./hot/pkg/un-sanctions/src"]
+hot.project.pkg-integration-un-sanctions.test.paths ["./hot/pkg/un-sanctions/integration-test"]
+hot.project.pkg-integration-un-sanctions.test.capture true
+hot.project.pkg-integration-un-sanctions.deps {}
+
+// OpenSanctions API unit tests (hermetic)
+hot.project.pkg-test-opensanctions.src.paths ["./hot/pkg/opensanctions/src"]
+hot.project.pkg-test-opensanctions.test.paths ["./hot/pkg/opensanctions/test"]
+hot.project.pkg-test-opensanctions.test.capture true
+hot.project.pkg-test-opensanctions.deps {}
+
+// OpenSanctions API integration tests (live; read-only)
+hot.project.pkg-integration-opensanctions.src.paths ["./hot/pkg/opensanctions/src"]
+hot.project.pkg-integration-opensanctions.test.paths ["./hot/pkg/opensanctions/integration-test"]
+hot.project.pkg-integration-opensanctions.test.capture true
+hot.project.pkg-integration-opensanctions.deps {}
 
 // OpenFIGI symbology unit tests (hermetic)
 hot.project.pkg-test-openfigi.src.paths ["./hot/pkg/openfigi/src"]
@@ -738,18 +858,6 @@ hot.project.pkg-test-zendesk.test.paths ["./hot/pkg/zendesk/test"]
 hot.project.pkg-test-zendesk.test.capture true
 hot.project.pkg-test-zendesk.deps {}
 
-// crm unit tests (provider normalizers + builders, hermetic)
-hot.project.pkg-test-crm.src.paths ["./hot/pkg/crm/src"]
-hot.project.pkg-test-crm.test.paths ["./hot/pkg/crm/test"]
-hot.project.pkg-test-crm.test.capture true
-hot.project.pkg-test-crm.deps {
-    "hot.dev/hubspot": { "local": "./hot/pkg/hubspot" },
-    "hot.dev/salesforce": { "local": "./hot/pkg/salesforce" },
-    "hot.dev/attio": { "local": "./hot/pkg/attio" },
-    "hot.dev/jwt": { "local": "./hot/pkg/jwt" },
-    "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" }
-}
-
 // hubspot unit tests (search bodies, note payloads, v3 webhook signature)
 hot.project.pkg-test-hubspot.src.paths ["./hot/pkg/hubspot/src"]
 hot.project.pkg-test-hubspot.test.paths ["./hot/pkg/hubspot/test"]
@@ -770,12 +878,6 @@ hot.project.pkg-test-attio.src.paths ["./hot/pkg/attio/src"]
 hot.project.pkg-test-attio.test.paths ["./hot/pkg/attio/test"]
 hot.project.pkg-test-attio.test.capture true
 hot.project.pkg-test-attio.deps {}
-
-// web-search unit tests (provider selection + normalizers, hermetic)
-hot.project.pkg-test-web-search.src.paths ["./hot/pkg/web-search/src"]
-hot.project.pkg-test-web-search.test.paths ["./hot/pkg/web-search/test"]
-hot.project.pkg-test-web-search.test.capture true
-hot.project.pkg-test-web-search.deps {}
 
 // notion unit tests (rich-text and block builders, hermetic)
 hot.project.pkg-test-notion.src.paths ["./hot/pkg/notion/src"]
@@ -888,40 +990,6 @@ hot.project.pkg-integration-box.src.paths ["./hot/pkg/box/src"]
 hot.project.pkg-integration-box.test.paths ["./hot/pkg/box/integration-test"]
 hot.project.pkg-integration-box.test.capture true
 hot.project.pkg-integration-box.deps {
-    "hot.dev/jwt": { "local": "./hot/pkg/jwt" },
-    "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" }
-}
-
-// documents abstraction unit tests (normalizers and adapters over fake responses, hermetic)
-hot.project.pkg-test-documents.src.paths ["./hot/pkg/documents/src"]
-hot.project.pkg-test-documents.test.paths ["./hot/pkg/documents/test"]
-hot.project.pkg-test-documents.test.capture true
-hot.project.pkg-test-documents.deps {
-    "hot.dev/google-core": { "local": "./hot/pkg/google-core" },
-    "hot.dev/google-drive": { "local": "./hot/pkg/google-drive" },
-    "hot.dev/microsoft-graph": { "local": "./hot/pkg/microsoft-graph" },
-    "hot.dev/microsoft-onedrive": { "local": "./hot/pkg/microsoft-onedrive" },
-    "hot.dev/dropbox": { "local": "./hot/pkg/dropbox" },
-    "hot.dev/box": { "local": "./hot/pkg/box" },
-    "hot.dev/aws-core": { "local": "./hot/pkg/aws-core" },
-    "hot.dev/aws-s3": { "local": "./hot/pkg/aws-s3" },
-    "hot.dev/jwt": { "local": "./hot/pkg/jwt" },
-    "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" }
-}
-
-// documents abstraction integration tests (uses whichever provider credentials are set)
-hot.project.pkg-integration-documents.src.paths ["./hot/pkg/documents/src"]
-hot.project.pkg-integration-documents.test.paths ["./hot/pkg/documents/integration-test"]
-hot.project.pkg-integration-documents.test.capture true
-hot.project.pkg-integration-documents.deps {
-    "hot.dev/google-core": { "local": "./hot/pkg/google-core" },
-    "hot.dev/google-drive": { "local": "./hot/pkg/google-drive" },
-    "hot.dev/microsoft-graph": { "local": "./hot/pkg/microsoft-graph" },
-    "hot.dev/microsoft-onedrive": { "local": "./hot/pkg/microsoft-onedrive" },
-    "hot.dev/dropbox": { "local": "./hot/pkg/dropbox" },
-    "hot.dev/box": { "local": "./hot/pkg/box" },
-    "hot.dev/aws-core": { "local": "./hot/pkg/aws-core" },
-    "hot.dev/aws-s3": { "local": "./hot/pkg/aws-s3" },
     "hot.dev/jwt": { "local": "./hot/pkg/jwt" },
     "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" }
 }
@@ -1184,18 +1252,6 @@ hot.project.pkg-aws-eventstream.src.paths ["./hot/pkg/aws-eventstream/src"]
 hot.project.pkg-aws-eventstream.test.paths ["./hot/pkg/aws-eventstream/test"]
 hot.project.pkg-aws-eventstream.test.capture true
 
-// crm integration tests (requires credentials; read-only or self-cleaning)
-hot.project.pkg-integration-crm.src.paths ["./hot/pkg/crm/src"]
-hot.project.pkg-integration-crm.test.paths ["./hot/pkg/crm/integration-test"]
-hot.project.pkg-integration-crm.test.capture true
-hot.project.pkg-integration-crm.deps {
-    "hot.dev/hubspot": { "local": "./hot/pkg/hubspot" },
-    "hot.dev/salesforce": { "local": "./hot/pkg/salesforce" },
-    "hot.dev/attio": { "local": "./hot/pkg/attio" },
-    "hot.dev/jwt": { "local": "./hot/pkg/jwt" },
-    "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" }
-}
-
 // firecrawl integration tests (requires credentials; read-only or self-cleaning)
 hot.project.pkg-integration-firecrawl.src.paths ["./hot/pkg/firecrawl/src"]
 hot.project.pkg-integration-firecrawl.test.paths ["./hot/pkg/firecrawl/integration-test"]
@@ -1284,12 +1340,6 @@ hot.project.pkg-integration-attio.src.paths ["./hot/pkg/attio/src"]
 hot.project.pkg-integration-attio.test.paths ["./hot/pkg/attio/integration-test"]
 hot.project.pkg-integration-attio.test.capture true
 hot.project.pkg-integration-attio.deps {}
-
-// web-search integration tests (requires a provider key; read-only)
-hot.project.pkg-integration-web-search.src.paths ["./hot/pkg/web-search/src"]
-hot.project.pkg-integration-web-search.test.paths ["./hot/pkg/web-search/integration-test"]
-hot.project.pkg-integration-web-search.test.capture true
-hot.project.pkg-integration-web-search.deps {}
 
 // notion integration tests (requires notion.token; read-only)
 hot.project.pkg-integration-notion.src.paths ["./hot/pkg/notion/src"]

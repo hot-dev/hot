@@ -1,0 +1,170 @@
+::eu::sanctions::xml ns
+meta {
+    doc: """
+    A small regex-based XML reader for the EU list file. The document is split into record strings, and fields are read
+    from each record with regexes: element text by tag, nested blocks,
+    and attributes of start tags. Character references are decoded on
+    the way out.
+
+    This is not a general XML parser. It relies on the file format:
+    record elements do not nest inside themselves, field elements hold
+    plain text, and there are no CDATA sections or comments inside
+    records.
+
+    **Why not `::hot::xml` for the whole file.** Speed. `from-xml` parses
+    22 MB in under a second, but every call that takes part of a parsed
+    tree copies it, and a record's fields take dozens of such calls.
+    Strings are cheap to pass. Measured on a real 22 MB list file (6,418
+    records) with a debug build: 55 s here, 91 to 109 s walking the tree,
+    with identical entries. Whole-tree parsing is worth revisiting if passing
+    a tree to a function stops copying it.
+    """
+}
+
+::re ::hot::regex
+::str ::hot::str
+
+// ---------------------------------------------------------------------------
+// Character references
+// ---------------------------------------------------------------------------
+
+decode
+meta {
+    doc: """
+    Decode XML character references in text with `::hot::xml`: the five
+    named entities and numeric references (`&#233;`, `&#xA;`). `&amp;lt;`
+    stays the literal text `&lt;`. Text the parser refuses comes back as
+    it was.
+
+    **Example**
+
+    ```hot
+    ::eu::sanctions::xml/decode("Smith &amp; Sons &#233;t&#xE9;")  // "Smith & Sons été"
+    ```
+    """
+}
+fn (s: Str): Str {
+  cond {
+    not(::str/contains(s, "&")) => { s }
+    => {
+      parsed from-xml(`<v>${s}</v>`)
+      if(is-err(parsed), s, ::hot::xml/text(parsed))
+    }
+  }
+}
+
+clean fn (s: Str): Str? {
+  t trim(::re/replace-all(decode(s), "\\s+", " "))
+  if(is-empty(t), null, t)
+}
+
+// ---------------------------------------------------------------------------
+// Elements
+// ---------------------------------------------------------------------------
+
+element-pattern fn (tag: Str): Str {
+  `(?s)<${tag}(?:\\s[^>]*)?>(.*?)</${tag}>`
+}
+
+records
+meta {
+    doc: """
+    Every `<tag ...>...</tag>` element of a document as a raw string.
+    The tag must not nest inside itself; `<tag/>` is skipped.
+
+    **Example**
+
+    ```hot
+    ::eu::sanctions::xml/records("<a><r>1</r><r>2</r></a>", "r")  // ["<r>1</r>", "<r>2</r>"]
+    ```
+    """
+}
+fn (doc: Str, tag: Str): Vec<Str> {
+  map(::re/find-all(doc, `(?s)<${tag}(?:\\s[^>]*)?>.*?</${tag}>`), (m) { m.match })
+}
+
+blocks
+meta {
+    doc: """The raw inner content of every `<tag>` element in `fragment`, in order (for nested structures)."""
+}
+fn (fragment: Str?, tag: Str): Vec<Str> {
+  cond {
+    is-null(fragment) => { [] }
+    => { map(::re/capture-all(fragment, element-pattern(tag)), (m) { or(m.groups[0], "") }) }
+  }
+}
+
+block
+meta {
+    doc: """The inner content of the first `<tag>` element, or null."""
+}
+fn (fragment: Str?, tag: Str): Str? {
+  first(blocks(fragment, tag))
+}
+
+texts
+meta {
+    doc: """
+    The text of every `<tag>` element in `fragment`: references
+    decoded, whitespace runs collapsed, trimmed, blanks dropped. Use it
+    for elements that hold text only.
+
+    **Example**
+
+    ```hot
+    ::eu::sanctions::xml/texts("<n><v>A &amp; B</v><v/><v> C </v></n>", "v")  // ["A & B", "C"]
+    ```
+    """
+}
+fn (fragment: Str?, tag: Str): Vec<Str> {
+  filter(map(blocks(fragment, tag), clean), is-some)
+}
+
+text
+meta {
+    doc: """The text of the first non-blank `<tag>` element, or null."""
+}
+fn (fragment: Str?, tag: Str): Str? {
+  first(texts(fragment, tag))
+}
+
+start-tags
+meta {
+    doc: """Every start (or empty-element) tag `<tag .../>` in `fragment`, as raw strings, for reading attributes."""
+}
+fn (fragment: Str?, tag: Str): Vec<Str> {
+  cond {
+    is-null(fragment) => { [] }
+    => { map(::re/find-all(fragment, `<${tag}(?:\\s[^>]*)?>`), (m) { m.match }) }
+  }
+}
+
+attr
+meta {
+    doc: """
+    An attribute of a start tag string, decoded and trimmed, or null
+    when missing or blank.
+
+    **Example**
+
+    ```hot
+    ::eu::sanctions::xml/attr("<nameAlias wholeName=\\"Abu Ali\\" strong=\\"true\\">", "wholeName")  // "Abu Ali"
+    ```
+    """
+}
+fn (start-tag: Str?, name: Str): Str? {
+  cond {
+    is-null(start-tag) => { null }
+    => {
+      dq ::re/capture(start-tag, `\\s${name}="([^"]*)"`)
+      sq ::re/capture(start-tag, `\\s${name}='([^']*)'`)
+      raw cond {
+        is-some(dq) => { dq.groups[0] }
+        is-some(sq) => { sq.groups[0] }
+        => { null }
+      }
+
+      if(is-null(raw), null, clean(raw))
+    }
+  }
+}

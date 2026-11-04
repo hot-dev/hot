@@ -1,0 +1,276 @@
+::un::sanctions ns
+meta {
+    doc: """
+    **Fetch only.** This package fetches and parses the list. It does
+    not screen names and it stores nothing. List data alone is not a
+    clearance decision.
+
+    The UN Security Council Consolidated List (`un`): every individual
+    and entity subject to Security Council sanctions, about 1,000
+    records.
+
+    **Format used**: the English XML file
+    (`https://scsanctions.un.org/resources/xml/en/consolidated.xml`,
+    about 2 MB; it redirects to a signed Azure Blob URL). It answers
+    only GET, so there is no cheap version check: `fetch` downloads the
+    file and compares the SHA-256 of the body with the version you pass,
+    which saves the parse but not the download.
+
+    **Example**
+
+    ```hot
+    out ::un::sanctions/fetch()
+    out.version
+    first(out.entries).name
+    ```
+    """
+}
+
+::re ::hot::regex
+::sx ::un::sanctions::xml
+::http ::un::sanctions::http
+
+URL "https://scsanctions.un.org/resources/xml/en/consolidated.xml"
+LIST_NAME "UN Security Council Consolidated List"
+
+ListingKind
+meta {
+    doc: """What is listed: an `<INDIVIDUAL>` is `"individual"`, an `<ENTITY>` is `"entity"`."""
+}
+type "individual" | "entity"
+
+Listing
+meta {
+    doc: """
+    One `<INDIVIDUAL>` or `<ENTITY>`, as the consolidated XML publishes
+    it.
+
+    **Fields**
+    - `id` — the `REFERENCE_NUMBER`, e.g. `"IQi.004"`
+    - `data-id` — the `DATAID`
+    - `kind` — a `ListingKind`
+    - `name` — `FIRST_NAME` to `FOURTH_NAME`, joined
+    - `aliases` — every `ALIAS_NAME`, then `NAME_ORIGINAL_SCRIPT`
+    - `dobs` — dates of birth as ISO 8601: `YYYY-MM-DD`, `YYYY`, or a
+      range `YYYY/YYYY`
+    - `nationalities` — as published
+    - `list-types` — the `UN_LIST_TYPE` values
+    - `addresses` — one line per address
+    - `comments` — the `COMMENTS1` text
+    - `listed-on` — the `LISTED_ON` date, as published
+    - `url` — the list file
+    """
+}
+type {
+    id: Str,
+    data-id: Str?,
+    kind: ListingKind,
+    name: Str,
+    aliases: Vec<Str>,
+    dobs: Vec<Str>,
+    nationalities: Vec<Str>,
+    list-types: Vec<Str>,
+    addresses: Vec<Str>,
+    comments: Str?,
+    listed-on: Str?,
+    url: Str
+}
+
+present fn (v: Any): Bool {
+  match v {
+    Null => { false }
+    Str => { not(is-empty(trim(v))) }
+    _ => { true }
+  }
+}
+
+clean-list
+meta {
+    doc: """Trim strings, drop blanks and duplicates, keep the first-seen order."""
+}
+fn (values: Vec): Vec<Str> {
+  distinct(map(filter(values, present), (v) { trim(Str(v)) }))
+}
+
+other-names
+meta {
+    doc: """Cleaned aliases without the primary name, ignoring case."""
+}
+fn (aliases: Vec, name: Str): Vec<Str> {
+  filter(clean-list(aliases), (a) { ne(lowercase(a), lowercase(name)) })
+}
+
+blank-to-null fn (v: Any): Str? {
+  if(present(v), trim(Str(v)), null)
+}
+
+// ---------------------------------------------------------------------------
+// Dates of birth
+// ---------------------------------------------------------------------------
+
+MONTHS {
+  jan: "01", feb: "02", mar: "03", apr: "04", may: "05", jun: "06",
+  jul: "07", aug: "08", sep: "09", oct: "10", nov: "11", dec: "12"
+}
+
+pad2 fn (s: Str): Str {
+  if(eq(length(s), 1), `0${s}`, s)
+}
+
+iso-date
+meta {
+    doc: """
+    Normalize one published date of birth to ISO 8601, or null when it
+    has no year. Accepts `1948-12-10`, `10 Dec 1948`, `Dec 1948`,
+    `1948`, `circa 1948`, `10/12/1948` and `dd/mm/1948` (day
+    first), and ranges such as `1959 to 1962` or `01 Jan 1960 to 31
+    Dec 1962` (`1959/1962`, `1960/1962`).
+
+    **Example**
+
+    ```hot
+    ::un::sanctions/iso-date("10 Dec 1948")  // "1948-12-10"
+    ::un::sanctions/iso-date("dd/mm/1963")   // "1963"
+    ::un::sanctions/iso-date("1959 to 1962") // "1959/1962"
+    ```
+    """
+}
+fn (raw: Str?): Str? {
+  s lowercase(trim(or(raw, "")))
+  years map(::re/find-all(s, "\\d{4}"), (m) { m.match })
+  is-range and(gte(length(years), 2), ::re/is-match(s, "\\d{4}.*(?:\\bto\\b|–|\\d{4}\\s*/\\s*\\d{4}$)"))
+  iso ::re/capture(s, "^(\\d{4})-(\\d{1,2})-(\\d{1,2})")
+  dmy ::re/capture(s, "^(\\d{1,2})\\s+([a-z]{3})[a-z]*\\.?\\s+(\\d{4})")
+  my ::re/capture(s, "^([a-z]{3})[a-z]*\\.?\\s+(\\d{4})")
+  slash ::re/capture(s, "^(\\d{1,2}|dd)/(\\d{1,2}|mm)/(\\d{4})")
+  year ::re/capture(s, "(\\d{4})")
+  cond {
+    is-range => { `${first(years)}/${last(years)}` }
+    is-some(iso) => { `${iso.groups[0]}-${pad2(iso.groups[1])}-${pad2(iso.groups[2])}` }
+    and(is-some(dmy), is-some(get(MONTHS, dmy.groups[1]))) => {
+      `${dmy.groups[2]}-${get(MONTHS, dmy.groups[1])}-${pad2(dmy.groups[0])}`
+    }
+
+    and(is-some(my), is-some(get(MONTHS, my.groups[0]))) => { `${my.groups[1]}-${get(MONTHS, my.groups[0])}` }
+    is-some(slash) => {
+      d slash.groups[0]
+      m slash.groups[1]
+      y slash.groups[2]
+      cond {
+        eq(m, "mm") => { y }
+        eq(d, "dd") => { `${y}-${pad2(m)}` }
+        => { `${y}-${pad2(m)}-${pad2(d)}` }
+      }
+    }
+
+    is-some(year) => { year.groups[0] }
+    => { null }
+  }
+}
+
+dob-of fn (node: Str): Str? {
+  date ::sx/text(node, "DATE")
+  year ::sx/text(node, "YEAR")
+  from ::sx/text(node, "FROM_YEAR")
+  to ::sx/text(node, "TO_YEAR")
+  cond {
+    is-some(date) => { iso-date(date) }
+    is-some(year) => { iso-date(year) }
+    and(is-some(from), is-some(to)) => { iso-date(`${from} to ${to}`) }
+    is-some(from) => { iso-date(from) }
+    => { null }
+  }
+}
+
+address-line fn (node: Str): Str {
+  join(filter(map(["STREET", "CITY", "STATE_PROVINCE", "ZIP_CODE", "COUNTRY"], (t) { ::sx/text(node, t) }), is-some), ", ")
+}
+
+parse-record
+meta {
+    doc: """Turn one `<INDIVIDUAL>` or `<ENTITY>` record string into a `Listing`; `individual` says which. Exposed for testing."""
+}
+fn (record: Str, individual: Bool): Listing {
+  prefix if(individual, "INDIVIDUAL", "ENTITY")
+  name trim(join(filter(map(["FIRST_NAME", "SECOND_NAME", "THIRD_NAME", "FOURTH_NAME"], (t) { ::sx/text(record, t) }), is-some), " "))
+  original ::sx/text(record, "NAME_ORIGINAL_SCRIPT")
+  aliases mapcat(::sx/blocks(record, `${prefix}_ALIAS`), (a) { ::sx/texts(a, "ALIAS_NAME") })
+  Listing({
+    id: trim(or(::sx/text(record, "REFERENCE_NUMBER"), "")),
+    data-id: ::sx/text(record, "DATAID"),
+    kind: if(individual, "individual", "entity"),
+    name: name,
+    aliases: other-names(concat(aliases, filter([original], is-some)), name),
+    dobs: clean-list(filter(map(::sx/blocks(record, "INDIVIDUAL_DATE_OF_BIRTH"), dob-of), is-some)),
+    nationalities: clean-list(::sx/texts(::sx/block(record, "NATIONALITY"), "VALUE")),
+    list-types: clean-list(::sx/texts(record, "UN_LIST_TYPE")),
+    addresses: clean-list(filter(map(::sx/blocks(record, `${prefix}_ADDRESS`), address-line), (s) { not(is-empty(s)) })),
+    comments: blank-to-null(::sx/text(record, "COMMENTS1")),
+    listed-on: ::sx/text(record, "LISTED_ON"),
+    url: URL
+  })
+}
+
+parse
+meta {
+    doc: """Parse the whole UN consolidated XML into `Listing` records (pure)."""
+}
+fn (doc: Str): Vec<Listing> {
+  people map(::sx/records(doc, "INDIVIDUAL"), (rec) { parse-record(rec, true) })
+  groups map(::sx/records(doc, "ENTITY"), (rec) { parse-record(rec, false) })
+  filter(concat(people, groups), (e) { and(not(is-empty(e.id)), not(is-empty(e.name))) })
+}
+
+require-entries
+meta {
+    doc: """The parsed records, or an Err when there are none: a changed file format can parse to nothing, and an empty list must not pass for a list with nobody on it."""
+}
+fn (entries: Vec): Vec {
+  cond {
+    is-empty(entries) => { err("un-sanctions: the file parsed to no records; its format may have changed") }
+    => { entries }
+  }
+}
+
+fetch
+meta {
+    doc: """
+    Download and parse the UN list. Returns `{version, entries,
+    unchanged}`, with `Listing` records in `entries`. `version` is the
+    first 16 hex digits of the body's SHA-256. When it equals
+    `known-version`, the file is not parsed, `unchanged` is true and
+    `entries` is null. The server answers GET only, so the file is
+    downloaded either way. A list that parses to no records is an Err.
+
+    **Example**
+
+    ```hot
+    out ::un::sanctions/fetch()
+    again ::un::sanctions/fetch(out.version)
+    again.unchanged
+    ```
+    """
+}
+fn
+(): Map {
+  fetch(null)
+},
+(known-version: Str?): Map {
+  text ::http/get-text(URL)
+  cond {
+    is-err(text) => { text }
+    => {
+      ver slice(::hot::hash/sha256(text), 0, 16)
+      cond {
+        eq(ver, known-version) => { {version: ver, entries: null, unchanged: true} }
+        => {
+          entries require-entries(parse(text))
+          cond {
+            is-err(entries) => { entries }
+            => { {version: ver, entries: entries, unchanged: false} }
+          }
+        }
+      }
+    }
+  }
+}
