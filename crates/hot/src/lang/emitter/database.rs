@@ -34,6 +34,7 @@ pub struct DatabaseEngineEventEmitter {
     shutdown_initiated: Arc<AtomicBool>,
     /// How many calls a run records (see `with_max_calls_per_run`).
     max_calls_per_run: Arc<AtomicUsize>,
+    call_budgets: CallBudgets,
 }
 
 /// Calls a run records by default. A heavily interpreted run makes hundreds
@@ -47,6 +48,24 @@ const FINISHED_CALL_BUDGET_TTL: Duration = Duration::from_secs(300);
 /// than the longest run, so a long call's stop still finds its start.
 const IDLE_CALL_BUDGET_TTL: Duration = Duration::from_secs(25 * 3_600);
 const CALL_BUDGET_PRUNE_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Sent in place of the first call a run doesn't record.
+const CALLS_TRUNCATED_EVENT: &str = "call:truncated";
+
+/// Each run's calls so far. Decided as a call is emitted, not as it's processed:
+/// the queue is unbounded, and an event waiting in it keeps its args alive. A
+/// run that reads a table can make a million calls past its limit while the
+/// processor is busy, and each one would hold its row until it's discarded.
+type CallBudgets = Arc<std::sync::Mutex<AHashMap<Uuid, RunCallBudget>>>;
+
+/// What happens to a call event.
+#[derive(PartialEq, Debug)]
+enum CallDecision {
+    Record,
+    Skip,
+    /// Skip it, and it's the first the run skips.
+    Truncate,
+}
 
 /// The calls a run has recorded, and those it no longer records.
 #[derive(Default)]
@@ -74,7 +93,7 @@ struct DatabaseEngineEventEmitterProcessor {
     /// (after secret masking) before JSON serialization.
     blob_store: Option<Arc<BlobStore>>,
     max_calls_per_run: Arc<AtomicUsize>,
-    call_budgets: AHashMap<Uuid, RunCallBudget>,
+    call_budgets: CallBudgets,
     last_budget_prune: Instant,
 }
 
@@ -110,10 +129,10 @@ struct CallEngineEventBatch {
     static_scope: String,
     runtime_path: String,
     call_depth: i64,
-    args: Option<String>,
-    return_value: Option<String>,
+    args: Option<CallPayload>,
+    return_value: Option<CallPayload>,
     error: Option<String>,
-    flow: Option<String>,
+    flow: Option<CallPayload>,
     file: Option<String>,
     line: Option<i64>,
     column: Option<i64>,
@@ -122,6 +141,20 @@ struct CallEngineEventBatch {
     stop_time: Option<chrono::DateTime<chrono::Utc>>,
     duration_us: Option<i64>,
 }
+
+/// A call's args, return value or flow, waiting to be masked and written.
+#[derive(Debug, Clone)]
+enum CallPayload {
+    Json(String),
+    /// A value with a large leaf stays a value. The run already holds it, so
+    /// this costs nothing, where JSON would write Bytes out at four times their
+    /// size on every call they pass through, and blob storage takes the leaf as
+    /// it is.
+    Large(Val),
+}
+
+/// The size of leaf that keeps a call's payload a [`CallPayload::Large`].
+const LARGE_PAYLOAD_LEAF_BYTES: usize = 64 * 1024;
 
 const BATCH_INTERVAL: Duration = Duration::from_millis(500);
 const MAX_REMASK_INTERVAL: Duration = Duration::from_secs(30);
@@ -156,6 +189,8 @@ impl DatabaseEngineEventEmitter {
         let writer_for_processor = writer.clone();
         let max_calls_per_run = Arc::new(AtomicUsize::new(DEFAULT_MAX_CALLS_PER_RUN));
         let max_calls_for_processor = Arc::clone(&max_calls_per_run);
+        let call_budgets = CallBudgets::default();
+        let budgets_for_processor = Arc::clone(&call_budgets);
 
         // Start event processing task
         tokio::spawn(async move {
@@ -163,6 +198,7 @@ impl DatabaseEngineEventEmitter {
                 writer_for_processor,
                 blob_store,
                 max_calls_for_processor,
+                budgets_for_processor,
             );
 
             let mut flush_timer = interval(BATCH_INTERVAL);
@@ -232,6 +268,7 @@ impl DatabaseEngineEventEmitter {
             shutdown_sender,
             shutdown_initiated: Arc::new(AtomicBool::new(false)),
             max_calls_per_run,
+            call_budgets,
         }
     }
 
@@ -255,6 +292,8 @@ impl DatabaseEngineEventEmitter {
         let writer_for_processor = writer.clone();
         let max_calls_per_run = Arc::new(AtomicUsize::new(DEFAULT_MAX_CALLS_PER_RUN));
         let max_calls_for_processor = Arc::clone(&max_calls_per_run);
+        let call_budgets = CallBudgets::default();
+        let budgets_for_processor = Arc::clone(&call_budgets);
 
         // Start event processing task
         tokio::spawn(async move {
@@ -278,6 +317,7 @@ impl DatabaseEngineEventEmitter {
                 writer_for_processor,
                 None,
                 max_calls_for_processor,
+                budgets_for_processor,
             );
 
             let mut flush_timer = interval(BATCH_INTERVAL);
@@ -349,6 +389,7 @@ impl DatabaseEngineEventEmitter {
             shutdown_sender,
             shutdown_initiated: Arc::new(AtomicBool::new(false)),
             max_calls_per_run,
+            call_budgets,
         }
     }
 
@@ -399,6 +440,7 @@ impl DatabaseEngineEventEmitterProcessor {
         writer: DatabaseWriter,
         blob_store: Option<Arc<BlobStore>>,
         max_calls_per_run: Arc<AtomicUsize>,
+        call_budgets: CallBudgets,
     ) -> Self {
         Self {
             writer,
@@ -408,65 +450,34 @@ impl DatabaseEngineEventEmitterProcessor {
             written_runs: AHashMap::new(),
             blob_store,
             max_calls_per_run,
-            call_budgets: AHashMap::new(),
+            call_budgets,
             last_budget_prune: Instant::now(),
         }
     }
 
-    /// Whether a call event is recorded: a run records its first calls up
-    /// to the cap, and a call's stop only with its start.
-    fn records_call(&mut self, event: &EngineEvent) -> bool {
-        let max = self.max_calls_per_run.load(Ordering::Relaxed);
-        if max == 0 {
-            return true;
-        }
-        let Val::Map(data) = &event.event_data else {
-            return true;
-        };
-        let Some(Val::Str(call_id)) = data.get(&Val::from("call_id")) else {
-            return true;
-        };
-        let Ok(call_id) = Uuid::parse_str(call_id) else {
-            return true;
-        };
+    /// A run has made its first call past its limit.
+    fn record_truncation(&mut self, event: &EngineEvent) {
         let run_id = event.execution_context.run_id;
-        if event.event_type == "call:stop" {
-            // A stop without a recorded start is recorded as before, unless
-            // the run's unrecorded starts may include its own.
-            return match self.call_budgets.get_mut(&run_id) {
-                Some(budget) => budget.open.remove(&call_id) || budget.unrecorded == 0,
-                None => true,
-            };
-        }
-        let budget = self.call_budgets.entry(run_id).or_default();
-        budget.last_seen = Some(Instant::now());
-        if budget.recorded < max {
-            budget.recorded += 1;
-            budget.open.insert(call_id);
-            return true;
-        }
-        budget.unrecorded += 1;
-        if budget.unrecorded == 1 {
-            tracing::warn!(
-                %run_id,
-                max_calls = max,
-                "Run made more calls than it records; recording no more"
-            );
-            self.writer.write(DatabaseWrite::RunInfo {
-                run_id,
-                info: serde_json::json!({
-                    "call_tracing": "truncated",
-                    "traced_calls_limit": max,
-                }),
-            });
-        }
-        false
+        let max = self.max_calls_per_run.load(Ordering::Relaxed);
+        tracing::warn!(
+            %run_id,
+            max_calls = max,
+            "Run made more calls than it records; recording no more"
+        );
+        self.writer.write(DatabaseWrite::RunInfo {
+            run_id,
+            info: serde_json::json!({
+                "call_tracing": "truncated",
+                "traced_calls_limit": max,
+            }),
+        });
     }
 
     /// Once a run ends, record how many of its calls it didn't.
     fn finish_call_budget(&mut self, run_id: Uuid) {
         self.ended_runs.push(run_id);
-        let Some(budget) = self.call_budgets.get_mut(&run_id) else {
+        let mut budgets = lock_call_budgets(&self.call_budgets);
+        let Some(budget) = budgets.get_mut(&run_id) else {
             return;
         };
         if !budget.finished && budget.unrecorded > 0 {
@@ -487,7 +498,7 @@ impl DatabaseEngineEventEmitterProcessor {
         self.last_budget_prune = Instant::now();
         self.written_runs
             .retain(|_, run| run.last_written.elapsed() < IDLE_CALL_BUDGET_TTL);
-        self.call_budgets.retain(|_, budget| {
+        lock_call_budgets(&self.call_budgets).retain(|_, budget| {
             let ttl = if budget.finished {
                 FINISHED_CALL_BUDGET_TTL
             } else {
@@ -499,9 +510,8 @@ impl DatabaseEngineEventEmitterProcessor {
 
     /// Process a single event - sends critical events immediately, batches others
     async fn process_event(&mut self, event: EngineEvent) {
-        if matches!(event.event_type.as_str(), "call:start" | "call:stop")
-            && !self.records_call(&event)
-        {
+        if event.event_type == CALLS_TRUNCATED_EVENT {
+            self.record_truncation(&event);
             return;
         }
         if matches!(
@@ -663,19 +673,82 @@ impl DatabaseEngineEventEmitterProcessor {
         }
     }
 
-    /// Mask a serialized call payload, then store its large parts in blob
-    /// storage: its large leaves, or all of it if that wouldn't leave little
-    /// enough inline. Masking MUST precede spill so secret bytes never reach
-    /// blob storage. Observability path: on spill failure, fall back to the
-    /// masked inline JSON, unless it's too large to store at all.
+    /// Mask a call payload, then store its large parts in blob storage: its
+    /// large leaves, or all of it if that wouldn't leave little enough inline.
+    /// Masking MUST precede spill so secret bytes never reach blob storage.
+    /// Observability path: on spill failure, fall back to the masked inline
+    /// JSON, unless it's too large to store at all.
     async fn finalize_call_payload(
         blob_store: &Option<Arc<BlobStore>>,
-        json_value: Option<String>,
+        payload: Option<CallPayload>,
         ctx: &ExecutionContext,
         source: SpillSource,
         source_id: &str,
     ) -> Option<String> {
-        let masked = Self::mask_call_payload(json_value, ctx)?;
+        match payload? {
+            CallPayload::Json(json) => {
+                let masked = Self::mask_call_payload(Some(json), ctx)?;
+                Self::finalize_masked_json(blob_store, masked, ctx, source, source_id).await
+            }
+            CallPayload::Large(value) => {
+                Self::finalize_large_payload(blob_store, value, ctx, source, source_id).await
+            }
+        }
+    }
+
+    /// As [`Self::finalize_call_payload`], without writing a value's large
+    /// leaves out as JSON, or reading them back to mask them.
+    async fn finalize_large_payload(
+        blob_store: &Option<Arc<BlobStore>>,
+        value: Val,
+        ctx: &ExecutionContext,
+        source: SpillSource,
+        source_id: &str,
+    ) -> Option<String> {
+        let masked = RecordMask::new(&ctx.secret_values, &ctx.secret_value_hashes).mask_val(value);
+        if let Some(store) = blob_store.as_ref().filter(|s| s.config().enabled())
+            && let Some(org_id) = ctx.org_id
+            && crate::blob::val_bytes_outside_large_leaves(
+                &masked,
+                store.config().spill_threshold_bytes,
+            ) <= store.config().max_inline_bytes
+        {
+            let scope = BlobScope {
+                org_id,
+                env_id: ctx.env_id,
+                run_id: Some(ctx.run_id),
+            };
+            match store
+                .spill_large_val(masked.clone(), scope, source, Some(source_id))
+                .await
+            {
+                Ok(spilled) => {
+                    if let Ok(json) = serde_json::to_string(&spilled) {
+                        return Some(Self::inline_call_payload(
+                            sanitize_json_for_jsonb(&json).into_owned(),
+                        ));
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    source = source.as_str(),
+                    source_id,
+                    error = %e,
+                    "blob spill failed for call payload; storing inline"
+                ),
+            }
+        }
+        let json = serde_json::to_string(&masked).unwrap_or_default();
+        let json = sanitize_json_for_jsonb(&json).into_owned();
+        Self::finalize_masked_json(blob_store, json, ctx, source, source_id).await
+    }
+
+    async fn finalize_masked_json(
+        blob_store: &Option<Arc<BlobStore>>,
+        masked: String,
+        ctx: &ExecutionContext,
+        source: SpillSource,
+        source_id: &str,
+    ) -> Option<String> {
         let Some(store) = blob_store.as_ref().filter(|s| s.config().enabled()) else {
             return Some(Self::inline_call_payload(masked));
         };
@@ -905,16 +978,19 @@ impl DatabaseEngineEventEmitterProcessor {
             .retain(|run_id, _| !ended.contains(run_id));
     }
 
-    /// Serialize a `Val` to JSON for storage in a Postgres `jsonb` column,
-    /// scrubbing out characters Postgres rejects (`\u0000`, lone UTF-16
-    /// surrogates) but JSON otherwise allows. Without this, a single bad
-    /// byte in a container/webhook payload would 22P05 the whole
-    /// transaction batch and we'd silently drop a window of trace data.
-    /// See [`super::postgres_safety`] for the full rationale.
-    fn serialize_val_for_jsonb(v: &Val) -> String {
+    /// A value as a call payload, in the form it's recorded. Its JSON is for
+    /// a Postgres `jsonb` column, so it's scrubbed of characters Postgres
+    /// rejects (`\u0000`, lone UTF-16 surrogates) but JSON otherwise allows.
+    /// Without this, a single bad byte in a container/webhook payload would
+    /// 22P05 the whole transaction batch and we'd silently drop a window of
+    /// trace data. See [`super::postgres_safety`] for the full rationale.
+    fn call_payload(v: &Val) -> CallPayload {
         let storage_val = v.to_record_repr();
+        if crate::blob::count_large_leaves(&storage_val, LARGE_PAYLOAD_LEAF_BYTES) > 0 {
+            return CallPayload::Large(storage_val);
+        }
         let raw = serde_json::to_string(&storage_val).unwrap_or_default();
-        sanitize_json_for_jsonb(&raw).into_owned()
+        CallPayload::Json(sanitize_json_for_jsonb(&raw).into_owned())
     }
 
     /// Mask a serialized call payload. See [`crate::lang::masking`].
@@ -1001,7 +1077,7 @@ impl DatabaseEngineEventEmitterProcessor {
                     if matches!(v, Val::Null) {
                         None
                     } else {
-                        Some(Self::serialize_val_for_jsonb(v))
+                        Some(Self::call_payload(v))
                     }
                 });
 
@@ -1028,7 +1104,7 @@ impl DatabaseEngineEventEmitterProcessor {
                     if matches!(v, Val::Null) {
                         None
                     } else {
-                        Some(Self::serialize_val_for_jsonb(v))
+                        Some(Self::call_payload(v))
                     }
                 });
 
@@ -1090,7 +1166,7 @@ impl DatabaseEngineEventEmitterProcessor {
                     if matches!(v, Val::Null) {
                         None
                     } else {
-                        Some(Self::serialize_val_for_jsonb(v))
+                        Some(Self::call_payload(v))
                     }
                 });
 
@@ -1148,6 +1224,64 @@ impl DatabaseEngineEventEmitterProcessor {
     }
 }
 
+fn lock_call_budgets(
+    budgets: &CallBudgets,
+) -> std::sync::MutexGuard<'_, AHashMap<Uuid, RunCallBudget>> {
+    // A budget is a few counters: one a panic left half-updated still serves.
+    budgets
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+impl DatabaseEngineEventEmitter {
+    /// Whether a call event is recorded: a run records its first calls up
+    /// to the cap, and a call's stop only with its start.
+    fn decide_call(&self, event: &EngineEvent) -> CallDecision {
+        let max = self.max_calls_per_run.load(Ordering::Relaxed);
+        if max == 0 {
+            return CallDecision::Record;
+        }
+        let Val::Map(data) = &event.event_data else {
+            return CallDecision::Record;
+        };
+        let Some(Val::Str(call_id)) = data.get(&Val::from("call_id")) else {
+            return CallDecision::Record;
+        };
+        let Ok(call_id) = Uuid::parse_str(call_id) else {
+            return CallDecision::Record;
+        };
+        let run_id = event.execution_context.run_id;
+        let mut budgets = lock_call_budgets(&self.call_budgets);
+        if event.event_type == "call:stop" {
+            // A stop without a recorded start is recorded as before, unless
+            // the run's unrecorded starts may include its own.
+            return match budgets.get_mut(&run_id) {
+                Some(budget) => {
+                    if budget.open.remove(&call_id) || budget.unrecorded == 0 {
+                        CallDecision::Record
+                    } else {
+                        CallDecision::Skip
+                    }
+                }
+                None => CallDecision::Record,
+            };
+        }
+        let budget = budgets.entry(run_id).or_default();
+        budget.last_seen = Some(Instant::now());
+        if budget.recorded < max {
+            budget.recorded += 1;
+            budget.open.insert(call_id);
+            return CallDecision::Record;
+        }
+        budget.unrecorded += 1;
+        if budget.unrecorded == 1 {
+            CallDecision::Truncate
+        } else {
+            CallDecision::Skip
+        }
+    }
+}
+
 impl EngineEventEmitter for DatabaseEngineEventEmitter {
     fn emit(&self, event: EngineEvent) {
         let event_type = event.event_type.clone();
@@ -1160,6 +1294,20 @@ impl EngineEventEmitter for DatabaseEngineEventEmitter {
                 run_id
             );
         }
+
+        let event = if matches!(event_type.as_str(), "call:start" | "call:stop") {
+            match self.decide_call(&event) {
+                CallDecision::Record => event,
+                CallDecision::Skip => return,
+                CallDecision::Truncate => EngineEvent {
+                    event_type: CALLS_TRUNCATED_EVENT.to_string(),
+                    event_data: Val::Null,
+                    ..event
+                },
+            }
+        } else {
+            event
+        };
 
         // Send all events through the processor for batching, secret masking, etc.
         if self.event_sender.send(event).is_err() {
@@ -1203,6 +1351,7 @@ impl Clone for DatabaseEngineEventEmitter {
             shutdown_sender: self.shutdown_sender.clone(),
             shutdown_initiated: Arc::clone(&self.shutdown_initiated),
             max_calls_per_run: Arc::clone(&self.max_calls_per_run),
+            call_budgets: Arc::clone(&self.call_budgets),
         }
     }
 }
@@ -1273,7 +1422,10 @@ mod tests {
             Val::Box(Box::new(lazy_thunk)),
         ]);
 
-        let json = DatabaseEngineEventEmitterProcessor::serialize_val_for_jsonb(&args);
+        let CallPayload::Json(json) = DatabaseEngineEventEmitterProcessor::call_payload(&args)
+        else {
+            panic!("a small value is recorded as JSON");
+        };
 
         assert!(!json.contains("\"$box\""));
         assert!(!json.contains("instructions"));
@@ -1959,6 +2111,197 @@ mod tests {
         let object = blob_store2.expect("blob object should exist for spilled bytes");
         assert_eq!(object.size, big_bytes.len() as i64);
         assert_eq!(object.status, "available");
+    }
+
+    async fn record_one_call(
+        emitter: &DatabaseEngineEventEmitter,
+        execution_context: &ExecutionContext,
+        args: Vec<Val>,
+    ) -> Uuid {
+        let call_id = Uuid::now_v7();
+        emitter.emit(EngineEvent::call_start(
+            execution_context,
+            call_id,
+            None,
+            "::hot::test/big".to_string(),
+            "::hot::test/big".to_string(),
+            "run/test".to_string(),
+            0,
+            args,
+            None,
+            chrono::Utc::now(),
+            None,
+        ));
+        emitter.emit(EngineEvent::call_stop(
+            execution_context,
+            call_id,
+            Some(Val::from("ok")),
+            None,
+            chrono::Utc::now(),
+            10,
+        ));
+        call_id
+    }
+
+    async fn stored_args(db: &crate::db::DatabasePool, call_id: Uuid) -> String {
+        let crate::db::DatabasePool::Sqlite(pool) = db else {
+            panic!("test_db should return SQLite");
+        };
+        sqlx::query("SELECT args FROM call WHERE call_id = ?")
+            .bind(call_id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+            .get("args")
+    }
+
+    #[tokio::test]
+    async fn a_large_leaf_is_stored_once_as_it_is_however_often_it_is_passed() {
+        let db = crate::db::test_db().await;
+        let (blob_store, _tmp) = test_blob_store(&db);
+        let emitter = DatabaseEngineEventEmitter::new_with_pool_and_blob_store(
+            db.clone(),
+            Some(blob_store.clone()),
+        );
+        let execution_context = persisted_execution_context(&db).await;
+        let bytes = vec![7u8; 2 * LARGE_PAYLOAD_LEAF_BYTES];
+        let shared = Val::bytes(bytes.clone());
+
+        let first = record_one_call(&emitter, &execution_context, vec![shared.clone()]).await;
+        let second = record_one_call(&emitter, &execution_context, vec![shared]).await;
+        emitter.shutdown().await.unwrap();
+
+        let (first, second) = (
+            stored_args(&db, first).await,
+            stored_args(&db, second).await,
+        );
+        assert!(first.contains("::hot::blob/BlobRef"), "args: {first}");
+        assert!(second.contains("::hot::blob/BlobRef"), "args: {second}");
+
+        // Stored raw, not as JSON: the blob's hash and size are the bytes' own.
+        let object = crate::db::blob::get_object_by_hash(
+            &db,
+            execution_context.org_id.unwrap(),
+            execution_context.env_id,
+            "blake3",
+            blake3::hash(&bytes).to_hex().as_ref(),
+        )
+        .await
+        .unwrap()
+        .expect("the bytes are one blob object");
+        assert_eq!(object.size, bytes.len() as i64);
+
+        // What a reader gets back is what the call was passed.
+        let scope = crate::blob::BlobScope {
+            org_id: execution_context.org_id.unwrap(),
+            env_id: execution_context.env_id,
+            run_id: Some(execution_context.run_id),
+        };
+        let rehydrated = blob_store
+            .rehydrate_blob_refs(
+                serde_json::from_str(&first).unwrap(),
+                scope,
+                crate::blob::RehydrateBudget::from_config(blob_store.config()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            format!("{rehydrated:?}"),
+            format!("{:?}", Val::vec(vec![Val::bytes(bytes)]))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_secret_in_a_large_leaf_never_reaches_blob_storage() {
+        let db = crate::db::test_db().await;
+        let (blob_store, _tmp) = test_blob_store(&db);
+        let emitter =
+            DatabaseEngineEventEmitter::new_with_pool_and_blob_store(db.clone(), Some(blob_store));
+        let execution_context = persisted_execution_context(&db).await;
+        // A credential field, in text big enough to be held as a value.
+        let mut bytes = br#"{"password":"hunter2-hunter2"}"#.to_vec();
+        bytes.resize(2 * LARGE_PAYLOAD_LEAF_BYTES, b' ');
+
+        let call_id = record_one_call(
+            &emitter,
+            &execution_context,
+            vec![Val::bytes(bytes.clone())],
+        )
+        .await;
+        emitter.shutdown().await.unwrap();
+
+        let args = stored_args(&db, call_id).await;
+        assert!(args.contains("<secret>"), "args: {args}");
+        let object = crate::db::blob::get_object_by_hash(
+            &db,
+            execution_context.org_id.unwrap(),
+            execution_context.env_id,
+            "blake3",
+            blake3::hash(&bytes).to_hex().as_ref(),
+        )
+        .await
+        .unwrap();
+        assert!(object.is_none(), "the bytes must not be stored");
+    }
+
+    #[tokio::test]
+    async fn a_large_leaf_is_recorded_inline_without_blob_storage() {
+        let db = crate::db::test_db().await;
+        let emitter = DatabaseEngineEventEmitter::new_with_pool(db.clone());
+        let execution_context = persisted_execution_context(&db).await;
+
+        let bytes = Val::bytes(vec![7u8; 2 * LARGE_PAYLOAD_LEAF_BYTES]);
+        let call_id = record_one_call(&emitter, &execution_context, vec![bytes.clone()]).await;
+        emitter.shutdown().await.unwrap();
+
+        let args: Val = serde_json::from_str(&stored_args(&db, call_id).await).unwrap();
+        assert_eq!(format!("{args:?}"), format!("{:?}", Val::vec(vec![bytes])));
+    }
+
+    /// An event held in the queue holds its args, so a call past the cap has to
+    /// go as it's emitted. Three million of them held 20 GB in one run.
+    #[tokio::test]
+    async fn a_call_past_the_cap_goes_as_it_is_emitted() {
+        let db = crate::db::test_db().await;
+        let emitter =
+            DatabaseEngineEventEmitter::new_with_pool(db.clone()).with_max_calls_per_run(1);
+        let execution_context = persisted_execution_context(&db).await;
+        let start = |call_id: Uuid| {
+            EngineEvent::call_start(
+                &execution_context,
+                call_id,
+                None,
+                "busy".to_string(),
+                "::demo".to_string(),
+                "::demo/busy".to_string(),
+                0,
+                Vec::new(),
+                None,
+                chrono::Utc::now(),
+                None,
+            )
+        };
+        let stop = |call_id: Uuid| {
+            EngineEvent::call_stop(
+                &execution_context,
+                call_id,
+                None,
+                None,
+                chrono::Utc::now(),
+                1,
+            )
+        };
+        let (recorded, truncated, skipped) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+
+        assert_eq!(emitter.decide_call(&start(recorded)), CallDecision::Record);
+        assert_eq!(
+            emitter.decide_call(&start(truncated)),
+            CallDecision::Truncate
+        );
+        assert_eq!(emitter.decide_call(&start(skipped)), CallDecision::Skip);
+        assert_eq!(emitter.decide_call(&stop(skipped)), CallDecision::Skip);
+        assert_eq!(emitter.decide_call(&stop(recorded)), CallDecision::Record);
+        emitter.shutdown().await.unwrap();
     }
 
     #[tokio::test]
