@@ -38,7 +38,9 @@ Pinned installs are useful when you need to finish database migrations with an o
 
 ## Upgrading from Hot 3.0.2 to 3.0.3 {#upgrading-from-3-0-2-to-3-0-3}
 
-**Packages** that call `::hot::gzip`, `::hot::zip` or `::hot::bytes/to-str` need `hot-min-version: "3.0.3"`.
+**`from-xml`** returns an Err for text with more than one root element, such as `<p>a</p><p>b</p>`. It used to return the last root and drop the others. Wrap such text in one root element, or parse it with `::hot::html/from-html` if it is HTML.
+
+**Packages** that use `::hot::html`, or call `::hot::gzip`, `::hot::zip` or `::hot::bytes/to-str`, need `hot-min-version: "3.0.3"`.
 
 `::hot::gzip/decode` and `::hot::zip/read-entry` refuse output over 64 MiB. Raise that with `hot.compression.max-output-bytes` in `hot.hot`, or read larger data with `decode-stream` and `read-entry-stream`, which hold one chunk at a time.
 

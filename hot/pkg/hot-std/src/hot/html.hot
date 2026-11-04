@@ -1,0 +1,221 @@
+::hot::html ns
+meta {
+    doc: """
+    Parse real-world HTML, query it with CSS selectors, and read its text and
+    attributes.
+
+    `from-html` follows the HTML standard, as browsers do, so it accepts any
+    string: unclosed tags, unquoted attributes and stray `<` all parse. Use it
+    for pages from the web, and `::hot::xml` for documents that must be well
+    formed.
+
+    ```hot
+    ::html ::hot::html
+
+    doc ::html/from-html(page)
+    rows ::html/select(doc, "table.results tbody tr")
+    map(rows, (row) {
+        cells ::html/select(row, "td")
+        {
+            name: ::html/text(cells[0]),
+            link: ::html/attr(::html/select-first(row, "a"), "href")
+        }
+    })
+    ```
+
+    **The tree** is plain data, the same shape as `::hot::xml/Xml`. Each element
+    is an `Html`, and its `content` holds child elements and `Str` text nodes,
+    with whitespace as written. Tag and attribute names are lowercase, apart
+    from SVG names like `viewBox`. A boolean attribute such as `disabled` has
+    the value `""`. Comments and the doctype aren't kept.
+
+    `<noscript>` content parses as elements, since no script runs here. The
+    tree holds what the page's HTML says, so anything a page's scripts load
+    later isn't in it.
+
+    **Selectors** use CSS syntax, including combinators, attribute selectors,
+    `:not()`, `:is()`, `:has()` and `:nth-child()`. `select` looks at the node
+    you give it and everything below, and sees nothing above it: `select(row,
+    "table td")` finds nothing when the table is above `row`. Each call passes
+    over the whole node, so select the rows from the page once, then select
+    within each row.
+
+    **Size limits.** The tree takes far more memory than the HTML, about 1 KB
+    for each element or text node while it's built. A real page can be up to
+    about 15 MB. `from-html` is an Err when the input is over 64 MB, the
+    document has over 524,288 nodes and attributes, elements nest more than
+    512 deep, or parsing takes over 30 seconds, which only input built to be
+    slow does. Raise them with `HOT_MAX_PARSE_INPUT_BYTES`,
+    `HOT_MAX_HTML_NODES` and `HOT_MAX_HTML_PARSE_SECONDS`. The depth limit is
+    fixed, and a selector can be at most 1,024 bytes. `select` is an Err when
+    its matches, each counted with everything below it, go over the node
+    limit, which takes a broad selector like `div` on a large or deeply nested
+    page. Each match is recorded in full, so a narrower selector is the fix.
+
+    **What Hot records.** Hot records each call's arguments and return value,
+    so a page's tree is recorded when `from-html` returns it and again by each
+    `select` you pass it to. As JSON the tree is a few times the size of the
+    page. Over 1 MB a value goes to blob storage. To keep records small, pull
+    out the values you need early and pass those on, not the tree.
+    """
+}
+
+Html
+meta {
+    doc: """
+    An HTML element with tag, attributes, and content.
+
+    **Fields**
+    - `tag`: The lowercase element name (Str)
+    - `attrs`: Attribute map (Map<Str, Str>)
+    - `content`: Child elements and text nodes, in document order (Vec)
+
+    **Example**
+
+    ```hot
+    doc ::html/from-html("<p class=note>Hi</p>")
+    p ::html/select-first(doc, "p")
+    p.tag          // "p"
+    p.attrs.class  // "note"
+    p.content      // ["Hi"]
+    ```
+    """
+}
+type {
+    tag: Str,
+    attrs: Map,
+    content: Vec
+}
+
+
+from-html
+meta {
+    doc: """
+    Parse an HTML string into a tree and return its `<html>` element. There is
+    always one: a fragment, or an empty string, gets the `<html>`, `<head>` and
+    `<body>` a browser would add.
+
+    Malformed HTML isn't an Err. It is repaired as a browser repairs it. Only
+    the limits in the namespace docs make this an Err.
+
+    **Example**
+
+    ```hot
+    doc ::html/from-html("<ul><li>One<li>Two</ul>")
+    doc.tag                        // "html"
+    length(::html/select(doc, "ul > li")) // 2
+    ```
+    """
+}
+fn (value: Str): Html {
+    call-lib(::hot::html/from-html, [value])
+}
+
+
+select
+meta {
+    doc: """
+    Get every element matching a CSS selector, in document order: `node`
+    itself and anything below it. An invalid selector is an Err.
+
+    **Example**
+
+    ```hot
+    doc ::html/from-html("<table><tr><td>a<td>b</table><a href=/x>x</a>")
+    length(::html/select(doc, "td"))          // 2
+    length(::html/select(doc, "a[href^='/']"))  // 1
+    length(::html/select(doc, "td, a"))       // 3
+    ```
+    """
+}
+fn (node: Html, selector: Str): Vec<Html> {
+    call-lib(::hot::html/select, [node, selector])
+}
+
+
+select-first
+meta {
+    doc: """
+    Get the first element matching a CSS selector, or null if none matches.
+    An invalid selector is an Err.
+
+    **Example**
+
+    ```hot
+    doc ::html/from-html("<h1>Title</h1><h1>Other</h1>")
+    ::html/text(::html/select-first(doc, "h1"))  // "Title"
+    ::html/select-first(doc, "h2")        // null
+    ```
+    """
+}
+fn (node: Html, selector: Str): Html? {
+    call-lib(::hot::html/select-first, [node, selector])
+}
+
+
+text
+meta {
+    doc: """
+    Get the text a reader would see in a node, on one line. Whitespace,
+    including `&nbsp;`, collapses to single spaces and is trimmed from the
+    ends. Elements a browser keeps apart, like cells, paragraphs and `<br>`,
+    are separated by a space, and inline elements aren't. Any `<script>`,
+    `<style>` or `<template>` below the node is left out.
+
+    Use `raw-text` for text exactly as written, such as a script's code or the
+    lines of a `<pre>`.
+
+    **Example**
+
+    ```hot
+    doc ::html/from-html("<td>\n  Smith &amp; <b>Sons</b><br>LLC\n</td>")
+    ::html/text(doc)  // "Smith & Sons LLC"
+    ```
+    """
+}
+fn (node: Html): Str {
+    call-lib(::hot::html/text, [node])
+}
+
+
+raw-text
+meta {
+    doc: """
+    Get all the text below a node exactly as parsed, with entities decoded:
+    nothing is collapsed, separated or left out. It reads a `<script>`, whose
+    content is kept as written.
+
+    **Example**
+
+    ```hot
+    doc ::html/from-html("<script>if (a < b) { go(\"<p>\") }</script>")
+    ::html/raw-text(::html/select-first(doc, "script"))  // "if (a < b) { go(\"<p>\") }"
+    ```
+    """
+}
+fn (node: Html): Str {
+    call-lib(::hot::html/raw-text, [node])
+}
+
+
+attr
+meta {
+    doc: """
+    Get an attribute value by name. Returns null if the element doesn't have
+    it. A boolean attribute has the value `""`, so test it with `is-null`.
+    Links keep the value in the page, which is often relative.
+
+    **Example**
+
+    ```hot
+    doc ::html/from-html("<input name=q disabled>")
+    input ::html/select-first(doc, "input")
+    ::html/attr(input, "name")      // "q"
+    ::html/attr(input, "disabled")  // ""
+    ::html/attr(input, "missing")   // null
+    ```
+    """
+}
+fn (node: Html, name: Str): Str? {
+    call-lib(::hot::html/attr, [node, name])
+}
