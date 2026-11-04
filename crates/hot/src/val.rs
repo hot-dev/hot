@@ -2147,7 +2147,7 @@ impl Val {
         use crate::lang::ast::{Ref, Value};
         match value {
             Value::Ref(Ref::Var(var_ref)) => {
-                Val::Str(std::sync::Arc::from(ToString::to_string(&var_ref.var.sym)))
+                Val::Str(std::sync::Arc::from(ToString::to_string(&var_ref.var)))
             }
             Value::Ref(Ref::Ns(ns_ref)) => {
                 let base = ToString::to_string(&ns_ref.ns);

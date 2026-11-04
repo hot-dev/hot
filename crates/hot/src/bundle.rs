@@ -2303,6 +2303,8 @@ type {}
 
 Intake meta {agent: {name: "Intake"}}
 type {}
+
+limits {port: 8080}
 "#;
 
     /// The manifest entry of a bundle of `META_NAMES_LIB` and `source`.
@@ -2434,6 +2436,40 @@ fn (request) { request }
             let meta = manifest_meta(first_nested_vec_item(&bundle_info, section, key));
             assert_eq!(meta.get_str("kind"), "::demo::lib/Complaint", "{section}");
         }
+    }
+
+    #[test]
+    fn test_manifest_keeps_the_path_of_a_deep_meta_name() {
+        let bundle_info = meta_names_bundle(
+            r#"::demo::handlers ns
+
+::lib ::demo::lib
+limits ::demo::lib/limits
+
+on-new meta {
+  on-event: "complaint:new",
+  port: limits.port,
+  ports: [::lib/limits.port, ::demo::lib/limits.port],
+  whole: limits,
+}
+fn (event) { event }
+"#,
+        );
+
+        let handler = manifest_meta(first_nested_vec_item(
+            &bundle_info,
+            "event_handlers",
+            "complaint:new",
+        ));
+        assert_eq!(
+            handler,
+            crate::val!({
+                "on-event": "complaint:new",
+                "port": "::demo::lib/limits.port",
+                "ports": ["::demo::lib/limits.port", "::demo::lib/limits.port"],
+                "whole": "::demo::lib/limits",
+            })
+        );
     }
 
     /// Compiling reports a name that resolves to nothing. Bundling doesn't
