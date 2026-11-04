@@ -86,3 +86,16 @@ meta ["test"] fn () {
     assert(is-err(::bytes/to-float(Bytes([1, 2, 3]))), "3 bytes is not a valid float width")
     assert(is-err(::bytes/from-float(1.5, 3)), "size 3 is invalid")
 }
+
+test-to-str-reads-utf-8
+meta ["test"]
+fn () {
+    assert-eq("héllo", ::hot::bytes/to-str(Bytes("héllo")))
+    assert-eq("", ::hot::bytes/to-str(Bytes([])))
+}
+
+test-to-str-refuses-invalid-utf-8
+meta ["test"]
+fn () {
+    assert(is-err(::hot::bytes/to-str(Bytes([255, 254]))))
+}

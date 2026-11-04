@@ -3264,6 +3264,7 @@ dependencies = [
  "reqwest 0.13.5",
  "rustls",
  "rustls-pki-types",
+ "same-file",
  "scraper",
  "serde",
  "serde_json",

@@ -244,6 +244,7 @@ pub fn is_pure_native(name: &str) -> bool {
         "::hot::cmp",
         "::hot::coll",
         "::hot::csv",
+        "::hot::gzip",
         "::hot::hash",
         "::hot::hex",
         "::hot::hmac",
@@ -1026,6 +1027,10 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         );
         map.insert("::hot::bytes/get".to_string(), HotLibFn::LibFn(bytes::get));
         map.insert(
+            "::hot::bytes/to-str".to_string(),
+            HotLibFn::LibFn(bytes::to_str),
+        );
+        map.insert(
             "::hot::bytes/to-vec".to_string(),
             HotLibFn::LibFn(bytes::to_vec),
         );
@@ -1495,6 +1500,36 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         map.insert("::hot::xml/at".to_string(), HotLibFn::LibFn(xml::at));
 
         // CSV and TSV functions
+        map.insert(
+            "::hot::gzip/encode".to_string(),
+            HotLibFn::LibFn(gzip::encode),
+        );
+        map.insert(
+            "::hot::gzip/decode".to_string(),
+            HotLibFn::VmAwareFn(gzip::decode),
+        );
+        map.insert(
+            "::hot::gzip/decode-stream".to_string(),
+            HotLibFn::LibFn(gzip::decode_stream),
+        );
+
+        map.insert(
+            "::hot::zip/entries".to_string(),
+            HotLibFn::VmAwareFn(zip::entries),
+        );
+        map.insert(
+            "::hot::zip/read-entry".to_string(),
+            HotLibFn::VmAwareFn(zip::read_entry),
+        );
+        map.insert(
+            "::hot::zip/read-entry-stream".to_string(),
+            HotLibFn::VmAwareFn(zip::read_entry_stream),
+        );
+        map.insert(
+            "::hot::zip/create".to_string(),
+            HotLibFn::LibFn(zip::create),
+        );
+
         map.insert(
             "::hot::csv/from-csv".to_string(),
             HotLibFn::LibFn(csv::from_csv),

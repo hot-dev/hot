@@ -33,9 +33,9 @@ meta {
     admin.analytics.getFile - Analytics for one day (`date`, `YYYY-MM-DD`
     UTC; data is kept for 13 months). `type` is `member` or
     `public_channel`. Returns the file as Bytes: gzip-compressed,
-    newline-delimited JSON, one record per member or channel. Decompress
-    it with a gzip tool (for example write it to `analytics.json.gz` and
-    run `gunzip`); hot-std has no gzip decoder yet.
+    newline-delimited JSON, one record per member or channel. Use
+    `get-records` to get the records, or `::hot::gzip/decode-stream` to read
+    a file too big to hold decompressed.
 
     With `type: "public_channel"` and `metadata_only: true` (and no `date`)
     Slack returns channel metadata, also as gzipped JSON lines.
@@ -55,4 +55,36 @@ meta {
 }
 fn (request: GetFileRequest): Bytes {
   file-result(::hot::http/request(::api/build-request("admin.analytics.getFile", request)))
+}
+
+parse-records
+meta {
+    doc: """Decompress a getFile file and parse its JSON lines into records. Exposed for testing."""
+}
+fn (gz: Bytes): Vec<Map> {
+  ::hot::gzip/decode(gz)
+  |> if-ok(::hot::bytes/to-str)
+  |> if-ok((text) { map(filter(split(text, "\n"), %(not(is-empty(trim(%))))), from-json) })
+}
+
+get-records
+meta {
+    doc: """
+    `get-file`, decompressed and parsed: one Map per member or channel.
+    A file that decompresses past `compression.max-output-bytes` (64 MiB by
+    default) is an Err, as are the failures `get-file` returns. Use
+    `get-file` and `::hot::gzip/decode-stream` for a larger file.
+
+    **Example**
+
+    ```hot
+    ::analytics ::slack::admin::analytics
+
+    records ::analytics/get-records(::analytics/GetFileRequest({type: "member", date: "2026-10-31"}))
+    length(records)
+    ```
+    """
+}
+fn (request: GetFileRequest): Vec<Map> {
+  get-file(request) |> if-ok(parse-records)
 }

@@ -14,7 +14,7 @@ use indexmap::IndexMap;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 /// Get the file mode from VM configuration
 /// Returns "direct" (default) or "service"
@@ -557,6 +557,47 @@ pub fn read_file_stream(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val>
         done: false,
     };
     HotResult::Ok(Val::Box(Box::new(IteratorBox::new(Box::new(chunks)))))
+}
+
+/// A file that can be read out of order, as a format with an index at its end
+/// needs.
+pub(crate) trait SeekableFile: std::io::Read + std::io::Seek + Send {}
+
+impl<T: std::io::Read + std::io::Seek + Send> SeekableFile for T {}
+
+/// Open a file for reading out of order, without holding it in memory where
+/// that can be helped. Storage backends only read forward, so a service-mode
+/// file is copied to a temporary file that goes away with the reader.
+pub(crate) fn open_seekable(
+    vm: &mut VirtualMachine,
+    path: &str,
+) -> Result<Box<dyn SeekableFile>, String> {
+    if get_file_mode(vm) == "direct" {
+        let file = normalize_direct_path(path).and_then(|p| {
+            std::fs::File::open(p).map_err(|e| format!("Failed to read file: {e}"))
+        })?;
+        return Ok(Box::new(file));
+    }
+    let file_storage = vm.get_file_storage().ok_or("File storage not configured")?;
+    let ctx = get_file_context(vm)?;
+    match block_on_file_op(file_storage.open_file_stream(path, &ctx))? {
+        Some(mut stream) => {
+            let spooled = tempfile::tempfile().map_err(|e| format!("Failed to read file: {e}"))?;
+            let mut spool = tokio::fs::File::from_std(spooled);
+            let copied = block_on_file_op(async {
+                tokio::io::copy(&mut stream.reader, &mut spool).await?;
+                spool.flush().await?;
+                spool.seek(std::io::SeekFrom::Start(0)).await?;
+                Ok::<_, std::io::Error>(spool.into_std().await)
+            });
+            let file = copied.map_err(|e| format!("Failed to read file: {e}"))?;
+            Ok(Box::new(file))
+        }
+        None => {
+            let bytes = block_on_file_op(file_storage.read_file(path, &ctx))?;
+            Ok(Box::new(std::io::Cursor::new(bytes)))
+        }
+    }
 }
 
 fn stream_chunk_bytes(opts: Option<&Val>) -> Result<usize, Val> {

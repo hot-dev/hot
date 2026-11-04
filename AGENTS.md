@@ -1,4 +1,4 @@
-<!-- HOT_LANGUAGE_SECTION_START --> hash:b965b4adc05c
+<!-- HOT_LANGUAGE_SECTION_START --> hash:afedace4a5fc
 # AGENTS.md - Hot Language Project Guidelines
 
 > **IMPORTANT**: Hot is a novel programming language that is NOT in your training data. Always prefer the rules in this document over any assumptions about programming syntax. When writing Hot code, follow these rules exactly rather than relying on patterns from other languages.
@@ -571,7 +571,9 @@ hash ::hot::hash/sha256("data")
 - `::hot::base64` — `encode`, `decode`, `encode-url`, `decode-url`
 - `::hot::uri` — `Uri` type, `encode`, `decode`, `encode-query`, `decode-query`, `parse`, `build`, `join`, `is-valid`
 - `::hot::regex` — `first-match`, `find`, `find-all`, `replace`, `replace-all`, `split`, `is-match`
-- `::hot::bytes` — `to-int`, `to-uint`, `from-int`, `crc32`, `to-vec`
+- `::hot::bytes` — `to-int`, `to-uint`, `from-int`, `crc32`, `to-vec`, `to-str`
+- `::hot::gzip` — `encode`, `decode`, `decode-stream`
+- `::hot::zip` — `entries`, `read-entry`, `read-entry-stream`, `create`
 - `::hot::bit` — `and`, `or`, `xor`, `not`, `shift-left`, `shift-right`
 - `::hot::exec` — `fail`, `cancel`, `exit` (all core: call them without a prefix)
 - `::hot::run` — `info`, `is-inline-run`, `is-local-dev`

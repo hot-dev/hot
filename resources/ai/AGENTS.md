@@ -570,7 +570,9 @@ hash ::hot::hash/sha256("data")
 - `::hot::base64` — `encode`, `decode`, `encode-url`, `decode-url`
 - `::hot::uri` — `Uri` type, `encode`, `decode`, `encode-query`, `decode-query`, `parse`, `build`, `join`, `is-valid`
 - `::hot::regex` — `first-match`, `find`, `find-all`, `replace`, `replace-all`, `split`, `is-match`
-- `::hot::bytes` — `to-int`, `to-uint`, `from-int`, `crc32`, `to-vec`
+- `::hot::bytes` — `to-int`, `to-uint`, `from-int`, `crc32`, `to-vec`, `to-str`
+- `::hot::gzip` — `encode`, `decode`, `decode-stream`
+- `::hot::zip` — `entries`, `read-entry`, `read-entry-stream`, `create`
 - `::hot::bit` — `and`, `or`, `xor`, `not`, `shift-left`, `shift-right`
 - `::hot::exec` — `fail`, `cancel`, `exit` (all core: call them without a prefix)
 - `::hot::run` — `info`, `is-inline-run`, `is-local-dev`
