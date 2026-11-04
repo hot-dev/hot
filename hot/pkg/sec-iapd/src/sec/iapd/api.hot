@@ -1,0 +1,181 @@
+::sec::iapd::api ns
+meta {
+    ctx: {"sec.iapd.user-agent": {required: false}},
+    doc: """
+    Transport for SEC IAPD: the settings resolver (per-call `opts` first,
+    then context variables, then the default), a typed `HttpError`, and
+    GETs that return a response or decoded JSON.
+
+    | opts key | Context variable | Default |
+    |---|---|---|
+    | `user-agent` | `sec.iapd.user-agent` | `hot-dev-sec-iapd-pkg/0.1 (+https://hot.dev)` |
+
+    **Per-call User-Agent.** `user-agent` in `opts` is masked in call
+    records and never written to context. Present but blank or null, it
+    is an error, never a fallback to context.
+    """
+}
+
+::ctx ::hot::ctx
+::uri ::hot::uri
+
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+SOURCE "sec-iapd"
+DEFAULT_USER_AGENT "hot-dev-sec-iapd-pkg/0.1 (+https://hot.dev)"
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+given
+meta {
+    doc: """True for a non-null value that is not a blank string."""
+}
+fn (v: Any): Bool {
+  match v {
+    Null => { false }
+    Str => { not(is-empty(trim(v))) }
+    _ => { true }
+  }
+}
+
+pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
+  from-opts get(opts, key)
+  from-ctx ::ctx/get(ctx-key)
+  cond {
+    given(from-opts) => { from-opts }
+    given(from-ctx) => { from-ctx }
+    => { default }
+  }
+}
+
+resolve
+meta {
+    doc: """
+    Resolve settings for one call: `{user-agent}`. A value in `opts` wins
+    over context and is used for that call only. An Err when `user-agent`
+    is in `opts` but blank or null.
+
+    **Example**
+
+    ```hot
+    cfg ::sec::iapd::api/resolve({user-agent: "Tenant Co ops@tenant.example"})
+    ```
+    """
+}
+fn (opts: Map): Map {
+  from-opts get(opts, "user-agent")
+  ::ctx/mark-secret(filter([from-opts], given))
+  cond {
+    and(in("user-agent", keys(opts)), not(given(from-opts))) => {
+      err("sec-iapd: user-agent is in the call's opts but is blank or null. Pass a value, or leave user-agent out to use the context variable.")
+    }
+    => { {user-agent: pick(opts, "user-agent", "sec.iapd.user-agent", DEFAULT_USER_AGENT)} }
+  }
+}
+
+headers
+meta {
+    doc: """The request headers from settings, or an Err from `resolve`."""
+}
+fn (opts: Map): Map {
+  cfg resolve(opts)
+  // Returned, not consumed: consuming an Err would halt the run.
+  if(is-err(cfg), cfg, {User-Agent: cfg.user-agent})
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+HttpError
+meta {
+    doc: """
+    A non-2xx response. `source` is `"sec-iapd"`; `url` the requested URL
+    (these hosts take no credentials); `message` a one-line summary that
+    never includes the User-Agent.
+    """
+}
+type {
+    source: Str,
+    status: Int,
+    url: Str,
+    message: Str
+}
+
+http-error
+meta {
+    doc: """Build an `HttpError` from a non-2xx response (pure)."""
+}
+fn (response: HttpResponse, url: Str): HttpError {
+  HttpError({
+    source: SOURCE,
+    status: response.status,
+    url: url,
+    message: `${SOURCE}: HTTP ${response.status} for ${url}`
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------
+
+query-string
+meta {
+    doc: """Build a `?a=1&b=2` suffix from a Map, dropping null and blank values (pure); `""` when nothing remains."""
+}
+fn (params: Map): Str {
+  ::uri/query-string(filter-vals(params, given))
+}
+
+request
+meta {
+    doc: """
+    GET a URL with `headers`, returning the `HttpResponse` on 2xx or an
+    Err carrying `HttpError`. A transport failure passes through as its
+    own Err.
+    """
+}
+fn (url: Str, headers: Map): HttpResponse {
+  response ::hot::http/request(HttpRequest({
+    method: "GET",
+    url,
+    headers: headers,
+    body: ""
+  }))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response }
+    => { err(http-error(response, url)) }
+  }
+}
+
+json-body
+meta {
+    doc: """
+    Decode a response's JSON. The reports host serves its index as
+    `binary/octet-stream`, so this reads the bytes when the body isn't
+    already decoded (pure).
+    """
+}
+fn (response: HttpResponse): Any {
+  body response.body
+  cond {
+    is-map(body) => { body }
+    is-vec(body) => { body }
+    is-str(body) => { from-json(body) }
+    => { from-json(::hot::bytes/to-str(response.body-bytes)) }
+  }
+}
+
+get-json
+meta {
+    doc: """GET a JSON resource and return the decoded body, or an Err carrying `HttpError`."""
+}
+fn (url: Str, headers: Map): Any {
+  response request(url, {Accept: "application/json", ...headers})
+  if(is-err(response), response, json-body(response))
+}

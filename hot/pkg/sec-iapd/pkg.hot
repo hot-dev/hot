@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.sec-iapd {
+  name: "hot.dev/sec-iapd",
+  version: "0.1.0",
+  hot-min-version: "3.0.3",
+  description: "SEC Investment Adviser Public Disclosure for Hot, with no key: monthly Form ADV Part 1 and ADV-W data files, one row per filing with regulatory assets and private fund totals, and firm lookups by name or CRD.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["kyb", "company-data", "sec", "iapd", "form-adv", "investment-advisers"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

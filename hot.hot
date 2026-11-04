@@ -143,6 +143,7 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/resend/test",
     "./hot/pkg/salesforce/test",
     "./hot/pkg/sec-edgar/test",
+    "./hot/pkg/sec-iapd/test",
     "./hot/pkg/sentry/test",
     "./hot/pkg/shopify/test",
     "./hot/pkg/slack-admin/test",
@@ -259,6 +260,7 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/resend": { "local": "./hot/pkg/resend" },
     "hot.dev/salesforce": { "local": "./hot/pkg/salesforce" },
     "hot.dev/sec-edgar": { "local": "./hot/pkg/sec-edgar" },
+    "hot.dev/sec-iapd": { "local": "./hot/pkg/sec-iapd" },
     "hot.dev/sentry": { "local": "./hot/pkg/sentry" },
     "hot.dev/shopify": { "local": "./hot/pkg/shopify" },
     "hot.dev/slack": { "local": "./hot/pkg/slack" },
@@ -683,6 +685,18 @@ hot.project.pkg-integration-sec-edgar.src.paths ["./hot/pkg/sec-edgar/src"]
 hot.project.pkg-integration-sec-edgar.test.paths ["./hot/pkg/sec-edgar/integration-test"]
 hot.project.pkg-integration-sec-edgar.test.capture true
 hot.project.pkg-integration-sec-edgar.deps {}
+
+// SEC IAPD unit tests (hermetic)
+hot.project.pkg-test-sec-iapd.src.paths ["./hot/pkg/sec-iapd/src"]
+hot.project.pkg-test-sec-iapd.test.paths ["./hot/pkg/sec-iapd/test"]
+hot.project.pkg-test-sec-iapd.test.capture true
+hot.project.pkg-test-sec-iapd.deps {}
+
+// SEC IAPD integration tests (live; read-only)
+hot.project.pkg-integration-sec-iapd.src.paths ["./hot/pkg/sec-iapd/src"]
+hot.project.pkg-integration-sec-iapd.test.paths ["./hot/pkg/sec-iapd/integration-test"]
+hot.project.pkg-integration-sec-iapd.test.capture true
+hot.project.pkg-integration-sec-iapd.deps {}
 
 // UK Companies House unit tests (hermetic)
 hot.project.pkg-test-companies-house.src.paths ["./hot/pkg/companies-house/src"]

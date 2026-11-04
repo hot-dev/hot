@@ -142,6 +142,7 @@ un-sanctions
 opensanctions
 gleif
 sec-edgar
+sec-iapd
 companies-house
 
 # Government & Public Data
