@@ -84,6 +84,8 @@ async fn rerun_event_handler_run_reemits_original_event() {
     let body: serde_json::Value = serde_json::from_str(&resp.body).expect("json response");
     assert_eq!(body["success"], json!(true), "body = {}", resp.body);
     assert_eq!(body["action"], json!("re-run"), "body = {}", resp.body);
+    // All the event's handlers run, so no one run is the re-run.
+    assert_eq!(body["run_id"], json!(null), "body = {}", resp.body);
 
     // The newly emitted event must preserve the original event type and data.
     let new_event_id =
@@ -91,6 +93,15 @@ async fn rerun_event_handler_run_reemits_original_event() {
     let new_event = Event::get_event(client.db(), &new_event_id)
         .await
         .expect("new event exists");
+
+    // The page the app opens for it exists before any of its runs do.
+    client
+        .get(&format!(
+            "/events/{new_event_id}?org_id={}&env_id={}",
+            td.org_id, td.env_id
+        ))
+        .await
+        .assert_status(axum::http::StatusCode::OK);
 
     assert_eq!(new_event.event_type, "data:analyze");
     assert_eq!(
@@ -151,6 +162,7 @@ async fn retry_event_handler_run_attaches_retry_context() {
     resp.assert_status(axum::http::StatusCode::OK);
     let body: serde_json::Value = serde_json::from_str(&resp.body).expect("json response");
     assert_eq!(body["action"], json!("retried"), "body = {}", resp.body);
+    assert_eq!(body["run_id"], json!(null), "body = {}", resp.body);
 
     let new_event_id =
         Uuid::parse_str(body["event_id"].as_str().expect("event_id string")).expect("uuid");
@@ -179,6 +191,103 @@ async fn retry_event_handler_run_attaches_retry_context() {
         "first retry should be attempt 1: {:?}",
         retry
     );
+}
+
+/// A retry of one handler's run is one run, which the response names as the
+/// worker will run it. A retry of a run that names no handler is for all the
+/// event's handlers, so the test above gets no run.
+#[tokio::test]
+async fn retry_of_a_handlers_run_reports_the_run_it_will_be() {
+    let mut client = TestClient::new().await;
+    let td = insert_test_data(client.db()).await.expect("test data");
+    client.login_as(&td.user_id);
+
+    let event_id = Uuid::now_v7();
+    Event::insert_event(
+        client.db(),
+        &event_id,
+        &td.env_id,
+        &td.stream_id,
+        "data:analyze",
+        &json!({}),
+        chrono::Utc::now(),
+        &td.user_id,
+        None,
+    )
+    .await
+    .expect("insert data:analyze event");
+    link_event_and_set_status(client.db(), &td.run_id, &event_id, RunStatus::Failed).await;
+    let DatabasePool::Sqlite(pool) = &**client.db() else {
+        panic!("tests run against SQLite");
+    };
+    sqlx::query("UPDATE run SET event_handler_fn = '::demo/analyze' WHERE run_id = ?")
+        .bind(td.run_id)
+        .execute(pool)
+        .await
+        .expect("name the run's handler");
+
+    let resp = client
+        .post_form(
+            &format!(
+                "/runs/{}/retry?org_id={}&env_id={}",
+                td.run_id, td.org_id, td.env_id
+            ),
+            &[],
+        )
+        .await;
+
+    resp.assert_status(axum::http::StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_str(&resp.body).expect("json response");
+    let new_event_id =
+        Uuid::parse_str(body["event_id"].as_str().expect("event_id string")).expect("uuid");
+    let run_id = hot::db::run::event_handler_run_id(
+        new_event_id,
+        td.project_id,
+        "data:analyze",
+        "::demo/analyze",
+        1,
+    );
+    assert_eq!(body["run_id"], json!(run_id), "body = {}", resp.body);
+}
+
+/// A function run re-dispatches through the hot:call handler, not the handler
+/// the run names, so the response has no run to report.
+#[tokio::test]
+async fn retry_of_a_function_run_names_no_run() {
+    let mut client = TestClient::new().await;
+    let td = insert_test_data(client.db()).await.expect("test data");
+    client.login_as(&td.user_id);
+
+    let event_id = Uuid::now_v7();
+    Event::insert_event(
+        client.db(),
+        &event_id,
+        &td.env_id,
+        &td.stream_id,
+        "hot:schedule",
+        &json!({ "fn": "::demo/nightly", "args": [] }),
+        chrono::Utc::now(),
+        &td.user_id,
+        None,
+    )
+    .await
+    .expect("insert hot:schedule event");
+    link_event_and_set_status(client.db(), &td.run_id, &event_id, RunStatus::Failed).await;
+
+    let resp = client
+        .post_form(
+            &format!(
+                "/runs/{}/retry?org_id={}&env_id={}",
+                td.run_id, td.org_id, td.env_id
+            ),
+            &[],
+        )
+        .await;
+
+    resp.assert_status(axum::http::StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_str(&resp.body).expect("json response");
+    assert_eq!(body["action"], json!("retried"), "body = {}", resp.body);
+    assert_eq!(body["run_id"], json!(null), "body = {}", resp.body);
 }
 
 /// Regression guard: re-running a direct function call (`hot:call`) still
@@ -219,6 +328,7 @@ async fn rerun_function_call_run_redispatches_hot_call() {
     resp.assert_status(axum::http::StatusCode::OK);
     let body: serde_json::Value = serde_json::from_str(&resp.body).expect("json response");
     assert_eq!(body["success"], json!(true), "body = {}", resp.body);
+    assert_eq!(body["run_id"], json!(null), "body = {}", resp.body);
 
     let new_event_id =
         Uuid::parse_str(body["event_id"].as_str().expect("event_id string")).expect("uuid");

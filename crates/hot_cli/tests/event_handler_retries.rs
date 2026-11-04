@@ -326,7 +326,7 @@ async fn failed_runs_retry_on_their_own_handler_alone(database: Database) {
     expected.get_mut("once").unwrap().push(2);
     settled_attempts(&database, &home, &expected).await;
 
-    // The app goes on to the run it reports.
+    // The run the app reports is the run that ran.
     let retry: Uuid = retry["run_id"].as_str().unwrap().parse().unwrap();
     let runs = event_runs(&database, &home).await;
     let retry = runs
@@ -334,6 +334,41 @@ async fn failed_runs_retry_on_their_own_handler_alone(database: Database) {
         .find(|run| run.run_id == retry)
         .unwrap_or_else(|| panic!("the app reported a run that never ran: {retry}"));
     assert_eq!(retry.origin_run_id, Some(run_id));
+
+    // Re-run is for all the event's handlers, so no one run is the re-run, and
+    // the page the app opens lists them all.
+    let scope = format!("org_id={org_id}&env_id={env_id}");
+    let app = format!("http://127.0.0.1:{app_port}");
+    let client = reqwest::Client::new();
+    let rerun = client
+        .post(format!("{app}/runs/{run_id}/rerun?{scope}"))
+        .send()
+        .await
+        .unwrap();
+    assert!(rerun.status().is_success(), "{rerun:?}");
+    let rerun: Value = rerun.json().await.unwrap();
+    assert_eq!(rerun["run_id"], Value::Null, "{rerun}");
+    for (handler, attempts) in [
+        ("never", vec![0]),
+        ("once", vec![0, 1]),
+        ("relayed", vec![0]),
+        ("twice", vec![0, 1, 2]),
+    ] {
+        let expected = expected.get_mut(handler).unwrap();
+        expected.extend(attempts);
+        expected.sort();
+    }
+    settled_attempts(&database, &home, &expected).await;
+
+    let event_id = rerun["event_id"].as_str().unwrap();
+    let table = client
+        .get(format!("{app}/events/{event_id}/table?{scope}"))
+        .send()
+        .await
+        .unwrap();
+    assert!(table.status().is_success(), "{table:?}");
+    let table = table.text().await.unwrap();
+    assert_eq!(table.matches("href=\"/runs/").count(), 3, "{table}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
