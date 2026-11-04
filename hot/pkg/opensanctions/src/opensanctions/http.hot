@@ -1,0 +1,69 @@
+::opensanctions::http ns
+meta {
+    doc: """
+    Requests to OpenSanctions: one `request` function and a typed
+    `HttpError`.
+    """
+}
+
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+USER_AGENT "hot-dev-opensanctions-pkg/0.1 (+https://hot.dev)"
+
+HttpError
+meta {
+    doc: """A non-2xx response from OpenSanctions. `url` is the requested URL (without credentials); `message` is a one-line summary."""
+}
+type {
+    status: Int,
+    url: Str,
+    headers: Map,
+    body: Any,
+    message: Str
+}
+
+body-snippet fn (body: Any): Str {
+  text match body {
+    Null => { "" }
+    Str => { body }
+    Bytes => { "" }
+    _ => { to-json(body) }
+  }
+
+  if(gt(length(text), 200), `${slice(text, 0, 200)}…`, text)
+}
+
+http-error
+meta {
+    doc: """Build an `HttpError` from a non-2xx response. Exposed for testing; every request uses it."""
+}
+fn (response: HttpResponse, url: Str): HttpError {
+  snippet body-snippet(response.body)
+  HttpError({
+    status: response.status,
+    url: url,
+    headers: or(response.headers, {}),
+    body: response.body,
+    message: if(is-empty(snippet), `HTTP ${response.status} from ${url}`, `HTTP ${response.status} from ${url}: ${snippet}`)
+  })
+}
+
+request
+meta {
+    doc: """One request with the package User-Agent. Returns the `HttpResponse` on 2xx, or an Err carrying `HttpError` (transport failures pass through as their own Err)."""
+}
+fn (method: Str, url: Str, headers: Map, body: Any): HttpResponse {
+  response ::hot::http/request(HttpRequest({
+    method,
+    url,
+    headers: {User-Agent: USER_AGENT, ...headers},
+    body
+  }))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response }
+    => { err(http-error(response, url)) }
+  }
+}

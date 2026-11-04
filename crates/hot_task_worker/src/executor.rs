@@ -1416,6 +1416,22 @@ pub(crate) fn retry_container_id(base: &str, attempt: u32) -> String {
     format!("{}r{:x}", &base[..base.len() - 2], attempt)
 }
 
+/// Labels for a box's active snapshot.
+///
+/// Nothing else references the snapshot until its Container record exists,
+/// and CNI setup runs in that gap. containerd GC deletes unreferenced
+/// snapshots, so without this root label a GC landing there removes it
+/// under the box. Prod showed this as shim ENOENT on create and as boxes
+/// running on another image's rootfs. Cleanup removes the snapshot by key.
+#[cfg(feature = "kata")]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn box_snapshot_labels() -> std::collections::HashMap<String, String> {
+    std::collections::HashMap::from([(
+        "containerd.io/gc.root".to_string(),
+        chrono::Utc::now().to_rfc3339(),
+    )])
+}
+
 /// Retry the full setup (snapshot → container → task) with a fresh
 /// container ID on each attempt. The Kata Go shim has a known cgroup
 /// cleanup bug where stale sandbox state from a failed attempt cannot
@@ -2682,7 +2698,7 @@ mod kata {
                     snapshotter: SNAPSHOTTER.to_string(),
                     key: container_id.to_string(),
                     parent: parent_chain_id.to_string(),
-                    ..Default::default()
+                    labels: box_snapshot_labels(),
                 },
                 NAMESPACE
             );
@@ -3735,6 +3751,11 @@ mod kata_tests {
         assert_eq!(a, b);
         assert_eq!(a.len(), 24);
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_box_snapshot_is_a_gc_root() {
+        assert!(super::box_snapshot_labels().contains_key("containerd.io/gc.root"));
     }
 
     #[test]

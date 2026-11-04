@@ -1,0 +1,211 @@
+::uk::sanctions::http ns
+meta {
+    doc: """
+    Downloads for the UK list file: a typed `HttpError`, text bodies
+    that survive any content type, HEAD-based change detection (ETag and
+    Last-Modified), and Range-chunked downloads, since the file is
+    larger than one response (`http.max-response-bytes`, 16 MiB by
+    default).
+    """
+}
+
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+USER_AGENT "hot-dev-uk-sanctions-pkg/0.1 (+https://hot.dev)"
+
+// Range chunk size; keep it under `http.max-response-bytes`.
+DEFAULT_CHUNK_BYTES 8388608
+
+HttpError
+meta {
+    doc: """A non-2xx response from the UK list server. `url` is the requested URL (without credentials); `message` is a one-line summary."""
+}
+type {
+    status: Int,
+    url: Str,
+    headers: Map,
+    body: Any,
+    message: Str
+}
+
+body-snippet fn (body: Any): Str {
+  text match body {
+    Null => { "" }
+    Str => { body }
+    Bytes => { "" }
+    _ => { to-json(body) }
+  }
+
+  if(gt(length(text), 200), `${slice(text, 0, 200)}…`, text)
+}
+
+http-error
+meta {
+    doc: """Build an `HttpError` from a non-2xx response. Exposed for testing; every request uses it."""
+}
+fn (response: HttpResponse, url: Str): HttpError {
+  snippet body-snippet(response.body)
+  HttpError({
+    status: response.status,
+    url: url,
+    headers: or(response.headers, {}),
+    body: response.body,
+    message: if(is-empty(snippet), `HTTP ${response.status} from ${url}`, `HTTP ${response.status} from ${url}: ${snippet}`)
+  })
+}
+
+header
+meta {
+    doc: """A response header by lower-case name, or null."""
+}
+fn (response: Any, name: Str): Str? {
+  headers or(get(or(response, {}), "headers"), {})
+  get(headers, name)
+}
+
+body-text
+meta {
+    doc: """The response body as text: the decoded string when Hot kept it as one, otherwise the body bytes decoded as UTF-8 (a CSV served as `application/octet-stream`, or a body that happened to parse as JSON)."""
+}
+fn (response: Any): Str {
+  body get(response, "body")
+  bytes get(response, "body-bytes")
+  cond {
+    is-bytes(bytes) => { Str(bytes) }
+    is-str(body) => { body }
+    is-bytes(body) => { Str(body) }
+    is-null(body) => { "" }
+    => { to-json(body) }
+  }
+}
+
+request
+meta {
+    doc: """One request with the package User-Agent. Returns the `HttpResponse` on 2xx, or an Err carrying `HttpError` (transport failures pass through as their own Err)."""
+}
+fn (method: Str, url: Str, headers: Map, body: Any): HttpResponse {
+  response ::hot::http/request(HttpRequest({
+    method,
+    url,
+    headers: {User-Agent: USER_AGENT, ...headers},
+    body
+  }))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response }
+    => { err(http-error(response, url)) }
+  }
+}
+
+head
+meta {
+    doc: """
+    HEAD a list file and return `{etag, last-modified, content-length,
+    accept-ranges}` (each null when not sent). Refreshes compare these
+    with the cached version. A conditional GET would save no request: a
+    changed file over the response cap still needs this HEAD for its size
+    and Range support.
+    """
+}
+fn (url: Str): Map {
+  response request("HEAD", url, {}, "")
+  cond {
+    is-err(response) => { response }
+    => {
+      len header(response, "content-length")
+      {
+        etag: header(response, "etag"),
+        last-modified: header(response, "last-modified"),
+        content-length: if(and(is-some(len), ::hot::regex/is-match(len, "^\\d+$")), Int(len), null),
+        accept-ranges: header(response, "accept-ranges")
+      }
+    }
+  }
+}
+
+is-size-limit-error
+meta {
+    doc: """True when a request failed because the response exceeded `http.max-response-bytes`."""
+}
+fn (result: Result): Bool {
+  and(is-err(result), contains(err-message(result), "exceeds"))
+}
+
+byte-ranges
+meta {
+    doc: """Split `size` bytes into inclusive `[start, end]` ranges of at most `chunk` bytes (pure). `byte-ranges(10, 4)` is `[[0, 3], [4, 7], [8, 9]]`."""
+}
+fn (size: Int, chunk: Int): Vec {
+  c max(chunk, 1)
+  count floor(div(add(size, sub(c, 1)), c))
+  map(range(0, count), (i) {
+    start mul(i, c)
+    [start, sub(min(size, add(start, c)), 1)]
+  })
+}
+
+fetch-ranges fn (url: Str, ranges: Vec, index: Int, acc: Bytes): Bytes {
+  cond {
+    gte(index, length(ranges)) => { acc }
+    => {
+      r get(ranges, index)
+      response request("GET", url, {Range: `bytes=${first(r)}-${last(r)}`}, "")
+      cond {
+        is-err(response) => { response }
+        // A server that ignores Range answers 200 with the whole body.
+        eq(response.status, 200) => { response.body-bytes }
+        eq(response.status, 206) => { fetch-ranges(url, ranges, add(index, 1), concat(acc, response.body-bytes)) }
+        => { err(`uk-sanctions: unexpected HTTP ${response.status} for a Range request to ${url}`) }
+      }
+    }
+  }
+}
+
+too-large-message
+meta {
+    doc: """The error for a file over `http.max-response-bytes` that can't be fetched in Range chunks. Exposed for testing."""
+}
+fn (url: Str): Str {
+  `uk-sanctions: ${url} is larger than http.max-response-bytes (16 MiB by default) and its server does not support Range requests; raise http.max-response-bytes above the file's size`
+}
+
+get-text
+meta {
+    doc: """
+    GET the list file as text. A response over `http.max-response-bytes`
+    is fetched again in Range chunks of `chunk-bytes`, which the UK
+    server supports. If it stops supporting them, the Err says to raise
+    the cap. Returns `{text, etag, last-modified}`.
+    """
+}
+fn
+(url: Str): Map {
+  get-text(url, DEFAULT_CHUNK_BYTES)
+},
+(url: Str, chunk-bytes: Int): Map {
+  response request("GET", url, {}, "")
+  cond {
+    is-size-limit-error(response) => {
+      info head(url)
+      size if(is-err(info), null, info.content-length)
+      cond {
+        is-null(size) => { err(too-large-message(url)) }
+        ne(lowercase(or(info.accept-ranges, "")), "bytes") => { err(too-large-message(url)) }
+        => {
+          bytes fetch-ranges(url, byte-ranges(size, chunk-bytes), 0, Bytes([]))
+          cond {
+            is-err(bytes) => { bytes }
+            => { {text: Str(bytes), etag: info.etag, last-modified: info.last-modified} }
+          }
+        }
+      }
+    }
+
+    is-err(response) => { response }
+    => {
+      {text: body-text(response), etag: header(response, "etag"), last-modified: header(response, "last-modified")}
+    }
+  }
+}

@@ -226,6 +226,18 @@ meta ["test"] fn () {
     assert-eq(gz, result, "gzip body returned as Bytes")
 }
 
+test-analytics-parses-records
+meta ["test"] fn () {
+    gz ::hot::gzip/encode("{\"id\":\"U1\"}\n{\"id\":\"U2\"}\n")
+    assert-eq([{id: "U1"}, {id: "U2"}], ::analytics/parse-records(gz))
+}
+
+test-analytics-reports-a-corrupt-file
+meta ["test"] fn () {
+    assert(is-err(::analytics/parse-records(Bytes([31, 139, 8, 0]))))
+    assert(is-err(::analytics/parse-records(::hot::gzip/encode(Bytes([255, 254])))))
+}
+
 test-analytics-error-body
 meta ["test"] fn () {
     result ::analytics/file-result(ok-response({ok: false, error: "file_not_yet_available"}))

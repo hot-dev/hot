@@ -1,0 +1,317 @@
+::hot::test::html ns
+meta {
+    doc: """
+    Tests for `::hot::html`. Real pages live under
+    `./hot/pkg/hot-std/test/fixtures/resources/html`, saved on Nov 3 2026. The
+    counts they assert come from Python's `html.parser`, not from this module.
+    """
+}
+
+// =============================================================================
+// HTML Module Tests
+// =============================================================================
+
+::html ::hot::html
+::res ::hot::resource
+
+// Parsing what `from-xml` rejects
+
+test-void-tags
+meta ["test"]
+fn () {
+    doc ::html/from-html("<p>a<br>b<img src=x.png><input name=q></p><hr>c")
+    assert-eq(1, length(::html/select(doc, "br")), "br needs no closing tag")
+    assert-eq(0, length(::html/select(doc, "br > *")), "void elements hold nothing")
+    assert-eq(1, length(::html/select(doc, "p > input")), "text and tags after void tags stay in p")
+    assert-eq("b", ::html/select-first(doc, "p").content[2], "text after br is a sibling")
+    assert-eq("c", last(::html/select-first(doc, "body").content), "text after hr is in the body")
+}
+
+test-unquoted-and-boolean-attributes
+meta ["test"]
+fn () {
+    doc ::html/from-html("<input type=checkbox checked data-id=42 value='a b' title=\"c\">")
+    input ::html/select-first(doc, "input")
+    assert-eq("checkbox", ::html/attr(input, "type"), "unquoted")
+    assert-eq("42", ::html/attr(input, "data-id"), "unquoted with a dash in the name")
+    assert-eq("a b", ::html/attr(input, "value"), "single quoted")
+    assert-eq("c", ::html/attr(input, "title"), "double quoted")
+    assert-eq("", ::html/attr(input, "checked"), "boolean attribute is an empty string")
+    assert-eq(null, ::html/attr(input, "missing"), "missing attribute is null")
+    assert-eq("checkbox", input.attrs.type, "attrs is a plain Map")
+}
+
+test-attribute-names-lowercased
+meta ["test"]
+fn () {
+    doc ::html/from-html("<A HREF=/x CLASS=y>z</A>")
+    a ::html/select-first(doc, "a.y")
+    assert-eq("a", a.tag, "tag is lowercased")
+    assert-eq("/x", ::html/attr(a, "href"), "attribute name is lowercased")
+    assert-eq("/x", ::html/attr(a, "HREF"), "attr finds it in any case")
+}
+
+test-unclosed-li
+meta ["test"]
+fn () {
+    doc ::html/from-html("<ul><li>One<li>Two<li>Three</ul><p>After")
+    items ::html/select(doc, "ul > li")
+    assert-eq(["One", "Two", "Three"], map(items, ::html/text), "each li closes the last")
+    assert-eq("After", ::html/text(::html/select-first(doc, "ul + p")), "p follows the list")
+}
+
+test-unclosed-table-cells
+meta ["test"]
+fn () {
+    doc ::html/from-html("<table><tr><td>a<td>b<tr><td>c</table>")
+    assert-eq(2, length(::html/select(doc, "tbody > tr")), "tbody is added and rows close")
+    assert-eq(3, length(::html/select(doc, "td")), "cells close each other")
+}
+
+test-raw-script-content
+meta ["test"]
+fn () {
+    code "if (a < b && c > d) { document.write(\"<p>x</p><!-- y\") }"
+    doc ::html/from-html(`<head><script>${code}</script><style>p > a { color: red }</style></head><p>Shown</p>`)
+    assert-eq(code, ::html/raw-text(::html/select-first(doc, "script")), "script is kept as written")
+    assert-eq(1, length(::html/select(doc, "p")), "tags in a script aren't elements")
+    assert-eq("p > a { color: red }", ::html/raw-text(::html/select-first(doc, "style")), "style is kept as written")
+    assert-eq("Shown", ::html/text(::html/select-first(doc, "body")), "text leaves out scripts and styles")
+    assert-eq("Shown", ::html/text(doc), "at any level")
+}
+
+test-named-entities
+meta ["test"]
+fn () {
+    doc ::html/from-html("<p title='Q&amp;A'>caf&eacute; &copy; &mdash; &#8212; &#x2014; &lt;b&gt; &bogus; AT&T &amp</p>")
+    p ::html/select-first(doc, "p")
+    assert-eq("café © — — — <b> &bogus; AT&T &", ::html/text(p), "text is decoded")
+    assert-eq("Q&A", ::html/attr(p, "title"), "attributes are decoded")
+}
+
+test-comments-and-doctype-are-dropped
+meta ["test"]
+fn () {
+    doc ::html/from-html("<!doctype html><!-- a --><p>b<!-- <i>c</i> -->d</p>")
+    assert-eq(0, length(::html/select(doc, "i")), "a comment holds no elements")
+    assert-eq(["b", "d"], ::html/select-first(doc, "p").content, "comments aren't content")
+}
+
+test-noscript-holds-elements
+meta ["test"]
+fn () {
+    doc ::html/from-html("<body><noscript><a href=/plain>Plain</a></noscript>")
+    assert-eq("/plain", ::html/attr(::html/select-first(doc, "noscript a"), "href"), "nothing runs scripts here")
+}
+
+test-fragments-get-a-document
+meta ["test"]
+fn () {
+    assert-eq("html", ::html/from-html("").tag, "empty input")
+    assert-eq("html", ::html/from-html("just text").tag, "text")
+    doc ::html/from-html("<p>a</p><p>b</p>")
+    assert-eq("html", doc.tag, "several roots")
+    assert-eq(["head", "body"], map(doc.content, (c) { c.tag }), "head and body are added")
+    assert-eq(2, length(::html/select(doc, "body > p")), "both are kept")
+}
+
+test-misnested-tags-repair
+meta ["test"]
+fn () {
+    doc ::html/from-html("<b>one<i>two</b>three</i> < 5 </nope>")
+    assert-eq("onetwothree < 5", ::html/text(doc), "text survives repair")
+    assert-eq(2, length(::html/select(doc, "i")), "i is reopened after b closes, as in a browser")
+}
+
+// Selectors
+
+test-select-forms
+meta ["test"]
+fn () {
+    doc ::html/from-html("""
+        <div id=main class="a b">
+          <a href="/one" rel=next>One</a>
+          <a href="https://x.dev/two">Two</a>
+          <p class=b>Three</p>
+        </div>
+        <p>Four</p>
+    """)
+    count (selector) { length(::html/select(doc, selector)) }
+    assert-eq(1, count("#main"), "id")
+    assert-eq(2, count(".b"), "class")
+    assert-eq(1, count("div.a.b"), "compound")
+    assert-eq(2, count("div a"), "descendant")
+    assert-eq(0, count("body > a"), "child")
+    assert-eq(1, count("a + a"), "next sibling")
+    assert-eq(1, count("a ~ p"), "later sibling")
+    assert-eq(3, count("a, .b > *, p.b"), "a list counts each element once")
+    assert-eq(2, count("a[href]"), "attribute present")
+    assert-eq(1, count("a[rel=next]"), "attribute value")
+    assert-eq(1, count("a[href^='https:']"), "attribute prefix")
+    assert-eq(1, count("a:not([rel])"), "not")
+    assert-eq(1, count("a:first-child"), "first-child")
+    assert-eq(1, count("div > :nth-child(2)"), "nth-child")
+    assert-eq(1, count("div:has(> p)"), "has")
+}
+
+test-select-is-relative-to-the-node
+meta ["test"]
+fn () {
+    doc ::html/from-html("<table><tr><td>a<td>b</table>")
+    row ::html/select-first(doc, "tr")
+    assert-eq(2, length(::html/select(row, "td")), "searches below the row")
+    assert-eq(1, length(::html/select(row, "tr")), "includes the row itself")
+    assert-eq(0, length(::html/select(row, "table td")), "sees nothing above the row")
+}
+
+test-select-first-none-is-null
+meta ["test"]
+fn () {
+    doc ::html/from-html("<p>a</p>")
+    assert-eq(null, ::html/select-first(doc, "h1"), "no match")
+    assert-eq([], ::html/select(doc, "h1"), "no matches")
+}
+
+test-invalid-selector-is-err
+meta ["test"]
+fn () {
+    doc ::html/from-html("<p>a</p>")
+    assert(is-err(::html/select(doc, "p >")), "select")
+    assert(is-err(::html/select-first(doc, "")), "select-first")
+}
+
+test-typed-values-work-like-parsed-ones
+meta ["test"]
+fn () {
+    node ::html/Html({
+        tag: "div",
+        attrs: {class: "box"},
+        content: [::html/Html({tag: "b", attrs: {}, content: ["Hi"]}), " there"]
+    })
+    assert-eq(1, length(::html/select(node, "div.box > b")), "select")
+    assert-eq("Hi there", ::html/text(node), "text")
+    assert-eq("box", ::html/attr(node, "class"), "attr")
+    assert-eq("Hi", ::html/raw-text(::html/select-first(node, "b")), "select returns the value it was given")
+}
+
+test-node-functions-reject-non-nodes
+meta ["test"]
+fn () {
+    assert(is-err(::html/select(null, "p")), "select")
+    assert(is-err(::html/text(null)), "text")
+    assert(is-err(::html/attr(null, "href")), "attr of a select-first that found nothing")
+}
+
+// Text
+
+test-text-reads-like-the-page
+meta ["test"]
+fn () {
+    doc ::html/from-html("<td>\n   Smith &amp; <b>So</b>ns&nbsp;&nbsp;<br>LLC\n</td><p>one</p><p>two</p><div><span>a</span><span>b</span></div>")
+    body ::html/select-first(doc, "body")
+    assert-eq("Smith & Sons LLC one two ab", ::html/text(body), "whitespace collapses, blocks separate, inline joins")
+}
+
+test-text-cells-stay-apart
+meta ["test"]
+fn () {
+    doc ::html/from-html("<table><tr><td>a</td><td>b</td></tr><tr><td>c</td></tr></table>")
+    assert-eq("a b c", ::html/text(doc), "cells and rows are separated")
+    assert-eq("abc", ::html/raw-text(doc), "raw-text adds nothing")
+}
+
+test-raw-text-keeps-whitespace
+meta ["test"]
+fn () {
+    doc ::html/from-html("<pre>\n  a\n   b &amp; c\n</pre>")
+    pre ::html/select-first(doc, "pre")
+    assert-eq("  a\n   b & c\n", ::html/raw-text(pre), "as parsed: the newline after <pre> isn't content")
+    assert-eq("a b & c", ::html/text(pre), "text collapses it")
+}
+
+test-text-empty
+meta ["test"]
+fn () {
+    doc ::html/from-html("<td> &nbsp; </td><td></td>")
+    assert-eq("", ::html/text(doc), "nothing but whitespace")
+}
+
+// Real pages, none of which `from-xml` can parse
+
+test-fincen-table
+meta ["test"]
+fn () {
+    page ::res/load-str("html/fincen-enforcement-actions.html")
+    assert(is-err(from-xml(page)), "the page isn't well formed XML")
+    doc ::html/from-html(page)
+
+    assert-eq(
+        ["Enforcement Action", "Date Sort ascending", "Matter Number", "Financial Institution"],
+        map(::html/select(doc, "table thead th"), ::html/text),
+        "header row"
+    )
+
+    rows ::html/select(doc, "table tbody tr")
+    assert-eq(120, length(rows), "every row")
+    actions map(rows, (row) {
+        cells ::html/select(row, "td")
+        {
+            title: ::html/text(cells[0]),
+            link: ::html/attr(::html/select-first(cells[0], "a"), "href"),
+            date: ::html/text(cells[1]),
+            matter: ::html/text(cells[2]),
+            industry: ::html/text(cells[3])
+        }
+    })
+
+    assert-eq("In the Matter of Bank of America, N.A.", actions[0].title, "first title")
+    assert-eq("10/13/2026", actions[0].date, "first date")
+    assert-eq("2026-03", actions[0].matter, "first matter number")
+    assert-eq("Depository Institutions", actions[0].industry, "first industry")
+    assert(::hot::str/starts-with(actions[0].link, "/"), "a site-relative link")
+
+    last-action last(actions)
+    assert-eq("In the Matter of Gulfside Casino Partnership, d/b/a Copa Casino", last-action.title, "last title")
+    assert-eq("04/23/1999", last-action.date, "last date")
+    assert-eq("", last-action.industry, "an empty cell")
+
+    assert-eq(179, length(::html/select(doc, "a[href]")), "every link")
+    assert-eq(8, length(::html/select(doc, "script")), "every script")
+}
+
+test-federal-reserve-table-and-links
+meta ["test"]
+fn () {
+    page ::res/load-str("html/federal-reserve-enforcement-actions.html")
+    assert(is-err(from-xml(page)), "the page isn't well formed XML")
+    doc ::html/from-html(page)
+
+    assert-eq(1, length(::html/select(doc, "table")), "the page's other table is in a comment")
+    rows ::html/select(doc, "table tbody tr")
+    assert-eq(4, length(rows), "every row")
+    cells ::html/select(rows[0], "td")
+    assert-eq("State nonmember banks and insured branches of foreign banks", ::html/text(cells[0]), "br separates words")
+    assert-eq("Federal Deposit Insurance Corporation", ::html/text(cells[1]), "second cell")
+
+    links ::html/select(doc, "a[href]")
+    assert-eq(243, length(links), "every link")
+    assert-eq("#content", ::html/attr(links[0], "href"), "first link")
+    assert-eq("/open/open.htm", ::html/attr(last(links), "href"), "last link")
+}
+
+test-cfpb-articles
+meta ["test"]
+fn () {
+    page ::res/load-str("html/cfpb-enforcement-actions.html")
+    assert(is-err(from-xml(page)), "the page isn't well formed XML")
+    doc ::html/from-html(page)
+
+    posts ::html/select(doc, "article.o-post-preview")
+    assert-eq(25, length(posts), "every action on the page")
+    first-post posts[0]
+    title ::html/select-first(first-post, ".o-post-preview__title a")
+    assert-eq("Synapse Financial Technologies, Inc.", ::html/text(title), "title")
+    assert-eq("/enforcement/actions/synapse-financial-technologies-inc/", ::html/attr(title, "href"), "link")
+    assert-eq("2025-08-21T00:00:00", ::html/attr(::html/select-first(first-post, "time"), "datetime"), "date")
+    assert-eq(134, length(::html/select(doc, "a[href]")), "every link")
+}

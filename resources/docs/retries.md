@@ -53,11 +53,13 @@ Backoff formulas:
 
 When a retryable run fails:
 
-1. Hot reads retry config from function metadata.
+1. Hot reads retry config from the metadata of the function that ran.
 2. If attempts remain, the run is updated to `pending_retry`.
-3. A new run is scheduled at `next_retry_at`.
+3. A new run of the same function is scheduled at `next_retry_at`.
 4. The retry run is linked to the original via `origin_run_id`.
 5. Retries stop on success or when attempts are exhausted.
+
+Each handler of an event retries on its own. When several handlers share an event, one with `retry` retries on its own policy, one without isn't retried, and a retry runs only the handler that failed.
 
 In Hot App, retries are shown with retry badges (for example `↻1`, `↻2`) and linked run history.
 

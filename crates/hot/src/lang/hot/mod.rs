@@ -21,9 +21,11 @@ pub mod env;
 pub mod event;
 pub mod exec;
 pub mod file;
+pub mod gzip;
 pub mod hash;
 pub mod hex;
 pub mod hmac;
+pub mod html;
 pub mod http;
 pub mod info;
 pub mod internal_mcp;
@@ -60,6 +62,7 @@ pub mod uri;
 pub mod uuid;
 pub mod ws;
 pub mod xml;
+pub mod zip;
 
 // Re-export the Hot library map.
 pub use libmap::{HotLibFn, HotLibMap, get_hotlib_map};

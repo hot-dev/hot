@@ -5802,6 +5802,7 @@ async fn process_code_task(
         secret_values: Default::default(),
         access_id: None,
         agent_type: None,
+        event_handler_fn: None,
         queue_timing: None,
         deadline_at: chrono::Duration::from_std(
             task_deadline.saturating_duration_since(tokio::time::Instant::now()),

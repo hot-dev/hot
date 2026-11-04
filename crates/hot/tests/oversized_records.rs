@@ -138,6 +138,63 @@ async fn the_worst_shape_at_the_limit_fits_jsonb_and_past_it_is_left_out() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_value_too_deep_to_read_back_is_left_out_and_the_run_stays_readable() {
+    let Some(database) = database().await else {
+        return;
+    };
+    let emitter = DatabaseEngineEventEmitter::new_with_pool(database.db.clone());
+    let context = context(&database.fixture);
+    let nested = |levels| (0..levels).fold(Val::Int(1), |inner, _| Val::vec(vec![inner]));
+
+    let deepest = record(&emitter, &context, nested(hot::blob::MAX_RECORD_DEPTH)).await;
+    let too_deep = record(&emitter, &context, nested(1_000)).await;
+    emitter
+        .shutdown()
+        .await
+        .expect("the run's writes succeeded");
+
+    let db = database.db.with_scope(hot::db::DatabaseScope::Environment {
+        org_id: database.fixture.org_id,
+        env_id: database.fixture.env_id,
+    });
+    let calls = hot::db::call::Call::get_calls_by_run(&db, &context.run_id)
+        .await
+        .expect("a deep value must not make the run's calls unreadable");
+    assert_eq!(calls.len(), 2);
+
+    let stored = hot::db::call::Call::get_call(&db, &deepest)
+        .await
+        .expect("the deepest value kept reads back");
+    assert!(stored.return_value.unwrap().is_array());
+
+    let stored = hot::db::call::Call::get_call(&db, &too_deep)
+        .await
+        .expect("what stands in for the value reads back");
+    let stored = stored.return_value.unwrap();
+    assert_eq!(stored["$type"], hot::blob::OMITTED_TYPE);
+    assert_eq!(stored["$val"]["reason"], "too deeply nested to record");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn repeats_of_shared_storage_are_left_out_and_the_run_carries_on() {
+    let Some(database) = database().await else {
+        return;
+    };
+    let emitter = DatabaseEngineEventEmitter::new_with_pool(database.db.clone());
+    let context = context(&database.fixture);
+
+    let text = Val::from("x".repeat(1024 * 1024));
+    let call_id = record(&emitter, &context, Val::vec(vec![text; 100_000])).await;
+    let stored = stored_text(&database.raw, call_id).await;
+    assert!(stored.contains(hot::blob::OMITTED_TYPE), "{stored:.200}");
+
+    emitter
+        .shutdown()
+        .await
+        .expect("the run's writes succeeded");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_value_of_many_small_parts_is_stored_whole_and_reads_back() {
     let Some(database) = database().await else {
         return;

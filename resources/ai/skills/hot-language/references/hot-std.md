@@ -291,6 +291,8 @@ attr fn (node: Map, name: Str): Str                      // Get attribute value
 at fn (node: Map, path: Str): Any                        // Navigate XML path
 ```
 
+`from-xml` rejects most web pages, and a document with more than one root element. Use [`::hot::html`](#hothtml) for HTML.
+
 ### CSV and TSV (core)
 
 Namespace `::hot::csv`. Values stay `Str`, so ZIP codes and IDs keep their leading zeros. Malformed input is an Err naming the line.
@@ -441,6 +443,51 @@ response ::http/request(HttpRequest({
     body: {name: "Alice"},
 }))
 ```
+
+### ::hot::html
+
+Parse real-world HTML and query it with CSS selectors. `from-html` repairs malformed HTML as a browser does, so unclosed tags, unquoted attributes and raw `<script>` content all parse, and any string gives a tree. Use it for web pages, and `::hot::xml` for documents that must be well formed. These functions aren't core, so `text` and `attr` here don't clash with XML's.
+
+<!-- hot-check: skip -->
+```hot
+::html ::hot::html
+
+Html type { tag: Str, attrs: Map, content: Vec }
+
+from-html fn (value: Str): Html                          // The <html> element, always present
+select fn (node: Html, selector: Str): Vec<Html>         // CSS selector; node and below, in document order
+select-first fn (node: Html, selector: Str): Html?       // First match, or null
+text fn (node: Html): Str                                // As a reader sees it: whitespace collapsed, no scripts
+raw-text fn (node: Html): Str                            // Exactly as parsed, including script code
+attr fn (node: Html, name: Str): Str?                    // Attribute value, or null
+```
+
+Select the rows from the page once, then select within each row:
+
+```hot
+::html ::hot::html
+
+actions fn (page: Str): Vec {
+    doc ::html/from-html(page)
+    map(::html/select(doc, "table tbody tr"), (row) {
+        cells ::html/select(row, "td")
+        {
+            title: ::html/text(cells[0]),
+            link: ::html/attr(::html/select-first(row, "a"), "href"),
+            date: ::html/text(cells[1])
+        }
+    })
+}
+```
+
+- **The tree** is plain data, the same shape as `::hot::xml/Xml`. `content` holds child elements and `Str` text nodes. Names are lowercase, apart from SVG names like `viewBox`. Comments and the doctype aren't kept.
+- **`attr`** returns `""` for a boolean attribute such as `disabled`, so test it with `is-null`. A link keeps the value in the page, which is often relative. Put the site in front of a link starting with `/`, as in `` `https://example.gov${href}` ``. `::hot::uri/join` doesn't suit links: it adds them to the base's path, and encodes `?` and `#`.
+- **`select`** looks at the node you give it and below, and sees nothing above it: `select(row, "table td")` finds nothing when the table is above `row`. Selectors support combinators, attribute selectors, `:not()`, `:is()`, `:has()` and `:nth-child()`. An invalid selector is an Err.
+- **`select-first`** returns null when nothing matches, and passing that to `text` or `attr` is an Err. Test with `is-null` when an element may be missing.
+- **`text`** separates cells, blocks and `<br>` with a space, and collapses whitespace, `&nbsp;` included. Use `raw-text` for a script's code or the lines of a `<pre>`.
+- **Nothing on the page runs.** Content a page's scripts load later isn't in the tree, and `<noscript>` content parses as elements.
+- **Limits.** `from-html` is an Err over 64 MB, 524,288 nodes and attributes (about 15 MB of a real page), 512 levels of nesting, or 30 seconds of parsing. `select` is an Err if its matches, each counted with all that is below it, pass the node limit; a broad selector like `div` on a large page can do that, and a narrower selector is the fix. Raise them with `HOT_MAX_PARSE_INPUT_BYTES`, `HOT_MAX_HTML_NODES` and `HOT_MAX_HTML_PARSE_SECONDS`.
+- **Recording.** A page's tree is recorded when `from-html` returns it and again by each `select` it's passed to, at a few times the size of the page. Pull out the values you need early, and pass those on rather than the tree.
 
 ### ::hot::uri
 
@@ -688,7 +735,42 @@ from-int fn (value: Int, size: Int): Bytes               // Int to bytes (big-en
 from-int fn (value: Int, size: Int, endian: Str): Bytes  // Int to bytes with endianness
 crc32 fn (data: Bytes | Str | Vec): Int                  // CRC32 checksum
 to-vec fn (bytes: Bytes): Vec<Int>                       // Bytes to vector of ints
+to-str fn (bytes: Bytes): Str                            // UTF-8 bytes to Str; Err if invalid
 ```
+
+### ::hot::gzip
+
+<!-- hot-check: skip -->
+```hot
+::gzip ::hot::gzip
+
+encode fn (data: Bytes | Str): Bytes                     // Compress; same input, same output
+encode fn (data: Bytes | Str, opts: Map): Bytes          // level: 0 to 9
+decode fn (data: Bytes): Bytes                           // Decompress; output over the limit is an Err
+decode fn (data: Bytes, opts: Map): Bytes                // max-bytes lowers the limit
+decode-stream fn (source: Iter | Bytes): Iter            // Bytes chunks, for data too big to hold
+decode-stream fn (source: Iter | Bytes, opts: Map): Iter // max-bytes stops the stream
+```
+
+`::hot::http` doesn't decompress responses. For a compressed response, send `accept-encoding: gzip`, check `content-encoding`, and pass the Bytes body to `decode`.
+
+### ::hot::zip
+
+An archive is `Bytes`, or a `Str` naming a file. Use the file for large archives. Entries are `{name, safe-path, size, compressed-size, method, is-dir, is-encrypted}`.
+
+<!-- hot-check: skip -->
+```hot
+::zip ::hot::zip
+
+entries fn (source: Bytes | Str): Vec<Map>               // List without decompressing
+read-entry fn (source: Bytes | Str, name: Str): Bytes    // One entry; output over the limit is an Err
+read-entry fn (source: Bytes | Str, name: Str, opts: Map): Bytes
+read-entry-stream fn (source: Bytes | Str, name: Str): Iter  // Bytes chunks; feeds iter-csv and iter-tsv
+read-entry-stream fn (source: Bytes | Str, name: Str, opts: Map): Iter
+create fn (entries: Vec<Map>): Bytes                     // From {name, data} Maps
+```
+
+`decode` and `read-entry` stop at `compression.max-output-bytes` (64 MiB by default). Compressed input is untrusted, so never write an entry to its `name`: use `safe-path`, and skip entries where it is null.
 
 ### ::hot::bit
 

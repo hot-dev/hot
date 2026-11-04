@@ -144,15 +144,41 @@ pub const MAX_INLINE_DEFAULT_BYTES: usize = 1024 * 1024;
 /// its text, as `[0,0,0,...]` does, so this is 256 MB over 8.
 pub const MAX_INLINE_HARD_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 
+/// How much of a value a record may write out before it is checked against what
+/// the value occupies. See [`crate::val::Val::to_record_repr`].
+pub const RECORD_BUDGET_FLOOR_BYTES: usize = MAX_INLINE_HARD_LIMIT_BYTES;
+
+/// How much a record over the floor may write out for each byte the value
+/// occupies, counting storage shared within it once. Leaves room for a value
+/// that repeats some of its data, and not for one that is mostly repeats.
+pub const RECORD_BUDGET_PER_RESIDENT_BYTE: usize = 4;
+
+/// The deepest value a record keeps. `serde_json` refuses to read past 127
+/// levels, which would fail reading every call of the run, not only this one.
+/// The margin is for what storage adds: `$type` and `$val` around Bytes, say, or
+/// a `BlobRef` in place of a leaf.
+pub const MAX_RECORD_DEPTH: usize = 120;
+
 /// Typed-map `$type` tag for a value too large to record.
 pub const OMITTED_TYPE: &str = "::hot::blob/Omitted";
 
 /// What a record holds in place of a value that couldn't be kept: blob storage
-/// is off or failed, and the value is over [`MAX_INLINE_HARD_LIMIT_BYTES`].
+/// is off or failed and the value is over [`MAX_INLINE_HARD_LIMIT_BYTES`], or it
+/// is over its budget. `size` is then what the budget allowed, so at least that.
 pub fn omitted_val(size: usize) -> Val {
+    omitted_val_because(size, "too large to record")
+}
+
+/// What a record holds in place of a value deeper than [`MAX_RECORD_DEPTH`].
+/// `size` is how much of it was reached.
+pub fn omitted_too_deep_val(size: usize) -> Val {
+    omitted_val_because(size, "too deeply nested to record")
+}
+
+fn omitted_val_because(size: usize, reason: &str) -> Val {
     let mut inner = IndexMap::new();
     inner.insert(Val::from("size"), Val::Int(size as i64));
-    inner.insert(Val::from("reason"), Val::from("too large to record"));
+    inner.insert(Val::from("reason"), Val::from(reason));
     let mut map = IndexMap::new();
     map.insert(Val::from("$type"), Val::from(OMITTED_TYPE));
     map.insert(Val::from("$val"), Val::map(inner));

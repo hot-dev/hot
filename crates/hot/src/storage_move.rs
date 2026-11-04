@@ -1374,7 +1374,12 @@ mod tests {
         let local = target(FileStorageType::Local)
             .configure(&Val::map_empty(), StorageRole::File)
             .unwrap();
-        assert_eq!(local.get_str("file.storage.path"), "/data/files");
+        // A rooted path stays as named. On Windows that's on the current drive.
+        let absolute = |path: &str| std::path::absolute(path).unwrap();
+        assert_eq!(
+            std::path::Path::new(&local.get_str("file.storage.path")),
+            absolute("/data/files")
+        );
         // Records keep the path, and Hot may run from another directory.
         let relative = MoveTarget {
             path: "data/files".into(),
@@ -1384,7 +1389,10 @@ mod tests {
         .unwrap();
         let path = relative.get_str("file.storage.path");
         assert!(std::path::Path::new(&path).is_absolute(), "{path}");
-        assert!(path.ends_with("data/files"), "{path}");
+        assert!(
+            std::path::Path::new(&path).ends_with("data/files"),
+            "{path}"
+        );
         // A record with a `..` in it would depend on that directory too, and
         // collection would not delete its object.
         let resolved = |path: &str| {
@@ -1412,7 +1420,11 @@ mod tests {
             ("/nonexistent/sub/../../../x", "/x"),
             ("/..", "/"),
         ] {
-            assert_eq!(resolved(given), wanted, "{given}");
+            assert_eq!(
+                std::path::Path::new(&resolved(given)),
+                absolute(wanted),
+                "{given}"
+            );
         }
         assert!(
             MoveTarget {
@@ -1522,7 +1534,10 @@ mod tests {
         {
             assert_eq!(backend, "s3");
             let old = old.unwrap();
-            let suffix = old.rsplit('/').next().unwrap();
+            let suffix = std::path::Path::new(&old)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap();
             assert!(
                 stored.as_deref().unwrap().ends_with(suffix),
                 "{path}: {stored:?} keeps {suffix}"

@@ -1,0 +1,220 @@
+::gleif::api ns
+meta {
+    ctx: {"gleif.base-url": {required: false, secret: false}},
+    doc: """
+    Transport for the GLEIF API: the settings resolver (per-call `opts`
+    first, then context variables, then defaults), a typed `HttpError`,
+    JSON GETs, and query-string building that drops unset values.
+
+    | opts key | Context variable | Default |
+    |---|---|---|
+    | `base-url` | `gleif.base-url` | `https://api.gleif.org/api/v1` |
+
+    GLEIF takes no credential, so a per-call `base-url` needs none.
+    """
+}
+
+::ctx ::hot::ctx
+::uri ::hot::uri
+::re ::hot::regex
+
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+SOURCE "gleif"
+BASE_URL "https://api.gleif.org/api/v1"
+PACKAGE_AGENT "hot-dev-gleif-pkg/0.1 (+https://hot.dev)"
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+given
+meta {
+    doc: """True for a non-null value that is not a blank string."""
+}
+fn (v: Any): Bool {
+  match v {
+    Null => { false }
+    Str => { not(is-empty(trim(v))) }
+    _ => { true }
+  }
+}
+
+pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
+  from-opts get(opts, key)
+  from-ctx ::ctx/get(ctx-key)
+  cond {
+    given(from-opts) => { from-opts }
+    given(from-ctx) => { from-ctx }
+    => { default }
+  }
+}
+
+strip-slash fn (url: Str): Str {
+  ::re/replace-all(url, "/+$", "")
+}
+
+resolve
+meta {
+    doc: """
+    Resolve settings for one call: `{base-url}`. A value in `opts` wins
+    over context.
+
+    **Example**
+
+    ```hot
+    cfg ::gleif::api/resolve({base-url: "https://gleif-proxy.example/api/v1"})
+    ```
+    """
+}
+fn (opts: Map): Map {
+  {base-url: strip-slash(pick(opts, "base-url", "gleif.base-url", BASE_URL))}
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+HttpError
+meta {
+    doc: """
+    A non-2xx GLEIF response. `source` is `"gleif"`; `url` the
+    requested URL (GLEIF takes no credentials in URLs); `retry-after`
+    the parsed `Retry-After` seconds on 429s; `message` a one-line
+    summary that never includes credentials.
+    """
+}
+type {
+    source: Str,
+    status: Int,
+    url: Str,
+    headers: Map,
+    body: Any,
+    retry-after: Int?,
+    message: Str
+}
+
+body-detail fn (body: Any): Str? {
+  cond {
+    is-str(body) => { if(gt(length(body), 200), `${slice(body, 0, 200)}…`, body) }
+    is-map(body) => {
+      // GLEIF: {errors: [{title, detail}]}
+      first-error if(is-vec(get(body, "errors")), first(get(body, "errors")), null)
+      or(
+        get(or(first-error, {}), "detail"),
+        get(or(first-error, {}), "title"),
+        get(or(first-error, {}), "error"),
+        get(body, "error"),
+        get(body, "message")
+      )
+    }
+    => { null }
+  }
+}
+
+retry-after fn (headers: Map): Int? {
+  v get(headers, "retry-after")
+  cond {
+    is-null(v) => { null }
+    ::re/is-match(trim(Str(v)), "^\\d+$") => { Int(trim(Str(v))) }
+    => { null }
+  }
+}
+
+http-error
+meta {
+    doc: """Build an `HttpError` from a non-2xx response. Exposed for testing; every request uses it."""
+}
+fn (response: HttpResponse, url: Str): HttpError {
+  headers or(response.headers, {})
+  detail body-detail(response.body)
+  HttpError({
+    source: SOURCE,
+    status: response.status,
+    url: url,
+    headers: headers,
+    body: response.body,
+    retry-after: retry-after(headers),
+    message: if(is-some(detail), `${SOURCE}: HTTP ${response.status}: ${detail}`, `${SOURCE}: HTTP ${response.status} for ${url}`)
+  })
+}
+
+is-not-found
+meta {
+    doc: """True when `e` is an `HttpError` with status 404."""
+}
+fn (e: Any): Bool {
+  and(is-map(e), eq(get(e, "status"), 404))
+}
+
+// ---------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------
+
+query-string
+meta {
+    doc: """Build a `?a=1&b=2` suffix from a Map, dropping null and blank values (pure); `""` when nothing remains. Keys may contain brackets (`filter[fulltext]`, `page[size]`) and are encoded."""
+}
+fn (params: Map): Str {
+  ::uri/query-string(filter-vals(params, given))
+}
+
+path-segment
+meta {
+    doc: """Percent-encode one path segment."""
+}
+fn (value: Any): Str {
+  ::uri/encode(Str(value))
+}
+
+request
+meta {
+    doc: """
+    GET (or another method) a GLEIF URL with `headers`, returning
+    the `HttpResponse` on 2xx or an Err carrying `HttpError`. A
+    transport failure passes through as its own Err.
+    """
+}
+fn (method: Str, url: Str, headers: Map): HttpResponse {
+  response ::hot::http/request(HttpRequest({
+    method,
+    url,
+    headers: {User-Agent: PACKAGE_AGENT, ...headers},
+    body: ""
+  }))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response }
+    => { err(http-error(response, url)) }
+  }
+}
+
+get-json
+meta {
+    doc: """GET a JSON resource and return the decoded body, or an Err carrying `HttpError`."""
+}
+fn (url: Str, headers: Map): Any {
+  response request("GET", url, {Accept: "application/json", ...headers})
+  cond {
+    is-err(response) => { response }
+    is-str(response.body) => {
+      text trim(response.body)
+      if(or(::hot::str/starts-with(text, "{"), ::hot::str/starts-with(text, "[")), from-json(text), response.body)
+    }
+    => { response.body }
+  }
+}
+
+get-json-or-null
+meta {
+    doc: """`get-json`, but a 404 gives null (an absent parent or record) instead of an Err."""
+}
+fn (url: Str, headers: Map): Any {
+  out get-json(url, headers)
+  cond {
+    and(is-err(out), is-not-found(err-value(out))) => { null }
+    => { out }
+  }
+}

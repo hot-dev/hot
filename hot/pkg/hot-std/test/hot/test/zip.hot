@@ -1,0 +1,154 @@
+::hot::test::zip ns
+meta ["test"]
+
+// =============================================================================
+// Zip Module Tests
+// =============================================================================
+
+::zip ::hot::zip
+::bytes ::hot::bytes
+
+// Whether `result` is an Err whose message holds `text`.
+fails-with fn (result: Result, text: Str): Bool {
+    and(is-err(result), contains(Str(err-value(result)), text))
+}
+
+sample fn (): Bytes {
+    ::zip/create([
+        {name: "data/a.csv", data: "id,zip\n1,02134\n"},
+        {name: "b.bin", data: Bytes([0, 255])},
+    ])
+}
+
+test-entries-lists-in-order
+meta ["test"]
+fn () {
+    assert-eq(["data/a.csv", "b.bin"], map(::zip/entries(sample()), %.name))
+}
+
+test-entries-describes-an-entry
+meta ["test"]
+fn () {
+    entry first(::zip/entries(sample()))
+    assert-eq("data/a.csv", entry.safe-path)
+    assert-eq(15, entry.size)
+    assert-eq("deflate", entry.method)
+    assert-eq(false, entry.is-dir)
+    assert-eq(false, entry.is-encrypted)
+}
+
+test-read-entry-round-trips
+meta ["test"]
+fn () {
+    assert-eq("id,zip\n1,02134\n", ::bytes/to-str(::zip/read-entry(sample(), "data/a.csv")))
+    assert-eq(Bytes([0, 255]), ::zip/read-entry(sample(), "b.bin"))
+}
+
+test-read-entry-feeds-from-csv
+meta ["test"]
+fn () {
+    assert-eq([{id: "1", zip: "02134"}], from-csv(::zip/read-entry(sample(), "data/a.csv")))
+}
+
+test-read-entry-names-a-missing-entry
+meta ["test"]
+fn () {
+    assert(fails-with(::zip/read-entry(sample(), "nope"), "no entry named"))
+}
+
+test-read-entry-stops-at-max-bytes
+meta ["test"]
+fn () {
+    bomb ::zip/create([{name: "bomb", data: Bytes(map(range(100000), (i) { 0 }))}])
+    assert(lt(length(bomb), 1000))
+    assert(fails-with(::zip/read-entry(bomb, "bomb", {max-bytes: 1000}), "output exceeds 1000 bytes"))
+    assert-eq(100000, length(::zip/read-entry(bomb, "bomb", {max-bytes: 100000})))
+}
+
+test-read-entry-stream-feeds-iter-csv
+meta ["test"]
+fn () {
+    rows ::hot::iter/collect(iter-csv(::zip/read-entry-stream(sample(), "data/a.csv")))
+    assert-eq([{id: "1", zip: "02134"}], rows)
+}
+
+test-read-entry-stream-stops-at-max-bytes
+meta ["test"]
+fn () {
+    bomb ::zip/create([{name: "bomb", data: Bytes(map(range(100000), (i) { 0 }))}])
+    assert(fails-with(::zip/read-entry-stream(bomb, "bomb", {max-bytes: 1000}), "max-bytes"))
+}
+
+test-reads-an-archive-from-a-file
+meta ["test"]
+fn () {
+    path "zip-test-archive.zip"
+    write-file-bytes(path, sample())
+    names map(::zip/entries(path), %.name)
+    text ::bytes/to-str(::zip/read-entry(path, "data/a.csv"))
+    rows ::hot::iter/collect(iter-csv(::zip/read-entry-stream(path, "data/a.csv")))
+    delete-file(path)
+    assert-eq(["data/a.csv", "b.bin"], names)
+    assert-eq("id,zip\n1,02134\n", text)
+    assert-eq([{id: "1", zip: "02134"}], rows)
+}
+
+test-a-missing-file-is-an-err
+meta ["test"]
+fn () {
+    assert(is-err(::zip/entries("no-such-archive.zip")))
+}
+
+test-corrupt-input-is-an-err
+meta ["test"]
+fn () {
+    assert(fails-with(::zip/entries(Bytes("not a zip file")), "not a valid zip"))
+    assert(is-err(::zip/entries(Bytes([]))))
+    archive sample()
+    assert(is-err(::zip/entries(slice(archive, 0, sub(length(archive), 10)))))
+}
+
+test-a-corrupt-entry-is-an-err
+meta ["test"]
+fn () {
+    archive ::zip/create([{name: "a.txt", data: "hello hello hello hello"}])
+    // The entry's compressed data starts after a 30-byte header and its name.
+    bad concat(slice(archive, 0, 37), Bytes([255, 255, 255, 255]), slice(archive, 41))
+    assert(is-err(::zip/read-entry(bad, "a.txt")))
+    assert(is-err(::hot::iter/collect(::zip/read-entry-stream(bad, "a.txt"))))
+}
+
+test-create-refuses-unsafe-names
+meta ["test"]
+fn () {
+    assert(fails-with(::zip/create([{name: "../a.txt", data: "x"}]), "unsafe entry name"))
+    assert(fails-with(::zip/create([{name: "/etc/passwd", data: "x"}]), "unsafe entry name"))
+    assert(fails-with(::zip/create([{name: "a\\b.txt", data: "x"}]), "unsafe entry name"))
+    assert(fails-with(::zip/create([{name: "dir/", data: "x"}]), "unsafe entry name"))
+}
+
+test-create-refuses-a-repeated-name
+meta ["test"]
+fn () {
+    assert(is-err(::zip/create([{name: "a.txt", data: "x"}, {name: "a.txt", data: "y"}])))
+}
+
+test-create-refuses-a-bad-entry
+meta ["test"]
+fn () {
+    assert(is-err(::zip/create([{name: "a.txt"}])))
+    assert(is-err(::zip/create([{data: "x"}])))
+    assert(is-err(::zip/create(["a.txt"])))
+}
+
+test-create-is-deterministic
+meta ["test"]
+fn () {
+    assert-eq(sample(), sample())
+}
+
+test-create-makes-an-empty-archive
+meta ["test"]
+fn () {
+    assert-eq([], ::zip/entries(::zip/create([])))
+}

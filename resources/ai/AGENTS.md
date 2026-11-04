@@ -488,6 +488,14 @@ children fn (node: Map, name: Str): Vec<Map>
 text fn (node: Map): Str
 attr fn (node: Map, name: Str): Str
 
+// HTML: repairs malformed pages, as a browser does. Use for web pages, and XML for well formed documents
+::hot::html/from-html fn (value: Str): Html                   // The <html> element: {tag, attrs, content}
+::hot::html/select fn (node: Html, selector: Str): Vec<Html>  // CSS selector; node and below, in document order
+::hot::html/select-first fn (node: Html, selector: Str): Html?
+::hot::html/text fn (node: Html): Str                         // As a reader sees it: whitespace collapsed, no scripts
+::hot::html/raw-text fn (node: Html): Str                     // Exactly as parsed, including scripts
+::hot::html/attr fn (node: Html, name: Str): Str?
+
 // CSV and TSV (values stay Str; `types` converts named columns)
 from-csv fn (text: Str | Bytes): Vec<Map>
 from-csv fn (text: Str | Bytes, opts: Map): Vec
@@ -562,7 +570,9 @@ hash ::hot::hash/sha256("data")
 - `::hot::base64` — `encode`, `decode`, `encode-url`, `decode-url`
 - `::hot::uri` — `Uri` type, `encode`, `decode`, `encode-query`, `decode-query`, `parse`, `build`, `join`, `is-valid`
 - `::hot::regex` — `first-match`, `find`, `find-all`, `replace`, `replace-all`, `split`, `is-match`
-- `::hot::bytes` — `to-int`, `to-uint`, `from-int`, `crc32`, `to-vec`
+- `::hot::bytes` — `to-int`, `to-uint`, `from-int`, `crc32`, `to-vec`, `to-str`
+- `::hot::gzip` — `encode`, `decode`, `decode-stream`
+- `::hot::zip` — `entries`, `read-entry`, `read-entry-stream`, `create`
 - `::hot::bit` — `and`, `or`, `xor`, `not`, `shift-left`, `shift-right`
 - `::hot::exec` — `fail`, `cancel`, `exit` (all core: call them without a prefix)
 - `::hot::run` — `info`, `is-inline-run`, `is-local-dev`

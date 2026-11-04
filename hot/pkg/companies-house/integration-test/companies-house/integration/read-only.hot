@@ -1,0 +1,25 @@
+::companies-house::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration smoke tests (live, read-only)
+// =============================================================================
+// COMPANIES_HOUSE_API_KEY (and optionally COMPANIES_HOUSE_BASE_URL for the
+// sandbox). The test only reads; without the key it records a skip and passes.
+// Run with: hot test -p pkg-integration-companies-house
+
+::ctx ::companies-house::integration::ctx
+
+test-search-and-profile
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip("COMPANIES_HOUSE_API_KEY is not set") }
+        => {
+            found ::companies-house/search-companies("tesco", {items-per-page: 3})
+            assert(gt(length(found.items), 0), "search finds companies")
+            number first(found.items).company_number
+            profile ::companies-house/company(number)
+            assert-eq(number, profile.company_number)
+        }
+    }
+}
