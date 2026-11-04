@@ -102,6 +102,23 @@ fn (data: Bytes | Str | Vec): Int {
 }
 
 
+to-str
+meta {
+    doc: """
+    Read bytes as UTF-8 text. Bytes that aren't valid UTF-8 are an Err.
+
+    **Example**
+
+    ```hot
+    to-str(Bytes([72, 105]))  // "Hi"
+    ```
+    """
+}
+fn (bytes: Bytes): Str {
+    call-lib(::hot::bytes/to-str, [bytes])
+}
+
+
 to-vec
 meta {
     doc: """

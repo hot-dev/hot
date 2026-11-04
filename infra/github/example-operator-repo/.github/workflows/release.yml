@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   hot:
-    uses: hot-dev/hot/.github/workflows/selfhost-release.yml@v3.0.2
+    uses: hot-dev/hot/.github/workflows/selfhost-release.yml@v3.0.3
     with:
       release: ${{ inputs.release }}
       installation: hot-example

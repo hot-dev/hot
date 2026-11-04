@@ -688,7 +688,42 @@ from-int fn (value: Int, size: Int): Bytes               // Int to bytes (big-en
 from-int fn (value: Int, size: Int, endian: Str): Bytes  // Int to bytes with endianness
 crc32 fn (data: Bytes | Str | Vec): Int                  // CRC32 checksum
 to-vec fn (bytes: Bytes): Vec<Int>                       // Bytes to vector of ints
+to-str fn (bytes: Bytes): Str                            // UTF-8 bytes to Str; Err if invalid
 ```
+
+### ::hot::gzip
+
+<!-- hot-check: skip -->
+```hot
+::gzip ::hot::gzip
+
+encode fn (data: Bytes | Str): Bytes                     // Compress; same input, same output
+encode fn (data: Bytes | Str, opts: Map): Bytes          // level: 0 to 9
+decode fn (data: Bytes): Bytes                           // Decompress; output over the limit is an Err
+decode fn (data: Bytes, opts: Map): Bytes                // max-bytes lowers the limit
+decode-stream fn (source: Iter | Bytes): Iter            // Bytes chunks, for data too big to hold
+decode-stream fn (source: Iter | Bytes, opts: Map): Iter // max-bytes stops the stream
+```
+
+`::hot::http` doesn't decompress responses. For a compressed response, send `accept-encoding: gzip`, check `content-encoding`, and pass the Bytes body to `decode`.
+
+### ::hot::zip
+
+An archive is `Bytes`, or a `Str` naming a file. Use the file for large archives. Entries are `{name, safe-path, size, compressed-size, method, is-dir, is-encrypted}`.
+
+<!-- hot-check: skip -->
+```hot
+::zip ::hot::zip
+
+entries fn (source: Bytes | Str): Vec<Map>               // List without decompressing
+read-entry fn (source: Bytes | Str, name: Str): Bytes    // One entry; output over the limit is an Err
+read-entry fn (source: Bytes | Str, name: Str, opts: Map): Bytes
+read-entry-stream fn (source: Bytes | Str, name: Str): Iter  // Bytes chunks; feeds iter-csv and iter-tsv
+read-entry-stream fn (source: Bytes | Str, name: Str, opts: Map): Iter
+create fn (entries: Vec<Map>): Bytes                     // From {name, data} Maps
+```
+
+`decode` and `read-entry` stop at `compression.max-output-bytes` (64 MiB by default). Compressed input is untrusted, so never write an entry to its `name`: use `safe-path`, and skip entries where it is null.
 
 ### ::hot::bit
 

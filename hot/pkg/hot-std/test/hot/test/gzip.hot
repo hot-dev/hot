@@ -1,0 +1,143 @@
+::hot::test::gzip ns
+meta ["test"]
+
+// =============================================================================
+// Gzip Module Tests
+// =============================================================================
+
+::gzip ::hot::gzip
+::bytes ::hot::bytes
+
+// Whether `result` is an Err whose message holds `text`.
+fails-with fn (result: Result, text: Str): Bool {
+    and(is-err(result), contains(Str(err-value(result)), text))
+}
+
+// All of a stream's chunks as one Str.
+stream-text fn (stream: Iter): Str {
+    join(map(::hot::iter/collect(stream), ::bytes/to-str), "")
+}
+
+test-round-trips-text
+meta ["test"]
+fn () {
+    assert-eq("héllo wörld", ::bytes/to-str(::gzip/decode(::gzip/encode("héllo wörld"))))
+}
+
+test-round-trips-bytes
+meta ["test"]
+fn () {
+    data Bytes([0, 255, 1, 254])
+    assert-eq(data, ::gzip/decode(::gzip/encode(data)))
+}
+
+test-round-trips-empty
+meta ["test"]
+fn () {
+    assert-eq(0, length(::gzip/decode(::gzip/encode(""))))
+}
+
+test-encode-shrinks-repetition
+meta ["test"]
+fn () {
+    text join(map(range(1000), (i) { "hello " }), "")
+    assert(lt(length(::gzip/encode(text)), 100))
+}
+
+test-encode-is-deterministic
+meta ["test"]
+fn () {
+    assert-eq(::gzip/encode("same"), ::gzip/encode("same"))
+}
+
+test-encode-level
+meta ["test"]
+fn () {
+    text join(map(range(1000), (i) { "hello " }), "")
+    assert(gt(length(::gzip/encode(text, {level: 0})), length(::gzip/encode(text, {level: 9}))))
+    assert-eq(text, ::bytes/to-str(::gzip/decode(::gzip/encode(text, {level: 0}))))
+    assert(fails-with(::gzip/encode("x", {level: 10}), "level"))
+}
+
+test-decode-reads-gzip-tool-output
+meta ["test"]
+fn () {
+    // `printf hello | gzip -n`
+    gz Bytes([31, 139, 8, 0, 0, 0, 0, 0, 0, 3, 203, 72, 205, 201, 201, 7, 0, 134, 166, 16, 54, 5, 0, 0, 0])
+    assert-eq("hello", ::bytes/to-str(::gzip/decode(gz)))
+}
+
+test-decode-reads-every-member
+meta ["test"]
+fn () {
+    gz concat(::gzip/encode("one "), ::gzip/encode("two"))
+    assert-eq("one two", ::bytes/to-str(::gzip/decode(gz)))
+}
+
+test-decode-refuses-input-that-isnt-gzip
+meta ["test"]
+fn () {
+    assert(is-err(::gzip/decode(Bytes("not gzip"))))
+    assert(is-err(::gzip/decode(Bytes([]))))
+}
+
+test-decode-refuses-truncated-input
+meta ["test"]
+fn () {
+    gz ::gzip/encode("hello hello hello")
+    assert(is-err(::gzip/decode(slice(gz, 0, sub(length(gz), 4)))))
+}
+
+test-decode-refuses-a-bad-checksum
+meta ["test"]
+fn () {
+    gz ::gzip/encode("hello")
+    n sub(length(gz), 8)
+    corrupt concat(slice(gz, 0, n), Bytes([0, 0, 0, 0]), slice(gz, add(n, 4)))
+    assert(is-err(::gzip/decode(corrupt)))
+}
+
+test-decode-stops-at-max-bytes
+meta ["test"]
+fn () {
+    bomb ::gzip/encode(Bytes(map(range(100000), (i) { 0 })))
+    assert(lt(length(bomb), 1000))
+    assert(fails-with(::gzip/decode(bomb, {max-bytes: 1000}), "output exceeds 1000 bytes"))
+    assert-eq(100000, length(::gzip/decode(bomb, {max-bytes: 100000})))
+}
+
+test-decode-refuses-unknown-options
+meta ["test"]
+fn () {
+    assert(is-err(::gzip/decode(::gzip/encode("x"), {max-byte: 1})))
+    assert(is-err(::gzip/decode(::gzip/encode("x"), {max-bytes: 0})))
+}
+
+test-decode-stream-reads-bytes
+meta ["test"]
+fn () {
+    assert-eq("hello", stream-text(::gzip/decode-stream(::gzip/encode("hello"))))
+}
+
+test-decode-stream-reads-chunks-from-a-file
+meta ["test"]
+fn () {
+    path "gzip-stream-test.csv.gz"
+    write-file-bytes(path, ::gzip/encode("id,zip\n1,02134\n"))
+    rows ::hot::iter/collect(iter-csv(::gzip/decode-stream(read-file-stream(path, {chunk-size: 3}))))
+    delete-file(path)
+    assert-eq([{id: "1", zip: "02134"}], rows)
+}
+
+test-decode-stream-stops-at-max-bytes
+meta ["test"]
+fn () {
+    bomb ::gzip/encode(Bytes(map(range(200000), (i) { 0 })))
+    assert(fails-with(::hot::iter/collect(::gzip/decode-stream(bomb, {max-bytes: 1000})), "max-bytes"))
+}
+
+test-decode-stream-reports-corrupt-input
+meta ["test"]
+fn () {
+    assert(is-err(::hot::iter/collect(::gzip/decode-stream(Bytes("not gzip")))))
+}

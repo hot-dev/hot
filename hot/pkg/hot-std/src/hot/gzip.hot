@@ -1,0 +1,128 @@
+::hot::gzip ns
+meta {
+    doc: """
+    Gzip compression (RFC 1952).
+
+    Use `decode` for data that fits in memory, and `decode-stream` to read
+    the rest a chunk at a time.
+
+    **Bad input is an Err.** That covers input that isn't gzip, a truncated
+    file, a failed checksum and data after the end of the stream.
+
+    **Size limits.** Treat compressed data as untrusted: a few KB can expand to
+    gigabytes. `decode` stops with an Err once its output passes
+    `compression.max-output-bytes` (64 MiB by default), whatever the input
+    claims. Set `hot.compression.max-output-bytes` in `hot.hot`. The `max-bytes` option can lower
+    the limit for one call, never raise it. `decode-stream` holds one chunk at a
+    time, so that setting doesn't apply to it. Pass `max-bytes` to stop a stream
+    early.
+
+    **HTTP responses.** `::hot::http` doesn't decompress responses. To read a
+    compressed one, or an API that requires compression, send
+    `accept-encoding: gzip` and decode the body. A server can still answer
+    uncompressed, so check `content-encoding`. `http.max-response-bytes` limits
+    the compressed size, and `decode` the decompressed size:
+
+    ```hot
+    response ::hot::http/request(::hot::http/HttpRequest({
+        method: "GET",
+        url: "https://api.example.com/data.xml",
+        headers: {accept-encoding: "gzip"},
+    }))
+    text if(
+        eq(get(response.headers, "content-encoding"), "gzip"),
+        ::hot::bytes/to-str(::hot::gzip/decode(response.body)),
+        response.body,
+    )
+    ```
+
+    **What Hot records.** A call's arguments and return value are recorded, so
+    decompressed data is recorded too. Pass a stream to `iter-csv` or `iter-tsv`
+    to keep the rows of a large file out of the record.
+    """
+}
+
+
+encode
+meta {
+    doc: """
+    Compress `data` to gzip. A `Str` is compressed as its UTF-8 bytes. The
+    same input always gives the same output: the header holds no timestamp or
+    file name.
+
+    **Options**
+    - `level`: from `0` (no compression) to `9` (smallest). Default `6`
+
+    **Example**
+
+    ```hot
+    gz ::hot::gzip/encode("hello hello hello")
+    ::hot::gzip/encode("hello", {level: 9})
+    ```
+    """
+}
+fn
+(data: Bytes | Str): Bytes {
+    call-lib(::hot::gzip/encode, [data])
+},
+(data: Bytes | Str, opts: Map): Bytes {
+    call-lib(::hot::gzip/encode, [data, opts])
+}
+
+
+decode
+meta {
+    doc: """
+    Decompress gzip `data` to `Bytes`. Reads every member of a file made of
+    several. Use `::hot::bytes/to-str` on the result for text. Output over the
+    limit is an Err; see the namespace docs.
+
+    **Options**
+    - `max-bytes`: stop with an Err past this many bytes. Can only lower `compression.max-output-bytes`
+
+    **Example**
+
+    ```hot
+    gz ::hot::gzip/encode("hello")
+    ::hot::bytes/to-str(::hot::gzip/decode(gz))  // "hello"
+
+    ::hot::gzip/decode(gz, {max-bytes: 1048576})
+    ```
+    """
+}
+fn
+(data: Bytes): Bytes {
+    call-lib(::hot::gzip/decode, [data])
+},
+(data: Bytes, opts: Map): Bytes {
+    call-lib(::hot::gzip/decode, [data, opts])
+}
+
+
+decode-stream
+meta {
+    doc: """
+    Decompress gzip a chunk at a time, as an iterator of `Bytes`. `source` is
+    `Bytes`, or an iterator of `Bytes` chunks such as `read-file-stream`.
+    Chunks can split anywhere, including inside a character. Bad input is an
+    Err when the iterator reaches it, which can be after some chunks.
+
+    **Options**
+    - `max-bytes`: stop with an Err past this many bytes. Default no limit
+
+    **Example**
+
+    ```hot
+    // Rows of a gzipped CSV file too big to load
+    rows iter-csv(::hot::gzip/decode-stream(read-file-stream("customers.csv.gz")))
+    for-each(rows, (row) { print(row.id) })
+    ```
+    """
+}
+fn
+(source: Iter | Bytes): Iter {
+    call-lib(::hot::gzip/decode-stream, [source])
+},
+(source: Iter | Bytes, opts: Map): Iter {
+    call-lib(::hot::gzip/decode-stream, [source, opts])
+}
