@@ -1,0 +1,59 @@
+::tavily::api ns
+meta {
+    ctx: {"tavily.api.key": {required: false}},
+    doc: """
+    Credentials for Tavily.
+
+    **Per-call credentials.** Every API-calling function in `::tavily`
+    takes an optional trailing `opts` Map, resolved by `resolve`: `opts`
+    first, then the `tavily.api.key` context variable. Nothing from `opts`
+    is written to ctx, so one run can act for many tenants and parallel
+    flows don't share credentials. Credentials in `opts` are masked in
+    call records. An `api-key` present but blank or null is an error,
+    never a fallback to context.
+
+    - `api-key`: the API key for this call
+    """
+}
+
+::ctx ::hot::ctx
+
+non-blank fn (value: Any): Str? {
+  if(is-str(value), if(is-blank(value), null, trim(value)), null)
+}
+
+resolve-from
+meta {
+    doc: """The one resolver, pure: `{api-key}` for a call from `opts` first, then `ctx-values` (a Map of context variables). An Err when no API key is set, or when `api-key` is in `opts` but blank or null (that never falls back to context). Exposed for testing; `resolve` feeds it the context."""
+}
+fn (opts: Map, ctx-values: Map): Map {
+  opt-key non-blank(get(opts, "api-key"))
+  api-key or(opt-key, non-blank(get(ctx-values, "tavily.api.key")))
+  cond {
+    and(in("api-key", keys(opts)), is-null(opt-key)) => {
+      err("tavily: api-key is in the call's opts but is blank or null. Pass a value, or leave api-key out to use tavily.api.key.")
+    }
+
+    is-null(api-key) => { err("tavily: tavily.api.key is not set. Add it in Context Variables, or pass {api-key: ...} in the call's opts.") }
+    => { {api-key: api-key} }
+  }
+}
+
+resolve
+meta {
+    ctx: {"tavily.api.key": {required: false}},
+    doc: """
+    The credentials for one call (see `resolve-from`). An `api-key` from
+    `opts` is masked in this run's records and never written to ctx.
+
+    **Example**
+
+    ```hot
+    ::tavily::api/resolve({api-key: "tvly-tenant-b"}).api-key  // "tvly-tenant-b"
+    ```
+    """
+}
+fn (opts: Map): Map {
+  ::ctx/mark-secret(non-blank(get(opts, "api-key")))
+  resolve-from(opts, {"tavily.api.key": ::ctx/get("tavily.api.key")})
+}

@@ -1,0 +1,97 @@
+::brave::search ns
+meta {
+    ctx: {"brave.api.key": {required: false}},
+    doc: """
+    Brave Search API bindings: web search
+    (https://api-dashboard.search.brave.com).
+
+    **Setup**: context variable `brave.api.key` (the subscription token),
+    or a per-call `api-key` in the trailing `opts` Map of any API-calling
+    function (see `::brave::search::api`). Sent as `X-Subscription-Token`.
+
+    **Quick start**
+
+    ```hot
+    out ::brave::search/search("rust jit compiler", {count: 5, freshness: "pm"})
+    map(out.web.results, (r) { `${r.title} - ${r.url}` })
+    ```
+
+    Options use Brave's own names, and functions return Brave's own
+    response. A failed call is an Err carrying
+    `::brave::search::http/HttpError`.
+    """
+}
+
+::api ::brave::search::api
+::uri ::hot::uri
+::http ::brave::search::http
+
+HttpRequest ::hot::http/HttpRequest
+
+BASE_URL "https://api.search.brave.com/res/v1"
+
+build-request
+meta {
+    doc: """The outgoing `HttpRequest` for a key. Pure; exposed for testing."""
+}
+fn (path: Str, api-key: Str): HttpRequest {
+  HttpRequest({
+    method: "GET",
+    url: `${BASE_URL}${path}`,
+    headers: {
+      X-Subscription-Token: api-key,
+      Accept: "application/json"
+    }
+  })
+}
+
+get-json fn
+(path: Str): Any {
+  get-json(path, {})
+},
+// 2-arity: explicit API key override
+(path: Str, api-key: Str?): Any {
+  get-json(path, {api-key: api-key})
+},
+// 2-arity: per-call credentials (see `::brave::search::api`)
+(path: Str, opts: Map): Any {
+  resolved ::api/resolve(opts)
+  cond {
+    is-err(resolved) => { resolved }
+    => { ::http/send(build-request(path, resolved.api-key)) }
+  }
+}
+
+search
+meta {
+    ctx: {"brave.api.key": {required: false}},
+    doc: """
+    GET /web/search - Brave web search. `options`: `count` (max 20),
+    `offset` (page index, max 9), `country`, `search_lang`,
+    `safesearch` ("off"/"moderate"/"strict"), `freshness` ("pd", "pw",
+    "pm", "py", or a range like "2026-01-01to2026-06-30"),
+    `extra_snippets`. Restrict sites with operators in the query
+    (`site:example.com`, `NOT site:example.com`). Null options are
+    dropped. Returns `{web: {results: [{title, url, description}]}, ...}`;
+    titles and descriptions can contain `<strong>` markup and HTML
+    entities.
+
+    **Example**
+
+    ```hot
+    out ::brave::search/search("rust jit compiler", {count: 5, freshness: "pm"})
+    map(out.web.results, (r) { r.url })
+    ```
+    """
+}
+fn
+(query: Str): Map {
+  search(query, {})
+},
+(query: Str, options: Map): Map {
+  search(query, options, {})
+},
+(query: Str, options: Map, opts: Map): Map {
+  params filter-vals({...options, q: query}, is-some)
+  get-json(`/web/search?${::uri/encode-query(params)}`, opts)
+}

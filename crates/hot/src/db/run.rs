@@ -134,6 +134,7 @@ pub struct UnstartedRun {
     pub event_id: Uuid,
     pub by_user_id: Uuid,
     pub retry_attempt: i16,
+    pub event_handler_fn: String,
 }
 
 #[derive(Debug, FromRow)]
@@ -260,6 +261,9 @@ pub struct Run {
     // Access attribution - links to the access audit record for API-initiated runs
     #[sqlx(default)]
     pub access_id: Option<Uuid>,
+    // The event handler this run executes (`ns/var`), which its retries follow
+    #[sqlx(default)]
+    pub event_handler_fn: Option<String>,
     // Agent identity — qualified type name when run was produced by an agent handler
     #[sqlx(default)]
     pub agent_type: Option<String>,
@@ -298,7 +302,7 @@ impl Run {
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 let run = sqlx::query_as::<_, Run>(
-                    "SELECT r.run_id, r.env_id, r.stream_id, r.build_id, r.run_type_id, rt.run_type, r.origin_run_id, r.event_id, r.start_time, r.stop_time, r.status_id, rs.status, r.by_user_id, r.result, r.info, r.retry_attempt, r.next_retry_at, b.project_id, p.name as project_name, COALESCE(e.event_data->>'fn', (SELECT function_name FROM call WHERE run_id = r.run_id AND parent_call_id IS NULL LIMIT 1), (SELECT function_name FROM task WHERE run_id = r.run_id LIMIT 1)) as event_fn, e.created_at as queued_at, r.access_id FROM run r JOIN run_status rs ON r.status_id = rs.status_id JOIN run_type rt ON r.run_type_id = rt.run_type_id LEFT JOIN build b ON r.build_id = b.build_id LEFT JOIN project p ON b.project_id = p.project_id LEFT JOIN event e ON r.event_id = e.event_id WHERE r.run_id = $1"
+                    "SELECT r.run_id, r.env_id, r.stream_id, r.build_id, r.run_type_id, rt.run_type, r.origin_run_id, r.event_id, r.start_time, r.stop_time, r.status_id, rs.status, r.by_user_id, r.result, r.info, r.retry_attempt, r.next_retry_at, r.event_handler_fn, b.project_id, p.name as project_name, COALESCE(e.event_data->>'fn', (SELECT function_name FROM call WHERE run_id = r.run_id AND parent_call_id IS NULL LIMIT 1), (SELECT function_name FROM task WHERE run_id = r.run_id LIMIT 1)) as event_fn, e.created_at as queued_at, r.access_id FROM run r JOIN run_status rs ON r.status_id = rs.status_id JOIN run_type rt ON r.run_type_id = rt.run_type_id LEFT JOIN build b ON r.build_id = b.build_id LEFT JOIN project p ON b.project_id = p.project_id LEFT JOIN event e ON r.event_id = e.event_id WHERE r.run_id = $1"
                 )
                 .bind(run_id)
                 .fetch_optional(pg_pool)
@@ -309,7 +313,7 @@ impl Run {
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 let run = sqlx::query_as::<_, Run>(
-                    "SELECT r.run_id, r.env_id, r.stream_id, r.build_id, r.run_type_id, rt.run_type, r.origin_run_id, r.event_id, r.start_time, r.stop_time, r.status_id, rs.status, r.by_user_id, r.result, r.info, r.retry_attempt, r.next_retry_at, b.project_id, p.name as project_name, COALESCE(json_extract(e.event_data, '$.fn'), (SELECT function_name FROM call WHERE run_id = r.run_id AND parent_call_id IS NULL LIMIT 1), (SELECT function_name FROM task WHERE run_id = r.run_id LIMIT 1)) as event_fn, e.created_at as queued_at, r.access_id FROM run r JOIN run_status rs ON r.status_id = rs.status_id JOIN run_type rt ON r.run_type_id = rt.run_type_id LEFT JOIN build b ON r.build_id = b.build_id LEFT JOIN project p ON b.project_id = p.project_id LEFT JOIN event e ON r.event_id = e.event_id WHERE r.run_id = ?"
+                    "SELECT r.run_id, r.env_id, r.stream_id, r.build_id, r.run_type_id, rt.run_type, r.origin_run_id, r.event_id, r.start_time, r.stop_time, r.status_id, rs.status, r.by_user_id, r.result, r.info, r.retry_attempt, r.next_retry_at, r.event_handler_fn, b.project_id, p.name as project_name, COALESCE(json_extract(e.event_data, '$.fn'), (SELECT function_name FROM call WHERE run_id = r.run_id AND parent_call_id IS NULL LIMIT 1), (SELECT function_name FROM task WHERE run_id = r.run_id LIMIT 1)) as event_fn, e.created_at as queued_at, r.access_id FROM run r JOIN run_status rs ON r.status_id = rs.status_id JOIN run_type rt ON r.run_type_id = rt.run_type_id LEFT JOIN build b ON r.build_id = b.build_id LEFT JOIN project p ON b.project_id = p.project_id LEFT JOIN event e ON r.event_id = e.event_id WHERE r.run_id = ?"
                 )
                 .bind(run_id)
                 .fetch_optional(sqlite_pool)
@@ -2054,8 +2058,8 @@ impl Run {
                 )))
             })?;
 
-        let sql = "INSERT INTO run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, event_id, start_time, stop_time, status_id, by_user_id, retry_attempt, result) \
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) \
+        let sql = "INSERT INTO run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, event_id, start_time, stop_time, status_id, by_user_id, retry_attempt, result, event_handler_fn) \
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) \
                    ON CONFLICT (run_id) DO UPDATE SET status_id = excluded.status_id, stop_time = excluded.stop_time, result = excluded.result, next_retry_at = NULL \
                    WHERE run.status_id = 1 OR (run.status_id = 5 AND run.next_retry_at IS NULL)";
         match db {
@@ -2074,6 +2078,7 @@ impl Run {
                     .bind(run.by_user_id)
                     .bind(run.retry_attempt)
                     .bind(&result_val)
+                    .bind(&run.event_handler_fn)
                     .execute(pool)
                     .await?;
             }
@@ -2092,6 +2097,7 @@ impl Run {
                     .bind(run.by_user_id)
                     .bind(run.retry_attempt)
                     .bind(result_val.to_string())
+                    .bind(&run.event_handler_fn)
                     .execute(pool)
                     .await?;
             }
@@ -2124,8 +2130,8 @@ impl Run {
                     e
                 )))
             })?;
-        let sql = "INSERT INTO run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, event_id, start_time, status_id, by_user_id, retry_attempt) \
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
+        let sql = "INSERT INTO run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, event_id, start_time, status_id, by_user_id, retry_attempt, event_handler_fn) \
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
                    ON CONFLICT (run_id) DO NOTHING";
         match db {
             crate::db::DatabasePool::Postgres(pool) => {
@@ -2141,6 +2147,7 @@ impl Run {
                     .bind(RunStatus::Running.as_id())
                     .bind(run.by_user_id)
                     .bind(run.retry_attempt)
+                    .bind(&run.event_handler_fn)
                     .execute(pool)
                     .await?;
             }
@@ -2157,6 +2164,7 @@ impl Run {
                     .bind(RunStatus::Running.as_id())
                     .bind(run.by_user_id)
                     .bind(run.retry_attempt)
+                    .bind(&run.event_handler_fn)
                     .execute(pool)
                     .await?;
             }
@@ -3675,7 +3683,7 @@ impl Run {
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 let runs = sqlx::query_as::<_, Run>(
-                    "SELECT r.run_id, r.env_id, r.stream_id, r.build_id, r.run_type_id, rt.run_type, r.origin_run_id, r.event_id, r.start_time, r.stop_time, r.status_id, rs.status, r.by_user_id, r.result, r.info, r.retry_attempt, r.next_retry_at, b.project_id, p.name as project_name, COALESCE(e.event_data->>'fn', (SELECT function_name FROM call WHERE run_id = r.run_id AND parent_call_id IS NULL LIMIT 1), (SELECT function_name FROM task WHERE run_id = r.run_id LIMIT 1)) as event_fn, e.created_at as queued_at FROM run r JOIN run_status rs ON r.status_id = rs.status_id JOIN run_type rt ON r.run_type_id = rt.run_type_id LEFT JOIN build b ON r.build_id = b.build_id LEFT JOIN project p ON b.project_id = p.project_id LEFT JOIN event e ON r.event_id = e.event_id WHERE r.status_id = 5 AND r.next_retry_at IS NOT NULL AND r.next_retry_at <= $1 AND ($3::uuid IS NULL OR r.env_id = $3) ORDER BY r.next_retry_at ASC LIMIT $2"
+                    "SELECT r.run_id, r.env_id, r.stream_id, r.build_id, r.run_type_id, rt.run_type, r.origin_run_id, r.event_id, r.start_time, r.stop_time, r.status_id, rs.status, r.by_user_id, r.result, r.info, r.retry_attempt, r.next_retry_at, r.event_handler_fn, b.project_id, p.name as project_name, COALESCE(e.event_data->>'fn', (SELECT function_name FROM call WHERE run_id = r.run_id AND parent_call_id IS NULL LIMIT 1), (SELECT function_name FROM task WHERE run_id = r.run_id LIMIT 1)) as event_fn, e.created_at as queued_at FROM run r JOIN run_status rs ON r.status_id = rs.status_id JOIN run_type rt ON r.run_type_id = rt.run_type_id LEFT JOIN build b ON r.build_id = b.build_id LEFT JOIN project p ON b.project_id = p.project_id LEFT JOIN event e ON r.event_id = e.event_id WHERE r.status_id = 5 AND r.next_retry_at IS NOT NULL AND r.next_retry_at <= $1 AND ($3::uuid IS NULL OR r.env_id = $3) ORDER BY r.next_retry_at ASC LIMIT $2"
                 )
                 .bind(now)
                 .bind(batch_size)
@@ -3686,7 +3694,7 @@ impl Run {
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 let runs = sqlx::query_as::<_, Run>(
-                    "SELECT r.run_id, r.env_id, r.stream_id, r.build_id, r.run_type_id, rt.run_type, r.origin_run_id, r.event_id, r.start_time, r.stop_time, r.status_id, rs.status, r.by_user_id, r.result, r.info, r.retry_attempt, r.next_retry_at, b.project_id, p.name as project_name, COALESCE(json_extract(e.event_data, '$.fn'), (SELECT function_name FROM call WHERE run_id = r.run_id AND parent_call_id IS NULL LIMIT 1), (SELECT function_name FROM task WHERE run_id = r.run_id LIMIT 1)) as event_fn, e.created_at as queued_at FROM run r JOIN run_status rs ON r.status_id = rs.status_id JOIN run_type rt ON r.run_type_id = rt.run_type_id LEFT JOIN build b ON r.build_id = b.build_id LEFT JOIN project p ON b.project_id = p.project_id LEFT JOIN event e ON r.event_id = e.event_id WHERE r.status_id = 5 AND r.next_retry_at IS NOT NULL AND r.next_retry_at <= ? AND (? IS NULL OR r.env_id = ?) ORDER BY r.next_retry_at ASC LIMIT ?"
+                    "SELECT r.run_id, r.env_id, r.stream_id, r.build_id, r.run_type_id, rt.run_type, r.origin_run_id, r.event_id, r.start_time, r.stop_time, r.status_id, rs.status, r.by_user_id, r.result, r.info, r.retry_attempt, r.next_retry_at, r.event_handler_fn, b.project_id, p.name as project_name, COALESCE(json_extract(e.event_data, '$.fn'), (SELECT function_name FROM call WHERE run_id = r.run_id AND parent_call_id IS NULL LIMIT 1), (SELECT function_name FROM task WHERE run_id = r.run_id LIMIT 1)) as event_fn, e.created_at as queued_at FROM run r JOIN run_status rs ON r.status_id = rs.status_id JOIN run_type rt ON r.run_type_id = rt.run_type_id LEFT JOIN build b ON r.build_id = b.build_id LEFT JOIN project p ON b.project_id = p.project_id LEFT JOIN event e ON r.event_id = e.event_id WHERE r.status_id = 5 AND r.next_retry_at IS NOT NULL AND r.next_retry_at <= ? AND (? IS NULL OR r.env_id = ?) ORDER BY r.next_retry_at ASC LIMIT ?"
                 )
                 .bind(now)
                 .bind(env_id)

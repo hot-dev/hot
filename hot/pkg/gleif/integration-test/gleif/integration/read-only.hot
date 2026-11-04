@@ -1,0 +1,27 @@
+::gleif::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration smoke tests (live, read-only)
+// =============================================================================
+// GLEIF_LIVE=1 (no key). The test only reads; without the setting it records
+// a skip and passes.
+// Run with: hot test -p pkg-integration-gleif
+
+::ctx ::gleif::integration::ctx
+
+test-search-and-parent
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("GLEIF_LIVE is not 1") }
+        => {
+            page ::gleif/search("apple inc", {page-size: 2})
+            assert(gt(length(page.data), 0), "full-text search finds records")
+            assert(is-some(::gleif/next-page(page)), "there is a second page")
+            assert(::gleif/is-lei(first(page.data).attributes.lei), "a valid LEI")
+            parent ::gleif/direct-parent("549300G81RQKP7XW2N18")
+            assert-eq("HWUPKR0MPOU8FGXBT394", parent.id, "Apple Operations International's parent is Apple Inc.")
+            assert-eq(null, ::gleif/direct-parent("HWUPKR0MPOU8FGXBT394"), "Apple Inc. reports no parent")
+        }
+    }
+}

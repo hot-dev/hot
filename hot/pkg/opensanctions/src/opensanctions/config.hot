@@ -1,0 +1,94 @@
+::opensanctions::config ns
+meta {
+    ctx: {
+        "opensanctions.api-key": {required: false},
+        "opensanctions.base-url": {required: false, secret: false},
+        "opensanctions.dataset": {required: false, secret: false}
+    },
+    doc: """
+    The one settings resolver for the package: per-call `opts` first,
+    then context variables, then defaults. Per-call values are never
+    written to context, so parallel flows and tenants in one run don't
+    see each other's keys.
+
+    | opts key | Context variable | Default |
+    |---|---|---|
+    | `api-key` | `opensanctions.api-key` | none |
+    | `base-url` | `opensanctions.base-url` | `https://api.opensanctions.org` |
+    | `dataset` | `opensanctions.dataset` | `"default"` |
+
+    **Per-call credentials.** An `api-key` in `opts` is masked in call
+    records. Present but blank or null, it is an error, never a fallback
+    to context. The context key is never sent to a per-call `base-url`: a
+    self-hosted yente that needs no key gets none.
+    """
+}
+
+::ctx ::hot::ctx
+
+DEFAULT_OPENSANCTIONS_URL "https://api.opensanctions.org"
+DEFAULT_DATASET "default"
+
+given fn (v: Any): Bool {
+  match v {
+    Null => { false }
+    Str => { not(is-empty(trim(v))) }
+    _ => { true }
+  }
+}
+
+pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
+  from-opts get(opts, key)
+  from-ctx ::ctx/get(ctx-key)
+  cond {
+    given(from-opts) => { from-opts }
+    given(from-ctx) => { from-ctx }
+    => { default }
+  }
+}
+
+resolve
+meta {
+    doc: """
+    Resolve settings for one call: `{api-key, base-url, dataset}`. An
+    `api-key` in `opts` replaces the context key for that call only and
+    comes back unchanged; `api-key` is null when neither is set, and when
+    `opts` has a `base-url` without one. An Err when `api-key` is in
+    `opts` but blank or null.
+
+    **Example**
+
+    ```hot
+    cfg ::opensanctions::config/resolve({api-key: tenant.opensanctions-key, dataset: "sanctions"})
+    ```
+    """
+}
+fn (opts: Map): Map {
+  key get(opts, "api-key")
+  if(given(key), ::ctx/mark-secret(key))
+  base pick(opts, "base-url", "opensanctions.base-url", DEFAULT_OPENSANCTIONS_URL)
+  cond {
+    and(in("api-key", keys(opts)), not(given(key))) => {
+      err("opensanctions: api-key is in the call's opts but is blank or null. Pass a value, or leave api-key out to use opensanctions.api-key.")
+    }
+    => {
+      {
+        api-key: if(given(get(opts, "base-url")), key, pick(opts, "api-key", "opensanctions.api-key", null)),
+        base-url: ::hot::regex/replace-all(Str(base), "/+$", ""),
+        dataset: pick(opts, "dataset", "opensanctions.dataset", DEFAULT_DATASET)
+      }
+    }
+  }
+}
+
+require-api-key
+meta {
+    doc: """The resolved OpenSanctions API key. The hosted API needs one, so its absence there is an Err naming where to set it; a self-hosted yente may need none, which gives null."""
+}
+fn (cfg: Map): Str? {
+  cond {
+    given(cfg.api-key) => { cfg.api-key }
+    ne(cfg.base-url, DEFAULT_OPENSANCTIONS_URL) => { null }
+    => { err("opensanctions: no OpenSanctions API key; set opensanctions.api-key or pass {api-key: ...} in opts. The context key is never sent to a per-call base-url.") }
+  }
+}

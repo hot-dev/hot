@@ -1,0 +1,24 @@
+::companies-house::integration::ctx ns
+
+::env ::hot::env
+
+// Placeholder settings for the companies-house integration suite. Unset
+// environment variables are skipped entirely, so absent credentials behave
+// exactly as if never configured.
+::hot::ctx/set(filter-vals({
+    "companies-house.api-key": ::env/get("COMPANIES_HOUSE_API_KEY", ""),
+    "companies-house.base-url": ::env/get("COMPANIES_HOUSE_BASE_URL", ""),
+}, (v) { not(is-empty(v)) }))
+
+configured
+meta {doc: """True when COMPANIES_HOUSE_API_KEY is set."""}
+fn (): Bool {
+    is-some(::hot::ctx/get("companies-house.api-key"))
+}
+
+skip
+meta {doc: """Record a skip and pass."""}
+fn (why: Str): Bool {
+    println(`companies-house integration: ${why} - skipping`)
+    assert(true, `skipped: ${why}`)
+}

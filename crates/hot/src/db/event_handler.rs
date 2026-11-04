@@ -83,6 +83,12 @@ pub struct EventHandlerWithProject {
 }
 
 impl EventHandler {
+    /// The handler's function, `ns/var`: what a run records of its handler,
+    /// which unlike `event_handler_id` outlives a redeploy.
+    pub fn function_name(&self) -> String {
+        format!("{}/{}", self.ns, self.var)
+    }
+
     /// Get event handler by ID
     pub async fn get_event_handler(
         db: &crate::db::DatabasePool,

@@ -1,0 +1,447 @@
+::companies-house ns
+meta {
+    ctx: {
+        "companies-house.api-key": {required: false},
+        "companies-house.base-url": {required: false, secret: false},
+        "companies-house.document-base-url": {required: false, secret: false}
+    },
+    doc: """
+    The UK Companies House Public Data API
+    (`https://api.company-information.service.gov.uk`) and Document API
+    (`https://document-api.company-information.service.gov.uk`).
+
+    **Auth**: a free REST API key from the Companies House developer
+    hub, sent as the username of HTTP Basic auth with an empty password.
+    Set `companies-house.api-key` or pass `{api-key: ...}` per call. The
+    sandbox (`https://api-sandbox.company-information.service.gov.uk`,
+    test data only) takes a sandbox key; point `base-url` at it.
+
+    **Rate limit**: 600 requests per 5 minutes per key; a 429 carries
+    `retry-after` in the `HttpError`.
+
+    **Paging**: lists use `items_per_page` and `start_index`;
+    `next-start` computes the next offset and `collect` follows it.
+
+    **Streaming API** (`stream.companieshouse.gov.uk`, a separate stream
+    key and long-lived connections) is not wrapped: a run should not
+    hold a connection open indefinitely. Poll `filing-history` from a
+    schedule instead, or run a dedicated consumer outside Hot.
+    """
+}
+
+::api ::companies-house::api
+::b64 ::hot::base64
+
+auth-header
+meta {
+    doc: """`Basic base64("{api-key}:")`: the key is the username and the password is empty (pure)."""
+}
+fn (api-key: Str): Str {
+  credentials `${api-key}:`
+  `Basic ${::b64/encode(credentials)}`
+}
+
+company-number
+meta {
+    doc: """
+    Normalize a UK company number: trimmed, upper-cased, and
+    zero-padded to eight characters when it is all digits (`"6"` →
+    `"00000006"`); prefixed numbers such as `"SC123456"` or
+    `"OC301540"` are kept. An Err for anything that is not one to eight
+    letters and digits.
+    """
+}
+fn (number: Any): Str {
+  s uppercase(::hot::regex/replace-all(trim(Str(number)), "\\s+", ""))
+  cond {
+    ::hot::regex/is-match(s, "^\\d{1,8}$") => { pad-start(s, 8, "0") }
+    ::hot::regex/is-match(s, "^[A-Z]{1,2}\\d{1,7}$") => {
+      m ::hot::regex/capture(s, "^([A-Z]{1,2})(\\d+)$")
+      prefix m.groups[0]
+      `${prefix}${pad-start(m.groups[1], sub(8, length(prefix)), "0")}`
+    }
+
+    ::hot::regex/is-match(s, "^[A-Z0-9]{8}$") => { s }
+    => { err(`companies-house: invalid UK company number '${number}'`) }
+  }
+}
+
+// Errors are returned, not consumed: consuming an Err would halt the run.
+with-key fn (opts: Map, f: Fn): Any {
+  cfg ::api/resolve(opts)
+  cond {
+    is-err(cfg) => { cfg }
+    => {
+      key ::api/require-api-key(cfg)
+      if(is-err(key), key, f(cfg, auth-header(key)))
+    }
+  }
+}
+
+ch-get fn (path: Str, params: Map, opts: Map): Any {
+  with-key(opts, (cfg, auth) {
+    ::api/get-json(`${cfg.base-url}${path}${::api/query-string(params)}`, {Authorization: auth})
+  })
+}
+
+page-params
+meta {
+    doc: """`items_per_page` and `start_index` from `opts.items-per-page` and `opts.start-index`, omitted when unset (pure)."""
+}
+fn (opts: Map): Map {
+  {items_per_page: get(opts, "items-per-page"), start_index: get(opts, "start-index")}
+}
+
+company-path fn (number: Any): Str {
+  `/company/${::api/path-segment(company-number(number))}`
+}
+
+// ---------------------------------------------------------------------------
+// Search
+// ---------------------------------------------------------------------------
+
+search-companies
+meta {
+    doc: """
+    Search companies by name or number. Returns `{items, total_results,
+    start_index, items_per_page}`; each item has `title`,
+    `company_number`, `company_status`, `company_type`,
+    `date_of_creation`, `address`. `opts`: `items-per-page`,
+    `start-index`, `restrictions`, plus `api-key`.
+
+    **Example**
+
+    ```hot
+    found ::companies-house/search-companies("tesco", {items-per-page: 5})
+    first(found.items).company_number
+    ```
+    """
+}
+fn
+(q: Str): Map {
+  search-companies(q, {})
+},
+(q: Str, opts: Map): Map {
+  ch-get("/search/companies", {q: q, restrictions: get(opts, "restrictions"), ...page-params(opts)}, opts)
+}
+
+search-officers
+meta {
+    doc: """Search officers (directors, secretaries, LLP members) by name. Items link to `/officers/{id}/appointments`."""
+}
+fn
+(q: Str): Map {
+  search-officers(q, {})
+},
+(q: Str, opts: Map): Map {
+  ch-get("/search/officers", {q: q, ...page-params(opts)}, opts)
+}
+
+search-all
+meta {
+    doc: """Search companies, officers and disqualified officers together (`/search`)."""
+}
+fn
+(q: Str): Map {
+  search-all(q, {})
+},
+(q: Str, opts: Map): Map {
+  ch-get("/search", {q: q, ...page-params(opts)}, opts)
+}
+
+search-disqualified-officers
+meta {
+    doc: """Search disqualified directors by name."""
+}
+fn
+(q: Str): Map {
+  search-disqualified-officers(q, {})
+},
+(q: Str, opts: Map): Map {
+  ch-get("/search/disqualified-officers", {q: q, ...page-params(opts)}, opts)
+}
+
+// ---------------------------------------------------------------------------
+// Company data
+// ---------------------------------------------------------------------------
+
+company
+meta {
+    doc: """The company profile (`company_name`, `company_status`, `type`, `date_of_creation`, `registered_office_address`, `sic_codes`, `accounts`, `confirmation_statement`, `links`, ...), or null when there is no such company."""
+}
+fn
+(number: Any): Map? {
+  company(number, {})
+},
+(number: Any, opts: Map): Map? {
+  with-key(opts, (cfg, auth) {
+    ::api/get-json-or-null(`${cfg.base-url}${company-path(number)}`, {Authorization: auth})
+  })
+}
+
+registered-office-address
+meta {
+    doc: """The registered office address."""
+}
+fn
+(number: Any): Map {
+  registered-office-address(number, {})
+},
+(number: Any, opts: Map): Map {
+  ch-get(`${company-path(number)}/registered-office-address`, {}, opts)
+}
+
+officers
+meta {
+    doc: """One page of a company's officers. `opts`: `items-per-page` (max 100), `start-index`, `register-type` (`"directors"`, `"secretaries"`, `"llp-members"`), `register-view`, `order-by` (`"appointed_on"`, `"resigned_on"`, `"surname"`)."""
+}
+fn
+(number: Any): Map {
+  officers(number, {})
+},
+(number: Any, opts: Map): Map {
+  ch-get(`${company-path(number)}/officers`, {
+    register_type: get(opts, "register-type"),
+    register_view: get(opts, "register-view"),
+    order_by: get(opts, "order-by"),
+    ...page-params(opts)
+  }, opts)
+}
+
+officer-appointments
+meta {
+    doc: """One page of an officer's appointments across companies. `officer-id` comes from an officer's `links.officer.appointments` (see `officer-id-from-link`)."""
+}
+fn
+(officer-id: Str): Map {
+  officer-appointments(officer-id, {})
+},
+(officer-id: Str, opts: Map): Map {
+  ch-get(`/officers/${::api/path-segment(officer-id)}/appointments`, page-params(opts), opts)
+}
+
+officer-id-from-link
+meta {
+    doc: """The officer id in a link such as `/officers/AbC123/appointments` (pure), or null."""
+}
+fn (link: Str?): Str? {
+  m if(is-null(link), null, ::hot::regex/capture(link, "/officers/([^/]+)/appointments"))
+  if(is-null(m), null, m.groups[0])
+}
+
+persons-with-significant-control
+meta {
+    doc: """One page of a company's persons with significant control (individuals, corporate entities, legal persons, and beneficial owners), with `natures_of_control`. `opts`: `items-per-page`, `start-index`, `register-view`."""
+}
+fn
+(number: Any): Map {
+  persons-with-significant-control(number, {})
+},
+(number: Any, opts: Map): Map {
+  ch-get(`${company-path(number)}/persons-with-significant-control`, {register_view: get(opts, "register-view"), ...page-params(opts)}, opts)
+}
+
+psc-statements
+meta {
+    doc: """One page of a company's PSC statements (e.g. no registrable person)."""
+}
+fn
+(number: Any): Map {
+  psc-statements(number, {})
+},
+(number: Any, opts: Map): Map {
+  ch-get(`${company-path(number)}/persons-with-significant-control-statements`, {register_view: get(opts, "register-view"), ...page-params(opts)}, opts)
+}
+
+filing-history
+meta {
+    doc: """
+    One page of a company's filing history, newest first. `opts`:
+    `category` (e.g. `"accounts"`, `"confirmation-statement"`, or a
+    comma list), `items-per-page` (max 100), `start-index`. Each item's
+    `links.document_metadata` points to the Document API (see
+    `document-id`).
+    """
+}
+fn
+(number: Any): Map {
+  filing-history(number, {})
+},
+(number: Any, opts: Map): Map {
+  ch-get(`${company-path(number)}/filing-history`, {category: get(opts, "category"), ...page-params(opts)}, opts)
+}
+
+filing
+meta {
+    doc: """One filing-history item by transaction id."""
+}
+fn
+(number: Any, transaction-id: Str): Map {
+  filing(number, transaction-id, {})
+},
+(number: Any, transaction-id: Str, opts: Map): Map {
+  ch-get(`${company-path(number)}/filing-history/${::api/path-segment(transaction-id)}`, {}, opts)
+}
+
+charges
+meta {
+    doc: """One page of a company's charges (mortgages and security interests)."""
+}
+fn
+(number: Any): Map {
+  charges(number, {})
+},
+(number: Any, opts: Map): Map {
+  ch-get(`${company-path(number)}/charges`, page-params(opts), opts)
+}
+
+// ---------------------------------------------------------------------------
+// Documents
+// ---------------------------------------------------------------------------
+
+document-id
+meta {
+    doc: """
+    The document id from a filing's `links.document_metadata` URL (any
+    host, e.g. `https://frontend-doc-api.company-information.service.gov.uk/document/abc123`),
+    or the id itself (pure). Null when there is none.
+    """
+}
+fn (link-or-id: Str?): Str? {
+  cond {
+    is-null(link-or-id) => { null }
+    => {
+      m ::hot::regex/capture(link-or-id, "/document/([^/?#]+)")
+      cond {
+        is-some(m) => { m.groups[0] }
+        ::hot::regex/is-match(link-or-id, "^[A-Za-z0-9_-]+$") => { link-or-id }
+        => { null }
+      }
+    }
+  }
+}
+
+document-metadata
+meta {
+    doc: """
+    A document's metadata from the Document API: `resources` maps each
+    available content type (`application/pdf`, often
+    `application/xhtml+xml` for iXBRL accounts) to its size, plus
+    `pages`, `created_at` and `links`.
+    """
+}
+fn
+(link-or-id: Str): Map {
+  document-metadata(link-or-id, {})
+},
+(link-or-id: Str, opts: Map): Map {
+  id document-id(link-or-id)
+  cond {
+    is-null(id) => { err(`companies-house: no document id in '${link-or-id}'`) }
+    => {
+      with-key(opts, (cfg, auth) {
+        ::api/get-json(`${cfg.document-base-url}/document/${::api/path-segment(id)}`, {Authorization: auth})
+      })
+    }
+  }
+}
+
+document-content
+meta {
+    doc: """
+    Download a document as `{content-type, bytes}`. `content-type`
+    (default `"application/pdf"`) must be one listed in the metadata's
+    `resources`. The Document API answers with a redirect to a
+    short-lived signed URL; the API key is not sent to that host.
+    Documents above `http.max-response-bytes` (16 MiB by default) fail.
+
+    **Example**
+
+    ```hot
+    ::ch ::companies-house
+    history ::ch/filing-history("00445790", {category: "accounts", items-per-page: 1})
+    pdf ::ch/document-content(first(history.items).links.document_metadata, "application/pdf")
+    pdf.bytes
+    ```
+    """
+}
+fn
+(link-or-id: Str): Map {
+  document-content(link-or-id, "application/pdf", {})
+},
+(link-or-id: Str, content-type: Str): Map {
+  document-content(link-or-id, content-type, {})
+},
+(link-or-id: Str, content-type: Str, opts: Map): Map {
+  id document-id(link-or-id)
+  cond {
+    is-null(id) => { err(`companies-house: no document id in '${link-or-id}'`) }
+    => {
+      with-key(opts, (cfg, auth) {
+        url `${cfg.document-base-url}/document/${::api/path-segment(id)}/content`
+        response ::api/request("GET", url, {Authorization: auth, Accept: content-type})
+        cond {
+          is-err(response) => { response }
+          => {
+            bytes response.body-bytes
+            {content-type: or(get(or(response.headers, {}), "content-type"), content-type), bytes: if(is-bytes(bytes), bytes, Bytes(Str(or(response.body, ""))))}
+          }
+        }
+      })
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Pagination
+// ---------------------------------------------------------------------------
+
+next-start
+meta {
+    doc: """The `start_index` of the page after `page` (`start_index + items` while below `total_results`), or null on the last page (pure)."""
+}
+fn (page: Any): Int? {
+  p or(page, {})
+  start or(get(p, "start_index"), 0)
+  items or(get(p, "items"), [])
+  total get(p, "total_results")
+  next add(start, length(items))
+  cond {
+    is-empty(items) => { null }
+    is-null(total) => { null }
+    lt(next, total) => { next }
+    => { null }
+  }
+}
+
+collect-pages fn (fetch: Fn, start: Int, size: Int, limit: Int, acc: Vec): Vec {
+  page fetch(start)
+  items or(get(page, "items"), [])
+  combined concat(acc, items)
+  next next-start(page)
+  cond {
+    gte(length(combined), limit) => { slice(combined, 0, limit) }
+    is-null(next) => { combined }
+    => { collect-pages(fetch, next, size, limit, combined) }
+  }
+}
+
+collect
+meta {
+    doc: """
+    Follow `start_index` pages of a Companies House list until `limit`
+    items or the end. `fetch` takes `opts` (with `start-index` and
+    `items-per-page` set) and returns one page.
+
+    **Example**
+
+    ```hot
+    ::ch ::companies-house
+    all-officers ::ch/collect((o) { ::ch/officers("00445790", o) }, {}, 300)
+    ```
+    """
+}
+fn (fetch: Fn, opts: Map, limit: Int): Vec {
+  size min(100, max(1, limit))
+  collect-pages((start) { fetch({...opts, items-per-page: size, start-index: start}) }, 0, size, limit, [])
+}

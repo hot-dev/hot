@@ -1,0 +1,39 @@
+::uk::sanctions::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration smoke tests (live, read-only)
+// =============================================================================
+// UK_SANCTIONS_LIVE=1 sends a HEAD request, then downloads the whole file
+// (about 22 MB, in Range chunks under the default cap) and parses it.
+// Run with: UK_SANCTIONS_LIVE=1 hot test -p pkg-integration-uk-sanctions
+
+::ctx ::uk::sanctions::integration::ctx
+
+test-uk-list-head
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("UK_SANCTIONS_LIVE is not 1") }
+        => {
+            info ::uk::sanctions::http/head(::uk::sanctions/URL)
+            assert(is-some(or(info.etag, info.last-modified)), "a version to compare")
+            assert-eq("bytes", lowercase(or(info.accept-ranges, "")), "the Range download depends on this")
+            assert(is-some(::uk::sanctions/current-version()), "the cheap check gives a version")
+        }
+    }
+}
+
+test-uk-list-downloads-and-parses
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("UK_SANCTIONS_LIVE is not 1") }
+        => {
+            out ::uk::sanctions/fetch()
+            assert(gt(length(out.entries), 3000), "the list has about 6,400 designations")
+            assert-eq(::uk::sanctions/current-version(), out.version)
+            assert(some(out.entries, (e) { eq(e.kind, "vessel") }), "ships are present")
+            again ::uk::sanctions/fetch(out.version)
+            assert(again.unchanged, "the same version downloads nothing")
+        }
+    }
+}

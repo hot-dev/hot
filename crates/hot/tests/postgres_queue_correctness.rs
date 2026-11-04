@@ -818,6 +818,7 @@ async fn postgres_unstarted_and_earlier_delivery_runs_settle() {
         event_id,
         by_user_id: data.user_id,
         retry_attempt: 0,
+        event_handler_fn: "::demo/on-event".to_string(),
     };
     let status = async |run_id| Run::get_run(&db, &run_id).await.unwrap().status_id;
 

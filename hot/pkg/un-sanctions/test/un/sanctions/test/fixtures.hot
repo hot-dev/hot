@@ -1,0 +1,87 @@
+::un::sanctions::test::fixtures ns
+
+// Small excerpts of the real published list (public data), trimmed to
+// the fields the parser reads. Retrieved 1 Nov 2026.
+
+// UN Security Council Consolidated List XML: two individuals and one entity
+// (comments shortened).
+UN_XML """
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<CONSOLIDATED_LIST dateGenerated="2026-10-31T23:00:07.052Z">
+  <INDIVIDUALS>
+    <INDIVIDUAL>
+      <DATAID>6908051</DATAID>
+      <FIRST_NAME>ABID</FIRST_NAME>
+      <SECOND_NAME>HAMID</SECOND_NAME>
+      <THIRD_NAME>MAHMUD</THIRD_NAME>
+      <FOURTH_NAME>AL-TIKRITI</FOURTH_NAME>
+      <UN_LIST_TYPE>Iraq</UN_LIST_TYPE>
+      <REFERENCE_NUMBER>IQi.004</REFERENCE_NUMBER>
+      <LISTED_ON>2003-06-27</LISTED_ON>
+      <NAME_ORIGINAL_SCRIPT>عابد حامد محمود التكريتي</NAME_ORIGINAL_SCRIPT>
+      <COMMENTS1/>
+      <NATIONALITY>
+        <VALUE>Iraq</VALUE>
+      </NATIONALITY>
+      <INDIVIDUAL_ALIAS>
+        <QUALITY>Good</QUALITY>
+        <ALIAS_NAME>Abid Hamid Bid Hamid Mahmud</ALIAS_NAME>
+      </INDIVIDUAL_ALIAS>
+      <INDIVIDUAL_ALIAS>
+        <QUALITY>Good</QUALITY>
+        <ALIAS_NAME>Abed Mahmoud Hammud</ALIAS_NAME>
+      </INDIVIDUAL_ALIAS>
+      <INDIVIDUAL_ADDRESS>
+        <COUNTRY/>
+      </INDIVIDUAL_ADDRESS>
+      <INDIVIDUAL_DATE_OF_BIRTH>
+        <TYPE_OF_DATE>APPROXIMATELY</TYPE_OF_DATE>
+        <YEAR>1957</YEAR>
+      </INDIVIDUAL_DATE_OF_BIRTH>
+    </INDIVIDUAL>
+    <INDIVIDUAL>
+      <DATAID>6909615</DATAID>
+      <FIRST_NAME>MUHAMMED </FIRST_NAME>
+      <SECOND_NAME>LUMISA </SECOND_NAME>
+      <UN_LIST_TYPE>DRC</UN_LIST_TYPE>
+      <REFERENCE_NUMBER>CDi.047</REFERENCE_NUMBER>
+      <COMMENTS1>Gender: Male. Commander of the Allied Democratic Forces &amp; logistics.</COMMENTS1>
+      <NATIONALITY>
+        <VALUE>Uganda</VALUE>
+      </NATIONALITY>
+      <INDIVIDUAL_ALIAS>
+        <QUALITY>Good</QUALITY>
+        <ALIAS_NAME>LUMISA, MUHAMAD</ALIAS_NAME>
+      </INDIVIDUAL_ALIAS>
+      <INDIVIDUAL_ADDRESS>
+        <COUNTRY>Democratic Republic of the Congo</COUNTRY>
+      </INDIVIDUAL_ADDRESS>
+      <INDIVIDUAL_DATE_OF_BIRTH>
+        <TYPE_OF_DATE>BETWEEN</TYPE_OF_DATE>
+        <FROM_YEAR>1959</FROM_YEAR>
+        <TO_YEAR>1965</TO_YEAR>
+      </INDIVIDUAL_DATE_OF_BIRTH>
+    </INDIVIDUAL>
+  </INDIVIDUALS>
+  <ENTITIES>
+    <ENTITY>
+      <DATAID>6908027</DATAID>
+      <FIRST_NAME>FORCES DEMOCRATIQUES DE LIBERATION DU RWANDA (FDLR)</FIRST_NAME>
+      <UN_LIST_TYPE>DRC</UN_LIST_TYPE>
+      <REFERENCE_NUMBER>CDe.005</REFERENCE_NUMBER>
+      <ENTITY_ALIAS>
+        <QUALITY>a.k.a.</QUALITY>
+        <ALIAS_NAME>FDLR</ALIAS_NAME>
+      </ENTITY_ALIAS>
+      <ENTITY_ALIAS>
+        <QUALITY>a.k.a.</QUALITY>
+        <ALIAS_NAME>Combatant Force for the Liberation of Rwanda</ALIAS_NAME>
+      </ENTITY_ALIAS>
+      <ENTITY_ADDRESS>
+        <CITY>North Kivu</CITY>
+        <COUNTRY>Democratic Republic of the Congo</COUNTRY>
+      </ENTITY_ADDRESS>
+    </ENTITY>
+  </ENTITIES>
+</CONSOLIDATED_LIST>
+"""

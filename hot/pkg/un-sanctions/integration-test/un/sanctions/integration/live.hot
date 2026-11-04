@@ -1,0 +1,28 @@
+::un::sanctions::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration smoke tests (live, read-only)
+// =============================================================================
+// UN_SANCTIONS_LIVE=1 downloads and parses the UN list (about 2 MB).
+// Run with: UN_SANCTIONS_LIVE=1 hot test -p pkg-integration-un-sanctions
+
+::ctx ::un::sanctions::integration::ctx
+
+test-un-list-downloads-and-parses
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("UN_SANCTIONS_LIVE is not 1") }
+        => {
+            out ::un::sanctions/fetch()
+            assert(not(out.unchanged), "a null known version always parses")
+            assert(gt(length(out.entries), 500), "the UN list has about 1,000 records")
+            assert-eq(16, length(out.version))
+            sample first(out.entries)
+            assert(not(is-empty(sample.name)), "entries have names")
+            assert(some(out.entries, (e) { eq(e.kind, "entity") }), "entities are present")
+            again ::un::sanctions/fetch(out.version)
+            assert(again.unchanged, "the same body is recognized as unchanged")
+        }
+    }
+}

@@ -1,0 +1,110 @@
+::uk::sanctions::test::fixtures ns
+
+// Small excerpts of the real published list (public data), trimmed to
+// the fields the parser reads. Retrieved 1 Nov 2026.
+
+// FCDO UK Sanctions List XML: three designations (statements of reasons,
+// sanctions indicators, positions and ship details removed).
+UK_XML """
+<?xml version="1.0" encoding="utf-8"?>
+<Designations xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <DateGenerated>30/10/2026</DateGenerated>
+  <Designation>
+    <LastUpdated>29/04/2026</LastUpdated>
+    <DateDesignated>25/01/2001</DateDesignated>
+    <UniqueID>AFG0007</UniqueID>
+    <OFSIGroupID>6909</OFSIGroupID>
+    <UNReferenceNumber>TAi.003</UNReferenceNumber>
+    <Names>
+      <Name>
+        <Name1>Abdul Kabir</Name1>
+        <Name6>MOHAMMAD JAN</Name6>
+        <NameType>Primary Name</NameType>
+      </Name>
+      <Name>
+        <Name1>KABIR</Name1>
+        <Name2>MUHAMMAD JAN</Name2>
+        <Name6>ABDUL</Name6>
+        <NameType>Primary Name Variation</NameType>
+      </Name>
+      <Name>
+        <Name6>A Kabir</Name6>
+        <NameType>Alias</NameType>
+        <AliasStrength>Good quality a.k.a</AliasStrength>
+      </Name>
+    </Names>
+    <NonLatinNames>
+      <NonLatinName>
+        <NameNonLatinScript>عبد الکبیر محمد جان</NameNonLatinScript>
+      </NonLatinName>
+    </NonLatinNames>
+    <RegimeName>The Afghanistan (Sanctions) (EU Exit) Regulations 2020</RegimeName>
+    <IndividualEntityShip>Individual</IndividualEntityShip>
+    <DesignationSource>UN</DesignationSource>
+    <OtherInformation>Active in terrorist operations in Eastern Afghanistan.</OtherInformation>
+    <Addresses>
+      <Address>
+        <AddressCountry>Afghanistan</AddressCountry>
+      </Address>
+    </Addresses>
+    <IndividualDetails>
+      <Individual>
+        <DOBs>
+          <DOB>dd/mm/1963</DOB>
+          <DOB>30/01/1972</DOB>
+          <DOB>30/01/1972</DOB>
+        </DOBs>
+        <Nationalities>
+          <Nationality>Afghanistan</Nationality>
+        </Nationalities>
+      </Individual>
+    </IndividualDetails>
+  </Designation>
+  <Designation>
+    <LastUpdated>18/12/2021</LastUpdated>
+    <DateDesignated>03/10/2017</DateDesignated>
+    <UniqueID>DPR0075</UniqueID>
+    <Names>
+      <Name>
+        <Name6>Petrel 8</Name6>
+        <NameType>Primary name</NameType>
+      </Name>
+      <Name>
+        <Name6>Jal Vahini</Name6>
+        <NameType>Alias</NameType>
+      </Name>
+      <Name>
+        <Name6>Tian Tai 36</Name6>
+        <NameType>Alias</NameType>
+      </Name>
+    </Names>
+    <RegimeName>The Democratic People's Republic of Korea (Sanctions) (EU Exit) Regulations 2019</RegimeName>
+    <IndividualEntityShip>Ship</IndividualEntityShip>
+    <DesignationSource>UN</DesignationSource>
+  </Designation>
+  <Designation>
+    <LastUpdated>01/01/2025</LastUpdated>
+    <DateDesignated>29/06/2012</DateDesignated>
+    <UniqueID>AQD0011</UniqueID>
+    <Names>
+      <Name>
+        <Name6>AL-HARAMAIN &amp; AL MASJED AL-AQSA CHARITY FOUNDATION</Name6>
+        <NameType>Primary Name</NameType>
+      </Name>
+      <Name>
+        <Name6>Al Haramain Al Masjed Al Aqsa</Name6>
+        <NameType>Alias</NameType>
+      </Name>
+    </Names>
+    <RegimeName>Isil (Da'esh) and Al-Qaeda (United Nations Sanctions) (EU Exit) Regulations 2019</RegimeName>
+    <IndividualEntityShip>Entity</IndividualEntityShip>
+    <Addresses>
+      <Address>
+        <AddressLine1>Hamdije Cemerlica 41</AddressLine1>
+        <AddressLine2>Sarajevo</AddressLine2>
+        <AddressCountry>Bosnia and Herzegovina</AddressCountry>
+      </Address>
+    </Addresses>
+  </Designation>
+</Designations>
+"""
