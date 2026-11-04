@@ -1,5 +1,6 @@
 use fastnum::D256;
 use indexmap::IndexMap;
+use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -1414,14 +1415,261 @@ impl<'de> Deserialize<'de> for Val {
     where
         D: serde::Deserializer<'de>,
     {
-        // Instead of using a custom visitor that goes through f64,
-        // deserialize to serde_json::Value first, which preserves exact number representations
-        let json_value = serde_json::Value::deserialize(deserializer)?;
-        Ok(serde_json_to_val(json_value))
+        deserializer
+            .deserialize_any(JsonNodeVisitor)
+            .map(JsonNode::into_val)
     }
 }
 
-// Keep the old implementation as a fallback for non-JSON deserializers
+/// The key `serde_json` hands an exact number under. Its `arbitrary_precision`
+/// feature keeps a number as text, so nothing goes through `f64`.
+const JSON_NUMBER_KEY: &str = "$serde_json::private::Number";
+
+/// A JSON value on its way to a `Val`. Reading through `serde_json::Value`
+/// costs about 100 bytes for each element of an array, and Bytes are arrays of
+/// numbers in JSON: a recorded 31 MB response took 13 GB to read back. An array
+/// of byte-sized integers stays packed until it's known to be Bytes or not.
+enum JsonNode {
+    Val(Val),
+    ByteSized(Vec<u8>),
+}
+
+impl JsonNode {
+    fn into_val(self) -> Val {
+        match self {
+            JsonNode::Val(value) => value,
+            JsonNode::ByteSized(items) => Val::vec(byte_sized_vals(&items)),
+        }
+    }
+}
+
+fn byte_sized_vals(items: &[u8]) -> Vec<Val> {
+    items
+        .iter()
+        .map(|item| Val::Int(i64::from(*item)))
+        .collect()
+}
+
+impl<'de> Deserialize<'de> for JsonNode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(JsonNodeVisitor)
+    }
+}
+
+struct JsonNodeVisitor;
+
+impl<'de> Visitor<'de> for JsonNodeVisitor {
+    type Value = JsonNode;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("any valid JSON value")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<JsonNode, E> {
+        Ok(JsonNode::Val(Val::Bool(value)))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<JsonNode, E> {
+        Ok(JsonNode::Val(Val::Int(value)))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<JsonNode, E> {
+        Ok(JsonNode::Val(match i64::try_from(value) {
+            Ok(number) => Val::Int(number),
+            Err(_) => json_number_to_val(&value.into()),
+        }))
+    }
+
+    fn visit_i128<E: serde::de::Error>(self, value: i128) -> Result<JsonNode, E> {
+        json_number_text_to_val(&ToString::to_string(&value)).map(JsonNode::Val)
+    }
+
+    fn visit_u128<E: serde::de::Error>(self, value: u128) -> Result<JsonNode, E> {
+        json_number_text_to_val(&ToString::to_string(&value)).map(JsonNode::Val)
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<JsonNode, E> {
+        Ok(JsonNode::Val(
+            serde_json::Number::from_f64(value)
+                .map_or(Val::Null, |number| json_number_to_val(&number)),
+        ))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<JsonNode, E> {
+        Ok(JsonNode::Val(Val::from(value)))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<JsonNode, E> {
+        Ok(JsonNode::Val(Val::from(value)))
+    }
+
+    fn visit_none<E>(self) -> Result<JsonNode, E> {
+        Ok(JsonNode::Val(Val::Null))
+    }
+
+    fn visit_some<D>(self, deserializer: D) -> Result<JsonNode, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        JsonNode::deserialize(deserializer)
+    }
+
+    fn visit_unit<E>(self) -> Result<JsonNode, E> {
+        Ok(JsonNode::Val(Val::Null))
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<JsonNode, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut packed = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(4096));
+        while let Some(item) = seq.next_element::<JsonNode>()? {
+            match item {
+                JsonNode::Val(Val::Int(number)) if u8::try_from(number).is_ok() => {
+                    packed.push(number as u8);
+                }
+                other => {
+                    let mut items = byte_sized_vals(&packed);
+                    items.push(other.into_val());
+                    while let Some(item) = seq.next_element::<JsonNode>()? {
+                        items.push(item.into_val());
+                    }
+                    return Ok(JsonNode::Val(Val::vec(items)));
+                }
+            }
+        }
+        Ok(JsonNode::ByteSized(packed))
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<JsonNode, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut entries: IndexMap<String, JsonNode> = IndexMap::new();
+        let mut boxed: Option<JsonValue> = None;
+        let mut is_first = true;
+        while let Some(key) = map.next_key::<String>()? {
+            if is_first && key == JSON_NUMBER_KEY {
+                let text: String = map.next_value()?;
+                return json_number_text_to_val(&text).map(JsonNode::Val);
+            }
+            is_first = false;
+            if key == "$box" {
+                boxed = Some(map.next_value()?);
+            } else {
+                entries.insert(key, map.next_value()?);
+            }
+        }
+        // `$box` wins over anything beside it. A box's contents aren't Bytes on
+        // their own, and its readers take `serde_json::Value`.
+        Ok(JsonNode::Val(match boxed {
+            Some(content) => boxed_json_to_val(content),
+            None => json_entries_to_val(entries),
+        }))
+    }
+}
+
+/// A map's entries as a `Val`, as [`serde_json_to_val`] reads a JSON object.
+fn json_entries_to_val(mut entries: IndexMap<String, JsonNode>) -> Val {
+    let tag = match entries.get("$type") {
+        Some(JsonNode::Val(Val::Str(tag))) => Some(Arc::clone(tag)),
+        _ => None,
+    };
+    match tag.as_deref() {
+        Some(HOT_BYTE_TYPE) => {
+            if let Some(JsonNode::Val(Val::Int(byte))) = entries.get("$val")
+                && let Ok(byte) = u8::try_from(*byte)
+            {
+                return Val::Byte(byte);
+            }
+        }
+        Some(HOT_BYTES_TYPE) => {
+            if matches!(entries.get("$val"), Some(JsonNode::ByteSized(_)))
+                && let Some(JsonNode::ByteSized(bytes)) = entries.swap_remove("$val")
+            {
+                return Val::bytes(bytes);
+            }
+        }
+        Some(tag) => {
+            // A typed map keeps `$type` first, wherever it came in.
+            let mut map = IndexMap::with_capacity(entries.len());
+            map.insert(Val::from("$type"), Val::from(tag));
+            for (key, value) in entries {
+                if key != "$type" {
+                    map.insert(Val::from(key), value.into_val());
+                }
+            }
+            return Val::map(map);
+        }
+        None => {}
+    }
+    Val::map(
+        entries
+            .into_iter()
+            .map(|(key, value)| (Val::from(key), value.into_val()))
+            .collect(),
+    )
+}
+
+fn json_number_text_to_val<E: serde::de::Error>(text: &str) -> Result<Val, E> {
+    // Nearly every number is a plain integer, and Bytes hold millions of them.
+    if let Ok(number) = text.parse::<i64>() {
+        return Ok(Val::Int(number));
+    }
+    text.parse::<serde_json::Number>()
+        .map(|number| json_number_to_val(&number))
+        .map_err(E::custom)
+}
+
+fn json_number_to_val(n: &serde_json::Number) -> Val {
+    if let Some(i) = n.as_i64() {
+        Val::Int(i)
+    } else if let Some(f) = n.as_f64() {
+        // For JSON numbers, we need to preserve precision when possible
+        // Try to parse as D256 from string representation first
+        if let Ok(decimal) = D256::from_str(&n.to_string(), fastnum::decimal::Context::default()) {
+            Val::Dec(decimal)
+        } else {
+            // Fallback to f64 conversion if string parsing fails
+            Val::Dec(D256::from_f64(f))
+        }
+    } else {
+        Val::Null
+    }
+}
+
+/// What a `$box` tag holds: a reference if it reads as one, else its data.
+fn boxed_json_to_val(content: JsonValue) -> Val {
+    // Try to reconstruct FunctionRef first
+    if let Ok(func_ref) =
+        serde_json::from_value::<crate::lang::runtime::function_ref::FunctionRef>(content.clone())
+    {
+        return Val::Box(Box::new(func_ref));
+    }
+
+    // Try to reconstruct TypeRef (for variant union types)
+    if let Ok(type_ref) = serde_json::from_value::<crate::lang::refs::TypeRef>(content.clone()) {
+        return Val::Box(Box::new(type_ref));
+    }
+
+    // Try to reconstruct LambdaInfo (for lazy thunks)
+    if let Ok(lambda_info) =
+        serde_json::from_value::<crate::lang::bytecode::LambdaInfo>(content.clone())
+    {
+        return Val::Box(Box::new(lambda_info));
+    }
+
+    // Try to reconstruct NamespaceRef
+    if let Ok(ns_ref) = serde_json::from_value::<crate::lang::refs::NamespaceRef>(content.clone()) {
+        return Val::Box(Box::new(ns_ref));
+    }
+
+    // Fallback: return as map (lose Box wrapper, but at least preserve data)
+    serde_json_to_val(content)
+}
 
 // Helper function to convert serde_json::Value to Val
 fn json_array_to_bytes(items: &[serde_json::Value]) -> Option<Vec<u8>> {
@@ -1438,62 +1686,13 @@ fn serde_json_to_val(value: serde_json::Value) -> Val {
     match value {
         serde_json::Value::Null => Val::Null,
         serde_json::Value::Bool(b) => Val::Bool(b),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Val::Int(i)
-            } else if let Some(f) = n.as_f64() {
-                // For JSON numbers, we need to preserve precision when possible
-                // Try to parse as D256 from string representation first
-                if let Ok(decimal) =
-                    D256::from_str(&n.to_string(), fastnum::decimal::Context::default())
-                {
-                    Val::Dec(decimal)
-                } else {
-                    // Fallback to f64 conversion if string parsing fails
-                    Val::Dec(D256::from_f64(f))
-                }
-            } else {
-                Val::Null
-            }
-        }
+        serde_json::Value::Number(n) => json_number_to_val(&n),
         serde_json::Value::String(s) => Val::from(s),
         serde_json::Value::Array(arr) => Val::vec(arr.into_iter().map(serde_json_to_val).collect()),
         serde_json::Value::Object(obj) => {
             // Check for $box tag
-            if obj.contains_key("$box")
-                && let Some(content) = obj.get("$box")
-            {
-                // Try to reconstruct FunctionRef first
-                if let Ok(func_ref) = serde_json::from_value::<
-                    crate::lang::runtime::function_ref::FunctionRef,
-                >(content.clone())
-                {
-                    return Val::Box(Box::new(func_ref));
-                }
-
-                // Try to reconstruct TypeRef (for variant union types)
-                if let Ok(type_ref) =
-                    serde_json::from_value::<crate::lang::refs::TypeRef>(content.clone())
-                {
-                    return Val::Box(Box::new(type_ref));
-                }
-
-                // Try to reconstruct LambdaInfo (for lazy thunks)
-                if let Ok(lambda_info) =
-                    serde_json::from_value::<crate::lang::bytecode::LambdaInfo>(content.clone())
-                {
-                    return Val::Box(Box::new(lambda_info));
-                }
-
-                // Try to reconstruct NamespaceRef
-                if let Ok(ns_ref) =
-                    serde_json::from_value::<crate::lang::refs::NamespaceRef>(content.clone())
-                {
-                    return Val::Box(Box::new(ns_ref));
-                }
-
-                // Fallback: return as map (lose Box wrapper, but at least preserve data)
-                return serde_json_to_val(content.clone());
+            if let Some(content) = obj.get("$box") {
+                return boxed_json_to_val(content.clone());
             }
 
             // Check for Byte/Bytes typed maps
@@ -4610,6 +4809,71 @@ mod tests {
 
         // Only Null is falsy (besides Bool(false))
         assert!(!Val::Null.is_truthy());
+    }
+
+    /// `Val::eq` holds Bytes equal to a Vec of the same numbers, so compare as
+    /// `{:?}` shows them: the variant and the order of a map's keys both count.
+    #[test]
+    fn reading_json_gives_what_reading_through_serde_json_value_gives() {
+        let bytes = r#""$type":"::hot::type/Bytes""#;
+        let byte = r#""$type":"::hot::type/Byte""#;
+        let cases = [
+            "null".to_string(),
+            "true".to_string(),
+            r#""text""#.to_string(),
+            "0".to_string(),
+            "-1".to_string(),
+            "255".to_string(),
+            "256".to_string(),
+            "9223372036854775807".to_string(),
+            "9223372036854775808".to_string(),
+            "18446744073709551616".to_string(),
+            "1.5".to_string(),
+            "1.0".to_string(),
+            "1e3".to_string(),
+            "0.1234567890123456789012345".to_string(),
+            "[]".to_string(),
+            "[1,2,3]".to_string(),
+            "[1,300,2]".to_string(),
+            "[1,-1,2]".to_string(),
+            r#"[1,"a",2]"#.to_string(),
+            "[1,2.0]".to_string(),
+            "[[1,2],[],[3,null]]".to_string(),
+            "{}".to_string(),
+            r#"{"a":1,"b":[1,2]}"#.to_string(),
+            r#"{"a":1,"b":2,"a":3}"#.to_string(),
+            format!(r#"{{{bytes},"$val":[1,2,255]}}"#),
+            format!(r#"{{"$val":[1,2],{bytes}}}"#),
+            format!(r#"{{{bytes},"$val":[]}}"#),
+            format!(r#"{{{bytes},"$val":[1,256]}}"#),
+            format!(r#"{{{bytes},"$val":"text"}}"#),
+            format!(r#"{{{bytes}}}"#),
+            format!(r#"{{"outer":[{{{bytes},"$val":[1]}}]}}"#),
+            format!(r#"{{{byte},"$val":7}}"#),
+            format!(r#"{{{byte},"$val":256}}"#),
+            format!(r#"{{{byte},"$val":[7]}}"#),
+            r#"{"x":1,"$type":"::my/Type","y":[1,2]}"#.to_string(),
+            r#"{"$type":1,"$val":[1,2]}"#.to_string(),
+            r#"{"$box":{"x":[1,2]}}"#.to_string(),
+            r#"{"a":1,"$box":[1,2]}"#.to_string(),
+            r#"{"a":1,"$serde_json::private::Number":"12"}"#.to_string(),
+        ];
+        for json in &cases {
+            let value: JsonValue = serde_json::from_str(json).unwrap();
+            let expected = format!("{:?}", serde_json_to_val(value.clone()));
+            let direct: Val = serde_json::from_str(json).unwrap();
+            assert_eq!(format!("{direct:?}"), expected, "from_str of {json}");
+            let from_value: Val = serde_json::from_value(value).unwrap();
+            assert_eq!(format!("{from_value:?}"), expected, "from_value of {json}");
+        }
+    }
+
+    #[test]
+    fn reading_json_refuses_what_serde_json_refuses() {
+        assert!(serde_json::from_str::<Val>("[1,").is_err());
+        assert!(serde_json::from_str::<Val>("{\"a\":}").is_err());
+        let deep = format!("{}{}", "[".repeat(200), "]".repeat(200));
+        assert!(serde_json::from_str::<Val>(&deep).is_err());
     }
 
     /// Test using serde_json_to_val function which should preserve precision
