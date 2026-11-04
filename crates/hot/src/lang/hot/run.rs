@@ -50,6 +50,8 @@ pub fn info(vm: &mut crate::lang::runtime::vm::VirtualMachine, _args: &[Val]) ->
                 "status": "running",
                 "start-time": start_time_instant.clone(),
                 "retry-attempt": ctx.retry_attempt as i64,
+                "max-retries": ctx.max_retries as i64,
+                "retry-delay": ctx.retry_delay_ms as i64,
                 "origin-run-id": uuid_to_val(ctx.origin_run_id)
             }
         });

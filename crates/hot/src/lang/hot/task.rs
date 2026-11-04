@@ -439,6 +439,8 @@ pub fn start(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
             "status": "running",
             "start-time": start_time_val,
             "retry-attempt": ctx.retry_attempt as i64,
+            "max-retries": ctx.max_retries as i64,
+            "retry-delay": ctx.retry_delay_ms as i64,
             "origin-run-id": origin_run_id_val
         }
     });

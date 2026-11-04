@@ -168,6 +168,8 @@ pub async fn publish_event_internal(
         event_id: Some(event_id),
         origin_run_id: None,
         retry_attempt: 0,
+        max_retries: 0,
+        retry_delay_ms: 0,
         secret_keys: AHashSet::new(), // Will be populated from ctx metadata
         secret_value_hashes: AHashSet::new(),
         secret_values: Default::default(),

@@ -91,8 +91,8 @@ meta {
     i.run.status          // "running"
     i.run.start-time      // Instant when the run started
     i.run.retry-attempt   // Current retry attempt (0 = first try, 1 = first retry, etc.)
-    i.run.max-retries     // Maximum retries from function meta (0 = no retries)
-    i.run.retry-delay     // Delay between retries in milliseconds
+    i.run.max-retries     // Retries Hot makes if this run fails (0 = no retries)
+    i.run.retry-delay     // Base delay between those retries in milliseconds (0 = no retries)
     i.run.origin-run-id   // UUID of original run if this is a retry (null otherwise)
     i.build.hash          // Build hash (null if not available)
     i.project.name        // Project name (null if not available)
@@ -101,6 +101,12 @@ meta {
     i.org.id              // Organization UUID (null if not available)
     i.org.slug            // Organization slug (e.g. "local", "acme-inc")
     ```
+
+    `max-retries` and `retry-delay` come from the `retry` meta of the run's event
+    handler or schedule, after platform limits, and read the same on every
+    attempt. `retry-delay` is the delay before backoff and jitter. Both are 0
+    without a `retry`, in a call, which Hot doesn't retry, and in a task, whose
+    `retry` option they don't report.
     """
 }
 fn (): RunInfo {

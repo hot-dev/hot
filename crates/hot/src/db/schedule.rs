@@ -672,6 +672,46 @@ impl Schedule {
         Ok(schedule)
     }
 
+    /// The retry policy of a scheduled function (`ns/var`), from its schedule's
+    /// meta. Inactive schedules count: a redeploy deactivates a schedule while
+    /// retries of its failed runs are still to come.
+    pub async fn get_retry_config_by_build_fn(
+        db: &crate::db::DatabasePool,
+        build_id: &Uuid,
+        function: &str,
+    ) -> crate::env::retry::RetryConfig {
+        use crate::env::retry::RetryConfig;
+
+        let Some((ns, var)) = function.rsplit_once('/') else {
+            return RetryConfig::default();
+        };
+
+        let meta: Option<JsonValue> = match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => sqlx::query_scalar(
+                "SELECT meta FROM schedule WHERE build_id = $1 AND ns = $2 AND var = $3 LIMIT 1",
+            )
+            .bind(build_id)
+            .bind(ns)
+            .bind(var)
+            .fetch_optional(pg_pool)
+            .await
+            .ok()
+            .flatten(),
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => sqlx::query_scalar(
+                "SELECT meta FROM schedule WHERE build_id = ? AND ns = ? AND var = ? LIMIT 1",
+            )
+            .bind(build_id)
+            .bind(ns)
+            .bind(var)
+            .fetch_optional(sqlite_pool)
+            .await
+            .ok()
+            .flatten(),
+        };
+
+        RetryConfig::from_meta(meta.as_ref())
+    }
+
     /// Get schedules by build ID
     pub async fn get_schedules_by_build(
         db: &crate::db::DatabasePool,

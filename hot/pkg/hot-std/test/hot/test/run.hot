@@ -7,3 +7,11 @@ meta ["test"] fn () {
     // schedule.
     assert(is-inline-run(), "is-inline-run() under hot test")
 }
+
+test-info-retries-are-zero-in-a-direct-run
+meta ["test"] fn () {
+    // Hot retries handlers and schedules, not a run started directly.
+    run info().run
+    assert-eq(0, run.max-retries, "max-retries")
+    assert-eq(0, run.retry-delay, "retry-delay")
+}
