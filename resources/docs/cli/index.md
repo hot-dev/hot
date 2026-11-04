@@ -638,6 +638,23 @@ This downloads and installs the requested version of Hot. If you're already on t
 
 To move from a package install to a user install, run the installer script with `--user` (on Windows, set `HOT_INSTALL_SCOPE=user`), then remove the package install.
 
+### hot uninstall
+
+Remove the install this `hot` runs from, the way it was installed:
+
+```bash
+hot uninstall
+```
+
+It lists what it will remove and asks first. Your projects are left alone.
+
+```bash
+hot uninstall --dry-run   # Show what would be removed
+hot uninstall --yes       # Don't ask, for scripts
+```
+
+See [Uninstalling Hot](/docs/uninstalling) for what each install does, and how to remove Hot by hand.
+
 ### hot help
 
 Display help information:

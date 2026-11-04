@@ -4,6 +4,7 @@ mod command;
 mod conf;
 mod profile;
 mod remote;
+mod uninstall;
 mod update;
 
 use crate::cli::{
@@ -544,6 +545,15 @@ async fn async_main(providers: CliProviders) {
         let exit_code = run_fmt(global, paths, *check);
         if exit_code != 0 {
             std::process::exit(exit_code);
+        }
+        return;
+    }
+
+    // Handle uninstall command early (before conf processing)
+    if let Some(Command::Uninstall { yes, dry_run }) = &cli.command {
+        if let Err(e) = uninstall::run_uninstall(*yes, *dry_run) {
+            eprintln!("{e}");
+            std::process::exit(1);
         }
         return;
     }
@@ -1895,7 +1905,10 @@ async fn async_main(providers: CliProviders) {
                 std::process::exit(1);
             }
         }
-        Some(Command::Version) | Some(Command::Update { .. }) | Some(Command::Help { .. }) => {
+        Some(Command::Version)
+        | Some(Command::Update { .. })
+        | Some(Command::Uninstall { .. })
+        | Some(Command::Help { .. }) => {
             // Handled early, before config processing
         }
         None => {
