@@ -643,6 +643,7 @@ async fn webhook_handler_inner(
         secret_values: Default::default(),
         access_id: None,
         agent_type: None,
+        event_handler_fn: None,
         queue_timing: None,
         // Enqueue-only producer context; the worker stamps deadline_at at admission
         deadline_at: None,

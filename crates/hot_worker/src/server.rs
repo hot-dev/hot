@@ -3035,6 +3035,7 @@ fn event_run_type_id(event_type: &str) -> i16 {
 fn event_handler_run_row(
     event_message: &EventMessage,
     build: &Build,
+    event_handler: &EventHandler,
     run_id: Uuid,
 ) -> hot::db::run::UnstartedRun {
     let context = &event_message.body.execution_context;
@@ -3048,6 +3049,7 @@ fn event_handler_run_row(
         event_id: event_message.body.event.event_id,
         by_user_id: context.user_id.unwrap_or(build.created_by_user_id),
         retry_attempt: context.retry_attempt,
+        event_handler_fn: event_handler.function_name(),
     }
 }
 
@@ -3058,11 +3060,12 @@ async fn record_unstarted_run(
     db: &DatabasePool,
     event_message: &EventMessage,
     build: &Build,
+    event_handler: &EventHandler,
     run_id: Uuid,
     error: &str,
     held: bool,
 ) {
-    let run = event_handler_run_row(event_message, build, run_id);
+    let run = event_handler_run_row(event_message, build, event_handler, run_id);
     if let Err(record_error) = hot::db::run::Run::record_unstarted_run(db, &run, error, held).await
     {
         warn!(
@@ -4967,6 +4970,7 @@ async fn execute_single_event_handler_inner(
     .with_retry_attempt(retry_attempt)
     .with_env_name(env_name)
     .with_org_slug(org_slug)
+    .with_event_handler_fn(event_handler.function_name())
     .with_agent_type(
         resolve_agent_type_for_execution(db, &build.build_id, event_handler, event_message).await,
     );
@@ -8446,7 +8450,13 @@ pub async fn run_with_components_shared_context_and_db(
                                                     };
 
                                                 match handlers_result {
-                                                    Ok(all_handlers) => {
+                                                    Ok(mut all_handlers) => {
+                                                        // A retry belongs to the handler whose run failed, not to
+                                                        // the whole event. If a redeploy removed that handler,
+                                                        // nothing is left to retry.
+                                                        if let Some(retried) = event_message.retried_handler() {
+                                                            all_handlers.retain(|handler| handler.function_name() == retried);
+                                                        }
                                                         if all_handlers.is_empty() {
                                                             let err_msg = format!("No event handlers found for event type '{}'", event_message.body.event.event_type);
                                                             if exact_target_build.is_some() {
@@ -8645,6 +8655,12 @@ pub async fn run_with_components_shared_context_and_db(
                                                             if !handler_build.deployed || !handler_build.active || handler_build.runtime_status != Build::RUNTIME_STATUS_READY {
                                                                 continue;
                                                             }
+                                                            // Another project's handler can share the retried handler's name.
+                                                            if event_message.retried_handler().is_some()
+                                                                && event_message.body.event.target_project_id.is_some_and(|project_id| project_id != handler_build.project_id)
+                                                            {
+                                                                continue;
+                                                            }
                                                             if let Some(reason) = handler_build.runtime_version_error_message() {
                                                                 // A newer worker, as a rolling deploy starts, can run
                                                                 // the build's work.
@@ -8775,8 +8791,8 @@ pub async fn run_with_components_shared_context_and_db(
                                                         // runs record themselves: write their rows first, so
                                                         // dead-letter settlement can fail them.
                                                         if recovered_delivery {
-                                                            for (_, handler_build, run_id) in &admitted_handlers {
-                                                                let row = event_handler_run_row(&event_message, handler_build, *run_id);
+                                                            for (event_handler, handler_build, run_id) in &admitted_handlers {
+                                                                let row = event_handler_run_row(&event_message, handler_build, event_handler, *run_id);
                                                                 if let Err(error) = hot::db::run::Run::open_event_run(db, &row).await {
                                                                     warn!("hot.dev: WORKER {} could not write run {} before running its recovered event: {}", worker_id, run_id, error);
                                                                 }
@@ -8867,11 +8883,11 @@ pub async fn run_with_components_shared_context_and_db(
                                                                                                     let failure = format!("Handler setup failed before the run started: {reason}");
                                                                                                     if !started_any_handler && !last_delivery_attempt {
                                                                                                         warn!("hot.dev: WORKER {} deferring event '{}' for redelivery: {}", worker_id, event_message.body.event.event_type, failure);
-                                                                                                        record_unstarted_run(db, &event_message, &handler_build, run_id, &failure, true).await;
+                                                                                                        record_unstarted_run(db, &event_message, &handler_build, &event_handler, run_id, &failure, true).await;
                                                                                                         return Err(worker_counted_redelivery_error(failure, infra_retry_backoff_ms.max(SETUP_FAILURE_BACKOFF_MS)));
                                                                                                     }
                                                                                                     error!("hot.dev: WORKER {} failed event handler {}: {}", worker_id, event_handler.event_handler_id, failure);
-                                                                                                    record_unstarted_run(db, &event_message, &handler_build, run_id, &failure, false).await;
+                                                                                                    record_unstarted_run(db, &event_message, &handler_build, &event_handler, run_id, &failure, false).await;
                                                                                                     started_any_handler = true;
                                                                                                     all_success = false;
                                                                                                 }
@@ -13138,7 +13154,17 @@ handler fn () { initialized }
         let (event_message, build, run_id) = event_with_run(&db, &data).await;
         let event_id = event_message.body.event.event_id;
 
-        record_unstarted_run(&db, &event_message, &build, run_id, "Parse errors", true).await;
+        let handler = test_handler("demo", "on-event");
+        record_unstarted_run(
+            &db,
+            &event_message,
+            &build,
+            &handler,
+            run_id,
+            "Parse errors",
+            true,
+        )
+        .await;
         let run = Run::get_run(&db, &run_id).await.unwrap();
         assert_eq!(run.status_id, RunStatus::PendingRetry.as_id());
         assert_eq!(run.event_id, Some(event_id));
@@ -13152,13 +13178,22 @@ handler fn () { initialized }
             Run::get_run(&db, &run_id).await.unwrap().status_id,
             RunStatus::Running.as_id()
         );
-        record_unstarted_run(&db, &event_message, &build, run_id, "Still broken", false).await;
+        record_unstarted_run(
+            &db,
+            &event_message,
+            &build,
+            &handler,
+            run_id,
+            "Still broken",
+            false,
+        )
+        .await;
         let run = Run::get_run(&db, &run_id).await.unwrap();
         assert_eq!(run.status_id, RunStatus::Failed.as_id());
         assert!(run.stop_time.is_some());
 
         // A finished run stays as it finished.
-        record_unstarted_run(&db, &event_message, &build, run_id, "Late", true).await;
+        record_unstarted_run(&db, &event_message, &build, &handler, run_id, "Late", true).await;
         let run = Run::get_run(&db, &run_id).await.unwrap();
         assert_eq!(run.status_id, RunStatus::Failed.as_id());
         assert!(run.result.unwrap().to_string().contains("Still broken"));
@@ -13176,7 +13211,8 @@ handler fn () { initialized }
         let (db, db_path) = migrated_sqlite_file_db().await;
         let data = hot::db::insert_test_data(&db).await.unwrap();
         let (event_message, build, running) = event_with_run(&db, &data).await;
-        let row = |run_id| event_handler_run_row(&event_message, &build, run_id);
+        let handler = test_handler("demo", "on-event");
+        let row = |run_id| event_handler_run_row(&event_message, &build, &handler, run_id);
         let held = Uuid::now_v7();
         let finished = Uuid::now_v7();
         for run_id in [running, held, finished] {
@@ -13211,9 +13247,17 @@ handler fn () { initialized }
         let (event_message, build, run_id) = event_with_run(&db, &data).await;
         let event_id = event_message.body.event.event_id;
 
-        Run::open_event_run(&db, &event_handler_run_row(&event_message, &build, run_id))
-            .await
-            .unwrap();
+        Run::open_event_run(
+            &db,
+            &event_handler_run_row(
+                &event_message,
+                &build,
+                &test_handler("demo", "on-event"),
+                run_id,
+            ),
+        )
+        .await
+        .unwrap();
         settle_orphaned_event_runs(
             &db,
             [OrphanedMessageIds {
