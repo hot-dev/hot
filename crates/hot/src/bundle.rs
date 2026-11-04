@@ -2294,6 +2294,168 @@ mod tests {
         assert_eq!(map.get(&Val::from("file")), Some(&Val::from(expected)));
     }
 
+    const META_NAMES_LIB: &str = r#"::demo::lib ns
+
+Complaint type { id: Str }
+
+Complaints meta {workflow: {name: "Complaints"}}
+type {}
+
+Intake meta {agent: {name: "Intake"}}
+type {}
+"#;
+
+    /// The manifest entry of a bundle of `META_NAMES_LIB` and `source`.
+    fn meta_names_bundle(source: &str) -> indexmap::IndexMap<Val, Val> {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let src_dir = temp_dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(src_dir.join("lib.hot"), META_NAMES_LIB).unwrap();
+        std::fs::write(src_dir.join("source.hot"), source).unwrap();
+
+        let src_paths = vec![src_dir.to_string_lossy().to_string()];
+        let bundle = create_bundle("names", &src_paths, &[], &[], true, &[]).unwrap();
+        let Val::Map(manifest) = &bundle.manifest else {
+            panic!("manifest should be a map");
+        };
+        let Some(Val::Map(bundle_info)) = manifest.get(&Val::from("hot.bundle.names")) else {
+            panic!("manifest should hold the bundle");
+        };
+        bundle_info.as_ref().clone()
+    }
+
+    fn manifest_meta(artifact: &Val) -> Val {
+        artifact.get("meta").expect("artifact should have meta")
+    }
+
+    fn manifest_type<'a>(
+        bundle_info: &'a indexmap::IndexMap<Val, Val>,
+        section: &str,
+        type_name: &str,
+    ) -> &'a Val {
+        let Some(Val::Vec(items)) = bundle_info.get(&Val::from(section)) else {
+            panic!("{section} should be a vec");
+        };
+        items
+            .iter()
+            .find(|item| item.get_str("type_name") == type_name)
+            .unwrap_or_else(|| panic!("{section} should have {type_name}"))
+    }
+
+    #[test]
+    fn test_manifest_writes_nested_meta_names_in_full() {
+        let bundle_info = meta_names_bundle(
+            r#"::demo::flows ns
+
+::lib ::demo::lib
+Form ::demo::lib/Complaint
+
+Local type { id: Str }
+
+Review meta {
+  workflow: {name: "Review"},
+  policy: {form: Form, forms: [::lib/Complaint, Local]},
+}
+type {}
+
+Triage meta {
+  agent: {name: "Triage"},
+  policy: {form: Form, forms: [::lib/Complaint, Local]},
+}
+type {}
+"#,
+        );
+
+        let policy = crate::val!({
+            "form": "::demo::lib/Complaint",
+            "forms": ["::demo::lib/Complaint", "::demo::flows/Local"],
+        });
+        let review = manifest_type(&bundle_info, "workflows", "Review");
+        assert_eq!(manifest_meta(review).get("policy"), Some(policy.clone()));
+
+        let triage = manifest_type(&bundle_info, "agents", "Triage");
+        assert_eq!(manifest_meta(triage).get("policy"), Some(policy));
+    }
+
+    #[test]
+    fn test_manifest_writes_imported_meta_names_in_full() {
+        let bundle_info = meta_names_bundle(
+            r#"::demo::handlers ns
+
+::lib ::demo::lib
+Shared ::demo::lib/Intake
+Named ::demo::lib/Complaints
+Complaint ::demo::lib/Complaint
+
+on-new meta {
+  on-event: "complaint:new",
+  agent: Shared,
+  workflows: [Named, ::lib/Complaints],
+  kind: Complaint,
+}
+fn (event) { event }
+
+nightly meta {schedule: "0 2 * * *", agent: Shared, workflow: Named, kind: Complaint}
+fn (event) { event }
+
+lookup meta {mcp: {service: "complaints"}, kind: Complaint}
+fn (id: Str): Str { id }
+
+on-hook meta {webhook: {service: "complaints", path: "/new"}, kind: Complaint}
+fn (request) { request }
+"#,
+        );
+
+        let handler = manifest_meta(first_nested_vec_item(
+            &bundle_info,
+            "event_handlers",
+            "complaint:new",
+        ));
+        assert_eq!(
+            handler,
+            crate::val!({
+                "on-event": "complaint:new",
+                "agent": "::demo::lib/Intake",
+                "workflows": ["::demo::lib/Complaints", "::demo::lib/Complaints"],
+                "kind": "::demo::lib/Complaint",
+            })
+        );
+
+        let schedule = manifest_meta(first_nested_vec_item(
+            &bundle_info,
+            "scheduled_functions",
+            "0 2 * * *",
+        ));
+        assert_eq!(schedule.get_str("agent"), "::demo::lib/Intake");
+        assert_eq!(schedule.get_str("workflow"), "::demo::lib/Complaints");
+        assert_eq!(schedule.get_str("kind"), "::demo::lib/Complaint");
+
+        for (section, key) in [("mcp_tools", "complaints"), ("webhooks", "complaints")] {
+            let meta = manifest_meta(first_nested_vec_item(&bundle_info, section, key));
+            assert_eq!(meta.get_str("kind"), "::demo::lib/Complaint", "{section}");
+        }
+    }
+
+    /// Compiling reports a name that resolves to nothing. Bundling doesn't
+    /// compile, so it keeps the name as written and goes on.
+    #[test]
+    fn test_manifest_keeps_a_meta_name_that_does_not_resolve() {
+        let bundle_info = meta_names_bundle(
+            r#"::demo::handlers ns
+
+on-new meta {on-event: "complaint:new", kind: Missing}
+fn (event) { event }
+"#,
+        );
+
+        let handler = manifest_meta(first_nested_vec_item(
+            &bundle_info,
+            "event_handlers",
+            "complaint:new",
+        ));
+        assert_eq!(handler.get_str("kind"), "Missing");
+    }
+
     #[test]
     fn test_bundle_creation_with_event_handlers() {
         use std::fs;

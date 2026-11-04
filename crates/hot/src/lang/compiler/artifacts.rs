@@ -496,11 +496,7 @@ impl AgentDef {
         });
 
         // Full meta from the variable
-        let meta = var
-            .meta
-            .as_ref()
-            .and_then(|m| serde_json::to_value(&m.val).ok())
-            .map(|j| serde_json::from_value::<Val>(j).unwrap_or(Val::Null));
+        let meta = var.meta.as_ref().map(|m| m.val.resolve_boxes());
 
         let mut agent_map = indexmap::IndexMap::new();
         agent_map.insert(Val::from("type_name"), Val::from(type_name.clone()));
@@ -723,11 +719,7 @@ impl WorkflowDef {
         let tags = workflow_meta.get(&Val::from("tags")).cloned();
 
         // Full meta from the variable.
-        let meta = var
-            .meta
-            .as_ref()
-            .and_then(|m| serde_json::to_value(&m.val).ok())
-            .map(|j| serde_json::from_value::<Val>(j).unwrap_or(Val::Null));
+        let meta = var.meta.as_ref().map(|m| m.val.resolve_boxes());
 
         let mut workflow_map = indexmap::IndexMap::new();
         workflow_map.insert(Val::from("type_name"), Val::from(type_name.clone()));

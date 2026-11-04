@@ -199,6 +199,10 @@ impl Engine {
             .extract_core_variables_from_program(&program)
             .map_err(|e| e.format_error(color))?;
 
+        // The artifacts below copy each var's meta, and this program is never
+        // compiled, so write the names in it as full names first.
+        engine.compiler.resolve_meta_names(&mut program);
+
         // Extract event handlers, scheduled functions, and MCP tools
         tracing::debug!(
             "About to extract from program with {} namespaces",

@@ -7915,6 +7915,13 @@ impl Compiler {
         self.extract_core_variables(program)
     }
 
+    /// Rewrite the names in a program's meta to the definitions they name,
+    /// without compiling it. Needs the program's core variables.
+    pub fn resolve_meta_names(&self, program: &mut Program) {
+        Resolver::with_registries(self.program.namespaces.clone(), self.core_variables.clone())
+            .resolve_program_meta(program);
+    }
+
     /// Extract all variables marked with core metadata from the program
     /// This creates a registry of core variables that can be auto-imported
     fn extract_core_variables(&mut self, program: &Program) -> CompilerResult<()> {
