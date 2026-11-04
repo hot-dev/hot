@@ -1,0 +1,21 @@
+::brave::integration ns
+meta ["test"]
+
+// Requires BRAVE_API_KEY; skips without it. Read-only: one small search.
+// Run with: hot test --project pkg-integration-brave-search
+
+::ctx ::brave::integration::ctx
+
+test-search
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip(::ctx/UNCONFIGURED) }
+        => {
+            out ::brave::search/search("hot.dev programming language", {count: 3})
+            assert(not(is-err(out)), `search: ${if-err(out, (e) { err-message(e) })}`)
+            assert(gt(length(out.web.results), 0), "should return results")
+            assert(lte(length(out.web.results), 3), "respects count")
+            assert(starts-with(first(out.web.results).url, "http"), "returns URLs")
+        }
+    }
+}

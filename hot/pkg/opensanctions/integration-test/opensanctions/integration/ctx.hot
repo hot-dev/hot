@@ -1,0 +1,24 @@
+::opensanctions::integration::ctx ns
+
+::env ::hot::env
+
+// OPENSANCTIONS_API_KEY enables the /match smoke test, and
+// OPENSANCTIONS_BASE_URL points it at a self-hosted yente. Unset variables
+// are skipped entirely.
+::hot::ctx/set(filter-vals({
+    "opensanctions.api-key": ::env/get("OPENSANCTIONS_API_KEY", ""),
+    "opensanctions.base-url": ::env/get("OPENSANCTIONS_BASE_URL", ""),
+}, (v) { not(is-empty(v)) }))
+
+configured
+meta {doc: """True when an OpenSanctions key is set."""}
+fn (): Bool {
+    is-some(::hot::ctx/get("opensanctions.api-key"))
+}
+
+skip
+meta {doc: """Record a skip and pass."""}
+fn (why: Str): Bool {
+    println(`opensanctions integration: ${why} - skipping`)
+    assert(true, `skipped: ${why}`)
+}

@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.tavily {
+  name: "hot.dev/tavily",
+  version: "0.1.0",
+  hot-min-version: "3.0.2",
+  description: "Tavily API bindings for Hot: web search built for LLM agents, with generated answers, news and finance topics, date and domain filters, and page content extraction.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["ai", "search", "agents", "tavily"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

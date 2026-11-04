@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.exa {
+  name: "hot.dev/exa",
+  version: "0.1.0",
+  hot-min-version: "3.0.2",
+  description: "Exa API bindings for Hot: neural web search with inline page contents, find-similar pages, and clean page text for URLs.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["ai", "search", "agents", "exa"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}
