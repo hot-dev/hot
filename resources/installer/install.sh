@@ -12,8 +12,8 @@
 # in ~/.local/bin and its resources in ~/.local/share/hot (--prefix picks
 # another folder). --system installs for every user of the machine with the
 # macOS or Debian package, which needs sudo. Running as root or in CI, with a
-# package install already on the machine, or for a release from before user
-# installs, defaults to --system.
+# package install already on the machine and no user install, or for a release
+# from before user installs, defaults to --system.
 #
 
 set -eu
@@ -23,9 +23,12 @@ MODE=""
 PREFIX="${HOT_INSTALL_PREFIX:-}"
 MODIFY_PATH=true
 
-# Identifiers of the macOS and Debian packages
+# Identifiers of the macOS and Debian packages. cargo-deb names the Debian
+# package after the hot_cli crate.
 MACOS_PKG_ID="dev.hot.hot.pkg"
-DEB_PKG_NAME="hot"
+DEB_PKG_NAME="hot-cli"
+
+INSTALL_FAILED="Installation failed. To install Hot without sudo, run this again with --user."
 
 # Marks a folder this script installed from the release archive. `hot update`
 # reads it to update that install in place.
@@ -126,8 +129,39 @@ package_installed() {
 package_remove_command() {
     case "$1" in
         macos) echo "sudo rm -rf /usr/local/bin/hot /usr/local/share/hot && sudo pkgutil --forget $MACOS_PKG_ID" ;;
-        linux) echo "sudo dpkg -r $DEB_PKG_NAME" ;;
+        linux) echo "sudo dpkg --purge $DEB_PKG_NAME" ;;
     esac
+}
+
+# Whether this user has an install in ~/.local, from this script or the
+# per-user package
+user_install_exists() {
+    [ -n "${HOME:-}" ] && [ -f "$HOME/.local/share/hot/$RECEIPT" ]
+}
+
+# Whether $1 and $2 are one file. On a merged /usr, /bin/hot is /usr/bin/hot.
+same_file() {
+    [ "$1" -ef "$2" ]
+}
+
+# Set MODE for platform $1 when the command line doesn't choose one
+choose_default_mode() {
+    if [ -z "$SUDO" ]; then
+        # Root, as in a Dockerfile: install for the whole machine.
+        MODE="system"
+    elif [ -n "${CI:-}" ]; then
+        # CI runners have sudo, and later steps expect hot on the system PATH.
+        MODE="system"
+    elif user_install_exists; then
+        # The copy in ~/.local keeps running after a package update, so
+        # update that one even when a package is installed too.
+        MODE="user"
+    elif package_installed "$1" && command -v sudo >/dev/null 2>&1; then
+        MODE="system"
+        echo "Updating the existing system install. Use --user to install for just you."
+    else
+        MODE="user"
+    fi
 }
 
 # Download file
@@ -171,16 +205,16 @@ download_verified() {
 # Install on macOS
 install_macos() {
     echo "Installing Hot..."
-    $SUDO installer -pkg "$1" -target / || error "Installation failed"
+    $SUDO installer -pkg "$1" -target / || error "$INSTALL_FAILED"
 }
 
 # Install on Linux
 install_linux() {
     echo "Installing Hot..."
     if command -v dpkg >/dev/null 2>&1; then
-        $SUDO dpkg -i "$1" || error "Installation failed"
+        $SUDO dpkg -i "$1" || error "$INSTALL_FAILED"
     else
-        $SUDO apt install -y "$1" || error "Installation failed"
+        $SUDO apt install -y "$1" || error "$INSTALL_FAILED"
     fi
 }
 
@@ -330,17 +364,8 @@ main() {
     if [ -z "$MODE" ]; then
         if [ -n "$PREFIX" ]; then
             MODE="user"
-        elif [ -z "$SUDO" ]; then
-            # Root, as in a Dockerfile: install for the whole machine.
-            MODE="system"
-        elif [ -n "${CI:-}" ]; then
-            # CI runners have sudo, and later steps expect hot on the system PATH.
-            MODE="system"
-        elif package_installed "$os"; then
-            MODE="system"
-            echo "Updating the existing system install. Use --user to install for just you."
         else
-            MODE="user"
+            choose_default_mode "$os"
         fi
     fi
 
@@ -402,14 +427,14 @@ main() {
 
     if [ "$MODE" = "user" ]; then
         add_to_path "$bin_dir"
-        if [ -n "$other_hot" ] && [ "$other_hot" != "$bin_dir/hot" ]; then
-            echo ""
-            echo "Another hot is installed at $other_hot."
-            echo "Which one runs depends on the order of your PATH."
-            if package_installed "$os"; then
-                echo "To remove the system install:"
-                echo "  $(package_remove_command "$os")"
-            fi
+    fi
+    if [ -n "$other_hot" ] && ! same_file "$other_hot" "$bin_dir/hot"; then
+        echo ""
+        echo "Another hot is installed at $other_hot."
+        echo "Which one runs depends on the order of your PATH."
+        if [ "$MODE" = "user" ] && package_installed "$os"; then
+            echo "To remove the system install:"
+            echo "  $(package_remove_command "$os")"
         fi
     fi
 

@@ -28,7 +28,7 @@ curl -fsSL https://get.hot.dev/install.sh | sh -s -- --system
 
 The installer installs for the whole machine on its own when it runs as root
 (as in a Dockerfile), in CI, or when a package install of Hot is already on the
-machine. `--prefix <folder>` installs for your user somewhere other than
+machine and you have no user install. `--prefix <folder>` installs for your user somewhere other than
 `~/.local`.
 
 ### Windows (PowerShell)
