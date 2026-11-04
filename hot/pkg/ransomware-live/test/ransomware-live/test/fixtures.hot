@@ -1,0 +1,77 @@
+::ransomware-live::test::fixtures ns
+
+// Trimmed real v2 responses (retrieved 4 Nov 2026), except where noted. Victim
+// names, domains, descriptions and leak-page URLs are replaced with
+// placeholders: the real values are unverified claims by criminal groups.
+
+// GET /v2/recentvictims (first item)
+RECENT_VICTIM {
+  activity: "Manufacturing",
+  attackdate: "2026-11-04T00:54:13.250999+00:00",
+  claim_url: "http://leak-page.invalid/post/1",
+  country: "SI",
+  data_size: null,
+  description: "Placeholder description",
+  discovered: "2026-11-04T00:54:26.315826+00:00",
+  domain: "",
+  group: "Aoqin",
+  press: null,
+  ransom: null,
+  screenshot: "https://images.ransomware.live/placeholder.png",
+  url: "https://www.ransomware.live/id/placeholder",
+  victim: "Example Manufacturing d.o.o."
+}
+
+// GET /v2/countryvictims/LU (first item): older field names than the other endpoints
+COUNTRY_VICTIM {
+  activity: "Financial Services",
+  country: "LU",
+  data_size: null,
+  description: "Placeholder description",
+  discovered: "2026-09-18T15:25:08.389430+00:00",
+  group_name: "N0n",
+  post_title: "Example Finance S.A.",
+  post_url: "http://leak-page.invalid/post/2",
+  published: "2026-09-18T15:24:52.166408+00:00",
+  ransom: null,
+  website: "example.lu"
+}
+
+// GET /v2/group/lockbit3, trimmed
+GROUP {
+  added_date: "2022-06-29",
+  altname: null,
+  description: "LockBit, also recognized as LockBit Black or Lockbit 3.0",
+  locations: [],
+  name: "lockbit3",
+  tools: [],
+  ttps: [],
+  url: "https://www.ransomware.live/group/lockbit3"
+}
+
+// GET /v2/group/no-such-group-xyz (HTTP 404)
+GROUP_NOT_FOUND {error: "Group 'no-such-group-xyz' not found."}
+
+// GET https://api-pro.ransomware.live/validate without a key (HTTP 401)
+PRO_MISSING_KEY {message: "Missing X-API-KEY header"}
+
+// Not a real response: no key was available. Built from the field list in
+// https://api-pro.ransomware.live/swagger.json, which doesn't describe the
+// response envelope.
+PRO_VICTIM {
+  victim: "Example Corp",
+  group: "examplegroup",
+  attackdate: "2026-11-01",
+  discovered: "2026-11-02",
+  country: "US",
+  activity: "Healthcare",
+  website: "example.com",
+  screenshot: "",
+  infostealer: "",
+  press: null,
+  id: "RXhhbXBsZSBDb3JwQGV4YW1wbGVncm91cA==",
+  permalink: "https://www.ransomware.live/id/RXhhbXBsZSBDb3JwQGV4YW1wbGVncm91cA=="
+}
+
+// Not a real response, as above.
+PRO_GROUP {group: "examplegroup", altname: null, victims: 3}

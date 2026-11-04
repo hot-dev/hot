@@ -1,0 +1,71 @@
+::regulations-gov::test::fixtures ns
+
+// Trimmed real responses, retrieved 4 Nov 2026 with the public DEMO_KEY.
+
+// GET /documents?filter[docketId]=FAA-2018-1084&page[size]=5
+DOCUMENTS_PAGE {
+  data: [
+    {
+      type: "documents",
+      id: "FAA-2018-1084-0001",
+      attributes: {
+        agencyId: "FAA",
+        objectId: "0900006483a6cba3",
+        frDocNum: "2019-00765",
+        documentType: "Rule",
+        withdrawn: false,
+        commentEndDate: "2019-03-16T03:59:59Z",
+        lastModifiedDate: "2019-04-20T01:01:22Z",
+        postedDate: "2019-02-13T05:00:00Z",
+        title: "External Marking Requirement for Small Unmanned Aircraft",
+        docketId: "FAA-2018-1084",
+        subtype: "Interim Final Rule"
+      }
+    }
+  ],
+  meta: {
+    hasNextPage: false,
+    hasPreviousPage: false,
+    numberOfElements: 2,
+    pageNumber: 1,
+    pageSize: 5,
+    totalElements: 2,
+    totalPages: 1,
+    firstPage: true,
+    lastPage: true
+  }
+}
+
+// GET /comments?filter[commentOnId]=0900006483a6cba3&page[size]=5&sort=lastModifiedDate,documentId
+// Comment titles carry commenters' names, so they are left out here.
+COMMENTS_PAGE {
+  data: [
+    {
+      type: "comments",
+      id: "FAA-2018-1084-0003",
+      attributes: {agencyId: "FAA", objectId: "0900006483a6815d", documentType: "Public Submission", lastModifiedDate: "2019-02-13T16:21:20Z"}
+    },
+    {
+      type: "comments",
+      id: "FAA-2018-1084-0004",
+      attributes: {agencyId: "FAA", objectId: "0900006483a6e222", documentType: "Public Submission", lastModifiedDate: "2019-02-13T18:58:31Z"}
+    }
+  ],
+  meta: {
+    hasNextPage: true,
+    hasPreviousPage: false,
+    numberOfElements: 5,
+    pageNumber: 1,
+    pageSize: 5,
+    totalElements: 418,
+    totalPages: 40,
+    firstPage: true,
+    lastPage: false
+  }
+}
+
+// GET /documents/FAA-2018-1084-9999 (HTTP 404)
+NOT_FOUND {errors: [{status: "404", title: "The document with the specified ID could not be found."}]}
+
+// GET /dockets/FAA-2018-1084 with no key (HTTP 403, from api.data.gov)
+NO_KEY {error: {code: "API_KEY_MISSING", message: "No api_key was supplied. Get one at https://api.regulations.gov:443"}}

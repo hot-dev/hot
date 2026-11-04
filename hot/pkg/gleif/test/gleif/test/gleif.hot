@@ -105,3 +105,16 @@ fn () {
     assert-eq(["p1-a", "p1-b", "p2-a", "p2-b", "p3-a", "p3-b"], ::gleif/collect(fetch, {}, 100))
     assert-eq(["p1-a", "p1-b", "p2-a"], ::gleif/collect(fetch, {}, 3))
 }
+
+test-collect-returns-an-err-from-a-later-page
+meta ["test"]
+fn () {
+    fetch (o) {
+      cond {
+        eq(o.page, 1) => { {data: ["a"], meta: {pagination: {currentPage: 1, lastPage: 2}}} }
+        => { err("HTTP 429") }
+      }
+    }
+
+    assert(is-err(::gleif/collect(fetch, {}, 100)), "a 429 mid-way comes back as the Err")
+}

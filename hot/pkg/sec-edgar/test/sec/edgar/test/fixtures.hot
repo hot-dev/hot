@@ -37,3 +37,670 @@ SEC_TICKERS {
   "2": {cik_str: 789019, ticker: "MSFT", title: "MICROSOFT CORP"},
   "3": {cik_str: 1418121, ticker: "APLE", title: "Apple Hospitality REIT, Inc."}
 }
+
+// Form D fixtures (retrieved 4 Nov 2026).
+
+// GET https://www.sec.gov/Archives/edgar/data/2163169/000216316926000001/primary_doc.xml
+// A new filing with no sale yet and an amount in dollars.
+FORM_D_NEW """
+<?xml version="1.0"?>
+<edgarSubmission>
+
+    <schemaVersion>X0708</schemaVersion>
+
+    <submissionType>D</submissionType>
+
+    <testOrLive>LIVE</testOrLive>
+
+    <primaryIssuer>
+        <cik>0002163169</cik>
+        <entityName>Doliver Palmstar SPV, LLC</entityName>
+        <issuerAddress>
+            <street1>6363 WOODWAY DR</street1>
+            <street2>STE 763</street2>
+            <city>HOUSTON</city>
+            <stateOrCountry>TX</stateOrCountry>
+            <stateOrCountryDescription>TEXAS</stateOrCountryDescription>
+            <zipCode>77057</zipCode>
+        </issuerAddress>
+        <issuerPhoneNumber>7139170022</issuerPhoneNumber>
+        <jurisdictionOfInc>TEXAS</jurisdictionOfInc>
+        <issuerPreviousNameList>
+            <value>None</value>
+        </issuerPreviousNameList>
+        <edgarPreviousNameList>
+            <value>None</value>
+        </edgarPreviousNameList>
+        <entityType>Limited Liability Company</entityType>
+        <yearOfInc>
+            <withinFiveYears>true</withinFiveYears>
+            <value>2026</value>
+        </yearOfInc>
+    </primaryIssuer>
+
+    <relatedPersonsList>
+        <relatedPersonInfo>
+            <relatedPersonName>
+                <firstName>Ralph</firstName>
+                <middleName>Denneth</middleName>
+                <lastName>McBride</lastName>
+            </relatedPersonName>
+            <relatedPersonAddress>
+                <street1>6363 Woodway Dr</street1>
+                <street2>Ste 763</street2>
+                <city>Houston</city>
+                <stateOrCountry>TX</stateOrCountry>
+                <stateOrCountryDescription>TEXAS</stateOrCountryDescription>
+                <zipCode>77057</zipCode>
+            </relatedPersonAddress>
+            <relatedPersonRelationshipList>
+                <relationship>Executive Officer</relationship>
+            </relatedPersonRelationshipList>
+            <relationshipClarification>Manager of Doliver Opportunity Manager, LLC, general partner of Issuer</relationshipClarification>
+        </relatedPersonInfo>
+    </relatedPersonsList>
+
+    <offeringData>
+        <industryGroup>
+            <industryGroupType>Pooled Investment Fund</industryGroupType>
+            <investmentFundInfo>
+                <investmentFundType>Private Equity Fund</investmentFundType>
+                <is40Act>false</is40Act>
+            </investmentFundInfo>
+        </industryGroup>
+        <issuerSize>
+            <revenueRange>Decline to Disclose</revenueRange>
+        </issuerSize>
+        <federalExemptionsExclusions>
+            <item>06b</item>
+            <item>3C</item>
+            <item>3C.1</item>
+        </federalExemptionsExclusions>
+        <typeOfFiling>
+            <newOrAmendment>
+                <isAmendment>false</isAmendment>
+            </newOrAmendment>
+            <dateOfFirstSale>
+                <yetToOccur>true</yetToOccur>
+            </dateOfFirstSale>
+        </typeOfFiling>
+        <durationOfOffering>
+            <moreThanOneYear>false</moreThanOneYear>
+        </durationOfOffering>
+        <typesOfSecuritiesOffered>
+            <isPooledInvestmentFundType>true</isPooledInvestmentFundType>
+        </typesOfSecuritiesOffered>
+        <businessCombinationTransaction>
+            <isBusinessCombinationTransaction>false</isBusinessCombinationTransaction>
+            <clarificationOfResponse></clarificationOfResponse>
+        </businessCombinationTransaction>
+        <minimumInvestmentAccepted>100000</minimumInvestmentAccepted>
+        <salesCompensationList></salesCompensationList>
+        <offeringSalesAmounts>
+            <totalOfferingAmount>8000000</totalOfferingAmount>
+            <totalAmountSold>0</totalAmountSold>
+            <totalRemaining>8000000</totalRemaining>
+            <clarificationOfResponse></clarificationOfResponse>
+        </offeringSalesAmounts>
+        <investors>
+            <hasNonAccreditedInvestors>false</hasNonAccreditedInvestors>
+            <totalNumberAlreadyInvested>0</totalNumberAlreadyInvested>
+        </investors>
+        <salesCommissionsFindersFees>
+            <salesCommissions>
+                <dollarAmount>0</dollarAmount>
+            </salesCommissions>
+            <findersFees>
+                <dollarAmount>0</dollarAmount>
+            </findersFees>
+            <clarificationOfResponse></clarificationOfResponse>
+        </salesCommissionsFindersFees>
+        <useOfProceeds>
+            <grossProceedsUsed>
+                <dollarAmount>0</dollarAmount>
+            </grossProceedsUsed>
+            <clarificationOfResponse></clarificationOfResponse>
+        </useOfProceeds>
+        <signatureBlock>
+            <authorizedRepresentative>false</authorizedRepresentative>
+            <signature>
+                <issuerName>Doliver Palmstar SPV, LLC</issuerName>
+                <signatureName>Ralph McBride</signatureName>
+                <nameOfSigner>Ralph McBride</nameOfSigner>
+                <signatureTitle>Manager of Doliver Opportunity Manager, LLC, general partner</signatureTitle>
+                <signatureDate>2026-10-30</signatureDate>
+            </signature>
+        </signatureBlock>
+    </offeringData>
+</edgarSubmission>
+"""
+
+// GET https://www.sec.gov/Archives/edgar/data/2162876/000216287626000002/primary_doc.xml
+// (two of five related persons). An amendment with a sales compensation recipient.
+FORM_D_AMENDMENT """
+<?xml version="1.0"?>
+<edgarSubmission>
+
+    <schemaVersion>X0708</schemaVersion>
+
+    <submissionType>D/A</submissionType>
+
+    <testOrLive>LIVE</testOrLive>
+
+    <primaryIssuer>
+        <cik>0002162876</cik>
+        <entityName>Ancora 2030 V1, a sub-fund of Ancora ICAV</entityName>
+        <issuerAddress>
+            <street1>118 PICCADILLY</street1>
+            <street2>OFFICE 105</street2>
+            <city>LONDON</city>
+            <stateOrCountry>X0</stateOrCountry>
+            <stateOrCountryDescription>UNITED KINGDOM</stateOrCountryDescription>
+            <zipCode>W1J 7NW</zipCode>
+        </issuerAddress>
+        <issuerPhoneNumber>00442075696749</issuerPhoneNumber>
+        <jurisdictionOfInc>IRELAND</jurisdictionOfInc>
+        <issuerPreviousNameList>
+            <value>None</value>
+        </issuerPreviousNameList>
+        <edgarPreviousNameList>
+            <value>None</value>
+        </edgarPreviousNameList>
+        <entityType>Other</entityType>
+        <entityTypeOtherDesc>Irish Collective Asset-Management Vehicle</entityTypeOtherDesc>
+        <yearOfInc>
+            <withinFiveYears>true</withinFiveYears>
+            <value>2026</value>
+        </yearOfInc>
+    </primaryIssuer>
+
+    <relatedPersonsList>
+        <relatedPersonInfo>
+            <relatedPersonName>
+                <firstName>Anthony</firstName>
+                <middleName>Dominique Christian</middleName>
+                <lastName>Duyck</lastName>
+            </relatedPersonName>
+            <relatedPersonAddress>
+                <street1>Pembroke Hall</street1>
+                <street2>38/39 Fitzwilliam Square West</street2>
+                <city>Dublin</city>
+                <stateOrCountry>L2</stateOrCountry>
+                <stateOrCountryDescription>IRELAND</stateOrCountryDescription>
+                <zipCode>2</zipCode>
+            </relatedPersonAddress>
+            <relatedPersonRelationshipList>
+                <relationship>Director</relationship>
+            </relatedPersonRelationshipList>
+            <relationshipClarification></relationshipClarification>
+        </relatedPersonInfo>
+        <relatedPersonInfo>
+            <relatedPersonName>
+                <firstName>Conor</firstName>
+                <lastName>Gilsenan</lastName>
+            </relatedPersonName>
+            <relatedPersonAddress>
+                <street1>Pembroke Hall</street1>
+                <street2>38/39 Fitzwilliam Square West</street2>
+                <city>Dublin</city>
+                <stateOrCountry>L2</stateOrCountry>
+                <stateOrCountryDescription>IRELAND</stateOrCountryDescription>
+                <zipCode>2</zipCode>
+            </relatedPersonAddress>
+            <relatedPersonRelationshipList>
+                <relationship>Director</relationship>
+            </relatedPersonRelationshipList>
+            <relationshipClarification></relationshipClarification>
+        </relatedPersonInfo>
+    </relatedPersonsList>
+
+    <offeringData>
+        <industryGroup>
+            <industryGroupType>Pooled Investment Fund</industryGroupType>
+            <investmentFundInfo>
+                <investmentFundType>Other Investment Fund</investmentFundType>
+                <is40Act>false</is40Act>
+            </investmentFundInfo>
+        </industryGroup>
+        <issuerSize>
+            <aggregateNetAssetValueRange>Decline to Disclose</aggregateNetAssetValueRange>
+        </issuerSize>
+        <federalExemptionsExclusions>
+            <item>06b</item>
+            <item>3C</item>
+            <item>3C.1</item>
+        </federalExemptionsExclusions>
+        <typeOfFiling>
+            <newOrAmendment>
+                <isAmendment>true</isAmendment>
+                <previousAccessionNumber>0002162876-26-000001</previousAccessionNumber>
+            </newOrAmendment>
+            <dateOfFirstSale>
+                <value>2026-10-15</value>
+            </dateOfFirstSale>
+        </typeOfFiling>
+        <durationOfOffering>
+            <moreThanOneYear>false</moreThanOneYear>
+        </durationOfOffering>
+        <typesOfSecuritiesOffered>
+            <isPooledInvestmentFundType>true</isPooledInvestmentFundType>
+        </typesOfSecuritiesOffered>
+        <businessCombinationTransaction>
+            <isBusinessCombinationTransaction>false</isBusinessCombinationTransaction>
+            <clarificationOfResponse></clarificationOfResponse>
+        </businessCombinationTransaction>
+        <minimumInvestmentAccepted>125000</minimumInvestmentAccepted>
+        <salesCompensationList>
+            <recipient>
+                <recipientName>Butler Capital Investments, LLC</recipientName>
+                <recipientCRDNumber>114242</recipientCRDNumber>
+                <associatedBDName>Duncan Winfield Riefler</associatedBDName>
+                <associatedBDCRDNumber>1669942</associatedBDCRDNumber>
+                <recipientAddress>
+                    <street1>326 CENTRE ISLAND ROAD</street1>
+                    <city>OYSTER BAY</city>
+                    <stateOrCountry>NY</stateOrCountry>
+                    <stateOrCountryDescription>NEW YORK</stateOrCountryDescription>
+                    <zipCode>11771</zipCode>
+                </recipientAddress>
+                <statesOfSolicitationList>
+                    <state>NY</state>
+                    <description>NEW YORK</description>
+                </statesOfSolicitationList>
+                <foreignSolicitation>false</foreignSolicitation>
+            </recipient>
+        </salesCompensationList>
+        <offeringSalesAmounts>
+            <totalOfferingAmount>Indefinite</totalOfferingAmount>
+            <totalAmountSold>1000000</totalAmountSold>
+            <totalRemaining>Indefinite</totalRemaining>
+            <clarificationOfResponse></clarificationOfResponse>
+        </offeringSalesAmounts>
+        <investors>
+            <hasNonAccreditedInvestors>false</hasNonAccreditedInvestors>
+            <totalNumberAlreadyInvested>1</totalNumberAlreadyInvested>
+        </investors>
+        <salesCommissionsFindersFees>
+            <salesCommissions>
+                <dollarAmount>14000</dollarAmount>
+                <isEstimate>true</isEstimate>
+            </salesCommissions>
+            <findersFees>
+                <dollarAmount>0</dollarAmount>
+            </findersFees>
+            <clarificationOfResponse></clarificationOfResponse>
+        </salesCommissionsFindersFees>
+        <useOfProceeds>
+            <grossProceedsUsed>
+                <dollarAmount>0</dollarAmount>
+            </grossProceedsUsed>
+            <clarificationOfResponse></clarificationOfResponse>
+        </useOfProceeds>
+        <signatureBlock>
+            <authorizedRepresentative>false</authorizedRepresentative>
+            <signature>
+                <issuerName>Ancora 2030 V1, a sub-fund of Ancora ICAV</issuerName>
+                <signatureName>Nadir Afzal</signatureName>
+                <nameOfSigner>Nadir Afzal</nameOfSigner>
+                <signatureTitle>COO</signatureTitle>
+                <signatureDate>2026-10-29</signatureDate>
+            </signature>
+        </signatureBlock>
+    </offeringData>
+</edgarSubmission>
+"""
+
+// GET https://www.sec.gov/Archives/edgar/data/1806777/000208111126000183/primary_doc.xml
+// (one related person, two recipients). Two issuers.
+FORM_D_TWO_ISSUERS """
+<?xml version="1.0"?>
+<edgarSubmission>
+
+    <schemaVersion>X0708</schemaVersion>
+
+    <submissionType>D/A</submissionType>
+
+    <testOrLive>LIVE</testOrLive>
+
+    <primaryIssuer>
+        <cik>0001806778</cik>
+        <entityName>Adams Street Private Income Fund LP</entityName>
+        <issuerAddress>
+            <street1>C/O ADAMS STREET PARTNERS, LLC</street1>
+            <street2>ONE NORTH WACKER DRIVE, SUITE 2700</street2>
+            <city>CHICAGO</city>
+            <stateOrCountry>IL</stateOrCountry>
+            <stateOrCountryDescription>ILLINOIS</stateOrCountryDescription>
+            <zipCode>60606</zipCode>
+        </issuerAddress>
+        <issuerPhoneNumber>312-553-7890</issuerPhoneNumber>
+        <jurisdictionOfInc>DELAWARE</jurisdictionOfInc>
+        <issuerPreviousNameList>
+            <value>None</value>
+        </issuerPreviousNameList>
+        <edgarPreviousNameList>
+            <value>None</value>
+        </edgarPreviousNameList>
+        <entityType>Limited Partnership</entityType>
+        <yearOfInc>
+            <overFiveYears>true</overFiveYears>
+        </yearOfInc>
+    </primaryIssuer>
+
+    <issuerList>
+        <issuer>
+            <cik>0001806777</cik>
+            <entityName>ASP (Feeder) Private Income Fund LP</entityName>
+            <issuerAddress>
+                <street1>C/O ADAMS STREET PARTNERS, LLC</street1>
+                <street2>ONE NORTH WACKER DRIVE, SUITE 2700</street2>
+                <city>CHICAGO</city>
+                <stateOrCountry>IL</stateOrCountry>
+                <stateOrCountryDescription>ILLINOIS</stateOrCountryDescription>
+                <zipCode>60606</zipCode>
+            </issuerAddress>
+            <issuerPhoneNumber>312-553-7890</issuerPhoneNumber>
+            <jurisdictionOfInc>DELAWARE</jurisdictionOfInc>
+            <issuerPreviousNameList>
+                <value>None</value>
+            </issuerPreviousNameList>
+            <edgarPreviousNameList>
+                <value>None</value>
+            </edgarPreviousNameList>
+            <entityType>Limited Partnership</entityType>
+            <yearOfInc>
+                <overFiveYears>true</overFiveYears>
+            </yearOfInc>
+        </issuer>
+    </issuerList>
+
+    <relatedPersonsList>
+        <relatedPersonInfo>
+            <relatedPersonName>
+                <firstName>N/A</firstName>
+                <lastName>ASP PIF GP Management LP</lastName>
+            </relatedPersonName>
+            <relatedPersonAddress>
+                <street1>c/o ADAMS STREET PARTNERS, LLC</street1>
+                <street2>ONE NORTH WACKER DRIVE, SUITE 2700</street2>
+                <city>CHICAGO</city>
+                <stateOrCountry>IL</stateOrCountry>
+                <stateOrCountryDescription>ILLINOIS</stateOrCountryDescription>
+                <zipCode>60606</zipCode>
+            </relatedPersonAddress>
+            <relatedPersonRelationshipList>
+                <relationship>Director</relationship>
+            </relatedPersonRelationshipList>
+            <relationshipClarification>General partner of the Issuers (the &quot;General Partner&quot;)</relationshipClarification>
+        </relatedPersonInfo>
+    </relatedPersonsList>
+
+    <offeringData>
+        <industryGroup>
+            <industryGroupType>Pooled Investment Fund</industryGroupType>
+            <investmentFundInfo>
+                <investmentFundType>Other Investment Fund</investmentFundType>
+                <is40Act>false</is40Act>
+            </investmentFundInfo>
+        </industryGroup>
+        <issuerSize>
+            <aggregateNetAssetValueRange>Decline to Disclose</aggregateNetAssetValueRange>
+        </issuerSize>
+        <federalExemptionsExclusions>
+            <item>06b</item>
+            <item>3C</item>
+            <item>3C.7</item>
+        </federalExemptionsExclusions>
+        <typeOfFiling>
+            <newOrAmendment>
+                <isAmendment>true</isAmendment>
+                <previousAccessionNumber>0002081111-26-000162</previousAccessionNumber>
+            </newOrAmendment>
+            <dateOfFirstSale>
+                <value>2020-03-17</value>
+            </dateOfFirstSale>
+        </typeOfFiling>
+        <durationOfOffering>
+            <moreThanOneYear>true</moreThanOneYear>
+        </durationOfOffering>
+        <typesOfSecuritiesOffered>
+            <isOtherType>true</isOtherType>
+            <descriptionOfOtherType>Limited Partnership Interests</descriptionOfOtherType>
+        </typesOfSecuritiesOffered>
+        <businessCombinationTransaction>
+            <isBusinessCombinationTransaction>false</isBusinessCombinationTransaction>
+            <clarificationOfResponse></clarificationOfResponse>
+        </businessCombinationTransaction>
+        <minimumInvestmentAccepted>0</minimumInvestmentAccepted>
+        <salesCompensationList>
+            <recipient>
+                <recipientName>ALPS Advisory (HK) Ltd.</recipientName>
+                <recipientCRDNumber>None</recipientCRDNumber>
+                <associatedBDName>None</associatedBDName>
+                <associatedBDCRDNumber>None</associatedBDCRDNumber>
+                <recipientAddress>
+                    <street1>15/F The Wellington</street1>
+                    <street2>198 Wellington Street</street2>
+                    <city>Central</city>
+                    <stateOrCountry>K3</stateOrCountry>
+                    <stateOrCountryDescription>HONG KONG</stateOrCountryDescription>
+                    <zipCode>None</zipCode>
+                </recipientAddress>
+                <statesOfSolicitationList></statesOfSolicitationList>
+                <foreignSolicitation>true</foreignSolicitation>
+            </recipient>
+            <recipient>
+                <recipientName>Allen Partners Pty Ltd</recipientName>
+                <recipientCRDNumber>None</recipientCRDNumber>
+                <associatedBDName>None</associatedBDName>
+                <associatedBDCRDNumber>None</associatedBDCRDNumber>
+                <recipientAddress>
+                    <street1>Level 16, 1 Macquarie Place</street1>
+                    <city>Sydney</city>
+                    <stateOrCountry>C3</stateOrCountry>
+                    <stateOrCountryDescription>AUSTRALIA</stateOrCountryDescription>
+                    <zipCode>NSW 2000</zipCode>
+                </recipientAddress>
+                <statesOfSolicitationList></statesOfSolicitationList>
+                <foreignSolicitation>true</foreignSolicitation>
+            </recipient>
+        </salesCompensationList>
+        <offeringSalesAmounts>
+            <totalOfferingAmount>Indefinite</totalOfferingAmount>
+            <totalAmountSold>655554456</totalAmountSold>
+            <totalRemaining>Indefinite</totalRemaining>
+            <clarificationOfResponse></clarificationOfResponse>
+        </offeringSalesAmounts>
+        <investors>
+            <hasNonAccreditedInvestors>false</hasNonAccreditedInvestors>
+            <totalNumberAlreadyInvested>77</totalNumberAlreadyInvested>
+        </investors>
+        <salesCommissionsFindersFees>
+            <salesCommissions>
+                <dollarAmount>8433941</dollarAmount>
+                <isEstimate>true</isEstimate>
+            </salesCommissions>
+            <findersFees>
+                <dollarAmount>0</dollarAmount>
+            </findersFees>
+            <clarificationOfResponse>Each entity listed in Item 12 will receive a fee for investors that such entity introduces to the Issuers that invest in the Issuers in an amount equal to a percentage of either (1) management fees payable by the Issuers or (2) investors' commitments.</clarificationOfResponse>
+        </salesCommissionsFindersFees>
+        <useOfProceeds>
+            <grossProceedsUsed>
+                <dollarAmount>0</dollarAmount>
+            </grossProceedsUsed>
+            <clarificationOfResponse>Adams Street Partners, LLC or an affiliate thereof will receive a fee for management services. Amount to be paid, number of years to be paid, and extent to be paid out of the adjusted gross proceeds unknown at this time.</clarificationOfResponse>
+        </useOfProceeds>
+        <signatureBlock>
+            <authorizedRepresentative>true</authorizedRepresentative>
+            <signature>
+                <issuerName>Adams Street Private Income Fund LP</issuerName>
+                <signatureName>/s/ Eric R. Mansell</signatureName>
+                <nameOfSigner>Eric R. Mansell</nameOfSigner>
+                <signatureTitle>EVP of the member of the GP of the GP</signatureTitle>
+                <signatureDate>2026-09-28</signatureDate>
+            </signature>
+        </signatureBlock>
+    </offeringData>
+</edgarSubmission>
+"""
+
+// GET https://efts.sec.gov/LATEST/search-index?forms=D&dateRange=custom&startdt=2026-10-20&enddt=2026-10-31
+// (two of the hundred hits)
+FORM_D_SEARCH {
+  "hits": {
+    "total": {
+      "value": 2184,
+      "relation": "eq"
+    },
+    "hits": [
+      {
+        "_index": "edgar_file",
+        "_id": "0002163169-26-000001:primary_doc.xml",
+        "_score": null,
+        "_source": {
+          "ciks": [
+            "0002163169"
+          ],
+          "period_ending": null,
+          "file_num": [
+            "021-603162"
+          ],
+          "display_names": [
+            "Doliver Palmstar SPV, LLC  (CIK 0002163169)"
+          ],
+          "xsl": "xslFormDX01",
+          "schema_version": "X0708",
+          "sequence": 1,
+          "root_forms": [
+            "D"
+          ],
+          "file_date": "2026-10-30",
+          "biz_states": [
+            "TX"
+          ],
+          "sics": [],
+          "form": "D",
+          "adsh": "0002163169-26-000001",
+          "film_num": [
+            "261508569"
+          ],
+          "biz_locations": [
+            "Houston, TX"
+          ],
+          "file_type": "D",
+          "ma_i_individual": null,
+          "file_description": null,
+          "inc_states": [
+            "TX"
+          ],
+          "items": [
+            "06B",
+            "3C",
+            "3C.1"
+          ]
+        },
+        "sort": [
+          1793318400000,
+          "0002163169-26-000001:primary_doc.xml"
+        ]
+      },
+      {
+        "_index": "edgar_file",
+        "_id": "0002162876-26-000002:primary_doc.xml",
+        "_score": null,
+        "_source": {
+          "ciks": [
+            "0002162876"
+          ],
+          "period_ending": null,
+          "file_num": [
+            "021-603017"
+          ],
+          "display_names": [
+            "Ancora 2030 V1, a sub-fund of Ancora ICAV  (CIK 0002162876)"
+          ],
+          "xsl": "xslFormDX01",
+          "schema_version": "X0708",
+          "sequence": 1,
+          "root_forms": [
+            "D"
+          ],
+          "file_date": "2026-10-30",
+          "biz_states": [],
+          "sics": [],
+          "form": "D/A",
+          "adsh": "0002162876-26-000002",
+          "film_num": [
+            "261503680"
+          ],
+          "biz_locations": [
+            "London"
+          ],
+          "file_type": "D/A",
+          "ma_i_individual": null,
+          "file_description": null,
+          "inc_states": [
+            "L2"
+          ],
+          "items": [
+            "06B",
+            "3C",
+            "3C.1"
+          ]
+        },
+        "sort": [
+          1793318400000,
+          "0002162876-26-000002:primary_doc.xml"
+        ]
+      }
+    ]
+  }
+}
+
+// GET https://data.sec.gov/submissions/CIK0002162876.json (trimmed)
+FORM_D_SUBMISSIONS {
+  "cik": "0002162876",
+  "name": "Ancora 2030 V1, a sub-fund of Ancora ICAV",
+  "filings": {
+    "recent": {
+      "accessionNumber": [
+        "0002162876-26-000002",
+        "0002162876-26-000001"
+      ],
+      "filingDate": [
+        "2026-10-30",
+        "2026-10-30"
+      ],
+      "form": [
+        "D/A",
+        "D"
+      ],
+      "primaryDocument": [
+        "xslFormDX01/primary_doc.xml",
+        "xslFormDX01/primary_doc.xml"
+      ]
+    },
+    "files": []
+  }
+}
+
+// The zip links as they appear on
+// https://www.sec.gov/data-research/sec-markets-data/form-d-data-sets
+FORM_D_DATA_SETS_HTML """
+<a href="/files/datastandardsinnovation/data/form-d-data-sets/2026q3_d.zip" download>2026 Q3</a>
+<a href="/files/structureddata/data/form-d-data-sets/2026q1_d.zip" download>2026 Q1</a>
+<a href="/files/structureddata/data/form-d-data-sets/2012q1_d.zip" download>2012 Q1</a>
+<a href="/files/structureddata/data/form-d-data-sets/2010q3_d_0.zip" download>2010 Q3</a>
+"""
+
+// The header and one row of each table for accession 0001104659-26-112421 in
+// https://www.sec.gov/files/datastandardsinnovation/data/form-d-data-sets/2026q3_d.zip
+FORM_D_TSV {
+  FORMDSUBMISSION: "ACCESSIONNUMBER\tFILE_NUM\tFILING_DATE\tSIC_CODE\tSCHEMAVERSION\tSUBMISSIONTYPE\tTESTORLIVE\tOVER100PERSONSFLAG\tOVER100ISSUERFLAG\n0001104659-26-112421\t021-599503               \t30-SEP-2026\t\tX0708\tD\tLIVE\t\t\n",
+  ISSUERS: "ACCESSIONNUMBER\tIS_PRIMARYISSUER_FLAG\tISSUER_SEQ_KEY\tCIK\tENTITYNAME\tSTREET1\tSTREET2\tCITY\tSTATEORCOUNTRY\tSTATEORCOUNTRYDESCRIPTION\tZIPCODE\tISSUERPHONENUMBER\tJURISDICTIONOFINC\tISSUER_PREVIOUSNAME_1\tISSUER_PREVIOUSNAME_2\tISSUER_PREVIOUSNAME_3\tEDGAR_PREVIOUSNAME_1\tEDGAR_PREVIOUSNAME_2\tEDGAR_PREVIOUSNAME_3\tENTITYTYPE\tENTITYTYPEOTHERDESC\tYEAROFINC_TIMESPAN_CHOICE\tYEAROFINC_VALUE_ENTERED\n0001104659-26-112421\tYES\t101\t0002122354\tThird Point Private Capital Income Fund\t55 HUDSON YARDS\t51ST FLOOR\tNEW YORK\tNY\tNEW YORK\t10001\t212-715-3880\tDELAWARE\t\t\t\t\t\t\tOther\tOther - Statutory Trust\twithinFiveYears\t2025\n",
+  OFFERING: "ACCESSIONNUMBER\tINDUSTRYGROUPTYPE\tINVESTMENTFUNDTYPE\tIS40ACT\tREVENUERANGE\tAGGREGATENETASSETVALUERANGE\tFEDERALEXEMPTIONS_ITEMS_LIST\tISAMENDMENT\tPREVIOUSACCESSIONNUMBER\tSALE_DATE\tYETTOOCCUR\tMORETHANONEYEAR\tISEQUITYTYPE\tISDEBTTYPE\tISOPTIONTOACQUIRETYPE\tISSECURITYTOBEACQUIREDTYPE\tISPOOLEDINVESTMENTFUNDTYPE\tISTENANTINCOMMONTYPE\tISMINERALPROPERTYTYPE\tISOTHERTYPE\tDESCRIPTIONOFOTHERTYPE\tISBUSINESSCOMBINATIONTRANS\tBUSCOMBCLARIFICATIONOFRESP\tMINIMUMINVESTMENTACCEPTED\tOVER100RECIPIENTFLAG\tTOTALOFFERINGAMOUNT\tTOTALAMOUNTSOLD\tTOTALREMAINING\tSALESAMTCLARIFICATIONOFRESP\tHASNONACCREDITEDINVESTORS\tNUMBERNONACCREDITEDINVESTORS\tTOTALNUMBERALREADYINVESTED\tSALESCOMM_DOLLARAMOUNT\tSALESCOMM_ISESTIMATE\tFINDERSFEE_DOLLARAMOUNT\tFINDERSFEE_ISESTIMATE\tFINDERFEECLARIFICATIONOFRESP\tGROSSPROCEEDSUSED_DOLLARAMOUNT\tGROSSPROCEEDSUSED_ISESTIMATE\tGROSSPROCEEDSUSED_CLAROFRESP\tAUTHORIZEDREPRESENTATIVE\n0001104659-26-112421\tPooled Investment Fund\tOther Investment Fund\tfalse\t\tDecline to Disclose\t06b\tfalse\t\t\ttrue\ttrue\t\t\t\t\ttrue\t\t\t\t\tfalse\t\t10000\t\tIndefinite\t0\tIndefinite\tItem 11: Capital commitments of lesser amounts may be accepted at the sole discretion of the Issuer.\tfalse\t\t0\t0\t\t0\t\t\t0\t\t\tfalse\n",
+  RELATEDPERSONS: "ACCESSIONNUMBER\tRELATEDPERSON_SEQ_KEY\tFIRSTNAME\tMIDDLENAME\tLASTNAME\tSTREET1\tSTREET2\tCITY\tSTATEORCOUNTRY\tSTATEORCOUNTRYDESCRIPTION\tZIPCODE\tRELATIONSHIP_1\tRELATIONSHIP_2\tRELATIONSHIP_3\tRELATIONSHIPCLARIFICATION\n0001104659-26-112421\t102\tJana\t\tTsilman\t55 Hudson Yards\t51st Floor\tNew York\tNY\tNEW YORK\t10001\tExecutive Officer\t\t\tChief Compliance Officer\n",
+  RECIPIENTS: "ACCESSIONNUMBER\tRECIPIENT_SEQ_KEY\tRECIPIENTNAME\tRECIPIENTCRDNUMBER\tASSOCIATEDBDNAME\tASSOCIATEDBDCRDNUMBER\tSTREET1\tSTREET2\tCITY\tSTATEORCOUNTRY\tSTATEORCOUNTRYDESCRIPTION\tZIPCODE\tSTATES_OR_VALUE_LIST\tDESCRIPTIONS_LIST\tFOREIGNSOLICITATION\n",
+  SIGNATURES: "ACCESSIONNUMBER\tSIGNATURE_SEQ_KEY\tISSUERNAME\tSIGNATURENAME\tNAMEOFSIGNER\tSIGNATURETITLE\tSIGNATUREDATE\n0001104659-26-112421\t101\tThird Point Private Capital Income Fund\t/s/ Jana Tsilman\tJana Tsilman\tChief Compliance Officer\t2026-09-30\n"
+}

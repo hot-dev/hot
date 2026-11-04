@@ -6,6 +6,8 @@ meta ["test"]
 ::edgar ::sec::edgar
 
 HttpResponse ::hot::http/HttpResponse
+FORM_D_SEARCH ::fx/FORM_D_SEARCH
+FORM_D_SUBMISSIONS ::fx/FORM_D_SUBMISSIONS
 
 // ============================================================================
 // Settings resolver
@@ -160,4 +162,315 @@ fn () {
     p ::edgar/full-text-params("\"climate risk\"", {forms: ["10-K", "10-Q"], start-date: "2025-01-01", end-date: "2025-03-31", ciks: [320193]})
     assert-eq("?q=%22climate+risk%22&forms=10-K%2C10-Q&ciks=0000320193&dateRange=custom&startdt=2025-01-01&enddt=2025-03-31", ::api/query-string(p))
     assert-eq("?q=x", ::api/query-string(::edgar/full-text-params("x", {})), "unset options omitted")
+}
+
+// ============================================================================
+// Form D: one filing
+// ============================================================================
+
+test-form-d-url
+meta ["test"]
+fn () {
+    assert-eq(
+      "https://www.sec.gov/Archives/edgar/data/2162876/000216287626000002/primary_doc.xml",
+      ::edgar/form-d-url("0002162876", "0002162876-26-000002")
+    )
+}
+
+test-form-d-rows-from-submissions-carry-the-rendered-url
+meta ["test"]
+fn () {
+    rows ::edgar/recent-filings(::fx/FORM_D_SUBMISSIONS, 5, {forms: ["D", "D/A"]})
+    assert-eq(["D/A", "D"], map(rows, (r) { r.form }))
+    assert(::hot::str/contains(first(rows).url, "/xslFormDX01/primary_doc.xml"), "the row's url is the HTML rendering, which is why form-d-url exists")
+    assert-eq(
+      "https://www.sec.gov/Archives/edgar/data/2162876/000216287626000002/primary_doc.xml",
+      ::edgar/form-d-url(FORM_D_SUBMISSIONS.cik, first(rows).accessionNumber)
+    )
+}
+
+test-parse-form-d-new-filing
+meta ["test"]
+fn () {
+    d ::edgar/parse-form-d(::fx/FORM_D_NEW)
+    assert-eq("D", d.form)
+    assert-eq(false, d.is-amendment)
+    assert-eq(null, d.previous-accession)
+    assert-eq("X0708", d.schema-version)
+    assert-eq("0002163169", d.issuer.cik)
+    assert-eq("Doliver Palmstar SPV, LLC", d.issuer.name)
+    assert-eq("HOUSTON", d.issuer.address.city)
+    assert-eq("TX", d.issuer.address.state)
+    assert-eq("77057", d.issuer.address.zip)
+    assert-eq(1, length(d.issuers))
+    assert-eq(["06b", "3C", "3C.1"], d.exemptions)
+    assert-eq(null, d.first-sale-date)
+    assert-eq(true, d.first-sale-yet-to-occur)
+    assert-eq(8000000, d.total-offering-amount)
+    assert-eq(0, d.total-amount-sold)
+    assert-eq(8000000, d.total-remaining)
+    assert-eq(100000, d.minimum-investment)
+    assert-eq("Pooled Investment Fund", d.industry-group)
+    assert-eq("Private Equity Fund", d.investment-fund-type)
+    assert-eq(false, d.is-40-act)
+    assert-eq("Decline to Disclose", d.revenue-range)
+    assert-eq(null, d.net-asset-value-range)
+    assert-eq(["PooledInvestmentFund"], d.security-types)
+    assert-eq([], d.sales-compensation, "an empty salesCompensationList")
+    assert-eq("Ralph McBride", first(d.signatures).signer)
+}
+
+test-parse-form-d-amendment
+meta ["test"]
+fn () {
+    d ::edgar/parse-form-d(::fx/FORM_D_AMENDMENT)
+    assert-eq("D/A", d.form)
+    assert-eq(true, d.is-amendment)
+    assert-eq("0002162876-26-000001", d.previous-accession)
+    assert-eq("2026-10-15", d.first-sale-date)
+    assert-eq(false, d.first-sale-yet-to-occur)
+    assert-eq("Indefinite", d.total-offering-amount)
+    assert-eq(1000000, d.total-amount-sold)
+    assert-eq("Indefinite", d.total-remaining)
+    assert-eq(125000, d.minimum-investment)
+    assert-eq(14000, d.sales-commissions)
+    assert-eq(0, d.finders-fees)
+    assert-eq(0, d.gross-proceeds-used)
+    assert-eq(1, d.total-investors)
+    assert-eq(false, d.has-non-accredited-investors)
+    assert-eq("Irish Collective Asset-Management Vehicle", d.issuer.entity-type-other)
+    assert-eq("IRELAND", d.issuer.jurisdiction)
+    assert-eq("2026", d.issuer.year-of-inc)
+    assert-eq("withinFiveYears", d.issuer.year-of-inc-choice)
+    assert-eq([], d.issuer.previous-names, "None is no name")
+}
+
+test-parse-form-d-related-persons
+meta ["test"]
+fn () {
+    people ::edgar/parse-form-d(::fx/FORM_D_AMENDMENT).related-persons
+    assert-eq(2, length(people))
+    p first(people)
+    assert-eq("Anthony Dominique Christian Duyck", p.name)
+    assert-eq("Duyck", p.last-name)
+    assert-eq(["Director"], p.relationships)
+    assert-eq("Dublin", p.address.city)
+    assert-eq(null, p.clarification)
+    assert-eq("Conor Gilsenan", people[1].name, "no middle name")
+}
+
+test-parse-form-d-recipients
+meta ["test"]
+fn () {
+    r first(::edgar/parse-form-d(::fx/FORM_D_AMENDMENT).sales-compensation)
+    assert-eq("Butler Capital Investments, LLC", r.name)
+    assert-eq("114242", r.crd)
+    assert-eq("1669942", r.broker-dealer-crd)
+    assert-eq(["NY"], r.states)
+    assert-eq(false, r.foreign-solicitation)
+}
+
+test-parse-form-d-two-issuers
+meta ["test"]
+fn () {
+    d ::edgar/parse-form-d(::fx/FORM_D_TWO_ISSUERS)
+    assert-eq(["0001806778", "0001806777"], map(d.issuers, (i) { i.cik }), "the primary comes first")
+    assert-eq(d.issuer, first(d.issuers))
+    assert-eq("overFiveYears", d.issuer.year-of-inc-choice)
+    assert-eq(null, d.issuer.year-of-inc)
+    assert-eq("2020-03-17", d.first-sale-date)
+    assert-eq(655554456, d.total-amount-sold)
+    assert-eq([], first(d.sales-compensation).states)
+    assert-eq(true, first(d.sales-compensation).foreign-solicitation)
+}
+
+test-parse-form-d-previous-names
+meta ["test"]
+fn () {
+    xml """
+    <edgarSubmission><submissionType>D</submissionType><primaryIssuer>
+      <issuerPreviousNameList><value>Old Co</value></issuerPreviousNameList>
+      <edgarPreviousNameList><value>Older Co</value></edgarPreviousNameList>
+    </primaryIssuer></edgarSubmission>
+    """
+    assert-eq(["Old Co", "Older Co"], ::edgar/parse-form-d(xml).issuer.previous-names)
+}
+
+test-parse-form-d-sparse-document
+meta ["test"]
+fn () {
+    d ::edgar/parse-form-d("<edgarSubmission><submissionType>D</submissionType></edgarSubmission>")
+    assert-eq(null, d.issuer.name)
+    assert-eq(false, d.is-amendment)
+    assert-eq([], d.exemptions)
+    assert-eq([], d.related-persons)
+    assert-eq([], d.signatures)
+    assert-eq(null, d.total-offering-amount)
+}
+
+test-parse-form-d-refuses-other-documents
+meta ["test"]
+fn () {
+    assert(is-err(::edgar/parse-form-d("<edgarSubmission><submissionType>D</edgarSubmission>")), "malformed XML")
+    assert(is-err(::edgar/parse-form-d("<html><body>Form D</body></html>")), "the HTML rendering")
+    out ::edgar/parse-form-d("<edgarSubmission><submissionType>4</submissionType></edgarSubmission>")
+    assert(is-err(out), "another form")
+    assert(::hot::str/contains(err-message(out), "submission type 4"), "names it")
+}
+
+test-amount
+meta ["test"]
+fn () {
+    assert-eq(8000000, ::edgar/amount("8000000"))
+    assert-eq("Indefinite", ::edgar/amount("Indefinite"))
+    assert-eq(null, ::edgar/amount(null))
+    assert-eq("1234567890123456789012", ::edgar/amount("1234567890123456789012"), "too big for an Int stays as filed")
+}
+
+test-not-found-reads-a-404-err
+meta ["test"]
+fn () {
+    e ::api/http-error(HttpResponse({status: 404, headers: {}, body: "Not found"}), "https://www.sec.gov/x")
+    assert(::api/is-not-found(e), "404")
+    assert(not(::api/is-not-found(::api/http-error(HttpResponse({status: 429, headers: {}, body: ""}), "https://www.sec.gov/x"))), "not a 429")
+    assert(not(::api/is-not-found("connection refused")), "a transport failure's text")
+}
+
+test-blank-user-agent-reaches-form-d-callers-as-an-err
+meta ["test"]
+fn () {
+    assert(is-err(::edgar/form-d(2162876, "0002162876-26-000002", {user-agent: ""})), "form-d")
+    assert(is-err(::edgar/form-d-filings("2026-10-20", "2026-10-31", {user-agent: ""})), "form-d-filings")
+    assert(is-err(::edgar/collect-form-d-filings("2026-10-20", "2026-10-31", 10, {user-agent: ""})), "collect-form-d-filings")
+    assert(is-err(::edgar/form-d-dataset(2026, 3, {user-agent: ""})), "form-d-dataset")
+}
+
+// ============================================================================
+// Form D: listing by date
+// ============================================================================
+
+test-form-d-filing-row
+meta ["test"]
+fn () {
+    hit first(FORM_D_SEARCH.hits.hits)
+    row ::edgar/form-d-filing(hit)
+    assert-eq("0002163169-26-000001", row.accession)
+    assert-eq("D", row.form)
+    assert-eq("2026-10-30", row.filed)
+    assert-eq(["0002163169"], row.ciks)
+    assert-eq(["Doliver Palmstar SPV, LLC"], row.names, "the CIK suffix is dropped")
+    assert-eq(["06B", "3C", "3C.1"], row.exemptions)
+    assert-eq("https://www.sec.gov/Archives/edgar/data/2163169/000216316926000001/primary_doc.xml", row.url)
+}
+
+test-form-d-page
+meta ["test"]
+fn () {
+    page ::edgar/form-d-page(::fx/FORM_D_SEARCH, 0)
+    assert-eq(2184, page.total)
+    assert-eq(true, page.total-is-exact)
+    assert-eq(2, length(page.filings))
+    assert-eq(["D", "D/A"], map(page.filings, (f) { f.form }))
+    assert-eq(2, page.next-from)
+}
+
+test-form-d-page-ends-with-the-results
+meta ["test"]
+fn () {
+    body {hits: {total: {value: 102, relation: "eq"}, hits: FORM_D_SEARCH.hits.hits}}
+    assert-eq(null, ::edgar/form-d-page(body, 100).next-from, "100 + 2 hits reaches the total")
+    assert-eq(null, ::edgar/form-d-page({hits: {total: {value: 50, relation: "eq"}, hits: []}}, 0).next-from, "an empty page ends it")
+}
+
+test-form-d-page-stops-at-the-search-window
+meta ["test"]
+fn () {
+    body {hits: {total: {value: 10000, relation: "gte"}, hits: FORM_D_SEARCH.hits.hits}}
+    page ::edgar/form-d-page(body, 9998)
+    assert-eq(false, page.total-is-exact)
+    assert-eq(null, page.next-from, "EDGAR refuses from + size past 10,000")
+}
+
+test-form-d-search-params
+meta ["test"]
+fn () {
+    // forms=D gives D and D/A from EDGAR; forms=D,D/A gives only D/A.
+    params ::edgar/full-text-params("", {forms: ["D"], start-date: "2026-10-20", end-date: "2026-10-31"})
+    assert-eq("D", params.forms)
+    assert-eq("custom", params.dateRange)
+    assert-eq("?forms=D&dateRange=custom&startdt=2026-10-20&enddt=2026-10-31", ::api/query-string(params))
+}
+
+// ============================================================================
+// Form D: quarterly data sets
+// ============================================================================
+
+test-form-d-dataset-url
+meta ["test"]
+fn () {
+    html ::fx/FORM_D_DATA_SETS_HTML
+    assert-eq("https://www.sec.gov/files/datastandardsinnovation/data/form-d-data-sets/2026q3_d.zip", ::edgar/form-d-dataset-url(html, 2026, 3))
+    assert-eq("https://www.sec.gov/files/structureddata/data/form-d-data-sets/2012q1_d.zip", ::edgar/form-d-dataset-url(html, 2012, 1))
+    assert-eq("https://www.sec.gov/files/structureddata/data/form-d-data-sets/2010q3_d_0.zip", ::edgar/form-d-dataset-url(html, 2010, 3))
+    assert-eq(null, ::edgar/form-d-dataset-url(html, 2026, 4), "not posted yet")
+    assert-eq(null, ::edgar/form-d-dataset-url(html, 2026, 5), "no such quarter")
+}
+
+dataset-zip fn (): Bytes {
+    t ::fx/FORM_D_TSV
+    ::hot::zip/create([
+      {name: "2026Q3_d/FORMDSUBMISSION.tsv", data: t.FORMDSUBMISSION},
+      {name: "2026Q3_d/ISSUERS.tsv", data: t.ISSUERS},
+      {name: "2026Q3_d/OFFERING.tsv", data: t.OFFERING},
+      {name: "2026Q3_d/RELATEDPERSONS.tsv", data: t.RELATEDPERSONS},
+      {name: "2026Q3_d/RECIPIENTS.tsv", data: t.RECIPIENTS},
+      {name: "2026Q3_d/SIGNATURES.tsv", data: t.SIGNATURES},
+      {name: "2026Q3_d/FormD_readme.html", data: "<html></html>"}
+    ])
+}
+
+test-parse-form-d-dataset-default-tables
+meta ["test"]
+fn () {
+    d ::edgar/parse-form-d-dataset(dataset-zip())
+    assert-eq(["issuers", "offerings", "submissions"], sort(keys(d)), "no tables of people unless asked")
+    row first(d.offerings)
+    assert-eq("0001104659-26-112421", row.ACCESSIONNUMBER)
+    assert-eq("Indefinite", row.TOTALOFFERINGAMOUNT)
+    assert-eq("021-599503", first(d.submissions).FILE_NUM, "padding is trimmed")
+    assert-eq("0002122354", first(d.issuers).CIK, "values stay Str")
+}
+
+test-parse-form-d-dataset-picks-tables
+meta ["test"]
+fn () {
+    d ::edgar/parse-form-d-dataset(dataset-zip(), {tables: ["related-persons", "signatures"]})
+    assert-eq(["related-persons", "signatures"], sort(keys(d)))
+    assert-eq("Tsilman", first(get(d, "related-persons")).LASTNAME)
+}
+
+test-parse-form-d-dataset-keeps-stray-quotes
+meta ["test"]
+fn () {
+    archive ::hot::zip/create([{name: "2026Q3_d/OFFERING.tsv", data: "ACCESSIONNUMBER\tSALESAMTCLARIFICATIONOFRESP\n1\tthe \"Fund\" size\n"}])
+    assert-eq("the \"Fund\" size", first(::edgar/parse-form-d-dataset(archive, {tables: ["offerings"]}).offerings).SALESAMTCLARIFICATIONOFRESP)
+}
+
+test-parse-form-d-dataset-errs
+meta ["test"]
+fn () {
+    assert(is-err(::edgar/parse-form-d-dataset(Bytes("not a zip"))), "not a zip")
+    unknown ::edgar/parse-form-d-dataset(dataset-zip(), {tables: ["offerings", "nope"]})
+    assert(is-err(unknown), "unknown table")
+    assert(::hot::str/contains(err-message(unknown), "nope"), "names it")
+    missing ::edgar/parse-form-d-dataset(::hot::zip/create([{name: "x/OFFERING.tsv", data: "A\n1\n"}]))
+    assert(is-err(missing), "a table the zip lacks")
+}
+
+test-form-d-returns-an-err-for-a-bad-cik
+meta ["test"]
+fn () {
+    out ::edgar/form-d("not-a-cik", "0002162876-26-000002", {user-agent: "Acme ops@acme.example"})
+    assert(is-err(out), "a bad CIK doesn't halt the run")
+    assert(::hot::str/contains(err-message(out), "invalid CIK"), "says why")
 }

@@ -47,6 +47,7 @@ supabase
 supabase-admin
 
 # Data
+feed
 mysql
 pg
 redis
@@ -88,6 +89,7 @@ elevenlabs
 cal-com
 plaid
 shopify
+openfigi
 
 # Infrastructure & Platform
 cloudflare
@@ -141,6 +143,19 @@ opensanctions
 gleif
 sec-edgar
 companies-house
+
+# Government & Public Data
+ecfr
+federal-register
+congress-gov
+regulations-gov
+legiscan
+cfpb-complaints
+fdic-bankfind
+ffiec
+nppes
+courtlistener
+gdelt
 
 # Banking & Accounting
 increase

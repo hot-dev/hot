@@ -1,0 +1,30 @@
+::gdelt::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration smoke test (live, read-only)
+// =============================================================================
+// GDELT_LIVE=1 (no key). GDELT allows one request every five seconds, so this
+// makes a single request and passes with a note if GDELT answers 429. Without
+// the setting it records a skip and passes.
+// Run with: hot test -p pkg-integration-gdelt
+
+::ctx ::gdelt::integration::ctx
+
+test-articles
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("GDELT_LIVE is not 1") }
+        => {
+            found ::gdelt/articles("\"data breach\"", {timespan: "7d", max-records: 3, sort: "DateDesc"})
+            cond {
+                and(is-err(found), eq(get(err-value(found), "status"), 429)) => { ::ctx/skip("GDELT answered 429") }
+                => {
+                    assert(gt(length(found), 0), "there are articles")
+                    assert(is-some(first(found).url), "articles have URLs")
+                    assert(::hot::str/contains(::gdelt/iso-date(first(found).seendate), "T"), "seendate parses")
+                }
+            }
+        }
+    }
+}

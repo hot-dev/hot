@@ -157,6 +157,15 @@ fn (response: HttpResponse, url: Str): HttpError {
   })
 }
 
+is-not-found
+meta {
+    doc: """True when `e` is an `HttpError` with status 404."""
+}
+fn (e: Any): Bool {
+  // A constructed HttpError isn't is-map; a transport failure's Err is a Str.
+  and(not(is-str(e)), eq(get(e, "status"), 404))
+}
+
 // ---------------------------------------------------------------------------
 // Requests
 // ---------------------------------------------------------------------------

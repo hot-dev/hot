@@ -1,0 +1,277 @@
+::ransomware-live ns
+meta {
+    ctx: {
+        "ransomware-live.api-key": {required: false},
+        "ransomware-live.base-url": {required: false, secret: false},
+        "ransomware-live.pro-base-url": {required: false, secret: false}
+    },
+    doc: """
+    The ransomware.live metadata API: recent victims, victims by group,
+    country or keyword, and ransomware groups.
+
+    **Victim names are claims made by criminal groups, not confirmed
+    breaches.** Verify them before acting on them.
+
+    **Hosts**: with an `api-key` every call goes to the PRO API
+    (`https://api-pro.ransomware.live`, `X-API-KEY` header). Without one
+    it goes to the free v2 API (`https://api.ransomware.live/v2`), which
+    the site marks for personal use only, not corporate or business use,
+    and limits to one request per minute per endpoint. PRO keys are free,
+    and the PRO limit is 60 requests per minute and 500,000 per month.
+
+    **Terms**: commercial use of the data needs prior written approval
+    from the owner of ransomware.live, with or without a PRO key.
+
+    **Records**: both hosts' victim records come back with the same field
+    names (`normalize-victim`). Records include leak-page URLs in
+    `claim_url` and group `locations`, which the package never fetches.
+
+    Neither host paginates. Every function takes an optional trailing
+    `opts` Map: `api-key`, `base-url` and `pro-base-url`.
+    """
+}
+
+::api ::ransomware-live::api
+
+// Field names the v2 country endpoint and the PRO API still use, and the
+// names the other v2 endpoints use for the same fields.
+VICTIM_ALIASES {
+  post_title: "victim",
+  group_name: "group",
+  published: "attackdate",
+  post_url: "claim_url",
+  website: "domain",
+  permalink: "url"
+}
+
+normalize-victim
+meta {
+    doc: """
+    One victim record with the field names of the v2 `recentvictims`
+    endpoint (pure): `victim`, `group`, `attackdate`, `claim_url`,
+    `domain` and `url` replace `post_title`, `group_name`, `published`,
+    `post_url`, `website` and `permalink`. Other fields pass through.
+    """
+}
+fn (record: Map): Map {
+  reduce(keys(VICTIM_ALIASES), (acc, old) {
+    new get(VICTIM_ALIASES, old)
+    value get(acc, old)
+    without delete(acc, old)
+    cond {
+      not(in(old, keys(acc))) => { acc }
+      ::api/given(get(acc, new)) => { without }
+      => { assoc(without, new, value) }
+    }
+  }, record)
+}
+
+normalize-group
+meta {
+    doc: """One group record with its name under `name` (pure). The PRO group list calls it `group`, and calls the victim count `victims`."""
+}
+fn (record: Map): Map {
+  cond {
+    in("name", keys(record)) => { record }
+    => { assoc(delete(record, "group"), "name", get(record, "group")) }
+  }
+}
+
+rows
+meta {
+    doc: """
+    The list in a response body (pure): the body itself when it is a Vec,
+    or the Vec under `key`; `[]` for null, which is how a v2 lookup with
+    no match arrives. An Err for any other shape, so a changed response
+    is never read as empty.
+    """
+}
+fn (body: Any, key: Str): Any {
+  inner if(is-map(body), get(body, key), null)
+  cond {
+    is-null(body) => { [] }
+    is-vec(body) => { body }
+    is-vec(inner) => { inner }
+    => { err(`ransomware-live: unexpected response: no ${key} list`) }
+  }
+}
+
+country-code
+meta {
+    doc: """An ISO 3166-1 alpha-2 code, trimmed and upper-cased, or an Err (pure)."""
+}
+fn (code: Str): Str {
+  s uppercase(trim(code))
+  cond {
+    ::hot::regex/is-match(s, "^[A-Z]{2}$") => { s }
+    => { err(`ransomware-live: invalid ISO 3166-1 alpha-2 country code '${code}'`) }
+  }
+}
+
+is-pro fn (cfg: Map): Bool {
+  ::api/given(cfg.api-key)
+}
+
+lookup-result
+meta {
+    doc: """
+    What a lookup returns for `out` (pure): null for the 404 the free v2
+    API gives when a group, country or keyword has no match. Every other
+    Err stays an Err, and so does a PRO 404, whose meaning isn't
+    confirmed. `cfg` is the resolved settings.
+    """
+}
+fn (out: Result, cfg: Map): Any {
+  cond {
+    not(is-err(out)) => { out }
+    is-pro(cfg) => { out }
+    ::api/is-not-found(err-value(out)) => { null }
+    => { out }
+  }
+}
+
+rl-request fn (cfg: Map, free-path: Str, pro-path: Str, pro-params: Map): Any {
+  cond {
+    is-pro(cfg) => {
+      ::api/get-json(`${cfg.pro-base-url}${pro-path}${::api/query-string(pro-params)}`, {X-API-KEY: cfg.api-key})
+    }
+    => { ::api/get-json(`${cfg.base-url}${free-path}`, {}) }
+  }
+}
+
+// A call that always has a list to give, so any 404 is an Err: a moved
+// endpoint or a wrong URL must not read as no victims. Errors are returned,
+// not consumed: consuming an Err would halt the run.
+rl-get fn (free-path: Str, pro-path: Str, pro-params: Map, opts: Map): Any {
+  cfg ::api/resolve(opts)
+  if(is-err(cfg), cfg, rl-request(cfg, free-path, pro-path, pro-params))
+}
+
+// A call that can find nothing. See `lookup-result`.
+rl-lookup fn (free-path: Str, pro-path: Str, pro-params: Map, opts: Map): Any {
+  cfg ::api/resolve(opts)
+  if(is-err(cfg), cfg, lookup-result(rl-request(cfg, free-path, pro-path, pro-params), cfg))
+}
+
+victims fn (body: Result): Any {
+  list if(is-err(body), body, rows(body, "victims"))
+  if(is-err(list), list, map(list, normalize-victim))
+}
+
+recent-victims
+meta {
+    doc: """
+    The 100 most recent claimed victims. Each name is a criminal group's
+    claim, not a confirmed breach.
+
+    **Example**
+
+    ```hot
+    latest ::ransomware-live/recent-victims()
+    first(latest).group
+    ```
+    """
+}
+fn
+(): Vec<Map> {
+  recent-victims({})
+},
+(opts: Map): Vec<Map> {
+  victims(rl-get("/recentvictims", "/victims/recent", {}, opts))
+}
+
+group-victims
+meta {
+    doc: """The victims claimed by a group, or `[]` when there are none. Names are as `groups` gives them (`"lockbit3"`)."""
+}
+fn
+(group: Str): Vec<Map> {
+  group-victims(group, {})
+},
+(group: Str, opts: Map): Vec<Map> {
+  victims(rl-lookup(`/groupvictims/${::api/path-segment(group)}`, "/victims/", {group: group}, opts))
+}
+
+country-victims
+meta {
+    doc: """The victims claimed in a country, by ISO 3166-1 alpha-2 code, or `[]` when there are none."""
+}
+fn
+(code: Str): Vec<Map> {
+  country-victims(code, {})
+},
+(code: Str, opts: Map): Vec<Map> {
+  cc country-code(code)
+  cond {
+    is-err(cc) => { cc }
+    => { victims(rl-lookup(`/countryvictims/${cc}`, "/victims/", {country: cc}, opts)) }
+  }
+}
+
+search-victims
+meta {
+    doc: """
+    Victims whose name or website contains `keyword`, or `[]` when there
+    are none. A match on a name is not evidence about a particular
+    company: names collide, and claims are unverified.
+
+    **Example**
+
+    ```hot
+    hits ::ransomware-live/search-victims("hospital")
+    ```
+    """
+}
+fn
+(keyword: Str): Vec<Map> {
+  search-victims(keyword, {})
+},
+(keyword: Str, opts: Map): Vec<Map> {
+  victims(rl-lookup(`/searchvictims/${::api/path-segment(keyword)}`, "/victims/search", {q: keyword}, opts))
+}
+
+groups
+meta {
+    doc: """All tracked groups. v2 records hold full detail (`name`, `description`, `locations`, `tools`, `ttps`); PRO records hold `name`, `altname` and a `victims` count, with full detail from `group`."""
+}
+fn
+(): Vec<Map> {
+  groups({})
+},
+(opts: Map): Vec<Map> {
+  body rl-get("/groups", "/groups", {}, opts)
+  list if(is-err(body), body, rows(body, "groups"))
+  if(is-err(list), list, map(list, normalize-group))
+}
+
+group
+meta {
+    doc: """One group's profile by name, or null when the free v2 API has none. On PRO a 404 is an Err."""
+}
+fn
+(name: Str): Map? {
+  group(name, {})
+},
+(name: Str, opts: Map): Map? {
+  segment ::api/path-segment(name)
+  rl-lookup(`/group/${segment}`, `/groups/${segment}`, {}, opts)
+}
+
+validate-key
+meta {
+    doc: """Check a PRO key (`/validate`). Returns the API's body, or an Err carrying `HttpError` for a bad key. An Err naming the context variable when no key is set."""
+}
+fn
+(): Map {
+  validate-key({})
+},
+(opts: Map): Map {
+  cfg ::api/resolve(opts)
+  cond {
+    is-err(cfg) => { cfg }
+    => {
+      key ::api/require-api-key(cfg)
+      if(is-err(key), key, ::api/get-json(`${cfg.pro-base-url}/validate`, {X-API-KEY: key}))
+    }
+  }
+}

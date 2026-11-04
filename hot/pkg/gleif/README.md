@@ -47,7 +47,7 @@ issuers ::gleif/by-isin("US0378331005")
 
 ## Pagination
 
-GLEIF pages by number: `page-size` (up to 200) and `page`. `next-page(page)` reads `meta.pagination`, and `collect(fetch, opts, limit)` follows it.
+GLEIF pages by number: `page-size` (up to 200) and `page`. `next-page(page)` reads `meta.pagination`, and `collect(fetch, opts, limit)` follows it. An Err on any page is returned in place of the items.
 
 ```hot
 children ::gleif/collect((o) { ::gleif/direct-children("HWUPKR0MPOU8FGXBT394", o) }, {}, 500)

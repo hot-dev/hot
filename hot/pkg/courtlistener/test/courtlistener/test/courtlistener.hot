@@ -1,0 +1,228 @@
+::courtlistener::test::courtlistener ns
+meta ["test"]
+
+::fx ::courtlistener::test::fixtures
+::api ::courtlistener::api
+::cl ::courtlistener
+
+HttpResponse ::hot::http/HttpResponse
+
+// ============================================================================
+// Settings resolver
+// ============================================================================
+
+test-resolve-defaults
+meta ["test"]
+fn () {
+    cfg ::api/resolve({})
+    assert-eq("https://www.courtlistener.com/api/rest/v4", cfg.base-url)
+    assert-eq(null, cfg.api-token)
+}
+
+test-resolve-opts-override
+meta ["test"]
+fn () {
+    cfg ::api/resolve({api-token: "t-test", base-url: "https://cl.example/api/"})
+    assert-eq("t-test", cfg.api-token)
+    assert-eq("https://cl.example/api", cfg.base-url)
+    assert-eq(null, ::hot::ctx/get("courtlistener.api-token"), "per-call tokens are never written to ctx")
+}
+
+test-resolve-reads-context
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"courtlistener.api-token": "ctx-token", "courtlistener.base-url": "https://ctx.example/"})
+    cfg ::api/resolve({})
+    assert-eq("ctx-token", cfg.api-token)
+    assert-eq("https://ctx.example", cfg.base-url)
+    ::hot::ctx/set({"courtlistener.api-token": null, "courtlistener.base-url": null})
+}
+
+test-blank-credential-is-an-err-naming-the-key
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"courtlistener.api-token": "ctx-token"})
+    for-each(["", "  ", null], (v) {
+      out ::api/resolve({api-token: v})
+      assert(is-err(out), "a blank api-token never falls back to context")
+      assert(::hot::str/contains(err-message(out), "api-token"), "the Err names api-token")
+    })
+    ::hot::ctx/set({"courtlistener.api-token": null})
+}
+
+test-per-call-url-needs-a-per-call-token
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"courtlistener.api-token": "ctx-token"})
+    out ::api/resolve({base-url: "https://elsewhere.example"})
+    assert(is-err(out), "the context token is never sent to a per-call URL")
+    assert(::hot::str/contains(err-message(out), "base-url"), "the Err names base-url")
+    ::hot::ctx/set({"courtlistener.api-token": null})
+}
+
+test-gated-calls-fail-before-any-request
+meta ["test"]
+fn () {
+    for-each([
+      () { ::cl/search("foo") },
+      () { ::cl/search-opinions("foo") },
+      () { ::cl/search-recap("foo") },
+      () { ::cl/search-dockets("foo") },
+      () { ::cl/search-documents("foo") },
+      () { ::cl/docket(4214664) },
+      () { ::cl/dockets({court: "dcd"}) },
+      () { ::cl/docket-entries(4214664) },
+      () { ::cl/cluster(2812209) },
+      () { ::cl/opinion(9973155) }
+    ], (call) {
+      out call()
+      assert(is-err(out), "a token is required")
+      assert(::hot::str/contains(err-message(out), "courtlistener.api-token"), "the Err names the context variable")
+    })
+}
+
+test-blank-credential-reaches-every-caller-as-an-err
+meta ["test"]
+fn () {
+    assert(is-err(::cl/search("foo", {api-token: ""})), "search")
+    assert(is-err(::cl/docket(1, {api-token: ""})), "docket")
+    assert(is-err(::cl/courts({api-token: ""})), "courts, though it needs no token")
+}
+
+// ============================================================================
+// Transport helpers
+// ============================================================================
+
+test-query-string-drops-unset
+meta ["test"]
+fn () {
+    assert-eq("?q=a+b", ::api/query-string({q: "a b", cursor: null, order_by: ""}))
+    assert-eq("", ::api/query-string({a: null}))
+}
+
+test-path-segment
+meta ["test"]
+fn () {
+    assert-eq("a%2Fb", ::api/path-segment("a/b"))
+    assert-eq("42", ::api/path-segment(42))
+}
+
+test-http-error
+meta ["test"]
+fn () {
+    response HttpResponse({status: 401, headers: {}, body: ::fx/UNAUTHENTICATED})
+    e untype(::api/http-error(response, "https://www.courtlistener.com/api/rest/v4/search/"))
+    assert-eq("courtlistener", e.source)
+    assert-eq("courtlistener: HTTP 401: Authentication credentials were not provided.", e.message)
+    assert(not(::api/is-not-found(e)), "401")
+}
+
+test-http-error-retry-after
+meta ["test"]
+fn () {
+    response HttpResponse({status: 429, headers: {"retry-after": "42"}, body: {detail: "Request was throttled."}})
+    e untype(::api/http-error(response, "https://www.courtlistener.com/api/rest/v4/search/"))
+    assert-eq(42, e.retry-after)
+}
+
+// ============================================================================
+// Parameters
+// ============================================================================
+
+test-auth-header
+meta ["test"]
+fn () {
+    assert-eq("Token abc", ::cl/auth-header("abc"))
+}
+
+test-search-params
+meta ["test"]
+fn () {
+    assert-eq("?q=foo&type=o", ::api/query-string(::cl/search-params("foo", {})))
+    p ::cl/search-params("foo", {type: "r", order-by: "dateFiled desc", highlight: true, cursor: "abc", params: {stat_Unpublished: "on"}})
+    assert-eq("r", p.type)
+    assert-eq("dateFiled desc", p.order_by)
+    assert-eq("on", p.highlight)
+    assert-eq("abc", p.cursor)
+    assert-eq("on", p.stat_Unpublished)
+    assert-eq("01/02/2026", ::cl/search-params("foo", {filed-after: "01/02/2026"}).filed_after)
+    assert-eq(null, ::cl/search-params("foo", {highlight: false}).highlight)
+}
+
+test-refine-params
+meta ["test"]
+fn () {
+    p ::cl/refine-params({fields: ["id", "case_name"], omit: "clusters", order-by: "-id", page: 2})
+    assert-eq("id,case_name", p.fields)
+    assert-eq("clusters", p.omit)
+    assert-eq("-id", p.order_by)
+    assert-eq(2, p.page)
+    assert-eq("", ::api/query-string(::cl/refine-params({})))
+}
+
+test-resource-id
+meta ["test"]
+fn () {
+    assert-eq(4214664, ::cl/resource-id("https://www.courtlistener.com/api/rest/v4/dockets/4214664/"))
+    assert-eq(null, ::cl/resource-id("https://www.courtlistener.com/api/rest/v4/courts/dcd/"))
+    assert-eq(null, ::cl/resource-id(null))
+}
+
+// ============================================================================
+// Pagination
+// ============================================================================
+
+test-next-params
+meta ["test"]
+fn () {
+    assert-eq({cursor: "cz0yMzUuODcxMjUmcz04MDUzNTUzJnQ9byZkPTIwMjQtMDktMTY="}, ::cl/next-params(::fx/SEARCH_PAGE), "the cursor is decoded")
+    assert-eq({cursor: "cD0xMDUxNjI5NA=="}, ::cl/next-params(::fx/OPINIONS_PAGE))
+    assert-eq({page: 2}, ::cl/next-params(::fx/COURTS_PAGE))
+    assert-eq(null, ::cl/next-params(::fx/DOCKET_ENTRIES_LAST_PAGE))
+    assert-eq(null, ::cl/next-params({}))
+    assert-eq(null, ::cl/next-params(null))
+}
+
+test-collect-follows-pages
+meta ["test"]
+fn () {
+    fetch (o) {
+      n or(o.page, 1)
+      {
+        results: [`p${n}-a`, `p${n}-b`],
+        next: if(lt(n, 3), `https://www.courtlistener.com/api/rest/v4/courts/?page=${add(n, 1)}`, null)
+      }
+    }
+
+    assert-eq(["p1-a", "p1-b", "p2-a", "p2-b", "p3-a", "p3-b"], ::cl/collect(fetch, {page: null}, 100))
+    assert-eq(["p1-a", "p1-b", "p2-a"], ::cl/collect(fetch, {page: null}, 3))
+}
+
+test-collect-returns-an-err-from-a-later-page
+meta ["test"]
+fn () {
+    fetch (o) {
+      cond {
+        is-some(o.cursor) => { err("courtlistener: HTTP 429: Request was throttled.") }
+        => { ::fx/SEARCH_PAGE }
+      }
+    }
+
+    assert(is-err(::cl/collect(fetch, {cursor: null}, 100)), "a 429 mid-way comes back as the Err")
+}
+
+test-collect-treats-a-page-of-html-as-an-err
+meta ["test"]
+fn () {
+    out ::cl/collect((o) { ::api/decode-body(HttpResponse({status: 200, headers: {}, body: "<html>Down for maintenance</html>"}), "u") }, {}, 10)
+    assert(is-err(out), "a maintenance page isn't an empty result")
+    assert-eq(200, err-value(out).status)
+}
+
+test-decode-body
+meta ["test"]
+fn () {
+    assert-eq({a: 1}, ::api/decode-body(HttpResponse({status: 200, headers: {}, body: "{\"a\": 1}"}), "u"), "JSON text")
+    assert-eq({a: 1}, ::api/decode-body(HttpResponse({status: 200, headers: {}, body: {a: 1}}), "u"), "already decoded")
+    assert(is-err(::api/decode-body(HttpResponse({status: 200, headers: {}, body: "{\"a\": "}), "u")), "truncated JSON")
+}

@@ -1,0 +1,298 @@
+::regulations-gov::test::regulations-gov ns
+meta ["test"]
+
+::fx ::regulations-gov::test::fixtures
+::api ::regulations-gov::api
+::reg ::regulations-gov
+
+HttpResponse ::hot::http/HttpResponse
+
+// ============================================================================
+// Settings resolver
+// ============================================================================
+
+test-resolve-defaults
+meta ["test"]
+fn () {
+    cfg ::api/resolve({})
+    assert-eq("https://api.regulations.gov/v4", cfg.base-url)
+    assert-eq(null, cfg.api-key)
+}
+
+test-resolve-opts-override
+meta ["test"]
+fn () {
+    cfg ::api/resolve({api-key: "k-test", base-url: "https://api-staging.regulations.gov/v4/"})
+    assert-eq("k-test", cfg.api-key)
+    assert-eq("https://api-staging.regulations.gov/v4", cfg.base-url)
+    assert-eq(null, ::hot::ctx/get("regulations-gov.api-key"), "per-call keys are never written to ctx")
+}
+
+test-resolve-reads-context
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"regulations-gov.api-key": "ctx-key", "regulations-gov.base-url": "https://ctx.example/"})
+    cfg ::api/resolve({})
+    assert-eq("ctx-key", cfg.api-key)
+    assert-eq("https://ctx.example", cfg.base-url)
+    ::hot::ctx/set({"regulations-gov.api-key": null, "regulations-gov.base-url": null})
+}
+
+test-blank-credential-is-an-err-naming-the-key
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"regulations-gov.api-key": "ctx-key"})
+    for-each(["", "  ", null], (v) {
+      out ::api/resolve({api-key: v})
+      assert(is-err(out), "blank api-key never falls back to context")
+      assert(::hot::str/contains(err-message(out), "api-key"), "the Err names api-key")
+    })
+    ::hot::ctx/set({"regulations-gov.api-key": null})
+}
+
+test-blank-credential-reaches-every-caller-as-an-err
+meta ["test"]
+fn () {
+    assert(is-err(::reg/documents({api-key: ""})), "documents")
+    assert(is-err(::reg/document("X-1", {api-key: ""})), "document")
+    assert(is-err(::reg/comments({api-key: ""})), "comments")
+    assert(is-err(::reg/comment("X-1", {api-key: ""})), "comment")
+    assert(is-err(::reg/dockets({api-key: ""})), "dockets")
+    assert(is-err(::reg/docket("X", {api-key: ""})), "docket")
+    assert(is-err(::reg/all-comments({api-key: ""}, 10)), "all-comments")
+}
+
+test-keyed-url-needs-a-per-call-key
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"regulations-gov.api-key": "ctx-key"})
+    out ::api/resolve({base-url: "https://proxy.example"})
+    assert(is-err(out), "the context key never goes to a per-call URL")
+    assert(::hot::str/contains(err-message(out), "base-url"), "names base-url")
+    assert(is-ok(::api/resolve({api-key: "t", base-url: "https://proxy.example"})), "fine with a per-call key")
+    ::hot::ctx/set({"regulations-gov.api-key": null})
+}
+
+test-missing-credentials-are-errors
+meta ["test"]
+fn () {
+    key ::api/require-api-key(::api/resolve({}))
+    assert(is-err(key), "Regulations.gov needs a key")
+    assert(::hot::str/contains(err-message(key), "regulations-gov.api-key"), "names the ctx key")
+    assert(is-err(::reg/docket("FAA-2018-1084")), "fails before any request")
+}
+
+// ============================================================================
+// Transport helpers
+// ============================================================================
+
+test-query-string
+meta ["test"]
+fn () {
+    assert-eq("?filter%5BdocketId%5D=a%26b", ::api/query-string({"filter[docketId]": "a&b", "page[size]": null, sort: ""}))
+    assert-eq("", ::api/query-string({include: null}))
+}
+
+test-path-segment
+meta ["test"]
+fn () {
+    assert-eq("a%2Fb%20c", ::api/path-segment("a/b c"))
+}
+
+test-http-error-json-api-shape
+meta ["test"]
+fn () {
+    e untype(::api/http-error(HttpResponse({status: 404, headers: {}, body: ::fx/NOT_FOUND}), "https://api.regulations.gov/v4/documents/X"))
+    assert-eq("regulations-gov", e.source)
+    assert-eq("regulations-gov: HTTP 404: The document with the specified ID could not be found.", e.message)
+    assert(::api/is-not-found(e), "404")
+}
+
+test-http-error-api-data-gov-shape
+meta ["test"]
+fn () {
+    e untype(::api/http-error(HttpResponse({status: 403, headers: {}, body: ::fx/NO_KEY}), "https://api.regulations.gov/v4/dockets"))
+    assert-eq("regulations-gov: HTTP 403: No api_key was supplied. Get one at https://api.regulations.gov:443", e.message)
+}
+
+test-http-error-rate-limit
+meta ["test"]
+fn () {
+    response HttpResponse({status: 429, headers: {retry-after: "3600"}, body: {error: {code: "OVER_RATE_LIMIT"}}})
+    e untype(::api/http-error(response, "https://api.regulations.gov/v4/dockets"))
+    assert-eq(3600, e.retry-after)
+    assert-eq("regulations-gov: HTTP 429: OVER_RATE_LIMIT", e.message)
+}
+
+// ============================================================================
+// Parameters
+// ============================================================================
+
+test-page-params
+meta ["test"]
+fn () {
+    assert-eq({"page[size]": null, "page[number]": null}, ::reg/page-params({}))
+    assert-eq({"page[size]": 250, "page[number]": 3}, ::reg/page-params({page-size: 900, page: 3}), "at most 250")
+    assert-eq({"page[size]": 5, "page[number]": null}, ::reg/page-params({page-size: 2}), "at least 5")
+}
+
+test-filter-params
+meta ["test"]
+fn () {
+    assert-eq({}, ::reg/filter-params(null))
+    assert-eq({"filter[docketId]": "FAA-2018-1084"}, ::reg/filter-params({docketId: "FAA-2018-1084"}))
+    assert-eq({"filter[postedDate][ge]": "2026-01-01", "filter[postedDate][le]": "2026-02-01"}, ::reg/filter-params({postedDate: {ge: "2026-01-01", le: "2026-02-01"}}))
+    assert-eq({"filter[withinCommentPeriod]": true}, ::reg/filter-params({withinCommentPeriod: true}))
+    assert-eq({}, ::reg/filter-params({withinCommentPeriod: false}), "the API rejects false")
+}
+
+test-list-params-url
+meta ["test"]
+fn () {
+    p ::reg/list-params({filters: {agencyId: "EPA", postedDate: {ge: "2026-01-01"}}, sort: "-postedDate", page-size: 25, page: 2})
+    assert-eq("?filter%5BagencyId%5D=EPA&filter%5BpostedDate%5D%5Bge%5D=2026-01-01&sort=-postedDate&page%5Bsize%5D=25&page%5Bnumber%5D=2", ::api/query-string(p))
+}
+
+// ============================================================================
+// Paging and windows
+// ============================================================================
+
+test-next-page
+meta ["test"]
+fn () {
+    assert-eq(null, ::reg/next-page(::fx/DOCUMENTS_PAGE))
+    assert-eq(2, ::reg/next-page(::fx/COMMENTS_PAGE))
+    assert-eq(null, ::reg/next-page({meta: {pageNumber: 20, hasNextPage: true}}), "the documented range ends at 20")
+    assert-eq(null, ::reg/next-page(null))
+}
+
+test-eastern-date-time
+meta ["test"]
+fn () {
+    assert-eq("2020-08-10 11:58:52", ::reg/eastern-date-time("2020-08-10T15:58:52Z"), "the API's own example, in daylight time")
+    assert-eq("2019-02-13 11:21:20", ::reg/eastern-date-time("2019-02-13T16:21:20Z"), "standard time")
+}
+
+test-window-opts
+meta ["test"]
+fn () {
+    first-page ::reg/window-opts({filters: {commentOnId: "abc"}}, "lastModifiedDate,documentId", null, 1)
+    assert-eq({commentOnId: "abc"}, first-page.filters)
+    assert-eq(250, first-page.page-size)
+    assert-eq("lastModifiedDate,documentId", first-page.sort)
+    later ::reg/window-opts({filters: {lastModifiedDate: {le: "2026-01-01 00:00:00"}}}, "lastModifiedDate,docketId", "2025-01-01 00:00:00", 3)
+    assert-eq({ge: "2025-01-01 00:00:00", le: "2026-01-01 00:00:00"}, later.filters.lastModifiedDate, "a caller's le stays")
+    assert-eq(3, later.page)
+}
+
+test-next-cursor
+meta ["test"]
+fn () {
+    rows ::fx/COMMENTS_PAGE.data
+    assert-eq("2019-02-13 13:58:31", ::reg/next-cursor(rows, null))
+    assert(is-err(::reg/next-cursor(rows, "2019-02-13 13:58:31")), "a cursor that can't move stops the walk")
+    assert(is-err(::reg/next-cursor([{id: "x", attributes: {}}], null)), "no timestamp")
+}
+
+// A fake API row: row n was last modified n seconds after 15:00:00 UTC.
+fake-row fn (n: Int): Map {
+  {id: `row-${n}`, attributes: {lastModifiedDate: `2026-01-15T15:00:${pad-start(Str(n), 2, "0")}Z`}}
+}
+
+test-windows-go-past-the-ceiling-without-repeats
+meta ["test"]
+fn () {
+    // 20 pages of 1 row a window, 45 rows in all: three windows.
+    fetch (o) {
+      ge get-in(o, ["filters", "lastModifiedDate", "ge"])
+      start cond {
+        is-null(ge) => { 0 }
+        // Eastern is five hours behind in January: "10:00:19" is row 19
+        => { Int(slice(ge, 17, 19)) }
+      }
+
+      n add(start, sub(o.page, 1))
+      {data: [fake-row(n)], meta: {pageNumber: o.page, hasNextPage: lt(n, 44)}}
+    }
+
+    rows ::reg/collect-windows(fetch, {}, "lastModifiedDate,documentId", 1000)
+    assert-eq(45, length(rows))
+    assert-eq(45, length(distinct(map(rows, (r) { r.id }))), "the overlapping row appears once")
+    assert-eq("row-44", last(rows).id)
+    assert-eq(10, length(::reg/collect-windows(fetch, {}, "lastModifiedDate,documentId", 10)), "limit")
+}
+
+test-windows-stop-on-a-stuck-timestamp
+meta ["test"]
+fn () {
+    fetch (o) {
+      {data: [{id: `p${o.page}-${or(get-in(o, ["filters", "lastModifiedDate", "ge"]), "")}`, attributes: {lastModifiedDate: "2026-01-15T15:00:00Z"}}], meta: {pageNumber: o.page, hasNextPage: true}}
+    }
+
+    out ::reg/collect-windows(fetch, {}, "lastModifiedDate,documentId", 1000)
+    assert(is-err(out), "no endless walk when a whole window shares a timestamp")
+    assert(::hot::str/contains(err-message(out), "lastModifiedDate"), "says why")
+}
+
+test-windows-need-a-map-filter
+meta ["test"]
+fn () {
+    out ::reg/collect-windows((o) { {} }, {filters: {lastModifiedDate: "2026-01-01 00:00:00"}}, "lastModifiedDate,documentId", 10)
+    assert(is-err(out), "an exact lastModifiedDate can't be windowed")
+}
+
+test-windows-return-an-err-page
+meta ["test"]
+fn () {
+    assert(is-err(::reg/collect-windows((o) { err("boom") }, {}, "lastModifiedDate,documentId", 10)), "the Err comes back")
+}
+
+test-windows-treat-a-page-of-html-as-an-err
+meta ["test"]
+fn () {
+    out ::reg/collect-windows((o) { ::api/decode-body(HttpResponse({status: 200, headers: {}, body: "<html>Down for maintenance</html>"}), "u") }, {}, "lastModifiedDate,documentId", 10)
+    assert(is-err(out), "a maintenance page isn't an empty result")
+    assert-eq(200, err-value(out).status)
+}
+
+test-decode-body
+meta ["test"]
+fn () {
+    assert-eq({a: 1}, ::api/decode-body(HttpResponse({status: 200, headers: {}, body: "{\"a\": 1}"}), "u"), "JSON text")
+    assert-eq({a: 1}, ::api/decode-body(HttpResponse({status: 200, headers: {}, body: {a: 1}}), "u"), "already decoded")
+    assert(is-err(::api/decode-body(HttpResponse({status: 200, headers: {}, body: "{\"a\": "}), "u")), "truncated JSON")
+}
+
+// `total` rows, with `hasNextPage` false on page 20 whatever remains. All rows
+// up to the first window's last share one timestamp, and the rest the next.
+ceiling-fetch fn (total: Int): Fn {
+    (o) {
+      ge get-in(o, ["filters", "lastModifiedDate", "ge"])
+      start if(is-null(ge), 0, 4999)
+      end if(is-null(ge), min(total, 5000), total)
+      from add(start, mul(sub(o.page, 1), 250))
+      ids range(from, min(add(from, 250), end))
+      stamp (n) { if(lt(n, 4999), "2026-01-15T15:00:00Z", "2026-01-15T16:00:00Z") }
+      {
+        data: map(ids, (n) { {id: `row-${n}`, attributes: {lastModifiedDate: stamp(n)}} }),
+        meta: {pageNumber: o.page, hasNextPage: and(is-null(ge), lt(o.page, 20))}
+      }
+    }
+}
+
+test-windows-restart-after-a-full-page-20
+meta ["test"]
+fn () {
+    rows ::reg/collect-windows(ceiling-fetch(5100), {}, "lastModifiedDate,documentId", 10000)
+    assert-eq(5100, length(rows), "hasNextPage false on a full page 20 isn't the end")
+    assert-eq(5100, length(distinct(map(rows, (r) { r.id }))), "the overlapping row appears once")
+    assert-eq(5000, length(::reg/collect-windows(ceiling-fetch(5000), {}, "lastModifiedDate,documentId", 10000)), "exactly 5,000 rows")
+}
+
+test-blank-ids-are-errs
+meta ["test"]
+fn () {
+    assert(::hot::str/contains(err-message(::reg/document("  ", {api-key: "k"})), "needs an id"), "document")
+    assert(::hot::str/contains(err-message(::reg/comment("", {api-key: "k"})), "needs an id"), "comment")
+    assert(::hot::str/contains(err-message(::reg/docket("", {api-key: "k"})), "needs an id"), "docket")
+}

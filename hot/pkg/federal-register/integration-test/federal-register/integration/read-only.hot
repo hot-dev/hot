@@ -1,0 +1,88 @@
+::federal-register::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration smoke tests (live, read-only)
+// =============================================================================
+// FEDERAL_REGISTER_LIVE=1 (no key). The tests only read; without the setting
+// they record a skip and pass.
+// Run with: hot test -p pkg-integration-federal-register
+
+::ctx ::federal-register::integration::ctx
+
+test-search-pages-and-document
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("FEDERAL_REGISTER_LIVE is not 1") }
+        => {
+            opts {
+              agencies: "financial-crimes-enforcement-network",
+              type: "RULE",
+              publication-date-gte: "2024-01-01",
+              publication-date-lte: "2026-11-01",
+              cfr-title: 31,
+              cfr-part: 1010,
+              order: "newest",
+              per-page: 2,
+              fields: ["document_number", "title", "type"]
+            }
+
+            page ::federal-register/search(opts)
+            assert-eq(2, length(page.results))
+            assert-eq("Rule", first(page.results).type)
+            more ::federal-register/search({after: ::federal-register/next-page(page)})
+            assert(not(eq(first(page.results).document_number, first(more.results).document_number)), "the cursor moves on")
+            doc ::federal-register/get-document(first(page.results).document_number, {fields: ["document_number", "title"]})
+            assert-eq(first(page.results).title, doc.title)
+            assert-eq(null, ::federal-register/get-document("0000-00000"), "no such document")
+        }
+    }
+}
+
+test-collect-crosses-pages
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("FEDERAL_REGISTER_LIVE is not 1") }
+        => {
+            opts {cfr-title: 31, cfr-part: 1010, order: "newest", per-page: 2, fields: ["document_number"]}
+            docs ::federal-register/collect(::federal-register/search, opts, 3)
+            assert-eq(3, length(docs), "two pages, trimmed to the limit")
+            assert(not(eq(docs[0].document_number, docs[2].document_number)), "the second page holds different documents")
+        }
+    }
+}
+
+test-significant-and-bad-agency
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("FEDERAL_REGISTER_LIVE is not 1") }
+        => {
+            page ::federal-register/search({significant: true, type: "RULE", per-page: 2, fields: ["document_number", "significant"]})
+            assert(first(page.results).significant, "only significant rules")
+            bad ::federal-register/search({agencies: "no-such-agency"})
+            assert(is-err(bad), "an unknown slug is an Err, not an empty result")
+            assert-eq(400, untype(err-value(bad)).status)
+        }
+    }
+}
+
+test-public-inspection-and-agencies
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("FEDERAL_REGISTER_LIVE is not 1") }
+        => {
+            out ::federal-register/public-inspection()
+            assert(is-vec(out.results), "the current list")
+            cond {
+                is-empty(out.results) => { println("federal-register integration: public inspection is empty today") }
+                => {
+                    number first(out.results).document_number
+                    assert-eq(number, ::federal-register/get-public-inspection(number).document_number)
+                }
+            }
+
+            slugs map(::federal-register/agencies(), (a) { a.slug })
+            assert(not(is-empty(filter(slugs, (s) { eq(s, "financial-crimes-enforcement-network") }))), "FinCEN is listed")
+        }
+    }
+}

@@ -1,0 +1,90 @@
+::cfpb::complaints::test::fixtures ns
+
+// Trimmed real responses (retrieved 4 Nov 2026).
+
+// GET /?company=JPMORGAN CHASE & CO.&date_received_min=2026-01-01&state=CA&size=2&sort=created_date_desc
+// (hits and _meta, with one break point kept of 99)
+SEARCH_PAGE {
+  hits: {
+    total: {value: 3790, relation: "eq"},
+    max_score: null,
+    hits: [
+      {
+        _index: "complaint-public-v1",
+        _id: "31224554",
+        _score: null,
+        _source: {
+          product: "Debt collection",
+          date_sent_to_company: "2026-10-28T11:26:26.000Z",
+          issue: "Attempts to collect debt not owed",
+          sub_product: "I do not know",
+          zip_code: "90037",
+          tags: null,
+          complaint_id: "31224554",
+          timely: "Yes",
+          company_response: "Closed with explanation",
+          submitted_via: "Web",
+          company: "JPMORGAN CHASE & CO.",
+          date_received: "2026-10-28T11:23:23.000Z",
+          state: "CA",
+          company_public_response: null,
+          sub_issue: "Debt is not yours"
+        },
+        sort: [1793186603000, "31224554"]
+      }
+    ]
+  },
+  _meta: {
+    license: "CC0",
+    last_updated: "2026-11-03T12:00:00-05:00",
+    last_indexed: "2026-11-03T12:00:00-05:00",
+    total_record_count: 18879284,
+    is_data_stale: false,
+    has_data_issue: false,
+    break_points: {"2": [1793142399000, "31179918"], "3": [1793065121000, "31089777"]}
+  }
+}
+
+// GET /31224554 for a complaint, and GET /99999999999 for none: both 200.
+NO_COMPLAINT {
+  took: 2,
+  timed_out: false,
+  hits: {total: {value: 0, relation: "eq"}, max_score: null, hits: []}
+}
+
+// The aggregations of GET /?company=JPMORGAN CHASE & CO.&date_received_min=2026-01-01&size=0
+AGGREGATIONS {
+  product: {
+    doc_count: 22164,
+    product: {
+      doc_count_error_upper_bound: 0,
+      sum_other_doc_count: 0,
+      buckets: [
+        {
+          key: "Checking or savings account",
+          doc_count: 7887,
+          "sub_product.raw": {
+            buckets: [
+              {key: "Checking account", doc_count: 6948},
+              {key: "Other banking product or service", doc_count: 565}
+            ]
+          }
+        }
+      ]
+    }
+  },
+  company_response: {
+    doc_count: 22164,
+    company_response: {
+      doc_count_error_upper_bound: 0,
+      sum_other_doc_count: 0,
+      buckets: [
+        {key: "Closed with explanation", doc_count: 18563},
+        {key: "Closed with monetary relief", doc_count: 1819}
+      ]
+    }
+  }
+}
+
+// GET /?state=ZZ&size=2 (400)
+BAD_STATE {state: {"0": ["\"ZZ\" is not a valid choice."]}}

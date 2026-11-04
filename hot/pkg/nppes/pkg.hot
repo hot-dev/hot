@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.nppes {
+  name: "hot.dev/nppes",
+  version: "0.1.0",
+  hot-min-version: "3.0.2",
+  description: "The CMS NPI Registry (NPPES) API for Hot, with no key: lookups by NPI, searches by name, organization, taxonomy and location, and paging.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["kyb", "healthcare", "npi", "nppes", "cms"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

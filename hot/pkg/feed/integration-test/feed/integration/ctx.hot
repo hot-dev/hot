@@ -1,0 +1,19 @@
+::feed::integration::ctx ns
+
+::env ::hot::env
+
+// Feeds need no key but only run with FEED_LIVE=1, so CI without network
+// stays hermetic.
+
+live
+meta {doc: """True when FEED_LIVE=1."""}
+fn (): Bool {
+    eq(::env/get("FEED_LIVE", ""), "1")
+}
+
+skip
+meta {doc: """Record a skip and pass."""}
+fn (why: Str): Bool {
+    println(`feed integration: ${why} - skipping`)
+    assert(true, `skipped: ${why}`)
+}

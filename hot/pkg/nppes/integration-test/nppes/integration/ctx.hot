@@ -1,0 +1,19 @@
+::nppes::integration::ctx ns
+
+::env ::hot::env
+
+// The API needs no key, but this only runs with NPPES_LIVE=1, so CI without
+// network stays hermetic.
+
+live
+meta {doc: """True when NPPES_LIVE=1."""}
+fn (): Bool {
+    eq(::env/get("NPPES_LIVE", ""), "1")
+}
+
+skip
+meta {doc: """Record a skip and pass."""}
+fn (why: Str): Bool {
+    println(`nppes integration: ${why} - skipping`)
+    assert(true, `skipped: ${why}`)
+}

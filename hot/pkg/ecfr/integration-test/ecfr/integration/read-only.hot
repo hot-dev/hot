@@ -1,0 +1,73 @@
+::ecfr::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration smoke tests (live, read-only)
+// =============================================================================
+// ECFR_LIVE=1 (no key). The tests only read; without the setting they record
+// a skip and pass.
+// Run with: hot test -p pkg-integration-ecfr
+
+::ctx ::ecfr::integration::ctx
+
+test-section-and-part
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("ECFR_LIVE is not 1") }
+        => {
+            date ::ecfr/latest-date(31)
+            assert(is-str(date), "title 31 has a current date")
+            section ::ecfr/get-section(31, "1010.230", {date: date})
+            assert-eq("31 CFR 1010.230", section.citation)
+            assert(::hot::str/contains(section.text, "beneficial owner"), "the CDD rule's text")
+            part ::ecfr/get-part(31, "1010", {date: date})
+            assert-eq("31 CFR Part 1010", part.citation)
+            assert(gt(length(part.sections), 50), "part 1010 has many sections")
+            assert-eq(null, ::ecfr/get-part(31, "99999", {date: date}), "no such part")
+            assert(is-err(::ecfr/get-section(31, "1010.230", {date: "2030-01-01"})), "a date past the title's current date is an Err, not a missing section")
+        }
+    }
+}
+
+test-ancestry-and-versions
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("ECFR_LIVE is not 1") }
+        => {
+            nodes ::ecfr/ancestry(31, {section: "1010.230"})
+            assert-eq("chapter", nodes[2].type)
+            assert-eq("X", nodes[2].identifier, "Chapter X is FinCEN")
+            out ::ecfr/versions(31, {part: "1010", section: "1010.100", issue-date-gte: "2024-01-01", issue-date-lte: "2030-01-01"})
+            assert(gt(length(out.content_versions), 0), "1010.100 was amended in 2024")
+            assert-eq({gte: "2024-01-01", lte: "2030-01-01"}, out.meta.issue_date, "eCFR read both date bounds")
+        }
+    }
+}
+
+test-structure
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("ECFR_LIVE is not 1") }
+        => {
+            tree ::ecfr/structure(31)
+            assert-eq("title", tree.type)
+            assert(gt(tree.size, 0), "the size of the title's XML")
+            assert(gt(length(tree.children), 0), "subtitles")
+        }
+    }
+}
+
+test-search
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("ECFR_LIVE is not 1") }
+        => {
+            page ::ecfr/search("beneficial ownership", {title: 31, per-page: 2})
+            assert-eq(2, length(page.results))
+            assert-eq(2, ::ecfr/next-page(page))
+            assert(gt(::ecfr/search-count("beneficial ownership", {title: 31}), 0), "the count agrees there are results")
+            hits ::ecfr/collect((o) { ::ecfr/search("beneficial ownership", o) }, {title: 31, per-page: 2}, 3)
+            assert-eq(3, length(hits), "two pages, trimmed to the limit")
+        }
+    }
+}

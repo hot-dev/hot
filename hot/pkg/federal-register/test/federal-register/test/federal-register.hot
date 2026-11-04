@@ -1,0 +1,226 @@
+::federal-register::test::federal-register ns
+meta ["test"]
+
+::fx ::federal-register::test::fixtures
+::api ::federal-register::api
+
+HttpResponse ::hot::http/HttpResponse
+
+// ============================================================================
+// Settings resolver
+// ============================================================================
+
+test-resolve-defaults
+meta ["test"]
+fn () {
+    assert-eq("https://www.federalregister.gov/api/v1", ::api/resolve({}).base-url)
+}
+
+test-resolve-opts-override
+meta ["test"]
+fn () {
+    assert-eq("https://fr.example", ::api/resolve({base-url: "https://fr.example/"}).base-url)
+}
+
+test-resolve-reads-context
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"federal-register.base-url": "https://ctx.example/api/"})
+    assert-eq("https://ctx.example/api", ::api/resolve({}).base-url)
+    assert-eq("https://opts.example", ::api/resolve({base-url: "https://opts.example"}).base-url, "opts win")
+    ::hot::ctx/set({"federal-register.base-url": null})
+}
+
+// ============================================================================
+// Transport helpers
+// ============================================================================
+
+test-query-string-drops-unset
+meta ["test"]
+fn () {
+    assert-eq("?order=newest", ::api/query-string({order: "newest", page: null, term: "", "fields[]": []}))
+    assert-eq("", ::api/query-string({a: null}))
+}
+
+test-query-string-repeats-a-vec
+meta ["test"]
+fn () {
+    assert-eq("?conditions%5Btype%5D%5B%5D=RULE&conditions%5Btype%5D%5B%5D=NOTICE", ::api/query-string({"conditions[type][]": ["RULE", "NOTICE"]}))
+}
+
+test-query-string-encodes-values
+meta ["test"]
+fn () {
+    assert-eq("?conditions%5Bterm%5D=%22a+%26+b%22", ::api/query-string({"conditions[term]": "\"a & b\""}))
+    assert-eq("?page=2", ::api/query-string({page: 2}), "numbers")
+}
+
+test-path-segment
+meta ["test"]
+fn () {
+    assert-eq("a%2Fb%20c", ::api/path-segment("a/b c"))
+}
+
+test-http-error
+meta ["test"]
+fn () {
+    e untype(::api/http-error(HttpResponse({status: 400, headers: {}, body: ::fx/BAD_AGENCY_BODY}), "https://x.example"))
+    assert-eq("federal-register", e.source)
+    assert-eq("federal-register: HTTP 400: agencies: invalid value", e.message)
+}
+
+test-http-error-leaves-out-html
+meta ["test"]
+fn () {
+    response HttpResponse({status: 404, headers: {}, body: "<html><title>404 Not Found</title></html>"})
+    assert-eq("federal-register: HTTP 404 for https://x.example", untype(::api/http-error(response, "https://x.example")).message)
+}
+
+test-http-error-reads-retry-after
+meta ["test"]
+fn () {
+    response HttpResponse({status: 429, headers: {retry-after: "30"}, body: ""})
+    assert-eq(30, untype(::api/http-error(response, "https://x.example")).retry-after)
+}
+
+test-is-not-found-reads-a-typed-error
+meta ["test"]
+fn () {
+    response HttpResponse({status: 404, headers: {}, body: ""})
+    assert(::api/is-not-found(::api/http-error(response, "https://x.example")), "the typed value `request` returns")
+    assert(not(::api/is-not-found("connection refused")), "a transport failure is a Str")
+    assert(not(::api/is-not-found(null)), "null")
+}
+
+test-null-on-404
+meta ["test"]
+fn () {
+    missing HttpResponse({status: 404, headers: {}, body: ""})
+    down HttpResponse({status: 503, headers: {}, body: ""})
+    assert-eq(null, ::api/null-on-404(err(::api/http-error(missing, "https://x.example"))))
+    assert(is-err(::api/null-on-404(err(::api/http-error(down, "https://x.example")))), "only a 404 is an empty lookup")
+    assert-eq("kept", ::api/null-on-404("kept"))
+}
+
+test-html-page-is-detected
+meta ["test"]
+fn () {
+    page HttpResponse({status: 200, headers: {content-type: "text/html; charset=utf-8"}, body: "<html></html>"})
+    assert(::api/is-html(page), "the CAPTCHA page a flagged client is redirected to")
+    assert(not(::api/is-html(HttpResponse({status: 200, headers: {content-type: "application/json"}, body: {}}))), "JSON")
+    e ::api/html-error(page, "https://x.example")
+    assert-eq(200, untype(e).status)
+    assert(not(::api/is-not-found(e)), "not a 404, so it can't read as an empty lookup")
+}
+
+// ============================================================================
+// Parameters
+// ============================================================================
+
+test-page-params
+meta ["test"]
+fn () {
+    assert-eq({per_page: null, page: null}, ::federal-register/page-params({}))
+    assert-eq({per_page: 1000, page: 3}, ::federal-register/page-params({per-page: 5000, page: 3}), "capped at 1000")
+}
+
+test-significant-param
+meta ["test"]
+fn () {
+    assert-eq("1", ::federal-register/significant-param(true))
+    assert-eq("0", ::federal-register/significant-param(false))
+    assert-eq(null, ::federal-register/significant-param(null))
+}
+
+test-search-params
+meta ["test"]
+fn () {
+    q ::api/query-string(::federal-register/search-params({
+      term: "beneficial",
+      type: "rule",
+      agencies: "financial-crimes-enforcement-network",
+      publication-date-gte: "2024-01-01",
+      cfr-title: 31,
+      cfr-part: 1010,
+      significant: true,
+      order: "newest",
+      per-page: 2
+    }))
+    assert-eq("?conditions%5Bterm%5D=beneficial&conditions%5Btype%5D%5B%5D=RULE&conditions%5Bagencies%5D%5B%5D=financial-crimes-enforcement-network&conditions%5Bpublication_date%5D%5Bgte%5D=2024-01-01&conditions%5Bcfr%5D%5Btitle%5D=31&conditions%5Bcfr%5D%5Bpart%5D=1010&conditions%5Bsignificant%5D=1&order=newest&per_page=2", q)
+}
+
+test-search-params-vecs
+meta ["test"]
+fn () {
+    q ::api/query-string(::federal-register/search-params({agencies: ["a", "b"], fields: ["title", "type"]}))
+    assert-eq("?conditions%5Bagencies%5D%5B%5D=a&conditions%5Bagencies%5D%5B%5D=b&fields%5B%5D=title&fields%5B%5D=type", q)
+    assert-eq("", ::api/query-string(::federal-register/search-params({})))
+}
+
+test-search-params-keeps-significant-false
+meta ["test"]
+fn () {
+    assert-eq("?conditions%5Bsignificant%5D=0", ::api/query-string(::federal-register/search-params({significant: false})))
+}
+
+// ============================================================================
+// Pagination
+// ============================================================================
+
+test-next-page
+meta ["test"]
+fn () {
+    next ::federal-register/next-page(::fx/SEARCH_PAGE)
+    assert(::hot::str/starts-with(next, "/documents?conditions"), "the path under the API root")
+    assert(::hot::str/contains(next, "search_after_cursor=WzE3ODY2NjU2MDAwMDAsIjIwMjYtMTY1NzYiXQ"), "keeps the cursor")
+    assert-eq(null, ::federal-register/next-page(::fx/SEARCH_LAST_PAGE))
+    assert-eq(null, ::federal-register/next-page({}))
+    assert-eq(null, ::federal-register/next-page(null))
+}
+
+test-next-page-refuses-a-foreign-path
+meta ["test"]
+fn () {
+    assert(is-err(::federal-register/next-page({next_page_url: "https://other.example/elsewhere"})), "not followed, and not read as the last page")
+}
+
+test-collect-follows-the-cursor
+meta ["test"]
+fn () {
+    fetch (o) {
+      n or(get(o, "after"), "/documents?page=1")
+      cond {
+        eq(n, "/documents?page=1") => { {results: ["a", "b"], next_page_url: "https://www.federalregister.gov/api/v1/documents?page=2"} }
+        => { {results: ["c"]} }
+      }
+    }
+
+    assert-eq(["a", "b", "c"], ::federal-register/collect(fetch, {}, 100))
+    assert-eq(["a"], ::federal-register/collect(fetch, {}, 1))
+}
+
+test-collect-passes-errors-on
+meta ["test"]
+fn () {
+    assert(is-err(::federal-register/collect((o) { err("down") }, {}, 10)), "a failed page is not an empty result")
+}
+
+test-collect-refuses-a-link-it-cannot-read
+meta ["test"]
+fn () {
+    fetch (o) { {results: [1], next_page_url: "https://proxy.example/fr/documents.json?page=2"} }
+    assert(is-err(::federal-register/collect(fetch, {}, 10)), "one page must not look like the whole result")
+    assert-eq([1], ::federal-register/collect(fetch, {}, 1), "limit reached first")
+}
+
+test-collect-follows-thousands-of-pages
+meta ["test"]
+fn () {
+    n 3000
+    fetch (o) {
+      i Int(::hot::regex/capture(or(get(o, "after"), "/d?page=1"), "page=(\\d+)").groups[0])
+      {results: [i], next_page_url: if(lt(i, n), `https://www.federalregister.gov/api/v1/d?page=${add(i, 1)}`, null)}
+    }
+
+    assert-eq(n, length(::federal-register/collect(fetch, {}, n)), "no recursion limit")
+}

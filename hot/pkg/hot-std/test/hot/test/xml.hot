@@ -141,7 +141,7 @@ fn () {
     xml ::xml/from-xml("<p>Hello <b>World</b>!</p>")
     txt ::xml/text(xml)
     // text() returns direct text content only, not nested element text
-    assert(contains(txt, "Hello"), "should contain 'Hello'")
+    assert-eq("Hello!", txt, "direct text only, each node trimmed")
     // Nested element text is accessed via child
     b ::xml/child(xml, "b")
     assert-eq("World", ::xml/text(b), "nested b should contain 'World'")

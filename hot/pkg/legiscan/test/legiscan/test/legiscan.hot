@@ -1,0 +1,287 @@
+::legiscan::test::legiscan ns
+meta ["test"]
+
+::fx ::legiscan::test::fixtures
+::api ::legiscan::api
+::lg ::legiscan
+
+HttpResponse ::hot::http/HttpResponse
+
+KEY "abc123secret"
+URL "https://api.legiscan.com/?key=abc123secret&op=getBill&id=1"
+
+// ============================================================================
+// Settings resolver
+// ============================================================================
+
+test-resolve-defaults
+meta ["test"]
+fn () {
+    cfg ::api/resolve({})
+    assert-eq("https://api.legiscan.com", cfg.base-url)
+    assert-eq(null, cfg.api-key)
+}
+
+test-resolve-opts-override
+meta ["test"]
+fn () {
+    cfg ::api/resolve({api-key: "k-test", base-url: "https://legiscan.example/"})
+    assert-eq("k-test", cfg.api-key)
+    assert-eq("https://legiscan.example", cfg.base-url)
+    assert-eq(null, ::hot::ctx/get("legiscan.api-key"), "per-call keys are never written to ctx")
+}
+
+test-resolve-reads-context
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"legiscan.api-key": "ctx-key", "legiscan.base-url": "https://ctx.example/"})
+    cfg ::api/resolve({})
+    assert-eq("ctx-key", cfg.api-key)
+    assert-eq("https://ctx.example", cfg.base-url)
+    ::hot::ctx/set({"legiscan.api-key": null, "legiscan.base-url": null})
+}
+
+test-blank-credential-is-an-err-naming-the-key
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"legiscan.api-key": "ctx-key"})
+    for-each(["", "  ", null], (v) {
+      out ::api/resolve({api-key: v})
+      assert(is-err(out), "blank api-key never falls back to context")
+      assert(::hot::str/contains(err-message(out), "api-key"), "the Err names api-key")
+    })
+    ::hot::ctx/set({"legiscan.api-key": null})
+}
+
+test-blank-credential-reaches-every-caller-as-an-err
+meta ["test"]
+fn () {
+    assert(is-err(::lg/session-list("CA", {api-key: ""})), "session-list")
+    assert(is-err(::lg/master-list(1791, {api-key: ""})), "master-list")
+    assert(is-err(::lg/master-list-raw(1791, {api-key: ""})), "master-list-raw")
+    assert(is-err(::lg/bill(1, {api-key: ""})), "bill")
+    assert(is-err(::lg/bill-text(1, {api-key: ""})), "bill-text")
+    assert(is-err(::lg/search("x", {api-key: ""})), "search")
+    assert(is-err(::lg/search-raw("x", {api-key: ""})), "search-raw")
+}
+
+test-keyed-url-needs-a-per-call-key
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"legiscan.api-key": "ctx-key"})
+    out ::api/resolve({base-url: "https://proxy.example"})
+    assert(is-err(out), "the context key never goes to a per-call URL")
+    assert(::hot::str/contains(err-message(out), "base-url"), "names base-url")
+    assert(is-ok(::api/resolve({api-key: "t", base-url: "https://proxy.example"})), "fine with a per-call key")
+    ::hot::ctx/set({"legiscan.api-key": null})
+}
+
+test-missing-credentials-are-errors
+meta ["test"]
+fn () {
+    key ::api/require-api-key(::api/resolve({}))
+    assert(is-err(key), "LegiScan needs a key")
+    assert(::hot::str/contains(err-message(key), "legiscan.api-key"), "names the ctx key")
+    assert(is-err(::lg/bill(1)), "fails before any request")
+}
+
+// ============================================================================
+// Redaction
+// ============================================================================
+
+test-redact
+meta ["test"]
+fn () {
+    assert-eq("https://api.legiscan.com/?key=REDACTED&op=getBill&id=1", ::api/redact(URL, KEY))
+    assert-eq("https://api.legiscan.com/?key=REDACTED&op=getBill&id=1", ::api/redact(URL, null), "without the key in hand")
+    assert-eq("https://api.legiscan.com/?op=getBill&key=REDACTED", ::api/redact("https://api.legiscan.com/?op=getBill&key=a%2Fb", "a/b"), "an encoded key")
+    assert-eq("bad key REDACTED given", ::api/redact("bad key abc123secret given", KEY), "a bare copy")
+    assert-eq("error sending request for url (https://x/?key=REDACTED)", ::api/redact("error sending request for url (https://x/?key=abc)", null))
+}
+
+test-redact-value
+meta ["test"]
+fn () {
+    assert-eq({a: ["REDACTED"], b: 1}, ::api/redact-value({a: [KEY], b: 1}, KEY))
+    assert-eq(5, ::api/redact-value(5, KEY))
+    assert-eq(null, ::api/redact-value(null, KEY))
+}
+
+test-http-error-is-redacted
+meta ["test"]
+fn () {
+    response HttpResponse({status: 500, headers: {location: URL}, body: `failed: ${URL}`})
+    e untype(::api/http-error(response, URL, KEY))
+    assert-eq("legiscan", e.source)
+    assert(not(::hot::str/contains(to-json(e), KEY)), "no field holds the key")
+    assert-eq("https://api.legiscan.com/?key=REDACTED&op=getBill&id=1", e.url)
+}
+
+test-http-error-without-a-body-shows-the-redacted-url
+meta ["test"]
+fn () {
+    e untype(::api/http-error(HttpResponse({status: 503, headers: {}, body: null}), URL, KEY))
+    assert-eq("legiscan: HTTP 503 for https://api.legiscan.com/?key=REDACTED&op=getBill&id=1", e.message)
+}
+
+test-transport-failure-is-redacted
+meta ["test"]
+fn () {
+    // Nothing listens on the discard port, so this fails without leaving the machine.
+    out ::lg/bill(1, {api-key: KEY, base-url: "http://127.0.0.1:9"})
+    assert(is-err(out), "the connection fails")
+    assert(not(::hot::str/contains(err-message(out), KEY)), "the Err doesn't carry the key")
+}
+
+test-operation-url
+meta ["test"]
+fn () {
+    cfg {api-key: "k", base-url: "https://api.legiscan.com"}
+    assert-eq("https://api.legiscan.com/?key=k&op=getBill&id=7", ::api/operation-url(cfg, "getBill", {id: 7}))
+    assert-eq("https://api.legiscan.com/?key=k&op=getSessionList", ::api/operation-url(cfg, "getSessionList", {state: null}))
+}
+
+// ============================================================================
+// status: "ERROR"
+// ============================================================================
+
+test-status-ok-passes
+meta ["test"]
+fn () {
+    ok HttpResponse({status: 200, headers: {}, body: null})
+    assert-eq(::fx/SESSION_LIST, ::api/check-body(ok, ::fx/SESSION_LIST, URL, KEY))
+}
+
+test-status-error-on-http-200-is-an-err
+meta ["test"]
+fn () {
+    ok HttpResponse({status: 200, headers: {}, body: null})
+    out ::api/check-body(ok, ::fx/ERROR_RESPONSE, URL, KEY)
+    assert(is-err(out), "HTTP 200 with status ERROR")
+    e untype(err-value(out))
+    assert-eq("legiscan: IMPORTANT_SYSTEM_MESSAGE", e.message)
+    assert-eq("IMPORTANT_SYSTEM_MESSAGE", e.alert)
+    assert-eq(200, e.status)
+    assert(not(::hot::str/contains(to-json(e), KEY)), "no field holds the key")
+}
+
+test-status-error-alert-is-redacted
+meta ["test"]
+fn () {
+    ok HttpResponse({status: 200, headers: {}, body: null})
+    out ::api/check-body(ok, {status: "ERROR", alert: {message: `Invalid API key ${KEY}`}}, URL, KEY)
+    assert-eq("legiscan: Invalid API key REDACTED", err-message(out))
+}
+
+test-status-error-without-an-alert
+meta ["test"]
+fn () {
+    ok HttpResponse({status: 200, headers: {}, body: null})
+    out ::api/check-body(ok, {status: "ERROR"}, URL, KEY)
+    assert(is-err(out), "the alert is optional")
+    assert-eq("legiscan: unexpected response for https://api.legiscan.com/?key=REDACTED&op=getBill&id=1", err-message(out))
+}
+
+test-a-non-json-body-is-an-err
+meta ["test"]
+fn () {
+    ok HttpResponse({status: 200, headers: {}, body: null})
+    assert(is-err(::api/check-body(ok, "<html>maintenance</html>", URL, KEY)), "no status at all")
+}
+
+// ============================================================================
+// LegiScan
+// ============================================================================
+
+test-session-params
+meta ["test"]
+fn () {
+    assert-eq({id: "1791"}, ::lg/session-params(1791))
+    assert-eq({id: "1791"}, ::lg/session-params("1791"))
+    assert-eq({state: "CA"}, ::lg/session-params(" ca "))
+    assert(is-err(::lg/session-params("California")), "neither")
+}
+
+test-bill-rows
+meta ["test"]
+fn () {
+    rows ::lg/bill-rows(::fx/MASTER_LIST_RAW.masterlist)
+    assert-eq([1132030, 1131894], map(rows, (r) { r.bill_id }))
+    assert-eq([], ::lg/bill-rows({session: {session_id: 1}}), "other fields are not rows")
+    assert-eq([], ::lg/bill-rows(null))
+}
+
+test-change-hashes
+meta ["test"]
+fn () {
+    rows ::lg/bill-rows(::fx/MASTER_LIST_RAW.masterlist)
+    known ::lg/hash-index(rows)
+    assert-eq("d72444d8f2026219e38cb2179dcc67a0", get(known, "1132030"))
+    assert-eq([], ::lg/changed-bills(rows, known), "nothing changed")
+    stale assoc(known, "1131894", "old")
+    assert-eq([1131894], map(::lg/changed-bills(rows, stale), (r) { r.bill_id }))
+    assert-eq(2, length(::lg/changed-bills(rows, {})), "unknown bills count as changed")
+}
+
+test-decode-text
+meta ["test"]
+fn () {
+    text ::lg/decode-text(::fx/BILL_TEXT)
+    assert-eq(Bytes("<p>An act</p>"), text.bytes, "MIME line breaks are ignored")
+    assert-eq(null, get(text, "doc"), "the base64 copy is dropped")
+    assert-eq("text/html", text.mime)
+    assert-eq({doc_id: 1}, ::lg/decode-text({doc_id: 1}), "no doc")
+    assert(is-err(::lg/decode-text({doc_id: 1, doc: "not*base64"})), "bad base64")
+}
+
+test-search-params
+meta ["test"]
+fn () {
+    assert-eq("?query=money+transmitter&state=ALL", ::api/query-string(::lg/search-params("money transmitter", {})))
+    assert-eq("?query=x&state=CA&year=2&page=3", ::api/query-string(::lg/search-params("x", {state: "CA", year: 2, page: 3})))
+    assert-eq("?query=x&id=1791", ::api/query-string(::lg/search-params("x", {id: 1791})), "a session needs no state")
+}
+
+test-search-result
+meta ["test"]
+fn () {
+    found ::lg/search-result(::fx/SEARCH_RESULT)
+    assert-eq(22525, found.summary.count)
+    assert-eq([449621], map(found.results, (r) { r.bill_id }))
+    raw ::lg/search-result(::fx/SEARCH_RAW_RESULT)
+    assert-eq([449621, 431262], map(raw.results, (r) { r.bill_id }))
+    keyed ::lg/search-result({summary: {}, results: {"0": {bill_id: 7}}})
+    assert-eq([7], map(keyed.results, (r) { r.bill_id }))
+    assert-eq([], ::lg/search-result(null).results)
+}
+
+test-paging
+meta ["test"]
+fn () {
+    assert-eq(2, ::lg/next-page(::lg/search-result(::fx/SEARCH_RESULT)))
+    assert-eq(null, ::lg/next-page(::lg/search-result(::fx/SEARCH_RAW_RESULT)))
+    assert-eq(null, ::lg/next-page(null))
+}
+
+test-collect-follows-pages
+meta ["test"]
+fn () {
+    fetch (o) {
+      n o.page
+      {summary: {page_current: n, page_total: 3}, results: [`p${n}-a`, `p${n}-b`]}
+    }
+
+    assert-eq(["p1-a", "p1-b", "p2-a", "p2-b", "p3-a", "p3-b"], ::lg/collect(fetch, {}, 100))
+    assert-eq(["p1-a", "p1-b", "p2-a"], ::lg/collect(fetch, {}, 3))
+    assert(is-err(::lg/collect((o) { err("boom") }, {}, 10)), "an Err comes back")
+}
+
+test-malformed-json-is-an-http-error
+meta ["test"]
+fn () {
+    response HttpResponse({status: 200, headers: {}, body: `{"status": "OK", "note": "${KEY}`})
+    out ::api/check-body(response, ::api/decode-body(response), `https://api.legiscan.com/?key=${KEY}&op=getBill`, KEY)
+    assert(is-err(out), "truncated JSON comes back as an Err")
+    assert-eq("legiscan", err-value(out).source)
+    assert(not(::hot::str/contains(to-json(untype(err-value(out))), KEY)), "with no key in it")
+}

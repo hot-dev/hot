@@ -1,0 +1,329 @@
+::ecfr::test::ecfr ns
+meta ["test"]
+
+::fx ::ecfr::test::fixtures
+::api ::ecfr::api
+
+HttpResponse ::hot::http/HttpResponse
+
+// ============================================================================
+// Settings resolver
+// ============================================================================
+
+test-resolve-defaults
+meta ["test"]
+fn () {
+    assert-eq("https://www.ecfr.gov/api", ::api/resolve({}).base-url)
+}
+
+test-resolve-opts-override
+meta ["test"]
+fn () {
+    assert-eq("https://ecfr.example", ::api/resolve({base-url: "https://ecfr.example/"}).base-url)
+}
+
+test-resolve-reads-context
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"ecfr.base-url": "https://ctx.example/api/"})
+    assert-eq("https://ctx.example/api", ::api/resolve({}).base-url)
+    assert-eq("https://opts.example", ::api/resolve({base-url: "https://opts.example"}).base-url, "opts win")
+    ::hot::ctx/set({"ecfr.base-url": null})
+}
+
+// ============================================================================
+// Transport helpers
+// ============================================================================
+
+test-query-string-drops-unset
+meta ["test"]
+fn () {
+    assert-eq("?query=beneficial+owner", ::api/query-string({query: "beneficial owner", page: null, date: ""}))
+    assert-eq("", ::api/query-string({a: null}))
+    assert-eq("?hierarchy%5Btitle%5D=31", ::api/query-string({"hierarchy[title]": 31}))
+}
+
+test-path-segment
+meta ["test"]
+fn () {
+    assert-eq("a%2Fb%20c", ::api/path-segment("a/b c"))
+    assert-eq("31", ::api/path-segment(31))
+}
+
+test-body-text-decodes-gzip
+meta ["test"]
+fn () {
+    gz ::hot::gzip/encode("<DIV8/>")
+    response HttpResponse({status: 200, headers: {content-encoding: "gzip"}, body: gz, body-bytes: gz})
+    assert-eq("<DIV8/>", ::api/body-text(response))
+}
+
+test-body-text-reads-uncompressed
+meta ["test"]
+fn () {
+    raw Bytes("<DIV8/>")
+    assert-eq("<DIV8/>", ::api/body-text(HttpResponse({status: 200, headers: {}, body: "<DIV8/>", body-bytes: raw})), "a server can answer uncompressed")
+    assert-eq("<DIV8/>", ::api/body-text(HttpResponse({status: 200, headers: {}, body: "<DIV8/>"})))
+}
+
+test-body-text-bad-gzip-is-err
+meta ["test"]
+fn () {
+    raw Bytes("not gzip")
+    assert(is-err(::api/body-text(HttpResponse({status: 200, headers: {content-encoding: "gzip"}, body: raw, body-bytes: raw}))), "bad gzip")
+}
+
+test-http-error
+meta ["test"]
+fn () {
+    response HttpResponse({status: 404, headers: {}, body: {error: "No matching content found."}})
+    e untype(::api/http-error(response, "https://www.ecfr.gov/api/x"))
+    assert-eq("ecfr", e.source)
+    assert-eq("ecfr: HTTP 404: No matching content found.", e.message)
+    assert(::api/is-not-found(e), "404")
+}
+
+test-is-not-found-reads-a-typed-error
+meta ["test"]
+fn () {
+    response HttpResponse({status: 404, headers: {}, body: {error: "No matching content found."}})
+    assert(::api/is-not-found(::api/http-error(response, "https://x.example")), "the typed value `request` returns")
+    assert(not(::api/is-not-found("connection refused")), "a transport failure is a Str")
+    assert(not(::api/is-not-found(null)), "null")
+}
+
+test-null-on-404
+meta ["test"]
+fn () {
+    missing HttpResponse({status: 404, headers: {}, body: {error: "No matching content found."}})
+    down HttpResponse({status: 503, headers: {}, body: ""})
+    assert-eq(null, ::api/null-on-404(err(::api/http-error(missing, "https://x.example"))))
+    assert(is-err(::api/null-on-404(err(::api/http-error(down, "https://x.example")))), "only a 404 is an empty lookup")
+    assert-eq("kept", ::api/null-on-404("kept"))
+}
+
+test-past-date-stays-an-err
+meta ["test"]
+fn () {
+    body {error: "The requested date 2030-01-01 is past the title's most recent issue date of 2026-11-02, see https://www.ecfr.gov/api/versioner/v1/titles for details"}
+    e ::api/http-error(HttpResponse({status: 404, headers: {}, body: body}), "https://x.example")
+    assert(::api/is-past-date(e), "the section may exist")
+    assert(is-err(::api/null-on-404(err(e))), "not reported as missing")
+    missing ::api/http-error(HttpResponse({status: 404, headers: {}, body: {error: "No matching content found."}}), "https://x.example")
+    assert(not(::api/is-past-date(missing)), "a real miss")
+}
+
+test-http-error-decodes-gzip-body
+meta ["test"]
+fn () {
+    gz ::hot::gzip/encode("{\"error\":\"No matching content found.\"}")
+    response HttpResponse({status: 404, headers: {content-encoding: "gzip"}, body: gz, body-bytes: gz})
+    assert-eq("ecfr: HTTP 404: No matching content found.", untype(::api/http-error(response, "https://x.example")).message)
+}
+
+test-http-error-reads-retry-after
+meta ["test"]
+fn () {
+    response HttpResponse({status: 429, headers: {retry-after: "30"}, body: ""})
+    assert-eq(30, untype(::api/http-error(response, "https://x.example")).retry-after)
+}
+
+test-http-error-leaves-out-html
+meta ["test"]
+fn () {
+    response HttpResponse({status: 503, headers: {}, body: "<html><title>Down</title></html>"})
+    assert-eq("ecfr: HTTP 503 for https://x.example", untype(::api/http-error(response, "https://x.example")).message)
+}
+
+test-html-page-is-detected
+meta ["test"]
+fn () {
+    page HttpResponse({status: 200, headers: {content-type: "text/html; charset=utf-8"}, body: "<html></html>"})
+    assert(::api/is-html(page), "the CAPTCHA page a flagged client is redirected to")
+    assert(not(::api/is-html(HttpResponse({status: 200, headers: {content-type: "text/xml"}, body: ""}))), "XML")
+    e untype(::api/html-error(page, "https://x.example"))
+    assert-eq(200, e.status)
+    assert(not(::api/is-not-found(e)), "not a 404, so it can't read as an empty lookup")
+}
+
+// ============================================================================
+// Parameters
+// ============================================================================
+
+test-dated-path
+meta ["test"]
+fn () {
+    assert-eq("/full/2026-11-02/title-31.xml", ::ecfr/dated-path("full", "2026-11-02", 31, "xml"))
+    assert-eq("/ancestry/2026-11-02/title-31.json", ::ecfr/dated-path("ancestry", "2026-11-02", "31", "json"))
+}
+
+test-hierarchy-params
+meta ["test"]
+fn () {
+    assert-eq("?chapter=X&part=1010&section=1010.230", ::api/query-string(::ecfr/hierarchy-params({chapter: "X", part: "1010", section: "1010.230", date: "2026-11-02"})))
+    assert-eq("", ::api/query-string(::ecfr/hierarchy-params({})))
+}
+
+test-versions-params
+meta ["test"]
+fn () {
+    p ::ecfr/versions-params({part: "1010", issue-date-gte: "2024-01-01", issue-date-lte: "2025-01-01"})
+    assert-eq("?part=1010&issue_date%5Bgte%5D=2024-01-01&issue_date%5Blte%5D=2025-01-01", ::api/query-string(p))
+}
+
+test-search-params
+meta ["test"]
+fn () {
+    p ::ecfr/search-params("beneficial ownership", {title: 31, part: "1010", date: "2026-11-02", per-page: 10, page: 2})
+    assert-eq("?query=beneficial+ownership&date=2026-11-02&hierarchy%5Btitle%5D=31&hierarchy%5Bpart%5D=1010&per_page=10&page=2", ::api/query-string(p))
+}
+
+test-find-title
+meta ["test"]
+fn () {
+    assert-eq("Money and Finance: Treasury", ::ecfr/find-title(::fx/TITLES, 31).name)
+    assert-eq("Money and Finance: Treasury", ::ecfr/find-title(::fx/TITLES, "31").name, "a Str title matches too")
+    assert-eq(null, ::ecfr/find-title(::fx/TITLES, 99))
+    assert-eq(null, ::ecfr/find-title(null, 31))
+}
+
+// ============================================================================
+// XML to text
+// ============================================================================
+
+test-flatten-inline
+meta ["test"]
+fn () {
+    assert-eq("<P>(a) Accept. A bank</P>", ::ecfr/flatten-inline("<P>(a) <I>Accept.</I> A bank</P>"))
+    assert-eq("<P>(d):</P>", ::ecfr/flatten-inline("<P>(<E T=\"01\">d</E>):</P>"))
+    assert-eq("<P>10^6 units</P>", ::ecfr/flatten-inline("<P>10<SU>6</SU> units</P>"))
+    assert-eq("<TH>as last amended</TH>", ::ecfr/flatten-inline("<TH>as last\n<br/>amended</TH>"))
+    assert-eq("<P>word</P>", ::ecfr/flatten-inline("<P>word<FTREF/></P>"))
+}
+
+test-parse-section
+meta ["test"]
+fn () {
+    s ::ecfr/parse-full(::fx/SECTION_XML)
+    assert-eq("section", s.type)
+    assert-eq("1010.100", s.identifier)
+    assert-eq("31 CFR 1010.100", s.citation)
+    assert-eq("§ 1010.100 General definitions.", s.heading)
+    assert-eq("[75 FR 65812, Oct. 26, 2010, as amended at 76 FR 43596, July 21, 2011]", s.source-note)
+    assert-eq(2, length(s.notes))
+    assert-eq("This amendment was delayed until Jan. 1, 2028, at 91 FR 36, Jan. 2, 2026.", s.notes[1])
+}
+
+test-parse-section-text
+meta ["test"]
+fn () {
+    paragraphs ::hot::str/split(::ecfr/parse-full(::fx/SECTION_XML).text, "\n\n")
+    assert-eq(4, length(paragraphs), "the amendment links and source note are not rule text")
+    assert(::hot::str/starts-with(paragraphs[1], "(a) Accept. A receiving"), "spaces around italics survive")
+    assert-eq("Note to paragraph (d):", paragraphs[2])
+    assert-eq("The number of individuals may vary.", paragraphs[3])
+}
+
+test-parse-part
+meta ["test"]
+fn () {
+    p ::ecfr/parse-full(::fx/PART_XML)
+    assert-eq("part", p.type)
+    assert-eq("1010", p.identifier)
+    assert-eq("31 CFR Part 1010", p.citation, "reads the twice-escaped metadata")
+    assert-eq("PART 1010—GENERAL PROVISIONS", p.heading)
+    assert-eq("12 U.S.C. 1829b and 1951-1959; 31 U.S.C. 5311-5314.", p.authority)
+    assert-eq("75 FR 65812, Oct. 26, 2010, unless otherwise noted.", p.source)
+    assert-eq(1, length(p.sections))
+    s first(p.sections)
+    assert-eq("31 CFR 1010.821", s.citation)
+    assert-eq("§ 1010.821 Penalty adjustment and table.", s.heading)
+    assert-eq("H", s.subpart)
+    assert-eq("1010", s.part, "a part is its own part")
+}
+
+test-parse-table
+meta ["test"]
+fn () {
+    s first(::ecfr/parse-full(::fx/PART_XML).sections)
+    paragraphs ::hot::str/split(s.text, "\n\n")
+    assert-eq("(a) Inflation adjustments. See the table.^1", first(paragraphs))
+    rows ::hot::str/split(paragraphs[1], "\n")
+    assert-eq("Table 1 to § 1010.821—Penalty Adjustment Table", first(rows))
+    assert-eq("U.S. Code citation | Penalties as last amended by statute", rows[1])
+    assert-eq("12 U.S.C. 1829b(j) | $10,000", rows[2])
+}
+
+test-parse-full-bad-xml-is-err
+meta ["test"]
+fn () {
+    assert(is-err(::ecfr/parse-full("<DIV8>")), "unclosed")
+}
+
+test-citation-of-missing
+meta ["test"]
+fn () {
+    assert-eq(null, ::ecfr/citation-of(from-xml("<DIV8 N=\"1\"/>")))
+}
+
+// ============================================================================
+// Pagination
+// ============================================================================
+
+test-next-page
+meta ["test"]
+fn () {
+    assert-eq(2, ::ecfr/next-page(::fx/SEARCH_PAGE))
+    assert-eq(null, ::ecfr/next-page(::fx/SEARCH_LAST_PAGE))
+    assert-eq(null, ::ecfr/next-page({}))
+    assert-eq(null, ::ecfr/next-page(null))
+}
+
+test-collect-follows-pages
+meta ["test"]
+fn () {
+    fetch (o) {
+      n o.page
+      {results: [`p${n}-a`, `p${n}-b`], meta: {current_page: n, total_pages: 3}}
+    }
+
+    assert-eq(["p1-a", "p1-b", "p2-a", "p2-b", "p3-a", "p3-b"], ::ecfr/collect(fetch, {}, 100))
+    assert-eq(["p1-a", "p1-b", "p2-a"], ::ecfr/collect(fetch, {}, 3))
+}
+
+test-collect-passes-errors-on
+meta ["test"]
+fn () {
+    assert(is-err(::ecfr/collect((o) { err("down") }, {}, 10)), "a failed page is not an empty result")
+}
+
+test-http-error-survives-a-body-that-only-looks-like-json
+meta ["test"]
+fn () {
+    e ::api/http-error(HttpResponse({status: 500, headers: {}, body: "{oops"}), "u")
+    assert-eq(500, e.status)
+    assert-eq("{oops", e.body, "kept as text")
+}
+
+test-collect-follows-thousands-of-pages
+meta ["test"]
+fn () {
+    n 3000
+    fetch (o) { {results: [o.page], meta: {current_page: o.page, total_pages: n}} }
+    assert-eq(n, length(::ecfr/collect(fetch, {per-page: 1}, n)), "no recursion limit")
+}
+
+test-collect-returns-an-err-page
+meta ["test"]
+fn () {
+    assert(is-err(::ecfr/collect((o) { err("HTTP 429") }, {}, 10)), "a 429 comes back as the Err")
+}
+
+test-blank-places-are-errs
+meta ["test"]
+fn () {
+    opts {date: "2026-01-01", base-url: "http://127.0.0.1:1"}
+    assert(::hot::str/contains(err-message(::ecfr/get-section(31, "  ", opts)), "needs a section"), "not the whole title")
+    assert(::hot::str/contains(err-message(::ecfr/get-section(31, null, opts)), "needs a section"), "null too")
+    assert(::hot::str/contains(err-message(::ecfr/get-part(31, "", opts)), "needs a part"), "not the whole title")
+}

@@ -1,0 +1,32 @@
+::federal-register::test::fixtures ns
+
+// Trimmed real responses (retrieved 4 Nov 2026).
+
+// GET /documents.json?per_page=2&order=newest with FinCEN, RULE, published
+// since 2024-01-01 and 31 CFR 1010 (one result)
+SEARCH_PAGE {
+  description: "Documents published on or after 01/01/2024, from Financial Crimes Enforcement Network, of type Rule, and affecting 31 CFR 1010",
+  count: 20,
+  total_pages: 10,
+  next_page_url: "https://www.federalregister.gov/api/v1/documents?conditions%5Bagencies%5D%5B%5D=financial-crimes-enforcement-network&conditions%5Bcfr%5D%5Bpart%5D=1010&conditions%5Bcfr%5D%5Btitle%5D=31&conditions%5Bpublication_date%5D%5Bgte%5D=2024-01-01&conditions%5Btype%5D%5B%5D=RULE&format=json&order=newest&page=2&per_page=2&search_after_cursor=WzE3ODY2NjU2MDAwMDAsIjIwMjYtMTY1NzYiXQ",
+  results: [
+    {
+      title: "Geographic Targeting Order Imposing Recordkeeping and Reporting Requirements on Certain Money Services Businesses Along the Southwest Border",
+      type: "Rule",
+      document_number: "2026-18194",
+      publication_date: "2026-09-04",
+      pdf_url: "https://www.govinfo.gov/content/pkg/FR-2026-09-04/pdf/2026-18194.pdf"
+    }
+  ]
+}
+
+// The same search on its last page has no next_page_url.
+SEARCH_LAST_PAGE {
+  description: "Documents of type Rule",
+  count: 20,
+  total_pages: 10,
+  results: []
+}
+
+// GET /documents.json?conditions[agencies][]=no-such-agency (HTTP 400)
+BAD_AGENCY_BODY {errors: {agencies: "invalid value"}}

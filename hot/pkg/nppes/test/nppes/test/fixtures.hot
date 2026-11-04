@@ -1,0 +1,60 @@
+::nppes::test::fixtures ns
+
+// Trimmed real responses (retrieved 4 Nov 2026).
+
+// One result of GET /api/?version=2.1&organization_name=mayo clinic*&state=MN&limit=2
+// (authorized official fields left out)
+MAYO {
+  addresses: [
+    {
+      address_1: "200 1ST ST SW",
+      address_purpose: "LOCATION",
+      address_type: "DOM",
+      city: "ROCHESTER",
+      country_code: "US",
+      country_name: "United States",
+      postal_code: "559050001",
+      state: "MN",
+      telephone_number: "507-284-2511"
+    },
+    {
+      address_1: "200 1ST ST SW",
+      address_purpose: "MAILING",
+      address_type: "DOM",
+      city: "ROCHESTER",
+      country_code: "US",
+      country_name: "United States",
+      postal_code: "559050001",
+      state: "MN",
+      telephone_number: "507-284-2511"
+    }
+  ],
+  basic: {
+    certification_date: "2021-04-12",
+    enumeration_date: "2014-02-05",
+    last_updated: "2021-04-12",
+    organization_name: "MAYO CLINIC",
+    organizational_subpart: "NO",
+    status: "A"
+  },
+  created_epoch: "1391631819000",
+  endpoints: [],
+  enumeration_type: "NPI-2",
+  identifiers: [],
+  last_updated_epoch: "1618259871000",
+  number: "1881018208",
+  other_names: [],
+  practiceLocations: [],
+  taxonomies: [
+    {code: "261QM1300X", desc: "Clinic/Center, Multi-Specialty", license: null, primary: true, state: null, taxonomy_group: ""}
+  ]
+}
+
+// GET /api/?version=2.1&number=1234567890
+NO_RESULTS {result_count: 0, results: []}
+
+// GET /api/?version=2.1&state=MN (status 200)
+STATE_ALONE {Errors: [{description: "Field state requires additional search criteria", field: "state", number: "07"}]}
+
+// GET /api/?version=2.1&first_name=j*&last_name=smith (status 200)
+SHORT_WILDCARD {Errors: [{description: "Wildcards require at least two leading characters", field: "first_name", number: "03"}]}

@@ -1,0 +1,82 @@
+::fdic::bankfind::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration smoke tests (live, read-only)
+// =============================================================================
+// FDIC_BANKFIND_LIVE=1 (no key needed; FDIC_API_KEY is sent when set). The tests
+// only read; without the setting they record a skip and pass.
+// Run with: hot test -p pkg-integration-fdic-bankfind
+
+::ctx ::fdic::bankfind::integration::ctx
+::b ::fdic::bankfind
+
+CHASE 628
+FIRST_REPUBLIC 59017
+
+test-institutions-and-branches
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("FDIC_BANKFIND_LIVE is not 1") }
+        => {
+            chase ::b/institution(CHASE, {fields: ["CERT", "NAME", "ACTIVE"]})
+            assert(::hot::str/contains(chase.NAME, "JPMorgan Chase"), "by certificate number")
+            assert-eq(null, ::b/institution(99999999), "an unknown certificate is null")
+
+            page ::b/institutions({filters: {STALP: "IA", ACTIVE: 1}, fields: "CERT,NAME,ASSET", sort-by: "ASSET", sort-order: "DESC", limit: 2})
+            assert-eq(2, length(::b/rows(page)), "filtered by a Map")
+            assert(gt(::b/total(page), 2), "more than one page")
+            assert-eq(2, ::b/next-page(page))
+
+            quoted ::b/institutions({filters: {NAME: "JPMorgan Chase Bank, National Association"}, fields: "CERT", limit: 1})
+            assert-eq(CHASE, first(::b/rows(quoted)).CERT, "a quoted phrase")
+
+            fuzzy ::b/institutions({search: "NAME:JPMorgan", fields: "CERT,NAME", limit: 2})
+            assert(gt(length(::b/rows(fuzzy)), 0), "name search")
+
+            offices ::b/branches(CHASE, {fields: "UNINUM,CITY,MAINOFF", limit: 2})
+            assert-eq(1, first(::b/rows(offices)).MAINOFF, "the main office sorts first")
+            assert-eq(5, length(::b/collect((o) { ::b/branches(CHASE, o) }, {fields: "UNINUM", limit: 2}, 5)), "paged")
+        }
+    }
+}
+
+test-history-and-failures
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("FDIC_BANKFIND_LIVE is not 1") }
+        => {
+            events ::b/rows(::b/institution-history(CHASE, {fields: "CHANGECODE_DESC,EFFDATE,ORG_ROLE_CDE,OUT_CERT", limit: 100}))
+            assert(gt(length(events), 0), "institution events")
+            assert(is-null(find-first(events, (e) { not(eq(e.ORG_ROLE_CDE, "FI")) })), "no branch events")
+            assert(is-some(find-first(events, (e) { eq(get(e, "OUT_CERT"), FIRST_REPUBLIC) })), "the First Republic merger")
+
+            absorbed ::b/history({filters: {OUT_CERT: FIRST_REPUBLIC, ORG_ROLE_CDE: "FI"}, fields: "ACQ_CERT"})
+            assert-eq(CHASE, first(::b/rows(absorbed)).ACQ_CERT, "what absorbed it")
+
+            failed ::b/failure(FIRST_REPUBLIC, {fields: "NAME,FAILDATE,COST"})
+            assert-eq("FIRST REPUBLIC BANK", uppercase(failed.NAME))
+            assert-eq(null, ::b/failure(CHASE), "never failed")
+            assert-eq(5, ::b/total(::b/failures({filters: {FAILYR: 2023}, limit: 1})), "five failures in 2023")
+        }
+    }
+}
+
+test-financials-summary-and-errors
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("FDIC_BANKFIND_LIVE is not 1") }
+        => {
+            quarters ::b/rows(::b/institution-financials(CHASE, {fields: "REPDTE,ASSET,DEP", limit: 2}))
+            assert-eq(2, length(quarters))
+            assert(gt(Int(first(quarters).REPDTE), Int(last(quarters).REPDTE)), "newest first")
+
+            years ::b/rows(::b/summary({filters: "STNAME:\"Iowa\" AND YEAR:2023", fields: "STNAME,YEAR,CB_SI,ASSET", limit: 2}))
+            assert-eq(2, length(years), "commercial banks and savings institutions")
+
+            out ::b/institutions({filters: "NOPE:[", limit: 1})
+            assert(is-err(out), "bad syntax is a 400")
+            assert-eq(400, untype(err-value(out)).status)
+        }
+    }
+}

@@ -1,0 +1,225 @@
+::nppes::api ns
+meta {
+    ctx: {"nppes.base-url": {required: false, secret: false}},
+    doc: """
+    Transport for the NPI Registry API: the settings resolver (per-call
+    `opts` first, then context variables, then defaults), a typed
+    `HttpError`, JSON GETs that turn the API's `Errors` body into an Err,
+    and query-string building that drops unset values.
+
+    | opts key | Context variable | Default |
+    |---|---|---|
+    | `base-url` | `nppes.base-url` | `https://npiregistry.cms.hhs.gov/api` |
+
+    The API takes no credential, so a per-call `base-url` needs none.
+    """
+}
+
+::ctx ::hot::ctx
+::uri ::hot::uri
+::re ::hot::regex
+
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+SOURCE "nppes"
+BASE_URL "https://npiregistry.cms.hhs.gov/api"
+PACKAGE_AGENT "hot-dev-nppes-pkg/0.1 (+https://hot.dev)"
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+given
+meta {
+    doc: """True for a non-null value that is not a blank string."""
+}
+fn (v: Any): Bool {
+  match v {
+    Null => { false }
+    Str => { not(is-empty(trim(v))) }
+    _ => { true }
+  }
+}
+
+pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
+  from-opts get(opts, key)
+  from-ctx ::ctx/get(ctx-key)
+  cond {
+    given(from-opts) => { from-opts }
+    given(from-ctx) => { from-ctx }
+    => { default }
+  }
+}
+
+strip-slash fn (url: Str): Str {
+  ::re/replace-all(url, "/+$", "")
+}
+
+resolve
+meta {
+    doc: """
+    Resolve settings for one call: `{base-url}`. A value in `opts` wins
+    over context.
+
+    **Example**
+
+    ```hot
+    cfg ::nppes::api/resolve({base-url: "https://npi-proxy.example/api"})
+    ```
+    """
+}
+fn (opts: Map): Map {
+  {base-url: strip-slash(pick(opts, "base-url", "nppes.base-url", BASE_URL))}
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+HttpError
+meta {
+    doc: """
+    A failed NPI Registry response. `source` is `"nppes"`; `url` the
+    requested URL (the API takes no credentials in URLs); `retry-after`
+    the parsed `Retry-After` seconds on 429s; `message` a one-line
+    summary. The API reports bad criteria with status 200 and an `Errors`
+    body, so `status` can be 200: `body.Errors` then lists
+    `{description, field, number}`. It is also 200 when the site answered
+    with something other than JSON (see `decode-body`).
+    """
+}
+type {
+    source: Str,
+    status: Int,
+    url: Str,
+    headers: Map,
+    body: Any,
+    retry-after: Int?,
+    message: Str
+}
+
+error-line fn (e: Map): Str {
+  field get(e, "field")
+  description get(e, "description")
+  if(given(field), `${field}: ${description}`, Str(description))
+}
+
+body-detail fn (body: Any): Str? {
+  cond {
+    is-str(body) => { if(gt(length(body), 200), `${slice(body, 0, 200)}…`, body) }
+    is-map(body) => {
+      errors get(body, "Errors")
+      cond {
+        and(is-vec(errors), not(is-empty(errors))) => { join(map(errors, error-line), "; ") }
+        => { or(get(body, "message"), get(body, "error")) }
+      }
+    }
+    => { null }
+  }
+}
+
+retry-after fn (headers: Map): Int? {
+  v get(headers, "retry-after")
+  cond {
+    is-null(v) => { null }
+    ::re/is-match(trim(Str(v)), "^\\d+$") => { Int(trim(Str(v))) }
+    => { null }
+  }
+}
+
+http-error
+meta {
+    doc: """Build an `HttpError` from a failed response. Exposed for testing; every request uses it."""
+}
+fn (response: HttpResponse, url: Str): HttpError {
+  headers or(response.headers, {})
+  detail body-detail(response.body)
+  HttpError({
+    source: SOURCE,
+    status: response.status,
+    url: url,
+    headers: headers,
+    body: response.body,
+    retry-after: retry-after(headers),
+    message: if(is-some(detail), `${SOURCE}: HTTP ${response.status}: ${detail}`, `${SOURCE}: HTTP ${response.status} for ${url}`)
+  })
+}
+
+not-json-error
+meta {
+    doc: """An `HttpError` for a 2xx response that is not a JSON object, such as a maintenance page, which would otherwise read as no such provider. Exposed for testing."""
+}
+fn (response: HttpResponse, url: Str): HttpError {
+  HttpError({
+    source: SOURCE,
+    status: response.status,
+    url: url,
+    headers: or(response.headers, {}),
+    body: null,
+    retry-after: null,
+    message: `${SOURCE}: expected JSON from ${url}, got something else (usually an HTML page)`
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------
+
+query-string
+meta {
+    doc: """Build a `?a=1&b=2` suffix from a Map, dropping null and blank values (pure); `""` when nothing remains."""
+}
+fn (params: Map): Str {
+  ::uri/query-string(filter-vals(params, given))
+}
+
+request
+meta {
+    doc: """
+    GET (or another method) an NPI Registry URL with `headers`, returning
+    the `HttpResponse` on 2xx or an Err carrying `HttpError`. A transport
+    failure passes through as its own Err.
+    """
+}
+fn (method: Str, url: Str, headers: Map): HttpResponse {
+  response ::hot::http/request(HttpRequest({
+    method,
+    url,
+    headers: {User-Agent: PACKAGE_AGENT, ...headers},
+    body: ""
+  }))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response }
+    => { err(http-error(response, url)) }
+  }
+}
+
+decode-body
+meta {
+    doc: """The decoded JSON of a 2xx response, or an Err carrying `HttpError` when it holds `Errors` or isn't a JSON object (pure). Exposed for testing."""
+}
+fn (response: HttpResponse, url: Str): Any {
+  raw response.body
+  text if(is-str(raw), trim(raw), "")
+  body if(::hot::str/starts-with(text, "{"), from-json(text), raw)
+  cond {
+    is-err(body) => { err(not-json-error(response, url)) }
+    not(is-map(body)) => { err(not-json-error(response, url)) }
+    is-some(get(body, "Errors")) => {
+      err(http-error(HttpResponse({status: response.status, headers: response.headers, body: body}), url))
+    }
+    => { body }
+  }
+}
+
+get-json
+meta {
+    doc: """GET a JSON resource and return the decoded body, or an Err carrying `HttpError`."""
+}
+fn (url: Str, headers: Map): Any {
+  response request("GET", url, {Accept: "application/json", ...headers})
+  if(is-err(response), response, decode-body(response, url))
+}

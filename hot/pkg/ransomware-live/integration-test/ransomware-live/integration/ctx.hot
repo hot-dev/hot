@@ -1,0 +1,29 @@
+::ransomware-live::integration::ctx ns
+
+::env ::hot::env
+
+// Placeholder settings for the ransomware-live integration suite. Unset
+// environment variables are skipped entirely, so absent credentials behave
+// exactly as if never configured.
+::hot::ctx/set(filter-vals({
+    "ransomware-live.api-key": ::env/get("RANSOMWARE_LIVE_API_KEY", ""),
+}, (v) { not(is-empty(v)) }))
+
+live
+meta {doc: """True when RANSOMWARE_LIVE_LIVE=1 or a key is set."""}
+fn (): Bool {
+    or(eq(::env/get("RANSOMWARE_LIVE_LIVE", ""), "1"), configured())
+}
+
+configured
+meta {doc: """True when RANSOMWARE_LIVE_API_KEY is set."""}
+fn (): Bool {
+    is-some(::hot::ctx/get("ransomware-live.api-key"))
+}
+
+skip
+meta {doc: """Record a skip and pass."""}
+fn (why: Str): Bool {
+    println(`ransomware-live integration: ${why} - skipping`)
+    assert(true, `skipped: ${why}`)
+}

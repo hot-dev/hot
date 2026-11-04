@@ -1,0 +1,48 @@
+::congress-gov::test::fixtures ns
+
+// Trimmed real responses, retrieved 4 Nov 2026 with the public DEMO_KEY.
+
+// GET /bill/117/hr?format=json&limit=2&offset=1
+BILLS_PAGE {
+  bills: [
+    {
+      congress: 117,
+      introducedDate: "2021-01-04",
+      latestAction: {actionDate: "2021-01-04", text: "Referred to the House Committee on Oversight and Reform."},
+      number: "24",
+      originChamber: "House",
+      originChamberCode: "H",
+      title: "Federal Reserve Transparency Act of 2021",
+      type: "HR",
+      updateDate: "2026-01-14",
+      updateDateIncludingText: "2026-01-14",
+      url: "https://api.congress.gov/v3/bill/117/hr/24?format=json"
+    }
+  ],
+  pagination: {
+    count: 9709,
+    next: "https://api.congress.gov/v3/bill/117/hr?offset=3&limit=2&format=json",
+    prev: "https://api.congress.gov/v3/bill/117/hr?offset=0&limit=2&format=json"
+  },
+  request: {billType: "hr", congress: "117", contentType: "application/json", format: "json"}
+}
+
+// GET /bill/117/hr/3076/text?format=json&limit=2. Three rows for limit=2:
+// the row count is no guide to the next offset.
+TEXT_PAGE {
+  pagination: {count: 8, next: "https://api.congress.gov/v3/bill/117/hr/3076/text?offset=2&limit=2&format=json"},
+  textVersions: [
+    {date: null, formats: [{type: "PDF", url: "https://www.congress.gov/117/bills/hr3076/BILLS-117hr3076enr.pdf"}], type: "Enrolled Bill"},
+    {date: "2022-02-15T05:00:00Z", formats: [{type: "PDF", url: "https://www.congress.gov/117/bills/hr3076/BILLS-117hr3076pcs2.pdf"}], type: "Placed on Calendar Senate"},
+    {date: "2022-04-07T03:59:59Z", formats: [{type: "PDF", url: "https://www.congress.gov/117/plaws/publ108/PLAW-117publ108.pdf"}], type: "Public Law"}
+  ]
+}
+
+// GET /bill/117/hr/999999?format=json (HTTP 404)
+NOT_FOUND {
+  error: "No Bill matches the given query.",
+  request: {billNumber: "999999", billType: "hr", congress: "117", contentType: "application/json", format: "json"}
+}
+
+// GET /bill/117/hr/3076?format=json with no key (HTTP 403, from api.data.gov)
+NO_KEY {error: {code: "API_KEY_MISSING", message: "No api_key was supplied. Get one at https://api.congress.gov:443"}}

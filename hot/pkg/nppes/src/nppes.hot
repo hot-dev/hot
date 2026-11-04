@@ -1,0 +1,335 @@
+::nppes ns
+meta {
+    ctx: {"nppes.base-url": {required: false, secret: false}},
+    doc: """
+    The CMS NPI Registry API, version 2.1
+    (`https://npiregistry.cms.hhs.gov/api/?version=2.1`, no key): one
+    provider by NPI, and searches by name, organization, taxonomy and
+    location.
+
+    **Search limits.** A request returns up to 200 records (default 10)
+    and can skip up to 1,000, so one set of criteria reaches 1,200
+    records over six requests. The API doesn't report a total, and it
+    answers a `limit` or `skip` above the maximum as if it were the
+    maximum, without saying so: past 1,000, `skip` returns the same
+    records again. So `search` caps `limit` and refuses a higher `skip`.
+
+    `next-page` gives the next `skip`, and `collect` follows it to the
+    end of that reach.
+
+    Every function takes an optional trailing `opts` Map: the criteria
+    listed at `search-params`, `limit`, `skip`, and `base-url`.
+    """
+}
+
+::api ::nppes::api
+
+VERSION "2.1"
+MAX_LIMIT 200
+MAX_SKIP 1000
+DEFAULT_LIMIT 10
+
+// opts key -> API parameter, for parameters sent as given.
+PARAMS {
+  number: "number",
+  enumeration-type: "enumeration_type",
+  taxonomy-description: "taxonomy_description",
+  name-purpose: "name_purpose",
+  first-name: "first_name",
+  last-name: "last_name",
+  organization-name: "organization_name",
+  address-purpose: "address_purpose",
+  city: "city",
+  state: "state",
+  postal-code: "postal_code",
+  country-code: "country_code"
+}
+
+page-limit
+meta {
+    doc: """`opts.limit`, capped at 200, or 10 when unset (pure)."""
+}
+fn (opts: Map): Int {
+  min(or(get(opts, "limit"), DEFAULT_LIMIT), MAX_LIMIT)
+}
+
+alias-param fn (value: Any): Str? {
+  cond {
+    is-null(value) => { null }
+    eq(value, true) => { "True" }
+    eq(value, false) => { "False" }
+    => { value }
+  }
+}
+
+search-params
+meta {
+    doc: """
+    Query parameters for a search (pure). `first-name`, `last-name`,
+    `organization-name`, `taxonomy-description`, `city` and `postal-code`
+    take a trailing `*` after at least two characters.
+
+    | opts key | Meaning |
+    |---|---|
+    | `number` | A 10-digit NPI |
+    | `enumeration-type` | `"NPI-1"` (individuals) or `"NPI-2"` (organizations); needs other criteria |
+    | `first-name`, `last-name` | Individuals, or authorized officials with `name-purpose: "AO"` |
+    | `use-first-name-alias` | `true` (the API's default) also matches similar first names; `false` is exact |
+    | `name-purpose` | `"AO"` or `"PROVIDER"` |
+    | `organization-name` | Organizations; checks every name on the record, including former and other names |
+    | `taxonomy-description` | An exact taxonomy description or specialty |
+    | `address-purpose` | `"LOCATION"`, `"MAILING"`, `"PRIMARY"` or `"SECONDARY"` |
+    | `city`, `postal-code` | A 5-digit code also matches ZIP+4 |
+    | `state` | Two letters; needs another criterion besides `enumeration-type` and `country-code` |
+    | `country-code` | Two letters; `"US"` needs other criteria |
+    | `limit`, `skip` | Page size up to 200; records to skip, up to 1,000 |
+    """
+}
+fn (opts: Map): Map {
+  given-params reduce(keys(PARAMS), (acc, k) {
+    v get(opts, k)
+    if(::api/given(v), assoc(acc, get(PARAMS, k), v), acc)
+  }, {})
+  {
+    version: VERSION,
+    ...given-params,
+    use_first_name_alias: alias-param(get(opts, "use-first-name-alias")),
+    limit: if(is-some(get(opts, "limit")), page-limit(opts), null),
+    skip: get(opts, "skip")
+  }
+}
+
+registry-get fn (opts: Map): Any {
+  cfg ::api/resolve(opts)
+  ::api/get-json(`${cfg.base-url}/${::api/query-string(search-params(opts))}`, {})
+}
+
+// ---------------------------------------------------------------------------
+// Providers
+// ---------------------------------------------------------------------------
+
+search
+meta {
+    doc: """
+    Search the registry. Returns the API's page: `result_count` (the
+    records in this page, not the total) and `results`. Read it with
+    `results`. Criteria the API rejects are an Err, such as `state` alone
+    or a wildcard after one letter. An Err too when `skip` is over 1,000,
+    which the API would answer with repeated records.
+
+    **Example**
+
+    ```hot
+    page ::nppes/search({organization-name: "mayo clinic*", state: "MN", limit: 50})
+    first(::nppes/results(page)).basic.organization_name
+    ```
+    """
+}
+fn (opts: Map): Map {
+  skip get(opts, "skip")
+  cond {
+    and(is-some(skip), gt(skip, MAX_SKIP)) => {
+      err(`nppes: skip is ${skip}, and the API stops at ${MAX_SKIP}. Narrow the search instead.`)
+    }
+    => { registry-get(opts) }
+  }
+}
+
+get-provider
+meta {
+    doc: """
+    One provider by NPI, or null when the registry has none. An NPI that
+    isn't 10 digits is an Err from the API; `is-npi` checks one first.
+
+    **Example**
+
+    ```hot
+    provider ::nppes/get-provider("1881018208")
+    provider.basic.organization_name       // "MAYO CLINIC"
+    ::nppes/primary-taxonomy(provider).desc
+    ```
+    """
+}
+fn
+(npi: Any): Map? {
+  get-provider(npi, {})
+},
+(npi: Any, opts: Map): Map? {
+  out registry-get({...opts, number: Str(npi)})
+  cond {
+    is-err(out) => { out }
+    => {
+      found results(out)
+      if(is-empty(found), null, first(found))
+    }
+  }
+}
+
+organizations
+meta {
+    doc: """Search organizational providers (Type 2 NPIs) by name, with any other criteria in `opts`."""
+}
+fn
+(name: Str): Map {
+  organizations(name, {})
+},
+(name: Str, opts: Map): Map {
+  search({...opts, organization-name: name, enumeration-type: "NPI-2"})
+}
+
+individuals
+meta {
+    doc: """Search individual providers (Type 1 NPIs) by last name, with `first-name` and any other criteria in `opts`."""
+}
+fn
+(last-name: Str): Map {
+  individuals(last-name, {})
+},
+(last-name: Str, opts: Map): Map {
+  search({...opts, last-name: last-name, enumeration-type: "NPI-1"})
+}
+
+// ---------------------------------------------------------------------------
+// Reading responses (pure)
+// ---------------------------------------------------------------------------
+
+results
+meta {
+    doc: """The provider records in a page (pure)."""
+}
+fn (page: Any): Vec<Map> {
+  or(get(or(page, {}), "results"), [])
+}
+
+address-for fn (provider: Any, purpose: Str): Map? {
+  find-first(or(get(or(provider, {}), "addresses"), []), (a) { eq(get(a, "address_purpose"), purpose) })
+}
+
+location-address
+meta {
+    doc: """A provider's primary practice location address, or null (pure). Other locations are in `practiceLocations`."""
+}
+fn (provider: Any): Map? {
+  address-for(provider, "LOCATION")
+}
+
+mailing-address
+meta {
+    doc: """A provider's mailing address, or null (pure)."""
+}
+fn (provider: Any): Map? {
+  address-for(provider, "MAILING")
+}
+
+primary-taxonomy
+meta {
+    doc: """The taxonomy marked primary, `{code, desc, license, state, primary, taxonomy_group}`, or null (pure)."""
+}
+fn (provider: Any): Map? {
+  find-first(or(get(or(provider, {}), "taxonomies"), []), (t) { eq(get(t, "primary"), true) })
+}
+
+is-active
+meta {
+    doc: """True when the record's `basic.status` is `"A"` (pure)."""
+}
+fn (provider: Any): Bool {
+  eq(get-in(or(provider, {}), ["basic", "status"]), "A")
+}
+
+is-npi
+meta {
+    doc: """True for a syntactically valid NPI: 10 digits with a valid Luhn check digit, computed with the `80840` health-industry prefix (pure). It says nothing about whether the NPI was issued."""
+}
+fn (npi: Any): Bool {
+  s trim(Str(npi))
+  cond {
+    not(::hot::regex/is-match(s, "^[0-9]{10}$")) => { false }
+    => { eq(mod(luhn-sum(`80840${s}`), 10), 0) }
+  }
+}
+
+luhn-sum fn (digits: Str): Int {
+  items reverse(filter(::hot::regex/split(digits, ""), (c) { not(is-empty(c)) }))
+  reduce(range(0, length(items)), (acc, i) {
+    d Int(get(items, i))
+    doubled if(eq(mod(i, 2), 1), mul(d, 2), d)
+    add(acc, if(gt(doubled, 9), sub(doubled, 9), doubled))
+  }, 0)
+}
+
+// ---------------------------------------------------------------------------
+// Pagination
+// ---------------------------------------------------------------------------
+
+next-page
+meta {
+    doc: """
+    The `skip` after `page`, or null when the page came back short or the
+    next `skip` would pass 1,000 (pure). `opts` are the ones that fetched
+    `page`. The API gives no total, so a full last page gets one more,
+    empty, request.
+    """
+}
+fn (page: Any, opts: Map): Int? {
+  limit page-limit(opts)
+  next add(or(get(opts, "skip"), 0), limit)
+  cond {
+    lt(length(results(page)), limit) => { null }
+    gt(next, MAX_SKIP) => { null }
+    => { next }
+  }
+}
+
+final-skip fn (page: Any, opts: Map): Int? {
+  // A page size that doesn't divide 1,000 steps over the last allowed skip.
+  cond {
+    lt(length(results(page)), page-limit(opts)) => { null }
+    lt(or(get(opts, "skip"), 0), MAX_SKIP) => { MAX_SKIP }
+    => { null }
+  }
+}
+
+collect-pages fn (fetch: Fn, opts: Map, start: Int, limit: Int, acc: Vec): Vec {
+  page fetch(opts)
+  cond {
+    // Returned, not consumed: consuming an Err would halt the run.
+    is-err(page) => { page }
+    => {
+      // The page at `final-skip` starts on records already read.
+      found results(page)
+      overlap sub(add(start, length(acc)), or(get(opts, "skip"), 0))
+      items slice(found, min(max(0, overlap), length(found)))
+      combined concat(acc, items)
+      next or(next-page(page, opts), final-skip(page, opts))
+      cond {
+        gte(length(combined), limit) => { slice(combined, 0, limit) }
+        is-empty(items) => { combined }
+        is-null(next) => { combined }
+        => { collect-pages(fetch, {...opts, skip: next}, start, limit, combined) }
+      }
+    }
+  }
+}
+
+collect
+meta {
+    doc: """
+    Follow pages until `limit` records or the API's reach. `fetch` takes
+    `opts` (with `limit` and `skip` set) and returns one page. An Err on
+    any page is returned in place of the records. One search reaches
+    `skip` 1,000 plus a page, so 1,200 records at the default 200 a page.
+    Exactly that many means there may be more: narrow the criteria, by
+    state or postal code, and collect again.
+
+    **Example**
+
+    ```hot
+    rows ::nppes/collect((o) { ::nppes/organizations("mayo clinic*", o) }, {state: "MN"}, 500)
+    ```
+    """
+}
+fn (fetch: Fn, opts: Map, limit: Int): Vec {
+  size min(page-limit({...opts, limit: or(get(opts, "limit"), MAX_LIMIT)}), max(1, limit))
+  collect-pages(fetch, {...opts, limit: size}, or(get(opts, "skip"), 0), limit, [])
+}

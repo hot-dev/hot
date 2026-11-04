@@ -1,0 +1,41 @@
+::courtlistener::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration smoke tests (live, read-only)
+// =============================================================================
+// COURTLISTENER_LIVE=1 runs the court list, which needs no token.
+// COURTLISTENER_API_TOKEN also runs search and docket reads. The default limit
+// is 5 requests a minute, and these tests stay under it. Without either setting
+// they record a skip and pass.
+// Run with: hot test -p pkg-integration-courtlistener
+
+::ctx ::courtlistener::integration::ctx
+
+test-courts-without-a-token
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("COURTLISTENER_LIVE is not 1") }
+        => {
+            page ::courtlistener/courts({fields: ["id", "full_name"]})
+            assert(gt(length(page.results), 0), "the court list has courts")
+            assert-eq({page: 2}, ::courtlistener/next-params(page), "there is a second page")
+            assert-eq("Supreme Court of the United States", ::courtlistener/court("scotus").full_name)
+            assert-eq(null, ::courtlistener/court("no-such-court"), "a missing court is null")
+        }
+    }
+}
+
+test-search-and-docket
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip("COURTLISTENER_API_TOKEN is not set") }
+        => {
+            page ::courtlistener/search-opinions("court_id:scotus privacy")
+            assert(gt(length(page.results), 0), "search finds opinions")
+            assert(is-some(::courtlistener/next-params(page)), "there is a next page")
+            assert-eq("1:16-cv-00745", ::courtlistener/docket(4214664, {fields: ["docket_number"]}).docket_number)
+            assert-eq(null, ::courtlistener/docket(999999999999), "a missing docket is null")
+        }
+    }
+}

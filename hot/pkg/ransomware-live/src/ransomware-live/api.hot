@@ -1,0 +1,244 @@
+::ransomware-live::api ns
+meta {
+    ctx: {
+        "ransomware-live.api-key": {required: false},
+        "ransomware-live.base-url": {required: false, secret: false},
+        "ransomware-live.pro-base-url": {required: false, secret: false}
+    },
+    doc: """
+    Transport for ransomware.live: the settings resolver (per-call `opts`
+    first, then context variables, then defaults), a typed `HttpError`,
+    JSON GETs, and query-string building that drops unset values.
+
+    | opts key | Context variable | Default |
+    |---|---|---|
+    | `api-key` | `ransomware-live.api-key` | none: calls use the free v2 API |
+    | `base-url` | `ransomware-live.base-url` | `https://api.ransomware.live/v2` |
+    | `pro-base-url` | `ransomware-live.pro-base-url` | `https://api-pro.ransomware.live` |
+
+    **Per-call credentials.** `api-key` in `opts` is masked in call
+    records and never written to context, so parallel flows and tenants
+    in one run don't see each other's keys. Present but blank or null, it
+    is an error, never a fallback to context. A per-call `pro-base-url`
+    needs an `api-key` in the same `opts`: the context key is never sent
+    to a per-call URL.
+    """
+}
+
+::ctx ::hot::ctx
+::uri ::hot::uri
+::re ::hot::regex
+
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+SOURCE "ransomware-live"
+BASE_URL "https://api.ransomware.live/v2"
+PRO_BASE_URL "https://api-pro.ransomware.live"
+PACKAGE_AGENT "hot-dev-ransomware-live-pkg/0.1 (+https://hot.dev)"
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+given
+meta {
+    doc: """True for a non-null value that is not a blank string."""
+}
+fn (v: Any): Bool {
+  match v {
+    Null => { false }
+    Str => { not(is-empty(trim(v))) }
+    _ => { true }
+  }
+}
+
+pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
+  from-opts get(opts, key)
+  from-ctx ::ctx/get(ctx-key)
+  cond {
+    given(from-opts) => { from-opts }
+    given(from-ctx) => { from-ctx }
+    => { default }
+  }
+}
+
+strip-slash fn (url: Str): Str {
+  ::re/replace-all(url, "/+$", "")
+}
+
+resolve
+meta {
+    doc: """
+    Resolve settings for one call: `{api-key, base-url, pro-base-url}`.
+    Values in `opts` win over context; an `api-key` in `opts` is used for
+    that call only and comes back unchanged. An Err when `api-key` is in
+    `opts` but blank or null, or when `opts` has a `pro-base-url` without
+    `api-key`.
+
+    **Example**
+
+    ```hot
+    cfg ::ransomware-live::api/resolve({api-key: tenant.rl-key})
+    ```
+    """
+}
+fn (opts: Map): Map {
+  from-opts get(opts, "api-key")
+  ::ctx/mark-secret(filter([from-opts], given))
+  cond {
+    and(in("api-key", keys(opts)), not(given(from-opts))) => {
+      err("ransomware-live: api-key is in the call's opts but is blank or null. Pass a value, or leave api-key out to use the context variable.")
+    }
+
+    and(given(get(opts, "pro-base-url")), not(given(from-opts))) => {
+      err("ransomware-live: pro-base-url is in the call's opts without api-key. Pass api-key with it. The context key is never sent to a per-call URL.")
+    }
+    => {
+      {
+        api-key: pick(opts, "api-key", "ransomware-live.api-key", null),
+        base-url: strip-slash(pick(opts, "base-url", "ransomware-live.base-url", BASE_URL)),
+        pro-base-url: strip-slash(pick(opts, "pro-base-url", "ransomware-live.pro-base-url", PRO_BASE_URL))
+      }
+    }
+  }
+}
+
+require-api-key
+meta {
+    doc: """The API key from resolved settings, or an Err naming where to set it."""
+}
+fn (cfg: Map): Str {
+  cond {
+    given(cfg.api-key) => { cfg.api-key }
+    => { err("ransomware-live: no API key; set ransomware-live.api-key or pass {api-key: ...}") }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+HttpError
+meta {
+    doc: """
+    A non-2xx ransomware.live response. `source` is `"ransomware-live"`;
+    `url` the requested URL (the key goes in a header, never the URL);
+    `retry-after` the parsed `Retry-After` seconds on 429s; `message` a
+    one-line summary that never includes credentials.
+    """
+}
+type {
+    source: Str,
+    status: Int,
+    url: Str,
+    headers: Map,
+    body: Any,
+    retry-after: Int?,
+    message: Str
+}
+
+body-detail fn (body: Any): Str? {
+  cond {
+    is-str(body) => { if(gt(length(body), 200), `${slice(body, 0, 200)}…`, body) }
+    is-map(body) => {
+      // v2: {error}; PRO: {message}
+      or(get(body, "error"), get(body, "message"))
+    }
+    => { null }
+  }
+}
+
+retry-after fn (headers: Map): Int? {
+  v get(headers, "retry-after")
+  cond {
+    is-null(v) => { null }
+    ::re/is-match(trim(Str(v)), "^\\d+$") => { Int(trim(Str(v))) }
+    => { null }
+  }
+}
+
+http-error
+meta {
+    doc: """Build an `HttpError` from a non-2xx response. Exposed for testing; every request uses it."""
+}
+fn (response: HttpResponse, url: Str): HttpError {
+  headers or(response.headers, {})
+  detail body-detail(response.body)
+  HttpError({
+    source: SOURCE,
+    status: response.status,
+    url: url,
+    headers: headers,
+    body: response.body,
+    retry-after: retry-after(headers),
+    message: if(is-some(detail), `${SOURCE}: HTTP ${response.status}: ${detail}`, `${SOURCE}: HTTP ${response.status} for ${url}`)
+  })
+}
+
+is-not-found
+meta {
+    doc: """True when `e` is an `HttpError` with status 404."""
+}
+fn (e: Any): Bool {
+  and(is-map(e), eq(get(e, "status"), 404))
+}
+
+// ---------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------
+
+query-string
+meta {
+    doc: """Build a `?a=1&b=2` suffix from a Map, dropping null and blank values (pure); `""` when nothing remains."""
+}
+fn (params: Map): Str {
+  ::uri/query-string(filter-vals(params, given))
+}
+
+path-segment
+meta {
+    doc: """Percent-encode one path segment."""
+}
+fn (value: Any): Str {
+  ::uri/encode(Str(value))
+}
+
+request
+meta {
+    doc: """
+    GET (or another method) a ransomware.live URL with `headers`, returning
+    the `HttpResponse` on 2xx or an Err carrying `HttpError`. A
+    transport failure passes through as its own Err.
+    """
+}
+fn (method: Str, url: Str, headers: Map): HttpResponse {
+  response ::hot::http/request(HttpRequest({
+    method,
+    url,
+    headers: {User-Agent: PACKAGE_AGENT, ...headers},
+    body: ""
+  }))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response }
+    => { err(http-error(response, url)) }
+  }
+}
+
+get-json
+meta {
+    doc: """GET a JSON resource and return the decoded body, or an Err carrying `HttpError`."""
+}
+fn (url: Str, headers: Map): Any {
+  response request("GET", url, {Accept: "application/json", ...headers})
+  cond {
+    is-err(response) => { response }
+    is-str(response.body) => {
+      text trim(response.body)
+      if(or(::hot::str/starts-with(text, "{"), ::hot::str/starts-with(text, "[")), from-json(text), response.body)
+    }
+    => { response.body }
+  }
+}

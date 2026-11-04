@@ -1,0 +1,272 @@
+::federal-register::api ns
+meta {
+    ctx: {"federal-register.base-url": {required: false, secret: false}},
+    doc: """
+    Transport for the Federal Register API: the settings resolver
+    (per-call `opts` first, then context variables, then defaults), a
+    typed `HttpError`, JSON GETs, and query-string building that drops
+    unset values and repeats a key for a Vec.
+
+    | opts key | Context variable | Default |
+    |---|---|---|
+    | `base-url` | `federal-register.base-url` | `https://www.federalregister.gov/api/v1` |
+
+    The Federal Register takes no credential, so a per-call `base-url`
+    needs none.
+    """
+}
+
+::ctx ::hot::ctx
+::uri ::hot::uri
+::re ::hot::regex
+
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+SOURCE "federal-register"
+BASE_URL "https://www.federalregister.gov/api/v1"
+PACKAGE_AGENT "hot-dev-federal-register-pkg/0.1 (+https://hot.dev)"
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+given
+meta {
+    doc: """True for a non-null value that is not a blank string or an empty Vec."""
+}
+fn (v: Any): Bool {
+  match v {
+    Null => { false }
+    Str => { not(is-empty(trim(v))) }
+    Vec => { not(is-empty(v)) }
+    _ => { true }
+  }
+}
+
+pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
+  from-opts get(opts, key)
+  from-ctx ::ctx/get(ctx-key)
+  cond {
+    given(from-opts) => { from-opts }
+    given(from-ctx) => { from-ctx }
+    => { default }
+  }
+}
+
+strip-slash fn (url: Str): Str {
+  ::re/replace-all(url, "/+$", "")
+}
+
+resolve
+meta {
+    doc: """
+    Resolve settings for one call: `{base-url}`. A value in `opts` wins
+    over context.
+
+    **Example**
+
+    ```hot
+    cfg ::federal-register::api/resolve({base-url: "https://fr-proxy.example/api/v1"})
+    ```
+    """
+}
+fn (opts: Map): Map {
+  {base-url: strip-slash(pick(opts, "base-url", "federal-register.base-url", BASE_URL))}
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+HttpError
+meta {
+    doc: """
+    A failed Federal Register response. `source` is `"federal-register"`;
+    `url` the requested URL (the API takes no credentials in URLs);
+    `retry-after` the parsed `Retry-After` seconds on 429s; `message` a
+    one-line summary that never includes credentials. `status` can be 200
+    when the site served an HTML page in place of API data (see
+    `is-html`).
+    """
+}
+type {
+    source: Str,
+    status: Int,
+    url: Str,
+    headers: Map,
+    body: Any,
+    retry-after: Int?,
+    message: Str
+}
+
+error-fields fn (errors: Map): Str {
+  join(map(keys(errors), (k) { `${k}: ${Str(get(errors, k))}` }), "; ")
+}
+
+body-detail fn (body: Any): Str? {
+  cond {
+    // A missing document gets an HTML page, which has no useful one-line detail.
+    and(is-str(body), ::hot::str/starts-with(trim(body), "<")) => { null }
+    is-str(body) => { if(gt(length(body), 200), `${slice(body, 0, 200)}…`, body) }
+    is-map(body) => {
+      // Federal Register: {errors: {agencies: "invalid value"}}
+      errors get(body, "errors")
+      cond {
+        is-map(errors) => { error-fields(errors) }
+        => { or(get(body, "error"), get(body, "message")) }
+      }
+    }
+    => { null }
+  }
+}
+
+retry-after fn (headers: Map): Int? {
+  v get(headers, "retry-after")
+  cond {
+    is-null(v) => { null }
+    ::re/is-match(trim(Str(v)), "^\\d+$") => { Int(trim(Str(v))) }
+    => { null }
+  }
+}
+
+http-error
+meta {
+    doc: """Build an `HttpError` from a non-2xx response. Exposed for testing; every request uses it."""
+}
+fn (response: HttpResponse, url: Str): HttpError {
+  headers or(response.headers, {})
+  detail body-detail(response.body)
+  HttpError({
+    source: SOURCE,
+    status: response.status,
+    url: url,
+    headers: headers,
+    body: response.body,
+    retry-after: retry-after(headers),
+    message: if(is-some(detail), `${SOURCE}: HTTP ${response.status}: ${detail}`, `${SOURCE}: HTTP ${response.status} for ${url}`)
+  })
+}
+
+html-error
+meta {
+    doc: """Build an `HttpError` for an HTML page served in place of API data. Exposed for testing."""
+}
+fn (response: HttpResponse, url: Str): HttpError {
+  headers or(response.headers, {})
+  HttpError({
+    source: SOURCE,
+    status: response.status,
+    url: url,
+    headers: headers,
+    body: response.body,
+    retry-after: retry-after(headers),
+    message: `${SOURCE}: got an HTML page instead of API data for ${url}; the site may have flagged this client as automated`
+  })
+}
+
+is-html
+meta {
+    doc: """
+    True when a response is an HTML page (pure). No endpoint here serves
+    HTML on success, so a 200 page means the request was sent somewhere
+    else. The site redirects clients it flags as automated to a CAPTCHA
+    page, and `::hot::http` follows the redirect.
+    """
+}
+fn (response: Any): Bool {
+  contains(lowercase(Str(or(get(or(response.headers, {}), "content-type"), ""))), "text/html")
+}
+
+is-not-found
+meta {
+    doc: """True when `e` is an `HttpError` with status 404."""
+}
+fn (e: Any): Bool {
+  cond {
+    or(is-null(e), is-str(e)) => { false }
+    // `is-map` is false for a typed HttpError, so untype before reading it.
+    => { eq(get(untype(e), "status"), 404) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------
+
+query-pairs fn (key: Str, value: Any): Vec<Str> {
+  map(if(is-vec(value), value, [value]), (item) { ::uri/encode-query(zipmap([key], [item])) })
+}
+
+query-string
+meta {
+    doc: """Build a `?a=1&b=2` suffix from a Map, dropping null, blank and empty values (pure); `""` when nothing remains. A Vec repeats its key, as `conditions[agencies][]` needs, and keys are encoded."""
+}
+fn (params: Map): Str {
+  kept filter-vals(params, given)
+  pairs mapcat(keys(kept), (k) { query-pairs(k, get(kept, k)) })
+  if(is-empty(pairs), "", `?${join(pairs, "&")}`)
+}
+
+path-segment
+meta {
+    doc: """Percent-encode one path segment."""
+}
+fn (value: Any): Str {
+  ::uri/encode(Str(value))
+}
+
+request
+meta {
+    doc: """
+    GET a Federal Register URL with `headers`, returning the
+    `HttpResponse` on 2xx or an Err carrying `HttpError`. An HTML page is
+    an Err too. A transport failure passes through as its own Err.
+    """
+}
+fn (url: Str, headers: Map): HttpResponse {
+  response ::hot::http/request(HttpRequest({
+    method: "GET",
+    url,
+    headers: {User-Agent: PACKAGE_AGENT, ...headers},
+    body: ""
+  }))
+  cond {
+    is-err(response) => { response }
+    not(is-ok-response(response)) => { err(http-error(response, url)) }
+    is-html(response) => { err(html-error(response, url)) }
+    => { response }
+  }
+}
+
+get-json
+meta {
+    doc: """GET a JSON resource and return the decoded body, or an Err carrying `HttpError`."""
+}
+fn (url: Str): Any {
+  response request(url, {Accept: "application/json"})
+  cond {
+    is-err(response) => { response }
+    is-str(response.body) => {
+      text trim(response.body)
+      if(or(::hot::str/starts-with(text, "{"), ::hot::str/starts-with(text, "[")), from-json(text), response.body)
+    }
+    => { response.body }
+  }
+}
+
+null-on-404 fn (out: Result): Any {
+  cond {
+    and(is-err(out), is-not-found(err-value(out))) => { null }
+    => { out }
+  }
+}
+
+get-json-or-null
+meta {
+    doc: """`get-json`, but a 404 gives null (an absent document) instead of an Err."""
+}
+fn (url: Str): Any {
+  null-on-404(get-json(url))
+}

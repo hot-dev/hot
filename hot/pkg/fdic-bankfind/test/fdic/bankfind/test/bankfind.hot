@@ -1,0 +1,261 @@
+::fdic::bankfind::test::bankfind ns
+meta ["test"]
+
+::fx ::fdic::bankfind::test::fixtures
+::api ::fdic::bankfind::api
+::b ::fdic::bankfind
+
+HttpResponse ::hot::http/HttpResponse
+
+// ============================================================================
+// Settings resolver
+// ============================================================================
+
+test-resolve-defaults
+meta ["test"]
+fn () {
+    cfg ::api/resolve({})
+    assert-eq("https://api.fdic.gov/banks", cfg.base-url)
+    assert-eq(null, cfg.api-key, "the API needs no key")
+}
+
+test-resolve-reads-context
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"fdic.bankfind.api-key": "ctx-key", "fdic.bankfind.base-url": "https://ctx.example/banks/"})
+    cfg ::api/resolve({})
+    assert-eq("ctx-key", cfg.api-key)
+    assert-eq("https://ctx.example/banks", cfg.base-url)
+    assert-eq("opts-key", ::api/resolve({api-key: "opts-key"}).api-key, "opts win")
+    assert-eq(null, ::api/resolve({base-url: "https://other.example"}).api-key, "the context key never goes to a per-call URL")
+    assert-eq("opts-key", ::api/resolve({base-url: "https://other.example", api-key: "opts-key"}).api-key)
+    ::hot::ctx/set({"fdic.bankfind.api-key": null, "fdic.bankfind.base-url": null})
+}
+
+test-resolve-blank-key-is-an-err
+meta ["test"]
+fn () {
+    assert(is-err(::api/resolve({api-key: ""})), "blank")
+    assert(is-err(::api/resolve({api-key: null})), "null")
+    assert(is-err(::b/institutions({api-key: "  "})), "no fallback to context, and no request")
+}
+
+// ============================================================================
+// Transport helpers
+// ============================================================================
+
+test-query-string-drops-unset
+meta ["test"]
+fn () {
+    assert-eq("?limit=0", ::api/query-string({limit: 0, offset: null, fields: ""}))
+    assert-eq("", ::api/query-string({a: null}))
+    assert-eq("?filters=STNAME%3A%22West+Virginia%22", ::api/query-string({filters: "STNAME:\"West Virginia\""}))
+}
+
+test-redact-url
+meta ["test"]
+fn () {
+    assert-eq("https://x/banks/failures?limit=1&api_key=REDACTED", ::api/redact-url("https://x/banks/failures?limit=1&api_key=abc123"))
+    assert-eq("https://x?api_key=REDACTED&limit=1", ::api/redact-url("https://x?api_key=abc123&limit=1"))
+    assert-eq("https://x?limit=1", ::api/redact-url("https://x?limit=1"))
+}
+
+test-http-error
+meta ["test"]
+fn () {
+    response HttpResponse({status: 400, headers: {}, body: ::fx/BAD_FILTER})
+    e untype(::api/http-error(response, "https://api.fdic.gov/banks/institutions?limit=1&api_key=abc123"))
+    assert-eq("fdic-bankfind", e.source)
+    assert-eq("fdic-bankfind: HTTP 400: Invalid request input, please double check your search query syntax", e.message)
+    assert-eq("https://api.fdic.gov/banks/institutions?limit=1&api_key=REDACTED", e.url)
+}
+
+test-http-error-has-no-key-without-a-body
+meta ["test"]
+fn () {
+    response HttpResponse({status: 503, headers: {"retry-after": "30"}, body: ""})
+    e untype(::api/http-error(response, "https://api.fdic.gov/banks/institutions?api_key=abc123"))
+    assert-eq(30, e.retry-after)
+    assert(not(::hot::str/contains(e.message, "abc123")), "the summary uses the redacted URL")
+    assert(not(::hot::str/contains(e.url, "abc123")), "so does the url")
+}
+
+test-http-error-shapes
+meta ["test"]
+fn () {
+    plain untype(::api/http-error(HttpResponse({status: 404, headers: {}, body: ::fx/NOT_FOUND}), "u"))
+    assert-eq("fdic-bankfind: HTTP 404: Cannot GET /api/nothing?limit=1", plain.message)
+    // The shape api.data.gov documents for its gateway errors.
+    gateway untype(::api/http-error(HttpResponse({status: 429, headers: {}, body: {error: {code: "OVER_RATE_LIMIT", message: "Too many requests."}}}), "u"))
+    assert-eq("fdic-bankfind: HTTP 429: Too many requests.", gateway.message)
+}
+
+test-transport-failure-has-no-key
+meta ["test"]
+fn () {
+    out ::api/get-json("http://127.0.0.1:9/banks/institutions?api_key=abc123", {})
+    assert(is-err(out), "nothing listens there")
+    assert(not(::hot::str/contains(Str(err-value(out)), "abc123")), "the key stays out of the Err")
+}
+
+// ============================================================================
+// Filters and parameters
+// ============================================================================
+
+test-phrase
+meta ["test"]
+fn () {
+    assert-eq("\"First Bank\"", ::b/phrase("First Bank"))
+    assert-eq("\"a\\\" OR NAME:\\\"b\"", ::b/phrase("a\" OR NAME:\"b"), "a quote can't end the phrase")
+    assert-eq("\"a\\\\b\"", ::b/phrase("a\\b"))
+}
+
+test-filter-string
+meta ["test"]
+fn () {
+    assert-eq("STALP:\"IA\" AND ACTIVE:1", ::b/filter-string({STALP: "IA", ACTIVE: 1}))
+    assert-eq("STNAME:(\"Iowa\",\"West Virginia\")", ::b/filter-string({STNAME: ["Iowa", "West Virginia"]}))
+}
+
+test-and-filters
+meta ["test"]
+fn () {
+    assert-eq("CERT:628", ::b/and-filters({CERT: 628}, null))
+    assert-eq("CERT:628", ::b/and-filters({CERT: 628}, {}))
+    assert-eq("CERT:628", ::b/and-filters({CERT: 628}, ""))
+    assert-eq("(CERT:628) AND (STALP:IA OR STALP:NE)", ::b/and-filters({CERT: 628}, "STALP:IA OR STALP:NE"))
+    assert-eq(null, ::b/and-filters(null, null))
+}
+
+test-list-params
+meta ["test"]
+fn () {
+    p ::b/list-params({
+        filters: {STALP: "IA"},
+        search: "NAME:Island",
+        fields: ["CERT", "NAME"],
+        sort-by: "ASSET",
+        sort-order: "DESC",
+        limit: 50000,
+        offset: 100,
+        agg-by: "CERT",
+        agg-limit: 5,
+        api-key: "abc123",
+        base-url: "https://x"
+    })
+    assert-eq("STALP:\"IA\"", p.filters)
+    assert-eq("NAME:Island", p.search)
+    assert-eq("CERT,NAME", p.fields)
+    assert-eq("ASSET", p.sort_by)
+    assert-eq("DESC", p.sort_order)
+    assert-eq(10000, p.limit, "capped at 10,000")
+    assert-eq(100, p.offset)
+    assert-eq("CERT", p.agg_by)
+    assert-eq(5, p.agg_limit)
+    assert-eq(null, get(p, "api_key"), "the key is added at the request")
+    assert-eq(null, get(p, "base-url"), "settings are not parameters")
+}
+
+test-list-params-passes-strings
+meta ["test"]
+fn () {
+    p ::b/list-params({filters: "DEP:[50000 TO *]", fields: "CERT,NAME"})
+    assert-eq("DEP:[50000 TO *]", p.filters)
+    assert-eq("CERT,NAME", p.fields)
+    assert-eq(null, ::b/list-params({}).limit)
+}
+
+// ============================================================================
+// Reading responses and paging
+// ============================================================================
+
+test-rows-and-total
+meta ["test"]
+fn () {
+    row first(::b/rows(::fx/INSTITUTION_PAGE))
+    assert-eq("JPMorgan Chase Bank, National Association", row.NAME)
+    assert-eq(628, row.CERT)
+    assert-eq(1, ::b/total(::fx/INSTITUTION_PAGE))
+    assert-eq([], ::b/rows(::fx/EMPTY_PAGE))
+    assert-eq([], ::b/rows(null))
+    assert-eq(null, ::b/total(null))
+}
+
+test-next-page
+meta ["test"]
+fn () {
+    assert-eq(2, ::b/next-page(::fx/LOCATION_PAGE), "no offset echoed on the first page")
+    assert-eq(10001, ::b/next-page(::fx/DEEP_HISTORY_PAGE), "offset comes back as a Str")
+    assert-eq(null, ::b/next-page(::fx/INSTITUTION_PAGE), "the last page")
+    assert-eq(null, ::b/next-page(::fx/EMPTY_PAGE))
+    assert-eq(null, ::b/next-page({}))
+}
+
+test-collect-follows-pages
+meta ["test"]
+fn () {
+    data ["a", "b", "c", "d", "e"]
+    fetch (o) {
+        offset or(get(o, "offset"), 0)
+        chunk slice(data, offset, min(add(offset, o.limit), 5))
+        {meta: {total: 5, parameters: {offset: Str(offset)}}, data: map(chunk, (x) { {data: {id: x}} })}
+    }
+
+    ids (rows) { map(rows, (r) { r.id }) }
+    assert-eq(data, ids(::b/collect(fetch, {limit: 2}, 100)), "to the last page")
+    assert-eq(["a", "b", "c"], ids(::b/collect(fetch, {limit: 2}, 3)), "stops at limit")
+    assert-eq(data, ids(::b/collect(fetch, {}, 100)), "a default page size")
+}
+
+test-lookups-return-an-err
+meta ["test"]
+fn () {
+    assert(is-err(::b/institution(628, {api-key: ""})), "institution gives the Err back")
+    assert(is-err(::b/failure(59017, {api-key: ""})), "failure gives the Err back")
+}
+
+test-collect-returns-an-err-page
+meta ["test"]
+fn () {
+    assert(is-err(::b/collect((o) { err("HTTP 429") }, {}, 10)), "a 429 comes back as the Err")
+}
+
+test-collect-treats-a-page-of-html-as-an-err
+meta ["test"]
+fn () {
+    out ::b/collect((o) { ::api/decode-body(HttpResponse({status: 200, headers: {}, body: "<html>Down for maintenance</html>"}), "https://api.fdic.gov/banks/institutions?api_key=sekret123") }, {}, 10)
+    assert(is-err(out), "a maintenance page isn't an empty result")
+    assert-eq(200, err-value(out).status)
+    assert(not(::hot::str/contains(to-json(untype(err-value(out))), "sekret123")), "no key in the error")
+}
+
+test-decode-body-turns-bad-json-into-an-err
+meta ["test"]
+fn () {
+    assert(is-err(::api/decode-body(HttpResponse({status: 200, headers: {}, body: "{\"data\": [tru"}), "u")), "truncated JSON")
+}
+
+test-decode-body-drops-the-echoed-key
+meta ["test"]
+fn () {
+    body {meta: {total: 1, parameters: {limit: "1", api_key: "sekret123"}}, data: []}
+    page ::api/decode-body(HttpResponse({status: 200, headers: {}, body: body}), "u")
+    assert-eq({limit: "1"}, page.meta.parameters)
+    assert-eq(1, ::b/total(page), "the rest of the page stays")
+}
+
+test-http-error-redacts-the-body-and-headers
+meta ["test"]
+fn () {
+    url "https://api.fdic.gov/banks/institutions?limit=1&api_key=sekret123"
+    response HttpResponse({
+      status: 403,
+      headers: {link: "https://api.fdic.gov/banks/institutions?api_key=sekret123", "x-echo": "sekret123"},
+      body: {message: "Bad key sekret123", meta: {parameters: {limit: "1", api_key: "sekret123"}}}
+    })
+
+    e untype(::api/http-error(response, url))
+    assert(not(::hot::str/contains(to-json(e), "sekret123")), "no field carries the key")
+    assert-eq({limit: "1"}, e.body.meta.parameters, "api_key is dropped")
+    assert-eq(403, e.status)
+}

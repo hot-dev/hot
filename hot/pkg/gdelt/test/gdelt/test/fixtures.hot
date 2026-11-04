@@ -1,0 +1,39 @@
+::gdelt::test::fixtures ns
+
+// RATE_LIMITED and ARTICLES are real responses (retrieved 4 Nov 2026). GDELT
+// answered 429 to the timeline request, so TIMELINE is not a real response.
+
+// Real: the 429 body for any DOC API request, trimmed to its first sentence
+RATE_LIMITED "Please limit requests to one every 5 seconds or contact kalev.leetaru5@gmail.com for larger queries."
+
+// Real: GET ?query="data breach"&mode=ArtList&format=json&maxrecords=3&timespan=1d&sort=DateDesc
+ARTICLES {
+  articles: [
+    {
+      url: "https://www.insurancebusinessmag.com/au/news/cyber/nsw-health-cyber-breach-puts-public-sector-cover-in-focus-596057.aspx",
+      url_mobile: "",
+      title: "NSW Health cyber breach puts public sector cover in focus",
+      seendate: "20261104T013000Z",
+      socialimage: "",
+      domain: "insurancebusinessmag.com",
+      language: "English",
+      sourcecountry: "United States"
+    }
+  ]
+}
+
+// Not a real response. Based on the timeline description at
+// https://blog.gdeltproject.org/gdelt-doc-2-0-api-debuts/, which gives no JSON
+// field names; the names here are from memory of the API and are unverified.
+TIMELINE {
+  query_details: {title: "\"data breach\"", date_resolution: "1d"},
+  timeline: [
+    {
+      series: "Volume Intensity",
+      data: [
+        {date: "20261102T000000Z", value: 0.12},
+        {date: "20261103T000000Z", value: 0.2}
+      ]
+    }
+  ]
+}

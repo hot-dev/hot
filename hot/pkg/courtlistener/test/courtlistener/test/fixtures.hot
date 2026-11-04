@@ -1,0 +1,52 @@
+::courtlistener::test::fixtures ns
+
+// Retrieved 4 Nov 2026. No token was available, so only the first two
+// fixtures are real responses. The rest come from the samples published in
+// the API documentation at https://wiki.free.law/c/courtlistener/help/api/rest/v4/
+// and are not live responses.
+
+// Real: GET /courts/?fields=id,full_name (first two results), anonymous
+COURTS_PAGE {
+  count: 3359,
+  next: "https://www.courtlistener.com/api/rest/v4/courts/?fields=id%2Cfull_name&page=2",
+  previous: null,
+  results: [
+    {id: "scotus", full_name: "Supreme Court of the United States"},
+    {id: "ca1", full_name: "Court of Appeals for the First Circuit"}
+  ]
+}
+
+// Real: GET /search/ and GET /dockets/{id}/ without a token (HTTP 401)
+UNAUTHENTICATED {detail: "Authentication credentials were not provided."}
+
+// Published sample from the Search API documentation, trimmed
+SEARCH_PAGE {
+  count: 2343,
+  next: "https://www.courtlistener.com/api/rest/v4/search/?cursor=cz0yMzUuODcxMjUmcz04MDUzNTUzJnQ9byZkPTIwMjQtMDktMTY%3D&q=foo",
+  previous: null,
+  results: [
+    {
+      absolute_url: "/opinion/6613686/foo-v-foo/",
+      caseName: "Foo v. Foo",
+      cluster_id: 6613686,
+      court_id: "hawapp",
+      dateFiled: "2003-01-10",
+      docketNumber: "24158",
+      docket_id: 63544014
+    }
+  ]
+}
+
+// Published sample from the PACER Data APIs documentation, trimmed
+DOCKET_ENTRIES_LAST_PAGE {
+  next: null,
+  previous: null,
+  results: [{id: 2974081, pacer_doc_id: "04505578717"}]
+}
+
+// Published sample from the Case Law APIs documentation, trimmed
+OPINIONS_PAGE {
+  next: "https://www.courtlistener.com/api/rest/v4/opinions/?cluster__docket__court=scotus&cursor=cD0xMDUxNjI5NA%3D%3D",
+  previous: null,
+  results: [{id: 9973155}]
+}

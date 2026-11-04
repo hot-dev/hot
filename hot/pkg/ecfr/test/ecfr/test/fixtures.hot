@@ -1,0 +1,95 @@
+::ecfr::test::fixtures ns
+
+// Trimmed real responses (retrieved 4 Nov 2026).
+
+// GET /versioner/v1/titles.json (one title)
+TITLES {
+  titles: [
+    {
+      number: 31,
+      name: "Money and Finance: Treasury",
+      latest_amended_on: "2026-10-15",
+      latest_issue_date: "2026-10-15",
+      up_to_date_as_of: "2026-11-02",
+      reserved: false
+    }
+  ],
+  meta: {date: "2026-11-02", import_in_progress: false}
+}
+
+// GET /search/v1/results?query=beneficial ownership&hierarchy[title]=31&per_page=2
+SEARCH_PAGE {
+  results: [],
+  meta: {
+    current_page: 1,
+    total_pages: 16,
+    total_count: 32,
+    max_score: 29.812494,
+    description: "Changes to sections matching 'beneficial ownership' in Title 31"
+  }
+}
+
+SEARCH_LAST_PAGE {
+  results: [],
+  meta: {current_page: 16, total_pages: 16, total_count: 32}
+}
+
+// GET /versioner/v1/full/2026-11-02/title-31.xml?part=1010&section=1010.100,
+// which escapes hierarchy_metadata once.
+SECTION_XML """<?xml version="1.0" encoding="UTF-8"?> 
+<DIV8 N="1010.100" TYPE="SECTION" hierarchy_metadata="{&quot;path&quot;:&quot;/on/_SUBSTITUTE_DATE_/title-31/section-1010.100&quot;,&quot;citation&quot;:&quot;31 CFR 1010.100&quot;}">
+<HEAD>§ 1010.100 General definitions.</HEAD>
+<XREF ID="20240904" REFID="62" AMDINSN="2">Link to an amendment published at 89 FR 72274, Sept. 4, 2024.</XREF>
+<XREF ID="20260102" REFID="43a">This amendment was delayed until Jan. 1, 2028, at 91 FR 36, Jan. 2, 2026.</XREF>
+<P>When used in this chapter and in forms prescribed under this chapter, terms shall have the meanings ascribed in this subpart.</P>
+<P>(a) <I>Accept.</I> A receiving financial institution, other than the recipient's financial institution, accepts a transmittal order by executing the transmittal order.</P>
+<NOTE>
+<HED>Note to paragraph (<E T="01">d</E>):</HED>
+<P>The number of individuals may vary.</P>
+</NOTE>
+<CITA TYPE="N">[75 FR 65812, Oct. 26, 2010, as amended at 76 FR 43596, July 21, 2011]
+</CITA>
+</DIV8>
+"""
+
+// GET /versioner/v1/full/2026-11-02/title-31.xml?part=1010, cut to one section
+// and one table. This response escapes hierarchy_metadata twice.
+PART_XML """<?xml version="1.0"?>
+<DIV5 N="1010" TYPE="PART" VOLUME="3" hierarchy_metadata="{&amp;quot;path&amp;quot;:&amp;quot;/on/_SUBSTITUTE_DATE_/title-31/part-1010&amp;quot;,&amp;quot;citation&amp;quot;:&amp;quot;31 CFR Part 1010&amp;quot;}">
+<HEAD>PART 1010&#x2014;GENERAL PROVISIONS
+</HEAD>
+<AUTH>
+<HED>Authority:</HED><PSPACE>12 U.S.C. 1829b and 1951-1959; 31 U.S.C. 5311-5314.
+</PSPACE></AUTH>
+<SOURCE>
+<HED>Source:</HED><PSPACE>75 FR 65812, Oct. 26, 2010, unless otherwise noted.
+</PSPACE></SOURCE>
+<DIV6 N="H" TYPE="SUBPART" VOLUME="3" hierarchy_metadata="{&amp;quot;path&amp;quot;:&amp;quot;/on/_SUBSTITUTE_DATE_/title-31/part-1010/subpart-H&amp;quot;,&amp;quot;citation&amp;quot;:&amp;quot;31 CFR Part 1010 Subpart H&amp;quot;}">
+<HEAD>Subpart H&#x2014;Enforcement; Penalties; and Forfeiture</HEAD>
+<DIV8 N="1010.821" TYPE="SECTION" VOLUME="3" hierarchy_metadata="{&amp;quot;path&amp;quot;:&amp;quot;/on/_SUBSTITUTE_DATE_/title-31/section-1010.821&amp;quot;,&amp;quot;citation&amp;quot;:&amp;quot;31 CFR 1010.821&amp;quot;}">
+<HEAD>&#xA7; 1010.821 Penalty adjustment and table.</HEAD>
+<P>(a) <I>Inflation adjustments.</I> See the table.<SU>1</SU></P>
+<DIV width="100%"><DIV class="gpotbl_div">
+<TABLE border="1" class="gpo_table">
+<CAPTION><P class="title">Table 1 to &#xA7; 1010.821&#x2014;Penalty Adjustment Table</P></CAPTION>
+<THEAD>
+<TR>
+<TH class="center">U.S. Code citation</TH>
+<TH class="center">Penalties as last
+<br/>amended by statute</TH>
+</TR>
+</THEAD>
+<TBODY>
+<TR>
+<TD>12 U.S.C. 1829b(j)</TD>
+<TD>$10,000</TD>
+</TR>
+</TBODY>
+</TABLE>
+</DIV></DIV>
+<CITA TYPE="N">[81 FR 42504, June 30, 2016]
+</CITA>
+</DIV8>
+</DIV6>
+</DIV5>
+"""

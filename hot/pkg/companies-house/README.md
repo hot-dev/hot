@@ -55,7 +55,7 @@ psc ::ch/persons-with-significant-control(number)
 
 ## Pagination
 
-Companies House pages by offset: `items-per-page` (up to 100) and `start-index`. `next-start(page)` and `collect(fetch, opts, limit)` follow `total_results`.
+Companies House pages by offset: `items-per-page` (up to 100) and `start-index`. `next-start(page)` and `collect(fetch, opts, limit)` follow `total_results`. An Err on any page is returned in place of the items.
 
 ```hot
 ::ch ::companies-house

@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.ecfr {
+  name: "hot.dev/ecfr",
+  version: "0.1.0",
+  hot-min-version: "3.0.3",
+  description: "The eCFR API for Hot, with no key: titles, structure, ancestry, versions, search, and full text by part or section.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["regulations", "cfr", "ecfr", "compliance"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

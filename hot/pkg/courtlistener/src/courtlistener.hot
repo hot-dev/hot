@@ -1,0 +1,401 @@
+::courtlistener ns
+meta {
+    ctx: {
+        "courtlistener.api-token": {required: false},
+        "courtlistener.base-url": {required: false, secret: false}
+    },
+    doc: """
+    The Free Law Project CourtListener REST API v4
+    (`https://www.courtlistener.com/api/rest/v4`): search across case law
+    and RECAP (PACER) records, dockets, docket entries, opinions and
+    clusters by id, and the court list.
+
+    **Auth**: `Authorization: Token <token>`, from a free CourtListener
+    account. Set `courtlistener.api-token` or pass `{api-token: ...}` per
+    call. Every call here needs a token except `courts` and `court`.
+
+    **Rate limits**: by default 5 requests per minute, 50 per hour and 125
+    per day per account, on rolling windows that all apply at once. A
+    Free Law Project membership raises them. A 429 carries `retry-after`
+    in the `HttpError`.
+
+    **Paging**: responses carry `count`, `next` and `previous`, where
+    `next` holds a `cursor` or `page` parameter. `next-params` reads it
+    and `collect` follows it, always against the configured `base-url`.
+    """
+}
+
+::api ::courtlistener::api
+
+// Errors are returned, not consumed: consuming an Err would halt the run.
+with-token fn (opts: Map, f: Fn): Any {
+  cfg ::api/resolve(opts)
+  cond {
+    is-err(cfg) => { cfg }
+    => {
+      token ::api/require-api-token(cfg)
+      if(is-err(token), token, f(cfg, {Authorization: auth-header(token)}))
+    }
+  }
+}
+
+auth-header
+meta {
+    doc: """`Token <token>`, the `Authorization` value CourtListener expects (pure)."""
+}
+fn (token: Str): Str {
+  `Token ${token}`
+}
+
+cl-get fn (path: Str, params: Map, opts: Map): Any {
+  with-token(opts, (cfg, headers) {
+    ::api/get-json(`${cfg.base-url}${path}${::api/query-string(params)}`, headers)
+  })
+}
+
+cl-get-or-null fn (path: Str, params: Map, opts: Map): Any {
+  with-token(opts, (cfg, headers) {
+    ::api/get-json-or-null(`${cfg.base-url}${path}${::api/query-string(params)}`, headers)
+  })
+}
+
+field-list fn (v: Any): Str? {
+  cond {
+    is-vec(v) => { join(v, ",") }
+    => { v }
+  }
+}
+
+refine-params
+meta {
+    doc: """
+    The query refinement parameters from `opts` (pure): `fields` and
+    `omit` (a Vec or a comma-separated Str, `__` for nested fields),
+    `order-by`, `cursor` and `page`. Unset values stay null and drop out
+    of the query string.
+    """
+}
+fn (opts: Map): Map {
+  {
+    fields: field-list(get(opts, "fields")),
+    omit: field-list(get(opts, "omit")),
+    order_by: get(opts, "order-by"),
+    cursor: get(opts, "cursor"),
+    page: get(opts, "page")
+  }
+}
+
+list-params fn (filters: Map?, opts: Map): Map {
+  {...or(filters, {}), ...refine-params(opts)}
+}
+
+resource-id
+meta {
+    doc: """
+    The numeric id at the end of a v4 resource URL, as an Int, or null
+    (pure). Clusters, opinions and docket entries link their parents by
+    URL.
+
+    **Example**
+
+    ```hot
+    ::courtlistener/resource-id("https://www.courtlistener.com/api/rest/v4/dockets/4214664/")  // 4214664
+    ```
+    """
+}
+fn (url: Any): Int? {
+  m if(is-str(url), ::hot::regex/capture(url, "/(\\d+)/?$"), null)
+  if(is-null(m), null, Int(m.groups[0]))
+}
+
+// ---------------------------------------------------------------------------
+// Search
+// ---------------------------------------------------------------------------
+
+search-params
+meta {
+    doc: """
+    Query parameters for the Search API (pure): `q`, `type` (`opts.type`,
+    default `"o"`), `order_by`, `filed_after`, `filed_before`, `highlight`
+    (`opts.highlight` true gives `on`) and `cursor`. `opts.params` adds any
+    other parameter the search front end sends.
+    """
+}
+fn (q: Str, opts: Map): Map {
+  {
+    q: q,
+    type: or(get(opts, "type"), "o"),
+    order_by: get(opts, "order-by"),
+    filed_after: get(opts, "filed-after"),
+    filed_before: get(opts, "filed-before"),
+    highlight: if(eq(get(opts, "highlight"), true), "on", null),
+    cursor: get(opts, "cursor"),
+    ...or(get(opts, "params"), {})
+  }
+}
+
+search
+meta {
+    doc: """
+    Search CourtListener (`/search/`). `opts.type` picks the index: `o`
+    case law (the default), `r` federal cases with up to three nested
+    documents, `rd` federal filing documents, `d` federal cases only, `p`
+    judges, `oa` oral arguments. Returns the page: `count`, `next`,
+    `previous` and `results`. Filter with fielded terms in `q`, such as
+    `court_id:scotus` and `dateFiled:[2026-01-01 TO 2026-06-30]`.
+
+    **Example**
+
+    ```hot
+    page ::courtlistener/search("\"data breach\" court_id:ca9", {order-by: "dateFiled desc"})
+    first(page.results).caseName
+    ```
+    """
+}
+fn
+(q: Str): Map {
+  search(q, {})
+},
+(q: Str, opts: Map): Map {
+  cl-get("/search/", search-params(q, opts), opts)
+}
+
+search-opinions
+meta {
+    doc: """Search case law (`type=o`): opinion clusters with their nested opinions."""
+}
+fn
+(q: Str): Map {
+  search-opinions(q, {})
+},
+(q: Str, opts: Map): Map {
+  search(q, {...opts, type: "o"})
+}
+
+search-recap
+meta {
+    doc: """Search RECAP (`type=r`): federal cases with up to three nested documents. `more_docs` is true on a result with more matches than that."""
+}
+fn
+(q: Str): Map {
+  search-recap(q, {})
+},
+(q: Str, opts: Map): Map {
+  search(q, {...opts, type: "r"})
+}
+
+search-dockets
+meta {
+    doc: """Search federal cases only (`type=d`), without filing metadata. Above 2,000 results `count` is an estimate, within about 6%."""
+}
+fn
+(q: Str): Map {
+  search-dockets(q, {})
+},
+(q: Str, opts: Map): Map {
+  search(q, {...opts, type: "d"})
+}
+
+search-documents
+meta {
+    doc: """Search federal filing documents from PACER (`type=rd`), without docket metadata."""
+}
+fn
+(q: Str): Map {
+  search-documents(q, {})
+},
+(q: Str, opts: Map): Map {
+  search(q, {...opts, type: "rd"})
+}
+
+// ---------------------------------------------------------------------------
+// Dockets
+// ---------------------------------------------------------------------------
+
+docket
+meta {
+    doc: """One docket by id, or null when there is none. `opts.fields` and `opts.omit` trim the record."""
+}
+fn
+(id: Any): Map? {
+  docket(id, {})
+},
+(id: Any, opts: Map): Map? {
+  cl-get-or-null(`/dockets/${::api/path-segment(id)}/`, list-params({}, opts), opts)
+}
+
+dockets
+meta {
+    doc: """
+    One page of dockets matching `filters`, a Map of API filters. Docket
+    numbers are not unique, so pair `docket_number` with `court`.
+
+    **Example**
+
+    ```hot
+    page ::courtlistener/dockets({court: "dcd", docket_number: "1:16-cv-00745"})
+    first(page.results).case_name
+    ```
+    """
+}
+fn
+(filters: Map): Map {
+  dockets(filters, {})
+},
+(filters: Map, opts: Map): Map {
+  cl-get("/dockets/", list-params(filters, opts), opts)
+}
+
+docket-entries
+meta {
+    doc: """
+    One page of the entries on a docket (`/docket-entries/?docket=`).
+    `opts.filters` adds API filters, such as
+    `{date_filed__gte: "2026-01-01"}`. The Free Law Project lists some
+    APIs as available to select users only; a 403 here means this
+    account lacks access.
+    """
+}
+fn
+(docket-id: Any): Map {
+  docket-entries(docket-id, {})
+},
+(docket-id: Any, opts: Map): Map {
+  cl-get("/docket-entries/", list-params({docket: docket-id, ...or(get(opts, "filters"), {})}, opts), opts)
+}
+
+// ---------------------------------------------------------------------------
+// Case law
+// ---------------------------------------------------------------------------
+
+cluster
+meta {
+    doc: """
+    One opinion cluster by id, or null when there is none. The id in a
+    CourtListener opinion URL is a cluster id. `sub_opinions` links the
+    cluster's opinions and `docket` its parent.
+    """
+}
+fn
+(id: Any): Map? {
+  cluster(id, {})
+},
+(id: Any, opts: Map): Map? {
+  cl-get-or-null(`/clusters/${::api/path-segment(id)}/`, list-params({}, opts), opts)
+}
+
+opinion
+meta {
+    doc: """One opinion by id, or null when there is none. Opinion ids do not match cluster ids. Prefer `html_with_citations` for the text."""
+}
+fn
+(id: Any): Map? {
+  opinion(id, {})
+},
+(id: Any, opts: Map): Map? {
+  cl-get-or-null(`/opinions/${::api/path-segment(id)}/`, list-params({}, opts), opts)
+}
+
+// ---------------------------------------------------------------------------
+// Courts (no token needed)
+// ---------------------------------------------------------------------------
+
+public-get fn (path: Str, params: Map, opts: Map): Any {
+  cfg ::api/resolve(opts)
+  cond {
+    is-err(cfg) => { cfg }
+    => {
+      headers if(::api/given(cfg.api-token), {Authorization: auth-header(cfg.api-token)}, {})
+      ::api/get-json-or-null(`${cfg.base-url}${path}${::api/query-string(params)}`, headers)
+    }
+  }
+}
+
+courts
+meta {
+    doc: """One page of courts and jurisdictions, with their ids. Works without a token, and sends one when set."""
+}
+fn
+(): Map {
+  courts({})
+},
+(opts: Map): Map {
+  public-get("/courts/", list-params(get(opts, "filters"), opts), opts)
+}
+
+court
+meta {
+    doc: """One court by id (`"scotus"`, `"ca9"`), or null when there is none. Works without a token, and sends one when set."""
+}
+fn
+(id: Str): Map? {
+  court(id, {})
+},
+(id: Str, opts: Map): Map? {
+  public-get(`/courts/${::api/path-segment(id)}/`, list-params({}, opts), opts)
+}
+
+// ---------------------------------------------------------------------------
+// Pagination
+// ---------------------------------------------------------------------------
+
+next-params
+meta {
+    doc: """
+    The opts that fetch the page after `page`, from its `next` URL (pure):
+    `{cursor: ...}`, `{page: n}`, or null on the last page. Only the
+    parameter is read, so a next call goes to the configured `base-url`
+    and the token never follows a URL from a response.
+    """
+}
+fn (page: Any): Map? {
+  next get(or(page, {}), "next")
+  m if(::api/given(next), ::hot::regex/capture(next, "\\?(.*)$"), null)
+  query if(is-null(m), {}, ::hot::uri/decode-query(m.groups[0]))
+  cursor get(query, "cursor")
+  number get(query, "page")
+  cond {
+    ::api/given(cursor) => { {cursor: cursor} }
+    ::api/given(number) => { {page: Int(number)} }
+    => { null }
+  }
+}
+
+collect-pages fn (fetch: Fn, opts: Map, limit: Int, acc: Vec): Any {
+  page fetch(opts)
+  cond {
+    is-err(page) => { page }
+    => {
+      items or(get(page, "results"), [])
+      combined concat(acc, items)
+      next next-params(page)
+      cond {
+        gte(length(combined), limit) => { slice(combined, 0, limit) }
+        is-empty(items) => { combined }
+        is-null(next) => { combined }
+        => { collect-pages(fetch, {...opts, ...next}, limit, combined) }
+      }
+    }
+  }
+}
+
+collect
+meta {
+    doc: """
+    Follow pages until `limit` items or the last page. `fetch` takes
+    `opts` (with `cursor` or `page` set) and returns one page. An Err on
+    any page, such as a 429, is returned in place of the items.
+
+    The default limit of 5 requests a minute applies to every page, so
+    keep `limit` small or raise the account's limits.
+
+    **Example**
+
+    ```hot
+    entries ::courtlistener/collect((o) { ::courtlistener/docket-entries(4214664, o) }, {order-by: "id"}, 40)
+    ```
+    """
+}
+fn (fetch: Fn, opts: Map, limit: Int): Any {
+  collect-pages(fetch, opts, limit, [])
+}

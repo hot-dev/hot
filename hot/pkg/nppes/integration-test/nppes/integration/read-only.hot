@@ -1,0 +1,63 @@
+::nppes::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration smoke tests (live, read-only)
+// =============================================================================
+// NPPES_LIVE=1 (no key). The test only reads; without the setting it records a
+// skip and passes.
+// Run with: hot test -p pkg-integration-nppes
+
+::ctx ::nppes::integration::ctx
+
+MAYO "1881018208"
+
+test-lookup
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("NPPES_LIVE is not 1") }
+        => {
+            mayo ::nppes/get-provider(MAYO)
+            assert-eq("MAYO CLINIC", mayo.basic.organization_name)
+            assert(::nppes/is-active(mayo), "active")
+            assert-eq("ROCHESTER", ::nppes/location-address(mayo).city)
+            assert(is-some(::nppes/primary-taxonomy(mayo)), "a primary taxonomy")
+            assert(::nppes/is-npi(mayo.number), "a valid NPI")
+            assert-eq(null, ::nppes/get-provider("1234567890"), "an unknown NPI is null")
+        }
+    }
+}
+
+test-search-and-paging
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("NPPES_LIVE is not 1") }
+        => {
+            opts {state: "MN", limit: 2}
+            page ::nppes/organizations("mayo clinic*", opts)
+            assert-eq(2, length(::nppes/results(page)), "a full page")
+            assert-eq("NPI-2", first(::nppes/results(page)).enumeration_type)
+            assert-eq(2, ::nppes/next-page(page, opts))
+
+            rows ::nppes/collect((o) { ::nppes/organizations("mayo clinic*", o) }, opts, 5)
+            assert-eq(5, length(rows), "paged")
+
+            found ::nppes/results(::nppes/individuals("smith", {taxonomy-description: "Internal Medicine", state: "NY", limit: 1}))
+            assert-eq("NPI-1", first(found).enumeration_type, "individuals by name and taxonomy")
+        }
+    }
+}
+
+test-bad-criteria-are-an-err
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("NPPES_LIVE is not 1") }
+        => {
+            out ::nppes/search({state: "MN"})
+            assert(is-err(out), "state alone comes back as a 200 with Errors")
+            e untype(err-value(out))
+            assert-eq(200, e.status)
+            assert(::hot::str/contains(e.message, "state: Field state requires"), "the API's reason")
+        }
+    }
+}

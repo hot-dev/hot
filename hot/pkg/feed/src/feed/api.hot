@@ -1,0 +1,234 @@
+::feed::api ns
+meta {
+    ctx: {"feed.user-agent": {required: false}},
+    doc: """
+    Transport for feeds: the settings resolver (per-call `opts` first,
+    then context variables, then defaults), a typed `HttpError`, the
+    conditional GET, and decoding a response body to text.
+
+    | opts key | Context variable | Default |
+    |---|---|---|
+    | `user-agent` | `feed.user-agent` | `hot-dev-feed-pkg/0.1 (+https://hot.dev)` |
+
+    **Per-call User-Agent.** `user-agent` in `opts` is masked in call
+    records and never written to context, because some publishers
+    (sec.gov among them) want a contact email in it. Present but blank
+    or null, it is an error, never a fallback to context.
+    """
+}
+
+::ctx ::hot::ctx
+::re ::hot::regex
+
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+SOURCE "feed"
+PACKAGE_AGENT "hot-dev-feed-pkg/0.1 (+https://hot.dev)"
+ACCEPT "application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5"
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+given
+meta {
+    doc: """True for a non-null value that is not a blank string."""
+}
+fn (v: Any): Bool {
+  match v {
+    Null => { false }
+    Str => { not(is-empty(trim(v))) }
+    _ => { true }
+  }
+}
+
+pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
+  from-opts get(opts, key)
+  from-ctx ::ctx/get(ctx-key)
+  cond {
+    given(from-opts) => { from-opts }
+    given(from-ctx) => { from-ctx }
+    => { default }
+  }
+}
+
+resolve
+meta {
+    doc: """
+    Resolve settings for one call: `{user-agent}`. A value in `opts`
+    wins over context; it is used for that call only. An Err when
+    `user-agent` is in `opts` but blank or null.
+
+    **Example**
+
+    ```hot
+    cfg ::feed::api/resolve({user-agent: "Acme Corp ops@acme.example"})
+    ```
+    """
+}
+fn (opts: Map): Map {
+  from-opts get(opts, "user-agent")
+  ::ctx/mark-secret(filter([from-opts], given))
+  cond {
+    and(in("user-agent", keys(opts)), not(given(from-opts))) => {
+      err("feed: user-agent is in the call's opts but is blank or null. Pass a value, or leave user-agent out to use the context variable.")
+    }
+    => { {user-agent: pick(opts, "user-agent", "feed.user-agent", PACKAGE_AGENT)} }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+HttpError
+meta {
+    doc: """
+    A non-2xx feed response other than 304. `source` is `"feed"`; `url`
+    the requested URL, as given; `retry-after` the parsed `Retry-After`
+    seconds on 429s; `message` a one-line summary that never includes
+    the User-Agent.
+    """
+}
+type {
+    source: Str,
+    status: Int,
+    url: Str,
+    headers: Map,
+    body: Any,
+    retry-after: Int?,
+    message: Str
+}
+
+body-detail fn (body: Any): Str? {
+  cond {
+    is-str(body) => { if(gt(length(body), 200), `${slice(body, 0, 200)}…`, body) }
+    => { null }
+  }
+}
+
+retry-after fn (headers: Map): Int? {
+  v get(headers, "retry-after")
+  cond {
+    is-null(v) => { null }
+    ::re/is-match(trim(Str(v)), "^\\d+$") => { Int(trim(Str(v))) }
+    => { null }
+  }
+}
+
+http-error
+meta {
+    doc: """Build an `HttpError` from a non-2xx response. Exposed for testing; every request uses it."""
+}
+fn (response: HttpResponse, url: Str): HttpError {
+  headers or(response.headers, {})
+  detail body-detail(response.body)
+  HttpError({
+    source: SOURCE,
+    status: response.status,
+    url: url,
+    headers: headers,
+    body: response.body,
+    retry-after: retry-after(headers),
+    message: if(is-some(detail), `${SOURCE}: HTTP ${response.status}: ${detail}`, `${SOURCE}: HTTP ${response.status} for ${url}`)
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------
+
+request-headers
+meta {
+    doc: """
+    The headers for one fetch (pure): `User-Agent`, `Accept`, and
+    `If-None-Match` / `If-Modified-Since` from `opts.etag` and
+    `opts.last-modified` when they are set.
+    """
+}
+fn (cfg: Map, opts: Map): Map {
+  filter-vals({
+    User-Agent: cfg.user-agent,
+    Accept: ACCEPT,
+    If-None-Match: get(opts, "etag"),
+    If-Modified-Since: get(opts, "last-modified")
+  }, given)
+}
+
+request
+meta {
+    doc: """
+    GET a feed URL with `headers`, returning the `HttpResponse` on 2xx
+    or 304, or an Err carrying `HttpError`. A transport failure passes
+    through as its own Err.
+    """
+}
+fn (url: Str, headers: Map): HttpResponse {
+  response ::hot::http/request(HttpRequest({
+    method: "GET",
+    url,
+    headers: headers,
+    body: ""
+  }))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response }
+    eq(response.status, 304) => { response }
+    => { err(http-error(response, url)) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Body text
+// ---------------------------------------------------------------------------
+
+declared-encoding
+meta {
+    doc: """The lower-cased `encoding` of an XML declaration at the start of `bytes`, or `"utf-8"` when there is none (pure)."""
+}
+fn (bytes: Bytes): Str {
+  head slice(::hot::bytes/to-vec(bytes), 0, min(length(bytes), 100))
+  // The declaration is ASCII. Dropping other bytes keeps it readable as UTF-8.
+  ascii ::hot::bytes/to-str(Bytes(filter(head, (b) { lt(b, 128) })))
+  found ::re/capture(ascii, "^\\s*<\\?xml[^>]*encoding=[\"']([A-Za-z0-9._-]+)[\"']")
+  if(is-null(found), "utf-8", lowercase(found.groups[0]))
+}
+
+latin1-to-str
+meta {
+    doc: """ISO-8859-1 bytes as text (pure): every byte is the code point of the same value, so each one above 127 becomes two UTF-8 bytes."""
+}
+fn (bytes: Bytes): Str {
+  ::hot::bytes/to-str(Bytes(flatten(map(::hot::bytes/to-vec(bytes), (b) {
+    cond {
+      lt(b, 128) => { [b] }
+      lt(b, 192) => { [194, b] }
+      => { [195, sub(b, 64)] }
+    }
+  }))))
+}
+
+decode
+meta {
+    doc: """
+    A feed body as text (pure). A Str comes back unchanged. Bytes are
+    read in the encoding their XML declaration names: UTF-8 (the default),
+    US-ASCII or ISO-8859-1, which EDGAR's feeds declare. Any other
+    encoding, or bytes invalid in the declared one, is an Err.
+    """
+}
+fn (body: Str | Bytes): Str {
+  cond {
+    is-str(body) => { body }
+    => {
+      encoding declared-encoding(body)
+      cond {
+        in(encoding, ["utf-8", "utf8", "us-ascii", "ascii"]) => { ::hot::bytes/to-str(body) }
+        in(encoding, ["iso-8859-1", "latin1"]) => { latin1-to-str(body) }
+        => { err(`feed: unsupported encoding '${encoding}'`) }
+      }
+    }
+  }
+}

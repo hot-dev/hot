@@ -350,14 +350,20 @@ fn (page: Any): Int? {
 
 collect-pages fn (fetch: Fn, page-number: Int?, limit: Int, acc: Vec): Vec {
   page fetch(page-number)
-  items or(get(page, "data"), [])
-  combined concat(acc, items)
-  next next-page(page)
   cond {
-    gte(length(combined), limit) => { slice(combined, 0, limit) }
-    is-empty(items) => { combined }
-    is-null(next) => { combined }
-    => { collect-pages(fetch, next, limit, combined) }
+    // Returned, not consumed: consuming an Err would halt the run.
+    is-err(page) => { page }
+    => {
+      items or(get(page, "data"), [])
+      combined concat(acc, items)
+      next next-page(page)
+      cond {
+        gte(length(combined), limit) => { slice(combined, 0, limit) }
+        is-empty(items) => { combined }
+        is-null(next) => { combined }
+        => { collect-pages(fetch, next, limit, combined) }
+      }
+    }
   }
 }
 
@@ -366,7 +372,8 @@ meta {
     doc: """
     Follow pages of a paginated GLEIF call until `limit` items or the
     last page. `fetch` takes `opts` (with `page` and `page-size` set)
-    and returns one page.
+    and returns one page. An Err on any page is returned in place of the
+    items.
 
     **Example**
 

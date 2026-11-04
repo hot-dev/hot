@@ -1,0 +1,287 @@
+::regulations-gov::api ns
+meta {
+    ctx: {
+        "regulations-gov.api-key": {required: false},
+        "regulations-gov.base-url": {required: false, secret: false}
+    },
+    doc: """
+    Transport for the Regulations.gov API: the settings resolver (per-call
+    `opts` first, then context variables, then defaults), a typed
+    `HttpError`, JSON GETs, and query-string building that drops unset
+    values. Keys may contain brackets (`filter[docketId]`, `page[size]`)
+    and are encoded.
+
+    | opts key | Context variable | Default |
+    |---|---|---|
+    | `api-key` | `regulations-gov.api-key` | none: calls fail without it |
+    | `base-url` | `regulations-gov.base-url` | `https://api.regulations.gov/v4` |
+
+    **Per-call credentials.** `api-key` in `opts` is masked in call
+    records and never written to context, so parallel flows and tenants
+    in one run don't see each other's keys. Present but blank or null, it
+    is an error, never a fallback to context. A per-call `base-url` needs
+    an `api-key` in the same `opts`: the context key is never sent to a
+    per-call URL.
+    """
+}
+
+::ctx ::hot::ctx
+::uri ::hot::uri
+::re ::hot::regex
+
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+SOURCE "regulations-gov"
+BASE_URL "https://api.regulations.gov/v4"
+PACKAGE_AGENT "hot-dev-regulations-gov-pkg/0.1 (+https://hot.dev)"
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+given
+meta {
+    doc: """True for a non-null value that is not a blank string."""
+}
+fn (v: Any): Bool {
+  match v {
+    Null => { false }
+    Str => { not(is-empty(trim(v))) }
+    _ => { true }
+  }
+}
+
+pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
+  from-opts get(opts, key)
+  from-ctx ::ctx/get(ctx-key)
+  cond {
+    given(from-opts) => { from-opts }
+    given(from-ctx) => { from-ctx }
+    => { default }
+  }
+}
+
+strip-slash fn (url: Str): Str {
+  ::re/replace-all(url, "/+$", "")
+}
+
+resolve
+meta {
+    doc: """
+    Resolve settings for one call: `{api-key, base-url}`. Values in
+    `opts` win over context; an `api-key` in `opts` is used for that call
+    only and comes back unchanged. An Err when `api-key` is in `opts` but
+    blank or null, or when `opts` has `base-url` without `api-key`.
+
+    **Example**
+
+    ```hot
+    cfg ::regulations-gov::api/resolve({api-key: tenant.regulations-key})
+    ```
+    """
+}
+fn (opts: Map): Map {
+  from-opts get(opts, "api-key")
+  ::ctx/mark-secret(filter([from-opts], given))
+  cond {
+    and(in("api-key", keys(opts)), not(given(from-opts))) => {
+      err("regulations-gov: api-key is in the call's opts but is blank or null. Pass a value, or leave api-key out to use the context variable.")
+    }
+
+    and(given(get(opts, "base-url")), not(given(from-opts))) => {
+      err("regulations-gov: base-url is in the call's opts without api-key. Pass api-key with it. The context key is never sent to a per-call URL.")
+    }
+    => {
+      {
+        api-key: pick(opts, "api-key", "regulations-gov.api-key", null),
+        base-url: strip-slash(pick(opts, "base-url", "regulations-gov.base-url", BASE_URL))
+      }
+    }
+  }
+}
+
+require-api-key
+meta {
+    doc: """The API key from resolved settings, or an Err naming where to set it."""
+}
+fn (cfg: Map): Str {
+  cond {
+    given(cfg.api-key) => { cfg.api-key }
+    => { err("regulations-gov: no API key; set regulations-gov.api-key or pass {api-key: ...}") }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+HttpError
+meta {
+    doc: """
+    A failed Regulations.gov response. `source` is `"regulations-gov"`; `url`
+    the requested URL (the key travels in the `X-Api-Key` header, never
+    the URL); `retry-after` the parsed `Retry-After` seconds on 429s;
+    `message` a one-line summary that never includes credentials. `status`
+    is normally non-2xx, but it is 200 when the site answered with
+    something other than JSON (see `decode-body`).
+    """
+}
+type {
+    source: Str,
+    status: Int,
+    url: Str,
+    headers: Map,
+    body: Any,
+    retry-after: Int?,
+    message: Str
+}
+
+body-detail fn (body: Any): Str? {
+  cond {
+    is-str(body) => { if(gt(length(body), 200), `${slice(body, 0, 200)}…`, body) }
+    is-map(body) => {
+      // Regulations.gov: JSON:API {errors: [{status, title, detail}]}.
+      // api.data.gov, in front of it: {error: {code, message}}
+      first-error if(is-vec(get(body, "errors")), first(get(body, "errors")), null)
+      e get(body, "error")
+      or(
+        get(or(first-error, {}), "detail"),
+        get(or(first-error, {}), "title"),
+        if(is-map(e), or(get(e, "message"), get(e, "code")), e),
+        get(body, "message")
+      )
+    }
+    => { null }
+  }
+}
+
+retry-after fn (headers: Map): Int? {
+  v get(headers, "retry-after")
+  cond {
+    is-null(v) => { null }
+    ::re/is-match(trim(Str(v)), "^\\d+$") => { Int(trim(Str(v))) }
+    => { null }
+  }
+}
+
+http-error
+meta {
+    doc: """Build an `HttpError` from a non-2xx response. Exposed for testing; every request uses it."""
+}
+fn (response: HttpResponse, url: Str): HttpError {
+  headers or(response.headers, {})
+  detail body-detail(response.body)
+  HttpError({
+    source: SOURCE,
+    status: response.status,
+    url: url,
+    headers: headers,
+    body: response.body,
+    retry-after: retry-after(headers),
+    message: if(is-some(detail), `${SOURCE}: HTTP ${response.status}: ${detail}`, `${SOURCE}: HTTP ${response.status} for ${url}`)
+  })
+}
+
+not-json-error
+meta {
+    doc: """An `HttpError` for a 2xx response that is not JSON, such as a maintenance page, which would otherwise read as an empty page. Exposed for testing."""
+}
+fn (response: HttpResponse, url: Str): HttpError {
+  HttpError({
+    source: SOURCE,
+    status: response.status,
+    url: url,
+    headers: or(response.headers, {}),
+    body: null,
+    retry-after: null,
+    message: `${SOURCE}: expected JSON from ${url}, got something else (usually an HTML page)`
+  })
+}
+
+is-not-found
+meta {
+    doc: """True when `e` is an `HttpError` with status 404."""
+}
+fn (e: Any): Bool {
+  and(is-map(e), eq(get(e, "status"), 404))
+}
+
+// ---------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------
+
+query-string
+meta {
+    doc: """Build a `?a=1&b=2` suffix from a Map, dropping null and blank values (pure); `""` when nothing remains."""
+}
+fn (params: Map): Str {
+  ::uri/query-string(filter-vals(params, given))
+}
+
+path-segment
+meta {
+    doc: """Percent-encode one path segment."""
+}
+fn (value: Any): Str {
+  ::uri/encode(Str(value))
+}
+
+request
+meta {
+    doc: """
+    GET (or another method) a Regulations.gov URL with `headers`, returning
+    the `HttpResponse` on 2xx or an Err carrying `HttpError`. A
+    transport failure passes through as its own Err.
+    """
+}
+fn (method: Str, url: Str, headers: Map): HttpResponse {
+  response ::hot::http/request(HttpRequest({
+    method,
+    url,
+    headers: {User-Agent: PACKAGE_AGENT, ...headers},
+    body: ""
+  }))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response }
+    => { err(http-error(response, url)) }
+  }
+}
+
+decode-body
+meta {
+    doc: """The decoded JSON of a 2xx response, or an Err carrying `HttpError` when the body is not JSON (pure). Exposed for testing."""
+}
+fn (response: HttpResponse, url: Str): Any {
+  body response.body
+  text if(is-str(body), trim(body), "")
+  parsed if(or(::hot::str/starts-with(text, "{"), ::hot::str/starts-with(text, "[")), from-json(text), body)
+  cond {
+    is-err(parsed) => { err(not-json-error(response, url)) }
+    or(is-map(parsed), is-vec(parsed)) => { parsed }
+    => { err(not-json-error(response, url)) }
+  }
+}
+
+get-json
+meta {
+    doc: """GET a JSON resource and return the decoded body, or an Err carrying `HttpError`."""
+}
+fn (url: Str, headers: Map): Any {
+  response request("GET", url, {Accept: "application/json", ...headers})
+  if(is-err(response), response, decode-body(response, url))
+}
+
+get-json-or-null
+meta {
+    doc: """`get-json`, but a 404 gives null (no such record) instead of an Err."""
+}
+fn (url: Str, headers: Map): Any {
+  out get-json(url, headers)
+  cond {
+    and(is-err(out), is-not-found(err-value(out))) => { null }
+    => { out }
+  }
+}

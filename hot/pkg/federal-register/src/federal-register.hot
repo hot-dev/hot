@@ -1,0 +1,305 @@
+::federal-register ns
+meta {
+    ctx: {"federal-register.base-url": {required: false, secret: false}},
+    doc: """
+    The Federal Register API (`https://www.federalregister.gov/api/v1`,
+    no key): document search by agency, type, publication date, term,
+    CFR title and part, and significance; documents by number; documents
+    on public inspection; and the agencies list.
+
+    Search results page with a cursor. Follow `next-page` rather than
+    counting `page` numbers, and use `collect` to gather several pages.
+
+    Every function takes an optional trailing `opts` Map. Search takes
+    the conditions listed on `search-params`; all of them take
+    `base-url`.
+    """
+}
+
+::api ::federal-register::api
+::re ::hot::regex
+
+MAX_PER_PAGE 1000
+
+// ---------------------------------------------------------------------------
+// Parameters and paths
+// ---------------------------------------------------------------------------
+
+as-vec fn (v: Any): Vec {
+  cond {
+    is-null(v) => { [] }
+    is-vec(v) => { v }
+    => { [v] }
+  }
+}
+
+significant-param
+meta {
+    doc: """`"1"` for true, `"0"` for false, null when unset (pure)."""
+}
+fn (v: Bool?): Str? {
+  cond {
+    is-null(v) => { null }
+    v => { "1" }
+    => { "0" }
+  }
+}
+
+page-params
+meta {
+    doc: """`per_page` (capped at 1000) and `page` from `opts`, omitted when unset (pure)."""
+}
+fn (opts: Map): Map {
+  size get(opts, "per-page")
+  {per_page: if(is-some(size), min(size, MAX_PER_PAGE), null), page: get(opts, "page")}
+}
+
+search-params
+meta {
+    doc: """
+    Query parameters for a document search (pure), from these `opts`:
+
+    - `term`: full text; wrap a phrase in double quotes
+    - `type`: `"RULE"`, `"PRORULE"`, `"NOTICE"`, `"PRESDOCU"`, or a Vec of them
+    - `agencies`: an agency slug or a Vec of them (`slug` from `agencies`)
+    - `publication-date-gte`, `publication-date-lte`, `publication-date-is`: `YYYY-MM-DD`
+    - `cfr-title`, `cfr-part`: documents affecting that part of the CFR
+    - `significant`: true for rules deemed significant under EO 12866
+    - `order`: `"relevance"`, `"newest"` or `"oldest"`
+    - `fields`: a Vec of the fields to return
+    - `per-page`, `page`
+    """
+}
+fn (opts: Map): Map {
+  {
+    "conditions[term]": get(opts, "term"),
+    "conditions[type][]": map(as-vec(get(opts, "type")), uppercase),
+    "conditions[agencies][]": as-vec(get(opts, "agencies")),
+    "conditions[publication_date][gte]": get(opts, "publication-date-gte"),
+    "conditions[publication_date][lte]": get(opts, "publication-date-lte"),
+    "conditions[publication_date][is]": get(opts, "publication-date-is"),
+    "conditions[cfr][title]": get(opts, "cfr-title"),
+    "conditions[cfr][part]": get(opts, "cfr-part"),
+    "conditions[significant]": significant-param(get(opts, "significant")),
+    order: get(opts, "order"),
+    "fields[]": as-vec(get(opts, "fields")),
+    ...page-params(opts)
+  }
+}
+
+fr-get fn (path: Str, params: Map, opts: Map): Any {
+  cfg ::api/resolve(opts)
+  ::api/get-json(`${cfg.base-url}${path}${::api/query-string(params)}`)
+}
+
+fr-get-or-null fn (path: Str, params: Map, opts: Map): Any {
+  cfg ::api/resolve(opts)
+  ::api/get-json-or-null(`${cfg.base-url}${path}${::api/query-string(params)}`)
+}
+
+fields-param fn (opts: Map): Map {
+  {"fields[]": as-vec(get(opts, "fields"))}
+}
+
+// ---------------------------------------------------------------------------
+// Documents
+// ---------------------------------------------------------------------------
+
+search
+meta {
+    doc: """
+    Search documents. Returns the page: `count`, `total_pages`,
+    `description` (the search in words), `next_page_url` and `results`.
+    See `search-params` for the conditions.
+
+    `opts.after` takes a value from `next-page` and fetches that page,
+    which already carries the conditions.
+
+    `count` stops at 10000, so a count of exactly 10000 means at least
+    that many.
+
+    **Example**
+
+    ```hot
+    page ::federal-register/search({
+      agencies: "financial-crimes-enforcement-network",
+      type: ["RULE", "PRORULE"],
+      publication-date-gte: "2026-01-01",
+      cfr-title: 31,
+      cfr-part: 1010,
+      order: "newest"
+    })
+    first(page.results).document_number
+    ```
+    """
+}
+fn
+(): Map {
+  search({})
+},
+(opts: Map): Map {
+  after get(opts, "after")
+  cond {
+    ::api/given(after) => { fr-get(after, {}, opts) }
+    => { fr-get("/documents.json", search-params(opts), opts) }
+  }
+}
+
+get-document
+meta {
+    doc: """
+    One document by number, or null when there is none. `opts.fields`
+    limits the fields returned.
+
+    **Example**
+
+    ```hot
+    doc ::federal-register/get-document("2026-18194")
+    doc.title
+    doc.cfr_references
+    ```
+    """
+}
+fn
+(number: Str): Map? {
+  get-document(number, {})
+},
+(number: Str, opts: Map): Map? {
+  fr-get-or-null(`/documents/${::api/path-segment(trim(number))}.json`, fields-param(opts), opts)
+}
+
+// ---------------------------------------------------------------------------
+// Public inspection
+// ---------------------------------------------------------------------------
+
+public-inspection
+meta {
+    doc: """
+    The documents on public inspection now, filed but not yet published.
+    Returns `{count, results, special_filings_updated_at,
+    regular_filings_updated_at}`. This list has no paging and no
+    conditions; filter `results` in the caller.
+
+    **Example**
+
+    ```hot
+    out ::federal-register/public-inspection()
+    fincen filter(out.results, (d) { ::hot::str/contains(Str(d.agency_names), "Financial Crimes") })
+    ```
+    """
+}
+fn
+(): Map {
+  public-inspection({})
+},
+(opts: Map): Map {
+  fr-get("/public-inspection-documents/current.json", {}, opts)
+}
+
+get-public-inspection
+meta {
+    doc: """One public inspection document by number, or null when there is none."""
+}
+fn
+(number: Str): Map? {
+  get-public-inspection(number, {})
+},
+(number: Str, opts: Map): Map? {
+  fr-get-or-null(`/public-inspection-documents/${::api/path-segment(trim(number))}.json`, {}, opts)
+}
+
+// ---------------------------------------------------------------------------
+// Agencies
+// ---------------------------------------------------------------------------
+
+agencies
+meta {
+    doc: """
+    Every agency, as a Vec of Maps with `id`, `name`, `short_name`,
+    `slug`, `parent_id` and `url`. `slug` is what the `agencies`
+    condition of `search` takes. An unknown slug is a 400 Err, not an
+    empty result.
+
+    **Example**
+
+    ```hot
+    fincen first(filter(::federal-register/agencies(), (a) { eq(a.slug, "financial-crimes-enforcement-network") }))
+    ```
+    """
+}
+fn
+(): Vec<Map> {
+  agencies({})
+},
+(opts: Map): Vec<Map> {
+  fr-get("/agencies.json", {}, opts)
+}
+
+// ---------------------------------------------------------------------------
+// Pagination
+// ---------------------------------------------------------------------------
+
+next-page
+meta {
+    doc: """
+    The next page of a `search` as a value for `opts.after` (pure), or
+    null on the last page. It reads `next_page_url`, which holds the
+    cursor, and keeps only the path and query, so requests stay on your
+    `base-url`. An Err when `next_page_url` is set but has no `/api/v1/`
+    path to keep, so a `collect` can't end early and look complete.
+
+    **Example**
+
+    ```hot
+    page ::federal-register/search({term: "\"beneficial ownership\"", per-page: 100})
+    more ::federal-register/search({after: ::federal-register/next-page(page)})
+    ```
+    """
+}
+fn (page: Any): Str? {
+  url get(or(page, {}), "next_page_url")
+  cond {
+    not(::api/given(url)) => { null }
+    ::re/is-match(url, "^https?://[^/]+/api/v1/") => { ::re/replace(url, "^https?://[^/]+/api/v1", "") }
+    => { err(`federal-register: can't read next_page_url '${url}'; expected a /api/v1/ path`) }
+  }
+}
+
+collect-pages fn (fetch: Fn, opts: Map, limit: Int, acc: Vec): Vec {
+  page fetch(opts)
+  cond {
+    // Not `if-ok`: a recursive call inside its lambda isn't in tail position.
+    is-err(page) => { page }
+    => {
+      items or(get(page, "results"), [])
+      combined concat(acc, items)
+      next next-page(page)
+      cond {
+        gte(length(combined), limit) => { slice(combined, 0, limit) }
+        is-empty(items) => { combined }
+        is-err(next) => { next }
+        is-null(next) => { combined }
+        => { collect-pages(fetch, {...opts, after: next}, limit, combined) }
+      }
+    }
+  }
+}
+
+collect
+meta {
+    doc: """
+    Follow pages of a search until `limit` documents or the last page.
+    `fetch` takes `opts` and returns one page. `opts.per-page` defaults
+    to the smaller of `limit` and 1000.
+
+    **Example**
+
+    ```hot
+    docs ::federal-register/collect(::federal-register/search, {cfr-title: 31, cfr-part: 1010, order: "newest"}, 250)
+    ```
+    """
+}
+fn (fetch: Fn, opts: Map, limit: Int): Vec {
+  size or(get(opts, "per-page"), min(MAX_PER_PAGE, max(2, limit)))
+  collect-pages(fetch, {...opts, per-page: size}, limit, [])
+}
