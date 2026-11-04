@@ -588,7 +588,14 @@ async fn run_action_handler(
 
     // Create new event data
     let new_event_id = Uuid::now_v7();
-    let new_run_id = Uuid::now_v7();
+    // A retry of an event handler's run is that handler's alone, so it is one
+    // run this can name. Function runs re-dispatch as a hot:call, through
+    // another handler.
+    let retries_handler = is_retry && !is_function_call;
+    let new_run_id = retries_handler
+        .then(|| run.retry_run_id(new_event_id, &new_event_type, run.retry_attempt + 1))
+        .flatten()
+        .unwrap_or_else(Uuid::now_v7);
     let event_time = chrono::Utc::now();
 
     // For retry: use same stream_id, for rerun: new stream_id
@@ -758,12 +765,7 @@ async fn run_action_handler(
         ("env_id".to_string(), run.env_id.to_string()),
         ("event_type".to_string(), new_event_type.clone()),
     ]);
-    // A retry of an event handler's run is that handler's alone. Function runs
-    // re-dispatch as a hot:call, through another handler.
-    if is_retry
-        && !is_function_call
-        && let Some(event_handler_fn) = &run.event_handler_fn
-    {
+    if retries_handler && let Some(event_handler_fn) = &run.event_handler_fn {
         head.insert(
             hot::lang::event::RETRIED_HANDLER_HEAD.to_string(),
             event_handler_fn.clone(),

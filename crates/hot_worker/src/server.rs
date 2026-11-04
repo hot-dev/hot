@@ -3004,25 +3004,6 @@ async fn settle_orphaned_event_runs(
     }
 }
 
-/// The run id of an event's handler: the same for every delivery of the
-/// event, so a redelivery finds the runs earlier deliveries wrote. It derives
-/// from what a redeploy keeps (the handler's project, namespace and name),
-/// not from the deployment's `event_handler_id`, which every deploy and live
-/// build refresh replaces.
-fn event_handler_run_id(
-    event_id: Uuid,
-    project_id: Uuid,
-    event_type: &str,
-    handler: &EventHandler,
-    retry_attempt: i16,
-) -> Uuid {
-    let identity = format!(
-        "{event_id}:{project_id}:{event_type}:{}/{}:{retry_attempt}",
-        handler.ns, handler.var
-    );
-    Uuid::new_v5(&Uuid::NAMESPACE_OID, identity.as_bytes())
-}
-
 fn event_run_type_id(event_type: &str) -> i16 {
     match event_type {
         "hot:call" => hot::db::run::RunType::Call.as_id(),
@@ -8689,11 +8670,11 @@ pub async fn run_with_components_shared_context_and_db(
                                                                 awaiting_redeploy.push((handler_build.build_id, reason, build_needs_newer_runtime(&handler_build)));
                                                                 continue;
                                                             }
-                                                            let run_id = event_handler_run_id(
+                                                            let run_id = hot::db::run::event_handler_run_id(
                                                                 event_message.body.event.event_id,
                                                                 handler_build.project_id,
                                                                 &event_message.body.event.event_type,
-                                                                &event_handler,
+                                                                &event_handler.function_name(),
                                                                 event_message.body.execution_context.retry_attempt,
                                                             );
                                                             match earlier_runs.get(&run_id) {
@@ -13056,7 +13037,13 @@ handler fn () { initialized }
         let event_id = Uuid::now_v7();
         let project_id = Uuid::now_v7();
         let run_id = |handler: &EventHandler, project_id: Uuid, retry: i16| {
-            event_handler_run_id(event_id, project_id, "demo:event", handler, retry)
+            hot::db::run::event_handler_run_id(
+                event_id,
+                project_id,
+                "demo:event",
+                &handler.function_name(),
+                retry,
+            )
         };
         let deployed = test_handler("demo", "on-event");
         // A redeploy gives the handler a new id in a new build.
@@ -13141,7 +13128,13 @@ handler fn () { initialized }
         };
         let build = Build::get_build(db, &data.build_id).await.unwrap();
         let handler = test_handler("demo", "on-event");
-        let run_id = event_handler_run_id(event_id, build.project_id, "demo:event", &handler, 0);
+        let run_id = hot::db::run::event_handler_run_id(
+            event_id,
+            build.project_id,
+            "demo:event",
+            &handler.function_name(),
+            0,
+        );
         (event_message, build, run_id)
     }
 
