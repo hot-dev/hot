@@ -47,6 +47,17 @@ pub const DEFAULT_MAX_STRING_BYTES: usize = 256 * 1024 * 1024;
 /// allocate significantly more than the input size during parsing.
 pub const DEFAULT_MAX_PARSE_INPUT_BYTES: usize = 64 * 1024 * 1024;
 
+/// Maximum nodes (elements, text, comments) plus attributes in one parsed HTML
+/// document. Default: 512 Ki, measured at about 500 MB while `from-html` builds
+/// its result, which fits a 1 GiB worker. The input limit alone isn't enough:
+/// `<br>` is four bytes and takes about 900 bytes. Real pages run near 30 bytes
+/// of HTML to a node, so this allows a page of about 15 MB.
+pub const DEFAULT_MAX_HTML_NODES: usize = 512 * 1024;
+
+/// Maximum seconds `from-html` spends parsing. A 64 MB page takes a few
+/// seconds, so only input built to hit the parser's quadratic paths gets here.
+pub const DEFAULT_MAX_HTML_PARSE_SECONDS: usize = 30;
+
 /// Maximum byte length of a single allocation request expressed in bytes
 /// (e.g. `random-bytes(n)`). Default: 256 MB.
 pub const DEFAULT_MAX_ALLOC_BYTES: usize = 256 * 1024 * 1024;
@@ -77,6 +88,8 @@ fn cached_env(var: &str, default: usize) -> usize {
     static MAX_COLLECTION: OnceLock<usize> = OnceLock::new();
     static MAX_STRING: OnceLock<usize> = OnceLock::new();
     static MAX_PARSE: OnceLock<usize> = OnceLock::new();
+    static MAX_HTML_NODES: OnceLock<usize> = OnceLock::new();
+    static MAX_HTML_PARSE_SECONDS: OnceLock<usize> = OnceLock::new();
     static MAX_ALLOC: OnceLock<usize> = OnceLock::new();
     static MAX_REGEX_PATTERN: OnceLock<usize> = OnceLock::new();
     static MAX_REGEX_COMPILE: OnceLock<usize> = OnceLock::new();
@@ -86,6 +99,8 @@ fn cached_env(var: &str, default: usize) -> usize {
         "HOT_MAX_COLLECTION_SIZE" => &MAX_COLLECTION,
         "HOT_MAX_STRING_BYTES" => &MAX_STRING,
         "HOT_MAX_PARSE_INPUT_BYTES" => &MAX_PARSE,
+        "HOT_MAX_HTML_NODES" => &MAX_HTML_NODES,
+        "HOT_MAX_HTML_PARSE_SECONDS" => &MAX_HTML_PARSE_SECONDS,
         "HOT_MAX_ALLOC_BYTES" => &MAX_ALLOC,
         "HOT_MAX_REGEX_PATTERN_BYTES" => &MAX_REGEX_PATTERN,
         "HOT_MAX_REGEX_COMPILE_BYTES" => &MAX_REGEX_COMPILE,
@@ -114,6 +129,16 @@ pub fn max_string_bytes() -> usize {
 /// Active maximum parser input byte length.
 pub fn max_parse_input_bytes() -> usize {
     cached_env("HOT_MAX_PARSE_INPUT_BYTES", DEFAULT_MAX_PARSE_INPUT_BYTES)
+}
+
+/// Active maximum node count in a parsed HTML document.
+pub fn max_html_nodes() -> usize {
+    cached_env("HOT_MAX_HTML_NODES", DEFAULT_MAX_HTML_NODES)
+}
+
+/// Active maximum seconds spent parsing one HTML document.
+pub fn max_html_parse_seconds() -> usize {
+    cached_env("HOT_MAX_HTML_PARSE_SECONDS", DEFAULT_MAX_HTML_PARSE_SECONDS)
 }
 
 /// Active maximum bytes-allocation request size.

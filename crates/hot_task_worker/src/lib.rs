@@ -5791,6 +5791,8 @@ async fn process_code_task(
             .as_deref()
             .and_then(|s| Uuid::parse_str(s).ok()),
         retry_attempt: 0,
+        max_retries: 0,
+        retry_delay_ms: 0,
         secret_keys: Default::default(),
         secret_value_hashes: Default::default(),
         secret_values: Default::default(),

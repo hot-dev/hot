@@ -25,6 +25,7 @@ pub mod gzip;
 pub mod hash;
 pub mod hex;
 pub mod hmac;
+pub mod html;
 pub mod http;
 pub mod info;
 pub mod internal_mcp;

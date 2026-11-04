@@ -734,6 +734,8 @@ async fn run_action_handler(
         event_id: Some(new_event_id),
         origin_run_id: if is_retry { Some(run_id) } else { None },
         retry_attempt: if is_retry { run.retry_attempt + 1 } else { 0 },
+        max_retries: 0,
+        retry_delay_ms: 0,
         secret_keys: AHashSet::new(), // Will be populated from ctx metadata
         secret_value_hashes: AHashSet::new(),
         secret_values: Default::default(),
