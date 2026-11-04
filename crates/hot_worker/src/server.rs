@@ -3988,9 +3988,10 @@ fn recompile_live_build_cache(
 
 /// Build the qualified agent type name stored on runs from handler/schedule meta.
 ///
-/// Hot source writes `meta {agent: TeamAgent}`; manifest meta resolves the type
-/// reference to a short name like `"TeamAgent"`. Agent health matches runs using
-/// `{namespace}/{type_name}` from the deployed agent table.
+/// Hot source writes `meta {agent: TeamAgent}`; manifest meta holds the full name
+/// of the type, like `"::team/TeamAgent"`. Agent health matches runs using
+/// `{namespace}/{type_name}` from the deployed agent table. Meta stored by an
+/// older build holds the name as written, often a short name.
 fn agent_type_from_meta(meta: &JsonValue, namespace: &str) -> Option<String> {
     let agent_name = meta.get("agent")?.as_str()?;
     if agent_name.contains('/') {

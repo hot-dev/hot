@@ -41,6 +41,10 @@ namespace reads it: `cites` holds the `policy-text` string, and `clock-from` is
 the `found-at` function, which you can call. The `agent`, `workflow`, and
 `workflows` keys must name types.
 
+A build records the metadata of its event handlers, schedules, webhooks, MCP
+tools, agents, and workflows, in its manifest and in the database. There, each
+name is the full name of its definition, such as `::myapp::text/s4`.
+
 ## Documentation
 
 The `doc` field provides documentation for functions and types:

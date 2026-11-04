@@ -496,11 +496,7 @@ impl AgentDef {
         });
 
         // Full meta from the variable
-        let meta = var
-            .meta
-            .as_ref()
-            .and_then(|m| serde_json::to_value(&m.val).ok())
-            .map(|j| serde_json::from_value::<Val>(j).unwrap_or(Val::Null));
+        let meta = var.meta.as_ref().map(|m| m.val.resolve_boxes());
 
         let mut agent_map = indexmap::IndexMap::new();
         agent_map.insert(Val::from("type_name"), Val::from(type_name.clone()));
@@ -652,17 +648,8 @@ impl AgentDef {
     }
 
     fn extract_ref_target(val: &Val) -> Option<String> {
-        match val {
-            Val::Box(b) => {
-                if let Some(crate::lang::ast::AstNode(crate::lang::ast::Value::Ref(refv))) =
-                    b.as_any().downcast_ref::<crate::lang::ast::AstNode>()
-                {
-                    Some(format!("{:?}", refv))
-                } else {
-                    None
-                }
-            }
-            Val::Str(s) => Some((**s).to_owned()),
+        match val.resolve_boxes() {
+            Val::Str(s) => Some((*s).to_owned()),
             _ => None,
         }
     }
@@ -723,11 +710,7 @@ impl WorkflowDef {
         let tags = workflow_meta.get(&Val::from("tags")).cloned();
 
         // Full meta from the variable.
-        let meta = var
-            .meta
-            .as_ref()
-            .and_then(|m| serde_json::to_value(&m.val).ok())
-            .map(|j| serde_json::from_value::<Val>(j).unwrap_or(Val::Null));
+        let meta = var.meta.as_ref().map(|m| m.val.resolve_boxes());
 
         let mut workflow_map = indexmap::IndexMap::new();
         workflow_map.insert(Val::from("type_name"), Val::from(type_name.clone()));

@@ -322,6 +322,14 @@ impl Resolver {
         }
     }
 
+    /// Rewrite the names in a program's meta, as `resolve_program` does, for a
+    /// program that isn't being compiled. A name that resolves to nothing
+    /// stays as written: reporting it is left to the compile.
+    pub fn resolve_program_meta(&mut self, program: &mut Program) {
+        self.collect_declarations(program);
+        self.resolve_meta_refs(program);
+    }
+
     /// Collect all variable and function declarations
     fn collect_declarations(&mut self, program: &Program) {
         for (ns_path, namespace) in &program.namespaces {
