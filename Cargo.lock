@@ -3223,6 +3223,7 @@ dependencies = [
  "reqwest 0.13.5",
  "rustls",
  "rustls-pki-types",
+ "same-file",
  "serde",
  "serde_json",
  "sha2 0.11.1",
