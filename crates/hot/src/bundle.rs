@@ -2472,6 +2472,30 @@ fn (event) { event }
         );
     }
 
+    #[test]
+    fn test_manifest_names_the_refs_in_an_agents_mcp_servers() {
+        let bundle_info = meta_names_bundle(
+            r#"::demo::flows ns
+
+::lib ::demo::lib
+
+remote {url: "https://example.com/mcp"}
+
+Connected meta {agent: {name: "Connected", mcp-servers: [remote, ::lib/limits]}}
+type {}
+"#,
+        );
+
+        let connected = manifest_type(&bundle_info, "agents", "Connected");
+        assert_eq!(
+            connected.get("mcp_servers"),
+            Some(crate::val!([
+                {"kind": "ref", "target": "::demo::flows/remote"},
+                {"kind": "ref", "target": "::demo::lib/limits"},
+            ]))
+        );
+    }
+
     /// Compiling reports a name that resolves to nothing. Bundling doesn't
     /// compile, so it keeps the name as written and goes on.
     #[test]

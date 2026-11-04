@@ -648,17 +648,8 @@ impl AgentDef {
     }
 
     fn extract_ref_target(val: &Val) -> Option<String> {
-        match val {
-            Val::Box(b) => {
-                if let Some(crate::lang::ast::AstNode(crate::lang::ast::Value::Ref(refv))) =
-                    b.as_any().downcast_ref::<crate::lang::ast::AstNode>()
-                {
-                    Some(format!("{:?}", refv))
-                } else {
-                    None
-                }
-            }
-            Val::Str(s) => Some((**s).to_owned()),
+        match val.resolve_boxes() {
+            Val::Str(s) => Some((*s).to_owned()),
             _ => None,
         }
     }
