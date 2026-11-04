@@ -2471,6 +2471,57 @@ async fn test_stream_subscription_reports_retried_attempts_as_pending_retry() {
     reader.abort();
 }
 
+/// A task retries through new task rows, never through `pending_retry`, and
+/// its run's `retry_attempt` is the attempt it ran as. A retried attempt that
+/// fails is a final failure of that run, not a retry still to come.
+#[tokio::test]
+async fn test_stream_subscription_reports_failed_task_attempts_as_failed() {
+    let state = create_test_db().await;
+    let db = state.0.clone();
+    let hot::db::DatabasePool::Sqlite(pool) = db.as_ref() else {
+        unreachable!("integration tests use SQLite")
+    };
+    let (_api_key_id, api_key) = create_test_api_key(&db).await;
+    let (_, user_id) = hot::db::get_default_org_and_user_ids(&db).await.unwrap();
+    let env_id = Env::get_default_env(&db).await.unwrap().env_id;
+    let project_id = create_test_project(&db, &env_id, &user_id).await;
+    let build_id = create_test_build(&db, &project_id, &user_id, false).await;
+    let stream_id = Uuid::now_v7();
+    let run_id = Uuid::now_v7();
+    Run::insert_run(
+        &db,
+        &run_id,
+        &env_id,
+        &stream_id,
+        Some(&build_id),
+        RunType::Task.as_id(),
+        None,
+        &user_id,
+        Some(chrono::Utc::now() - chrono::Duration::seconds(60)),
+        None,
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE run SET stop_time = ?, status_id = ?, retry_attempt = ? WHERE run_id = ?")
+        .bind(chrono::Utc::now())
+        .bind(3i16)
+        .bind(2i16)
+        .bind(run_id)
+        .execute(pool)
+        .await
+        .unwrap();
+
+    let (mut sse, reader) = subscribe_stream_events(&state, &api_key, stream_id).await;
+    let events = receive_run_fails(&mut sse, 1).await;
+    let (_, run_fail) = events
+        .iter()
+        .find(|(name, _)| name == "run:fail")
+        .expect("run:fail for the run");
+    assert_eq!(run_fail["run"]["status"], "failed");
+    assert_eq!(run_fail["run"]["retry_attempt"], 2);
+    reader.abort();
+}
+
 // ============================================================================
 // Subscribe with Event Tests (Atomic SSE + Publish)
 // ============================================================================
