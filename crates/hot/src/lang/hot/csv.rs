@@ -28,7 +28,7 @@ const UTF8_BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
 
 /// The non-null options in `opts`, refusing any name not in `allowed`, so that
 /// a misspelled option can't silently parse a file the wrong way.
-fn option_entries<'a>(
+pub(crate) fn option_entries<'a>(
     opts: Option<&'a Val>,
     allowed: &[&str],
 ) -> Result<Vec<(&'a str, &'a Val)>, String> {
@@ -711,7 +711,7 @@ pub fn from_tsv(args: &[Val]) -> HotResult<Val> {
 /// `next` keeps its chunks out of `stream:data`, which is for values a program
 /// reads, and out of call records.
 #[derive(Debug)]
-struct ChunkInput {
+pub(crate) struct ChunkInput {
     source: Arc<Mutex<Box<dyn HotIterator>>>,
     chunk: Val,
     position: usize,
@@ -719,7 +719,7 @@ struct ChunkInput {
 }
 
 impl ChunkInput {
-    fn new(source: Arc<Mutex<Box<dyn HotIterator>>>) -> Self {
+    pub(crate) fn new(source: Arc<Mutex<Box<dyn HotIterator>>>) -> Self {
         ChunkInput {
             source,
             chunk: Val::Null,

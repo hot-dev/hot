@@ -90,10 +90,12 @@ mime_guess = { workspace = true }
 mime2ext = { workspace = true }
 # Blocking HTTP client for CDN package downloads (no async runtime)
 ureq = { workspace = true }
-# Gzip decompression for package tarballs
+# Gzip for package tarballs and ::hot::gzip
 flate2 = { workspace = true }
 # Tarball extraction for packages
 tar = { workspace = true }
+# Temporary copies of stored zip archives
+tempfile = { workspace = true }
 # XML parsing for ::hot::xml functions
 quick-xml = { workspace = true }
 # CSV and TSV parsing for ::hot::csv functions
@@ -143,5 +145,4 @@ blake3 = { workspace = true }
 ahash = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 filetime = { workspace = true }
-tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
