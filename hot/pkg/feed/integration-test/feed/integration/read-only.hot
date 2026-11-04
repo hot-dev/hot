@@ -1,0 +1,56 @@
+::feed::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration smoke tests (live, read-only)
+// =============================================================================
+// FEED_LIVE=1. Each test makes one or two requests to a public feed; without
+// the setting they record a skip and pass.
+// Run with: hot test -p pkg-integration-feed
+
+::ctx ::feed::integration::ctx
+
+SEC_AGENT "Hot Dev support@hot.dev"
+
+test-sec-press-releases-and-conditional-get
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("FEED_LIVE is not 1") }
+        => {
+            url "https://www.sec.gov/news/pressreleases.rss"
+            feed ::feed/fetch(url, {user-agent: SEC_AGENT})
+            assert-eq("Press Releases", feed.title)
+            assert(gt(length(feed.entries), 0), "entries")
+            assert(is-some(first(feed.entries).published-at), "a normalized date")
+            assert(is-some(feed.etag), "sec.gov sends an ETag")
+            again ::feed/fetch(url, {user-agent: SEC_AGENT, etag: feed.etag, last-modified: feed.last-modified})
+            assert(again.not-modified, "a 304 for the same ETag")
+            assert-eq([], again.entries)
+        }
+    }
+}
+
+test-federal-register
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("FEED_LIVE is not 1") }
+        => {
+            feed ::feed/fetch("https://www.federalregister.gov/api/v1/documents.rss")
+            assert(gt(length(feed.entries), 0), "entries")
+            assert(is-some(first(feed.entries).author), "dc:creator")
+        }
+    }
+}
+
+test-edgar-current-filings-atom
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("FEED_LIVE is not 1") }
+        => {
+            feed ::feed/fetch("https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=8-K&output=atom", {user-agent: SEC_AGENT})
+            assert(gt(length(feed.entries), 0), "entries")
+            assert(::hot::str/starts-with(feed.link, "https://www.sec.gov/"), "the relative link is resolved")
+            assert(::hot::str/starts-with(first(feed.entries).id, "urn:tag:sec.gov"), "id")
+        }
+    }
+}

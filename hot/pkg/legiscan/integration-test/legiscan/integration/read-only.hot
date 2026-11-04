@@ -1,0 +1,41 @@
+::legiscan::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration smoke tests (live, read-only)
+// =============================================================================
+// LEGISCAN_API_KEY (and optionally LEGISCAN_BASE_URL). The tests only read, and
+// spend four queries; without the key they record a skip and pass.
+// Run with: hot test -p pkg-integration-legiscan
+
+::ctx ::legiscan::integration::ctx
+::lg ::legiscan
+
+test-session-master-list-and-bill
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip("LEGISCAN_API_KEY is not set") }
+        => {
+            sessions ::lg/session-list("CA")
+            assert(gt(length(sessions), 0), "California has sessions")
+            rows ::lg/master-list-raw(first(sessions).session_id)
+            assert(gt(length(rows), 0), "the session has bills")
+            assert(is-some(first(rows).change_hash), "rows carry change_hash")
+            b ::lg/bill(first(rows).bill_id)
+            assert-eq(first(rows).bill_id, b.bill_id)
+        }
+    }
+}
+
+test-a-bad-key-is-an-err-without-the-key
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip("LEGISCAN_API_KEY is not set") }
+        => {
+            bad "not-a-real-legiscan-key"
+            out ::lg/session-list("CA", {api-key: bad})
+            assert(is-err(out), "LegiScan refuses it")
+            assert(not(::hot::str/contains(err-message(out), bad)), "the message hides the key")
+        }
+    }
+}

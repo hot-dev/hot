@@ -1,0 +1,25 @@
+::ffiec::integration::ctx ns
+
+::env ::hot::env
+
+// Placeholder settings for the ffiec integration suite. Unset environment
+// variables are skipped entirely, so absent credentials behave exactly as if
+// never configured.
+::hot::ctx/set(filter-vals({
+    "ffiec.user-id": ::env/get("FFIEC_USER_ID", ""),
+    "ffiec.token": ::env/get("FFIEC_TOKEN", ""),
+    "ffiec.base-url": ::env/get("FFIEC_BASE_URL", ""),
+}, (v) { not(is-empty(v)) }))
+
+configured
+meta {doc: """True when FFIEC_USER_ID and FFIEC_TOKEN are set."""}
+fn (): Bool {
+    and(is-some(::hot::ctx/get("ffiec.user-id")), is-some(::hot::ctx/get("ffiec.token")))
+}
+
+skip
+meta {doc: """Record a skip and pass."""}
+fn (why: Str): Bool {
+    println(`ffiec integration: ${why} - skipping`)
+    assert(true, `skipped: ${why}`)
+}

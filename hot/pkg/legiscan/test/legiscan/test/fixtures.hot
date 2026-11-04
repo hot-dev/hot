@@ -1,0 +1,79 @@
+::legiscan::test::fixtures ns
+
+// DOCS-DERIVED, NOT REAL RESPONSES. No LegiScan key was available, so these
+// are trimmed from the samples in the LegiScan API User Manual v1.91 (revision
+// 20250317), read 4 Nov 2026. The manual's samples are not all valid JSON; the
+// typos are fixed here. The shapes have not been checked against the live API.
+
+// Manual, getSessionList
+SESSION_LIST {
+  status: "OK",
+  sessions: [
+    {
+      session_id: 1791,
+      state_id: 5,
+      year_start: 2021,
+      year_end: 2022,
+      prefile: 0,
+      sine_die: 0,
+      prior: 0,
+      special: 0,
+      session_tag: "Regular Session",
+      session_title: "2021-2022 Regular Session",
+      session_name: "2021-2022 Session",
+      dataset_hash: "ead44c3c2a0055a7ecbc5c13ebd71f70"
+    }
+  ]
+}
+
+// Manual, getMasterListRaw
+MASTER_LIST_RAW {
+  status: "OK",
+  masterlist: {
+    "0": {bill_id: 1132030, number: "AB1", change_hash: "d72444d8f2026219e38cb2179dcc67a0"},
+    "1": {bill_id: 1131894, number: "AB2", change_hash: "d733e82d03a815e568f92e66f6fd87dc"}
+  }
+}
+
+// Manual, getSearch: rows are keyed beside summary
+SEARCH_RESULT {
+  summary: {page: "1 of 451", range: "1 - 50", relevancy: "100% - 99%", count: 22525, page_current: 1, page_total: 451},
+  "0": {
+    relevance: 100,
+    state: "IN",
+    bill_number: "SB0544",
+    bill_id: 449621,
+    change_hash: "76132191d8644cee472e05bf5f3ec515",
+    url: "https://legiscan.com/IN/bill/SB0544/2013",
+    last_action_date: "2012-05-10",
+    last_action: "Public Law 261",
+    title: "State and local tax administration."
+  }
+}
+
+// Manual, getSearchRaw: rows are under results. The manual prints them as a
+// list with "0": keys, which is not JSON, so both a Vec and a Map are handled.
+SEARCH_RAW_RESULT {
+  summary: {page: "14 of 14", range: "1 - 2000", relevancy: "100% - 99%", count: 22525, page_current: 14, page_total: 14},
+  results: [
+    {relevance: 100, bill_id: 449621, change_hash: "983e627cc15be727c85d4d9bd563e989"},
+    {relevance: 99, bill_id: 431262, change_hash: "5b10d1d4288e161a01dbad10276ae7ed"}
+  ]
+}
+
+// Manual, getBillText. The manual's "doc" is a placeholder; this one is
+// base64("<p>An act</p>"), split as a MIME encoder would.
+BILL_TEXT {
+  doc_id: 647508,
+  bill_id: 502329,
+  date: "2012-05-23",
+  type: "Enrolled",
+  mime: "text/html",
+  mime_id: 1,
+  text_size: 13,
+  text_hash: "bcd4ee6b03d1ae74a8b225f9b85b6863",
+  doc: "PHA+QW4gYWN0\nPC9wPg=="
+}
+
+// Manual, Status Response
+ERROR_RESPONSE {status: "ERROR", alert: {message: "IMPORTANT_SYSTEM_MESSAGE"}}

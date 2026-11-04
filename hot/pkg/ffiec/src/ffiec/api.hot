@@ -1,0 +1,260 @@
+::ffiec::api ns
+meta {
+    ctx: {
+        "ffiec.user-id": {required: false},
+        "ffiec.token": {required: false},
+        "ffiec.base-url": {required: false, secret: false}
+    },
+    doc: """
+    Transport for the FFIEC CDR Public Web Service: the settings resolver
+    (per-call `opts` first, then context variables, then defaults), a
+    typed `HttpError`, and GETs. The service takes every parameter as a
+    request header, so there are no query strings.
+
+    | opts key | Context variable | Default |
+    |---|---|---|
+    | `user-id` | `ffiec.user-id` | none: calls fail without it |
+    | `token` | `ffiec.token` | none: calls fail without it |
+    | `base-url` | `ffiec.base-url` | `https://ffieccdr.azure-api.us/public` |
+
+    **Per-call credentials.** `user-id` and `token` in `opts` are masked
+    in call records and never written to context, and they go together:
+    one without the other is an error, so a call never pairs one tenant's
+    user with another's token. Present but blank or null, either is an
+    error, never a fallback to context. A per-call `base-url` needs both
+    in the same `opts`: context credentials are never sent to a per-call
+    URL.
+    """
+}
+
+::ctx ::hot::ctx
+::re ::hot::regex
+
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+SOURCE "ffiec"
+BASE_URL "https://ffieccdr.azure-api.us/public"
+PACKAGE_AGENT "hot-dev-ffiec-pkg/0.1 (+https://hot.dev)"
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+given
+meta {
+    doc: """True for a non-null value that is not a blank string."""
+}
+fn (v: Any): Bool {
+  match v {
+    Null => { false }
+    Str => { not(is-empty(trim(v))) }
+    _ => { true }
+  }
+}
+
+pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
+  from-opts get(opts, key)
+  from-ctx ::ctx/get(ctx-key)
+  cond {
+    given(from-opts) => { from-opts }
+    given(from-ctx) => { from-ctx }
+    => { default }
+  }
+}
+
+strip-slash fn (url: Str): Str {
+  ::re/replace-all(url, "/+$", "")
+}
+
+CREDENTIAL_KEYS ["user-id", "token"]
+
+resolve
+meta {
+    doc: """
+    Resolve settings for one call: `{user-id, token, base-url}`. Values
+    in `opts` win over context; credentials in `opts` are used for that
+    call only and come back unchanged. An Err when a credential is in
+    `opts` but blank or null, when `opts` has one credential without the
+    other, or when it has `base-url` without both.
+
+    **Example**
+
+    ```hot
+    cfg ::ffiec::api/resolve({user-id: tenant.ffiec-user, token: tenant.ffiec-token})
+    ```
+    """
+}
+fn (opts: Map): Map {
+  ::ctx/mark-secret(filter(map(CREDENTIAL_KEYS, (k) { get(opts, k) }), given))
+  blank find-first(CREDENTIAL_KEYS, (k) { and(in(k, keys(opts)), not(given(get(opts, k)))) })
+  count length(filter(CREDENTIAL_KEYS, (k) { given(get(opts, k)) }))
+  cond {
+    is-some(blank) => {
+      err(`ffiec: ${blank} is in the call's opts but is blank or null. Pass a value, or leave it out to use the context variable.`)
+    }
+
+    eq(count, 1) => {
+      err("ffiec: user-id and token go together in the call's opts. Pass both, or leave both out to use the context variables.")
+    }
+
+    and(given(get(opts, "base-url")), eq(count, 0)) => {
+      err("ffiec: base-url is in the call's opts without user-id and token. Pass them with it. Context credentials are never sent to a per-call URL.")
+    }
+    => {
+      {
+        user-id: pick(opts, "user-id", "ffiec.user-id", null),
+        token: pick(opts, "token", "ffiec.token", null),
+        base-url: strip-slash(pick(opts, "base-url", "ffiec.base-url", BASE_URL))
+      }
+    }
+  }
+}
+
+auth-headers
+meta {
+    doc: """
+    The `UserID` and `Authentication` headers from resolved settings
+    (pure), or an Err naming what to set. `Authentication` is the
+    service's own header, not `Authorization`, and carries `Bearer
+    {token}`. A token already starting with `Bearer ` is used as it is.
+    """
+}
+fn (cfg: Map): Map {
+  token cfg.token
+  cond {
+    not(given(cfg.user-id)) => { err("ffiec: no user id; set ffiec.user-id or pass {user-id: ..., token: ...}") }
+    not(given(token)) => { err("ffiec: no token; set ffiec.token or pass {user-id: ..., token: ...}") }
+    => {
+      bearer if(::hot::str/starts-with(trim(token), "Bearer "), trim(token), `Bearer ${trim(token)}`)
+      {UserID: cfg.user-id, Authentication: bearer}
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+HttpError
+meta {
+    doc: """
+    A non-2xx FFIEC response. `source` is `"ffiec"`; `url` the requested
+    URL (credentials travel in headers, never the URL); `retry-after` the
+    parsed `Retry-After` seconds when the response has one; `message` a
+    one-line summary that never includes credentials.
+    """
+}
+type {
+    source: Str,
+    status: Int,
+    url: Str,
+    headers: Map,
+    body: Any,
+    retry-after: Int?,
+    message: Str
+}
+
+body-detail fn (body: Any): Str? {
+  cond {
+    is-str(body) => {
+      text trim(body)
+      cond {
+        is-empty(text) => { null }
+        gt(length(text), 200) => { `${slice(text, 0, 200)}…` }
+        => { text }
+      }
+    }
+
+    is-map(body) => {
+      // FFIEC: {StatusCode, Message}
+      or(get(body, "Message"), get(body, "message"))
+    }
+    => { null }
+  }
+}
+
+retry-after fn (headers: Map): Int? {
+  v get(headers, "retry-after")
+  cond {
+    is-null(v) => { null }
+    ::re/is-match(trim(Str(v)), "^\\d+$") => { Int(trim(Str(v))) }
+    => { null }
+  }
+}
+
+http-error
+meta {
+    doc: """Build an `HttpError` from a non-2xx response. Exposed for testing; every request uses it."""
+}
+fn (response: HttpResponse, url: Str): HttpError {
+  headers or(response.headers, {})
+  detail body-detail(response.body)
+  HttpError({
+    source: SOURCE,
+    status: response.status,
+    url: url,
+    headers: headers,
+    body: response.body,
+    retry-after: retry-after(headers),
+    message: if(is-some(detail), `${SOURCE}: HTTP ${response.status}: ${detail}`, `${SOURCE}: HTTP ${response.status} for ${url}`)
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------
+
+request
+meta {
+    doc: """
+    GET `url` with `headers`, returning the `HttpResponse` on 2xx or an
+    Err carrying `HttpError`. A transport failure passes through as its
+    own Err.
+    """
+}
+fn (url: Str, headers: Map): HttpResponse {
+  response ::hot::http/request(HttpRequest({
+    method: "GET",
+    url,
+    headers: {User-Agent: PACKAGE_AGENT, Accept: "application/json", ...headers},
+    body: ""
+  }))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response }
+    => { err(http-error(response, url)) }
+  }
+}
+
+decode-list
+meta {
+    doc: """The list in a response (pure): `[]` for an empty one, such as a 204, and the decoded rows otherwise."""
+}
+fn (response: HttpResponse): Any {
+  body response.body
+  cond {
+    is-vec(body) => { body }
+    is-str(body) => {
+      text trim(body)
+      cond {
+        is-empty(text) => { [] }
+        ::hot::str/starts-with(text, "[") => { from-json(text) }
+        => { err(`ffiec: expected a JSON list, got: ${slice(text, 0, min(80, length(text)))}`) }
+      }
+    }
+
+    is-null(body) => { [] }
+    => { err("ffiec: expected a JSON list") }
+  }
+}
+
+get-list
+meta {
+    doc: """GET a list resource and return its rows, or an Err carrying `HttpError`."""
+}
+fn (url: Str, headers: Map): Any {
+  response request(url, headers)
+  if(is-err(response), response, decode-list(response))
+}

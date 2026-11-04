@@ -1,0 +1,19 @@
+::ecfr::integration::ctx ns
+
+::env ::hot::env
+
+// eCFR needs no key but only runs with ECFR_LIVE=1, so CI without network
+// stays hermetic.
+
+live
+meta {doc: """True when ECFR_LIVE=1."""}
+fn (): Bool {
+    eq(::env/get("ECFR_LIVE", ""), "1")
+}
+
+skip
+meta {doc: """Record a skip and pass."""}
+fn (why: Str): Bool {
+    println(`ecfr integration: ${why} - skipping`)
+    assert(true, `skipped: ${why}`)
+}

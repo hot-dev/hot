@@ -174,3 +174,16 @@ fn () {
     assert-eq([0, 1, 2, 3, 4, 5], ::ch/collect(fetch, {}, 100), "the last page may run past the total")
     assert-eq([0, 1, 2], ::ch/collect(fetch, {}, 3))
 }
+
+test-collect-returns-an-err-from-a-later-page
+meta ["test"]
+fn () {
+    fetch (o) {
+      cond {
+        eq(o.start-index, 0) => { {items: [0, 1], start_index: 0, total_results: 4} }
+        => { err("HTTP 429") }
+      }
+    }
+
+    assert(is-err(::ch/collect(fetch, {}, 100)), "a 429 mid-way comes back as the Err")
+}

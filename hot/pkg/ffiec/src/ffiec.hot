@@ -1,0 +1,329 @@
+::ffiec ns
+meta {
+    ctx: {
+        "ffiec.user-id": {required: false},
+        "ffiec.token": {required: false},
+        "ffiec.base-url": {required: false, secret: false}
+    },
+    doc: """
+    The FFIEC Central Data Repository Public Web Service, REST edition
+    (`https://ffieccdr.azure-api.us/public`), as specified in
+    CDR-PDD-SIS-611 v1.10: Call Report and UBPR reporting periods, the
+    panel of reporters, recent filers and facsimiles.
+
+    **Auth**: a free PWS account's username and security token, sent in
+    the `UserID` and `Authentication` headers. Tokens must be regenerated
+    at least every 90 days from the PWS login page. Set `ffiec.user-id`
+    and `ffiec.token`, or pass `{user-id: ..., token: ...}` per call.
+
+    **Limit**: about 2,500 calls an hour. Past it the service answers 403
+    until the next hour.
+
+    **Reading new filings**: the spec's process is `reporting-periods`
+    about once a quarter, `filers-since-date` daily or weekly with the
+    time of your last run, then `facsimile` for each filer. The package
+    keeps no state: the caller holds that time.
+    """
+}
+
+::api ::ffiec::api
+::b64 ::hot::base64
+::re ::hot::regex
+
+FI_ID_TYPES ["ID_RSSD", "FDICCertNumber", "OCCChartNumber", "OTSDockNumber"]
+FACSIMILE_FORMATS ["PDF", "XBRL", "SDF"]
+CALL_SERIES "Call"
+
+// Errors are returned, not consumed: consuming an Err would halt the run.
+with-auth fn (opts: Map, f: Fn): Any {
+  cfg ::api/resolve(opts)
+  cond {
+    is-err(cfg) => { cfg }
+    => {
+      headers ::api/auth-headers(cfg)
+      if(is-err(headers), headers, f(cfg, headers))
+    }
+  }
+}
+
+ffiec-list fn (method: Str, params: Map, opts: Map): Any {
+  with-auth(opts, (cfg, auth) {
+    ::api/get-list(`${cfg.base-url}/${method}`, {...auth, ...params})
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Parameters
+// ---------------------------------------------------------------------------
+
+period-date
+meta {
+    doc: """
+    A reporting period end date in the service's `MM/DD/YYYY` form (pure)
+    from that form, `M/D/YYYY`, or `YYYY-MM-DD`. An Err for anything else.
+
+    **Example**
+
+    ```hot
+    ::ffiec/period-date("2025-03-31")  // "03/31/2025"
+    ```
+    """
+}
+fn (value: Any): Str {
+  s trim(Str(value))
+  cond {
+    ::re/is-match(s, "^\\d{4}-\\d{2}-\\d{2}$") => {
+      `${slice(s, 5, 7)}/${slice(s, 8, 10)}/${slice(s, 0, 4)}`
+    }
+
+    ::re/is-match(s, "^\\d{1,2}/\\d{1,2}/\\d{4}$") => {
+      parts ::hot::str/split(s, "/")
+      `${pad-start(parts[0], 2, "0")}/${pad-start(parts[1], 2, "0")}/${parts[2]}`
+    }
+    => { err(`ffiec: invalid reporting period '${value}'; expected MM/DD/YYYY or YYYY-MM-DD`) }
+  }
+}
+
+one-of fn (label: Str, value: Str, allowed: Vec): Str {
+  cond {
+    in(value, allowed) => { value }
+    => { err(`ffiec: invalid ${label} '${value}'; expected one of ${join(allowed, ", ")}`) }
+  }
+}
+
+filer-headers
+meta {
+    doc: """
+    The headers that pick one institution in one period (pure):
+    `reportingPeriodEndDate`, `fiIdType` from `opts.fi-id-type` (default
+    `"ID_RSSD"`) and `fiId`. An Err for a bad period or type.
+    """
+}
+fn (period: Any, fi-id: Any, opts: Map): Map {
+  date period-date(period)
+  id-type one-of("fi-id-type", or(get(opts, "fi-id-type"), "ID_RSSD"), FI_ID_TYPES)
+  cond {
+    is-err(date) => { date }
+    is-err(id-type) => { id-type }
+    => { {reportingPeriodEndDate: date, fiIdType: id-type, fiId: trim(Str(fi-id))} }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Reporting periods and filers
+// ---------------------------------------------------------------------------
+
+reporting-periods
+meta {
+    doc: """
+    RetrieveReportingPeriods: every Call Report period end date, as
+    `MM/DD/YYYY` strings.
+
+    **Example**
+
+    ```hot
+    periods ::ffiec/reporting-periods()
+    last(periods)
+    ```
+    """
+}
+fn
+(): Vec {
+  reporting-periods({})
+},
+(opts: Map): Vec {
+  ffiec-list("RetrieveReportingPeriods", {dataSeries: CALL_SERIES}, opts)
+}
+
+ubpr-reporting-periods
+meta {
+    doc: """RetrieveUBPRReportingPeriods: every UBPR period end date, as `MM/DD/YYYY` strings."""
+}
+fn
+(): Vec {
+  ubpr-reporting-periods({})
+},
+(opts: Map): Vec {
+  ffiec-list("RetrieveUBPRReportingPeriods", {}, opts)
+}
+
+panel-of-reporters
+meta {
+    doc: """
+    RetrievePanelOfReporters: the institutions expected to file for a
+    Call Report period. Each row has `ID_RSSD`, `FDICCertNumber`,
+    `OCCChartNumber`, `OTSDockNumber`, `PrimaryABARoutNumber`, `Name`,
+    `State`, `City`, `Address`, `ZIP`, `FilingType` and
+    `HasFiledForReportingPeriod`.
+
+    **Example**
+
+    ```hot
+    panel ::ffiec/panel-of-reporters("2025-03-31")
+    filter(panel, (row) { eq(row.State, "RI") })
+    ```
+    """
+}
+fn
+(period: Any): Vec {
+  panel-of-reporters(period, {})
+},
+(period: Any, opts: Map): Vec {
+  date period-date(period)
+  cond {
+    is-err(date) => { date }
+    => { ffiec-list("RetrievePanelOfReporters", {dataSeries: CALL_SERIES, reportingPeriodEndDate: date}, opts) }
+  }
+}
+
+filers fn (method: Str, period: Any, since: Str, opts: Map): Any {
+  date period-date(period)
+  cond {
+    is-err(date) => { date }
+    => { ffiec-list(method, {dataSeries: CALL_SERIES, reportingPeriodEndDate: date, lastUpdateDateTime: since}, opts) }
+  }
+}
+
+filers-since-date
+meta {
+    doc: """
+    RetrieveFilersSinceDate: the ID RSSDs of institutions that filed for
+    `period` after `since`, and whose filings are public. `since` is sent
+    as it is, in one of the spec's forms: `"04/15/2025"`,
+    `"2025-04-15 21:00:00.000"` or `"04/15/2025 9:00 PM"`.
+
+    **Example**
+
+    ```hot
+    ::ffiec/filers-since-date("2025-03-31", "04/15/2025 9:00 PM")  // [1474309, 540739]
+    ```
+    """
+}
+fn
+(period: Any, since: Str): Vec {
+  filers-since-date(period, since, {})
+},
+(period: Any, since: Str, opts: Map): Vec {
+  filers("RetrieveFilersSinceDate", period, since, opts)
+}
+
+filers-submission-date-time
+meta {
+    doc: """RetrieveFilersSubmissionDateTime: `{ID_RSSD, DateTime}` for each institution that filed for `period` after `since`. Takes `since` as `filers-since-date` does; the spec shows only the `MM/DD/YYYY` forms here."""
+}
+fn
+(period: Any, since: Str): Vec {
+  filers-submission-date-time(period, since, {})
+},
+(period: Any, since: Str, opts: Map): Vec {
+  filers("RetrieveFilersSubmissionDateTime", period, since, opts)
+}
+
+// ---------------------------------------------------------------------------
+// Facsimiles
+// ---------------------------------------------------------------------------
+
+facsimile-bytes
+meta {
+    doc: """
+    The file in a facsimile response as Bytes (pure). The spec calls the
+    body "a byte stream array" and doesn't say how it is encoded. A JSON
+    string is read as base64, a JSON list as byte values, and any other
+    content type as the raw file. An Err for any other JSON.
+    """
+}
+fn (response: Map): Bytes {
+  headers or(get(response, "headers"), {})
+  body get(response, "body")
+  raw get(response, "body-bytes")
+  is-json ::hot::str/contains(lowercase(or(get(headers, "content-type"), "")), "json")
+  cond {
+    not(is-json) => { if(is-bytes(raw), raw, Bytes(Str(or(body, "")))) }
+    is-vec(body) => { Bytes(body) }
+    is-str(body) => {
+      compact ::re/replace-all(body, "[\"\\s]", "")
+      cond {
+        ::b64/is-valid(compact) => { ::b64/decode(compact) }
+        => { err("ffiec: the facsimile is not valid base64") }
+      }
+    }
+    => { err("ffiec: unexpected facsimile response: not a base64 string or a byte list") }
+  }
+}
+
+is-missing-facsimile
+meta {
+    doc: """True when `e` is the `HttpError` the service gives for a facsimile it doesn't have (pure)."""
+}
+fn (e: Any): Bool {
+  and(
+    is-map(e),
+    eq(get(e, "status"), 400),
+    ::hot::str/contains(lowercase(Str(or(get(e, "message"), ""))), "not found or unavailable")
+  )
+}
+
+fetch-file fn (method: Str, headers: Map, format: Str, opts: Map): Any {
+  with-auth(opts, (cfg, auth) {
+    response ::api/request(`${cfg.base-url}/${method}`, {...auth, ...headers})
+    cond {
+      is-err(response) => {
+        e untype(err-value(response))
+        if(is-missing-facsimile(e), null, response)
+      }
+
+      eq(response.status, 204) => { null }
+      => {
+        bytes facsimile-bytes(untype(response))
+        if(is-err(bytes), bytes, {format: format, content-type: get(or(response.headers, {}), "content-type"), bytes: bytes})
+      }
+    }
+  })
+}
+
+facsimile
+meta {
+    doc: """
+    RetrieveFacsimile: one institution's Call Report for a period, as
+    `{format, content-type, bytes}`, or null when the service has none.
+    `opts`: `format` (`"XBRL"`, the default, `"PDF"` or `"SDF"`),
+    `fi-id-type` (`"ID_RSSD"`, the default, `"FDICCertNumber"`,
+    `"OCCChartNumber"` or `"OTSDockNumber"`), plus `user-id` and `token`.
+
+    **Example**
+
+    ```hot
+    report ::ffiec/facsimile("2025-03-31", 480228, {format: "PDF"})
+    report.bytes
+    ```
+    """
+}
+fn
+(period: Any, fi-id: Any): Map? {
+  facsimile(period, fi-id, {})
+},
+(period: Any, fi-id: Any, opts: Map): Map? {
+  format one-of("format", uppercase(or(get(opts, "format"), "XBRL")), FACSIMILE_FORMATS)
+  headers filer-headers(period, fi-id, opts)
+  cond {
+    is-err(format) => { format }
+    is-err(headers) => { headers }
+    => { fetch-file("RetrieveFacsimile", {dataSeries: CALL_SERIES, facsimileFormat: format, ...headers}, format, opts) }
+  }
+}
+
+ubpr-xbrl-facsimile
+meta {
+    doc: """RetrieveUBPRXBRLFacsimile: one institution's UBPR XBRL instance document for a period, as `{format, content-type, bytes}`, or null when the service has none. `opts`: `fi-id-type`, plus `user-id` and `token`."""
+}
+fn
+(period: Any, fi-id: Any): Map? {
+  ubpr-xbrl-facsimile(period, fi-id, {})
+},
+(period: Any, fi-id: Any, opts: Map): Map? {
+  headers filer-headers(period, fi-id, opts)
+  cond {
+    is-err(headers) => { headers }
+    => { fetch-file("RetrieveUBPRXBRLFacsimile", headers, "XBRL", opts) }
+  }
+}

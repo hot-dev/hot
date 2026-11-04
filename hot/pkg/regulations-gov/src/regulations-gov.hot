@@ -1,0 +1,401 @@
+::regulations-gov ns
+meta {
+    ctx: {
+        "regulations-gov.api-key": {required: false},
+        "regulations-gov.base-url": {required: false, secret: false}
+    },
+    doc: """
+    The Regulations.gov API v4 (`https://api.regulations.gov/v4`):
+    documents, dockets and public comments, read-only. Posting comments
+    is not wrapped.
+
+    **Auth**: a free api.data.gov key in the `X-Api-Key` header. Set
+    `regulations-gov.api-key` or pass `{api-key: ...}` per call.
+
+    **Paging**: lists take `page-size` (5 to 250) and `page`. `next-page`
+    gives the next page number. The API documents pages 1 to 20, so one
+    query reaches 5,000 records: `all-documents`, `all-comments` and
+    `all-dockets` go past that by sorting on `lastModifiedDate` and
+    restarting from the last record seen, the procedure the API
+    documents. `lastModifiedDate` is in beta upstream and may be removed.
+    """
+}
+
+::api ::regulations-gov::api
+::time ::hot::time
+
+MIN_PAGE_SIZE 5
+MAX_PAGE_SIZE 250
+MAX_PAGE 20
+
+// Errors are returned, not consumed: consuming an Err would halt the run.
+with-key fn (opts: Map, f: Fn): Any {
+  cfg ::api/resolve(opts)
+  cond {
+    is-err(cfg) => { cfg }
+    => {
+      key ::api/require-api-key(cfg)
+      if(is-err(key), key, f(cfg, key))
+    }
+  }
+}
+
+reg-get fn (path: Str, params: Map, opts: Map): Any {
+  with-key(opts, (cfg, key) {
+    ::api/get-json(`${cfg.base-url}${path}${::api/query-string(params)}`, {X-Api-Key: key})
+  })
+}
+
+page-params
+meta {
+    doc: """`page[size]` (held to 5 to 250) and `page[number]` from `opts.page-size` and `opts.page`, omitted when unset (pure)."""
+}
+fn (opts: Map): Map {
+  size get(opts, "page-size")
+  {
+    "page[size]": if(is-some(size), max(MIN_PAGE_SIZE, min(size, MAX_PAGE_SIZE)), null),
+    "page[number]": get(opts, "page")
+  }
+}
+
+filter-params
+meta {
+    doc: """
+    `filter[...]` parameters from a Map of field → value (pure). A Map
+    value gives the `ge` and `le` forms. `withinCommentPeriod: false` is
+    dropped, as the API accepts only `true`.
+
+    **Example**
+
+    ```hot
+    ::regulations-gov/filter-params({agencyId: "EPA", postedDate: {ge: "2026-01-01"}})
+    // {"filter[agencyId]": "EPA", "filter[postedDate][ge]": "2026-01-01"}
+    ```
+    """
+}
+fn (filters: Map?): Map {
+  m or(filters, {})
+  pairs mapcat(keys(m), (k) {
+    v get(m, k)
+    cond {
+      is-map(v) => { map(keys(v), (op) { [`filter[${k}][${op}]`, get(v, op)] }) }
+      and(eq(k, "withinCommentPeriod"), eq(v, false)) => { [] }
+      => { [[`filter[${k}]`, v]] }
+    }
+  })
+  zipmap(map(pairs, (p) { p[0] }), map(pairs, (p) { p[1] }))
+}
+
+list-params
+meta {
+    doc: """Query parameters for a list call (pure): the `filters`, `sort` and paging from `opts`."""
+}
+fn (opts: Map): Map {
+  {...filter-params(get(opts, "filters")), sort: get(opts, "sort"), ...page-params(opts)}
+}
+
+detail fn (kind: Str, id: Str, opts: Map): Any {
+  cond {
+    // With no id the path is the list route, whose page isn't a record.
+    not(::api/given(id)) => { err(`regulations-gov: ${kind} needs an id`) }
+    => {
+      with-key(opts, (cfg, key) {
+        include if(get(opts, "include-attachments"), "attachments", null)
+        ::api/get-json-or-null(`${cfg.base-url}/${kind}s/${::api/path-segment(trim(id))}${::api/query-string({include: include})}`, {X-Api-Key: key})
+      })
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Documents
+// ---------------------------------------------------------------------------
+
+documents
+meta {
+    doc: """
+    One page of documents: `{data, meta}`. Each row has `id` and
+    `attributes` with `docketId`, `documentType`, `title`, `postedDate`,
+    `commentEndDate`, `lastModifiedDate`, `frDocNum`, `objectId` (what
+    `filter[commentOnId]` takes) and `withdrawn`.
+
+    `opts`: `filters`, `sort`, `page-size`, `page`, plus `api-key`.
+    Filters: `agencyId`, `commentEndDate`, `docketId`, `documentType`,
+    `frDocNum`, `searchTerm`, `postedDate`, `lastModifiedDate`, `subtype`,
+    `withinCommentPeriod`. Sort on `commentEndDate`, `postedDate`,
+    `lastModifiedDate`, `documentId` or `title`, with a leading `-` for
+    descending.
+
+    **Example**
+
+    ```hot
+    page ::regulations-gov/documents({
+      filters: {agencyId: "CFPB", postedDate: {ge: "2026-10-01"}},
+      sort: "-postedDate",
+      page-size: 25
+    })
+    first(page.data).attributes.title
+    ```
+    """
+}
+fn
+(): Map {
+  documents({})
+},
+(opts: Map): Map {
+  reg-get("/documents", list-params(opts), opts)
+}
+
+document
+meta {
+    doc: """
+    One document, or null when there is none: `{data, included}`.
+    `data.attributes.fileFormats` has the download links. Attachments are
+    only returned with `{include-attachments: true}`, in `included`.
+    """
+}
+fn
+(id: Str): Map? {
+  document(id, {})
+},
+(id: Str, opts: Map): Map? {
+  detail("document", id, opts)
+}
+
+// ---------------------------------------------------------------------------
+// Comments
+// ---------------------------------------------------------------------------
+
+comments
+meta {
+    doc: """
+    One page of public comments: `{data, meta}`. `opts`: `filters`,
+    `sort`, `page-size`, `page`, plus `api-key`. Filters: `agencyId`,
+    `searchTerm`, `postedDate`, `lastModifiedDate`, `commentOnId` (a
+    document's `objectId`, not its `id`). Sort on `postedDate`,
+    `lastModifiedDate` or `documentId`.
+
+    **Example**
+
+    ```hot
+    doc ::regulations-gov/document("FAA-2018-1084-0001")
+    page ::regulations-gov/comments({filters: {commentOnId: doc.data.attributes.objectId}, page-size: 50})
+    page.meta.totalElements
+    ```
+    """
+}
+fn
+(): Map {
+  comments({})
+},
+(opts: Map): Map {
+  reg-get("/comments", list-params(opts), opts)
+}
+
+comment
+meta {
+    doc: """One comment, or null when there is none: `{data, included}`. `data.attributes.comment` is the text. Attachments are only returned with `{include-attachments: true}`, in `included`."""
+}
+fn
+(id: Str): Map? {
+  comment(id, {})
+},
+(id: Str, opts: Map): Map? {
+  detail("comment", id, opts)
+}
+
+// ---------------------------------------------------------------------------
+// Dockets
+// ---------------------------------------------------------------------------
+
+dockets
+meta {
+    doc: """
+    One page of dockets: `{data, meta}`. `opts`: `filters`, `sort`,
+    `page-size`, `page`, plus `api-key`. Filters: `agencyId`, `searchTerm`,
+    `lastModifiedDate`, `docketType`. Sort on `title`, `docketId` or
+    `lastModifiedDate`.
+    """
+}
+fn
+(): Map {
+  dockets({})
+},
+(opts: Map): Map {
+  reg-get("/dockets", list-params(opts), opts)
+}
+
+docket
+meta {
+    doc: """One docket, or null when there is none: `{data}`. The RIN is `data.attributes.rin`, which `documents` does not return."""
+}
+fn
+(id: Str): Map? {
+  docket(id, {})
+},
+(id: Str, opts: Map): Map? {
+  detail("docket", id, opts)
+}
+
+// ---------------------------------------------------------------------------
+// Pagination
+// ---------------------------------------------------------------------------
+
+next-page
+meta {
+    doc: """The page number after `page` from `meta`, or null on the last page or after page 20, the end of the API's documented range (pure)."""
+}
+fn (page: Any): Int? {
+  m or(get(or(page, {}), "meta"), {})
+  n get(m, "pageNumber")
+  cond {
+    is-null(n) => { null }
+    not(get(m, "hasNextPage")) => { null }
+    gte(n, MAX_PAGE) => { null }
+    => { add(n, 1) }
+  }
+}
+
+eastern-date-time
+meta {
+    doc: """
+    The `lastModifiedDate` of a row, as the API returns it in UTC, in the
+    form the `lastModifiedDate` filter takes: Eastern time,
+    `yyyy-MM-dd HH:mm:ss` (pure).
+
+    **Example**
+
+    ```hot
+    ::regulations-gov/eastern-date-time("2020-08-10T15:58:52Z")  // "2020-08-10 11:58:52"
+    ```
+    """
+}
+fn (utc: Str): Str {
+  zoned ::time/ZonedDateTime(::hot::regex/replace-all(trim(utc), "Z$", "+00:00[UTC]"))
+  ::time/format(::time/with-timezone(zoned, "America/New_York"), "YYYY-MM-DD HH:mm:ss")
+}
+
+window-opts
+meta {
+    doc: """`opts` for one page of a window (pure): the `sort`, the largest page size, and `filter[lastModifiedDate][ge]` set to `cursor` when there is one. Any `le` the caller gave stays."""
+}
+fn (opts: Map, sort: Str, cursor: Str?, page-number: Int): Map {
+  filters or(get(opts, "filters"), {})
+  modified or(get(filters, "lastModifiedDate"), {})
+  windowed if(is-null(cursor), filters, {...filters, lastModifiedDate: {...modified, ge: cursor}})
+  {...opts, filters: windowed, sort: sort, page-size: MAX_PAGE_SIZE, page: page-number}
+}
+
+next-cursor
+meta {
+    doc: """The `ge` value that starts the next window: the last row's `lastModifiedDate` in Eastern time. An Err when it would not move past `cursor`, which means one timestamp holds a whole window of records (pure)."""
+}
+fn (rows: Vec, cursor: Str?): Str {
+  stamp get-in(last(rows), ["attributes", "lastModifiedDate"])
+  next if(is-str(stamp), eastern-date-time(stamp), null)
+  cond {
+    is-null(next) => { err("regulations-gov: can't continue past this window: the last row has no lastModifiedDate") }
+    eq(next, cursor) => { err(`regulations-gov: can't continue past this window: every row shares lastModifiedDate ${next}`) }
+    => { next }
+  }
+}
+
+walk-windows fn (fetch: Fn, opts: Map, sort: Str, limit: Int, cursor: Str?, page-number: Int, seen: Map, acc: Vec): Any {
+  page fetch(window-opts(opts, sort, cursor, page-number))
+  cond {
+    is-err(page) => { page }
+    => {
+      rows or(get(page, "data"), [])
+
+      // A `ge` window starts on rows the last one already returned.
+      fresh filter(rows, (row) { is-null(get(seen, row.id)) })
+      ids map(fresh, (row) { row.id })
+      now-seen merge(seen, zipmap(ids, map(ids, (id) { true })))
+      combined concat(acc, fresh)
+      more get(or(get(page, "meta"), {}), "hasNextPage")
+
+      // `hasNextPage` can end at the paging ceiling rather than with the data.
+      at-ceiling and(gte(page-number, MAX_PAGE), gte(length(rows), MAX_PAGE_SIZE))
+      cond {
+        gte(length(combined), limit) => { slice(combined, 0, limit) }
+        is-empty(rows) => { combined }
+        and(not(more), not(at-ceiling)) => { combined }
+        lt(page-number, MAX_PAGE) => { walk-windows(fetch, opts, sort, limit, cursor, add(page-number, 1), now-seen, combined) }
+        => {
+          next next-cursor(rows, cursor)
+          if(is-err(next), next, walk-windows(fetch, opts, sort, limit, next, 1, now-seen, combined))
+        }
+      }
+    }
+  }
+}
+
+collect-windows
+meta {
+    doc: """
+    Fetch up to `limit` rows, past the paging ceiling of one query: read
+    20 pages of 250 sorted by `sort`, then restart from the last row's
+    `lastModifiedDate`, dropping the rows the overlap repeats. A full
+    page 20 restarts whatever `hasNextPage` says, so exactly 5,000 rows
+    costs one more request. `fetch` takes `opts` and returns one page.
+    `all-documents`, `all-comments` and `all-dockets` call this. Each
+    page is one request against the hourly limit.
+    """
+}
+fn (fetch: Fn, opts: Map, sort: Str, limit: Int): Vec {
+  modified get(or(get(opts, "filters"), {}), "lastModifiedDate")
+  cond {
+    and(is-some(modified), not(is-map(modified))) => {
+      err("regulations-gov: filters.lastModifiedDate must be a Map of ge and le here, as the windows set ge")
+    }
+    => {
+      start get(or(modified, {}), "ge")
+      walk-windows(fetch, opts, sort, limit, start, 1, {}, [])
+    }
+  }
+}
+
+all-documents
+meta {
+    doc: """
+    Up to `limit` documents matching `opts.filters`, oldest change first,
+    however many there are. A `lastModifiedDate` filter is in Eastern
+    time, `yyyy-MM-dd HH:mm:ss`.
+
+    **Example**
+
+    ```hot
+    rows ::regulations-gov/all-documents({filters: {docketId: "EOIR-2020-0003"}}, 20000)
+    ```
+    """
+}
+fn (opts: Map, limit: Int): Vec {
+  collect-windows((o) { documents(o) }, opts, "lastModifiedDate,documentId", limit)
+}
+
+all-comments
+meta {
+    doc: """
+    Up to `limit` comments matching `opts.filters`, oldest change first,
+    however many there are. Filter on one document with `commentOnId`.
+
+    **Example**
+
+    ```hot
+    ::reg ::regulations-gov
+    doc ::reg/document("FAA-2018-1084-0001")
+    rows ::reg/all-comments({filters: {commentOnId: doc.data.attributes.objectId}}, 20000)
+    ```
+    """
+}
+fn (opts: Map, limit: Int): Vec {
+  collect-windows((o) { comments(o) }, opts, "lastModifiedDate,documentId", limit)
+}
+
+all-dockets
+meta {
+    doc: """Up to `limit` dockets matching `opts.filters`, oldest change first, however many there are."""
+}
+fn (opts: Map, limit: Int): Vec {
+  collect-windows((o) { dockets(o) }, opts, "lastModifiedDate,docketId", limit)
+}

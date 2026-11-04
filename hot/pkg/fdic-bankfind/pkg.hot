@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.fdic-bankfind {
+  name: "hot.dev/fdic-bankfind",
+  version: "0.1.0",
+  hot-min-version: "3.0.2",
+  description: "The FDIC BankFind Suite API for Hot, with an optional key: institutions, branches, mergers and structure changes, failures, quarterly financials, and yearly summaries.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["kyb", "company-data", "fdic", "banks"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

@@ -1,0 +1,27 @@
+::congress-gov::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration smoke tests (live, read-only)
+// =============================================================================
+// CONGRESS_GOV_API_KEY (DEMO_KEY works, sparingly). The test only reads;
+// without the key it records a skip and passes.
+// Run with: hot test -p pkg-integration-congress-gov
+
+::ctx ::congress-gov::integration::ctx
+
+test-bills-and-detail
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip("CONGRESS_GOV_API_KEY is not set") }
+        => {
+            page ::congress-gov/bills(117, "hr", {limit: 2})
+            assert-eq(2, length(page.bills), "the list honours limit")
+            assert(is-some(::congress-gov/next-offset(page)), "there is a second page")
+            b ::congress-gov/bill(117, "hr", 3076)
+            assert-eq("Became Public Law No: 117-108.", b.latestAction.text)
+            acts ::congress-gov/actions(117, "hr", 3076, {limit: 2})
+            assert(gt(length(acts.actions), 0), "a bill has actions")
+        }
+    }
+}

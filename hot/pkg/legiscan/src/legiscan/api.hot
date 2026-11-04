@@ -1,0 +1,308 @@
+::legiscan::api ns
+meta {
+    ctx: {
+        "legiscan.api-key": {required: false},
+        "legiscan.base-url": {required: false, secret: false}
+    },
+    doc: """
+    Transport for the LegiScan Pull API: the settings resolver (per-call
+    `opts` first, then context variables, then defaults), a typed
+    `HttpError`, key redaction, and the GET that turns LegiScan's
+    `status: "ERROR"` responses into Errs.
+
+    | opts key | Context variable | Default |
+    |---|---|---|
+    | `api-key` | `legiscan.api-key` | none: calls fail without it |
+    | `base-url` | `legiscan.base-url` | `https://api.legiscan.com` |
+
+    **The key travels in the URL**, as LegiScan offers no header. Every
+    `HttpError` and transport Err is redacted before it leaves this
+    namespace. **Per-call credentials.** `api-key` in `opts` is masked in
+    call records and never written to context. Present but blank or null,
+    it is an error, never a fallback to context. A per-call `base-url`
+    needs an `api-key` in the same `opts`: the context key is never sent
+    to a per-call URL.
+    """
+}
+
+::ctx ::hot::ctx
+::uri ::hot::uri
+::re ::hot::regex
+
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+SOURCE "legiscan"
+BASE_URL "https://api.legiscan.com"
+PACKAGE_AGENT "hot-dev-legiscan-pkg/0.1 (+https://hot.dev)"
+REDACTED "REDACTED"
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+given
+meta {
+    doc: """True for a non-null value that is not a blank string."""
+}
+fn (v: Any): Bool {
+  match v {
+    Null => { false }
+    Str => { not(is-empty(trim(v))) }
+    _ => { true }
+  }
+}
+
+pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
+  from-opts get(opts, key)
+  from-ctx ::ctx/get(ctx-key)
+  cond {
+    given(from-opts) => { from-opts }
+    given(from-ctx) => { from-ctx }
+    => { default }
+  }
+}
+
+strip-slash fn (url: Str): Str {
+  ::re/replace-all(url, "/+$", "")
+}
+
+resolve
+meta {
+    doc: """
+    Resolve settings for one call: `{api-key, base-url}`. Values in
+    `opts` win over context; an `api-key` in `opts` is used for that call
+    only and comes back unchanged. An Err when `api-key` is in `opts` but
+    blank or null, or when `opts` has `base-url` without `api-key`.
+
+    **Example**
+
+    ```hot
+    cfg ::legiscan::api/resolve({api-key: tenant.legiscan-key})
+    ```
+    """
+}
+fn (opts: Map): Map {
+  from-opts get(opts, "api-key")
+  ::ctx/mark-secret(filter([from-opts], given))
+  cond {
+    and(in("api-key", keys(opts)), not(given(from-opts))) => {
+      err("legiscan: api-key is in the call's opts but is blank or null. Pass a value, or leave api-key out to use the context variable.")
+    }
+
+    and(given(get(opts, "base-url")), not(given(from-opts))) => {
+      err("legiscan: base-url is in the call's opts without api-key. Pass api-key with it. The context key is never sent to a per-call URL.")
+    }
+    => {
+      {
+        api-key: pick(opts, "api-key", "legiscan.api-key", null),
+        base-url: strip-slash(pick(opts, "base-url", "legiscan.base-url", BASE_URL))
+      }
+    }
+  }
+}
+
+require-api-key
+meta {
+    doc: """The API key from resolved settings, or an Err naming where to set it."""
+}
+fn (cfg: Map): Str {
+  cond {
+    given(cfg.api-key) => { cfg.api-key }
+    => { err("legiscan: no API key; set legiscan.api-key or pass {api-key: ...}") }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Redaction
+// ---------------------------------------------------------------------------
+
+redact
+meta {
+    doc: """
+    `text` with the `key=` query value blanked and every literal copy of
+    `api-key` replaced (pure). `api-key` may be null.
+
+    **Example**
+
+    ```hot
+    ::legiscan::api/redact("https://api.legiscan.com/?key=abc&op=getBill", "abc")
+    // "https://api.legiscan.com/?key=REDACTED&op=getBill"
+    ```
+    """
+}
+fn (text: Str, api-key: Str?): Str {
+  blanked ::re/replace-all(text, "([?&]key=)[^&\\s\"')]*", "${1}REDACTED")
+  if(given(api-key), ::hot::str/replace(blanked, api-key, REDACTED), blanked)
+}
+
+redact-value
+meta {
+    doc: """`redact` over a whole response value: a string, or every string inside a Map or Vec (pure)."""
+}
+fn (value: Any, api-key: Str?): Any {
+  cond {
+    is-str(value) => { redact(value, api-key) }
+    or(is-map(value), is-vec(value)) => { from-json(redact(to-json(value), api-key)) }
+    => { value }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+HttpError
+meta {
+    doc: """
+    A failed LegiScan response: a non-2xx status, or an HTTP 200 whose
+    body has `status: "ERROR"`, as LegiScan reports its own errors that
+    way. `source` is `"legiscan"`; `url` the requested URL with the key
+    redacted; `alert` LegiScan's `alert.message`, when there is one;
+    `retry-after` the parsed `Retry-After` seconds on 429s; `message` a
+    one-line summary. No field carries the API key.
+    """
+}
+type {
+    source: Str,
+    status: Int,
+    url: Str,
+    headers: Map,
+    body: Any,
+    alert: Str?,
+    retry-after: Int?,
+    message: Str
+}
+
+alert-message fn (body: Any): Str? {
+  cond {
+    is-map(body) => {
+      a get(body, "alert")
+      if(is-map(a), get(a, "message"), null)
+    }
+    => { null }
+  }
+}
+
+body-detail fn (body: Any): Str? {
+  cond {
+    is-str(body) => { if(gt(length(body), 200), `${slice(body, 0, 200)}…`, body) }
+    => { alert-message(body) }
+  }
+}
+
+retry-after fn (headers: Map): Int? {
+  v get(headers, "retry-after")
+  cond {
+    is-null(v) => { null }
+    ::re/is-match(trim(Str(v)), "^\\d+$") => { Int(trim(Str(v))) }
+    => { null }
+  }
+}
+
+http-error
+meta {
+    doc: """Build a redacted `HttpError` from a response. Exposed for testing; every request uses it."""
+}
+fn (response: HttpResponse, url: Str, api-key: Str?): HttpError {
+  headers redact-value(or(response.headers, {}), api-key)
+  body redact-value(response.body, api-key)
+  safe-url redact(url, api-key)
+  detail body-detail(body)
+  HttpError({
+    source: SOURCE,
+    status: response.status,
+    url: safe-url,
+    headers: headers,
+    body: body,
+    alert: alert-message(body),
+    retry-after: retry-after(headers),
+    message: if(is-some(detail), `${SOURCE}: HTTP ${response.status}: ${detail}`, `${SOURCE}: HTTP ${response.status} for ${safe-url}`)
+  })
+}
+
+check-body
+meta {
+    doc: """
+    `body` when its `status` is `"OK"`, otherwise an Err carrying
+    `HttpError`. The API reports errors with HTTP 200 and `status:
+    "ERROR"`, so a 2xx alone says nothing (pure).
+    """
+}
+fn (response: HttpResponse, body: Any, url: Str, api-key: Str?): Any {
+  ok and(is-map(body), eq(get(body, "status"), "OK"))
+  cond {
+    ok => { body }
+    => {
+      safe redact-value(body, api-key)
+      alert alert-message(safe)
+      e untype(http-error(HttpResponse({status: response.status, headers: response.headers, body: safe}), url, api-key))
+      summary if(is-some(alert), `${SOURCE}: ${alert}`, `${SOURCE}: unexpected response for ${e.url}`)
+      err(HttpError({...e, message: summary}))
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------
+
+query-string
+meta {
+    doc: """Build a `?a=1&b=2` suffix from a Map, dropping null and blank values (pure); `""` when nothing remains."""
+}
+fn (params: Map): Str {
+  ::uri/query-string(filter-vals(params, given))
+}
+
+operation-url
+meta {
+    doc: """The Pull API URL for one operation (pure). It holds the key: never show it, use `redact`."""
+}
+fn (cfg: Map, op: Str, params: Map): Str {
+  `${cfg.base-url}/${query-string({key: cfg.api-key, op: op, ...params})}`
+}
+
+request
+meta {
+    doc: """
+    GET `url`, returning the `HttpResponse` on 2xx or an Err carrying
+    `HttpError`. A transport failure is an Err with its text redacted,
+    since the client names the URL in it.
+    """
+}
+fn (url: Str, api-key: Str?): HttpResponse {
+  response ::hot::http/request(HttpRequest({
+    method: "GET",
+    url,
+    headers: {User-Agent: PACKAGE_AGENT, Accept: "application/json"},
+    body: ""
+  }))
+  cond {
+    is-err(response) => { err(`${SOURCE}: request failed: ${redact(err-message(response), api-key)}`) }
+    is-ok-response(response) => { response }
+    => { err(http-error(response, url, api-key)) }
+  }
+}
+
+decode-body
+meta {
+    doc: """The decoded JSON of a response, or its body as it came when that is not JSON, which `check-body` turns into an Err (pure)."""
+}
+fn (response: HttpResponse): Any {
+  body response.body
+  text if(is-str(body), trim(body), "")
+  parsed if(::hot::str/starts-with(text, "{"), from-json(text), body)
+  if(is-err(parsed), body, parsed)
+}
+
+get-op
+meta {
+    doc: """Run one operation and return the decoded body, or an Err carrying `HttpError` for a non-2xx or a `status: "ERROR"` body. Each call spends one query."""
+}
+fn (cfg: Map, op: Str, params: Map): Any {
+  url operation-url(cfg, op, params)
+  response request(url, cfg.api-key)
+  if(is-err(response), response, check-body(response, decode-body(response), url, cfg.api-key))
+}

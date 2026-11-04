@@ -1,0 +1,216 @@
+::cfpb::complaints::test::complaints ns
+meta ["test"]
+
+::fx ::cfpb::complaints::test::fixtures
+::api ::cfpb::complaints::api
+::c ::cfpb::complaints
+
+HttpResponse ::hot::http/HttpResponse
+
+// ============================================================================
+// Settings resolver
+// ============================================================================
+
+test-resolve-defaults
+meta ["test"]
+fn () {
+    assert-eq("https://www.consumerfinance.gov/data-research/consumer-complaints/search/api/v1", ::api/resolve({}).base-url)
+}
+
+test-resolve-opts-override
+meta ["test"]
+fn () {
+    assert-eq("https://ccdb.example", ::api/resolve({base-url: "https://ccdb.example/"}).base-url, "the API takes no credential")
+}
+
+test-resolve-reads-context
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"cfpb.complaints.base-url": "https://ctx.example/v1/"})
+    assert-eq("https://ctx.example/v1", ::api/resolve({}).base-url)
+    assert-eq("https://opts.example", ::api/resolve({base-url: "https://opts.example"}).base-url, "opts win")
+    ::hot::ctx/set({"cfpb.complaints.base-url": null})
+}
+
+// ============================================================================
+// Transport helpers
+// ============================================================================
+
+test-query-string
+meta ["test"]
+fn () {
+    assert-eq("?size=2", ::api/query-string({size: 2, frm: null, company: "", state: []}))
+    assert-eq("", ::api/query-string({a: null}))
+    assert-eq("?state=CA&state=NY", ::api/query-string({state: ["CA", "NY"]}), "a Vec repeats the key")
+    assert-eq("?company=JPMORGAN+CHASE+%26+CO.", ::api/query-string({company: "JPMORGAN CHASE & CO."}))
+    assert-eq("?product=Mortgage%E2%80%A2FHA+mortgage", ::api/query-string({product: "Mortgage•FHA mortgage"}))
+    assert-eq("?no_aggs=true&size=0", ::api/query-string({no_aggs: true, size: 0}))
+}
+
+test-http-error
+meta ["test"]
+fn () {
+    response HttpResponse({status: 400, headers: {}, body: ::fx/BAD_STATE})
+    e untype(::api/http-error(response, "https://ccdb.example/?state=ZZ"))
+    assert-eq("cfpb-complaints", e.source)
+    assert(::hot::str/contains(e.message, "HTTP 400"), "the status")
+    assert(::hot::str/contains(e.message, "is not a valid choice"), "the API's reason")
+}
+
+test-http-error-throttled
+meta ["test"]
+fn () {
+    response HttpResponse({status: 429, headers: {"retry-after": "12"}, body: {detail: "Request was throttled."}})
+    e untype(::api/http-error(response, "https://ccdb.example/"))
+    assert-eq(12, e.retry-after)
+    assert-eq("cfpb-complaints: HTTP 429: Request was throttled.", e.message)
+}
+
+test-html-at-200-is-an-err
+meta ["test"]
+fn () {
+    response HttpResponse({status: 200, headers: {}, body: "\n<!DOCTYPE html>\n<html lang=\"en\">"})
+    out ::api/decode-body(response, "https://ccdb.example/trends")
+    assert(is-err(out), "the site's HTML page is not an answer")
+    assert(::hot::str/contains(untype(err-value(out)).message, "expected JSON"), "says why")
+}
+
+test-decode-body
+meta ["test"]
+fn () {
+    assert-eq(["JPMORGAN CHASE & CO."], ::api/decode-body(HttpResponse({status: 200, headers: {}, body: "[\"JPMORGAN CHASE & CO.\"]"}), "u"))
+    assert-eq({a: 1}, ::api/decode-body(HttpResponse({status: 200, headers: {}, body: {a: 1}}), "u"), "already decoded")
+}
+
+// ============================================================================
+// Parameters
+// ============================================================================
+
+test-page-size
+meta ["test"]
+fn () {
+    assert-eq(25, ::c/page-size({}))
+    assert-eq(100, ::c/page-size({size: 500}), "capped at 100")
+    assert-eq(0, ::c/page-size({size: 0}), "0 asks for no complaints")
+}
+
+test-search-params
+meta ["test"]
+fn () {
+    p ::c/search-params({
+        company: "JPMORGAN CHASE & CO.",
+        state: ["CA", "NY"],
+        issue: "Getting a Loan",
+        date-received-min: "2026-01-01",
+        date-received-max: "2026-03-31",
+        sort: "created_date_desc",
+        size: 50,
+        base-url: "https://ccdb.example"
+    })
+    assert-eq("JPMORGAN CHASE & CO.", p.company)
+    assert-eq(["CA", "NY"], p.state)
+    assert-eq("2026-01-01", p.date_received_min)
+    assert-eq("2026-03-31", p.date_received_max)
+    assert-eq("created_date_desc", p.sort)
+    assert-eq(50, p.size)
+    assert-eq(true, p.no_aggs)
+    assert-eq(true, p.no_highlight)
+    assert-eq(null, get(p, "base-url"), "settings are not parameters")
+}
+
+test-search-params-aggs-and-paging
+meta ["test"]
+fn () {
+    p ::c/search-params({aggs: true, frm: 50, search-after: "1793142399000_31179918"})
+    assert-eq(null, p.no_aggs, "aggregations asked for")
+    assert-eq(50, p.frm)
+    assert-eq("1793142399000_31179918", p.search_after)
+}
+
+// ============================================================================
+// Reading responses
+// ============================================================================
+
+test-complaints-and-total
+meta ["test"]
+fn () {
+    rows ::c/complaints(::fx/SEARCH_PAGE)
+    assert-eq("31224554", first(rows).complaint_id)
+    assert-eq("Debt is not yours", first(rows).sub_issue)
+    assert-eq(3790, ::c/total(::fx/SEARCH_PAGE))
+    assert-eq([], ::c/complaints(::fx/NO_COMPLAINT))
+    assert-eq(0, ::c/total(::fx/NO_COMPLAINT))
+    assert-eq([], ::c/complaints(null))
+    assert-eq(null, ::c/total(null))
+}
+
+test-freshness
+meta ["test"]
+fn () {
+    f ::c/freshness(::fx/SEARCH_PAGE)
+    assert-eq("2026-11-03T12:00:00-05:00", f.last-indexed)
+    assert-eq(false, f.stale)
+    assert-eq(false, f.data-issue)
+    assert-eq(18879284, f.record-count)
+    assert-eq(null, ::c/freshness(null).stale)
+}
+
+test-buckets
+meta ["test"]
+fn () {
+    assert-eq(
+        [{key: "Closed with explanation", count: 18563}, {key: "Closed with monetary relief", count: 1819}],
+        ::c/buckets(::fx/AGGREGATIONS, "company_response")
+    )
+    product first(::c/buckets(::fx/AGGREGATIONS, "product"))
+    assert-eq("Checking or savings account", product.key)
+    assert-eq(7887, product.count)
+    assert-eq({key: "Checking account", count: 6948}, first(product.sub), "the second level")
+    assert-eq([], ::c/buckets(::fx/AGGREGATIONS, "tags"))
+    assert-eq([], ::c/buckets(null, "product"))
+}
+
+// ============================================================================
+// Paging
+// ============================================================================
+
+test-next-page
+meta ["test"]
+fn () {
+    assert-eq({frm: 2, search-after: "1793142399000_31179918"}, ::c/next-page(::fx/SEARCH_PAGE, {size: 2}))
+    assert-eq({frm: 4, search-after: "1793065121000_31089777"}, ::c/next-page(::fx/SEARCH_PAGE, {size: 2, frm: 2}))
+    assert-eq(null, ::c/next-page(::fx/SEARCH_PAGE, {size: 2, frm: 4}), "no break point for page 4")
+    assert-eq(null, ::c/next-page(::fx/SEARCH_PAGE, {size: 0}), "no complaints, no pages")
+    assert-eq(null, ::c/next-page({}, {size: 2}))
+}
+
+test-collect-follows-pages
+meta ["test"]
+fn () {
+    fetch (o) {
+        n add(floor(div(or(get(o, "frm"), 0), 2)), 1)
+        {
+            hits: {hits: [{_source: {id: `p${n}-a`}}, {_source: {id: `p${n}-b`}}]},
+            _meta: {break_points: {"2": [20, "a"], "3": [10, "b"]}}
+        }
+    }
+
+    all ::c/collect(fetch, {size: 2}, 100)
+    assert-eq(["p1-a", "p1-b", "p2-a", "p2-b", "p3-a", "p3-b"], map(all, (r) { r.id }), "stops with the break points")
+    assert-eq(3, length(::c/collect(fetch, {size: 2}, 3)))
+}
+
+test-collect-returns-an-err-page
+meta ["test"]
+fn () {
+    assert(is-err(::c/collect((o) { err("HTTP 429") }, {}, 10)), "a throttled request comes back as the Err")
+}
+
+test-get-complaint-refuses-a-blank-id
+meta ["test"]
+fn () {
+    out ::c/get-complaint("  ")
+    assert(is-err(out), "a blank id would request the search route")
+    assert(::hot::str/contains(err-message(out), "needs an id"), "says why, before any request")
+    assert(::hot::str/contains(err-message(::c/get-complaint(null)), "needs an id"), "null too")
+}

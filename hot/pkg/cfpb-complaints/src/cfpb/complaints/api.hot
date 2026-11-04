@@ -1,0 +1,235 @@
+::cfpb::complaints::api ns
+meta {
+    ctx: {"cfpb.complaints.base-url": {required: false, secret: false}},
+    doc: """
+    Transport for the CFPB Consumer Complaint Database API: the settings
+    resolver (per-call `opts` first, then context variables, then
+    defaults), a typed `HttpError`, JSON GETs, and query-string building
+    that drops unset values and repeats a key for a Vec value.
+
+    | opts key | Context variable | Default |
+    |---|---|---|
+    | `base-url` | `cfpb.complaints.base-url` | `https://www.consumerfinance.gov/data-research/consumer-complaints/search/api/v1` |
+
+    The API takes no credential, so a per-call `base-url` needs none.
+    """
+}
+
+::ctx ::hot::ctx
+::uri ::hot::uri
+::re ::hot::regex
+
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+SOURCE "cfpb-complaints"
+BASE_URL "https://www.consumerfinance.gov/data-research/consumer-complaints/search/api/v1"
+PACKAGE_AGENT "hot-dev-cfpb-complaints-pkg/0.1 (+https://hot.dev)"
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+given
+meta {
+    doc: """True for a non-null value that is not a blank string or an empty Vec."""
+}
+fn (v: Any): Bool {
+  match v {
+    Null => { false }
+    Str => { not(is-empty(trim(v))) }
+    Vec => { not(is-empty(v)) }
+    _ => { true }
+  }
+}
+
+pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
+  from-opts get(opts, key)
+  from-ctx ::ctx/get(ctx-key)
+  cond {
+    given(from-opts) => { from-opts }
+    given(from-ctx) => { from-ctx }
+    => { default }
+  }
+}
+
+strip-slash fn (url: Str): Str {
+  ::re/replace-all(url, "/+$", "")
+}
+
+resolve
+meta {
+    doc: """
+    Resolve settings for one call: `{base-url}`. A value in `opts` wins
+    over context.
+
+    **Example**
+
+    ```hot
+    cfg ::cfpb::complaints::api/resolve({base-url: "https://ccdb-proxy.example/api/v1"})
+    ```
+    """
+}
+fn (opts: Map): Map {
+  {base-url: strip-slash(pick(opts, "base-url", "cfpb.complaints.base-url", BASE_URL))}
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+HttpError
+meta {
+    doc: """
+    A failed CFPB response. `source` is `"cfpb-complaints"`; `url` the
+    requested URL (the API takes no credentials in URLs); `retry-after`
+    the parsed `Retry-After` seconds on 429s; `message` a one-line
+    summary. `status` is normally non-2xx, but it is 200 when the site
+    answered with something other than JSON (see `get-json`).
+    """
+}
+type {
+    source: Str,
+    status: Int,
+    url: Str,
+    headers: Map,
+    body: Any,
+    retry-after: Int?,
+    message: Str
+}
+
+clip fn (text: Str): Str {
+  if(gt(length(text), 200), `${slice(text, 0, 200)}…`, text)
+}
+
+body-detail fn (body: Any): Str? {
+  cond {
+    is-str(body) => { clip(body) }
+    is-map(body) => {
+      // Throttling: {detail}. Validation: {state: {"0": ["\"ZZ\" is not a valid choice."]}}
+      detail get(body, "detail")
+      cond {
+        is-str(detail) => { detail }
+        is-empty(body) => { null }
+        => { clip(to-json(body)) }
+      }
+    }
+    => { null }
+  }
+}
+
+retry-after fn (headers: Map): Int? {
+  v get(headers, "retry-after")
+  cond {
+    is-null(v) => { null }
+    ::re/is-match(trim(Str(v)), "^\\d+$") => { Int(trim(Str(v))) }
+    => { null }
+  }
+}
+
+http-error
+meta {
+    doc: """Build an `HttpError` from a non-2xx response. Exposed for testing; every request uses it."""
+}
+fn (response: HttpResponse, url: Str): HttpError {
+  headers or(response.headers, {})
+  detail body-detail(response.body)
+  HttpError({
+    source: SOURCE,
+    status: response.status,
+    url: url,
+    headers: headers,
+    body: response.body,
+    retry-after: retry-after(headers),
+    message: if(is-some(detail), `${SOURCE}: HTTP ${response.status}: ${detail}`, `${SOURCE}: HTTP ${response.status} for ${url}`)
+  })
+}
+
+not-json-error
+meta {
+    doc: """An `HttpError` for a 2xx response that is not JSON. consumerfinance.gov answers an unknown API path with its HTML search page and status 200, so a removed route looks like success. Exposed for testing."""
+}
+fn (response: HttpResponse, url: Str): HttpError {
+  HttpError({
+    source: SOURCE,
+    status: response.status,
+    url: url,
+    headers: or(response.headers, {}),
+    body: null,
+    retry-after: null,
+    message: `${SOURCE}: expected JSON from ${url}, got something else (usually the site's HTML page for an unknown path)`
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------
+
+query-pairs fn (key: Str, value: Any): Vec<Str> {
+  map(if(is-vec(value), value, [value]), (item) { ::uri/encode-query(assoc({}, key, Str(item))) })
+}
+
+query-string
+meta {
+    doc: """Build a `?a=1&b=2` suffix from a Map, dropping null, blank and empty values (pure); `""` when nothing remains. A Vec value repeats the key: `{state: ["CA", "NY"]}` gives `?state=CA&state=NY`."""
+}
+fn (params: Map): Str {
+  kept filter-vals(params, given)
+  pairs mapcat(keys(kept), (k) { query-pairs(k, get(kept, k)) })
+  if(is-empty(pairs), "", `?${join(pairs, "&")}`)
+}
+
+path-segment
+meta {
+    doc: """Percent-encode one path segment."""
+}
+fn (value: Any): Str {
+  ::uri/encode(Str(value))
+}
+
+request
+meta {
+    doc: """
+    GET (or another method) a CFPB URL with `headers`, returning the
+    `HttpResponse` on 2xx or an Err carrying `HttpError`. A transport
+    failure passes through as its own Err.
+    """
+}
+fn (method: Str, url: Str, headers: Map): HttpResponse {
+  response ::hot::http/request(HttpRequest({
+    method,
+    url,
+    headers: {User-Agent: PACKAGE_AGENT, ...headers},
+    body: ""
+  }))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response }
+    => { err(http-error(response, url)) }
+  }
+}
+
+decode-body
+meta {
+    doc: """The decoded JSON of a 2xx response, or an Err carrying `HttpError` when the body is not JSON (pure). Exposed for testing."""
+}
+fn (response: HttpResponse, url: Str): Any {
+  body response.body
+  cond {
+    is-str(body) => {
+      text trim(body)
+      if(or(::hot::str/starts-with(text, "{"), ::hot::str/starts-with(text, "[")), from-json(text), err(not-json-error(response, url)))
+    }
+    => { body }
+  }
+}
+
+get-json
+meta {
+    doc: """GET a JSON resource and return the decoded body, or an Err carrying `HttpError`."""
+}
+fn (url: Str, headers: Map): Any {
+  response request("GET", url, {Accept: "application/json", ...headers})
+  if(is-err(response), response, decode-body(response, url))
+}

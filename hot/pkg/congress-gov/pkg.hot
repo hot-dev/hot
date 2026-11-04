@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.congress-gov {
+  name: "hot.dev/congress-gov",
+  version: "0.1.0",
+  hot-min-version: "3.0.2",
+  description: "The Congress.gov API for Hot: bills and resolutions, with detail, actions, text versions and CRS summaries.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["legislation", "government-data", "congress", "us"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

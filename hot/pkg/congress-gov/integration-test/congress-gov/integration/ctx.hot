@@ -1,0 +1,24 @@
+::congress-gov::integration::ctx ns
+
+::env ::hot::env
+
+// Placeholder settings for the congress-gov integration suite. Unset
+// environment variables are skipped entirely, so absent credentials behave
+// exactly as if never configured.
+::hot::ctx/set(filter-vals({
+    "congress-gov.api-key": ::env/get("CONGRESS_GOV_API_KEY", ""),
+    "congress-gov.base-url": ::env/get("CONGRESS_GOV_BASE_URL", ""),
+}, (v) { not(is-empty(v)) }))
+
+configured
+meta {doc: """True when CONGRESS_GOV_API_KEY is set."""}
+fn (): Bool {
+    is-some(::hot::ctx/get("congress-gov.api-key"))
+}
+
+skip
+meta {doc: """Record a skip and pass."""}
+fn (why: Str): Bool {
+    println(`congress-gov integration: ${why} - skipping`)
+    assert(true, `skipped: ${why}`)
+}

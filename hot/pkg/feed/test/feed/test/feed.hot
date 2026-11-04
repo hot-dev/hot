@@ -1,0 +1,408 @@
+::feed::test::feed ns
+meta ["test"]
+
+::fx ::feed::test::fixtures
+::api ::feed::api
+::feed ::feed
+
+HttpResponse ::hot::http/HttpResponse
+
+// ============================================================================
+// Settings resolver
+// ============================================================================
+
+test-resolve-default-agent
+meta ["test"]
+fn () {
+    assert-eq("hot-dev-feed-pkg/0.1 (+https://hot.dev)", ::api/resolve({}).user-agent)
+}
+
+test-resolve-opts-override
+meta ["test"]
+fn () {
+    assert-eq("Acme ops@acme.test", ::api/resolve({user-agent: "Acme ops@acme.test"}).user-agent)
+    assert-eq(null, ::hot::ctx/get("feed.user-agent"), "a per-call user-agent is never written to ctx")
+}
+
+test-resolve-reads-context
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"feed.user-agent": "Ctx ops@ctx.test"})
+    assert-eq("Ctx ops@ctx.test", ::api/resolve({}).user-agent)
+    assert-eq("Acme ops@acme.test", ::api/resolve({user-agent: "Acme ops@acme.test"}).user-agent, "opts win")
+    ::hot::ctx/set({"feed.user-agent": null})
+}
+
+test-blank-user-agent-is-an-err-naming-the-key
+meta ["test"]
+fn () {
+    for-each(["", "  ", null], (v) {
+      out ::api/resolve({user-agent: v})
+      assert(is-err(out), "blank user-agent never falls back")
+      assert(::hot::str/contains(err-message(out), "user-agent"), "the Err names user-agent")
+    })
+    assert(is-err(::feed/fetch("https://feed.test/rss", {user-agent: ""})), "fetch returns it before any request")
+}
+
+// ============================================================================
+// Request headers
+// ============================================================================
+
+test-request-headers-plain
+meta ["test"]
+fn () {
+    h ::api/request-headers({user-agent: "Acme ops@acme.test"}, {})
+    assert-eq("Acme ops@acme.test", get(h, "User-Agent"))
+    assert(::hot::str/contains(h.Accept, "application/atom+xml"), "asks for feeds")
+    assert-eq(null, get(h, "If-None-Match"))
+    assert-eq(null, get(h, "If-Modified-Since"))
+}
+
+test-request-headers-conditional
+meta ["test"]
+fn () {
+    h ::api/request-headers({user-agent: "a"}, {etag: "\"1793774205\"", last-modified: "Wed, 04 Nov 2026 06:36:45 GMT"})
+    assert-eq("\"1793774205\"", get(h, "If-None-Match"))
+    assert-eq("Wed, 04 Nov 2026 06:36:45 GMT", get(h, "If-Modified-Since"))
+}
+
+// ============================================================================
+// Errors
+// ============================================================================
+
+test-http-error-shape
+meta ["test"]
+fn () {
+    e ::api/http-error(HttpResponse({status: 429, headers: {"retry-after": "30"}, body: "slow down"}), "https://feed.test/rss")
+    assert-eq("feed", e.source)
+    assert-eq(429, e.status)
+    assert-eq(30, e.retry-after)
+    assert-eq("feed: HTTP 429: slow down", e.message)
+}
+
+test-http-error-without-text-names-the-url
+meta ["test"]
+fn () {
+    e ::api/http-error(HttpResponse({status: 500, headers: {}, body: null}), "https://feed.test/rss")
+    assert-eq("feed: HTTP 500 for https://feed.test/rss", e.message)
+}
+
+// ============================================================================
+// Dates
+// ============================================================================
+
+test-normalize-rfc-822
+meta ["test"]
+fn () {
+    assert-eq("2026-10-30T19:30:00Z", ::feed/normalize-date("Fri, 30 Oct 2026 15:30:00 -0400"))
+    assert-eq("2026-11-04T05:00:00Z", ::feed/normalize-date("Wed, 04 Nov 2026 05:00:00 GMT"))
+    assert-eq("2026-11-03T14:00:00Z", ::feed/normalize-date("Tue, 3 Nov 2026 09:00 EST"), "one-digit day, no seconds, named zone")
+    assert-eq("2026-11-03T09:00:05Z", ::feed/normalize-date("3 November 2026 09:00:05 UT"), "no weekday, long month")
+}
+
+test-normalize-rfc-3339
+meta ["test"]
+fn () {
+    assert-eq("2026-11-03T22:27:58Z", ::feed/normalize-date("2026-11-03T17:27:58-05:00"))
+    assert-eq("2026-11-03T17:27:58Z", ::feed/normalize-date("2026-11-03T17:27:58Z"))
+    assert-eq("2026-11-03T17:27:58Z", ::feed/normalize-date(" 2026-11-03t17:27:58.25z "), "fraction dropped, lower case accepted")
+}
+
+test-normalize-refuses-what-it-cannot-be-sure-of
+meta ["test"]
+fn () {
+    for-each([
+      null,
+      "",
+      "sometime last week",
+      "2026-11-03",
+      "2026-02-30T10:00:00Z",
+      "Tue, 03 Nov 26 09:00:00 GMT",
+      "Tue, 03 Nov 2026 09:00:00 BST",
+      "Tue, 03 Foo 2026 09:00:00 GMT",
+      "Mon, 31 Feb 2026 09:00:00 GMT"
+    ], (raw) {
+      assert-eq(null, ::feed/normalize-date(raw), `not reliable: ${raw}`)
+    })
+}
+
+// ============================================================================
+// Links
+// ============================================================================
+
+test-resolve-link
+meta ["test"]
+fn () {
+    base "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=8-K#top"
+    assert-eq("https://www.sec.gov/x?y=1", ::feed/resolve-link(base, "/x?y=1"))
+    assert-eq("https://www.sec.gov/cgi-bin/x.html", ::feed/resolve-link(base, "x.html"))
+    assert-eq("https://www.sec.gov/cgi-bin/browse-edgar?z=1", ::feed/resolve-link(base, "?z=1"))
+    assert-eq("https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=8-K#a", ::feed/resolve-link(base, "#a"))
+    assert-eq("https://cdn.test/z", ::feed/resolve-link(base, "//cdn.test/z"))
+    assert-eq("https://x.test/a", ::feed/resolve-link(base, "https://x.test/a"))
+    assert-eq("mailto:a@x.test", ::feed/resolve-link(base, "mailto:a@x.test"))
+    assert-eq("https://x.test/a.html", ::feed/resolve-link("https://x.test", "a.html"), "a base with no path")
+}
+
+test-resolve-link-without-a-base
+meta ["test"]
+fn () {
+    assert-eq("/x", ::feed/resolve-link(null, "/x"))
+    assert-eq(null, ::feed/resolve-link("https://x.test/", null))
+}
+
+// ============================================================================
+// RSS
+// ============================================================================
+
+test-sec-press-rss
+meta ["test"]
+fn () {
+    feed ::feed/parse(::fx/SEC_PRESS_RSS)
+    assert-eq("Press Releases", feed.title)
+    assert-eq("https://www.sec.gov/", feed.link)
+    assert-eq(null, feed.updated, "this feed has no channel date")
+    assert-eq(2, length(feed.entries))
+    e first(feed.entries)
+    assert-eq("57c0bf48-4b38-4a9c-8d4c-fc217f39e7aa", e.id, "guid wins over link")
+    assert(::hot::str/starts-with(e.title, "SEC Issues Exemptive Relief"), "the padded title is trimmed")
+    assert(::hot::str/ends-with(e.title, "Repo Transactions"), "the padded title is trimmed")
+    assert(::hot::str/starts-with(e.link, "https://www.sec.gov/newsroom/press-releases/2026-111-"), "link")
+    assert-eq("Fri, 30 Oct 2026 15:30:00 -0400", e.published, "the raw date is kept")
+    assert-eq("2026-10-30T19:30:00Z", e.published-at)
+    assert-eq(null, e.updated)
+    assert-eq(null, e.author, "a blank dc:creator is null")
+    assert(::hot::str/starts-with(e.summary, "The Securities and Exchange Commission"), "summary")
+}
+
+test-federal-register-rss
+meta ["test"]
+fn () {
+    feed ::feed/parse(::fx/FEDERAL_REGISTER_RSS)
+    assert-eq("Wed, 04 Nov 2026 05:00:00 GMT", feed.updated, "the channel pubDate")
+    assert-eq("2026-11-04T05:00:00Z", feed.updated-at)
+    e first(feed.entries)
+    assert-eq("National Credit Union Administration", e.author, "dc:creator")
+    assert-eq(e.link, e.id, "a URL guid")
+}
+
+test-cdata-and-namespaced-elements
+meta ["test"]
+fn () {
+    feed ::feed/parse(::fx/EXTENSIONS_RSS)
+    assert-eq("Agency <News> & Notes", feed.title, "CDATA")
+    assert-eq("https://news.example/", feed.link, "the plain link, not the atom:link rel=self")
+    assert-eq("2026-11-03T12:00:00Z", feed.updated-at, "lastBuildDate")
+    e first(feed.entries)
+    assert-eq("Rule <b>final</b>", e.title)
+    assert-eq("https://news.example/?p=42", e.id)
+    assert-eq("Ada Lovelace, Grace Hopper", e.author, "every dc:creator")
+    assert-eq("Short & sweet", e.summary)
+    assert-eq("<p>The whole <em>story</em>.</p>", e.content)
+    assert-eq("2026-11-03T14:00:00Z", e.published-at)
+}
+
+test-rss-fallbacks
+meta ["test"]
+fn () {
+    entries ::feed/parse(::fx/EXTENSIONS_RSS, {base-url: "https://news.example/feed/"}).entries
+    atom-link entries[1]
+    assert-eq("https://news.example/only-atom/", atom-link.link, "atom:link alternate, resolved")
+    assert-eq("https://news.example/only-atom/", atom-link.id, "no guid: the link")
+    assert-eq("2026-11-02T08:00:00Z", atom-link.published, "dc:date")
+    assert-eq("2026-11-02T08:30:00Z", atom-link.updated-at, "atom:updated")
+    assert-eq("Body with no description", atom-link.summary, "content:encoded stands in for a missing description")
+    assert-eq("press@news.example (Press Office)", atom-link.author, "plain author")
+    permalink entries[2]
+    assert-eq("https://news.example/guid-link/", permalink.link, "a permalink guid stands in for a missing link")
+    assert-eq("sometime last week", permalink.published, "the raw date stays")
+    assert-eq(null, permalink.published-at, "an unreadable date is null")
+    assert-eq(null, entries[3].id, "nothing to identify it")
+}
+
+test-rss-without-channel-is-an-err
+meta ["test"]
+fn () {
+    assert(is-err(::feed/parse("<rss version=\"2.0\"></rss>")), "no channel")
+}
+
+// ============================================================================
+// Atom
+// ============================================================================
+
+test-edgar-atom
+meta ["test"]
+fn () {
+    feed ::feed/parse(::fx/EDGAR_ATOM, {base-url: "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=8-K&output=atom"})
+    assert(::hot::str/starts-with(feed.title, "Latest Filings"), "title")
+    assert-eq("https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent", feed.link, "the relative link is resolved")
+    assert-eq("2026-11-04T04:30:54-05:00", feed.updated)
+    assert-eq("2026-11-04T09:30:54Z", feed.updated-at)
+    assert-eq(2, length(feed.entries))
+    e first(feed.entries)
+    assert-eq("urn:tag:sec.gov,2008:accession-number=0001193125-26-445650", e.id)
+    assert-eq("8-K - ASHLAND INC. (0001674862) (Filer)", e.title)
+    assert-eq("https://www.sec.gov/Archives/edgar/data/1674862/000119312526445650/0001193125-26-445650-index.htm", e.link)
+    assert-eq(null, e.published, "EDGAR sends only updated")
+    assert-eq("2026-11-03T22:27:58Z", e.updated-at)
+    assert(::hot::str/contains(e.summary, "<b>AccNo:</b> 0001193125-26-445650"), "type=html text arrives unescaped once")
+    assert-eq("Webmaster", e.author, "an entry takes the feed's author")
+}
+
+test-atom-without-a-base-keeps-relative-links
+meta ["test"]
+fn () {
+    assert-eq("/cgi-bin/browse-edgar?action=getcurrent", ::feed/parse(::fx/EDGAR_ATOM).link)
+}
+
+test-prefixed-atom
+meta ["test"]
+fn () {
+    feed ::feed/parse(::fx/PREFIXED_ATOM)
+    assert-eq("News &amp; views", feed.title, "type=html is unescaped once and otherwise left alone")
+    assert-eq("https://atom.example/news/index.html", feed.link, "the link with no rel, against xml:base")
+    first-entry feed.entries[0]
+    assert-eq("https://atom.example/news/first.html", first-entry.link, "rel=alternate over rel=enclosure")
+    assert-eq("<div xmlns=\"http://www.w3.org/1999/xhtml\"><p>Full text</p></div>", first-entry.content, "xhtml keeps its markup")
+    assert-eq(first-entry.content, first-entry.summary, "content stands in for a missing summary")
+    assert-eq("Ada, Grace", first-entry.author)
+    assert-eq("2026-11-01T15:00:00Z", first-entry.published-at)
+    assert-eq("2026-11-02T15:00:00Z", first-entry.updated-at)
+    second feed.entries[1]
+    assert-eq("https://other.example/x/second.html", second.link, "the entry's xml:base")
+    assert-eq("Newsroom", second.author)
+    third feed.entries[2]
+    assert-eq("Wire", third.author, "the source's author before the feed's")
+    assert-eq("tag:atom.example,2026:3", third.id)
+    assert-eq(null, third.link)
+}
+
+// ============================================================================
+// Bad documents
+// ============================================================================
+
+test-malformed-xml-is-the-parsers-err
+meta ["test"]
+fn () {
+    out ::feed/parse("<rss><channel><title>Broken</channel></rss>")
+    assert(is-err(out), "no repair")
+    assert(::hot::str/contains(err-message(out), "XML"), "the parser's own Err")
+}
+
+test-other-documents-are-an-err
+meta ["test"]
+fn () {
+    html ::feed/parse("<html><body>Please verify you are a human</body></html>")
+    assert(is-err(html), "a block page")
+    assert(::hot::str/contains(err-message(html), "<html>"), "names the root")
+    assert(is-err(::feed/parse("<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"/>")), "RSS 1.0 is out of scope")
+}
+
+// ============================================================================
+// Encodings
+// ============================================================================
+
+test-latin-1-bytes
+meta ["test"]
+fn () {
+    head "<?xml version=\"1.0\" encoding=\"ISO-8859-1\" ?><rss><channel><title>Caf"
+    tail "</title></channel></rss>"
+    body Bytes(concat(::hot::bytes/to-vec(Bytes(head)), [233], ::hot::bytes/to-vec(Bytes(tail))))
+    assert-eq("Café", ::feed/parse(body).title)
+}
+
+test-utf-8-bytes
+meta ["test"]
+fn () {
+    assert-eq("Café", ::feed/parse(Bytes("<rss><channel><title>Café</title></channel></rss>")).title)
+}
+
+test-bytes-invalid-in-their-encoding-are-an-err
+meta ["test"]
+fn () {
+    body Bytes(concat(::hot::bytes/to-vec(Bytes("<rss><channel><title>")), [233], ::hot::bytes/to-vec(Bytes("</title></channel></rss>"))))
+    assert(is-err(::feed/parse(body)), "not valid UTF-8, and nothing declared otherwise")
+}
+
+test-unsupported-encoding-is-an-err
+meta ["test"]
+fn () {
+    out ::feed/parse(Bytes("<?xml version=\"1.0\" encoding=\"Shift_JIS\"?><rss/>"))
+    assert(is-err(out), "unknown encoding")
+    assert(::hot::str/contains(err-message(out), "shift_jis"), "names it")
+}
+
+// ============================================================================
+// Responses
+// ============================================================================
+
+test-read-response-returns-validators
+meta ["test"]
+fn () {
+    out ::feed/read-response(
+      HttpResponse({status: 200, headers: {etag: "\"1\"", "last-modified": "Wed, 04 Nov 2026 06:36:45 GMT"}, body: ::fx/SEC_PRESS_RSS}),
+      "https://www.sec.gov/news/pressreleases.rss",
+      {}
+    )
+    assert-eq(false, out.not-modified)
+    assert-eq("\"1\"", out.etag)
+    assert-eq("Wed, 04 Nov 2026 06:36:45 GMT", out.last-modified)
+    assert-eq(2, length(out.entries))
+}
+
+test-read-response-without-validators
+meta ["test"]
+fn () {
+    out ::feed/read-response(HttpResponse({status: 200, headers: {}, body: ::fx/FEDERAL_REGISTER_RSS}), "https://x.test/", {})
+    assert-eq(null, out.etag)
+    assert-eq(null, out.last-modified)
+}
+
+test-read-response-304
+meta ["test"]
+fn () {
+    out ::feed/read-response(
+      HttpResponse({status: 304, headers: {etag: "\"2\""}, body: ""}),
+      "https://x.test/",
+      {etag: "\"1\"", last-modified: "Wed, 04 Nov 2026 06:36:45 GMT"}
+    )
+    assert-eq(true, out.not-modified)
+    assert-eq([], out.entries)
+    assert-eq("\"2\"", out.etag, "the server's newer etag")
+    assert-eq("Wed, 04 Nov 2026 06:36:45 GMT", out.last-modified, "the caller's, when not repeated")
+}
+
+test-read-response-decodes-bytes
+meta ["test"]
+fn () {
+    bytes Bytes("<?xml version=\"1.0\"?><feed xmlns=\"http://www.w3.org/2005/Atom\"><title>T</title></feed>")
+    out ::feed/read-response(HttpResponse({status: 200, headers: {}, body: bytes, body-bytes: bytes}), "https://x.test/", {})
+    assert-eq("T", out.title)
+}
+
+test-read-response-passes-a-parse-err-back
+meta ["test"]
+fn () {
+    out ::feed/read-response(HttpResponse({status: 200, headers: {}, body: "<rss><oops></rss>"}), "https://x.test/", {})
+    assert(is-err(out), "no result from a bad body")
+}
+
+// ============================================================================
+// Diffing
+// ============================================================================
+
+test-new-entries
+meta ["test"]
+fn () {
+    entries [{id: "https://x.test/a.b"}, {id: "2"}, {id: "3"}]
+    assert-eq([{id: "2"}, {id: "3"}], ::feed/new-entries(entries, ["https://x.test/a.b", "9"]))
+    assert-eq(entries, ::feed/new-entries(entries, []))
+    assert-eq([], ::feed/new-entries(entries, ["3", "2", "https://x.test/a.b"]))
+    assert-eq([], ::feed/new-entries([], ["1"]))
+}
+
+test-new-entries-keeps-entries-without-an-id
+meta ["test"]
+fn () {
+    assert-eq([{id: null, title: "t"}], ::feed/new-entries([{id: null, title: "t"}], ["1"]))
+}

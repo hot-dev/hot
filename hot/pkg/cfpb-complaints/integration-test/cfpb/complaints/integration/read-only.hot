@@ -1,0 +1,79 @@
+::cfpb::complaints::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration smoke tests (live, read-only)
+// =============================================================================
+// CFPB_COMPLAINTS_LIVE=1 (no key). The test only reads, and stays under the
+// API's 5 single complaint reads and 20 searches a minute; without the setting
+// it records a skip and passes.
+// Run with: hot test -p pkg-integration-cfpb-complaints
+
+::ctx ::cfpb::complaints::integration::ctx
+::c ::cfpb::complaints
+
+COMPANY "JPMORGAN CHASE & CO."
+
+test-search-paging-and-lookup
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("CFPB_COMPLAINTS_LIVE is not 1") }
+        => {
+            opts {company: COMPANY, state: ["CA", "NY"], date-received-min: "2026-01-01", sort: "created_date_desc", size: 2}
+            page ::c/search(opts)
+            assert-eq(2, length(::c/complaints(page)), "a full page")
+            assert(gt(::c/total(page), 2), "more than one page")
+            assert(is-some(::c/freshness(page).last-indexed), "the load time")
+            assert-eq(null, get(page, "aggregations"), "aggregations off by default")
+
+            next ::c/next-page(page, opts)
+            assert-eq(2, next.frm)
+            page-two ::c/search({...opts, ...next})
+            one first(::c/complaints(page))
+            two first(::c/complaints(page-two))
+            assert(not(eq(one.complaint_id, two.complaint_id)), "page two moved on")
+
+            rows ::c/collect((o) { ::c/search(o) }, opts, 3)
+            assert-eq(3, length(rows))
+
+            found ::c/get-complaint(one.complaint_id)
+            assert-eq(COMPANY, found.company)
+            assert-eq(null, ::c/get-complaint(99999999999), "an unknown ID is null")
+        }
+    }
+}
+
+test-counts-and-aggregations
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("CFPB_COMPLAINTS_LIVE is not 1") }
+        => {
+            opts {company: COMPANY, date-received-min: "2026-01-01"}
+            assert(gt(::c/count(opts), 0), "counted")
+            assert-eq(0, ::c/count({company: "jpmorgan", date-received-min: "2026-01-01"}), "the company filter is exact")
+
+            aggs ::c/aggregations(opts)
+            products ::c/buckets(aggs, "product")
+            assert(gt(length(products), 0), "products")
+            assert(gt(first(products).count, 0), "a count")
+            assert(is-vec(first(products).sub), "sub-products")
+            assert(gt(length(::c/buckets(aggs, "company")), 1), "the company aggregation ignores the company filter")
+
+            assert-eq([COMPANY], ::c/suggest-companies("jpmorgan", {size: 3}))
+        }
+    }
+}
+
+test-bad-filter-is-an-err
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("CFPB_COMPLAINTS_LIVE is not 1") }
+        => {
+            out ::c/search({state: "ZZ", size: 1})
+            assert(is-err(out), "an unknown state is a 400")
+            e untype(err-value(out))
+            assert-eq(400, e.status)
+            assert(::hot::str/contains(e.message, "not a valid choice"), "the API's reason")
+        }
+    }
+}

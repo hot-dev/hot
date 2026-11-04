@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.gdelt {
+  name: "hot.dev/gdelt",
+  version: "0.1.0",
+  hot-min-version: "3.0.2",
+  description: "The GDELT DOC 2.0 API for Hot, with no key: global news article lists and coverage timelines by query, timespan or date range.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["news", "monitoring", "gdelt", "adverse-media"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

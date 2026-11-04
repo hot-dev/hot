@@ -1,0 +1,421 @@
+::feed ns
+meta {
+    ctx: {"feed.user-agent": {required: false}},
+    doc: """
+    A stateless RSS 2.0 and Atom 1.0 reader. `fetch` gets and parses a
+    feed, `parse` reads feed text with no network, and `new-entries`
+    diffs entries against the ids a caller keeps. Nothing here remembers
+    anything: storing ids, ETags and dates belongs to the caller.
+
+    Both formats come back in one shape: `{title, link, updated,
+    updated-at, entries}`, each entry `{id, title, link, published,
+    updated, summary, author, content, published-at, updated-at}`. A
+    missing or blank value is null.
+
+    **Dates.** `published` and `updated` are the raw strings from the
+    feed. `published-at` and `updated-at` are the same moments as UTC
+    `YYYY-MM-DDTHH:MM:SSZ`, or null when the raw string isn't a
+    well-formed RFC 822 or RFC 3339 date with a known offset.
+
+    **Malformed feeds.** `::hot::xml` is strict. XML it can't read, and a
+    document that isn't RSS or Atom, is an Err: nothing is repaired or
+    guessed at.
+
+    **Conditional GET.** Pass the `etag` and `last-modified` from the
+    last result in `opts`. A 304 comes back as `{not-modified: true,
+    etag, last-modified, entries: []}`.
+    """
+}
+
+::api ::feed::api
+::re ::hot::regex
+::xml ::hot::xml
+
+HttpResponse ::hot::http/HttpResponse
+ZonedDateTime ::hot::time/ZonedDateTime
+
+// ---------------------------------------------------------------------------
+// Dates (pure)
+// ---------------------------------------------------------------------------
+
+MONTHS {
+  jan: "01", feb: "02", mar: "03", apr: "04", may: "05", jun: "06",
+  jul: "07", aug: "08", sep: "09", oct: "10", nov: "11", dec: "12"
+}
+
+// RFC 822 zones with one meaning. Others, such as BST or IST, are ambiguous.
+ZONES {
+  gmt: "+00:00", ut: "+00:00", utc: "+00:00", z: "+00:00",
+  est: "-05:00", edt: "-04:00", cst: "-06:00", cdt: "-05:00",
+  mst: "-07:00", mdt: "-06:00", pst: "-08:00", pdt: "-07:00"
+}
+
+RFC_822 "^(?:[A-Za-z]+,?\\s+)?(\\d{1,2})\\s+([A-Za-z]{3})[A-Za-z]*\\s+(\\d{4})\\s+(\\d{2}):(\\d{2})(?::(\\d{2}))?\\s+([A-Za-z]+|[+-]\\d{4})$"
+RFC_3339 "^(\\d{4}-\\d{2}-\\d{2})[Tt ](\\d{2}:\\d{2}:\\d{2})(?:\\.\\d+)?([Zz]|[+-]\\d{2}:\\d{2})$"
+
+to-utc fn (date: Str, time: Str, offset: Str): Str? {
+  zoned ZonedDateTime(`${date}T${time}${offset}[${offset}]`)
+  if(is-err(zoned), null, Str(::hot::time/to-instant(zoned)))
+}
+
+rfc-822-offset fn (zone: Str): Str? {
+  cond {
+    ::re/is-match(zone, "^[+-]\\d{4}$") => { `${slice(zone, 0, 3)}:${slice(zone, 3, 5)}` }
+    => { get(ZONES, lowercase(zone)) }
+  }
+}
+
+from-rfc-822 fn (parts: Vec): Str? {
+  month get(MONTHS, lowercase(parts[1]))
+  offset rfc-822-offset(parts[6])
+  seconds if(::api/given(parts[5]), parts[5], "00")
+  cond {
+    or(is-null(month), is-null(offset)) => { null }
+    => { to-utc(`${parts[2]}-${month}-${::hot::str/pad-start(parts[0], 2, "0")}`, `${parts[3]}:${parts[4]}:${seconds}`, offset) }
+  }
+}
+
+normalize-date
+meta {
+    doc: """
+    An RFC 822 or RFC 3339 date as UTC `YYYY-MM-DDTHH:MM:SSZ`, dropping
+    fractions of a second (pure). Null for anything else: other formats,
+    a date-only value, a two-digit year, a time zone name with more than
+    one meaning, or a date that doesn't exist.
+
+    **Example**
+
+    ```hot
+    ::feed/normalize-date("Fri, 30 Oct 2026 15:30:00 -0400")  // "2026-10-30T19:30:00Z"
+    ::feed/normalize-date("2026-11-03T17:27:58-05:00")        // "2026-11-03T22:27:58Z"
+    ::feed/normalize-date("yesterday")                        // null
+    ```
+    """
+}
+fn (raw: Str?): Str? {
+  s if(is-null(raw), "", trim(raw))
+  in-822 ::re/capture(s, RFC_822)
+  in-3339 ::re/capture(s, RFC_3339)
+  cond {
+    is-some(in-3339) => {
+      p in-3339.groups
+      to-utc(p[0], p[1], if(eq(uppercase(p[2]), "Z"), "+00:00", p[2]))
+    }
+
+    is-some(in-822) => { from-rfc-822(in-822.groups) }
+    => { null }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Reading XML (pure)
+// ---------------------------------------------------------------------------
+
+node-text fn (node: Any): Str? {
+  s if(is-null(node), "", trim(::xml/text(node)))
+  if(is-empty(s), null, s)
+}
+
+first-text
+meta {
+    doc: """The first non-blank text among `node`'s children named by `tags`, in the order given, or null. Namespaced children go by their prefix, such as `dc:creator` (pure)."""
+}
+fn (node: Any, tags: Vec<Str>): Str? {
+  reduce(tags, (found, tag) {
+    if(is-some(found), found, node-text(::xml/child(node, tag)))
+  }, null)
+}
+
+all-text fn (node: Any, tag: Str): Vec<Str> {
+  filter(map(::xml/children(node, tag), node-text), is-some)
+}
+
+resolve-link
+meta {
+    doc: """
+    `href` against `base` (pure), for the relative links Atom allows:
+    EDGAR writes `/cgi-bin/browse-edgar?action=getcurrent`. An absolute
+    `href`, or one with no `base` to go on, comes back unchanged.
+    `..` segments are left in the URL.
+
+    **Example**
+
+    ```hot
+    ::feed/resolve-link("https://www.sec.gov/a/b.xml", "/c?d=1")  // "https://www.sec.gov/c?d=1"
+    ::feed/resolve-link("https://www.sec.gov/a/b.xml", "c.html")  // "https://www.sec.gov/a/c.html"
+    ```
+    """
+}
+fn (base: Str?, href: Str?): Str? {
+  origin if(is-null(base), null, ::re/capture(base, "^([A-Za-z][A-Za-z0-9+.-]*:)//[^/?#]*"))
+  cond {
+    is-null(href) => { null }
+    is-null(origin) => { href }
+    ::re/is-match(href, "^[A-Za-z][A-Za-z0-9+.-]*:") => { href }
+    ::hot::str/starts-with(href, "//") => { `${origin.groups[0]}${href}` }
+    ::hot::str/starts-with(href, "/") => { `${origin.match}${href}` }
+    ::hot::str/starts-with(href, "#") => { `${::re/replace-all(base, "#.*$", "")}${href}` }
+    ::hot::str/starts-with(href, "?") => { `${::re/replace-all(base, "[?#].*$", "")}${href}` }
+    => {
+      path slice(::re/replace-all(base, "[?#].*$", ""), length(origin.match))
+      folder ::re/replace-all(path, "[^/]*$", "")
+      `${origin.match}${if(is-empty(folder), "/", folder)}${href}`
+    }
+  }
+}
+
+alternate-href fn (node: Any, tag: Str): Str? {
+  links ::xml/children(node, tag)
+  alternate find-first(links, (l) {
+    rel ::xml/attr(l, "rel")
+    or(is-null(rel), eq(rel, "alternate"))
+  })
+  picked or(alternate, if(is-empty(links), null, first(links)))
+  if(is-null(picked), null, ::xml/attr(picked, "href"))
+}
+
+with-dates fn (m: Map): Map {
+  {...m, published-at: normalize-date(m.published), updated-at: normalize-date(m.updated)}
+}
+
+// ---------------------------------------------------------------------------
+// RSS 2.0 (pure)
+// ---------------------------------------------------------------------------
+
+permalink-guid fn (item: Any): Str? {
+  guid ::xml/child(item, "guid")
+  cond {
+    is-null(guid) => { null }
+    eq(::xml/attr(guid, "isPermaLink"), "false") => { null }
+    ::re/is-match(trim(::xml/text(guid)), "^https?://") => { trim(::xml/text(guid)) }
+    => { null }
+  }
+}
+
+rss-link fn (node: Any, base: Str?): Str? {
+  resolve-link(base, or(first-text(node, ["link"]), alternate-href(node, "atom:link"), permalink-guid(node)))
+}
+
+rss-author fn (item: Any): Str? {
+  creators all-text(item, "dc:creator")
+  if(is-empty(creators), first-text(item, ["author"]), join(creators, ", "))
+}
+
+rss-entry fn (item: Any, base: Str?): Map {
+  link rss-link(item, base)
+  with-dates({
+    id: or(first-text(item, ["guid"]), link),
+    title: first-text(item, ["title"]),
+    link: link,
+    published: first-text(item, ["pubDate", "dc:date"]),
+    updated: first-text(item, ["atom:updated"]),
+    summary: first-text(item, ["description", "content:encoded"]),
+    author: rss-author(item),
+    content: first-text(item, ["content:encoded"])
+  })
+}
+
+parse-rss fn (root: Any, base: Str?): Map {
+  channel ::xml/child(root, "channel")
+  cond {
+    is-null(channel) => { err("feed: an <rss> document with no <channel>") }
+    => {
+      updated first-text(channel, ["lastBuildDate", "pubDate", "dc:date", "atom:updated"])
+      {
+        title: first-text(channel, ["title"]),
+        link: rss-link(channel, base),
+        updated: updated,
+        updated-at: normalize-date(updated),
+        entries: map(::xml/children(channel, "item"), (item) { rss-entry(item, base) })
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Atom 1.0 (pure)
+// ---------------------------------------------------------------------------
+
+atom-text
+meta {
+    doc: """The first of `tags` under `node` with text, as `first-text`, except that `type="xhtml"` content comes back as its `<div>` markup, since `::hot::xml/text` skips child elements (pure)."""
+}
+fn (node: Any, tags: Vec<Str>): Str? {
+  reduce(tags, (found, tag) {
+    child ::xml/child(node, tag)
+    xhtml and(is-some(child), eq(::xml/attr(child, "type"), "xhtml"))
+    div if(xhtml, ::xml/child(child, "div"), null)
+    cond {
+      is-some(found) => { found }
+      is-some(div) => { to-xml(div) }
+      => { node-text(child) }
+    }
+  }, null)
+}
+
+atom-author fn (node: Any, p: Str): Str? {
+  names filter(map(::xml/children(node, `${p}author`), (a) { first-text(a, [`${p}name`, `${p}email`]) }), is-some)
+  if(is-empty(names), null, join(names, ", "))
+}
+
+atom-entry fn (entry: Any, p: Str, feed-base: Str?, feed-author: Str?): Map {
+  base resolve-link(feed-base, ::xml/attr(entry, "xml:base"))
+  link resolve-link(or(base, feed-base), alternate-href(entry, `${p}link`))
+  source ::xml/child(entry, `${p}source`)
+  with-dates({
+    id: or(first-text(entry, [`${p}id`]), link),
+    title: atom-text(entry, [`${p}title`]),
+    link: link,
+    published: first-text(entry, [`${p}published`]),
+    updated: first-text(entry, [`${p}updated`]),
+    summary: atom-text(entry, [`${p}summary`, `${p}content`]),
+    // RFC 4287 4.2.1: an entry with no author takes its source's, then the feed's.
+    author: or(atom-author(entry, p), if(is-null(source), null, atom-author(source, p)), feed-author),
+    content: atom-text(entry, [`${p}content`])
+  })
+}
+
+parse-atom fn (root: Any, p: Str, base: Str?): Map {
+  updated first-text(root, [`${p}updated`])
+  author atom-author(root, p)
+  {
+    title: atom-text(root, [`${p}title`]),
+    link: resolve-link(base, alternate-href(root, `${p}link`)),
+    updated: updated,
+    updated-at: normalize-date(updated),
+    entries: map(::xml/children(root, `${p}entry`), (entry) { atom-entry(entry, p, base, author) })
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Parsing
+// ---------------------------------------------------------------------------
+
+parse
+meta {
+    doc: """
+    Parse RSS 2.0 or Atom 1.0 text, or Bytes in an encoding `::feed::api/decode`
+    reads (pure). `opts.base-url` is the URL relative links resolve
+    against when the feed has no `xml:base`. An Err for malformed XML or
+    for any other kind of document, RSS 1.0 (RDF) included.
+
+    **Example**
+
+    ```hot
+    feed ::feed/parse(text)
+    first(feed.entries).title
+    ```
+    """
+}
+fn
+(text: Str | Bytes): Map {
+  parse(text, {})
+},
+(text: Str | Bytes, opts: Map): Map {
+  decoded ::api/decode(text)
+  root if(is-err(decoded), decoded, from-xml(decoded))
+  cond {
+    is-err(root) => { root }
+    => {
+      base resolve-link(get(opts, "base-url"), ::xml/attr(root, "xml:base"))
+      start or(base, get(opts, "base-url"))
+      atom ::re/capture(root.tag, "^(.*:)?feed$")
+      cond {
+        eq(root.tag, "rss") => { parse-rss(root, start) }
+        is-some(atom) => { parse-atom(root, or(atom.groups[0], ""), start) }
+        => { err(`feed: not an RSS 2.0 or Atom 1.0 document (root element <${root.tag}>)`) }
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Fetching
+// ---------------------------------------------------------------------------
+
+read-response
+meta {
+    doc: """
+    The result of `fetch` for one response (pure). A 304 keeps the
+    caller's `etag` and `last-modified` when the server doesn't repeat
+    them.
+    """
+}
+fn (response: HttpResponse, url: Str, opts: Map): Map {
+  headers or(response.headers, {})
+  validators {
+    etag: or(get(headers, "etag"), get(opts, "etag")),
+    last-modified: or(get(headers, "last-modified"), get(opts, "last-modified"))
+  }
+
+  cond {
+    eq(response.status, 304) => {
+      {title: null, link: null, updated: null, updated-at: null, entries: [], not-modified: true, ...validators}
+    }
+    => {
+      body if(is-str(response.body), response.body, response.body-bytes)
+      feed parse(body, {base-url: url})
+      if(is-err(feed), feed, {...feed, not-modified: false, ...validators})
+    }
+  }
+}
+
+fetch
+meta {
+    doc: """
+    GET a feed and parse it. Returns the `parse` result plus
+    `not-modified`, `etag` and `last-modified`.
+
+    `opts`: `user-agent` (sec.gov asks for a company name and contact
+    email), and `etag` and `last-modified` from an earlier result, which
+    make the request conditional. On a 304, `not-modified` is true and
+    `entries` is empty. Not every publisher sends either validator.
+    Non-2xx is an Err carrying `HttpError`.
+
+    **Example**
+
+    ```hot
+    first-read ::feed/fetch("https://www.sec.gov/news/pressreleases.rss", {user-agent: "Acme Corp ops@acme.example"})
+    next-read ::feed/fetch("https://www.sec.gov/news/pressreleases.rss", {
+      user-agent: "Acme Corp ops@acme.example",
+      etag: first-read.etag,
+      last-modified: first-read.last-modified
+    })
+    next-read.not-modified
+    ```
+    """
+}
+fn
+(url: Str): Map {
+  fetch(url, {})
+},
+(url: Str, opts: Map): Map {
+  cfg ::api/resolve(opts)
+  // Returned, not consumed: consuming an Err would halt the run.
+  response if(is-err(cfg), cfg, ::api/request(url, ::api/request-headers(cfg, opts)))
+  if(is-err(response), response, read-response(response, url, opts))
+}
+
+// ---------------------------------------------------------------------------
+// Diffing (pure)
+// ---------------------------------------------------------------------------
+
+new-entries
+meta {
+    doc: """
+    The entries whose `id` isn't in `seen-ids`, in feed order (pure). An
+    entry with no id can't be matched, so it always counts as new.
+
+    **Example**
+
+    ```hot
+    feed ::feed/fetch(url)
+    fresh ::feed/new-entries(feed.entries, stored-ids)
+    map(feed.entries, (e) { e.id })  // the ids to store for next time
+    ```
+    """
+}
+fn (entries: Vec<Map>, seen-ids: Vec): Vec<Map> {
+  seen zipmap(seen-ids, map(seen-ids, (id) { true }))
+  filter(entries, (e) { or(is-null(e.id), is-null(get(seen, e.id))) })
+}

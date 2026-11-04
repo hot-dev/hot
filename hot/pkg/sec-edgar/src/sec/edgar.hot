@@ -5,7 +5,9 @@ meta {
     SEC EDGAR's public data (no key): the ticker-to-CIK files,
     submissions (company profile plus filing history), XBRL company
     facts, company concepts and frames, filing indexes and document
-    URLs, and EDGAR full-text search.
+    URLs, EDGAR full-text search, and Form D notices of exempt offerings
+    (one filing's `primary_doc.xml`, a date-window listing, and SEC's
+    quarterly data sets).
 
     **User-Agent required.** SEC rejects requests without a declared
     User-Agent naming the company and a contact email, e.g. `"Acme Corp
@@ -24,6 +26,8 @@ meta {
 }
 
 ::api ::sec::edgar::api
+::xml ::hot::xml
+::zip ::hot::zip
 
 WWW "https://www.sec.gov"
 DATA "https://data.sec.gov"
@@ -419,4 +423,505 @@ fn
 },
 (q: Str, opts: Map): Map {
   sec-get(`${EFTS}/search-index${::api/query-string(full-text-params(q, opts))}`, opts)
+}
+
+// ---------------------------------------------------------------------------
+// Form D: one filing
+// ---------------------------------------------------------------------------
+
+form-d-url
+meta {
+    doc: """
+    The URL of a Form D filing's XML, `primary_doc.xml` in the filing
+    folder. Use this rather than the `url` from `recent-filings`: the
+    `primaryDocument` of a Form D is `xslFormDX01/primary_doc.xml`, the
+    same filing rendered as HTML.
+
+    **Example**
+
+    ```hot
+    ::sec::edgar/form-d-url(2162876, "0002162876-26-000002")
+    // "https://www.sec.gov/Archives/edgar/data/2162876/000216287626000002/primary_doc.xml"
+    ```
+    """
+}
+fn (cik: Any, accession: Str): Str {
+  filing-document-url(cik, accession, "primary_doc.xml")
+}
+
+field fn (node: Any, path: Vec<Str>): Str? {
+  found if(is-null(node), null, ::xml/at(node, path))
+  s if(is-null(found), "", trim(::xml/text(found)))
+  if(is-empty(s), null, s)
+}
+
+flag fn (node: Any, path: Vec<Str>): Bool? {
+  v field(node, path)
+  if(is-null(v), null, in(v, ["true", "1"]))
+}
+
+amount
+meta {
+    doc: """A Form D amount as an Int, or as filed when it isn't digits (`"Indefinite"`), or null when empty (pure)."""
+}
+fn (v: Str?): Any {
+  cond {
+    is-null(v) => { null }
+    ::hot::regex/is-match(v, "^\\d{1,18}$") => { Int(v) }
+    => { v }
+  }
+}
+
+kid fn (node: Any, tag: Str): Any {
+  if(is-null(node), null, ::xml/child(node, tag))
+}
+
+kids fn (node: Any, tag: Str): Vec {
+  if(is-null(node), [], ::xml/children(node, tag))
+}
+
+elements fn (node: Any): Vec {
+  if(is-null(node), [], filter(node.content, (c) { not(is-str(c)) }))
+}
+
+element-texts fn (nodes: Vec): Vec<Str> {
+  filter(map(nodes, (n) { field(n, []) }), is-some)
+}
+
+previous-names fn (node: Any, tag: Str): Vec<Str> {
+  // EDGAR writes <value>None</value> for an empty list.
+  filter(element-texts(elements(kid(node, tag))), (name) { not(eq(name, "None")) })
+}
+
+address fn (node: Any): Map {
+  {
+    street1: field(node, ["street1"]),
+    street2: field(node, ["street2"]),
+    city: field(node, ["city"]),
+    state: field(node, ["stateOrCountry"]),
+    state-description: field(node, ["stateOrCountryDescription"]),
+    zip: field(node, ["zipCode"])
+  }
+}
+
+form-d-issuer fn (node: Any): Map {
+  year kid(node, "yearOfInc")
+  choice find-first(elements(year), (e) { not(eq(e.tag, "value")) })
+  {
+    cik: field(node, ["cik"]),
+    name: field(node, ["entityName"]),
+    address: address(kid(node, "issuerAddress")),
+    phone: field(node, ["issuerPhoneNumber"]),
+    jurisdiction: field(node, ["jurisdictionOfInc"]),
+    entity-type: field(node, ["entityType"]),
+    entity-type-other: field(node, ["entityTypeOtherDesc"]),
+    year-of-inc: field(year, ["value"]),
+    year-of-inc-choice: if(is-null(choice), null, choice.tag),
+    previous-names: concat(previous-names(node, "issuerPreviousNameList"), previous-names(node, "edgarPreviousNameList"))
+  }
+}
+
+form-d-person fn (node: Any): Map {
+  first-name field(node, ["relatedPersonName", "firstName"])
+  middle-name field(node, ["relatedPersonName", "middleName"])
+  last-name field(node, ["relatedPersonName", "lastName"])
+  {
+    name: join(filter([first-name, middle-name, last-name], is-some), " "),
+    first-name: first-name,
+    middle-name: middle-name,
+    last-name: last-name,
+    address: address(kid(node, "relatedPersonAddress")),
+    relationships: element-texts(elements(kid(node, "relatedPersonRelationshipList"))),
+    clarification: field(node, ["relationshipClarification"])
+  }
+}
+
+form-d-recipient fn (node: Any): Map {
+  // A state list holds <state> and <description> pairs, or <value>All States</value>.
+  states filter(elements(kid(node, "statesOfSolicitationList")), (e) { not(eq(e.tag, "description")) })
+  {
+    name: field(node, ["recipientName"]),
+    crd: field(node, ["recipientCRDNumber"]),
+    broker-dealer: field(node, ["associatedBDName"]),
+    broker-dealer-crd: field(node, ["associatedBDCRDNumber"]),
+    address: address(kid(node, "recipientAddress")),
+    states: element-texts(states),
+    foreign-solicitation: flag(node, ["foreignSolicitation"])
+  }
+}
+
+form-d-signature fn (node: Any): Map {
+  {
+    issuer-name: field(node, ["issuerName"]),
+    signature: field(node, ["signatureName"]),
+    signer: field(node, ["nameOfSigner"]),
+    title: field(node, ["signatureTitle"]),
+    date: field(node, ["signatureDate"])
+  }
+}
+
+security-types fn (offering: Any): Vec<Str> {
+  // <isEquityType>true</isEquityType> becomes "Equity".
+  ticked filter(elements(kid(offering, "typesOfSecuritiesOffered")), (e) { eq(field(e, []), "true") })
+  map(ticked, (e) { ::hot::regex/replace-all(e.tag, "^is|Type$", "") })
+}
+
+form-d-fields fn (root: Any): Map {
+  o kid(root, "offeringData")
+  primary form-d-issuer(kid(root, "primaryIssuer"))
+  others map(kids(kid(root, "issuerList"), "issuer"), form-d-issuer)
+  {
+    form: field(root, ["submissionType"]),
+    schema-version: field(root, ["schemaVersion"]),
+    test-or-live: field(root, ["testOrLive"]),
+    is-amendment: eq(flag(o, ["typeOfFiling", "newOrAmendment", "isAmendment"]), true),
+    previous-accession: field(o, ["typeOfFiling", "newOrAmendment", "previousAccessionNumber"]),
+    issuer: primary,
+    issuers: concat([primary], others),
+    related-persons: map(kids(kid(root, "relatedPersonsList"), "relatedPersonInfo"), form-d-person),
+    industry-group: field(o, ["industryGroup", "industryGroupType"]),
+    investment-fund-type: field(o, ["industryGroup", "investmentFundInfo", "investmentFundType"]),
+    is-40-act: flag(o, ["industryGroup", "investmentFundInfo", "is40Act"]),
+    revenue-range: field(o, ["issuerSize", "revenueRange"]),
+    net-asset-value-range: field(o, ["issuerSize", "aggregateNetAssetValueRange"]),
+    exemptions: element-texts(kids(kid(o, "federalExemptionsExclusions"), "item")),
+    first-sale-date: field(o, ["typeOfFiling", "dateOfFirstSale", "value"]),
+    first-sale-yet-to-occur: eq(flag(o, ["typeOfFiling", "dateOfFirstSale", "yetToOccur"]), true),
+    more-than-one-year: flag(o, ["durationOfOffering", "moreThanOneYear"]),
+    security-types: security-types(o),
+    business-combination: flag(o, ["businessCombinationTransaction", "isBusinessCombinationTransaction"]),
+    minimum-investment: amount(field(o, ["minimumInvestmentAccepted"])),
+    total-offering-amount: amount(field(o, ["offeringSalesAmounts", "totalOfferingAmount"])),
+    total-amount-sold: amount(field(o, ["offeringSalesAmounts", "totalAmountSold"])),
+    total-remaining: amount(field(o, ["offeringSalesAmounts", "totalRemaining"])),
+    has-non-accredited-investors: flag(o, ["investors", "hasNonAccreditedInvestors"]),
+    non-accredited-investors: amount(field(o, ["investors", "numberNonAccreditedInvestors"])),
+    total-investors: amount(field(o, ["investors", "totalNumberAlreadyInvested"])),
+    sales-commissions: amount(field(o, ["salesCommissionsFindersFees", "salesCommissions", "dollarAmount"])),
+    finders-fees: amount(field(o, ["salesCommissionsFindersFees", "findersFees", "dollarAmount"])),
+    gross-proceeds-used: amount(field(o, ["useOfProceeds", "grossProceedsUsed", "dollarAmount"])),
+    sales-compensation: map(kids(kid(o, "salesCompensationList"), "recipient"), form-d-recipient),
+    signatures: map(kids(kid(o, "signatureBlock"), "signature"), form-d-signature)
+  }
+}
+
+parse-form-d
+meta {
+    doc: """
+    A Form D `primary_doc.xml` as a Map (pure). The main fields:
+
+    - `form` (`"D"` or `"D/A"`), `is-amendment`, `previous-accession`
+    - `issuer`, the primary issuer, and `issuers`, all of them with the
+      primary first: `{cik, name, address, phone, jurisdiction,
+      entity-type, entity-type-other, year-of-inc, year-of-inc-choice,
+      previous-names}`
+    - `related-persons`: `[{name, first-name, middle-name, last-name,
+      address, relationships, clarification}]`
+    - `exemptions`, as filed: `["06b", "3C", "3C.1"]`
+    - `first-sale-date` (`YYYY-MM-DD`), null when
+      `first-sale-yet-to-occur` is true
+    - `total-offering-amount`, `total-amount-sold`, `total-remaining`:
+      an Int, or `"Indefinite"`
+    - `minimum-investment`, `sales-commissions`, `finders-fees`,
+      `gross-proceeds-used`, `total-investors`,
+      `has-non-accredited-investors`, `non-accredited-investors`
+    - `industry-group`, `investment-fund-type`, `is-40-act`,
+      `revenue-range`, `net-asset-value-range`, `security-types`,
+      `more-than-one-year`, `business-combination`
+    - `sales-compensation`: `[{name, crd, broker-dealer,
+      broker-dealer-crd, address, states, foreign-solicitation}]`
+    - `signatures`: `[{issuer-name, signature, signer, title, date}]`
+
+    An element the filing leaves out is null. An Err for malformed XML,
+    and for XML that isn't a Form D.
+    """
+}
+fn (text: Str): Map {
+  root from-xml(text)
+  form if(is-err(root), null, field(root, ["submissionType"]))
+  cond {
+    is-err(root) => { root }
+    not(eq(root.tag, "edgarSubmission")) => { err(`sec-edgar: not a Form D document (root element <${root.tag}>)`) }
+    not(in(form, ["D", "D/A"])) => { err(`sec-edgar: not a Form D document (submission type ${form})`) }
+    => { form-d-fields(root) }
+  }
+}
+
+form-d
+meta {
+    doc: """
+    Read one Form D filing: `parse-form-d` of its `primary_doc.xml`,
+    plus `accession` and `url`. Null when the filing has no such document
+    (the 404 for a paper filing or a wrong accession number). An Err for
+    a CIK that isn't one.
+
+    Any CIK on the filing works, so rows from `recent-filings` and
+    `form-d-filings` both lead here.
+
+    **Example**
+
+    ```hot
+    subs ::sec::edgar/submissions(2162876)
+    row first(::sec::edgar/recent-filings(subs, 1, {forms: ["D", "D/A"]}))
+    d ::sec::edgar/form-d(subs.cik, row.accessionNumber)
+    d.issuer.name
+    d.total-offering-amount
+    ```
+    """
+}
+fn
+(cik: Any, accession: Str): Map? {
+  form-d(cik, accession, {})
+},
+(cik: Any, accession: Str, opts: Map): Map? {
+  // Checked here: an Err consumed while building the URL would halt the run.
+  digits cik-digits(cik)
+  url if(is-err(digits), null, form-d-url(digits, accession))
+  h headers(opts)
+  response if(is-err(digits), digits, if(is-err(h), h, ::api/request("GET", url, h)))
+  cond {
+    and(is-err(response), ::api/is-not-found(err-value(response))) => { null }
+    is-err(response) => { response }
+    => {
+      text ::hot::bytes/to-str(response.body-bytes)
+      parsed if(is-err(text), text, parse-form-d(text))
+      if(is-err(parsed), parsed, {accession: trim(accession), url: url, ...parsed})
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Form D: listing by date
+// ---------------------------------------------------------------------------
+
+// EDGAR full-text search refuses from + size past this.
+SEARCH_WINDOW 10000
+
+form-d-filing
+meta {
+    doc: """
+    One full-text search hit as a row (pure): `{accession, form, filed,
+    ciks, names, file-numbers, exemptions, url}`. `url` is `form-d-url`
+    for the first CIK, and `exemptions` are upper-cased by the index
+    (`"06B"`, where the filing says `"06b"`).
+    """
+}
+fn (hit: Map): Map {
+  s get(hit, "_source")
+  ciks or(get(s, "ciks"), [])
+  {
+    accession: s.adsh,
+    form: s.form,
+    filed: s.file_date,
+    ciks: ciks,
+    names: map(or(get(s, "display_names"), []), (n) { trim(::hot::regex/replace-all(n, "\\s*\\(CIK \\d+\\)$", "")) }),
+    file-numbers: or(get(s, "file_num"), []),
+    exemptions: or(get(s, "items"), []),
+    url: if(is-empty(ciks), null, form-d-url(first(ciks), s.adsh))
+  }
+}
+
+form-d-page
+meta {
+    doc: """A full-text search body as `{total, total-is-exact, from, filings, next-from}` (pure). `from` is the offset it was asked for."""
+}
+fn (body: Map, from: Int): Map {
+  hits or(get-in(body, ["hits", "hits"]), [])
+  total or(get-in(body, ["hits", "total", "value"]), 0)
+  next add(from, length(hits))
+  {
+    total: total,
+    total-is-exact: eq(get-in(body, ["hits", "total", "relation"]), "eq"),
+    from: from,
+    filings: map(hits, form-d-filing),
+    next-from: if(and(not(is-empty(hits)), lt(next, min(total, SEARCH_WINDOW))), next, null)
+  }
+}
+
+form-d-filings
+meta {
+    doc: """
+    One page (100 rows, newest first) of the Form D filings in a date
+    window, through `full-text-search`. Returns `{total, total-is-exact,
+    from, filings, next-from}`; pass `next-from` as `opts.from` for the
+    next page. It is null on the last page.
+
+    **`forms` defaults to `["D"]`, and that lists amendments too.** EDGAR
+    matches `forms=D` on the root form, so it returns both D and D/A,
+    while `forms=D,D/A` returns only the D/A filings. `opts.forms:
+    ["D/A"]` narrows to amendments. Keep originals alone by filtering on
+    `form`.
+
+    EDGAR serves the first 10,000 hits of a search and no further; past
+    that `total` stops at 10,000 and `total-is-exact` is false. A quarter
+    has more than that, so use narrower windows, or `form-d-dataset`.
+
+    `opts` also takes `ciks`, and anything else `full-text-search` does.
+
+    **Example**
+
+    ```hot
+    page ::sec::edgar/form-d-filings("2026-10-20", "2026-10-31")
+    page.total
+    first(page.filings).url
+    ```
+    """
+}
+fn
+(start-date: Str, end-date: Str): Map {
+  form-d-filings(start-date, end-date, {})
+},
+(start-date: Str, end-date: Str, opts: Map): Map {
+  body full-text-search("", {forms: ["D"], ...opts, start-date: start-date, end-date: end-date})
+  if(is-err(body), body, form-d-page(body, or(get(opts, "from"), 0)))
+}
+
+collect-form-d-pages fn (start-date: Str, end-date: Str, limit: Int, opts: Map, acc: Vec): Vec {
+  page form-d-filings(start-date, end-date, opts)
+  combined if(is-err(page), [], concat(acc, page.filings))
+  cond {
+    is-err(page) => { page }
+    gte(length(combined), limit) => { slice(combined, 0, limit) }
+    is-null(page.next-from) => { combined }
+    => { collect-form-d-pages(start-date, end-date, limit, {...opts, from: page.next-from}, combined) }
+  }
+}
+
+collect-form-d-filings
+meta {
+    doc: """
+    Follow `form-d-filings` pages until `limit` rows or the last page,
+    one request per 100 rows, and at most the 10,000 rows EDGAR serves
+    for one search. An Err on any page is returned in place of the rows.
+
+    **Example**
+
+    ```hot
+    rows ::sec::edgar/collect-form-d-filings("2026-10-30", "2026-10-30", 500, {})
+    ```
+    """
+}
+fn (start-date: Str, end-date: Str, limit: Int, opts: Map): Vec<Map> {
+  collect-form-d-pages(start-date, end-date, limit, opts, [])
+}
+
+// ---------------------------------------------------------------------------
+// Form D: quarterly data sets
+// ---------------------------------------------------------------------------
+
+FORM_D_TABLES {
+  submissions: "FORMDSUBMISSION",
+  issuers: "ISSUERS",
+  offerings: "OFFERING",
+  related-persons: "RELATEDPERSONS",
+  recipients: "RECIPIENTS",
+  signatures: "SIGNATURES"
+}
+
+form-d-datasets-page-url fn (): Str {
+  `${WWW}/data-research/sec-markets-data/form-d-data-sets`
+}
+
+form-d-dataset-url
+meta {
+    doc: """
+    A quarter's zip URL from the HTML of SEC's Form D data sets page, or
+    null when the page doesn't list it (pure). The URLs can't be built:
+    the folder has changed over the years and some names end `_d_0.zip`.
+    """
+}
+fn (html: Str, year: Int, quarter: Int): Str? {
+  found ::hot::regex/capture(html, `href="(/files/[^"]*/form-d-data-sets/${year}q${quarter}_d(?:_\\d+)?\\.zip)"`)
+  if(is-null(found), null, `${WWW}${found.groups[0]}`)
+}
+
+form-d-table fn (archive: Bytes, names: Vec<Str>, table: Str): Vec<Map> {
+  file get(FORM_D_TABLES, table)
+  entry if(is-null(file), null, find-first(names, (n) { ::hot::str/ends-with(n, `/${file}.tsv`) }))
+  data if(is-null(entry), null, ::zip/read-entry(archive, entry))
+  cond {
+    is-null(file) => { err(`sec-edgar: unknown Form D table '${table}'`) }
+    is-null(entry) => { err(`sec-edgar: the Form D data set has no ${file}.tsv`) }
+    is-err(data) => { data }
+    // SEC's TSVs don't quote, and a cell can hold a stray double quote.
+    => { from-tsv(data, {quote: false, trim: true}) }
+  }
+}
+
+read-form-d-tables fn (archive: Bytes, names: Vec<Str>, tables: Vec<Str>, acc: Map): Map {
+  rows if(is-empty(tables), null, form-d-table(archive, names, first(tables)))
+  cond {
+    is-empty(tables) => { acc }
+    is-err(rows) => { rows }
+    => { read-form-d-tables(archive, names, rest(tables), assoc(acc, first(tables), rows)) }
+  }
+}
+
+parse-form-d-dataset
+meta {
+    doc: """
+    Read tables from a quarterly data set zip as Bytes (pure). Returns a
+    Map of table name to rows, keyed by SEC's column names (see the
+    `FormD_readme.html` in each zip), with every value a Str.
+
+    `opts.tables` picks from `submissions`, `issuers`, `offerings`,
+    `related-persons`, `recipients` and `signatures`. It defaults to
+    `submissions`, `issuers` and `offerings`, leaving out the three
+    tables of people, which are the bulk of the data.
+
+    Rows of one filing share `ACCESSIONNUMBER` across tables.
+    """
+}
+fn
+(archive: Bytes): Map {
+  parse-form-d-dataset(archive, {})
+},
+(archive: Bytes, opts: Map): Map {
+  tables or(get(opts, "tables"), ["submissions", "issuers", "offerings"])
+  listing ::zip/entries(archive)
+  cond {
+    is-err(listing) => { listing }
+    => {
+      read-form-d-tables(archive, map(listing, (e) { e.name }), tables, {})
+    }
+  }
+}
+
+form-d-dataset
+meta {
+    doc: """
+    One quarter of SEC's Form D data sets: every Form D filed in the
+    quarter as flat tables. Two requests, the data sets page and the zip
+    (about 4 MB). Returns `{year, quarter, url, ...tables}`, or null when
+    SEC hasn't posted that quarter. `opts.tables` is as in
+    `parse-form-d-dataset`.
+
+    SEC updates the data sets quarterly, and says the values are as filed
+    and that it can't guarantee their accuracy.
+
+    **Example**
+
+    ```hot
+    d ::sec::edgar/form-d-dataset(2026, 3, {tables: ["offerings"]})
+    length(d.offerings)
+    ```
+    """
+}
+fn
+(year: Int, quarter: Int): Map? {
+  form-d-dataset(year, quarter, {})
+},
+(year: Int, quarter: Int, opts: Map): Map? {
+  h headers(opts)
+  page if(is-err(h), h, ::api/request("GET", form-d-datasets-page-url(), h))
+  url if(is-err(page), null, form-d-dataset-url(page.body, year, quarter))
+  cond {
+    is-err(page) => { page }
+    is-null(url) => { null }
+    => {
+      response ::api/request("GET", url, h)
+      tables if(is-err(response), response, parse-form-d-dataset(response.body-bytes, opts))
+      if(is-err(tables), tables, {year: year, quarter: quarter, url: url, ...tables})
+    }
+  }
 }

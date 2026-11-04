@@ -72,17 +72,26 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/box/test",
     "./hot/pkg/brave-search/test",
     "./hot/pkg/cal-com/test",
+    "./hot/pkg/cfpb-complaints/test",
     "./hot/pkg/cipherowl/test",
     "./hot/pkg/cloudflare/test",
     "./hot/pkg/companies-house/test",
+    "./hot/pkg/congress-gov/test",
+    "./hot/pkg/courtlistener/test",
     "./hot/pkg/deepgram/test",
     "./hot/pkg/discord/test",
     "./hot/pkg/dropbox/test",
+    "./hot/pkg/ecfr/test",
     "./hot/pkg/elevenlabs/test",
     "./hot/pkg/eu-sanctions/test",
     "./hot/pkg/exa/test",
+    "./hot/pkg/fdic-bankfind/test",
+    "./hot/pkg/federal-register/test",
+    "./hot/pkg/feed/test",
+    "./hot/pkg/ffiec/test",
     "./hot/pkg/ffmpeg/test",
     "./hot/pkg/firecrawl/test",
+    "./hot/pkg/gdelt/test",
     "./hot/pkg/gemini/test",
     "./hot/pkg/github/test",
     "./hot/pkg/gleif/test",
@@ -100,6 +109,7 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/intercom/test",
     "./hot/pkg/json-rpc/test",
     "./hot/pkg/jwt/test",
+    "./hot/pkg/legiscan/test",
     "./hot/pkg/libreoffice/test",
     "./hot/pkg/linear/test",
     "./hot/pkg/mcp/test",
@@ -110,6 +120,7 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/modern-treasury/test",
     "./hot/pkg/mysql/test",
     "./hot/pkg/notion/test",
+    "./hot/pkg/nppes/test",
     "./hot/pkg/oauth2/test",
     "./hot/pkg/ofac/test",
     "./hot/pkg/openai-compatible/test",
@@ -126,7 +137,9 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/qdrant/test",
     "./hot/pkg/quickbooks/test",
     "./hot/pkg/qwen/test",
+    "./hot/pkg/ransomware-live/test",
     "./hot/pkg/redis/test",
+    "./hot/pkg/regulations-gov/test",
     "./hot/pkg/resend/test",
     "./hot/pkg/salesforce/test",
     "./hot/pkg/sec-edgar/test",
@@ -176,17 +189,26 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/box": { "local": "./hot/pkg/box" },
     "hot.dev/brave-search": { "local": "./hot/pkg/brave-search" },
     "hot.dev/cal-com": { "local": "./hot/pkg/cal-com" },
+    "hot.dev/cfpb-complaints": { "local": "./hot/pkg/cfpb-complaints" },
     "hot.dev/cipherowl": { "local": "./hot/pkg/cipherowl" },
     "hot.dev/cloudflare": { "local": "./hot/pkg/cloudflare" },
     "hot.dev/companies-house": { "local": "./hot/pkg/companies-house" },
+    "hot.dev/congress-gov": { "local": "./hot/pkg/congress-gov" },
+    "hot.dev/courtlistener": { "local": "./hot/pkg/courtlistener" },
     "hot.dev/deepgram": { "local": "./hot/pkg/deepgram" },
     "hot.dev/discord": { "local": "./hot/pkg/discord" },
     "hot.dev/dropbox": { "local": "./hot/pkg/dropbox" },
+    "hot.dev/ecfr": { "local": "./hot/pkg/ecfr" },
     "hot.dev/elevenlabs": { "local": "./hot/pkg/elevenlabs" },
     "hot.dev/eu-sanctions": { "local": "./hot/pkg/eu-sanctions" },
     "hot.dev/exa": { "local": "./hot/pkg/exa" },
+    "hot.dev/fdic-bankfind": { "local": "./hot/pkg/fdic-bankfind" },
+    "hot.dev/federal-register": { "local": "./hot/pkg/federal-register" },
+    "hot.dev/feed": { "local": "./hot/pkg/feed" },
+    "hot.dev/ffiec": { "local": "./hot/pkg/ffiec" },
     "hot.dev/ffmpeg": { "local": "./hot/pkg/ffmpeg" },
     "hot.dev/firecrawl": { "local": "./hot/pkg/firecrawl" },
+    "hot.dev/gdelt": { "local": "./hot/pkg/gdelt" },
     "hot.dev/gemini": { "local": "./hot/pkg/gemini" },
     "hot.dev/github": { "local": "./hot/pkg/github" },
     "hot.dev/gleif": { "local": "./hot/pkg/gleif" },
@@ -203,6 +225,7 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/intercom": { "local": "./hot/pkg/intercom" },
     "hot.dev/json-rpc": { "local": "./hot/pkg/json-rpc" },
     "hot.dev/jwt": { "local": "./hot/pkg/jwt" },
+    "hot.dev/legiscan": { "local": "./hot/pkg/legiscan" },
     "hot.dev/libreoffice": { "local": "./hot/pkg/libreoffice" },
     "hot.dev/linear": { "local": "./hot/pkg/linear" },
     "hot.dev/mcp": { "local": "./hot/pkg/mcp" },
@@ -213,6 +236,7 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/modern-treasury": { "local": "./hot/pkg/modern-treasury" },
     "hot.dev/mysql": { "local": "./hot/pkg/mysql" },
     "hot.dev/notion": { "local": "./hot/pkg/notion" },
+    "hot.dev/nppes": { "local": "./hot/pkg/nppes" },
     "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" },
     "hot.dev/ofac": { "local": "./hot/pkg/ofac" },
     "hot.dev/openai": { "local": "./hot/pkg/openai" },
@@ -229,7 +253,9 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/qdrant": { "local": "./hot/pkg/qdrant" },
     "hot.dev/quickbooks": { "local": "./hot/pkg/quickbooks" },
     "hot.dev/qwen": { "local": "./hot/pkg/qwen" },
+    "hot.dev/ransomware-live": { "local": "./hot/pkg/ransomware-live" },
     "hot.dev/redis": { "local": "./hot/pkg/redis" },
+    "hot.dev/regulations-gov": { "local": "./hot/pkg/regulations-gov" },
     "hot.dev/resend": { "local": "./hot/pkg/resend" },
     "hot.dev/salesforce": { "local": "./hot/pkg/salesforce" },
     "hot.dev/sec-edgar": { "local": "./hot/pkg/sec-edgar" },
@@ -777,6 +803,162 @@ hot.project.pkg-integration-openfigi.src.paths ["./hot/pkg/openfigi/src"]
 hot.project.pkg-integration-openfigi.test.paths ["./hot/pkg/openfigi/integration-test"]
 hot.project.pkg-integration-openfigi.test.capture true
 hot.project.pkg-integration-openfigi.deps {}
+
+// eCFR unit tests (hermetic)
+hot.project.pkg-test-ecfr.src.paths ["./hot/pkg/ecfr/src"]
+hot.project.pkg-test-ecfr.test.paths ["./hot/pkg/ecfr/test"]
+hot.project.pkg-test-ecfr.test.capture true
+hot.project.pkg-test-ecfr.deps {}
+
+// eCFR integration tests (live; read-only)
+hot.project.pkg-integration-ecfr.src.paths ["./hot/pkg/ecfr/src"]
+hot.project.pkg-integration-ecfr.test.paths ["./hot/pkg/ecfr/integration-test"]
+hot.project.pkg-integration-ecfr.test.capture true
+hot.project.pkg-integration-ecfr.deps {}
+
+// Federal Register unit tests (hermetic)
+hot.project.pkg-test-federal-register.src.paths ["./hot/pkg/federal-register/src"]
+hot.project.pkg-test-federal-register.test.paths ["./hot/pkg/federal-register/test"]
+hot.project.pkg-test-federal-register.test.capture true
+hot.project.pkg-test-federal-register.deps {}
+
+// Federal Register integration tests (live; read-only)
+hot.project.pkg-integration-federal-register.src.paths ["./hot/pkg/federal-register/src"]
+hot.project.pkg-integration-federal-register.test.paths ["./hot/pkg/federal-register/integration-test"]
+hot.project.pkg-integration-federal-register.test.capture true
+hot.project.pkg-integration-federal-register.deps {}
+
+// CFPB Consumer Complaint Database unit tests (hermetic)
+hot.project.pkg-test-cfpb-complaints.src.paths ["./hot/pkg/cfpb-complaints/src"]
+hot.project.pkg-test-cfpb-complaints.test.paths ["./hot/pkg/cfpb-complaints/test"]
+hot.project.pkg-test-cfpb-complaints.test.capture true
+hot.project.pkg-test-cfpb-complaints.deps {}
+
+// CFPB Consumer Complaint Database integration tests (live; read-only)
+hot.project.pkg-integration-cfpb-complaints.src.paths ["./hot/pkg/cfpb-complaints/src"]
+hot.project.pkg-integration-cfpb-complaints.test.paths ["./hot/pkg/cfpb-complaints/integration-test"]
+hot.project.pkg-integration-cfpb-complaints.test.capture true
+hot.project.pkg-integration-cfpb-complaints.deps {}
+
+// FDIC BankFind unit tests (hermetic)
+hot.project.pkg-test-fdic-bankfind.src.paths ["./hot/pkg/fdic-bankfind/src"]
+hot.project.pkg-test-fdic-bankfind.test.paths ["./hot/pkg/fdic-bankfind/test"]
+hot.project.pkg-test-fdic-bankfind.test.capture true
+hot.project.pkg-test-fdic-bankfind.deps {}
+
+// FDIC BankFind integration tests (live; read-only)
+hot.project.pkg-integration-fdic-bankfind.src.paths ["./hot/pkg/fdic-bankfind/src"]
+hot.project.pkg-integration-fdic-bankfind.test.paths ["./hot/pkg/fdic-bankfind/integration-test"]
+hot.project.pkg-integration-fdic-bankfind.test.capture true
+hot.project.pkg-integration-fdic-bankfind.deps {}
+
+// NPPES NPI Registry unit tests (hermetic)
+hot.project.pkg-test-nppes.src.paths ["./hot/pkg/nppes/src"]
+hot.project.pkg-test-nppes.test.paths ["./hot/pkg/nppes/test"]
+hot.project.pkg-test-nppes.test.capture true
+hot.project.pkg-test-nppes.deps {}
+
+// NPPES NPI Registry integration tests (live; read-only)
+hot.project.pkg-integration-nppes.src.paths ["./hot/pkg/nppes/src"]
+hot.project.pkg-integration-nppes.test.paths ["./hot/pkg/nppes/integration-test"]
+hot.project.pkg-integration-nppes.test.capture true
+hot.project.pkg-integration-nppes.deps {}
+
+// CourtListener unit tests (hermetic)
+hot.project.pkg-test-courtlistener.src.paths ["./hot/pkg/courtlistener/src"]
+hot.project.pkg-test-courtlistener.test.paths ["./hot/pkg/courtlistener/test"]
+hot.project.pkg-test-courtlistener.test.capture true
+hot.project.pkg-test-courtlistener.deps {}
+
+// CourtListener integration tests (live; read-only)
+hot.project.pkg-integration-courtlistener.src.paths ["./hot/pkg/courtlistener/src"]
+hot.project.pkg-integration-courtlistener.test.paths ["./hot/pkg/courtlistener/integration-test"]
+hot.project.pkg-integration-courtlistener.test.capture true
+hot.project.pkg-integration-courtlistener.deps {}
+
+// GDELT unit tests (hermetic)
+hot.project.pkg-test-gdelt.src.paths ["./hot/pkg/gdelt/src"]
+hot.project.pkg-test-gdelt.test.paths ["./hot/pkg/gdelt/test"]
+hot.project.pkg-test-gdelt.test.capture true
+hot.project.pkg-test-gdelt.deps {}
+
+// GDELT integration tests (live; read-only)
+hot.project.pkg-integration-gdelt.src.paths ["./hot/pkg/gdelt/src"]
+hot.project.pkg-integration-gdelt.test.paths ["./hot/pkg/gdelt/integration-test"]
+hot.project.pkg-integration-gdelt.test.capture true
+hot.project.pkg-integration-gdelt.deps {}
+
+// ransomware.live unit tests (hermetic)
+hot.project.pkg-test-ransomware-live.src.paths ["./hot/pkg/ransomware-live/src"]
+hot.project.pkg-test-ransomware-live.test.paths ["./hot/pkg/ransomware-live/test"]
+hot.project.pkg-test-ransomware-live.test.capture true
+hot.project.pkg-test-ransomware-live.deps {}
+
+// ransomware.live integration tests (live; read-only)
+hot.project.pkg-integration-ransomware-live.src.paths ["./hot/pkg/ransomware-live/src"]
+hot.project.pkg-integration-ransomware-live.test.paths ["./hot/pkg/ransomware-live/integration-test"]
+hot.project.pkg-integration-ransomware-live.test.capture true
+hot.project.pkg-integration-ransomware-live.deps {}
+
+// Congress.gov unit tests (hermetic)
+hot.project.pkg-test-congress-gov.src.paths ["./hot/pkg/congress-gov/src"]
+hot.project.pkg-test-congress-gov.test.paths ["./hot/pkg/congress-gov/test"]
+hot.project.pkg-test-congress-gov.test.capture true
+hot.project.pkg-test-congress-gov.deps {}
+
+// Congress.gov integration tests (live; read-only)
+hot.project.pkg-integration-congress-gov.src.paths ["./hot/pkg/congress-gov/src"]
+hot.project.pkg-integration-congress-gov.test.paths ["./hot/pkg/congress-gov/integration-test"]
+hot.project.pkg-integration-congress-gov.test.capture true
+hot.project.pkg-integration-congress-gov.deps {}
+
+// Regulations.gov unit tests (hermetic)
+hot.project.pkg-test-regulations-gov.src.paths ["./hot/pkg/regulations-gov/src"]
+hot.project.pkg-test-regulations-gov.test.paths ["./hot/pkg/regulations-gov/test"]
+hot.project.pkg-test-regulations-gov.test.capture true
+hot.project.pkg-test-regulations-gov.deps {}
+
+// Regulations.gov integration tests (live; read-only)
+hot.project.pkg-integration-regulations-gov.src.paths ["./hot/pkg/regulations-gov/src"]
+hot.project.pkg-integration-regulations-gov.test.paths ["./hot/pkg/regulations-gov/integration-test"]
+hot.project.pkg-integration-regulations-gov.test.capture true
+hot.project.pkg-integration-regulations-gov.deps {}
+
+// LegiScan unit tests (hermetic)
+hot.project.pkg-test-legiscan.src.paths ["./hot/pkg/legiscan/src"]
+hot.project.pkg-test-legiscan.test.paths ["./hot/pkg/legiscan/test"]
+hot.project.pkg-test-legiscan.test.capture true
+hot.project.pkg-test-legiscan.deps {}
+
+// LegiScan integration tests (live; read-only)
+hot.project.pkg-integration-legiscan.src.paths ["./hot/pkg/legiscan/src"]
+hot.project.pkg-integration-legiscan.test.paths ["./hot/pkg/legiscan/integration-test"]
+hot.project.pkg-integration-legiscan.test.capture true
+hot.project.pkg-integration-legiscan.deps {}
+
+// FFIEC CDR unit tests (hermetic)
+hot.project.pkg-test-ffiec.src.paths ["./hot/pkg/ffiec/src"]
+hot.project.pkg-test-ffiec.test.paths ["./hot/pkg/ffiec/test"]
+hot.project.pkg-test-ffiec.test.capture true
+hot.project.pkg-test-ffiec.deps {}
+
+// FFIEC CDR integration tests (live; read-only)
+hot.project.pkg-integration-ffiec.src.paths ["./hot/pkg/ffiec/src"]
+hot.project.pkg-integration-ffiec.test.paths ["./hot/pkg/ffiec/integration-test"]
+hot.project.pkg-integration-ffiec.test.capture true
+hot.project.pkg-integration-ffiec.deps {}
+
+// RSS and Atom feeds unit tests (hermetic)
+hot.project.pkg-test-feed.src.paths ["./hot/pkg/feed/src"]
+hot.project.pkg-test-feed.test.paths ["./hot/pkg/feed/test"]
+hot.project.pkg-test-feed.test.capture true
+hot.project.pkg-test-feed.deps {}
+
+// RSS and Atom feeds integration tests (live; read-only)
+hot.project.pkg-integration-feed.src.paths ["./hot/pkg/feed/src"]
+hot.project.pkg-integration-feed.test.paths ["./hot/pkg/feed/integration-test"]
+hot.project.pkg-integration-feed.test.capture true
+hot.project.pkg-integration-feed.deps {}
 
 // Increase banking unit tests (hermetic)
 hot.project.pkg-test-increase.src.paths ["./hot/pkg/increase/src"]

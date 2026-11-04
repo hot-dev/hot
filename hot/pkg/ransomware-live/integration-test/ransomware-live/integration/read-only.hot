@@ -1,0 +1,67 @@
+::ransomware-live::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration smoke tests (live, read-only)
+// =============================================================================
+// RANSOMWARE_LIVE_LIVE=1 uses the free v2 API, which allows one request a minute
+// per endpoint, so each test calls an endpoint once. RANSOMWARE_LIVE_API_KEY uses
+// PRO instead. Without either setting they record a skip and pass.
+// Run with: hot test -p pkg-integration-ransomware-live
+
+::ctx ::ransomware-live::integration::ctx
+
+test-recent-victims
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("RANSOMWARE_LIVE_LIVE is not 1") }
+        => {
+            latest ::ransomware-live/recent-victims()
+            assert(gt(length(latest), 0), "there are recent claims")
+            assert(is-some(first(latest).group), "records name the claiming group")
+        }
+    }
+}
+
+test-country-records-share-field-names
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("RANSOMWARE_LIVE_LIVE is not 1") }
+        => {
+            records ::ransomware-live/country-victims("LU")
+            assert(gt(length(records), 0), "there are claims in Luxembourg")
+            assert(is-some(first(records).victim), "post_title became victim")
+            assert-eq("LU", first(records).country)
+        }
+    }
+}
+
+test-group
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("RANSOMWARE_LIVE_LIVE is not 1") }
+        => {
+            assert-eq("lockbit3", ::ransomware-live/group("lockbit3").name)
+        }
+    }
+}
+
+test-no-matches-are-empty
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("RANSOMWARE_LIVE_LIVE is not 1") }
+        => {
+            assert-eq([], ::ransomware-live/search-victims("zzqqzzqq"), "no match is an empty list, not an Err")
+        }
+    }
+}
+
+test-validate-key
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip("RANSOMWARE_LIVE_API_KEY is not set") }
+        => {
+            assert(is-map(::ransomware-live/validate-key()), "the key is valid")
+        }
+    }
+}

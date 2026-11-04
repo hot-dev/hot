@@ -1,0 +1,336 @@
+::congress-gov ns
+meta {
+    ctx: {
+        "congress-gov.api-key": {required: false},
+        "congress-gov.base-url": {required: false, secret: false}
+    },
+    doc: """
+    The Congress.gov API v3 (`https://api.congress.gov/v3`): bills and
+    resolutions, with detail, actions, text versions and CRS summaries.
+
+    **Auth**: a free api.data.gov key, sent in the `X-Api-Key` header so
+    it stays out of URLs. Set `congress-gov.api-key` or pass
+    `{api-key: ...}` per call.
+
+    **Rate limit**: 5,000 requests per hour. A 429 is an `HttpError`.
+
+    **Paging**: lists take `limit` (default 20, at most 250) and
+    `offset`. `next-offset` reads the API's own next link, and `collect`
+    follows it.
+    """
+}
+
+::api ::congress-gov::api
+::re ::hot::regex
+
+MAX_LIMIT 250
+BILL_TYPES ["hr", "s", "hjres", "sjres", "hconres", "sconres", "hres", "sres"]
+
+// The Map key each list endpoint puts its rows under.
+LIST_KEYS ["bills", "actions", "summaries", "textVersions"]
+
+// Errors are returned, not consumed: consuming an Err would halt the run.
+with-key fn (opts: Map, f: Fn): Any {
+  cfg ::api/resolve(opts)
+  cond {
+    is-err(cfg) => { cfg }
+    => {
+      key ::api/require-api-key(cfg)
+      if(is-err(key), key, f(cfg, key))
+    }
+  }
+}
+
+congress-get fn (path: Str, params: Map, opts: Map): Any {
+  with-key(opts, (cfg, key) {
+    ::api/get-json(`${cfg.base-url}${path}${::api/query-string({format: "json", ...params})}`, {X-Api-Key: key})
+  })
+}
+
+page-params
+meta {
+    doc: """`limit` (capped at 250) and `offset` from `opts`, omitted when unset (pure)."""
+}
+fn (opts: Map): Map {
+  limit get(opts, "limit")
+  {limit: if(is-null(limit), null, min(MAX_LIMIT, limit)), offset: get(opts, "offset")}
+}
+
+update-params
+meta {
+    doc: """`fromDateTime` and `toDateTime` from `opts.from-date-time` and `opts.to-date-time`, in `YYYY-MM-DDT00:00:00Z` form, omitted when unset (pure). They filter on the record's update date."""
+}
+fn (opts: Map): Map {
+  {fromDateTime: get(opts, "from-date-time"), toDateTime: get(opts, "to-date-time")}
+}
+
+// ---------------------------------------------------------------------------
+// Paths
+// ---------------------------------------------------------------------------
+
+bill-type
+meta {
+    doc: """Normalize a bill type to the path form: `"HR"` → `"hr"`. An Err for anything but hr, s, hjres, sjres, hconres, sconres, hres or sres."""
+}
+fn (value: Any): Str {
+  t lowercase(trim(Str(value)))
+  cond {
+    in(t, BILL_TYPES) => { t }
+    => { err(`congress-gov: invalid bill type '${value}'; expected one of ${join(BILL_TYPES, ", ")}`) }
+  }
+}
+
+whole-number fn (label: Str, value: Any): Str {
+  s trim(Str(value))
+  cond {
+    ::re/is-match(s, "^[1-9]\\d*$") => { s }
+    => { err(`congress-gov: invalid ${label} '${value}'`) }
+  }
+}
+
+bill-path
+meta {
+    doc: """
+    `/bill/{congress}/{kind}/{number}`, or as much of it as is given
+    (pure). `kind` and `number` may be null. An Err for a bad value.
+
+    **Example**
+
+    ```hot
+    ::congress-gov/bill-path(117, "HR", 3076)  // "/bill/117/hr/3076"
+    ::congress-gov/bill-path(117, null, null)  // "/bill/117"
+    ```
+    """
+}
+fn (congress: Any, kind: Any, number: Any): Str {
+  c if(is-null(congress), null, whole-number("congress", congress))
+  t if(is-null(kind), null, bill-type(kind))
+  n if(is-null(number), null, whole-number("bill number", number))
+  cond {
+    is-err(c) => { c }
+    is-err(t) => { t }
+    is-err(n) => { n }
+    => { join(concat(["/bill"], filter([c, t, n], is-some)), "/") }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Bills
+// ---------------------------------------------------------------------------
+
+list-bills fn (congress: Any, kind: Any, opts: Map): Map {
+  path bill-path(congress, kind, null)
+  cond {
+    is-err(path) => { path }
+    => { congress-get(path, {...page-params(opts), ...update-params(opts)}, opts) }
+  }
+}
+
+bills
+meta {
+    doc: """
+    One page of bills and resolutions: all of them, one Congress's, or
+    one type within a Congress. Returns `{bills, pagination, request}`;
+    each bill has `congress`, `type`, `number`, `title`, `originChamber`,
+    `latestAction`, `updateDate`, `updateDateIncludingText`, `url`.
+    `opts`: `limit`, `offset`, `from-date-time`, `to-date-time`, plus
+    `api-key`.
+
+    **Example**
+
+    ```hot
+    page ::congress-gov/bills(119, "hr", {limit: 50, from-date-time: "2026-11-01T00:00:00Z"})
+    first(page.bills).title
+    ```
+    """
+}
+fn
+(): Map {
+  list-bills(null, null, {})
+},
+(opts: Map): Map {
+  list-bills(null, null, opts)
+},
+(congress: Any, opts: Map): Map {
+  list-bills(congress, null, opts)
+},
+(congress: Any, kind: Any, opts: Map): Map {
+  list-bills(congress, kind, opts)
+}
+
+bill
+meta {
+    doc: """
+    One bill or resolution, or null when there is no such bill. Has
+    `title`, `introducedDate`, `sponsors`, `policyArea`, `latestAction`,
+    `laws`, and `{count, url}` links for `actions`, `cosponsors`,
+    `committees`, `relatedBills`, `subjects`, `summaries`, `textVersions`
+    and `titles`.
+
+    **Example**
+
+    ```hot
+    b ::congress-gov/bill(117, "hr", 3076)
+    b.latestAction.text  // "Became Public Law No: 117-108."
+    ```
+    """
+}
+fn
+(congress: Any, kind: Any, number: Any): Map? {
+  bill(congress, kind, number, {})
+},
+(congress: Any, kind: Any, number: Any, opts: Map): Map? {
+  path bill-path(congress, kind, number)
+  cond {
+    is-err(path) => { path }
+    => {
+      with-key(opts, (cfg, key) {
+        out ::api/get-json-or-null(`${cfg.base-url}${path}${::api/query-string({format: "json"})}`, {X-Api-Key: key})
+        cond {
+          is-err(out) => { out }
+          is-null(out) => { null }
+          => { get(out, "bill") }
+        }
+      })
+    }
+  }
+}
+
+bill-sub fn (congress: Any, kind: Any, number: Any, sub: Str, params: Map, opts: Map): Map {
+  path bill-path(congress, kind, number)
+  cond {
+    is-err(path) => { path }
+    => { congress-get(`${path}/${sub}`, params, opts) }
+  }
+}
+
+actions
+meta {
+    doc: """
+    One page of a bill's actions, newest first: `{actions, pagination,
+    request}`. Each action has `actionDate`, `text`, `type`, `actionCode`
+    and `sourceSystem`. `opts`: `limit`, `offset`, `from-date-time`,
+    `to-date-time`, plus `api-key`.
+    """
+}
+fn
+(congress: Any, kind: Any, number: Any): Map {
+  actions(congress, kind, number, {})
+},
+(congress: Any, kind: Any, number: Any, opts: Map): Map {
+  bill-sub(congress, kind, number, "actions", {...page-params(opts), ...update-params(opts)}, opts)
+}
+
+text-versions
+meta {
+    doc: """
+    One page of a bill's text versions: `{textVersions, pagination,
+    request}`. Each version has `type`, `date` (null on some versions)
+    and `formats`, a list of `{type, url}` links to congress.gov (`"PDF"`,
+    `"Formatted Text"`, `"Formatted XML"`). `opts`: `limit`, `offset`,
+    plus `api-key`.
+
+    **Example**
+
+    ```hot
+    page ::congress-gov/text-versions(117, "hr", 3076)
+    first(first(page.textVersions).formats).url
+    ```
+    """
+}
+fn
+(congress: Any, kind: Any, number: Any): Map {
+  text-versions(congress, kind, number, {})
+},
+(congress: Any, kind: Any, number: Any, opts: Map): Map {
+  bill-sub(congress, kind, number, "text", page-params(opts), opts)
+}
+
+summaries
+meta {
+    doc: """
+    One page of a bill's CRS summaries: `{summaries, pagination,
+    request}`. Each summary has `actionDate`, `actionDesc`, `updateDate`,
+    `versionCode` and `text`, which is HTML. `opts`: `limit`, `offset`,
+    plus `api-key`.
+    """
+}
+fn
+(congress: Any, kind: Any, number: Any): Map {
+  summaries(congress, kind, number, {})
+},
+(congress: Any, kind: Any, number: Any, opts: Map): Map {
+  bill-sub(congress, kind, number, "summaries", page-params(opts), opts)
+}
+
+// ---------------------------------------------------------------------------
+// Pagination
+// ---------------------------------------------------------------------------
+
+page-items
+meta {
+    doc: """The rows of a list response, whichever endpoint it came from; `[]` when there are none (pure)."""
+}
+fn (page: Any): Vec {
+  p or(page, {})
+  key find-first(LIST_KEYS, (k) { is-vec(get(p, k)) })
+  if(is-null(key), [], get(p, key))
+}
+
+next-offset
+meta {
+    doc: """
+    The `offset` of the page after `page`, from the `offset` in
+    `pagination.next`, or null on the last page (pure). The row count
+    can't be used for this: the text endpoint has returned more rows than
+    `limit` asked for.
+    """
+}
+fn (page: Any): Int? {
+  next get-in(or(page, {}), ["pagination", "next"])
+  cond {
+    not(is-str(next)) => { null }
+    ::re/is-match(next, "[?&]offset=\\d+") => {
+      Int(::re/capture(next, "[?&]offset=(\\d+)").groups[0])
+    }
+    => { null }
+  }
+}
+
+collect-pages fn (fetch: Fn, offset: Int, limit: Int, acc: Vec): Any {
+  page fetch(offset)
+  cond {
+    is-err(page) => { page }
+    => {
+      items page-items(page)
+      combined concat(acc, items)
+      next next-offset(page)
+      cond {
+        gte(length(combined), limit) => { slice(combined, 0, limit) }
+        is-empty(items) => { combined }
+        is-null(next) => { combined }
+        => { collect-pages(fetch, next, limit, combined) }
+      }
+    }
+  }
+}
+
+collect
+meta {
+    doc: """
+    Follow the pages of a list call until `limit` rows or the end.
+    `fetch` takes `opts` (with `limit` and `offset` set) and returns one
+    page. Each page is one request against the hourly limit.
+
+    **Example**
+
+    ```hot
+    ::cg ::congress-gov
+    all-actions ::cg/collect((o) { ::cg/actions(117, "hr", 3076, o) }, {}, 500)
+    ```
+    """
+}
+fn (fetch: Fn, opts: Map, limit: Int): Vec {
+  size min(MAX_LIMIT, max(1, limit))
+  collect-pages((offset) { fetch({...opts, limit: size, offset: offset}) }, 0, limit, [])
+}

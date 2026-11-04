@@ -1,0 +1,634 @@
+::ecfr ns
+meta {
+    ctx: {"ecfr.base-url": {required: false, secret: false}},
+    doc: """
+    The eCFR API (`https://www.ecfr.gov/api`, no key): the titles list,
+    a title's structure, a section's ancestry, version history, full-text
+    search, and regulation text by title, part or section.
+
+    `get-section` and `get-part` are the calls to reach for when citing a
+    rule such as 31 CFR 1010.230. They return plain text parsed from the
+    XML; `full-xml` returns the XML itself.
+
+    A whole title can pass the 16 MiB response limit
+    (`http.max-response-bytes`), so ask for a part, section or chapter.
+    `size` on `structure` and `ancestry` nodes gives the XML size in
+    bytes.
+
+    Dated calls take `opts.date` (`YYYY-MM-DD`). Without it they first
+    read the title's `up_to_date_as_of` from the titles list, which costs
+    one more request, so pass `date` in a loop.
+
+    Every function takes an optional trailing `opts` Map: `date`, the
+    hierarchy keys `subtitle`, `chapter`, `subchapter`, `part`, `subpart`,
+    `section` and `appendix`, and `base-url`.
+    """
+}
+
+::api ::ecfr::api
+::re ::hot::regex
+::xml ::hot::xml
+
+DEFAULT_COLLECT_PAGE_SIZE 100
+
+// Tags that sit inside a sentence. `from-xml` trims text at element
+// boundaries, so they come out before parsing to keep the spaces around them.
+INLINE_TAGS "</?(?:I|B|E|FR|AC|FTREF|strong|em)(?:\\s[^>]*)?/?>"
+
+// Editorial text that isn't part of the rule: HEAD and CITA have their own
+// fields, and XREF goes in `notes`.
+SKIPPED_TAGS ["HEAD", "CITA", "XREF"]
+
+// ---------------------------------------------------------------------------
+// Parameters and paths
+// ---------------------------------------------------------------------------
+
+hierarchy-params
+meta {
+    doc: """The hierarchy query parameters from `opts`, omitted when unset (pure): `{part: "1010", section: "1010.230"}`."""
+}
+fn (opts: Map): Map {
+  {
+    subtitle: get(opts, "subtitle"),
+    chapter: get(opts, "chapter"),
+    subchapter: get(opts, "subchapter"),
+    part: get(opts, "part"),
+    subpart: get(opts, "subpart"),
+    section: get(opts, "section"),
+    appendix: get(opts, "appendix")
+  }
+}
+
+versions-params
+meta {
+    doc: """Query parameters for `versions` (pure): the hierarchy keys and `issue_date[on]`, `[gte]` and `[lte]` from `opts.issue-date`, `issue-date-gte` and `issue-date-lte`."""
+}
+fn (opts: Map): Map {
+  {
+    ...hierarchy-params(opts),
+    "issue_date[on]": get(opts, "issue-date"),
+    "issue_date[gte]": get(opts, "issue-date-gte"),
+    "issue_date[lte]": get(opts, "issue-date-lte")
+  }
+}
+
+search-params
+meta {
+    doc: """Query parameters for a search (pure): `query`, `date`, `hierarchy[...]` from `opts.title` and the hierarchy keys, and paging."""
+}
+fn (query: Str, opts: Map): Map {
+  h hierarchy-params(opts)
+  {
+    query: query,
+    date: get(opts, "date"),
+    "hierarchy[title]": get(opts, "title"),
+    ...zipmap(map(keys(h), (k) { `hierarchy[${k}]` }), vals(h)),
+    per_page: get(opts, "per-page"),
+    page: get(opts, "page")
+  }
+}
+
+versioner-url fn (path: Str, params: Map, opts: Map): Str {
+  cfg ::api/resolve(opts)
+  `${cfg.base-url}/versioner/v1${path}${::api/query-string(params)}`
+}
+
+dated-path
+meta {
+    doc: """`/{kind}/{date}/title-{title}.{ext}` with each part encoded (pure)."""
+}
+fn (kind: Str, date: Str, title: Any, ext: Str): Str {
+  `/${kind}/${::api/path-segment(date)}/title-${::api/path-segment(title)}.${ext}`
+}
+
+date-for fn (title: Any, opts: Map): Any {
+  date get(opts, "date")
+  if(::api/given(date), date, latest-date(title, opts))
+}
+
+// ---------------------------------------------------------------------------
+// Titles
+// ---------------------------------------------------------------------------
+
+titles
+meta {
+    doc: """
+    All 50 titles with their currency dates. Returns `{titles, meta}`;
+    each title has `number`, `name`, `latest_amended_on`,
+    `latest_issue_date`, `up_to_date_as_of` and `reserved`.
+
+    **Example**
+
+    ```hot
+    out ::ecfr/titles()
+    first(out.titles).name  // "General Provisions"
+    ```
+    """
+}
+fn
+(): Map {
+  titles({})
+},
+(opts: Map): Map {
+  ::api/get-json(versioner-url("/titles.json", {}, opts))
+}
+
+find-title
+meta {
+    doc: """The entry for `title` in a `titles` response, or null (pure)."""
+}
+fn (body: Any, title: Any): Map? {
+  first(filter(or(get(or(body, {}), "titles"), []), (t) { eq(Str(t.number), Str(title)) }))
+}
+
+get-title
+meta {
+    doc: """One title's entry from the titles list, or null when there is none."""
+}
+fn
+(title: Any): Map? {
+  get-title(title, {})
+},
+(title: Any, opts: Map): Map? {
+  titles(opts) |> if-ok((body) { find-title(body, title) })
+}
+
+latest-date
+meta {
+    doc: """The date a title is current to (`up_to_date_as_of`), or null for an unknown title. Today's date often isn't available yet, so dated calls use this one."""
+}
+fn
+(title: Any): Str? {
+  latest-date(title, {})
+},
+(title: Any, opts: Map): Str? {
+  get-title(title, opts) |> if-ok((t) { get(or(t, {}), "up_to_date_as_of") })
+}
+
+// ---------------------------------------------------------------------------
+// Structure, ancestry and versions
+// ---------------------------------------------------------------------------
+
+structure
+meta {
+    doc: """
+    A title's table of contents on `opts.date`: a tree of nodes with
+    `identifier`, `label`, `type`, `size` and `children`, without the
+    regulation text. Null when the title or date has none.
+
+    **Example**
+
+    ```hot
+    tree ::ecfr/structure(31)
+    tree.label  // "Title 31—Money and Finance: Treasury"
+    ```
+    """
+}
+fn
+(title: Any): Map? {
+  structure(title, {})
+},
+(title: Any, opts: Map): Map? {
+  date-for(title, opts) |> if-ok((date) {
+    cond {
+      is-null(date) => { null }
+      => { ::api/get-json-or-null(versioner-url(dated-path("structure", date, title, "json"), {}, opts)) }
+    }
+  })
+}
+
+ancestry
+meta {
+    doc: """
+    The nodes above and including a place in a title, from the title
+    down, on `opts.date`. Pick the place with the hierarchy keys. Returns
+    a Vec of nodes with `identifier`, `label`, `type` and `size`, or null
+    when there is no such place.
+
+    **Example**
+
+    ```hot
+    nodes ::ecfr/ancestry(31, {section: "1010.230"})
+    map(nodes, (n) { n.type })  // ["title", "subtitle", "chapter", "part", "subpart", "section"]
+    ```
+    """
+}
+fn
+(title: Any): Vec? {
+  ancestry(title, {})
+},
+(title: Any, opts: Map): Vec? {
+  date-for(title, opts) |> if-ok((date) {
+    cond {
+      is-null(date) => { null }
+      => {
+        ::api/get-json-or-null(versioner-url(dated-path("ancestry", date, title, "json"), hierarchy-params(opts), opts))
+        |> if-ok((body) { if(is-null(body), null, get(body, "ancestors")) })
+      }
+    }
+  })
+}
+
+versions
+meta {
+    doc: """
+    Version history for a title, narrowed by the hierarchy keys and by
+    `opts.issue-date`, `issue-date-gte` and `issue-date-lte`. Returns
+    `{content_versions, meta}`. Each version has `date`, `amendment_date`,
+    `issue_date`, `identifier`, `name`, `substantive` and `removed`.
+
+    **Example**
+
+    ```hot
+    out ::ecfr/versions(31, {part: "1010", section: "1010.230", issue-date-gte: "2024-01-01"})
+    out.meta.latest_amendment_date
+    ```
+    """
+}
+fn
+(title: Any): Map {
+  versions(title, {})
+},
+(title: Any, opts: Map): Map {
+  ::api/get-json(versioner-url(`/versions/title-${::api/path-segment(title)}.json`, versions-params(opts), opts))
+}
+
+// ---------------------------------------------------------------------------
+// Search
+// ---------------------------------------------------------------------------
+
+search-url fn (path: Str, query: Str, opts: Map): Str {
+  cfg ::api/resolve(opts)
+  `${cfg.base-url}/search/v1${path}${::api/query-string(search-params(query, opts))}`
+}
+
+search
+meta {
+    doc: """
+    Full-text search. Returns `{results, meta}`: each result has
+    `hierarchy`, `headings`, `full_text_excerpt`, `starts_on` and
+    `ends_on`, and `meta` has `current_page`, `total_pages` and
+    `total_count`. Excerpts and headings carry `<strong>` around the
+    terms that matched.
+
+    Without `opts.date` this searches every version, superseded ones
+    included. Pass `date` for the text in force on that day. Narrow with
+    `title` and the hierarchy keys; page with `per-page` and `page`.
+
+    **Example**
+
+    ```hot
+    page ::ecfr/search("beneficial ownership", {title: 31, date: "2026-11-02", per-page: 10})
+    first(page.results).hierarchy.section  // "1010.380"
+    ```
+    """
+}
+fn
+(query: Str): Map {
+  search(query, {})
+},
+(query: Str, opts: Map): Map {
+  ::api/get-json(search-url("/results", query, opts))
+}
+
+search-count
+meta {
+    doc: """The number of results for a search, taking the same `opts` as `search`. Returns the count as an Int."""
+}
+fn
+(query: Str): Int {
+  search-count(query, {})
+},
+(query: Str, opts: Map): Int {
+  ::api/get-json(search-url("/count", query, opts)) |> if-ok((body) { get-in(body, ["meta", "total_count"]) })
+}
+
+// ---------------------------------------------------------------------------
+// Full text
+// ---------------------------------------------------------------------------
+
+full-xml
+meta {
+    doc: """
+    The source XML for a place in a title on `opts.date`, as a Str, or
+    null when the title, place or date has none. Pick the place with the
+    hierarchy keys.
+
+    With no hierarchy key this asks for the whole title, which can pass
+    the 16 MiB response limit and fail with an Err. Use `size` from
+    `ancestry` or `structure` to check first.
+
+    **Example**
+
+    ```hot
+    xml ::ecfr/full-xml(31, {chapter: "X", part: "1010"})
+    ```
+    """
+}
+fn
+(title: Any): Str? {
+  full-xml(title, {})
+},
+(title: Any, opts: Map): Str? {
+  date-for(title, opts) |> if-ok((date) {
+    cond {
+      is-null(date) => { null }
+      => { ::api/get-xml-or-null(versioner-url(dated-path("full", date, title, "xml"), hierarchy-params(opts), opts)) }
+    }
+  })
+}
+
+full
+meta {
+    doc: """`full-xml`, parsed by `parse-full`. Null when `full-xml` is."""
+}
+fn
+(title: Any): Map? {
+  full(title, {})
+},
+(title: Any, opts: Map): Map? {
+  full-xml(title, opts) |> if-ok((xml) { if(is-null(xml), null, parse-full(xml)) })
+}
+
+get-part
+meta {
+    doc: """
+    One part as parsed text, or null: `{type, identifier, citation,
+    heading, authority, source, sections}`. See `parse-full`. A blank
+    part is an Err.
+
+    **Example**
+
+    ```hot
+    part ::ecfr/get-part(31, "1010")
+    part.heading           // "PART 1010—GENERAL PROVISIONS"
+    length(part.sections)  // every section and appendix in the part
+    ```
+    """
+}
+fn
+(title: Any, part: Any): Map? {
+  get-part(title, part, {})
+},
+(title: Any, part: Any, opts: Map): Map? {
+  cond {
+    ::api/given(part) => { full(title, {...opts, part: part}) }
+    // Left out of the query, a blank part would fetch the whole title.
+    => { err("ecfr: get-part needs a part") }
+  }
+}
+
+get-section
+meta {
+    doc: """
+    One section as parsed text, or null: `{type, identifier, citation,
+    heading, text, notes, source-note}`. See `parse-full`. A blank
+    section is an Err.
+
+    **Example**
+
+    ```hot
+    s ::ecfr/get-section(31, "1010.230")
+    s.citation  // "31 CFR 1010.230"
+    s.text
+    ```
+    """
+}
+fn
+(title: Any, section: Any): Map? {
+  get-section(title, section, {})
+},
+(title: Any, section: Any, opts: Map): Map? {
+  cond {
+    ::api/given(section) => { full(title, {...opts, section: section}) }
+    // Left out of the query, a blank section would fetch the whole title.
+    => { err("ecfr: get-section needs a section") }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// XML to text
+// ---------------------------------------------------------------------------
+
+flatten-inline
+meta {
+    doc: """
+    Remove inline markup from eCFR XML before parsing (pure), so the
+    spaces around it survive. Superscripts become `^n`, so `10<SU>6</SU>`
+    doesn't read as 106, and a `<br/>` becomes a space.
+    """
+}
+fn (xml: Str): Str {
+  sup ::re/replace-all(xml, "<SU>([^<]*)</SU>", "^$1")
+  breaks ::re/replace-all(sup, "\\s*<br\\s*/>\\s*", " ")
+  ::re/replace-all(breaks, INLINE_TAGS, "")
+}
+
+squeeze fn (s: Str): Str {
+  trim(::re/replace-all(s, "\\s+", " "))
+}
+
+is-element fn (node: Any): Bool {
+  not(is-str(node))
+}
+
+node-text
+meta {
+    doc: """All the text under an XML node with whitespace collapsed (pure). `::hot::xml/text` reads only a node's direct text."""
+}
+fn (node: Any): Str {
+  cond {
+    is-null(node) => { "" }
+    is-str(node) => { squeeze(node) }
+    => { squeeze(join(map(node.content, node-text), " ")) }
+  }
+}
+
+table-row fn (row: Any): Str {
+  join(map(filter(row.content, is-element), node-text), " | ")
+}
+
+is-skipped fn (node: Any): Bool {
+  not(is-empty(filter(SKIPPED_TAGS, (tag) { eq(tag, node.tag) })))
+}
+
+blocks
+meta {
+    doc: """
+    The paragraphs of a node's text as a Vec of Str (pure). Headings,
+    source notes and amendment links are left out, and a table is one
+    block with a line per row and ` | ` between cells.
+    """
+}
+fn (node: Any): Vec<Str> {
+  cond {
+    is-str(node) => { filter([squeeze(node)], (s) { not(is-empty(s)) }) }
+    is-skipped(node) => { [] }
+    eq(node.tag, "TR") => { [table-row(node)] }
+    eq(node.tag, "TABLE") => { [join(mapcat(node.content, blocks), "\n")] }
+    is-empty(filter(node.content, is-element)) => { filter([node-text(node)], (s) { not(is-empty(s)) }) }
+    => { mapcat(node.content, blocks) }
+  }
+}
+
+citation-of
+meta {
+    doc: """
+    The citation in a node's `hierarchy_metadata` attribute (pure), or
+    null. The attribute is JSON, and part responses escape it twice, so
+    this reads the citation from either form.
+    """
+}
+fn (node: Any): Str? {
+  meta-attr or(::xml/attr(node, "hierarchy_metadata"), "")
+  found ::re/first-match(::hot::str/replace(meta-attr, "&quot;", "\""), "\"citation\":\"[^\"]*\"")
+  if(is-null(found), null, ::re/replace-all(found, "^\"citation\":\"|\"$", ""))
+}
+
+child-text fn (node: Any, tag: Str): Str? {
+  found ::xml/child(node, tag)
+  if(is-null(found), null, node-text(found))
+}
+
+labelled-text fn (node: Any, tag: Str): Str? {
+  found ::xml/child(node, tag)
+  body if(is-null(found), null, ::xml/child(found, "PSPACE"))
+  if(is-null(body), child-text(node, tag), node-text(body))
+}
+
+parse-section fn (node: Any, within: Map): Map {
+  {
+    type: lowercase(or(::xml/attr(node, "TYPE"), "section")),
+    identifier: ::xml/attr(node, "N"),
+    citation: citation-of(node),
+    heading: child-text(node, "HEAD"),
+    text: join(blocks(node), "\n\n"),
+    notes: map(::xml/children(node, "XREF"), node-text),
+    source-note: child-text(node, "CITA"),
+    ...within
+  }
+}
+
+is-leaf fn (node: Any): Bool {
+  kind ::xml/attr(node, "TYPE")
+  or(eq(kind, "SECTION"), eq(kind, "APPENDIX"))
+}
+
+collect-sections fn (node: Any, within: Map): Vec<Map> {
+  kind or(::xml/attr(node, "TYPE"), "")
+  here cond {
+    eq(kind, "PART") => { {...within, part: ::xml/attr(node, "N")} }
+    eq(kind, "SUBPART") => { {...within, subpart: ::xml/attr(node, "N")} }
+    => { within }
+  }
+
+  mapcat(filter(node.content, is-element), (child) {
+    cond {
+      is-leaf(child) => { [parse-section(child, here)] }
+      eq(or(::xml/attr(child, "TYPE"), ""), "") => { [] }
+      => { collect-sections(child, here) }
+    }
+  })
+}
+
+parse-full
+meta {
+    doc: """
+    Parse eCFR XML to text (pure). A section or appendix gives
+    `{type, identifier, citation, heading, text, notes, source-note}`:
+    `text` has paragraphs split by a blank line, `notes` holds eCFR's
+    editorial notes on amendments that are pending or delayed, and
+    `source-note` the Federal Register history.
+
+    Anything larger gives `{type, identifier, citation, heading,
+    authority, source, sections}`, where `sections` lists every section
+    and appendix in order, each with `part` and `subpart` when it has
+    them. `authority` and `source` come from the top node, so a chapter
+    has none.
+
+    Images are dropped, so a formula or chart set as a figure is missing
+    from `text`.
+
+    **Example**
+
+    ```hot
+    s ::ecfr/parse-full(xml)
+    s.citation  // "31 CFR 1010.100"
+    ```
+    """
+}
+fn (xml: Str): Map {
+  from-xml(flatten-inline(xml)) |> if-ok((root) {
+    cond {
+      is-leaf(root) => { parse-section(root, {}) }
+      => {
+        {
+          type: lowercase(or(::xml/attr(root, "TYPE"), "")),
+          identifier: ::xml/attr(root, "N"),
+          citation: citation-of(root),
+          heading: child-text(root, "HEAD"),
+          authority: labelled-text(root, "AUTH"),
+          source: labelled-text(root, "SOURCE"),
+          sections: collect-sections(root, {})
+        }
+      }
+    }
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Pagination
+// ---------------------------------------------------------------------------
+
+next-page
+meta {
+    doc: """The page number after a `search` page from `meta` (`current_page` < `total_pages`), or null on the last page (pure)."""
+}
+fn (page: Any): Int? {
+  m or(get(or(page, {}), "meta"), {})
+  current get(m, "current_page")
+  total get(m, "total_pages")
+  cond {
+    or(is-null(current), is-null(total)) => { null }
+    lt(current, total) => { add(current, 1) }
+    => { null }
+  }
+}
+
+collect-pages fn (fetch: Fn, page-number: Int, limit: Int, acc: Vec): Vec {
+  page fetch(page-number)
+  cond {
+    // Not `if-ok`: a recursive call inside its lambda isn't in tail position.
+    is-err(page) => { page }
+    => {
+      items or(get(page, "results"), [])
+      combined concat(acc, items)
+      next next-page(page)
+      cond {
+        gte(length(combined), limit) => { slice(combined, 0, limit) }
+        is-empty(items) => { combined }
+        is-null(next) => { combined }
+        => { collect-pages(fetch, next, limit, combined) }
+      }
+    }
+  }
+}
+
+collect
+meta {
+    doc: """
+    Follow pages of a search until `limit` results or the last page.
+    `fetch` takes `opts` (with `page` and `per-page` set) and returns one
+    page. `opts.per-page` defaults to 100.
+
+    **Example**
+
+    ```hot
+    hits ::ecfr/collect((o) { ::ecfr/search("beneficial ownership", o) }, {title: 31, date: "2026-11-02"}, 250)
+    ```
+    """
+}
+fn (fetch: Fn, opts: Map, limit: Int): Vec {
+  size or(get(opts, "per-page"), min(DEFAULT_COLLECT_PAGE_SIZE, max(1, limit)))
+  collect-pages((n) { fetch({...opts, per-page: size, page: n}) }, 1, limit, [])
+}

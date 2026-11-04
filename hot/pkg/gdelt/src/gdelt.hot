@@ -1,0 +1,211 @@
+::gdelt ns
+meta {
+    ctx: {"gdelt.base-url": {required: false, secret: false}},
+    doc: """
+    The GDELT DOC 2.0 API (`https://api.gdeltproject.org/api/v2/doc/doc`,
+    no key): worldwide news coverage in 65 languages, as article lists
+    and coverage timelines.
+
+    **Query**: all operators go inside the query string, such as
+    `"data breach" sourcelang:english domain:reuters.com`. Phrases need
+    double quotes, and an OR group needs parentheses.
+
+    **Window**: `timespan` (`"24h"`, `"7d"`, minimum 15 minutes) or
+    `start` and `end`. The default and documented limit is the last
+    three months.
+
+    **Rate limit**: GDELT asks for at most one request every five seconds
+    and answers 429 with plain text. Nothing here waits or retries.
+
+    **Errors**: a success response that isn't JSON, which is how GDELT is
+    reported to reject a query, comes back as an Err carrying `QueryError`.
+
+    Every function takes an optional trailing `opts` Map: `timespan`,
+    `start`, `end`, `sort`, `max-records` (articles), `mode` and `smooth`
+    (timelines), and `base-url`.
+    """
+}
+
+::api ::gdelt::api
+
+MAX_RECORDS 250
+MAX_SMOOTH 30
+TIMELINE_MODES ["TimelineVol", "TimelineVolRaw", "TimelineVolInfo", "TimelineTone", "TimelineLang", "TimelineSourceCountry"]
+
+// ---------------------------------------------------------------------------
+// Dates
+// ---------------------------------------------------------------------------
+
+datetime
+meta {
+    doc: """
+    A UTC date or time as GDELT's `YYYYMMDDHHMMSS` (pure). Takes that form
+    itself, `"2026-11-03"` (midnight), or `"2026-11-03T12:15:00Z"`; null
+    stays null. An Err for anything else, including a non-UTC offset.
+    """
+}
+fn (value: Any): Str? {
+  s if(is-str(value), trim(value), "")
+  cond {
+    is-null(value) => { null }
+    ::hot::regex/is-match(s, "^\\d{14}$") => { s }
+    ::hot::regex/is-match(s, "^\\d{4}-\\d{2}-\\d{2}$") => { `${::hot::regex/replace-all(s, "-", "")}000000` }
+    ::hot::regex/is-match(s, "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$") => {
+      ::hot::regex/replace-all(::hot::regex/replace-all(s, "\\.\\d+", ""), "[-:TZ]", "")
+    }
+    => { err(`gdelt: invalid datetime '${value}'; use YYYYMMDDHHMMSS, YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ in UTC`) }
+  }
+}
+
+iso-date
+meta {
+    doc: """
+    A GDELT timestamp as ISO 8601 (pure): `"20261103T121500Z"` →
+    `"2026-11-03T12:15:00Z"`. Articles' `seendate` and timeline `date`
+    use this form. Any other value comes back unchanged.
+    """
+}
+fn (value: Any): Any {
+  m if(is-str(value), ::hot::regex/capture(value, "^(\\d{4})(\\d{2})(\\d{2})T(\\d{2})(\\d{2})(\\d{2})Z$"), null)
+  cond {
+    is-null(m) => { value }
+    => {
+      g m.groups
+      `${g[0]}-${g[1]}-${g[2]}T${g[3]}:${g[4]}:${g[5]}Z`
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Parameters
+// ---------------------------------------------------------------------------
+
+capped fn (value: Any, limit: Int): Int? {
+  if(is-some(value), min(value, limit), null)
+}
+
+doc-params
+meta {
+    doc: """
+    Query parameters for one DOC API call (pure): `query`, `mode`,
+    `format=json`, `timespan`, `startdatetime` and `enddatetime` (from
+    `opts.start` and `opts.end`, via `datetime`), `sort`, `maxrecords`
+    (capped at 250) and `timelinesmooth` (capped at 30). An Err when a
+    datetime is invalid.
+    """
+}
+fn (query: Str, mode: Str, opts: Map): Map {
+  start datetime(get(opts, "start"))
+  end datetime(get(opts, "end"))
+  cond {
+    is-err(start) => { start }
+    is-err(end) => { end }
+    => {
+      {
+        query: query,
+        mode: mode,
+        format: "json",
+        timespan: get(opts, "timespan"),
+        startdatetime: start,
+        enddatetime: end,
+        sort: get(opts, "sort"),
+        maxrecords: capped(get(opts, "max-records"), MAX_RECORDS),
+        timelinesmooth: capped(get(opts, "smooth"), MAX_SMOOTH)
+      }
+    }
+  }
+}
+
+doc-get fn (query: Str, mode: Str, opts: Map): Any {
+  cfg ::api/resolve(opts)
+  params doc-params(query, mode, opts)
+  cond {
+    is-err(params) => { params }
+    => { ::api/get-json(`${cfg.base-url}${::api/query-string(params)}`, {}) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Articles
+// ---------------------------------------------------------------------------
+
+article-list
+meta {
+    doc: """The articles in an ArtList response (pure), or `[]` when there are none."""
+}
+fn (body: Any): Vec<Map> {
+  or(get(or(body, {}), "articles"), [])
+}
+
+articles
+meta {
+    doc: """
+    Articles matching `query` (`mode=ArtList`). Each has `url`,
+    `url_mobile`, `title`, `seendate`, `socialimage`, `domain`, `language`
+    and `sourcecountry`. `opts.max-records` is 75 by default and at most
+    250. `opts.sort` is `DateDesc`, `DateAsc`, `ToneDesc`, `ToneAsc` or
+    `HybridRel`; the default is relevance. There are no further pages.
+
+    **Example**
+
+    ```hot
+    found ::gdelt/articles("\"data breach\" sourcelang:english", {timespan: "24h", sort: "DateDesc", max-records: 25})
+    first(found).title
+    ```
+    """
+}
+fn
+(query: Str): Vec<Map> {
+  articles(query, {})
+},
+(query: Str, opts: Map): Vec<Map> {
+  body doc-get(query, "ArtList", opts)
+  if(is-err(body), body, article-list(body))
+}
+
+// ---------------------------------------------------------------------------
+// Timelines
+// ---------------------------------------------------------------------------
+
+timeline
+meta {
+    doc: """
+    Coverage over time for `query`. `opts.mode` is `TimelineVol` (share of
+    all monitored coverage, the default), `TimelineVolRaw` (article
+    counts), `TimelineVolInfo` (adds top articles), `TimelineTone`,
+    `TimelineLang` or `TimelineSourceCountry`. `opts.smooth` is a moving
+    window of up to 30 steps. Returns the decoded body; `timeline-points`
+    flattens it. Steps are 15 minutes under 72 hours, hourly up to a
+    week, and daily beyond.
+
+    **Example**
+
+    ```hot
+    body ::gdelt/timeline("\"data breach\"", {timespan: "7d"})
+    ::gdelt/timeline-points(body)
+    ```
+    """
+}
+fn
+(query: Str): Map {
+  timeline(query, {})
+},
+(query: Str, opts: Map): Map {
+  mode or(get(opts, "mode"), "TimelineVol")
+  cond {
+    in(mode, TIMELINE_MODES) => { doc-get(query, mode, opts) }
+    => { err(`gdelt: unknown timeline mode '${mode}'; use one of ${join(TIMELINE_MODES, ", ")}`) }
+  }
+}
+
+timeline-points
+meta {
+    doc: """Flatten a timeline response to `[{series, date, value}]`, with `date` in ISO 8601 (pure). `[]` when there are no points."""
+}
+fn (body: Any): Vec<Map> {
+  mapcat(or(get(or(body, {}), "timeline"), []), (s) {
+    map(or(get(s, "data"), []), (p) {
+      {series: get(s, "series"), date: iso-date(get(p, "date")), value: get(p, "value")}
+    })
+  })
+}

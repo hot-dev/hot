@@ -25,3 +25,50 @@ meta ["test"] fn () {
         }
     }
 }
+
+test-form-d-from-submissions
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip("SEC_USER_AGENT is not set") }
+        => {
+            subs ::sec::edgar/submissions(2162876)
+            row first(::sec::edgar/recent-filings(subs, 5, {forms: ["D"]}))
+            d ::sec::edgar/form-d(subs.cik, row.accessionNumber)
+            assert-eq("0002162876", d.issuer.cik)
+            assert-eq(false, d.is-amendment)
+            assert(gt(length(d.exemptions), 0), "exemptions")
+            assert-eq(null, ::sec::edgar/form-d(2162876, "0002162876-26-999999"), "no such filing")
+        }
+    }
+}
+
+test-form-d-filings-by-date
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip("SEC_USER_AGENT is not set") }
+        => {
+            page ::sec::edgar/form-d-filings("2026-10-20", "2026-10-31")
+            assert(gt(page.total, 1000), "a fortnight of filings")
+            assert-eq(100, length(page.filings))
+            assert-eq(100, page.next-from)
+            forms map(page.filings, (f) { f.form })
+            assert(in("D", forms), "originals")
+            assert(in("D/A", forms), "and amendments")
+            d ::sec::edgar/form-d(first(first(page.filings).ciks), first(page.filings).accession)
+            assert-eq(first(page.filings).form, d.form)
+        }
+    }
+}
+
+test-form-d-dataset
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip("SEC_USER_AGENT is not set") }
+        => {
+            d ::sec::edgar/form-d-dataset(2026, 3, {tables: ["submissions", "offerings"]})
+            assert(gt(length(d.submissions), 10000), "a quarter of filings")
+            assert-eq(length(d.submissions), length(d.offerings))
+            assert-eq(null, ::sec::edgar/form-d-dataset(2001, 1), "a quarter SEC doesn't list")
+        }
+    }
+}

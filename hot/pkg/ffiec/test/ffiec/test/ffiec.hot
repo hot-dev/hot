@@ -1,0 +1,209 @@
+::ffiec::test::ffiec ns
+meta ["test"]
+
+::fx ::ffiec::test::fixtures
+::api ::ffiec::api
+
+HttpResponse ::hot::http/HttpResponse
+
+CREDS {user-id: "PWSUser101", token: "tok-test"}
+
+// ============================================================================
+// Settings resolver
+// ============================================================================
+
+test-resolve-defaults
+meta ["test"]
+fn () {
+    cfg ::api/resolve({})
+    assert-eq("https://ffieccdr.azure-api.us/public", cfg.base-url)
+    assert-eq(null, cfg.user-id)
+    assert-eq(null, cfg.token)
+}
+
+test-resolve-opts-override
+meta ["test"]
+fn () {
+    cfg ::api/resolve({...CREDS, base-url: "https://ffiec.example/public/"})
+    assert-eq("PWSUser101", cfg.user-id)
+    assert-eq("tok-test", cfg.token)
+    assert-eq("https://ffiec.example/public", cfg.base-url)
+    assert-eq(null, ::hot::ctx/get("ffiec.token"), "per-call credentials are never written to ctx")
+}
+
+test-resolve-reads-context
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"ffiec.user-id": "ctx-user", "ffiec.token": "ctx-token", "ffiec.base-url": "https://ctx.example/"})
+    cfg ::api/resolve({})
+    assert-eq("ctx-user", cfg.user-id)
+    assert-eq("ctx-token", cfg.token)
+    assert-eq("https://ctx.example", cfg.base-url)
+    ::hot::ctx/set({"ffiec.user-id": null, "ffiec.token": null, "ffiec.base-url": null})
+}
+
+test-blank-credential-is-an-err-naming-the-key
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"ffiec.user-id": "ctx-user", "ffiec.token": "ctx-token"})
+    for-each(["", "  ", null], (v) {
+      out ::api/resolve({user-id: "u", token: v})
+      assert(is-err(out), "a blank token never falls back to context")
+      assert(::hot::str/contains(err-message(out), "token"), "the Err names token")
+      out2 ::api/resolve({user-id: v, token: "t"})
+      assert(is-err(out2), "a blank user-id never falls back to context")
+      assert(::hot::str/contains(err-message(out2), "user-id"), "the Err names user-id")
+    })
+    ::hot::ctx/set({"ffiec.user-id": null, "ffiec.token": null})
+}
+
+test-credentials-go-together
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"ffiec.user-id": "ctx-user", "ffiec.token": "ctx-token"})
+    assert(is-err(::api/resolve({token: "t"})), "a token never pairs with the context user")
+    assert(is-err(::api/resolve({user-id: "u"})), "a user never pairs with the context token")
+    ::hot::ctx/set({"ffiec.user-id": null, "ffiec.token": null})
+}
+
+test-blank-credential-reaches-every-caller-as-an-err
+meta ["test"]
+fn () {
+    bad {user-id: "u", token: ""}
+    assert(is-err(::ffiec/reporting-periods(bad)), "reporting-periods")
+    assert(is-err(::ffiec/ubpr-reporting-periods(bad)), "ubpr-reporting-periods")
+    assert(is-err(::ffiec/panel-of-reporters("2025-03-31", bad)), "panel-of-reporters")
+    assert(is-err(::ffiec/filers-since-date("2025-03-31", "04/15/2025", bad)), "filers-since-date")
+    assert(is-err(::ffiec/filers-submission-date-time("2025-03-31", "04/15/2025", bad)), "filers-submission-date-time")
+    assert(is-err(::ffiec/facsimile("2025-03-31", 480228, bad)), "facsimile")
+    assert(is-err(::ffiec/ubpr-xbrl-facsimile("2025-03-31", 480228, bad)), "ubpr-xbrl-facsimile")
+}
+
+test-keyed-url-needs-per-call-credentials
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"ffiec.user-id": "ctx-user", "ffiec.token": "ctx-token"})
+    out ::api/resolve({base-url: "https://proxy.example"})
+    assert(is-err(out), "context credentials never go to a per-call URL")
+    assert(::hot::str/contains(err-message(out), "base-url"), "names base-url")
+    assert(is-ok(::api/resolve({...CREDS, base-url: "https://proxy.example"})), "fine with per-call credentials")
+    ::hot::ctx/set({"ffiec.user-id": null, "ffiec.token": null})
+}
+
+test-missing-credentials-are-errors
+meta ["test"]
+fn () {
+    headers ::api/auth-headers(::api/resolve({}))
+    assert(is-err(headers), "FFIEC needs credentials")
+    assert(::hot::str/contains(err-message(headers), "ffiec.user-id"), "names the ctx key")
+    assert(is-err(::ffiec/reporting-periods()), "fails before any request")
+}
+
+test-auth-headers
+meta ["test"]
+fn () {
+    h ::api/auth-headers(::api/resolve(CREDS))
+    assert-eq("PWSUser101", h.UserID)
+    assert-eq("Bearer tok-test", h.Authentication)
+    assert-eq("Bearer tok-test", ::api/auth-headers(::api/resolve({user-id: "u", token: " Bearer tok-test "})).Authentication, "no double prefix")
+}
+
+// ============================================================================
+// Transport helpers
+// ============================================================================
+
+test-http-error-json-body
+meta ["test"]
+fn () {
+    e untype(::api/http-error(HttpResponse({status: 400, headers: {}, body: ::fx/EXPIRED_TOKEN}), "https://ffieccdr.azure-api.us/public/RetrieveReportingPeriods"))
+    assert-eq("ffiec", e.source)
+    assert-eq("ffiec: HTTP 400: Security Token is expired.", e.message)
+}
+
+test-http-error-plain-text-body
+meta ["test"]
+fn () {
+    e untype(::api/http-error(HttpResponse({status: 401, headers: {}, body: ::fx/NO_CREDENTIALS_BODY}), "https://ffieccdr.azure-api.us/public/RetrieveReportingPeriods"))
+    assert-eq("ffiec: HTTP 401: Missing client certificate thumbprint or Bearer token", e.message)
+}
+
+test-http-error-quota
+meta ["test"]
+fn () {
+    e untype(::api/http-error(HttpResponse({status: 403, headers: {}, body: ::fx/OUT_OF_QUOTA}), "https://ffieccdr.azure-api.us/public/RetrieveFacsimile"))
+    assert(::hot::str/contains(e.message, "Out of call volume quota"), "says why")
+}
+
+test-http-error-empty-body
+meta ["test"]
+fn () {
+    e untype(::api/http-error(HttpResponse({status: 500, headers: {}, body: ""}), "https://ffieccdr.azure-api.us/public/X"))
+    assert-eq("ffiec: HTTP 500 for https://ffieccdr.azure-api.us/public/X", e.message)
+}
+
+test-decode-list
+meta ["test"]
+fn () {
+    assert-eq(::fx/REPORTING_PERIODS, ::api/decode-list(HttpResponse({status: 200, headers: {}, body: ::fx/REPORTING_PERIODS})))
+    assert-eq(::fx/FILERS_SINCE_DATE, ::api/decode-list(HttpResponse({status: 200, headers: {}, body: "[1474309, 540739, 91086, 75309]"})), "an unparsed body")
+    assert-eq([], ::api/decode-list(HttpResponse({status: 204, headers: {}, body: null})), "204 has no content")
+    assert-eq([], ::api/decode-list(HttpResponse({status: 204, headers: {}, body: ""})))
+    assert(is-err(::api/decode-list(HttpResponse({status: 200, headers: {}, body: "<html>"}))), "not a list")
+}
+
+// ============================================================================
+// Parameters
+// ============================================================================
+
+test-period-date
+meta ["test"]
+fn () {
+    assert-eq("03/31/2025", ::ffiec/period-date("2025-03-31"))
+    assert-eq("03/31/2025", ::ffiec/period-date("03/31/2025"))
+    assert-eq("03/31/2025", ::ffiec/period-date(" 3/31/2025 "))
+    assert(is-err(::ffiec/period-date("Q1 2025")), "not a date")
+    assert(is-err(::ffiec/panel-of-reporters("Q1 2025", CREDS)), "fails before any request")
+}
+
+test-filer-headers
+meta ["test"]
+fn () {
+    assert-eq({reportingPeriodEndDate: "03/31/2025", fiIdType: "ID_RSSD", fiId: "480228"}, ::ffiec/filer-headers("2025-03-31", 480228, {}))
+    assert-eq("FDICCertNumber", ::ffiec/filer-headers("2025-03-31", 27417, {fi-id-type: "FDICCertNumber"}).fiIdType)
+    assert(is-err(::ffiec/filer-headers("2025-03-31", 1, {fi-id-type: "CIK"})), "not an id type")
+    assert(is-err(::ffiec/facsimile("2025-03-31", 1, {...CREDS, format: "CSV"})), "not a format")
+}
+
+// ============================================================================
+// Facsimiles
+// ============================================================================
+
+test-facsimile-bytes
+meta ["test"]
+fn () {
+    json {content-type: "application/json; charset=utf-8"}
+    // base64("<xbrl/>")
+    assert-eq(Bytes("<xbrl/>"), ::ffiec/facsimile-bytes({headers: json, body: "PHhicmwvPg=="}), "a JSON string is base64")
+    assert-eq(Bytes("<xbrl/>"), ::ffiec/facsimile-bytes({headers: json, body: "\"PHhicmwvPg==\""}), "still quoted")
+    assert-eq(Bytes([60, 120]), ::ffiec/facsimile-bytes({headers: json, body: [60, 120]}), "a byte list")
+    assert-eq(Bytes([37, 80]), ::ffiec/facsimile-bytes({headers: {content-type: "application/pdf"}, body: null, body-bytes: Bytes([37, 80])}), "a raw file")
+    assert-eq(Bytes("<xbrl/>"), ::ffiec/facsimile-bytes({headers: {content-type: "application/xml"}, body: "<xbrl/>"}), "raw text")
+    assert(is-err(::ffiec/facsimile-bytes({headers: json, body: "not*base64"})), "bad base64")
+    assert(is-err(::ffiec/facsimile-bytes({headers: json, body: {a: 1}})), "an unknown shape is an Err, not a guess")
+}
+
+test-transport-failure-is-an-err
+meta ["test"]
+fn () {
+    // Nothing listens on the discard port, so this fails without leaving the machine.
+    assert(is-err(::ffiec/facsimile("2025-03-31", 1, {...CREDS, base-url: "http://127.0.0.1:9"})), "an Err, not a crash")
+}
+
+test-is-missing-facsimile
+meta ["test"]
+fn () {
+    response HttpResponse({status: 400, headers: {}, body: ::fx/MISSING_FACSIMILE})
+    assert(::ffiec/is-missing-facsimile(untype(::api/http-error(response, "https://x"))), "the documented 400")
+    bad HttpResponse({status: 400, headers: {}, body: ::fx/BAD_PERIOD})
+    assert(not(::ffiec/is-missing-facsimile(untype(::api/http-error(bad, "https://x")))), "any other 400 stays an Err")
+}

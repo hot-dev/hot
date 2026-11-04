@@ -1,0 +1,184 @@
+::congress-gov::test::congress-gov ns
+meta ["test"]
+
+::fx ::congress-gov::test::fixtures
+::api ::congress-gov::api
+::cg ::congress-gov
+
+HttpResponse ::hot::http/HttpResponse
+
+// ============================================================================
+// Settings resolver
+// ============================================================================
+
+test-decode-body
+meta ["test"]
+fn () {
+    assert-eq({a: 1}, ::api/decode-body(HttpResponse({status: 200, headers: {}, body: "{\"a\": 1}"}), "u"), "JSON text")
+    assert-eq({a: 1}, ::api/decode-body(HttpResponse({status: 200, headers: {}, body: {a: 1}}), "u"), "already decoded")
+    assert(is-err(::api/decode-body(HttpResponse({status: 200, headers: {}, body: "{\"a\": "}), "u")), "truncated JSON")
+    page ::api/decode-body(HttpResponse({status: 200, headers: {}, body: "<html>Down for maintenance</html>"}), "u")
+    assert(is-err(page), "a maintenance page isn't an empty result")
+    assert-eq(200, err-value(page).status)
+}
+
+test-resolve-defaults
+meta ["test"]
+fn () {
+    cfg ::api/resolve({})
+    assert-eq("https://api.congress.gov/v3", cfg.base-url)
+    assert-eq(null, cfg.api-key)
+}
+
+test-resolve-opts-override
+meta ["test"]
+fn () {
+    cfg ::api/resolve({api-key: "k-test", base-url: "https://congress.example/v3/"})
+    assert-eq("k-test", cfg.api-key)
+    assert-eq("https://congress.example/v3", cfg.base-url)
+    assert-eq(null, ::hot::ctx/get("congress-gov.api-key"), "per-call keys are never written to ctx")
+}
+
+test-resolve-reads-context
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"congress-gov.api-key": "ctx-key", "congress-gov.base-url": "https://ctx.example/"})
+    cfg ::api/resolve({})
+    assert-eq("ctx-key", cfg.api-key)
+    assert-eq("https://ctx.example", cfg.base-url)
+    ::hot::ctx/set({"congress-gov.api-key": null, "congress-gov.base-url": null})
+}
+
+test-blank-credential-is-an-err-naming-the-key
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"congress-gov.api-key": "ctx-key"})
+    for-each(["", "  ", null], (v) {
+      out ::api/resolve({api-key: v})
+      assert(is-err(out), "blank api-key never falls back to context")
+      assert(::hot::str/contains(err-message(out), "api-key"), "the Err names api-key")
+    })
+    ::hot::ctx/set({"congress-gov.api-key": null})
+}
+
+test-blank-credential-reaches-every-caller-as-an-err
+meta ["test"]
+fn () {
+    assert(is-err(::cg/bills({api-key: ""})), "bills")
+    assert(is-err(::cg/bill(117, "hr", 3076, {api-key: ""})), "bill")
+    assert(is-err(::cg/actions(117, "hr", 3076, {api-key: ""})), "actions")
+    assert(is-err(::cg/text-versions(117, "hr", 3076, {api-key: ""})), "text-versions")
+    assert(is-err(::cg/summaries(117, "hr", 3076, {api-key: ""})), "summaries")
+}
+
+test-keyed-url-needs-a-per-call-key
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"congress-gov.api-key": "ctx-key"})
+    out ::api/resolve({base-url: "https://proxy.example"})
+    assert(is-err(out), "the context key never goes to a per-call URL")
+    assert(::hot::str/contains(err-message(out), "base-url"), "names base-url")
+    assert(is-ok(::api/resolve({api-key: "t", base-url: "https://proxy.example"})), "fine with a per-call key")
+    ::hot::ctx/set({"congress-gov.api-key": null})
+}
+
+test-missing-credentials-are-errors
+meta ["test"]
+fn () {
+    key ::api/require-api-key(::api/resolve({}))
+    assert(is-err(key), "Congress.gov needs a key")
+    assert(::hot::str/contains(err-message(key), "congress-gov.api-key"), "names the ctx key")
+    assert(is-err(::cg/bill(117, "hr", 3076)), "fails before any request")
+}
+
+// ============================================================================
+// Transport helpers
+// ============================================================================
+
+test-query-string-drops-unset
+meta ["test"]
+fn () {
+    assert-eq("?format=json&limit=5", ::api/query-string({format: "json", limit: 5, offset: null, fromDateTime: ""}))
+    assert-eq("", ::api/query-string({a: null}))
+}
+
+test-http-error-not-found
+meta ["test"]
+fn () {
+    e untype(::api/http-error(HttpResponse({status: 404, headers: {}, body: ::fx/NOT_FOUND}), "https://api.congress.gov/v3/bill/117/hr/999999"))
+    assert-eq("congress-gov", e.source)
+    assert-eq("congress-gov: HTTP 404: No Bill matches the given query.", e.message)
+    assert(::api/is-not-found(e), "404")
+}
+
+test-http-error-api-data-gov-shape
+meta ["test"]
+fn () {
+    e untype(::api/http-error(HttpResponse({status: 403, headers: {}, body: ::fx/NO_KEY}), "https://api.congress.gov/v3/bill"))
+    assert-eq("congress-gov: HTTP 403: No api_key was supplied. Get one at https://api.congress.gov:443", e.message)
+    assert(not(::api/is-not-found(e)), "403")
+}
+
+test-http-error-rate-limit
+meta ["test"]
+fn () {
+    response HttpResponse({status: 429, headers: {retry-after: "120"}, body: {error: {code: "OVER_RATE_LIMIT", message: ""}}})
+    e untype(::api/http-error(response, "https://api.congress.gov/v3/bill"))
+    assert-eq(120, e.retry-after)
+}
+
+// ============================================================================
+// Congress.gov
+// ============================================================================
+
+test-bill-path
+meta ["test"]
+fn () {
+    assert-eq("/bill/117/hr/3076", ::cg/bill-path(117, "HR", 3076))
+    assert-eq("/bill/117/sjres/1", ::cg/bill-path("117", " SJRes ", "1"))
+    assert-eq("/bill/117", ::cg/bill-path(117, null, null))
+    assert-eq("/bill", ::cg/bill-path(null, null, null))
+    assert(is-err(::cg/bill-path(117, "pl", 1)), "not a bill type")
+    assert(is-err(::cg/bill-path("../x", "hr", 1)), "not a Congress")
+    assert(is-err(::cg/bill-path(117, "hr", "1/../2")), "not a number")
+    assert(is-err(::cg/bill(117, "pl", 1, {api-key: "k"})), "fails before any request")
+}
+
+test-params
+meta ["test"]
+fn () {
+    assert-eq({limit: null, offset: null}, ::cg/page-params({}))
+    assert-eq({limit: 250, offset: 40}, ::cg/page-params({limit: 900, offset: 40}), "limit capped at 250")
+    assert-eq({fromDateTime: "2026-11-01T00:00:00Z", toDateTime: null}, ::cg/update-params({from-date-time: "2026-11-01T00:00:00Z"}))
+}
+
+test-paging
+meta ["test"]
+fn () {
+    assert-eq(1, length(::cg/page-items(::fx/BILLS_PAGE)))
+    assert-eq(3, length(::cg/page-items(::fx/TEXT_PAGE)))
+    assert-eq([], ::cg/page-items(null))
+    assert-eq(3, ::cg/next-offset(::fx/BILLS_PAGE))
+    assert-eq(2, ::cg/next-offset(::fx/TEXT_PAGE))
+    assert-eq(null, ::cg/next-offset({pagination: {count: 3}}), "no next link on the last page")
+    assert-eq(null, ::cg/next-offset(null))
+}
+
+test-collect-follows-next-links
+meta ["test"]
+fn () {
+    fetch (o) {
+      n o.offset
+      next if(lt(n, 4), {next: `https://api.congress.gov/v3/bill?offset=${add(n, 2)}&limit=2`}, {})
+      {bills: [n, add(n, 1)], pagination: {count: 6, ...next}}
+    }
+
+    assert-eq([0, 1, 2, 3, 4, 5], ::cg/collect(fetch, {}, 100))
+    assert-eq([0, 1, 2], ::cg/collect(fetch, {}, 3))
+}
+
+test-collect-returns-an-err-page
+meta ["test"]
+fn () {
+    assert(is-err(::cg/collect((o) { err("boom") }, {}, 10)), "the Err comes back")
+}

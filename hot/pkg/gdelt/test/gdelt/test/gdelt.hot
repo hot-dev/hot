@@ -1,0 +1,171 @@
+::gdelt::test::gdelt ns
+meta ["test"]
+
+::fx ::gdelt::test::fixtures
+::api ::gdelt::api
+
+HttpResponse ::hot::http/HttpResponse
+
+URL "https://api.gdeltproject.org/api/v2/doc/doc?query=x"
+
+// ============================================================================
+// Settings resolver
+// ============================================================================
+
+test-resolve-defaults
+meta ["test"]
+fn () {
+    assert-eq("https://api.gdeltproject.org/api/v2/doc/doc", ::api/resolve({}).base-url)
+}
+
+test-resolve-opts-override
+meta ["test"]
+fn () {
+    assert-eq("https://gdelt.example", ::api/resolve({base-url: "https://gdelt.example/"}).base-url, "GDELT takes no credential")
+}
+
+test-resolve-reads-context
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"gdelt.base-url": "https://ctx.example/doc/"})
+    assert-eq("https://ctx.example/doc", ::api/resolve({}).base-url)
+    assert-eq("https://opts.example", ::api/resolve({base-url: "https://opts.example"}).base-url, "opts win")
+    ::hot::ctx/set({"gdelt.base-url": null})
+}
+
+// ============================================================================
+// Transport helpers
+// ============================================================================
+
+test-query-string-drops-unset
+meta ["test"]
+fn () {
+    assert-eq("?query=%22a+b%22&mode=ArtList", ::api/query-string({query: "\"a b\"", mode: "ArtList", sort: null, timespan: ""}))
+}
+
+test-http-error-keeps-the-text-of-a-429
+meta ["test"]
+fn () {
+    response HttpResponse({status: 429, headers: {}, body: ::fx/RATE_LIMITED})
+    e untype(::api/http-error(response, URL))
+    assert-eq("gdelt", e.source)
+    assert-eq(429, e.status)
+    assert-eq(`gdelt: HTTP 429: ${::fx/RATE_LIMITED}`, e.message)
+    assert-eq(null, e.retry-after, "GDELT sent no Retry-After")
+}
+
+test-parse-body-passes-json
+meta ["test"]
+fn () {
+    assert-eq(::fx/ARTICLES, ::api/parse-body(::fx/ARTICLES, URL), "already decoded")
+    assert-eq({a: 1}, ::api/parse-body(" {\"a\": 1} ", URL), "JSON text")
+}
+
+// The wording is illustrative: GDELT's rejected-query text was not observed.
+test-parse-body-turns-text-into-a-query-error
+meta ["test"]
+fn () {
+    out ::api/parse-body("Your query was too short or too long.\n", URL)
+    assert(is-err(out), "text with a success status is an Err")
+    e untype(err-value(out))
+    assert-eq("gdelt", e.source)
+    assert-eq("Your query was too short or too long.", e.text)
+    assert-eq("gdelt: Your query was too short or too long.", e.message)
+    assert-eq(URL, e.url)
+}
+
+test-parse-body-bad-json-is-a-query-error
+meta ["test"]
+fn () {
+    out ::api/parse-body("{\"articles\": [", URL)
+    assert(is-err(out), "broken JSON is an Err")
+    assert-eq("gdelt: response is not valid JSON", untype(err-value(out)).message)
+}
+
+// ============================================================================
+// Dates
+// ============================================================================
+
+test-datetime
+meta ["test"]
+fn () {
+    assert-eq(null, ::gdelt/datetime(null))
+    assert-eq("20261103121500", ::gdelt/datetime("20261103121500"))
+    assert-eq("20261103000000", ::gdelt/datetime("2026-11-03"))
+    assert-eq("20261103121500", ::gdelt/datetime("2026-11-03T12:15:00Z"))
+    assert-eq("20261103121500", ::gdelt/datetime("2026-11-03T12:15:00.250Z"))
+    assert(is-err(::gdelt/datetime("2026-11-03T12:15:00+02:00")), "UTC only")
+    assert(is-err(::gdelt/datetime("yesterday")), "unparseable")
+}
+
+test-iso-date
+meta ["test"]
+fn () {
+    assert-eq("2026-11-03T12:15:00Z", ::gdelt/iso-date("20261103T121500Z"))
+    assert-eq("not a date", ::gdelt/iso-date("not a date"))
+    assert-eq(null, ::gdelt/iso-date(null))
+}
+
+// ============================================================================
+// Parameters
+// ============================================================================
+
+test-doc-params
+meta ["test"]
+fn () {
+    p ::gdelt/doc-params("foo", "ArtList", {timespan: "24h", sort: "DateDesc", max-records: 900})
+    assert-eq("?query=foo&mode=ArtList&format=json&timespan=24h&sort=DateDesc&maxrecords=250", ::api/query-string(p), "maxrecords capped at 250")
+    q ::gdelt/doc-params("foo", "TimelineVol", {start: "2026-11-01", end: "2026-11-03T00:00:00Z", smooth: 99})
+    assert-eq("20261101000000", q.startdatetime)
+    assert-eq("20261103000000", q.enddatetime)
+    assert-eq(30, q.timelinesmooth, "smoothing capped at 30")
+    assert-eq("?query=foo&mode=ArtList&format=json", ::api/query-string(::gdelt/doc-params("foo", "ArtList", {})))
+}
+
+test-bad-datetime-fails-before-any-request
+meta ["test"]
+fn () {
+    assert(is-err(::gdelt/doc-params("foo", "ArtList", {start: "soon"})), "start")
+    assert(is-err(::gdelt/doc-params("foo", "ArtList", {end: "soon"})), "end")
+    assert(is-err(::gdelt/articles("foo", {start: "soon"})), "articles")
+    assert(is-err(::gdelt/timeline("foo", {end: "soon"})), "timeline")
+}
+
+test-unknown-timeline-mode
+meta ["test"]
+fn () {
+    out ::gdelt/timeline("foo", {mode: "ArtList"})
+    assert(is-err(out), "not a timeline mode")
+    assert(::hot::str/contains(err-message(out), "TimelineVolRaw"), "the Err lists the modes")
+}
+
+// ============================================================================
+// Parsers
+// ============================================================================
+
+test-article-list
+meta ["test"]
+fn () {
+    assert-eq("insurancebusinessmag.com", first(::gdelt/article-list(::fx/ARTICLES)).domain)
+    assert-eq([], ::gdelt/article-list({}), "no matches")
+    assert-eq([], ::gdelt/article-list(null))
+}
+
+test-timeline-points
+meta ["test"]
+fn () {
+    assert-eq([
+      {series: "Volume Intensity", date: "2026-11-02T00:00:00Z", value: 0.12},
+      {series: "Volume Intensity", date: "2026-11-03T00:00:00Z", value: 0.2}
+    ], ::gdelt/timeline-points(::fx/TIMELINE))
+    assert-eq([], ::gdelt/timeline-points({}))
+}
+
+test-parse-body-bytes-is-a-query-error
+meta ["test"]
+fn () {
+    out ::api/parse-body(Bytes([255, 254]), URL)
+    assert(is-err(out), "invalid UTF-8 can't read as no articles")
+    assert-eq("gdelt", err-value(out).source)
+    assert(is-err(::api/parse-body(null, URL)), "nor can no body")
+}

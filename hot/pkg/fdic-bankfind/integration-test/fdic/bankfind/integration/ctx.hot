@@ -1,0 +1,23 @@
+::fdic::bankfind::integration::ctx ns
+
+::env ::hot::env
+
+// The API needs no key, but this only runs with FDIC_BANKFIND_LIVE=1, so CI
+// without network stays hermetic. FDIC_API_KEY is optional. An unset variable
+// is skipped entirely, so an absent key behaves as if never configured.
+::hot::ctx/set(filter-vals({
+    "fdic.bankfind.api-key": ::env/get("FDIC_API_KEY", ""),
+}, (v) { not(is-empty(v)) }))
+
+live
+meta {doc: """True when FDIC_BANKFIND_LIVE=1."""}
+fn (): Bool {
+    eq(::env/get("FDIC_BANKFIND_LIVE", ""), "1")
+}
+
+skip
+meta {doc: """Record a skip and pass."""}
+fn (why: Str): Bool {
+    println(`fdic-bankfind integration: ${why} - skipping`)
+    assert(true, `skipped: ${why}`)
+}

@@ -1,0 +1,203 @@
+::ransomware-live::test::ransomware-live ns
+meta ["test"]
+
+::fx ::ransomware-live::test::fixtures
+::api ::ransomware-live::api
+::rl ::ransomware-live
+
+HttpResponse ::hot::http/HttpResponse
+
+// ============================================================================
+// Settings resolver
+// ============================================================================
+
+test-resolve-defaults
+meta ["test"]
+fn () {
+    cfg ::api/resolve({})
+    assert-eq("https://api.ransomware.live/v2", cfg.base-url)
+    assert-eq("https://api-pro.ransomware.live", cfg.pro-base-url)
+    assert-eq(null, cfg.api-key)
+}
+
+test-resolve-opts-override
+meta ["test"]
+fn () {
+    cfg ::api/resolve({api-key: "k-test", pro-base-url: "https://pro.example/"})
+    assert-eq("k-test", cfg.api-key)
+    assert-eq("https://pro.example", cfg.pro-base-url)
+    assert-eq(null, ::hot::ctx/get("ransomware-live.api-key"), "per-call keys are never written to ctx")
+}
+
+test-resolve-reads-context
+meta ["test"]
+fn () {
+    ::hot::ctx/set({
+      "ransomware-live.api-key": "ctx-key",
+      "ransomware-live.base-url": "https://ctx.example/",
+      "ransomware-live.pro-base-url": "https://ctx-pro.example/"
+    })
+    cfg ::api/resolve({})
+    assert-eq("ctx-key", cfg.api-key)
+    assert-eq("https://ctx.example", cfg.base-url)
+    assert-eq("https://ctx-pro.example", cfg.pro-base-url)
+    ::hot::ctx/set({
+      "ransomware-live.api-key": null,
+      "ransomware-live.base-url": null,
+      "ransomware-live.pro-base-url": null
+    })
+}
+
+test-blank-credential-is-an-err-naming-the-key
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"ransomware-live.api-key": "ctx-key"})
+    for-each(["", "  ", null], (v) {
+      out ::api/resolve({api-key: v})
+      assert(is-err(out), "a blank api-key never falls back to context")
+      assert(::hot::str/contains(err-message(out), "api-key"), "the Err names api-key")
+    })
+    ::hot::ctx/set({"ransomware-live.api-key": null})
+}
+
+test-per-call-pro-url-needs-a-per-call-key
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"ransomware-live.api-key": "ctx-key"})
+    out ::api/resolve({pro-base-url: "https://elsewhere.example"})
+    assert(is-err(out), "the context key is never sent to a per-call URL")
+    assert(::hot::str/contains(err-message(out), "pro-base-url"), "the Err names pro-base-url")
+    ::hot::ctx/set({"ransomware-live.api-key": null})
+}
+
+test-blank-credential-reaches-every-caller-as-an-err
+meta ["test"]
+fn () {
+    assert(is-err(::rl/recent-victims({api-key: ""})), "recent-victims")
+    assert(is-err(::rl/group-victims("lockbit3", {api-key: ""})), "group-victims")
+    assert(is-err(::rl/country-victims("LU", {api-key: ""})), "country-victims")
+    assert(is-err(::rl/search-victims("hospital", {api-key: ""})), "search-victims")
+    assert(is-err(::rl/groups({api-key: ""})), "groups")
+    assert(is-err(::rl/group("lockbit3", {api-key: ""})), "group")
+}
+
+test-validate-key-needs-a-key
+meta ["test"]
+fn () {
+    out ::rl/validate-key()
+    assert(is-err(out), "no key")
+    assert(::hot::str/contains(err-message(out), "ransomware-live.api-key"), "the Err names the context variable")
+}
+
+// ============================================================================
+// Transport helpers
+// ============================================================================
+
+test-query-string-drops-unset
+meta ["test"]
+fn () {
+    assert-eq("?q=a+b", ::api/query-string({q: "a b", group: null, country: ""}))
+    assert-eq("", ::api/query-string({a: null}))
+}
+
+test-path-segment
+meta ["test"]
+fn () {
+    assert-eq("0day%20Syndicate", ::api/path-segment("0day Syndicate"))
+}
+
+test-http-error
+meta ["test"]
+fn () {
+    response HttpResponse({status: 404, headers: {}, body: ::fx/GROUP_NOT_FOUND})
+    e untype(::api/http-error(response, "https://api.ransomware.live/v2/group/no-such-group-xyz"))
+    assert-eq("ransomware-live", e.source)
+    assert-eq("ransomware-live: HTTP 404: Group 'no-such-group-xyz' not found.", e.message)
+    assert(::api/is-not-found(e), "404")
+}
+
+test-http-error-pro-shape
+meta ["test"]
+fn () {
+    response HttpResponse({status: 401, headers: {}, body: ::fx/PRO_MISSING_KEY})
+    e untype(::api/http-error(response, "https://api-pro.ransomware.live/validate"))
+    assert-eq("ransomware-live: HTTP 401: Missing X-API-KEY header", e.message)
+}
+
+test-http-error-retry-after
+meta ["test"]
+fn () {
+    response HttpResponse({status: 429, headers: {"retry-after": "60"}, body: "Too Many Requests"})
+    e untype(::api/http-error(response, "https://api.ransomware.live/v2/groups"))
+    assert-eq(60, e.retry-after)
+}
+
+// ============================================================================
+// Records
+// ============================================================================
+
+test-normalize-victim-keeps-current-records
+meta ["test"]
+fn () {
+    assert-eq(::fx/RECENT_VICTIM, ::rl/normalize-victim(::fx/RECENT_VICTIM))
+}
+
+test-normalize-victim-renames-v2-country-fields
+meta ["test"]
+fn () {
+    v ::rl/normalize-victim(::fx/COUNTRY_VICTIM)
+    assert-eq("Example Finance S.A.", v.victim)
+    assert-eq("N0n", v.group)
+    assert-eq("2026-09-18T15:24:52.166408+00:00", v.attackdate)
+    assert-eq("http://leak-page.invalid/post/2", v.claim_url)
+    assert-eq("example.lu", v.domain)
+    assert-eq("LU", v.country)
+    assert(not(in("post_title", keys(v))), "the old name is gone")
+}
+
+test-normalize-victim-renames-pro-fields
+meta ["test"]
+fn () {
+    v ::rl/normalize-victim(::fx/PRO_VICTIM)
+    assert-eq("example.com", v.domain)
+    assert-eq(::fx/PRO_VICTIM.permalink, v.url)
+    assert-eq("Example Corp", v.victim)
+}
+
+test-normalize-group
+meta ["test"]
+fn () {
+    assert-eq(::fx/GROUP, ::rl/normalize-group(::fx/GROUP))
+    g ::rl/normalize-group(::fx/PRO_GROUP)
+    assert-eq("examplegroup", g.name)
+    assert-eq(3, g.victims)
+}
+
+test-rows
+meta ["test"]
+fn () {
+    assert-eq([1], ::rl/rows([1], "victims"), "v2 returns a bare list")
+    assert-eq([1], ::rl/rows({client: "x", victims: [1]}, "victims"), "a wrapped list")
+    assert-eq([], ::rl/rows(null, "victims"), "a 404 is no rows")
+    assert(is-err(::rl/rows({error: "x"}, "victims")), "any other shape is an Err, never empty")
+}
+
+test-country-code
+meta ["test"]
+fn () {
+    assert-eq("LU", ::rl/country-code(" lu "))
+    assert(is-err(::rl/country-code("LUX")), "alpha-2 only")
+    assert(is-err(::rl/country-victims("LUX")), "rejected before any request")
+}
+
+test-lookup-result
+meta ["test"]
+fn () {
+    not-found err(::api/http-error(HttpResponse({status: 404, headers: {}, body: {error: "none"}}), "u"))
+    failed err(::api/http-error(HttpResponse({status: 500, headers: {}, body: {error: "down"}}), "u"))
+    free {api-key: null}
+    assert-eq(null, ::rl/lookup-result(not-found, free), "a v2 404 is no match")
+    assert(is-err(::rl/lookup-result(failed, free)), "a v2 500 stays an Err")
+    assert(is-err(::rl/lookup-result(not-found, {api-key: "k"})), "a PRO 404 stays an Err")
+    assert-eq([1], ::rl/lookup-result(ok([1]), free), "a body passes through")
+}

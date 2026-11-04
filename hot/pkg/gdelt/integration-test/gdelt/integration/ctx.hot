@@ -1,0 +1,19 @@
+::gdelt::integration::ctx ns
+
+::env ::hot::env
+
+// GDELT needs no key but only runs with GDELT_LIVE=1, so CI without network
+// stays hermetic.
+
+live
+meta {doc: """True when GDELT_LIVE=1."""}
+fn (): Bool {
+    eq(::env/get("GDELT_LIVE", ""), "1")
+}
+
+skip
+meta {doc: """Record a skip and pass."""}
+fn (why: Str): Bool {
+    println(`gdelt integration: ${why} - skipping`)
+    assert(true, `skipped: ${why}`)
+}

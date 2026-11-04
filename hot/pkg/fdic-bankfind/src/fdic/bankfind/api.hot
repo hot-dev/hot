@@ -1,0 +1,303 @@
+::fdic::bankfind::api ns
+meta {
+    ctx: {
+        "fdic.bankfind.api-key": {required: false},
+        "fdic.bankfind.base-url": {required: false, secret: false}
+    },
+    doc: """
+    Transport for the FDIC BankFind Suite API: the settings resolver
+    (per-call `opts` first, then context variables, then defaults), a
+    typed `HttpError`, JSON GETs, and query-string building that drops
+    unset values.
+
+    | opts key | Context variable | Default |
+    |---|---|---|
+    | `api-key` | `fdic.bankfind.api-key` | none: the API needs no key today |
+    | `base-url` | `fdic.bankfind.base-url` | `https://api.fdic.gov/banks` |
+
+    **The key goes in the URL.** FDIC documents only the `api_key` query
+    parameter, so every `HttpError` field is redacted (`redact-url`,
+    `redact-value`), and `api_key` is dropped from the parameters a
+    response echoes in `meta.parameters`.
+
+    **Per-call credentials.** `api-key` in `opts` is masked in call
+    records and never written to context, so parallel flows and tenants
+    in one run don't see each other's keys. Present but blank or null, it
+    is an error, never a fallback to context. A per-call `base-url`
+    without an `api-key` in the same `opts` sends no key: the context key
+    is never sent to a per-call URL.
+    """
+}
+
+::ctx ::hot::ctx
+::uri ::hot::uri
+::re ::hot::regex
+
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+SOURCE "fdic-bankfind"
+BASE_URL "https://api.fdic.gov/banks"
+PACKAGE_AGENT "hot-dev-fdic-bankfind-pkg/0.1 (+https://hot.dev)"
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+given
+meta {
+    doc: """True for a non-null value that is not a blank string."""
+}
+fn (v: Any): Bool {
+  match v {
+    Null => { false }
+    Str => { not(is-empty(trim(v))) }
+    _ => { true }
+  }
+}
+
+pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
+  from-opts get(opts, key)
+  from-ctx ::ctx/get(ctx-key)
+  cond {
+    given(from-opts) => { from-opts }
+    given(from-ctx) => { from-ctx }
+    => { default }
+  }
+}
+
+strip-slash fn (url: Str): Str {
+  ::re/replace-all(url, "/+$", "")
+}
+
+resolve
+meta {
+    doc: """
+    Resolve settings for one call: `{api-key, base-url}`. Values in
+    `opts` win over context; an `api-key` in `opts` is used for that call
+    only and comes back unchanged. `api-key` is null when none is set,
+    which the API accepts, and null when `opts` has a `base-url` but no
+    `api-key`. An Err when `api-key` is in `opts` but blank or null.
+
+    **Example**
+
+    ```hot
+    cfg ::fdic::bankfind::api/resolve({api-key: tenant.fdic-key})
+    ```
+    """
+}
+fn (opts: Map): Map {
+  from-opts get(opts, "api-key")
+  ::ctx/mark-secret(filter([from-opts], given))
+  cond {
+    and(in("api-key", keys(opts)), not(given(from-opts))) => {
+      err("fdic-bankfind: api-key is in the call's opts but is blank or null. Pass a value, or leave api-key out to use the context variable.")
+    }
+    => {
+      {
+        api-key: if(given(get(opts, "base-url")), from-opts, pick(opts, "api-key", "fdic.bankfind.api-key", null)),
+        base-url: strip-slash(pick(opts, "base-url", "fdic.bankfind.base-url", BASE_URL))
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+redact-url
+meta {
+    doc: """`url` with any `api_key` value replaced by `REDACTED` (pure)."""
+}
+fn (url: Str): Str {
+  // Stops at a quote too, as `redact-value` runs this over JSON text.
+  ::re/replace-all(url, "api_key=[^&#\\s\"')]*", "api_key=REDACTED")
+}
+
+redact
+meta {
+    doc: """`text` with any `api_key` value and every literal copy of `api-key` replaced by `REDACTED` (pure). `api-key` may be null."""
+}
+fn (text: Str, api-key: Str?): Str {
+  blanked redact-url(text)
+  if(given(api-key), ::hot::str/replace(blanked, api-key, "REDACTED"), blanked)
+}
+
+redact-value
+meta {
+    doc: """`redact` over a whole response value: a string, or every string inside a Map or Vec (pure)."""
+}
+fn (value: Any, api-key: Str?): Any {
+  cond {
+    is-str(value) => { redact(value, api-key) }
+    or(is-map(value), is-vec(value)) => { from-json(redact(to-json(value), api-key)) }
+    => { value }
+  }
+}
+
+url-key fn (url: Str): Str? {
+  found ::re/capture(url, "[?&]api_key=([^&#]*)")
+  if(is-null(found), null, ::uri/decode(found.groups[0]))
+}
+
+drop-key
+meta {
+    doc: """`body` without `api_key` in the `meta.parameters` the API echoes (pure)."""
+}
+fn (body: Any): Any {
+  parameters if(is-map(body), get-in(body, ["meta", "parameters"]), null)
+  cond {
+    is-map(parameters) => { assoc-in(body, ["meta", "parameters"], delete(parameters, "api_key")) }
+    => { body }
+  }
+}
+
+HttpError
+meta {
+    doc: """
+    A failed FDIC response. `source` is `"fdic-bankfind"`; `url` the
+    requested URL with any key redacted; `headers` and `body` redacted
+    too; `retry-after` the parsed `Retry-After` seconds on 429s; `message`
+    a one-line summary that never includes credentials. `status` is
+    normally non-2xx, but it is 200 when the site answered with something
+    other than JSON (see `decode-body`).
+    """
+}
+type {
+    source: Str,
+    status: Int,
+    url: Str,
+    headers: Map,
+    body: Any,
+    retry-after: Int?,
+    message: Str
+}
+
+body-detail fn (body: Any): Str? {
+  cond {
+    is-str(body) => { if(gt(length(body), 200), `${slice(body, 0, 200)}…`, body) }
+    is-map(body) => {
+      // BankFind: {errors: [{title, detail}]} or {message, error}.
+      // The api.data.gov gateway in front of it: {error: {code, message}}.
+      first-error if(is-vec(get(body, "errors")), first(get(body, "errors")), null)
+      gateway get(body, "error")
+      or(
+        get(or(first-error, {}), "title"),
+        get(body, "message"),
+        if(is-map(gateway), get(gateway, "message"), gateway)
+      )
+    }
+    => { null }
+  }
+}
+
+retry-after fn (headers: Map): Int? {
+  v get(headers, "retry-after")
+  cond {
+    is-null(v) => { null }
+    ::re/is-match(trim(Str(v)), "^\\d+$") => { Int(trim(Str(v))) }
+    => { null }
+  }
+}
+
+http-error
+meta {
+    doc: """Build an `HttpError` from a non-2xx response. Exposed for testing; every request uses it."""
+}
+fn (response: HttpResponse, url: Str): HttpError {
+  key url-key(url)
+  safe-url redact-url(url)
+  headers redact-value(or(response.headers, {}), key)
+  body drop-key(redact-value(response.body, key))
+  detail body-detail(body)
+  HttpError({
+    source: SOURCE,
+    status: response.status,
+    url: safe-url,
+    headers: headers,
+    body: body,
+    retry-after: retry-after(headers),
+    message: redact(if(is-some(detail), `${SOURCE}: HTTP ${response.status}: ${detail}`, `${SOURCE}: HTTP ${response.status} for ${safe-url}`), key)
+  })
+}
+
+not-json-error
+meta {
+    doc: """An `HttpError` for a 2xx response that is not JSON, such as a maintenance page, which would otherwise read as an empty result. Exposed for testing."""
+}
+fn (response: HttpResponse, url: Str): HttpError {
+  safe-url redact-url(url)
+  HttpError({
+    source: SOURCE,
+    status: response.status,
+    url: safe-url,
+    headers: redact-value(or(response.headers, {}), url-key(url)),
+    body: null,
+    retry-after: null,
+    message: `${SOURCE}: expected JSON from ${safe-url}, got something else (usually an HTML page)`
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------
+
+query-string
+meta {
+    doc: """Build a `?a=1&b=2` suffix from a Map, dropping null and blank values (pure); `""` when nothing remains."""
+}
+fn (params: Map): Str {
+  ::uri/query-string(filter-vals(params, given))
+}
+
+request
+meta {
+    doc: """
+    GET (or another method) a BankFind URL with `headers`, returning the
+    `HttpResponse` on 2xx or an Err carrying `HttpError`. A transport
+    failure stays its own Err, with any key redacted.
+    """
+}
+fn (method: Str, url: Str, headers: Map): HttpResponse {
+  response ::hot::http/request(HttpRequest({
+    method,
+    url,
+    headers: {User-Agent: PACKAGE_AGENT, ...headers},
+    body: ""
+  }))
+  cond {
+    is-err(response) => {
+      // The runtime's message quotes the URL.
+      err(redact-url(Str(err-value(response))))
+    }
+
+    is-ok-response(response) => { response }
+    => { err(http-error(response, url)) }
+  }
+}
+
+decode-body
+meta {
+    doc: """The decoded JSON of a 2xx response without `api_key` in `meta.parameters`, or an Err carrying `HttpError` when the body is not JSON (pure). Exposed for testing."""
+}
+fn (response: HttpResponse, url: Str): Any {
+  body response.body
+  text if(is-str(body), trim(body), "")
+  parsed if(or(::hot::str/starts-with(text, "{"), ::hot::str/starts-with(text, "[")), from-json(text), body)
+  cond {
+    is-err(parsed) => { err(not-json-error(response, url)) }
+    or(is-map(parsed), is-vec(parsed)) => { drop-key(parsed) }
+    => { err(not-json-error(response, url)) }
+  }
+}
+
+get-json
+meta {
+    doc: """GET a JSON resource and return the decoded body, or an Err carrying `HttpError`."""
+}
+fn (url: Str, headers: Map): Any {
+  response request("GET", url, {Accept: "application/json", ...headers})
+  if(is-err(response), response, decode-body(response, url))
+}

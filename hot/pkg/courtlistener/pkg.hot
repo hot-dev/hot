@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.courtlistener {
+  name: "hot.dev/courtlistener",
+  version: "0.1.0",
+  hot-min-version: "3.0.2",
+  description: "The Free Law Project CourtListener REST API v4 for Hot: opinion and RECAP search, dockets, docket entries, opinions and clusters by id, and cursor paging.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["legal", "court-records", "courtlistener", "recap"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

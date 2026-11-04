@@ -1,0 +1,336 @@
+::ecfr::api ns
+meta {
+    ctx: {"ecfr.base-url": {required: false, secret: false}},
+    doc: """
+    Transport for the eCFR API: the settings resolver (per-call `opts`
+    first, then context variables, then defaults), a typed `HttpError`,
+    gzip-aware GETs, and query-string building that drops unset values.
+
+    | opts key | Context variable | Default |
+    |---|---|---|
+    | `base-url` | `ecfr.base-url` | `https://www.ecfr.gov/api` |
+
+    Every request sends `accept-encoding: gzip`, because the full-text
+    endpoint answers 406 without it. `::hot::http` doesn't decompress,
+    so `body-text` decodes the body when `content-encoding` says gzip
+    and reads it as it is otherwise.
+
+    eCFR takes no credential, so a per-call `base-url` needs none.
+    """
+}
+
+::ctx ::hot::ctx
+::uri ::hot::uri
+::re ::hot::regex
+
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+SOURCE "ecfr"
+BASE_URL "https://www.ecfr.gov/api"
+PACKAGE_AGENT "hot-dev-ecfr-pkg/0.1 (+https://hot.dev)"
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+given
+meta {
+    doc: """True for a non-null value that is not a blank string."""
+}
+fn (v: Any): Bool {
+  match v {
+    Null => { false }
+    Str => { not(is-empty(trim(v))) }
+    _ => { true }
+  }
+}
+
+pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
+  from-opts get(opts, key)
+  from-ctx ::ctx/get(ctx-key)
+  cond {
+    given(from-opts) => { from-opts }
+    given(from-ctx) => { from-ctx }
+    => { default }
+  }
+}
+
+strip-slash fn (url: Str): Str {
+  ::re/replace-all(url, "/+$", "")
+}
+
+resolve
+meta {
+    doc: """
+    Resolve settings for one call: `{base-url}`. A value in `opts` wins
+    over context.
+
+    **Example**
+
+    ```hot
+    cfg ::ecfr::api/resolve({base-url: "https://ecfr-proxy.example/api"})
+    ```
+    """
+}
+fn (opts: Map): Map {
+  {base-url: strip-slash(pick(opts, "base-url", "ecfr.base-url", BASE_URL))}
+}
+
+// ---------------------------------------------------------------------------
+// Bodies
+// ---------------------------------------------------------------------------
+
+header fn (response: Any, name: Str): Str {
+  lowercase(Str(or(get(or(response.headers, {}), name), "")))
+}
+
+body-text
+meta {
+    doc: """
+    A response body as text (pure). Decompresses it when
+    `content-encoding` says gzip, since a server can also answer
+    uncompressed. Bad gzip is an Err.
+    """
+}
+fn (response: Any): Any {
+  raw or(response.body-bytes, response.body)
+  cond {
+    contains(header(response, "content-encoding"), "gzip") => {
+      ::hot::gzip/decode(raw) |> if-ok(::hot::bytes/to-str)
+    }
+
+    is-bytes(raw) => { ::hot::bytes/to-str(raw) }
+    => { raw }
+  }
+}
+
+parse-json fn (text: Any): Any {
+  cond {
+    not(is-str(text)) => { text }
+    or(::hot::str/starts-with(trim(text), "{"), ::hot::str/starts-with(trim(text), "[")) => { from-json(trim(text)) }
+    => { text }
+  }
+}
+
+is-html
+meta {
+    doc: """
+    True when a response is an HTML page (pure). No endpoint here serves
+    HTML, so a 200 page means the request was sent somewhere else. eCFR
+    redirects clients it flags as automated to a CAPTCHA page, and
+    `::hot::http` follows the redirect.
+    """
+}
+fn (response: Any): Bool {
+  contains(header(response, "content-type"), "text/html")
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+HttpError
+meta {
+    doc: """
+    A failed eCFR response. `source` is `"ecfr"`; `url` the requested URL
+    (eCFR takes no credentials in URLs); `retry-after` the parsed
+    `Retry-After` seconds on 429s; `message` a one-line summary that
+    never includes credentials. `status` can be 200 when the site served
+    an HTML page in place of API data (see `is-html`).
+    """
+}
+type {
+    source: Str,
+    status: Int,
+    url: Str,
+    headers: Map,
+    body: Any,
+    retry-after: Int?,
+    message: Str
+}
+
+body-detail fn (body: Any): Str? {
+  cond {
+    // An HTML error page has no useful one-line detail.
+    and(is-str(body), ::hot::str/starts-with(trim(body), "<")) => { null }
+    is-str(body) => { if(gt(length(body), 200), `${slice(body, 0, 200)}…`, body) }
+    is-map(body) => {
+      // eCFR: {error: "No matching content found."}
+      or(get(body, "error"), get(body, "message"))
+    }
+    => { null }
+  }
+}
+
+retry-after fn (headers: Map): Int? {
+  v get(headers, "retry-after")
+  cond {
+    is-null(v) => { null }
+    ::re/is-match(trim(Str(v)), "^\\d+$") => { Int(trim(Str(v))) }
+    => { null }
+  }
+}
+
+decoded-body fn (response: Any): Any {
+  text body-text(response)
+  parsed if(is-err(text), text, parse-json(text))
+  cond {
+    is-err(text) => { response.body }
+    // Text that only looks like JSON stays text, so the error can still be built.
+    is-err(parsed) => { text }
+    => { parsed }
+  }
+}
+
+http-error
+meta {
+    doc: """Build an `HttpError` from a non-2xx response, decoding a gzip error body. Exposed for testing; every request uses it."""
+}
+fn (response: HttpResponse, url: Str): HttpError {
+  headers or(response.headers, {})
+  body decoded-body(response)
+  detail body-detail(body)
+  HttpError({
+    source: SOURCE,
+    status: response.status,
+    url: url,
+    headers: headers,
+    body: body,
+    retry-after: retry-after(headers),
+    message: if(is-some(detail), `${SOURCE}: HTTP ${response.status}: ${detail}`, `${SOURCE}: HTTP ${response.status} for ${url}`)
+  })
+}
+
+html-error
+meta {
+    doc: """Build an `HttpError` for an HTML page served in place of API data. Exposed for testing."""
+}
+fn (response: HttpResponse, url: Str): HttpError {
+  headers or(response.headers, {})
+  HttpError({
+    source: SOURCE,
+    status: response.status,
+    url: url,
+    headers: headers,
+    body: decoded-body(response),
+    retry-after: retry-after(headers),
+    message: `${SOURCE}: got an HTML page instead of API data for ${url}; the site may have flagged this client as automated`
+  })
+}
+
+is-not-found
+meta {
+    doc: """True when `e` is an `HttpError` with status 404."""
+}
+fn (e: Any): Bool {
+  cond {
+    or(is-null(e), is-str(e)) => { false }
+    // `is-map` is false for a typed HttpError, so untype before reading it.
+    => { eq(get(untype(e), "status"), 404) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------
+
+query-string
+meta {
+    doc: """Build a `?a=1&b=2` suffix from a Map, dropping null and blank values (pure); `""` when nothing remains. Keys may contain brackets (`hierarchy[title]`) and are encoded."""
+}
+fn (params: Map): Str {
+  ::uri/query-string(filter-vals(params, given))
+}
+
+path-segment
+meta {
+    doc: """Percent-encode one path segment."""
+}
+fn (value: Any): Str {
+  ::uri/encode(Str(value))
+}
+
+request
+meta {
+    doc: """
+    GET an eCFR URL with `headers` and `accept-encoding: gzip`, returning
+    the `HttpResponse` on 2xx or an Err carrying `HttpError`. An HTML
+    page is an Err too. A transport failure passes through as its own
+    Err, including a response over `http.max-response-bytes`.
+    """
+}
+fn (url: Str, headers: Map): HttpResponse {
+  response ::hot::http/request(HttpRequest({
+    method: "GET",
+    url,
+    headers: {User-Agent: PACKAGE_AGENT, accept-encoding: "gzip", ...headers},
+    body: ""
+  }))
+  cond {
+    is-err(response) => { response }
+    not(is-ok-response(response)) => { err(http-error(response, url)) }
+    is-html(response) => { err(html-error(response, url)) }
+    => { response }
+  }
+}
+
+is-past-date
+meta {
+    doc: """
+    True when `e` is the 404 eCFR gives for a date past a title's current
+    date. It isn't an empty lookup: the section may well exist, and today
+    is usually past the current date.
+    """
+}
+fn (e: Any): Bool {
+  body if(is-not-found(e), get(untype(e), "body"), null)
+  detail if(is-map(body), get(body, "error"), null)
+  and(is-str(detail), contains(detail, "is past the title's most recent issue date"))
+}
+
+null-on-404
+meta {
+    doc: """Null for a 404 Err, so a lookup that finds nothing isn't a failure. `is-past-date` errors and every other Err pass through."""
+}
+fn (out: Result): Any {
+  cond {
+    not(is-err(out)) => { out }
+    is-past-date(err-value(out)) => { out }
+    is-not-found(err-value(out)) => { null }
+    => { out }
+  }
+}
+
+get-json
+meta {
+    doc: """GET a JSON resource and return the decoded body, or an Err carrying `HttpError`."""
+}
+fn (url: Str): Any {
+  response request(url, {Accept: "application/json"})
+  cond {
+    is-err(response) => { response }
+    => { body-text(response) |> if-ok(parse-json) }
+  }
+}
+
+get-json-or-null
+meta {
+    doc: """`get-json`, but a 404 gives null instead of an Err."""
+}
+fn (url: Str): Any {
+  null-on-404(get-json(url))
+}
+
+get-xml-or-null
+meta {
+    doc: """GET an XML resource and return its text, null on a 404, or an Err carrying `HttpError`."""
+}
+fn (url: Str): Any {
+  response request(url, {Accept: "application/xml"})
+  cond {
+    is-err(response) => { null-on-404(response) }
+    => { body-text(response) }
+  }
+}

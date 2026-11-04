@@ -1,0 +1,41 @@
+::regulations-gov::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration smoke tests (live, read-only)
+// =============================================================================
+// REGULATIONS_GOV_API_KEY (DEMO_KEY works, sparingly). The test only reads;
+// without the key it records a skip and passes.
+// Run with: hot test -p pkg-integration-regulations-gov
+
+::ctx ::regulations-gov::integration::ctx
+::reg ::regulations-gov
+
+test-documents-comments-and-windows
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip("REGULATIONS_GOV_API_KEY is not set") }
+        => {
+            docs ::reg/documents({filters: {docketId: "FAA-2018-1084"}, page-size: 5})
+            rule first(docs.data)
+            assert-eq("FAA-2018-1084-0001", rule.id)
+
+            // One request: the first 250 comments, sorted the way windows are.
+            rows ::reg/all-comments({filters: {commentOnId: rule.attributes.objectId}}, 3)
+            assert-eq(3, length(rows))
+
+            // The ge filter takes Eastern time: starting from a row's own
+            // lastModifiedDate has to return that row first.
+            row rows[2]
+            window ::reg/comments({
+                filters: {
+                    commentOnId: rule.attributes.objectId,
+                    lastModifiedDate: {ge: ::reg/eastern-date-time(row.attributes.lastModifiedDate)}
+                },
+                sort: "lastModifiedDate,documentId",
+                page-size: 5
+            })
+            assert-eq(row.id, first(window.data).id, "the cursor row opens the next window")
+        }
+    }
+}

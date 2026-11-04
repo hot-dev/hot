@@ -1,0 +1,31 @@
+::courtlistener::integration::ctx ns
+
+::env ::hot::env
+
+// Placeholder settings for the courtlistener integration suite. Unset
+// environment variables are skipped entirely, so absent credentials behave
+// exactly as if never configured.
+::hot::ctx/set(filter-vals({
+    "courtlistener.api-token": ::env/get("COURTLISTENER_API_TOKEN", ""),
+}, (v) { not(is-empty(v)) }))
+
+live
+meta {
+    doc: """True when COURTLISTENER_LIVE=1 or a token is set. The court list needs no token."""
+}
+fn (): Bool {
+    or(eq(::env/get("COURTLISTENER_LIVE", ""), "1"), configured())
+}
+
+configured
+meta {doc: """True when COURTLISTENER_API_TOKEN is set."""}
+fn (): Bool {
+    is-some(::hot::ctx/get("courtlistener.api-token"))
+}
+
+skip
+meta {doc: """Record a skip and pass."""}
+fn (why: Str): Bool {
+    println(`courtlistener integration: ${why} - skipping`)
+    assert(true, `skipped: ${why}`)
+}

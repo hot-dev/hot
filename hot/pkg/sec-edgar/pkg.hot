@@ -3,8 +3,8 @@
 hot.pkg.sec-edgar {
   name: "hot.dev/sec-edgar",
   version: "0.1.0",
-  hot-min-version: "3.0.2",
-  description: "SEC EDGAR for Hot: tickers to CIK, submissions and filings, XBRL company facts, concepts and frames, filing documents, and full-text search.",
+  hot-min-version: "3.0.3",
+  description: "SEC EDGAR for Hot: tickers to CIK, submissions and filings, XBRL company facts, concepts and frames, filing documents, full-text search, and Form D offerings.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",

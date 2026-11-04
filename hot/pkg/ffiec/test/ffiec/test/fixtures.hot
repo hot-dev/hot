@@ -1,0 +1,39 @@
+::ffiec::test::fixtures ns
+
+// DOCS-DERIVED, NOT REAL RESPONSES, except where marked. No FFIEC account was
+// available, so these come from the samples in CDR-PDD-SIS-611 v1.10, read
+// 4 Nov 2026. They have not been checked against the live service.
+
+// SIS-611 3.2.5
+REPORTING_PERIODS ["12/31/2002", "03/31/2003", "06/30/2003", "09/30/2003", "12/31/2003"]
+
+// SIS-611 3.3.5. The sample prints ZIP as 02886, FilingType as 051 and booleans
+// as True, none of which is JSON. FilingType is a string, as the field table
+// says; ZIP is a string here too, though the table calls it an Int.
+PANEL_ROW {
+  ID_RSSD: 724904,
+  FDICCertNumber: 27417,
+  OCCChartNumber: 712504,
+  OTSDockNumber: 12504,
+  PrimaryABARoutNumber: 211574862,
+  Name: "SHOREHAM BANK",
+  State: "RI",
+  City: "WARWICK",
+  Address: "ONE SHOREHAM WAY",
+  ZIP: "02886",
+  FilingType: "051",
+  HasFiledForReportingPeriod: true
+}
+
+// SIS-611 3.4.5
+FILERS_SINCE_DATE [1474309, 540739, 91086, 75309]
+
+// SIS-611 section 4
+BAD_PERIOD {StatusCode: 400, Message: "Invalid Reporting Period End Date specified in request."}
+MISSING_FACSIMILE {StatusCode: 400, Message: "The requested facsimile not found or unavailable."}
+EXPIRED_TOKEN {StatusCode: 400, Message: "Security Token is expired."}
+OUT_OF_QUOTA {StatusCode: 403, Message: "Out of call volume quota. Quota will be replenished in 00:41:07."}
+
+// REAL: GET /RetrieveReportingPeriods with no credentials, 4 Nov 2026 (HTTP
+// 401). A plain-text body, not the JSON section 4 shows.
+NO_CREDENTIALS_BODY "Missing client certificate thumbprint or Bearer token"

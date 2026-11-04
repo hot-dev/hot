@@ -1,0 +1,229 @@
+::gdelt::api ns
+meta {
+    ctx: {"gdelt.base-url": {required: false, secret: false}},
+    doc: """
+    Transport for the GDELT DOC 2.0 API: the settings resolver (per-call
+    `opts` first, then context variables, then defaults), typed
+    `HttpError` and `QueryError`, a JSON GET that detects GDELT's plain
+    text errors, and query-string building that drops unset values.
+
+    | opts key | Context variable | Default |
+    |---|---|---|
+    | `base-url` | `gdelt.base-url` | `https://api.gdeltproject.org/api/v2/doc/doc` |
+
+    GDELT takes no credential, so a per-call `base-url` needs none.
+    """
+}
+
+::ctx ::hot::ctx
+::uri ::hot::uri
+::re ::hot::regex
+
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+SOURCE "gdelt"
+BASE_URL "https://api.gdeltproject.org/api/v2/doc/doc"
+PACKAGE_AGENT "hot-dev-gdelt-pkg/0.1 (+https://hot.dev)"
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+given
+meta {
+    doc: """True for a non-null value that is not a blank string."""
+}
+fn (v: Any): Bool {
+  match v {
+    Null => { false }
+    Str => { not(is-empty(trim(v))) }
+    _ => { true }
+  }
+}
+
+pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
+  from-opts get(opts, key)
+  from-ctx ::ctx/get(ctx-key)
+  cond {
+    given(from-opts) => { from-opts }
+    given(from-ctx) => { from-ctx }
+    => { default }
+  }
+}
+
+strip-slash fn (url: Str): Str {
+  ::re/replace-all(url, "/+$", "")
+}
+
+resolve
+meta {
+    doc: """
+    Resolve settings for one call: `{base-url}`. A value in `opts` wins
+    over context.
+
+    **Example**
+
+    ```hot
+    cfg ::gdelt::api/resolve({base-url: "https://gdelt-proxy.example/doc"})
+    ```
+    """
+}
+fn (opts: Map): Map {
+  {base-url: strip-slash(pick(opts, "base-url", "gdelt.base-url", BASE_URL))}
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+HttpError
+meta {
+    doc: """
+    A non-2xx GDELT response. `source` is `"gdelt"`; `url` the requested
+    URL (GDELT takes no credentials); `retry-after` the parsed
+    `Retry-After` seconds on 429s, when GDELT sends one; `message` a
+    one-line summary.
+    """
+}
+type {
+    source: Str,
+    status: Int,
+    url: Str,
+    headers: Map,
+    body: Any,
+    retry-after: Int?,
+    message: Str
+}
+
+QueryError
+meta {
+    doc: """
+    A 2xx GDELT response that is not JSON, which is how GDELT is reported
+    to reject a query. `source` is `"gdelt"`;
+    `url` the requested URL; `text` GDELT's whole message; `message` a
+    one-line summary.
+    """
+}
+type {
+    source: Str,
+    url: Str,
+    text: Str,
+    message: Str
+}
+
+short-text fn (text: Str): Str {
+  if(gt(length(text), 200), `${slice(text, 0, 200)}…`, text)
+}
+
+body-detail fn (body: Any): Str? {
+  cond {
+    is-str(body) => { short-text(trim(body)) }
+    is-map(body) => { or(get(body, "error"), get(body, "message")) }
+    => { null }
+  }
+}
+
+retry-after fn (headers: Map): Int? {
+  v get(headers, "retry-after")
+  cond {
+    is-null(v) => { null }
+    ::re/is-match(trim(Str(v)), "^\\d+$") => { Int(trim(Str(v))) }
+    => { null }
+  }
+}
+
+http-error
+meta {
+    doc: """Build an `HttpError` from a non-2xx response. Exposed for testing; every request uses it."""
+}
+fn (response: HttpResponse, url: Str): HttpError {
+  headers or(response.headers, {})
+  detail body-detail(response.body)
+  HttpError({
+    source: SOURCE,
+    status: response.status,
+    url: url,
+    headers: headers,
+    body: response.body,
+    retry-after: retry-after(headers),
+    message: if(is-some(detail), `${SOURCE}: HTTP ${response.status}: ${detail}`, `${SOURCE}: HTTP ${response.status} for ${url}`)
+  })
+}
+
+query-error
+meta {
+    doc: """Build a `QueryError` from GDELT's text. Exposed for testing."""
+}
+fn (text: Str, url: Str): QueryError {
+  QueryError({source: SOURCE, url: url, text: text, message: `${SOURCE}: ${short-text(text)}`})
+}
+
+// ---------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------
+
+query-string
+meta {
+    doc: """Build a `?a=1&b=2` suffix from a Map, dropping null and blank values (pure); `""` when nothing remains."""
+}
+fn (params: Map): Str {
+  ::uri/query-string(filter-vals(params, given))
+}
+
+parse-body
+meta {
+    doc: """
+    The decoded body of a 2xx response (pure). A Map or Vec passes
+    through and JSON text is decoded. An Err carrying `QueryError` for
+    anything else, or for JSON that doesn't parse.
+    """
+}
+fn (body: Any, url: Str): Any {
+  text if(is-str(body), trim(body), "")
+  cond {
+    or(is-map(body), is-vec(body)) => { body }
+    // Invalid UTF-8 or a binary content type arrives as Bytes.
+    not(is-str(body)) => { err(query-error("response is not JSON text", url)) }
+    or(::hot::str/starts-with(text, "{"), ::hot::str/starts-with(text, "[")) => {
+      parsed from-json(text)
+      if(is-err(parsed), err(query-error("response is not valid JSON", url)), parsed)
+    }
+    => { err(query-error(text, url)) }
+  }
+}
+
+request
+meta {
+    doc: """
+    GET a GDELT URL with `headers`, returning the `HttpResponse` on 2xx
+    or an Err carrying `HttpError`. A transport failure passes through
+    as its own Err.
+    """
+}
+fn (method: Str, url: Str, headers: Map): HttpResponse {
+  response ::hot::http/request(HttpRequest({
+    method,
+    url,
+    headers: {User-Agent: PACKAGE_AGENT, ...headers},
+    body: ""
+  }))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response }
+    => { err(http-error(response, url)) }
+  }
+}
+
+get-json
+meta {
+    doc: """GET a JSON resource and return the decoded body, or an Err carrying `HttpError` or `QueryError`."""
+}
+fn (url: Str, headers: Map): Any {
+  response request("GET", url, {Accept: "application/json", ...headers})
+  cond {
+    is-err(response) => { response }
+    => { parse-body(response.body, url) }
+  }
+}

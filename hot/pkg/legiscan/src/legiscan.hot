@@ -1,0 +1,383 @@
+::legiscan ns
+meta {
+    ctx: {
+        "legiscan.api-key": {required: false},
+        "legiscan.base-url": {required: false, secret: false}
+    },
+    doc: """
+    The LegiScan Pull API (`https://api.legiscan.com`): sessions, master
+    bill lists, bills, bill text and full-text search for US states and
+    Congress.
+
+    **Auth**: a free key from `https://legiscan.com/legiscan`. LegiScan
+    takes it in the query string, so it is redacted from every error. Set
+    `legiscan.api-key` or pass `{api-key: ...}` per call.
+
+    **Queries**: a public key has 30,000 queries a month, and every call
+    here spends one, even when LegiScan answers from its cache.
+
+    **Avoiding repeat pulls**: compare each bill's `change_hash` from
+    `master-list-raw` with the one you stored, and call `bill` only for
+    those that changed. The package keeps no state: `changed-bills` takes
+    your stored hashes, and `hash-index` builds the Map to store.
+
+    **Errors**: LegiScan answers HTTP 200 with `status: "ERROR"` for its
+    own errors. Those are Errs carrying `HttpError`.
+    """
+}
+
+::api ::legiscan::api
+::b64 ::hot::base64
+::re ::hot::regex
+
+// Errors are returned, not consumed: consuming an Err would halt the run.
+call fn (op: Str, params: Map, field: Str, opts: Map): Any {
+  cfg ::api/resolve(opts)
+  cond {
+    is-err(cfg) => { cfg }
+    => {
+      key ::api/require-api-key(cfg)
+      cond {
+        is-err(key) => { key }
+        => {
+          out ::api/get-op(cfg, op, params)
+          if(is-err(out), out, get(out, field))
+        }
+      }
+    }
+  }
+}
+
+bill-rows
+meta {
+    doc: """
+    The bill rows of a `masterlist` or `searchresult` Map, which LegiScan
+    keys `"0"`, `"1"`, and so on beside other fields such as `summary`
+    (pure).
+    """
+}
+fn (m: Any): Vec {
+  cond {
+    is-map(m) => { filter(vals(m), (v) { and(is-map(v), is-some(get(v, "bill_id"))) }) }
+    => { [] }
+  }
+}
+
+session-params
+meta {
+    doc: """`{id}` for a session id, `{state}` for a state abbreviation; an Err for anything else (pure)."""
+}
+fn (session: Any): Map {
+  s trim(Str(session))
+  cond {
+    ::re/is-match(s, "^\\d+$") => { {id: s} }
+    ::re/is-match(s, "^[A-Za-z]{2}$") => { {state: uppercase(s)} }
+    => { err(`legiscan: expected a session_id or a state abbreviation, got '${session}'`) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Sessions and master lists
+// ---------------------------------------------------------------------------
+
+session-list
+meta {
+    doc: """
+    getSessionList: the sessions for a state abbreviation, or for every
+    state when `state` is null. Each has `session_id`, `state_id`,
+    `year_start`, `year_end`, `session_title`, `prior`, `sine_die`,
+    `special` and `dataset_hash`.
+
+    **Example**
+
+    ```hot
+    sessions ::legiscan/session-list("CA")
+    first(sessions).session_id
+    ```
+    """
+}
+fn
+(): Vec {
+  session-list(null, {})
+},
+(state: Str?): Vec {
+  session-list(state, {})
+},
+(state: Str?, opts: Map): Vec {
+  call("getSessionList", {state: state}, "sessions", opts)
+}
+
+master-list-for fn (op: Str, session: Any, opts: Map): Any {
+  params session-params(session)
+  cond {
+    is-err(params) => { params }
+    => {
+      out call(op, params, "masterlist", opts)
+      if(is-err(out), out, bill-rows(out))
+    }
+  }
+}
+
+master-list
+meta {
+    doc: """
+    getMasterList: summary rows for every bill in a session, given a
+    `session_id`, or a state abbreviation for its current session (which
+    LegiScan says to use with caution). Each row has `bill_id`, `number`,
+    `change_hash`, `url`, `status`, `status_date`, `last_action`,
+    `last_action_date`, `title`, `description`.
+    """
+}
+fn
+(session: Any): Vec {
+  master-list(session, {})
+},
+(session: Any, opts: Map): Vec {
+  master-list-for("getMasterList", session, opts)
+}
+
+master-list-raw
+meta {
+    doc: """
+    getMasterListRaw: `bill_id`, `number` and `change_hash` for every
+    bill in a session, for spotting what changed.
+
+    **Example**
+
+    ```hot
+    ::lg ::legiscan
+    rows ::lg/master-list-raw(1791)
+    changed ::lg/changed-bills(rows, stored-hashes)
+    bills map(changed, (row) { ::lg/bill(row.bill_id) })
+    next-hashes ::lg/hash-index(rows)
+    ```
+    """
+}
+fn
+(session: Any): Vec {
+  master-list-raw(session, {})
+},
+(session: Any, opts: Map): Vec {
+  master-list-for("getMasterListRaw", session, opts)
+}
+
+changed-bills
+meta {
+    doc: """
+    The rows of a master list or search result whose `change_hash`
+    differs from `known`, a Map of `bill_id` (as a string) to
+    `change_hash`, including rows not in `known` (pure).
+    """
+}
+fn (rows: Vec, known: Map): Vec {
+  filter(rows, (row) { not(eq(get(known, Str(row.bill_id)), row.change_hash)) })
+}
+
+hash-index
+meta {
+    doc: """The Map of `bill_id` (as a string) to `change_hash` for `rows`, for the caller to store and pass to `changed-bills` next time (pure)."""
+}
+fn (rows: Vec): Map {
+  zipmap(map(rows, (row) { Str(row.bill_id) }), map(rows, (row) { row.change_hash }))
+}
+
+// ---------------------------------------------------------------------------
+// Bills and text
+// ---------------------------------------------------------------------------
+
+bill
+meta {
+    doc: """
+    getBill: one bill, with `bill_number`, `title`, `description`,
+    `state`, `status`, `session`, `progress`, `history`, `sponsors`,
+    `votes`, `change_hash`, and `texts`, whose rows carry the `doc_id` for
+    `bill-text`.
+    """
+}
+fn
+(bill-id: Int): Map {
+  bill(bill-id, {})
+},
+(bill-id: Int, opts: Map): Map {
+  call("getBill", {id: bill-id}, "bill", opts)
+}
+
+decode-text
+meta {
+    doc: """A getBillText `text` Map with its base64 `doc` replaced by the decoded `bytes` (pure). An Err when `doc` isn't valid base64."""
+}
+fn (text: Map): Map {
+  doc get(text, "doc")
+  cond {
+    not(is-str(doc)) => { text }
+    => {
+      compact ::re/replace-all(doc, "\\s+", "")
+      cond {
+        ::b64/is-valid(compact) => { assoc(delete(text, "doc"), "bytes", ::b64/decode(compact)) }
+        => { err(`legiscan: doc ${get(text, "doc_id")} is not valid base64`) }
+      }
+    }
+  }
+}
+
+bill-text
+meta {
+    doc: """
+    getBillText: one text document, with `doc_id`, `bill_id`, `date`,
+    `type`, `mime`, `text_size`, `text_hash`, and `bytes`, the decoded
+    document. `mime` says what the bytes are: PDF, HTML or Word. A
+    document must fit in `http.max-response-bytes` (16 MiB by default) as
+    base64.
+
+    **Example**
+
+    ```hot
+    ::lg ::legiscan
+    b ::lg/bill(1167968)
+    text ::lg/bill-text(first(b.texts).doc_id)
+    text.mime
+    text.bytes
+    ```
+    """
+}
+fn
+(doc-id: Int): Map {
+  bill-text(doc-id, {})
+},
+(doc-id: Int, opts: Map): Map {
+  out call("getBillText", {id: doc-id}, "text", opts)
+  if(is-err(out), out, decode-text(out))
+}
+
+// ---------------------------------------------------------------------------
+// Search
+// ---------------------------------------------------------------------------
+
+search-params
+meta {
+    doc: """
+    Query parameters for a search (pure): `query`, plus `id` (a session)
+    or `state` (default `"ALL"`), and `year` and `page`, from `opts`.
+    `year` is 1 for all, 2 for current, 3 for recent, 4 for prior, or an
+    exact year.
+    """
+}
+fn (query: Str, opts: Map): Map {
+  id get(opts, "id")
+  {
+    query: query,
+    id: id,
+    state: if(is-some(id), null, or(get(opts, "state"), "ALL")),
+    year: get(opts, "year"),
+    page: get(opts, "page")
+  }
+}
+
+search-result
+meta {
+    doc: """A `searchresult` as `{summary, results}` (pure). getSearch keys rows beside `summary`; getSearchRaw puts them under `results`."""
+}
+fn (result: Any): Map {
+  r or(result, {})
+  rows get(r, "results")
+  {summary: get(r, "summary"), results: if(is-vec(rows), rows, bill-rows(or(rows, r)))}
+}
+
+run-search fn (op: Str, query: Str, opts: Map): Any {
+  out call(op, search-params(query, opts), "searchresult", opts)
+  if(is-err(out), out, search-result(out))
+}
+
+search
+meta {
+    doc: """
+    getSearch: one page of 50 full-text results: `{summary, results}`.
+    Each row has `relevance`, `state`, `bill_number`, `bill_id`,
+    `change_hash`, `url`, `text_url`, `last_action`, `last_action_date`,
+    `title`. `opts`: `state` (default `"ALL"`), `id` (a session), `year`,
+    `page`, plus `api-key`.
+
+    **Example**
+
+    ```hot
+    found ::legiscan/search("money transmitter", {state: "CA"})
+    found.summary.count
+    first(found.results).title
+    ```
+    """
+}
+fn
+(query: Str): Map {
+  search(query, {})
+},
+(query: Str, opts: Map): Map {
+  run-search("getSearch", query, opts)
+}
+
+search-raw
+meta {
+    doc: """getSearchRaw: one page of up to 2,000 results with only `relevance`, `bill_id` and `change_hash`, for keyword monitoring: `{summary, results}`. Takes the same `opts` as `search`."""
+}
+fn
+(query: Str): Map {
+  search-raw(query, {})
+},
+(query: Str, opts: Map): Map {
+  run-search("getSearchRaw", query, opts)
+}
+
+// ---------------------------------------------------------------------------
+// Pagination
+// ---------------------------------------------------------------------------
+
+next-page
+meta {
+    doc: """The page after a `search` or `search-raw` result, from `summary.page_current` and `summary.page_total`, or null on the last page (pure)."""
+}
+fn (result: Any): Int? {
+  s or(get(or(result, {}), "summary"), {})
+  current get(s, "page_current")
+  total get(s, "page_total")
+  cond {
+    or(is-null(current), is-null(total)) => { null }
+    lt(current, total) => { add(current, 1) }
+    => { null }
+  }
+}
+
+collect-pages fn (fetch: Fn, page-number: Int, limit: Int, acc: Vec): Any {
+  page fetch(page-number)
+  cond {
+    is-err(page) => { page }
+    => {
+      items or(get(page, "results"), [])
+      combined concat(acc, items)
+      next next-page(page)
+      cond {
+        gte(length(combined), limit) => { slice(combined, 0, limit) }
+        is-empty(items) => { combined }
+        is-null(next) => { combined }
+        => { collect-pages(fetch, next, limit, combined) }
+      }
+    }
+  }
+}
+
+collect
+meta {
+    doc: """
+    Follow pages of a search until `limit` rows or the last page. `fetch`
+    takes `opts` (with `page` set) and returns one page. Each page spends
+    one query.
+
+    **Example**
+
+    ```hot
+    ::lg ::legiscan
+    rows ::lg/collect((o) { ::lg/search-raw("money transmitter", o) }, {state: "CA"}, 5000)
+    ```
+    """
+}
+fn (fetch: Fn, opts: Map, limit: Int): Vec {
+  collect-pages((n) { fetch({...opts, page: n}) }, 1, limit, [])
+}

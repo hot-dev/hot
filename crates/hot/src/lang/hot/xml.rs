@@ -97,7 +97,7 @@ pub fn children(args: &[Val]) -> HotResult<Val> {
     HotResult::Ok(Val::vec(results))
 }
 
-/// Get text content from an element (concatenates all text nodes)
+/// Get text directly inside an element (joins its text nodes, skips child elements)
 pub fn text(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::xml/text", args, 1);
 

@@ -122,13 +122,17 @@ text
 meta {
     core: true,
     doc: """
-    Get the concatenated text content of an element.
+    Get the text directly inside an element, with its text nodes joined.
+    Text inside child elements is left out, so read a child with `child` or
+    `at`. `from-xml` trims each text node, so spaces around a child element
+    are gone.
 
     **Example**
 
     ```hot
     xml from-xml("<name>Alice <b>Smith</b></name>")
-    text(xml)   // "Alice Smith"
+    text(xml)                // "Alice"
+    text(child(xml, "b"))    // "Smith"
     ```
     """
 }

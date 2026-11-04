@@ -1,0 +1,376 @@
+::cfpb::complaints ns
+meta {
+    ctx: {"cfpb.complaints.base-url": {required: false, secret: false}},
+    doc: """
+    The CFPB Consumer Complaint Database API
+    (`https://www.consumerfinance.gov/data-research/consumer-complaints/search/api/v1`,
+    no key): filtered search, one complaint by ID, the aggregations the
+    search returns, match counts, and company name suggestions.
+
+    The API no longer has `/trends` or `/geo/states`, and complaint
+    narratives are gone: CFPB removed narratives and its visualizations
+    in September 2026 (Release 24). Build a trend from `count` over date
+    windows.
+
+    **What the data shows.** CFPB says the database is not a statistical
+    sample of consumers' experiences, so complaints are not
+    representative of all consumers' experiences with a product or
+    company. Read volume against company size and market share. Only
+    complaints sent to companies for response are published, after the
+    company responds or after 15 days, whichever comes first. Complaints
+    referred to other regulators are not published, such as those about
+    depository institutions with less than $10 billion in assets, so no
+    results does not mean no complaints.
+
+    Pages are `size` long (up to 100) and reach 10,000 records for one
+    query; `next-page` reads the API's `break_points`, and `collect`
+    follows them. The API's source sets 20 searches and 5 single
+    complaint reads per minute for each anonymous client.
+
+    Every function takes an optional trailing `opts` Map: the filters
+    listed at `search-params`, and `base-url`.
+    """
+}
+
+::api ::cfpb::complaints::api
+
+MAX_SIZE 100
+DEFAULT_SIZE 25
+
+// opts key -> API parameter, for parameters sent as given. Each filter takes a
+// Str or a Vec of Str, except the dates.
+PARAMS {
+  search-term: "search_term",
+  field: "field",
+  company: "company",
+  product: "product",
+  issue: "issue",
+  state: "state",
+  zip-code: "zip_code",
+  tags: "tags",
+  timely: "timely",
+  submitted-via: "submitted_via",
+  company-response: "company_response",
+  company-public-response: "company_public_response",
+  date-received-min: "date_received_min",
+  date-received-max: "date_received_max",
+  company-received-min: "company_received_min",
+  company-received-max: "company_received_max",
+  sort: "sort"
+}
+
+ccdb-get fn (path: Str, params: Map, opts: Map): Any {
+  cfg ::api/resolve(opts)
+  ::api/get-json(`${cfg.base-url}${path}${::api/query-string(params)}`, {})
+}
+
+page-size
+meta {
+    doc: """`opts.size`, capped at 100, or 25 when unset (pure). A `size` of 0 stays 0: it asks for counts and aggregations with no complaints."""
+}
+fn (opts: Map): Int {
+  min(or(get(opts, "size"), DEFAULT_SIZE), MAX_SIZE)
+}
+
+filter-params
+meta {
+    doc: """The API parameters for the filters in `opts` (pure), unset ones left out. See `search-params` for the keys."""
+}
+fn (opts: Map): Map {
+  reduce(keys(PARAMS), (acc, k) {
+    v get(opts, k)
+    if(::api/given(v), assoc(acc, get(PARAMS, k), v), acc)
+  }, {})
+}
+
+search-params
+meta {
+    doc: """
+    Query parameters for a search (pure). `size`, `frm` and
+    `search-after` page the results. Highlighting is always off, and
+    aggregations are off unless `opts.aggs` is true, since they add 100 KB
+    or more to a response.
+
+    | opts key | Meaning |
+    |---|---|
+    | `search-term`, `field` | Text to find; `field` is `"all"` (default) or `"company"` |
+    | `company` | Exact company names; find them with `suggest-companies` |
+    | `product`, `issue` | Exact labels; `Product•Sub-product` and `Issue•Sub-issue` select the second level |
+    | `state`, `zip-code` | Consumer mailing state and ZIP code |
+    | `tags`, `timely`, `submitted-via` | e.g. `"Servicemember"`, `"Yes"`, `"Web"` |
+    | `company-response`, `company-public-response` | e.g. `"Closed with explanation"` |
+    | `date-received-min`, `date-received-max` | `YYYY-MM-DD`, both ends included |
+    | `company-received-min`, `company-received-max` | `YYYY-MM-DD`, both ends included |
+    | `sort` | `created_date_desc`, `created_date_asc`, `relevance_desc` (default), `relevance_asc` |
+    """
+}
+fn (opts: Map): Map {
+  {
+    ...filter-params(opts),
+    size: page-size(opts),
+    frm: get(opts, "frm"),
+    search_after: get(opts, "search-after"),
+    no_aggs: if(eq(get(opts, "aggs"), true), null, true),
+    no_highlight: true
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Complaints
+// ---------------------------------------------------------------------------
+
+search
+meta {
+    doc: """
+    Search complaints. Returns the API's page: `hits` and `_meta`, plus
+    `aggregations` when `opts.aggs` is true. Read it with `complaints`,
+    `total` and `freshness`.
+
+    **Example**
+
+    ```hot
+    page ::cfpb::complaints/search({
+      company: "JPMORGAN CHASE & CO.",
+      state: ["CA", "NY"],
+      product: "Mortgage",
+      date-received-min: "2026-01-01",
+      sort: "created_date_desc",
+      size: 50
+    })
+    ::cfpb::complaints/total(page)
+    first(::cfpb::complaints/complaints(page)).issue
+    ```
+    """
+}
+fn
+(): Map {
+  search({})
+},
+(opts: Map): Map {
+  ccdb-get("/", search-params(opts), opts)
+}
+
+get-complaint
+meta {
+    doc: """One complaint by ID, or null when there is none (the API answers 200 with no hits). It carries `date_indexed`, which search results do not. A blank ID is an Err: it would otherwise request the search route."""
+}
+fn
+(id: Any): Map? {
+  get-complaint(id, {})
+},
+(id: Any, opts: Map): Map? {
+  out if(::api/given(id), ccdb-get(`/${::api/path-segment(id)}`, {}, opts), err("cfpb-complaints: get-complaint needs an id"))
+  cond {
+    is-err(out) => { out }
+    => {
+      found complaints(out)
+      if(is-empty(found), null, first(found))
+    }
+  }
+}
+
+complaints
+meta {
+    doc: """The complaints in a page: each hit's `_source` (pure)."""
+}
+fn (page: Any): Vec<Map> {
+  map(or(get-in(or(page, {}), ["hits", "hits"]), []), (hit) { get(hit, "_source") })
+}
+
+total
+meta {
+    doc: """How many complaints match the query, across all pages (pure). Exact above 10,000 too."""
+}
+fn (page: Any): Int? {
+  get-in(or(page, {}), ["hits", "total", "value"])
+}
+
+freshness
+meta {
+    doc: """
+    The state of the data from a search page's `_meta` (pure):
+    `{last-updated, last-indexed, stale, data-issue, record-count}`.
+    `stale` means the newest data is over 5 business days old;
+    `data-issue` means the latest load had a problem.
+    """
+}
+fn (page: Any): Map {
+  m or(get(or(page, {}), "_meta"), {})
+  {
+    last-updated: get(m, "last_updated"),
+    last-indexed: get(m, "last_indexed"),
+    stale: get(m, "is_data_stale"),
+    data-issue: get(m, "has_data_issue"),
+    record-count: get(m, "total_record_count")
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Counts and aggregations
+// ---------------------------------------------------------------------------
+
+count
+meta {
+    doc: """
+    How many complaints match the filters in `opts`, without fetching
+    any. Call it once per date window for a trend. Both date bounds are
+    included, so windows must not share a day.
+
+    **Example**
+
+    ```hot
+    ::cfpb::complaints/count({
+      company: "JPMORGAN CHASE & CO.",
+      date-received-min: "2026-01-01",
+      date-received-max: "2026-01-31"
+    })
+    ```
+    """
+}
+fn
+(): Int {
+  count({})
+},
+(opts: Map): Int {
+  out search({...opts, size: 0, aggs: false})
+  if(is-err(out), out, total(out))
+}
+
+aggregations
+meta {
+    doc: """
+    The aggregations for the filters in `opts`, with no complaints:
+    `product`, `issue`, `company`, `state`, `timely`, `company_response`,
+    `company_public_response`, `submitted_via` and `tags`. Read one with
+    `buckets`.
+
+    **A dimension ignores its own filter.** With `company` set,
+    `aggregations.company` still lists every company (so a UI can offer
+    other choices), and with `state` set, `aggregations.state` still
+    lists every state. All the other aggregations are filtered.
+
+    **Example**
+
+    ```hot
+    aggs ::cfpb::complaints/aggregations({company: "JPMORGAN CHASE & CO.", date-received-min: "2026-01-01"})
+    ::cfpb::complaints/buckets(aggs, "product")  // [{key: "Checking or savings account", count: 7887, sub: [...]}, ...]
+    ```
+    """
+}
+fn
+(): Map {
+  aggregations({})
+},
+(opts: Map): Map {
+  out search({...opts, size: 0, aggs: true})
+  if(is-err(out), out, or(get(out, "aggregations"), {}))
+}
+
+SUB_LEVELS ["sub_product.raw", "sub_issue.raw"]
+
+bucket-row fn (bucket: Map): Map {
+  level find-first(SUB_LEVELS, (k) { is-some(get(bucket, k)) })
+  row {key: get(bucket, "key"), count: get(bucket, "doc_count")}
+  if(is-null(level), row, assoc(row, "sub", map(get-in(bucket, [level, "buckets"]), bucket-row)))
+}
+
+buckets
+meta {
+    doc: """`[{key, count}]` for one aggregation, largest first (pure). `product` and `issue` rows also carry `sub`, the same shape for the sub-products or sub-issues. `[]` when the aggregation is absent."""
+}
+fn (aggs: Any, name: Str): Vec<Map> {
+  map(or(get-in(or(aggs, {}), [name, name, "buckets"]), []), bucket-row)
+}
+
+// ---------------------------------------------------------------------------
+// Suggestions
+// ---------------------------------------------------------------------------
+
+suggest-companies
+meta {
+    doc: """
+    Company names matching `text`, as the `company` filter needs them.
+    The filters in `opts` narrow the names, and `size` limits them.
+
+    **Example**
+
+    ```hot
+    ::cfpb::complaints/suggest-companies("jpmorgan")  // ["JPMORGAN CHASE & CO."]
+    ```
+    """
+}
+fn
+(text: Str): Vec<Str> {
+  suggest-companies(text, {})
+},
+(text: Str, opts: Map): Vec<Str> {
+  // The route needs its trailing slash: without it the site answers with HTML.
+  ccdb-get("/_suggest_company/", {...filter-params(opts), text: text, size: get(opts, "size")}, opts)
+}
+
+// ---------------------------------------------------------------------------
+// Pagination
+// ---------------------------------------------------------------------------
+
+next-page
+meta {
+    doc: """
+    The paging opts for the page after `page`, or null on the last one
+    (pure). `opts` are the ones that fetched `page`. Returns `{frm,
+    search-after}`, built from the `_meta.break_points` entry for the
+    next page. The API stops giving break points at 10,000 records.
+    """
+}
+fn (page: Any, opts: Map): Map? {
+  size page-size(opts)
+  frm or(get(opts, "frm"), 0)
+  points or(get-in(or(page, {}), ["_meta", "break_points"]), {})
+  next-number if(gt(size, 0), add(floor(div(frm, size)), 2), null)
+  point if(is-null(next-number), null, get(points, Str(next-number)))
+  cond {
+    is-null(point) => { null }
+    => { {frm: add(frm, size), search-after: `${first(point)}_${last(point)}`} }
+  }
+}
+
+collect-pages fn (fetch: Fn, opts: Map, limit: Int, acc: Vec): Vec {
+  page fetch(opts)
+  cond {
+    // Returned, not consumed: consuming an Err would halt the run.
+    is-err(page) => { page }
+    => {
+      items complaints(page)
+      combined concat(acc, items)
+      next next-page(page, opts)
+      cond {
+        gte(length(combined), limit) => { slice(combined, 0, limit) }
+        is-empty(items) => { combined }
+        is-null(next) => { combined }
+        => { collect-pages(fetch, {...opts, ...next}, limit, combined) }
+      }
+    }
+  }
+}
+
+collect
+meta {
+    doc: """
+    Follow pages until `limit` complaints or the last page. `fetch` takes
+    `opts` (with `size`, `frm` and `search-after` set) and returns one
+    page; `size` defaults to 100. Pass a `sort` of `created_date_desc` so the order is stable. A
+    query stops at 10,000 records, so split a larger one by date. It
+    makes one request per 100 complaints, and a throttled request ends
+    it with an Err.
+
+    **Example**
+
+    ```hot
+    ::c ::cfpb::complaints
+    rows ::c/collect((o) { ::c/search(o) }, {company: "JPMORGAN CHASE & CO.", sort: "created_date_desc"}, 500)
+    ```
+    """
+}
+fn (fetch: Fn, opts: Map, limit: Int): Vec {
+  size min(page-size({...opts, size: or(get(opts, "size"), MAX_SIZE)}), max(1, limit))
+  collect-pages(fetch, {...opts, size: size}, limit, [])
+}

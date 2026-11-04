@@ -1,0 +1,252 @@
+::nppes::test::nppes ns
+meta ["test"]
+
+::fx ::nppes::test::fixtures
+::api ::nppes::api
+
+HttpResponse ::hot::http/HttpResponse
+
+// ============================================================================
+// Settings resolver
+// ============================================================================
+
+test-resolve-defaults
+meta ["test"]
+fn () {
+    assert-eq("https://npiregistry.cms.hhs.gov/api", ::api/resolve({}).base-url)
+}
+
+test-resolve-opts-override
+meta ["test"]
+fn () {
+    assert-eq("https://npi.example/api", ::api/resolve({base-url: "https://npi.example/api/"}).base-url, "the API takes no credential")
+}
+
+test-resolve-reads-context
+meta ["test"]
+fn () {
+    ::hot::ctx/set({"nppes.base-url": "https://ctx.example/api/"})
+    assert-eq("https://ctx.example/api", ::api/resolve({}).base-url)
+    assert-eq("https://opts.example", ::api/resolve({base-url: "https://opts.example"}).base-url, "opts win")
+    ::hot::ctx/set({"nppes.base-url": null})
+}
+
+// ============================================================================
+// Transport helpers
+// ============================================================================
+
+test-query-string-drops-unset
+meta ["test"]
+fn () {
+    assert-eq("?version=2.1&skip=0", ::api/query-string({version: "2.1", skip: 0, city: null, state: ""}))
+    assert-eq("", ::api/query-string({a: null}))
+    assert-eq("?organization_name=mayo+clinic*", ::api/query-string({organization_name: "mayo clinic*"}))
+}
+
+test-http-error
+meta ["test"]
+fn () {
+    response HttpResponse({status: 503, headers: {"retry-after": "60"}, body: "Service Unavailable"})
+    e untype(::api/http-error(response, "https://npi.example/api/?version=2.1"))
+    assert-eq("nppes", e.source)
+    assert-eq(60, e.retry-after)
+    assert-eq("nppes: HTTP 503: Service Unavailable", e.message)
+}
+
+test-errors-body-is-an-err
+meta ["test"]
+fn () {
+    out ::api/decode-body(HttpResponse({status: 200, headers: {}, body: ::fx/STATE_ALONE}), "u")
+    assert(is-err(out), "bad criteria come back with status 200")
+    e untype(err-value(out))
+    assert-eq(200, e.status)
+    assert-eq("nppes: HTTP 200: state: Field state requires additional search criteria", e.message)
+    assert-eq("07", first(e.body.Errors).number)
+}
+
+test-errors-in-a-json-string
+meta ["test"]
+fn () {
+    text to-json(::fx/SHORT_WILDCARD)
+    out ::api/decode-body(HttpResponse({status: 200, headers: {}, body: text}), "u")
+    assert(is-err(out), "the same when the body is still text")
+    assert(::hot::str/contains(untype(err-value(out)).message, "first_name: Wildcards require"), "says which field")
+}
+
+test-decode-body
+meta ["test"]
+fn () {
+    assert-eq(::fx/NO_RESULTS, ::api/decode-body(HttpResponse({status: 200, headers: {}, body: to-json(::fx/NO_RESULTS)}), "u"))
+    assert-eq(::fx/NO_RESULTS, ::api/decode-body(HttpResponse({status: 200, headers: {}, body: ::fx/NO_RESULTS}), "u"), "already decoded")
+}
+
+// ============================================================================
+// Parameters
+// ============================================================================
+
+test-page-limit
+meta ["test"]
+fn () {
+    assert-eq(10, ::nppes/page-limit({}))
+    assert-eq(50, ::nppes/page-limit({limit: 50}))
+    assert-eq(200, ::nppes/page-limit({limit: 500}), "capped at 200")
+}
+
+test-search-params
+meta ["test"]
+fn () {
+    p ::nppes/search-params({
+        first-name: "jo*",
+        last-name: "smith",
+        taxonomy-description: "Internal Medicine",
+        enumeration-type: "NPI-1",
+        state: "NY",
+        postal-code: "14221",
+        use-first-name-alias: false,
+        limit: 500,
+        skip: 200,
+        base-url: "https://npi.example"
+    })
+    assert-eq("2.1", p.version)
+    assert-eq("jo*", p.first_name)
+    assert-eq("smith", p.last_name)
+    assert-eq("Internal Medicine", p.taxonomy_description)
+    assert-eq("NPI-1", p.enumeration_type)
+    assert-eq("NY", p.state)
+    assert-eq("14221", p.postal_code)
+    assert-eq("False", p.use_first_name_alias)
+    assert-eq(200, p.limit, "capped at 200")
+    assert-eq(200, p.skip)
+    assert-eq(null, get(p, "base-url"), "settings are not parameters")
+}
+
+test-search-params-leave-unset-out
+meta ["test"]
+fn () {
+    assert-eq("?version=2.1&city=baltimore", ::api/query-string(::nppes/search-params({city: "baltimore"})))
+    assert-eq("True", ::nppes/search-params({use-first-name-alias: true}).use_first_name_alias)
+}
+
+test-skip-over-the-maximum-is-an-err
+meta ["test"]
+fn () {
+    out ::nppes/search({city: "baltimore", skip: 1001})
+    assert(is-err(out), "the API would repeat the records at skip 1000")
+    assert(::hot::str/contains(err-value(out), "1000"), "names the maximum")
+}
+
+// ============================================================================
+// Reading responses
+// ============================================================================
+
+test-results
+meta ["test"]
+fn () {
+    assert-eq([::fx/MAYO], ::nppes/results({result_count: 1, results: [::fx/MAYO]}))
+    assert-eq([], ::nppes/results(::fx/NO_RESULTS))
+    assert-eq([], ::nppes/results(null))
+}
+
+test-addresses-and-taxonomy
+meta ["test"]
+fn () {
+    assert-eq("LOCATION", ::nppes/location-address(::fx/MAYO).address_purpose)
+    assert-eq("MAILING", ::nppes/mailing-address(::fx/MAYO).address_purpose)
+    assert-eq("261QM1300X", ::nppes/primary-taxonomy(::fx/MAYO).code)
+    assert-eq(null, ::nppes/location-address({}))
+    assert-eq(null, ::nppes/primary-taxonomy(null))
+    assert-eq("b", ::nppes/primary-taxonomy({taxonomies: [{code: "a", primary: false}, {code: "b", primary: true}]}).code)
+}
+
+test-is-active
+meta ["test"]
+fn () {
+    assert(::nppes/is-active(::fx/MAYO), "status A")
+    assert(not(::nppes/is-active({basic: {status: "D"}})), "deactivated")
+    assert(not(::nppes/is-active(null)), "no record")
+}
+
+test-is-npi
+meta ["test"]
+fn () {
+    assert(::nppes/is-npi("1881018208"), "Mayo Clinic")
+    assert(::nppes/is-npi("1234567893"), "the worked example in the NPI check digit standard")
+    assert(::nppes/is-npi(1881018208), "as a number")
+    assert(not(::nppes/is-npi("1234567890")), "bad check digit")
+    assert(not(::nppes/is-npi("123")), "too short")
+    assert(not(::nppes/is-npi("12345678a3")), "not digits")
+}
+
+// ============================================================================
+// Paging
+// ============================================================================
+
+test-next-page
+meta ["test"]
+fn () {
+    full (n) { {results: map(range(n), (i) { {number: i} })} }
+    assert-eq(10, ::nppes/next-page(full(10), {}))
+    assert-eq(200, ::nppes/next-page(full(200), {limit: 200}))
+    assert-eq(1000, ::nppes/next-page(full(200), {limit: 200, skip: 800}), "skip 1000 is allowed")
+    assert-eq(null, ::nppes/next-page(full(200), {limit: 200, skip: 1000}), "the end of the API's reach")
+    assert-eq(null, ::nppes/next-page(full(3), {limit: 10}), "a short page is the last")
+    assert-eq(null, ::nppes/next-page(::fx/NO_RESULTS, {}))
+}
+
+test-collect-follows-pages
+meta ["test"]
+fn () {
+    fetch (o) {
+        offset or(get(o, "skip"), 0)
+        {results: map(range(offset, min(add(offset, o.limit), 5)), (i) { {number: i} })}
+    }
+
+    ids (rows) { map(rows, (r) { r.number }) }
+    assert-eq([0, 1, 2, 3, 4], ids(::nppes/collect(fetch, {limit: 2}, 100)), "to a short page")
+    assert-eq([0, 1, 2], ids(::nppes/collect(fetch, {limit: 2}, 3)), "stops at limit")
+}
+
+test-collect-stops-at-the-api-reach
+meta ["test"]
+fn () {
+    calls (o) { {results: map(range(o.limit), (i) { {number: add(or(get(o, "skip"), 0), i)} })} }
+    rows ::nppes/collect(calls, {}, 5000)
+    assert-eq(1200, length(rows), "six pages of 200")
+    assert-eq(1199, last(rows).number)
+}
+
+test-collect-returns-an-err-page
+meta ["test"]
+fn () {
+    assert(is-err(::nppes/collect((o) { err("HTTP 429") }, {}, 10)), "a 429 comes back as the Err")
+}
+
+test-collect-treats-a-page-of-html-as-an-err
+meta ["test"]
+fn () {
+    out ::nppes/collect((o) { ::api/decode-body(HttpResponse({status: 200, headers: {}, body: "<html>Down for maintenance</html>"}), "u") }, {}, 10)
+    assert(is-err(out), "a maintenance page isn't an empty result")
+    assert-eq(200, err-value(out).status)
+}
+
+test-decode-body-turns-bad-json-into-an-err
+meta ["test"]
+fn () {
+    out ::api/decode-body(HttpResponse({status: 200, headers: {}, body: "{\"results\": [tru"}), "u")
+    assert(is-err(out), "truncated JSON comes back as an Err")
+    assert-eq("nppes", err-value(out).source)
+}
+
+test-collect-reaches-skip-1000-with-any-page-size
+meta ["test"]
+fn () {
+    fetch (o) {
+      skip or(get(o, "skip"), 0)
+      {results: map(range(skip, min(add(skip, o.limit), 1500)), (i) { {id: i} })}
+    }
+
+    rows ::nppes/collect(fetch, {limit: 150}, 5000)
+    assert-eq(1150, length(rows), "skip 1,000 plus a page")
+    assert-eq(1150, length(distinct(map(rows, (r) { r.id }))), "the overlap is dropped")
+    assert-eq(1149, last(rows).id)
+}

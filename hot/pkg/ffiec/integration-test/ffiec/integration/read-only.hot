@@ -1,0 +1,29 @@
+::ffiec::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration smoke tests (live, read-only)
+// =============================================================================
+// FFIEC_USER_ID and FFIEC_TOKEN (and optionally FFIEC_BASE_URL). The test only
+// reads; without them it records a skip and passes.
+// Run with: hot test -p pkg-integration-ffiec
+
+::ctx ::ffiec::integration::ctx
+
+test-periods-panel-and-facsimile
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip("FFIEC_USER_ID and FFIEC_TOKEN are not set") }
+        => {
+            periods ::ffiec/reporting-periods()
+            assert(gt(length(periods), 0), "there are Call periods")
+            assert(gt(length(::ffiec/ubpr-reporting-periods()), 0), "there are UBPR periods")
+            period ::ffiec/period-date(last(periods))
+            panel ::ffiec/panel-of-reporters(period)
+            assert(gt(length(panel), 0), "the panel has banks")
+            filed find-first(panel, (row) { row.HasFiledForReportingPeriod })
+            report ::ffiec/facsimile(period, filed.ID_RSSD, {format: "XBRL"})
+            assert(gt(length(report.bytes), 0), "the facsimile has content")
+        }
+    }
+}

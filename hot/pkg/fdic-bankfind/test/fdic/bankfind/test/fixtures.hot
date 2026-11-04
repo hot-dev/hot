@@ -1,0 +1,84 @@
+::fdic::bankfind::test::fixtures ns
+
+// Trimmed real responses (retrieved 4 Nov 2026).
+
+// GET /institutions?filters=CERT:628&fields=CERT,NAME,CITY,STALP,ACTIVE,ASSET,DEP&limit=2
+INSTITUTION_PAGE {
+  meta: {
+    total: 1,
+    parameters: {filters: "CERT:628", fields: "CERT,NAME,CITY,STALP,ACTIVE,ASSET,DEP", limit: "2"},
+    index: {name: "institutions_20261030090007", createTimestamp: "2026-10-30T11:58:49Z"}
+  },
+  data: [
+    {
+      data: {
+        ACTIVE: 1,
+        ASSET: 4091315000,
+        DEP: 2820284000,
+        NAME: "JPMorgan Chase Bank, National Association",
+        CITY: "Columbus",
+        CERT: 628,
+        STALP: "OH",
+        ID: "628"
+      },
+      score: 0
+    }
+  ],
+  totals: {count: 1}
+}
+
+// GET /institutions?filters=CERT:99999999&limit=1
+EMPTY_PAGE {
+  meta: {
+    total: 0,
+    parameters: {filters: "CERT:99999999", limit: "1"},
+    index: {name: "institutions_20261030090007", createTimestamp: "2026-10-30T11:58:49Z"}
+  },
+  data: [],
+  totals: {count: 0}
+}
+
+// GET /locations?filters=CERT:628&limit=2 (rows trimmed; meta as returned)
+LOCATION_PAGE {
+  meta: {total: 5413, parameters: {filters: "CERT:628", limit: "2"}},
+  data: [
+    {data: {CERT: "628", UNINUM: 417, MAINOFF: 1, CITY: "Columbus", STALP: "OH", ID: "417"}, score: 0},
+    {data: {CERT: "628", UNINUM: 183126, MAINOFF: 0, CITY: "Scarsdale", STALP: "NY", ID: "183126"}, score: 0}
+  ],
+  totals: {count: 5413}
+}
+
+// GET /history?filters=CERT:628&limit=1&offset=10000 (13,414 rows in all)
+DEEP_HISTORY_PAGE {
+  meta: {total: 13414, parameters: {filters: "CERT:628", fields: "CERT,TRANSNUM", limit: "1", offset: "10000"}},
+  data: [{data: {TRANSNUM: 200503454, CERT: 628, ID: "62ae41ced352f2bd571f88bdbb36290b"}, score: 0}],
+  totals: {count: 13414}
+}
+
+// One row of GET /history?filters=CERT:628 AND ORG_ROLE_CDE:FI
+MERGER {
+  CHANGECODE: 811,
+  CHANGECODE_DESC: "Participated in FDIC Assisted Merger",
+  EFFDATE: "2023-05-01T00:00:00",
+  ACQ_CERT: 628,
+  ACQ_INSTNAME: "JPMorgan Chase Bank, National Association",
+  OUT_CERT: 59017,
+  OUT_INSTNAME: "First Republic Bank",
+  SUR_CERT: 628,
+  SUR_INSTNAME: "JPMorgan Chase Bank, National Association",
+  ORG_ROLE_CDE: "FI"
+}
+
+// GET /institutions?filters=NOPE:[&limit=1 (400; detail trimmed)
+BAD_FILTER {
+  errors: [
+    {
+      status: 400,
+      title: "Invalid request input, please double check your search query syntax",
+      detail: "search_phase_execution_exception: [parse_exception] Reason: parse_exception: Encountered \"<EOF>\" at line 1, column 6.\nWas expecting one of:"
+    }
+  ]
+}
+
+// GET /nothing?limit=1 (404)
+NOT_FOUND {message: "Cannot GET /api/nothing?limit=1", error: "Not Found", statusCode: 404}
