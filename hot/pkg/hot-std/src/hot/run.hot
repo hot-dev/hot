@@ -103,10 +103,10 @@ meta {
     ```
 
     `max-retries` and `retry-delay` come from the `retry` meta of the run's event
-    handler or schedule, after platform limits, and read the same on every
-    attempt. `retry-delay` is the delay before backoff and jitter. Both are 0
-    without a `retry`, in a call, which Hot doesn't retry, and in a task, whose
-    `retry` option they don't report.
+    handler or schedule, or the `retry` option of its task, after platform limits,
+    and read the same on every attempt. `retry-delay` is the delay before backoff
+    and jitter. Both are 0 without a `retry`, and in a call, which Hot doesn't
+    retry.
     """
 }
 fn (): RunInfo {
