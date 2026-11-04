@@ -589,13 +589,13 @@ async fn run_action_handler(
     // Create new event data
     let new_event_id = Uuid::now_v7();
     // A retry of an event handler's run is that handler's alone, so it is one
-    // run this can name. Function runs re-dispatch as a hot:call, through
-    // another handler.
+    // run this can name. Anything else runs as the worker derives for whichever
+    // handlers take the event: all of them on a re-run, and for a function run
+    // the hot:call handler, not the one the run names.
     let retries_handler = is_retry && !is_function_call;
     let new_run_id = retries_handler
         .then(|| run.retry_run_id(new_event_id, &new_event_type, run.retry_attempt + 1))
-        .flatten()
-        .unwrap_or_else(Uuid::now_v7);
+        .flatten();
     let event_time = chrono::Utc::now();
 
     // For retry: use same stream_id, for rerun: new stream_id
@@ -713,7 +713,7 @@ async fn run_action_handler(
 
     // Create execution context
     let execution_context = hot::lang::event::ExecutionContext {
-        run_id: new_run_id,
+        run_id: new_run_id.unwrap_or_else(Uuid::now_v7),
         stream_id,
         run_type_id: if new_event_type == "hot:call" {
             hot::db::run::RunType::Call.as_id()

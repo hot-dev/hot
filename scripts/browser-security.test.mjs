@@ -183,6 +183,30 @@ function templateFiles(dir) {
     });
 }
 
+test('a retry or re-run opens its work once its runs have started', async () => {
+    const template = readFileSync(join(root, 'crates/hot_app/templates/run_detail.html'), 'utf8');
+    const source = template.match(/async function openRedispatched[\s\S]*?\n}\n/)?.[0];
+    assert.ok(source, 'run_detail.html defines openRedispatched');
+    const opened = async (data, tables) => {
+        const context = vm.createContext({
+            window: { hotScopeUrl: (url) => url, location: {} },
+            fetch: async () => ({ text: async () => tables.shift() ?? '' }),
+            setTimeout: (callback) => callback(),
+        });
+        vm.runInContext(source, context);
+        await vm.runInContext('openRedispatched', context)(data);
+        return context.window.location.href;
+    };
+    const started = '<a href="/runs/1">';
+
+    // One run the response names, once it exists: before, its page is "not found".
+    assert.equal(await opened({ event_id: 'e', run_id: 'r' }, ['', '', started]), '/runs/r');
+    // Runs the response can't name: the event lists them.
+    assert.equal(await opened({ event_id: 'e', run_id: null }, ['', started]), '/events/e');
+    // A worker that doesn't start it in time: only the event's page exists.
+    assert.equal(await opened({ event_id: 'e', run_id: 'r' }, []), '/events/e');
+});
+
 test('templates interpolate into JavaScript only through the js filter', () => {
     const dir = join(root, 'crates/hot_app/templates');
     const problems = templateFiles(dir).flatMap((file) =>

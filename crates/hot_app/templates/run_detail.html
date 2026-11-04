@@ -1168,6 +1168,24 @@ function initializeGraphToggle() {
 }
 
 // Retry a failed run (same stream, with retry context)
+// Open what a retry or re-run sent. Its runs start once a worker takes the
+// event, and a page lists runs as of its load, so wait briefly for them. The
+// response names a run only when the event has just that one; until it starts,
+// its page is "not found", while the event's page always exists.
+async function openRedispatched(data) {
+    const eventPage = `/events/${data.event_id}`;
+    for (let attempt = 0; attempt < 20; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        const table = await fetch(window.hotScopeUrl(`${eventPage}/table`));
+        if ((await table.text()).includes('/runs/')) {
+            const page = data.run_id ? `/runs/${data.run_id}` : eventPage;
+            window.location.href = window.hotScopeUrl(page);
+            return;
+        }
+    }
+    window.location.href = window.hotScopeUrl(eventPage);
+}
+
 async function retryRun(runId) {
     const confirmed = await showConfirm(
         'Retry Run',
@@ -1185,8 +1203,7 @@ async function retryRun(runId) {
         const data = await response.json();
 
         if (data.success) {
-            // Redirect to the new run
-            window.location.href = window.hotScopeUrl(`/runs/${data.run_id}`);
+            await openRedispatched(data);
         } else {
             await showAlert('Retry Failed', `Failed to retry: ${data.error}`, 'error');
         }
@@ -1213,8 +1230,7 @@ async function rerunRun(runId) {
         const data = await response.json();
 
         if (data.success) {
-            // Redirect to the new run
-            window.location.href = window.hotScopeUrl(`/runs/${data.run_id}`);
+            await openRedispatched(data);
         } else {
             await showAlert('Re-run Failed', `Failed to re-run: ${data.error}`, 'error');
         }
