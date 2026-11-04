@@ -134,6 +134,7 @@ ammonia = { workspace = true }
 libc = { workspace = true }
 
 [target."cfg(windows)".dependencies]
+same-file = { workspace = true }
 
 [build-dependencies]
 blake3 = { workspace = true }
