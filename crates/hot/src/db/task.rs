@@ -514,7 +514,8 @@ impl Task {
                 })
             }
             crate::db::DatabasePool::Sqlite(pool) => {
-                let mut tx = pool.begin().await?;
+                // Reads before writing, so take the writer lock up front.
+                let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
                 let row = sqlx::query_as::<_, (i16, i16, i16)>(
                     "SELECT task_status_id, retry_attempt, infra_retry_count FROM task WHERE task_id = ?",
                 )
@@ -3844,6 +3845,65 @@ mod tests {
         let child = Task::get(&db, &child_id).await.unwrap();
         assert_eq!(child.parent_task_id, Some(parent.task_id));
         assert_eq!(child.infra_retry_count, 1);
+    }
+
+    #[tokio::test]
+    async fn sqlite_finalize_with_infra_retry_waits_for_another_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let conf =
+            crate::val!({"uri": format!("sqlite:{}", dir.path().join("tasks.db").display())});
+        crate::db::run_migrations(&conf).await.unwrap();
+        let db = crate::db::create_db_pool(&conf).await.unwrap();
+        let crate::db::DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let task_id = Uuid::now_v7();
+        Task::insert(
+            &db,
+            &task_id,
+            &data.env_id,
+            &data.stream_id,
+            &data.build_id,
+            None,
+            "::app/retried",
+            None,
+            None,
+            "code",
+            60_000,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(Task::mark_running(&db, &task_id).await.unwrap());
+        // Another connection holds the writer lock while finalizing starts.
+        let mut holder = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        sqlx::query("UPDATE env SET name=name WHERE env_id=?")
+            .bind(data.env_id)
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            holder.commit().await.unwrap();
+        });
+        let error = serde_json::json!({"msg": "interrupted"});
+        let outcome = Task::finalize_with_infra_retry(
+            &db,
+            &task_id,
+            &Uuid::now_v7(),
+            3,
+            &error,
+            &error,
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            outcome,
+            InfraRetryFinalizeOutcome::RetryReady { .. }
+        ));
+        release.await.unwrap();
     }
 
     #[tokio::test]

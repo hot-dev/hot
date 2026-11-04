@@ -1,0 +1,247 @@
+::sec::edgar::api ns
+meta {
+    ctx: {"sec.edgar.user-agent": {required: false}},
+    doc: """
+    Transport for SEC EDGAR: the settings resolver (per-call `opts`
+    first, then context variables), a typed `HttpError`, JSON GETs, and
+    query-string building that drops unset values.
+
+    | opts key | Context variable | Default |
+    |---|---|---|
+    | `user-agent` | `sec.edgar.user-agent` | none: calls fail without it |
+
+    **Per-call User-Agent.** `user-agent` in `opts` is masked in call
+    records and never written to context, so parallel flows and tenants
+    in one run don't see each other's contact details. Present but blank
+    or null, it is an error, never a fallback to context.
+    """
+}
+
+::ctx ::hot::ctx
+::uri ::hot::uri
+::re ::hot::regex
+
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+SOURCE "sec-edgar"
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+given
+meta {
+    doc: """True for a non-null value that is not a blank string."""
+}
+fn (v: Any): Bool {
+  match v {
+    Null => { false }
+    Str => { not(is-empty(trim(v))) }
+    _ => { true }
+  }
+}
+
+pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
+  from-opts get(opts, key)
+  from-ctx ::ctx/get(ctx-key)
+  cond {
+    given(from-opts) => { from-opts }
+    given(from-ctx) => { from-ctx }
+    => { default }
+  }
+}
+
+resolve
+meta {
+    doc: """
+    Resolve settings for one call: `{user-agent}`. A value in `opts`
+    wins over context; it is used for that call only and comes back
+    unchanged. An Err when `user-agent` is in `opts` but blank or null.
+
+    **Example**
+
+    ```hot
+    cfg ::sec::edgar::api/resolve({user-agent: "Tenant Co ops@tenant.example"})
+    ```
+    """
+}
+fn (opts: Map): Map {
+  from-opts get(opts, "user-agent")
+  ::ctx/mark-secret(filter([from-opts], given))
+  cond {
+    and(in("user-agent", keys(opts)), not(given(from-opts))) => {
+      err("sec-edgar: user-agent is in the call's opts but is blank or null. Pass a value, or leave user-agent out to use the context variable.")
+    }
+    => { {user-agent: pick(opts, "user-agent", "sec.edgar.user-agent", null)} }
+  }
+}
+
+require-user-agent
+meta {
+    doc: """The User-Agent from resolved settings, or an Err explaining that SEC requires one with contact details."""
+}
+fn (cfg: Map): Str {
+  cond {
+    given(cfg.user-agent) => { cfg.user-agent }
+    => { err("sec-edgar: SEC EDGAR requires a User-Agent with contact details, e.g. \"Acme Corp ops@acme.com\"; set sec.edgar.user-agent or pass {user-agent: ...}") }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+HttpError
+meta {
+    doc: """
+    A non-2xx SEC response. `source` is `"sec-edgar"`; `url` the
+    requested URL (SEC takes no credentials in URLs); `retry-after`
+    the parsed `Retry-After` seconds on 429s; `message` a one-line
+    summary that never includes credentials.
+    """
+}
+type {
+    source: Str,
+    status: Int,
+    url: Str,
+    headers: Map,
+    body: Any,
+    retry-after: Int?,
+    message: Str
+}
+
+body-detail fn (body: Any): Str? {
+  cond {
+    is-str(body) => { if(gt(length(body), 200), `${slice(body, 0, 200)}…`, body) }
+    is-map(body) => {
+      // SEC mostly answers in text; a JSON error is {error} or {message}
+      first-error if(is-vec(get(body, "errors")), first(get(body, "errors")), null)
+      or(
+        get(or(first-error, {}), "detail"),
+        get(or(first-error, {}), "title"),
+        get(or(first-error, {}), "error"),
+        get(body, "error"),
+        get(body, "message")
+      )
+    }
+    => { null }
+  }
+}
+
+retry-after fn (headers: Map): Int? {
+  v get(headers, "retry-after")
+  cond {
+    is-null(v) => { null }
+    ::re/is-match(trim(Str(v)), "^\\d+$") => { Int(trim(Str(v))) }
+    => { null }
+  }
+}
+
+http-error
+meta {
+    doc: """Build an `HttpError` from a non-2xx response. Exposed for testing; every request uses it."""
+}
+fn (response: HttpResponse, url: Str): HttpError {
+  headers or(response.headers, {})
+  detail body-detail(response.body)
+  HttpError({
+    source: SOURCE,
+    status: response.status,
+    url: url,
+    headers: headers,
+    body: response.body,
+    retry-after: retry-after(headers),
+    message: if(is-some(detail), `${SOURCE}: HTTP ${response.status}: ${detail}`, `${SOURCE}: HTTP ${response.status} for ${url}`)
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------
+
+query-string
+meta {
+    doc: """Build a `?a=1&b=2` suffix from a Map, dropping null and blank values (pure); `""` when nothing remains."""
+}
+fn (params: Map): Str {
+  ::uri/query-string(filter-vals(params, given))
+}
+
+path-segment
+meta {
+    doc: """Percent-encode one path segment."""
+}
+fn (value: Any): Str {
+  ::uri/encode(Str(value))
+}
+
+request
+meta {
+    doc: """
+    GET (or another method) a SEC URL with `headers`, returning
+    the `HttpResponse` on 2xx or an Err carrying `HttpError`. A
+    transport failure passes through as its own Err.
+    """
+}
+fn (method: Str, url: Str, headers: Map): HttpResponse {
+  response ::hot::http/request(HttpRequest({
+    method,
+    url,
+    headers: headers,
+    body: ""
+  }))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response }
+    => { err(http-error(response, url)) }
+  }
+}
+
+get-json
+meta {
+    doc: """GET a JSON resource and return the decoded body, or an Err carrying `HttpError`."""
+}
+fn (url: Str, headers: Map): Any {
+  response request("GET", url, {Accept: "application/json", ...headers})
+  cond {
+    is-err(response) => { response }
+    is-str(response.body) => {
+      text trim(response.body)
+      if(or(::hot::str/starts-with(text, "{"), ::hot::str/starts-with(text, "[")), from-json(text), response.body)
+    }
+    => { response.body }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Columns to rows
+// ---------------------------------------------------------------------------
+
+columns-to-rows
+meta {
+    doc: """
+    Turn a columnar Map (`{a: [1, 2], b: [3, 4]}`, as in EDGAR's
+    `filings.recent`) into a Vec of row Maps (`[{a: 1, b: 3}, {a: 2, b:
+    4}]`), at most `limit` rows. Columns shorter than the first are
+    padded with null. Pure.
+    """
+}
+fn (columns: Map, limit: Int): Vec<Map> {
+  names keys(columns)
+  cond {
+    is-empty(names) => { [] }
+    => {
+      n min(limit, length(or(get(columns, first(names)), [])))
+      cols map(vals(columns), (c) { slice(concat(or(c, []), map(range(0, n), (i) { null })), 0, n) })
+      // Grow rows one column at a time with native interleave/partition;
+      // a lambda that indexed every column per row would copy them all.
+      start map(first(cols), (v) { [v] })
+      rows reduce(rest(cols), (acc, col) {
+        map(partition(interleave(acc, col), 2), (pair) { concat(pair[0], [pair[1]]) })
+      }, start)
+      map(rows, (r) { zipmap(names, r) })
+    }
+  }
+}

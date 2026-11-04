@@ -27,7 +27,7 @@ use uuid::Uuid;
 /// serialization fails. See [`crate::lang::emitter::postgres_safety`]
 /// for the full forbidden-character rationale.
 fn val_to_jsonb_string(v: &Val) -> String {
-    let storage_val = v.to_hot_data_repr();
+    let storage_val = v.to_record_repr();
     let raw = serde_json::to_string(&storage_val).unwrap_or_else(|_| "{}".to_string());
     sanitize_json_for_jsonb(&raw).into_owned()
 }
@@ -45,8 +45,16 @@ const BACKPRESSURE_THRESHOLD: usize = 1000;
 /// Batch size before the writer shard flushes pending call writes (SQLite and Postgres).
 const WRITE_BATCH_SIZE: usize = 100;
 
-/// Run info tuple: (run_type_id, build_id, event_id, env_id, retry_attempt, status_id)
-type RunInfo = (i16, Option<Uuid>, Option<Uuid>, Uuid, i16, i16);
+/// Run info tuple: (run_type_id, build_id, event_id, env_id, retry_attempt, status_id, event_handler_fn)
+type RunInfo = (
+    i16,
+    Option<Uuid>,
+    Option<Uuid>,
+    Uuid,
+    i16,
+    i16,
+    Option<String>,
+);
 
 fn elapsed_ms(elapsed: std::time::Duration) -> u64 {
     elapsed.as_millis().min(u128::from(u64::MAX)) as u64
@@ -1727,8 +1735,8 @@ WHERE hot.call.run_id = EXCLUDED.run_id
             let result: Result<u64, sqlx::Error> = match pool {
                 DatabasePool::Postgres(pg_pool) => {
                     sqlx::query(
-                        "INSERT INTO run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, event_id, start_time, status_id, by_user_id, retry_attempt, access_id, agent_type, info)
-                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                        "INSERT INTO run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, event_id, start_time, status_id, by_user_id, retry_attempt, access_id, agent_type, info, event_handler_fn)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                          ON CONFLICT (run_id) DO NOTHING"
                     )
                     .bind(ctx.run_id)
@@ -1745,14 +1753,15 @@ WHERE hot.call.run_id = EXCLUDED.run_id
                     .bind(ctx.access_id)
                     .bind(&ctx.agent_type)
                     .bind(&timing_info)
+                    .bind(&ctx.event_handler_fn)
                     .execute(pg_pool)
                     .await
                     .map(|result| result.rows_affected())
                 }
                 DatabasePool::Sqlite(sqlite_pool) => {
                     sqlx::query(
-                        "INSERT OR IGNORE INTO run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, event_id, start_time, status_id, by_user_id, retry_attempt, access_id, agent_type, info)
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                        "INSERT OR IGNORE INTO run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, event_id, start_time, status_id, by_user_id, retry_attempt, access_id, agent_type, info, event_handler_fn)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                     )
                     .bind(ctx.run_id)
                     .bind(ctx.env_id)
@@ -1768,6 +1777,7 @@ WHERE hot.call.run_id = EXCLUDED.run_id
                     .bind(ctx.access_id)
                     .bind(&ctx.agent_type)
                     .bind(timing_info.as_ref().map(serde_json::Value::to_string))
+                    .bind(&ctx.event_handler_fn)
                     .execute(sqlite_pool)
                     .await
                     .map(|result| result.rows_affected())
@@ -1858,8 +1868,8 @@ WHERE hot.call.run_id = EXCLUDED.run_id
     /// `Run::ensure_run_exists` (used by `::hot::task/start`, `::hot::box/start`,
     /// and file-metadata writes) inserts placeholder rows before the emitter's
     /// authoritative `run:start` lands. Those placeholders lack `event_id`,
-    /// `origin_run_id`, and `agent_type`, and carry an approximate
-    /// `start_time`. When the real run:start hits the insert-or-ignore
+    /// `origin_run_id`, `agent_type`, and `event_handler_fn`, and carry an
+    /// approximate `start_time`. When the real run:start hits the insert-or-ignore
     /// conflict, this fills in what the placeholder is missing. COALESCE keeps
     /// it idempotent for genuine duplicate run:start events.
     async fn backfill_run_provenance(
@@ -1876,7 +1886,8 @@ WHERE hot.call.run_id = EXCLUDED.run_id
                          event_id = COALESCE(event_id, $3),
                          agent_type = COALESCE(agent_type, $4),
                          start_time = LEAST(start_time, $5),
-                         info = COALESCE(info, '{}'::jsonb) || COALESCE($6, '{}'::jsonb)
+                         info = COALESCE(info, '{}'::jsonb) || COALESCE($6, '{}'::jsonb),
+                         event_handler_fn = COALESCE(event_handler_fn, $7)
                      WHERE run_id = $1",
                 )
                 .bind(ctx.run_id)
@@ -1885,6 +1896,7 @@ WHERE hot.call.run_id = EXCLUDED.run_id
                 .bind(&ctx.agent_type)
                 .bind(start_time)
                 .bind(&timing_info)
+                .bind(&ctx.event_handler_fn)
                 .execute(pg_pool)
                 .await?;
             }
@@ -1929,7 +1941,8 @@ WHERE hot.call.run_id = EXCLUDED.run_id
                          info = CASE
                              WHEN ?6 IS NULL THEN info
                              ELSE (SELECT info FROM replacement)
-                         END
+                         END,
+                         event_handler_fn = COALESCE(event_handler_fn, ?7)
                      WHERE run_id = ?1",
                 )
                 .bind(ctx.run_id)
@@ -1938,6 +1951,7 @@ WHERE hot.call.run_id = EXCLUDED.run_id
                 .bind(&ctx.agent_type)
                 .bind(start_time)
                 .bind(&timing_info)
+                .bind(&ctx.event_handler_fn)
                 .execute(sqlite_pool)
                 .await?;
             }
@@ -1966,8 +1980,8 @@ WHERE hot.call.run_id = EXCLUDED.run_id
         let rows_affected = match pool {
             DatabasePool::Postgres(pg_pool) => {
                 sqlx::query(
-                    "INSERT INTO hot.run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, event_id, start_time, stop_time, status_id, result, by_user_id, retry_attempt, access_id, agent_type, info)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14, $15, $16)
+                    "INSERT INTO hot.run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, event_id, start_time, stop_time, status_id, result, by_user_id, retry_attempt, access_id, agent_type, info, event_handler_fn)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14, $15, $16, $17)
                      ON CONFLICT (run_id) DO UPDATE
                      SET stop_time = EXCLUDED.stop_time,
                          status_id = EXCLUDED.status_id,
@@ -1991,14 +2005,15 @@ WHERE hot.call.run_id = EXCLUDED.run_id
                 .bind(ctx.access_id)
                 .bind(&ctx.agent_type)
                 .bind(&timing_info)
+                .bind(&ctx.event_handler_fn)
                 .execute(pg_pool)
                 .await?
                 .rows_affected()
             }
             DatabasePool::Sqlite(sqlite_pool) => {
                 sqlx::query(
-                    "INSERT OR IGNORE INTO run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, event_id, start_time, stop_time, status_id, result, by_user_id, retry_attempt, access_id, agent_type, info)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                    "INSERT OR IGNORE INTO run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, event_id, start_time, stop_time, status_id, result, by_user_id, retry_attempt, access_id, agent_type, info, event_handler_fn)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                 )
                 .bind(ctx.run_id)
                 .bind(ctx.env_id)
@@ -2016,6 +2031,7 @@ WHERE hot.call.run_id = EXCLUDED.run_id
                 .bind(ctx.access_id)
                 .bind(&ctx.agent_type)
                 .bind(timing_info.as_ref().map(serde_json::Value::to_string))
+                .bind(&ctx.event_handler_fn)
                 .execute(sqlite_pool)
                 .await?
                 .rows_affected()
@@ -2149,20 +2165,28 @@ WHERE hot.call.run_id = EXCLUDED.run_id
         // overwrite a terminal run or schedule a duplicate retry.
         let run_info: Option<RunInfo> = match pool {
             DatabasePool::Postgres(pg_pool) => {
-                sqlx::query_as("SELECT run_type_id, build_id, event_id, env_id, retry_attempt, status_id FROM hot.run WHERE run_id = $1")
+                sqlx::query_as("SELECT run_type_id, build_id, event_id, env_id, retry_attempt, status_id, event_handler_fn FROM hot.run WHERE run_id = $1")
                     .bind(run_id)
                     .fetch_optional(pg_pool)
                     .await?
             }
             DatabasePool::Sqlite(sqlite_pool) => {
-                sqlx::query_as("SELECT run_type_id, build_id, event_id, env_id, retry_attempt, status_id FROM run WHERE run_id = ?")
+                sqlx::query_as("SELECT run_type_id, build_id, event_id, env_id, retry_attempt, status_id, event_handler_fn FROM run WHERE run_id = ?")
                     .bind(run_id)
                     .fetch_optional(sqlite_pool)
                     .await?
             }
         };
 
-        let Some((run_type_id, build_id, event_id, env_id, retry_attempt, status_id)) = run_info
+        let Some((
+            run_type_id,
+            build_id,
+            event_id,
+            env_id,
+            retry_attempt,
+            status_id,
+            event_handler_fn,
+        )) = run_info
         else {
             return Err(sqlx::Error::RowNotFound);
         };
@@ -2179,8 +2203,14 @@ WHERE hot.call.run_id = EXCLUDED.run_id
         // Look up retry config from handler/schedule metadata based on run type
         let retry_config = match run_type_id {
             2 => {
-                // Event run - look up event handler
-                Self::get_event_handler_retry_config(pool, build_id, event_id).await
+                // Event run - look up its event handler
+                Self::get_event_handler_retry_config(
+                    pool,
+                    build_id,
+                    event_id,
+                    event_handler_fn.as_deref(),
+                )
+                .await
             }
             3 => {
                 // Schedule run - look up schedule
@@ -2421,11 +2451,13 @@ WHERE hot.call.run_id = EXCLUDED.run_id
         }
     }
 
-    /// Get retry config from event handler metadata
+    /// Get retry config from the metadata of the run's event handler. A run
+    /// from before runs named their handler goes by its event's first handler.
     async fn get_event_handler_retry_config(
         pool: &DatabasePool,
         build_id: Option<Uuid>,
         event_id: Option<Uuid>,
+        event_handler_fn: Option<&str>,
     ) -> crate::env::retry::RetryConfig {
         use crate::env::retry::RetryConfig;
 
@@ -2460,14 +2492,15 @@ WHERE hot.call.run_id = EXCLUDED.run_id
             return RetryConfig::default();
         };
 
-        // Look up event handler by build_id and event_type
+        // Look up event handler by build_id, event_type and function
         let meta: Option<serde_json::Value> = match pool {
             DatabasePool::Postgres(pg_pool) => {
                 sqlx::query_scalar(
-                    "SELECT meta FROM hot.event_handler WHERE build_id = $1 AND event_type = $2 LIMIT 1"
+                    "SELECT meta FROM hot.event_handler WHERE build_id = $1 AND event_type = $2 AND ($3::text IS NULL OR ns || '/' || var = $3) LIMIT 1"
                 )
                 .bind(build_id)
                 .bind(&event_type)
+                .bind(event_handler_fn)
                 .fetch_optional(pg_pool)
                 .await
                 .ok()
@@ -2475,10 +2508,11 @@ WHERE hot.call.run_id = EXCLUDED.run_id
             }
             DatabasePool::Sqlite(sqlite_pool) => {
                 sqlx::query_scalar(
-                    "SELECT meta FROM event_handler WHERE build_id = ? AND event_type = ? LIMIT 1"
+                    "SELECT meta FROM event_handler WHERE build_id = ?1 AND event_type = ?2 AND (?3 IS NULL OR ns || '/' || var = ?3) LIMIT 1"
                 )
                 .bind(build_id)
                 .bind(&event_type)
+                .bind(event_handler_fn)
                 .fetch_optional(sqlite_pool)
                 .await
                 .ok()
@@ -3085,7 +3119,8 @@ mod tests {
         );
 
         let claimed_at = chrono::Utc::now();
-        let mut context = ExecutionContext::minimal(run_id, stream_id, 4);
+        let mut context = ExecutionContext::minimal(run_id, stream_id, 4)
+            .with_event_handler_fn("::orders/on-created".to_string());
         context.env_id = Some(env_id);
         context.queue_timing = Some(crate::lang::event::QueueExecutionTiming {
             backend: "memory".to_string(),
@@ -3122,6 +3157,94 @@ mod tests {
         assert_eq!(info["nested"]["keep"], true);
         assert!(info["queue_timing"].get("old").is_none());
         assert_eq!(info["queue_timing"]["backend"], "memory");
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT event_handler_fn FROM run WHERE run_id = ?")
+                .bind(run_id)
+                .fetch_one(pool)
+                .await
+                .unwrap(),
+            "::orders/on-created"
+        );
+    }
+
+    #[tokio::test]
+    async fn event_run_failures_retry_on_the_meta_of_their_own_handler() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        let event_id = Uuid::now_v7();
+        crate::db::Event::insert_event(
+            &db,
+            &event_id,
+            &data.env_id,
+            &data.stream_id,
+            "order:created",
+            &serde_json::json!({}),
+            chrono::Utc::now(),
+            &data.user_id,
+            None,
+        )
+        .await
+        .unwrap();
+        for (var, meta) in [
+            ("no-retry", r#"{"on-event": "order:created"}"#),
+            ("retries", r#"{"on-event": "order:created", "retry": 2}"#),
+        ] {
+            sqlx::query(
+                "INSERT INTO event_handler (event_handler_id, build_id, event_type, ns, var, meta) VALUES (?, ?, 'order:created', '::orders', ?, ?)",
+            )
+            .bind(Uuid::now_v7())
+            .bind(data.build_id)
+            .bind(var)
+            .bind(meta)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+        let writer = DatabaseWriter::new(Arc::new(RwLock::new(Some(db.clone()))));
+        let fail_as = |event_handler_fn: Option<&'static str>, attempt: i16| {
+            let writer = &writer;
+            async move {
+                sqlx::query(
+                    "UPDATE run SET run_type_id=2, event_id=?, status_id=1, retry_attempt=?, event_handler_fn=? WHERE run_id=?",
+                )
+                .bind(event_id)
+                .bind(attempt)
+                .bind(event_handler_fn)
+                .bind(data.run_id)
+                .execute(pool)
+                .await
+                .unwrap();
+                writer.write(DatabaseWrite::RunFail {
+                    run_id: data.run_id,
+                    event_time: chrono::Utc::now(),
+                    failure: Val::from("failed"),
+                });
+                writer.flush_run(data.run_id).await.unwrap();
+                sqlx::query_scalar::<_, i16>("SELECT status_id FROM run WHERE run_id=?")
+                    .bind(data.run_id)
+                    .fetch_one(pool)
+                    .await
+                    .unwrap()
+            }
+        };
+        let pending_retry = crate::db::RunStatus::PendingRetry.as_id();
+        let failed = crate::db::RunStatus::Failed.as_id();
+
+        assert_eq!(fail_as(Some("::orders/no-retry"), 0).await, failed);
+        assert_eq!(fail_as(Some("::orders/retries"), 0).await, pending_retry);
+        assert_eq!(fail_as(Some("::orders/retries"), 1).await, pending_retry);
+        assert_eq!(fail_as(Some("::orders/retries"), 2).await, failed);
+
+        // A run from before runs named their handler goes by its event's
+        // handler, when the event has just the one.
+        sqlx::query("DELETE FROM event_handler WHERE var = 'no-retry'")
+            .execute(pool)
+            .await
+            .unwrap();
+        assert_eq!(fail_as(None, 0).await, pending_retry);
     }
 
     #[test]

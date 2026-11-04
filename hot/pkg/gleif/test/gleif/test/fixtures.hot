@@ -1,0 +1,25 @@
+::gleif::test::fixtures ns
+
+// Trimmed real responses (retrieved 1 Nov 2026).
+
+// The pagination block of GET /lei-records?filter[fulltext]=apple inc&page[size]=2
+GLEIF_PAGE {
+  meta: {pagination: {currentPage: 1, perPage: 2, from: 1, to: 2, total: 64, lastPage: 32}},
+  data: []
+}
+
+GLEIF_LAST_PAGE {
+  meta: {pagination: {currentPage: 32, perPage: 2, from: 63, to: 64, total: 64, lastPage: 32}},
+  data: []
+}
+
+// GET /fuzzycompletions?field=entity.legalName&q=appel inc (first item)
+GLEIF_FUZZY {
+  data: [
+    {
+      type: "fuzzycompletions",
+      attributes: {value: "Apple Inc."},
+      relationships: {"lei-records": {data: {type: "lei-records", id: "HWUPKR0MPOU8FGXBT394"}}}
+    }
+  ]
+}

@@ -1374,9 +1374,11 @@ mod tests {
         let local = target(FileStorageType::Local)
             .configure(&Val::map_empty(), StorageRole::File)
             .unwrap();
+        // A rooted path stays as named. On Windows that's on the current drive.
+        let absolute = |path: &str| std::path::absolute(path).unwrap();
         assert_eq!(
             std::path::Path::new(&local.get_str("file.storage.path")),
-            std::path::absolute("/data/files").unwrap()
+            absolute("/data/files")
         );
         // Records keep the path, and Hot may run from another directory.
         let relative = MoveTarget {
@@ -1420,7 +1422,7 @@ mod tests {
         ] {
             assert_eq!(
                 std::path::Path::new(&resolved(given)),
-                std::path::absolute(wanted).unwrap(),
+                absolute(wanted),
                 "{given}"
             );
         }
@@ -1532,7 +1534,10 @@ mod tests {
         {
             assert_eq!(backend, "s3");
             let old = old.unwrap();
-            let suffix = old.rsplit(['/', '\\']).next().unwrap();
+            let suffix = std::path::Path::new(&old)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap();
             assert!(
                 stored.as_deref().unwrap().ends_with(suffix),
                 "{path}: {stored:?} keeps {suffix}"

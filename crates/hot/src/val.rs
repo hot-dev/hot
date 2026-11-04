@@ -594,6 +594,43 @@ impl fmt::Display for Val {
     }
 }
 
+/// What each value costs a [`ReprBudget`], on top of the bytes of a Str or Bytes.
+/// About what a small value takes as JSON.
+const REPR_NODE_BYTES: usize = 8;
+
+/// Which limit stopped `spend_repr`.
+enum ReprLimit {
+    Size,
+    Depth,
+}
+
+/// What a record has left to write out of a value, spent by `spend_repr`.
+struct ReprBudget {
+    bytes_left: usize,
+    depth_left: usize,
+}
+
+impl ReprBudget {
+    fn for_record(bytes: usize) -> Self {
+        Self {
+            bytes_left: bytes,
+            depth_left: crate::blob::MAX_RECORD_DEPTH,
+        }
+    }
+
+    fn spend(&mut self, bytes: usize) -> Result<(), ReprLimit> {
+        self.bytes_left = self.bytes_left.checked_sub(bytes).ok_or(ReprLimit::Size)?;
+        Ok(())
+    }
+
+    /// Go `levels` deeper, returning the depth to restore on the way back up.
+    fn descend(&mut self, levels: usize) -> Result<usize, ReprLimit> {
+        let depth = self.depth_left;
+        self.depth_left = depth.checked_sub(levels).ok_or(ReprLimit::Depth)?;
+        Ok(depth)
+    }
+}
+
 /// Value format for display
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ValFormat {
@@ -1942,6 +1979,117 @@ impl Val {
         }
 
         Val::from(boxed.to_string())
+    }
+
+    /// [`Val::to_hot_data_repr`] for a run or call record, which writes out
+    /// every value in full. A Vec or Map shares its storage, so a small value
+    /// can hold a large one thousands of times over, and a record of that would
+    /// take far more memory than the run does. It can also nest deeper than a
+    /// record can be read back. Either way the record holds an `Omitted` instead,
+    /// and nothing is copied to find that out.
+    pub fn to_record_repr(&self) -> Val {
+        self.record_repr_within(crate::blob::RECORD_BUDGET_FLOOR_BYTES)
+    }
+
+    fn record_repr_within(&self, floor: usize) -> Val {
+        // Nearly every value is under the floor, and pays for nothing more.
+        let mut budget = ReprBudget::for_record(floor);
+        match self.spend_repr(&mut budget) {
+            Ok(()) => return self.to_hot_data_repr(),
+            Err(ReprLimit::Depth) => {
+                return crate::blob::omitted_too_deep_val(floor - budget.bytes_left);
+            }
+            Err(ReprLimit::Size) => {}
+        }
+
+        // A value that really is this large is recorded: blob storage takes it,
+        // and the run already holds it, so recording it costs a small multiple.
+        let allowed = self
+            .resident_bytes()
+            .saturating_mul(crate::blob::RECORD_BUDGET_PER_RESIDENT_BYTE)
+            .max(floor);
+        let mut budget = ReprBudget::for_record(allowed);
+        match self.spend_repr(&mut budget) {
+            Ok(()) => self.to_hot_data_repr(),
+            Err(ReprLimit::Size) => crate::blob::omitted_val(allowed),
+            Err(ReprLimit::Depth) => crate::blob::omitted_too_deep_val(allowed - budget.bytes_left),
+        }
+    }
+
+    /// Walk what [`Val::to_hot_data_repr`] would copy, without copying it,
+    /// stopping as soon as `budget` runs out.
+    fn spend_repr(&self, budget: &mut ReprBudget) -> Result<(), ReprLimit> {
+        budget.spend(REPR_NODE_BYTES)?;
+        match self {
+            Val::Map(m) => {
+                let depth = budget.descend(1)?;
+                for (key, value) in m.iter() {
+                    key.spend_repr(budget)?;
+                    value.spend_repr(budget)?;
+                }
+                budget.depth_left = depth;
+            }
+            Val::Vec(v) => {
+                let depth = budget.descend(1)?;
+                for item in v.iter() {
+                    item.spend_repr(budget)?;
+                }
+                budget.depth_left = depth;
+            }
+            Val::Str(s) => budget.spend(s.len())?,
+            Val::Bytes(b) => budget.spend(b.len())?,
+            Val::Box(b) => {
+                if let Some(lambda) = b
+                    .as_any()
+                    .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
+                {
+                    // Its Map, `$val`'s Map and `captures` hold what it captured.
+                    let depth = budget.descend(3)?;
+                    for value in lambda.closure_env.values() {
+                        value.spend_repr(budget)?;
+                    }
+                    budget.depth_left = depth;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Bytes this value occupies, counting storage shared within it once, in
+    /// the units [`ReprBudget`] spends. Takes time for what is stored, however
+    /// many times the value repeats it.
+    fn resident_bytes(&self) -> usize {
+        let mut seen = std::collections::HashSet::new();
+        let mut total = 0usize;
+        let mut stack = vec![self];
+        while let Some(val) = stack.pop() {
+            total = total.saturating_add(REPR_NODE_BYTES);
+            match val {
+                Val::Str(s) if seen.insert(s.as_ptr().cast::<()>()) => {
+                    total = total.saturating_add(s.len());
+                }
+                Val::Bytes(b) if seen.insert(Arc::as_ptr(b).cast::<()>()) => {
+                    total = total.saturating_add(b.len());
+                }
+                Val::Vec(v) if seen.insert(Arc::as_ptr(v).cast::<()>()) => {
+                    stack.extend(v.iter());
+                }
+                Val::Map(m) if seen.insert(Arc::as_ptr(m).cast::<()>()) => {
+                    stack.extend(m.iter().flat_map(|(key, value)| [key, value]));
+                }
+                Val::Box(b) => {
+                    if let Some(lambda) = b
+                        .as_any()
+                        .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
+                    {
+                        stack.extend(lambda.closure_env.values());
+                    }
+                }
+                _ => {}
+            }
+        }
+        total
     }
 
     fn format_box_display(boxed: &dyn ValBox) -> String {
@@ -5176,5 +5324,130 @@ mod tests {
         assert_eq!(ToString::to_string(&boxed), "::hot::math/add");
         assert_eq!(json["$type"], "::hot::type/Fn");
         assert_eq!(json["$val"], "::hot::math/add");
+    }
+
+    fn omitted_reason(val: &Val) -> Option<String> {
+        let json = serde_json::to_value(val).ok()?;
+        (json["$type"] == crate::blob::OMITTED_TYPE).then(|| {
+            json["$val"]["reason"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        })
+    }
+
+    fn nested(levels: usize) -> Val {
+        (0..levels).fold(Val::Int(1), |inner, _| Val::vec(vec![inner]))
+    }
+
+    fn lambda_capturing(value: Val) -> Val {
+        let mut closure_env = ahash::AHashMap::new();
+        closure_env.insert("value".to_string(), value);
+        Val::Box(Box::new(crate::lang::bytecode::LambdaInfo {
+            parameters: vec!["x".to_string()],
+            instructions: vec![],
+            register_count: 1,
+            capture_vars: vec!["value".to_string()],
+            closure_env,
+            defining_namespace: "::hot::test".to_string(),
+            is_lazy_param: false,
+            used_registers: vec![],
+            structural_hash_cache: Default::default(),
+            defining_frame: None,
+            result_params: Vec::new(),
+        }))
+    }
+
+    #[test]
+    fn record_repr_is_the_hot_data_repr_of_ordinary_values() {
+        let boxed = Val::Box(Box::new(
+            crate::lang::runtime::function_ref::FunctionRef::new("::hot::math/add".to_string()),
+        ));
+        let value = val!({
+            "text": "a",
+            "number": 1,
+            "list": [1, "two", null, true],
+            "map": {"nested": {"deeper": [1.5]}}
+        });
+        for value in [
+            value,
+            Val::Null,
+            Val::Bytes(Arc::new(vec![1, 2, 3])),
+            Val::vec(vec![boxed, lambda_capturing(val!({"kept": [1, 2]}))]),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&value.to_record_repr()).unwrap(),
+                serde_json::to_string(&value.to_hot_data_repr()).unwrap(),
+            );
+        }
+    }
+
+    #[test]
+    fn record_repr_leaves_out_what_shared_storage_repeats() {
+        let big = Val::vec((0..1_000).map(Val::Int).collect());
+        let many = Val::vec(vec![big.clone(); 10_000]);
+        let reason = omitted_reason(&many.record_repr_within(64 * 1024));
+        assert_eq!(reason.as_deref(), Some("too large to record"));
+
+        let text = Val::from("x".repeat(100_000));
+        let many = Val::vec(vec![text; 10_000]);
+        assert!(omitted_reason(&many.record_repr_within(64 * 1024)).is_some());
+
+        let bytes = Val::Bytes(Arc::new(vec![0; 100_000]));
+        let many = Val::vec(vec![bytes; 10_000]);
+        assert!(omitted_reason(&many.record_repr_within(64 * 1024)).is_some());
+
+        let captured = Val::vec(vec![big; 10_000]);
+        let lambda = lambda_capturing(captured);
+        assert!(omitted_reason(&lambda.record_repr_within(64 * 1024)).is_some());
+    }
+
+    #[test]
+    fn record_repr_stops_on_a_value_too_large_to_ever_expand() {
+        // Each level holds the one below twice: 2^64 values in 64 Vecs.
+        let mut value = Val::Int(1);
+        for _ in 0..64 {
+            value = Val::vec(vec![value.clone(), value]);
+        }
+        assert_eq!(
+            omitted_reason(&value.record_repr_within(64 * 1024)).as_deref(),
+            Some("too large to record")
+        );
+    }
+
+    #[test]
+    fn record_repr_keeps_a_value_that_really_is_large() {
+        let floor = 1024;
+        let large = Val::vec((0..10_000).map(Val::Int).collect());
+        assert_eq!(large.record_repr_within(floor), large);
+
+        let text = Val::from("x".repeat(10_000));
+        let large = Val::vec(vec![text.clone(); 3]);
+        assert_eq!(large.record_repr_within(floor), large);
+
+        // Some repetition is fine, and past that the value is mostly repeats.
+        let rows = Val::vec((0..1_000).map(Val::Int).collect());
+        let some = Val::vec(vec![rows.clone(); 3]);
+        assert_eq!(some.record_repr_within(floor), some);
+        let mostly = Val::vec(vec![rows; 5]);
+        assert!(omitted_reason(&mostly.record_repr_within(floor)).is_some());
+    }
+
+    #[test]
+    fn record_repr_leaves_out_what_could_not_be_read_back() {
+        let limit = crate::blob::MAX_RECORD_DEPTH;
+        assert_eq!(nested(limit).to_record_repr(), nested(limit));
+        assert_eq!(
+            omitted_reason(&nested(limit + 1).to_record_repr()).as_deref(),
+            Some("too deeply nested to record")
+        );
+
+        // A record holds its deepest value inside storage's own wrapping.
+        let deepest = serde_json::to_string(&Val::vec(vec![nested(limit - 1)])).unwrap();
+        serde_json::from_str::<serde_json::Value>(&format!("[[[[[[[{deepest}]]]]]]]"))
+            .expect("the limit leaves room for a BlobRef");
+
+        let inside_lambda = lambda_capturing(nested(limit));
+        assert!(omitted_reason(&inside_lambda.to_record_repr()).is_some());
     }
 }

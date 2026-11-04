@@ -2315,6 +2315,7 @@ async fn handle_tools_call_streaming(
         secret_values: Default::default(),
         access_id,
         agent_type: None,
+        event_handler_fn: None,
         queue_timing: None,
         // Enqueue-only producer context; the worker stamps deadline_at at admission
         deadline_at: None,
