@@ -27,7 +27,7 @@ use uuid::Uuid;
 /// serialization fails. See [`crate::lang::emitter::postgres_safety`]
 /// for the full forbidden-character rationale.
 fn val_to_jsonb_string(v: &Val) -> String {
-    let storage_val = v.to_hot_data_repr();
+    let storage_val = v.to_record_repr();
     let raw = serde_json::to_string(&storage_val).unwrap_or_else(|_| "{}".to_string());
     sanitize_json_for_jsonb(&raw).into_owned()
 }

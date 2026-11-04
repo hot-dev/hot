@@ -912,7 +912,7 @@ impl DatabaseEngineEventEmitterProcessor {
     /// transaction batch and we'd silently drop a window of trace data.
     /// See [`super::postgres_safety`] for the full rationale.
     fn serialize_val_for_jsonb(v: &Val) -> String {
-        let storage_val = v.to_hot_data_repr();
+        let storage_val = v.to_record_repr();
         let raw = serde_json::to_string(&storage_val).unwrap_or_default();
         sanitize_json_for_jsonb(&raw).into_owned()
     }
@@ -936,8 +936,7 @@ impl DatabaseEngineEventEmitterProcessor {
     /// Mask a value recorded on a run. Masks its storage form, so that values
     /// inside a closure's captures, say, aren't missed.
     fn mask_run_val(val: &Val, ctx: &ExecutionContext) -> Val {
-        RecordMask::new(&ctx.secret_values, &ctx.secret_value_hashes)
-            .mask_val(val.to_hot_data_repr())
+        RecordMask::new(&ctx.secret_values, &ctx.secret_value_hashes).mask_val(val.to_record_repr())
     }
 
     fn handle_call_start_batch(&mut self, event: &EngineEvent) {
@@ -1682,6 +1681,125 @@ mod tests {
         assert!(crate::blob::is_blob_ref_val(
             map.get(&Val::from("text")).unwrap()
         ));
+    }
+
+    fn omitted_reason(stored: &Val) -> String {
+        let Val::Map(map) = stored else {
+            panic!("expected a marker: {stored:?}");
+        };
+        assert_eq!(
+            map.get(&Val::from("$type")),
+            Some(&Val::from(crate::blob::OMITTED_TYPE))
+        );
+        let Some(Val::Map(inner)) = map.get(&Val::from("$val")) else {
+            panic!("expected a reason: {stored:?}");
+        };
+        inner.get(&Val::from("reason")).unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn repeats_of_shared_storage_are_left_out_with_blob_storage_on() {
+        let db = crate::db::test_db().await;
+        let (blob_store, _tmp) = test_blob_store(&db);
+        let execution_context = persisted_execution_context(&db).await;
+        let text = Val::from("x".repeat(1024 * 1024));
+        let stored = record_return(
+            &db,
+            Some(blob_store),
+            &execution_context,
+            Val::vec(vec![text; 100_000]),
+        )
+        .await;
+        assert!(omitted_reason(&stored).contains("too large"), "{stored:?}");
+    }
+
+    #[tokio::test]
+    async fn a_large_value_with_no_sharing_still_reaches_blob_storage() {
+        let db = crate::db::test_db().await;
+        let (blob_store, _tmp) = test_blob_store(&db);
+        let execution_context = persisted_execution_context(&db).await;
+        let cell = "x".repeat(1024);
+        let stored = record_return(
+            &db,
+            Some(blob_store),
+            &execution_context,
+            many_small_rows(40_000, &cell),
+        )
+        .await;
+        assert!(crate::blob::is_blob_ref_val(&stored), "{stored:.200?}");
+    }
+
+    #[tokio::test]
+    async fn one_deep_value_leaves_a_run_calls_readable() {
+        let db = crate::db::test_db().await;
+        let execution_context = persisted_execution_context(&db).await;
+        let emitter = DatabaseEngineEventEmitter::new_with_pool(db.clone());
+        let deep = (0..1_000).fold(Val::from("password"), |inner, _| Val::vec(vec![inner]));
+        let values = [Val::Int(1), deep.clone()];
+        let mut call_ids = Vec::new();
+        for value in values {
+            let call_id = Uuid::now_v7();
+            call_ids.push(call_id);
+            emitter.emit(EngineEvent::call_start(
+                &execution_context,
+                call_id,
+                None,
+                "::hot::test/deep".to_string(),
+                "::hot::test/deep".to_string(),
+                "run/test".to_string(),
+                0,
+                vec![value.clone()],
+                None,
+                chrono::Utc::now(),
+                None,
+            ));
+            emitter.emit(EngineEvent::call_stop(
+                &execution_context,
+                call_id,
+                Some(value),
+                None,
+                chrono::Utc::now(),
+                10,
+            ));
+        }
+        emitter.shutdown().await.unwrap();
+
+        let calls = crate::db::call::Call::get_calls_by_run(&db, &execution_context.run_id)
+            .await
+            .expect("a deep value must not make the run's calls unreadable");
+        assert_eq!(calls.len(), 2);
+
+        let call = crate::db::call::Call::get_call(&db, &call_ids[1])
+            .await
+            .expect("the deep call itself reads back");
+        for stored in [call.return_value.unwrap(), call.args.unwrap()] {
+            assert_eq!(stored["$type"], crate::blob::OMITTED_TYPE);
+            assert_eq!(stored["$val"]["reason"], "too deeply nested to record");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_run_result_of_shared_storage_is_left_out() {
+        let db = crate::db::test_db().await;
+        let execution_context = persisted_execution_context(&db).await;
+        let emitter = DatabaseEngineEventEmitter::new_with_pool(db.clone());
+        let text = Val::from("x".repeat(1024 * 1024));
+        emitter.emit(EngineEvent::run_start(&execution_context));
+        emitter.emit(EngineEvent::run_stop(
+            &execution_context,
+            Val::vec(vec![text; 100_000]),
+        ));
+        emitter.shutdown().await.unwrap();
+
+        let crate::db::DatabasePool::Sqlite(pool) = db else {
+            panic!("test_db should return SQLite");
+        };
+        let (stored,): (String,) = sqlx::query_as("SELECT result FROM run WHERE run_id = ?")
+            .bind(execution_context.run_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(stored.contains(crate::blob::OMITTED_TYPE), "{stored:.200}");
     }
 
     #[tokio::test]
