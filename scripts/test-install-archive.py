@@ -137,5 +137,122 @@ class ArchiveInstallTests(unittest.TestCase):
             self.assertNotEqual(path.stat().st_gid, 12346, str(path))
 
 
+class DefaultModeTests(unittest.TestCase):
+    """Runs the real mode choice against stand-ins for the package tools."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="hot-installer-test-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
+        self.tools = self.root / "tools"
+        self.tools.mkdir()
+        for tool in ["grep", "id", "uname"]:
+            (self.tools / tool).symlink_to(shutil.which(tool))
+        source, _ = INSTALLER.read_text().rsplit('\nmain "$@"', 1)
+        self.harness = self.root / "install.sh"
+        self.harness.write_text(
+            source + '\nSUDO="$TEST_SUDO"\nchoose_default_mode "$TEST_OS"\necho "mode=$MODE"\n'
+        )
+
+    def tool(self, name, script):
+        path = self.tools / name
+        path.write_text("#!/bin/sh\n" + script)
+        path.chmod(0o755)
+
+    def deb_installed(self):
+        # Answers only to the name the real package has
+        self.tool(
+            "dpkg-query",
+            'for arg; do name="$arg"; done\n'
+            '[ "$name" = hot-cli ] || exit 1\n'
+            "printf 'install ok installed'\n",
+        )
+
+    def pkg_installed(self):
+        self.tool("pkgutil", "exit 0\n")
+
+    def sudo_available(self):
+        self.tool("sudo", "exit 0\n")
+
+    def user_install(self):
+        resources = self.home / ".local/share/hot"
+        resources.mkdir(parents=True)
+        (resources / "install-receipt.json").write_text('{"method": "archive"}\n')
+
+    def mode(self, os_name="linux", sudo="sudo", **env):
+        result = subprocess.run(
+            ["/bin/sh", str(self.harness)],
+            env={
+                "HOME": str(self.home),
+                "PATH": str(self.tools),
+                "TEST_OS": os_name,
+                "TEST_SUDO": sudo,
+                **env,
+            },
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip().splitlines()[-1]
+
+    def test_a_clean_machine_gets_a_user_install(self):
+        self.sudo_available()
+        self.assertEqual(self.mode(), "mode=user")
+
+    def test_root_and_ci_install_for_the_machine(self):
+        self.sudo_available()
+        self.assertEqual(self.mode(sudo=""), "mode=system")
+        self.assertEqual(self.mode(CI="true"), "mode=system")
+
+    def test_a_debian_package_is_updated(self):
+        self.sudo_available()
+        self.deb_installed()
+        self.assertEqual(self.mode(), "mode=system")
+
+    def test_a_macos_package_is_updated(self):
+        self.sudo_available()
+        self.pkg_installed()
+        self.assertEqual(self.mode("macos"), "mode=system")
+
+    def test_a_user_install_wins_over_a_package(self):
+        self.sudo_available()
+        self.deb_installed()
+        self.pkg_installed()
+        self.user_install()
+        self.assertEqual(self.mode(), "mode=user")
+        self.assertEqual(self.mode("macos"), "mode=user")
+
+    def test_without_sudo_a_package_cant_be_updated(self):
+        self.deb_installed()
+        self.assertEqual(self.mode(), "mode=user")
+
+
+class PackageMessageTests(unittest.TestCase):
+    def run_function(self, call):
+        source, _ = INSTALLER.read_text().rsplit('\nmain "$@"', 1)
+        return subprocess.run(
+            ["/bin/sh", "-c", f"{source}\n{call}\n"], text=True, capture_output=True
+        )
+
+    def test_the_debian_remove_command_names_the_real_package(self):
+        result = self.run_function("package_remove_command linux")
+        self.assertEqual(result.stdout.strip(), "sudo dpkg --purge hot-cli")
+
+    def test_two_paths_to_one_file_are_the_same_hot(self):
+        with tempfile.TemporaryDirectory(prefix="hot-installer-test-") as temp:
+            real = Path(temp) / "hot"
+            real.touch()
+            link = Path(temp) / "link"
+            link.symlink_to(real)
+            other = Path(temp) / "other"
+            other.touch()
+            same = self.run_function(f"same_file '{link}' '{real}'")
+            different = self.run_function(f"same_file '{other}' '{real}'")
+        self.assertEqual(same.returncode, 0, same.stderr)
+        self.assertNotEqual(different.returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
