@@ -262,10 +262,16 @@ fn is_file_at_path(file: &File, path: &Path) -> bool {
     }
 }
 
-/// Elsewhere, an open file can't be unlinked out from under its path.
-#[cfg(not(unix))]
-fn is_file_at_path(_file: &File, _path: &Path) -> bool {
-    true
+/// Whether `file` is still the file at `path`. An open file can be unlinked on
+/// Windows too. `same_file` takes ownership, so it gets a clone, which shares
+/// the open file: dropping the clone leaves the lock held.
+#[cfg(windows)]
+fn is_file_at_path(file: &File, path: &Path) -> bool {
+    let open = file.try_clone().and_then(same_file::Handle::from_file);
+    match (open, same_file::Handle::from_path(path)) {
+        (Ok(open), Ok(current)) => open == current,
+        _ => false,
+    }
 }
 
 /// Whether a deployment runs this build, or is about to. A newer deployment
@@ -469,6 +475,21 @@ mod tests {
         assert!(!fixture.extracted(replaced));
         let path = fixture.extractions.lease_path(&replaced);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_file_unlinked_while_open_is_no_longer_the_file_at_its_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("build.lease");
+        let open = open_lock_file(&path).unwrap();
+        assert!(is_file_at_path(&open, &path));
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(!is_file_at_path(&open, &path));
+
+        let replacement = open_lock_file(&path).unwrap();
+        assert!(!is_file_at_path(&open, &path));
+        assert!(is_file_at_path(&replacement, &path));
     }
 
     #[tokio::test]

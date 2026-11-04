@@ -1226,7 +1226,9 @@ mod tests {
             unreachable!("test_db uses SQLite");
         };
         let run_id = Uuid::now_v7();
-        let started_at = Utc::now();
+        // A whole second: SQLite rounds each timestamp to the millisecond on its
+        // own, so a start on a half millisecond can make this 41 or 43.
+        let started_at = chrono::DateTime::from_timestamp(1_790_000_000, 0).unwrap();
         let stopped_at = started_at + chrono::Duration::milliseconds(42);
 
         Stream::record_run_started(&db, &stream_id).await.unwrap();

@@ -241,6 +241,23 @@ pub fn from_int(args: &[Val]) -> HotResult<Val> {
     HotResult::Ok(Val::bytes(bytes))
 }
 
+/// Read bytes as UTF-8 text
+pub fn to_str(args: &[Val]) -> HotResult<Val> {
+    validate_args!("::hot::bytes/to-str", args, 1);
+
+    let Val::Bytes(bytes) = &args[0] else {
+        return HotResult::Err(Val::from(
+            "::hot::bytes/to-str: Argument must be Bytes".to_string(),
+        ));
+    };
+    match std::str::from_utf8(bytes) {
+        Ok(text) => HotResult::Ok(Val::from(text)),
+        Err(error) => HotResult::Err(Val::from(format!(
+            "::hot::bytes/to-str: Not valid UTF-8: {error}"
+        ))),
+    }
+}
+
 /// CRC32 checksum (IEEE polynomial, same as used in AWS Event Stream)
 pub fn crc32(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::bytes/crc32", args, 1);

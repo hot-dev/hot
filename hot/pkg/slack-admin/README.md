@@ -7,7 +7,7 @@ Slack Admin API (`admin.*`) bindings for Hot, for Enterprise organizations: mana
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/slack-admin": "0.10.0"
+"hot.dev/slack-admin": "0.11.0"
 ```
 
 It depends on `hot.dev/slack` (1.1.0), which is installed with it.
@@ -85,7 +85,7 @@ Each function takes a typed request record named after it (`archive` takes `Arch
 | `::slack::admin::roles` | `list-assignments`, `add-assignments`, `remove-assignments` |
 | `::slack::admin::barriers` | `list`, `create`, `update-barrier`, `delete-barrier` |
 | `::slack::admin::auth` | `policy-get-entities`, `policy-assign-entities`, `policy-remove-entities` |
-| `::slack::admin::analytics` | `get-file` (gzipped JSON lines, returned as Bytes) |
+| `::slack::admin::analytics` | `get-records` (parsed records), `get-file` (gzipped JSON lines, returned as Bytes) |
 | `::slack::admin::workflows` | `search` / `search-all`, `permissions-lookup`, `collaborators-add`, `collaborators-remove`, `unpublish` |
 | `::slack::admin::functions` | `list`, `permissions-lookup`, `permissions-set` |
 | `::slack::admin::api` | `call` (any admin method), `paginate`, `next-cursor`, `form-body`, `SlackError`, `is-rate-limited` |
@@ -135,7 +135,7 @@ The Admin API has no webhooks of its own. To react to admin-relevant events (cha
 - Requests are `POST https://slack.com/api/<method>` with a form-encoded body and `Authorization: Bearer <token>`, the encoding Slack's own SDKs use for these methods.
 - Admin methods are rate-limited per method (mostly Tier 2, 20+ per minute; some Tier 3 or 4). Bulk jobs (`bulk-archive`, `bulk-delete`, `bulk-move`, `session-reset-bulk`) run in the background and return before they finish; only one bulk channel job runs at a time (`action_already_in_progress`).
 - `bulk-delete` and `delete-conversation` are irreversible.
-- `analytics/get-file` returns the gzip file as Bytes. hot-std has no gzip decoder yet, so write the bytes to a `.json.gz` file and decompress them with a gzip tool.
+- `analytics/get-file` returns the gzip file as Bytes, and `analytics/get-records` decompresses and parses it. A file that decompresses past `compression.max-output-bytes` (64 MiB by default) is an Err from `get-records`; read those with `get-file` and `::hot::gzip/decode-stream`.
 - `emoji/list` returns `emoji` as a Map of names, so it has no `-all` variant; page it with `cursor`.
 - Some arguments are required only in some cases (for example `team_id` with an org-level token on `invite-requests`, or exactly one of `app_id` / `request_id` on `apps/approve`). These are typed as optional and documented on each function.
 - There is no free sandbox with Admin API access on a normal plan. Slack's Developer Program can provision Enterprise sandboxes for testing.

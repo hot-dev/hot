@@ -36,6 +36,12 @@ $env:HOT_VERSION = "2.3.0"; irm https://get.hot.dev/install.ps1 | iex
 
 Pinned installs are useful when you need to finish database migrations with an older release line before moving to a newer major version.
 
+## Upgrading from Hot 3.0.2 to 3.0.3 {#upgrading-from-3-0-2-to-3-0-3}
+
+**Packages** that call `::hot::gzip`, `::hot::zip` or `::hot::bytes/to-str` need `hot-min-version: "3.0.3"`.
+
+`::hot::gzip/decode` and `::hot::zip/read-entry` refuse output over 64 MiB. Raise that with `hot.compression.max-output-bytes` in `hot.hot`, or read larger data with `decode-stream` and `read-entry-stream`, which hold one chunk at a time.
+
 ## Upgrading from Hot 3.0.1 to 3.0.2 {#upgrading-from-3-0-1-to-3-0-2}
 
 Hot 3.0.2 masks more secrets in call and run records. See [Secret Masking](/docs/language/meta#secret-masking) for what it covers and what it doesn't.
