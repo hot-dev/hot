@@ -1,0 +1,22 @@
+::opensanctions::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration smoke tests (live, read-only)
+// =============================================================================
+// OPENSANCTIONS_API_KEY runs one /match query.
+// Run with: OPENSANCTIONS_API_KEY=... hot test -p pkg-integration-opensanctions
+
+::ctx ::opensanctions::integration::ctx
+
+test-opensanctions-match
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip("OPENSANCTIONS_API_KEY is needed") }
+        => {
+            r ::opensanctions/screen("Vladimir Putin", {kind: "individual", dataset: "sanctions", limit: 3})
+            assert-eq("possible-match", r.status)
+            assert(gt(length(r.matches), 0), "a well-known listed person matches")
+        }
+    }
+}

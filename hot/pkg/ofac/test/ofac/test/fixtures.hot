@@ -1,0 +1,43 @@
+::ofac::test::fixtures ns
+
+// Small excerpts of the real published list (public data), trimmed to
+// the fields the parser reads. Retrieved 1 Nov 2026.
+
+// OFAC SLS SDN.CSV, ALT.CSV, ADD.CSV and SDN_COMMENTS.CSV rows (remarks of
+// 17016 shortened; the comment row continues it).
+OFAC_SDN """
+306,"BANCO NACIONAL DE CUBA",-0- ,"CUBA",-0- ,-0- ,-0- ,-0- ,-0- ,-0- ,-0- ,"a.k.a. 'BNC'."
+2676,"AL ZAWAHIRI, Dr. Ayman","individual","SDGT","Operational and Military Leader of JIHAD GROUP",-0- ,-0- ,-0- ,-0- ,-0- ,-0- ,"DOB 19 Jun 1951; POB Giza, Egypt; Secondary sanctions risk: section 1(b) of Executive Order 13224, as amended by Executive Order 13886; Passport 1084010 (Egypt); alt. Passport 19820215; Operational and Military Leader of JIHAD GROUP."
+4243,"EBANO","vessel","CUBA",-0- ,-0- ,"General Cargo","2595","1865","Panama",-0- ,"Vessel Registration Identification IMO 7406784; f.k.a. 'ANA I'; f.k.a. 'SAND SWAN'."
+15432,"EP-GOL","aircraft","SDGT",-0- ,-0- ,-0- ,-0- ,-0- ,-0- ,-0- ,"Aircraft Model IL-76TD; Aircraft Operator YAS AIR; Linked To: POUYA AIR."
+17016,"GAZPROMBANK JOINT STOCK COMPANY",-0- ,"UKRAINE-EO13662] [RUSSIA-EO14024",-0- ,-0- ,-0- ,-0- ,-0- ,-0- ,-0- ,"SWIFT/BIC GAZPRUMM; Website www.gazprombank.ru; Organization Established Date 31 Jul 1990"
+"""
+
+OFAC_ALT """
+306,220,"aka","NATIONAL BANK OF CUBA",-0-
+2676,4760,"aka","AL-ZAWAHIRI, Ayman",-0-
+2676,4761,"aka","SALIM, Ahmad Fuad",-0-
+2676,4787,"aka","AL-ZAWAHIRI, Aiman Muhammad Rabi",-0-
+"""
+
+OFAC_ADD """
+306,199,"Zweierstrasse 35","Zurich CH-8022","Switzerland",-0-
+306,200,"Avenida de Concha Espina 8","Madrid E-28036","Spain",-0-
+2676,1834,-0- ,-0- ,-0- ,-0-
+"""
+
+OFAC_COMMENTS """
+17016,"; Tax ID No. 7744001497 (Russia); Legal Entity Number 253400WSS48YWMBUA688"
+"""
+
+// The shape of the SLS file listing (POST /api/PublicationPreview/SdnList);
+// the hash value is illustrative.
+SLS_MANIFEST [
+  {
+    fileName: "SDN.CSV",
+    size: 5750799,
+    lastUpdated: "2026-10-28T00:00:00",
+    hashCodes: "{\"SHA-256\":\"5f240bed79d504e7a5aa0000000000000000000000000000000000000000beef\"}"
+  },
+  {fileName: "SDNLIST.PDF", size: 0, lastUpdated: "2026-10-28T00:00:00", hashCodes: null}
+]

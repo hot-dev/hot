@@ -1,0 +1,104 @@
+::exa::test::opts ns
+meta ["test"]
+
+// Hermetic: no network and no exa.* context. Calls with a credential
+// are never sent: these tests stop at the resolver or build the request.
+
+::api ::exa::api
+
+CTX {"exa.api.key": "ctx-exa"}
+
+test-resolve-opts-win-over-ctx
+meta ["test"] fn () {
+    assert-eq({api-key: "t"}, ::api/resolve-from({api-key: "t"}, CTX), "the context key is not used")
+}
+
+test-resolve-ctx-used-when-no-credentials-in-opts
+meta ["test"] fn () {
+    assert-eq("ctx-exa", ::api/resolve-from({}, CTX).api-key)
+    assert-eq("ctx-exa", ::api/resolve-from({numResults: 5}, CTX).api-key, "other keys are not credentials")
+}
+
+test-resolve-returns-marked-values-unchanged
+meta ["test"] fn () {
+    assert-eq("exa-call-value", ::api/resolve({api-key: "exa-call-value"}).api-key)
+}
+
+test-resolve-never-writes-ctx
+meta ["test"] fn () {
+    before ::hot::ctx/get("exa.api.key")
+    assert-eq("call-key", ::api/resolve({api-key: "call-key"}).api-key)
+    assert-eq(before, ::hot::ctx/get("exa.api.key"))
+}
+
+test-blank-credential-in-opts-is-an-error
+meta ["test"] fn () {
+    results map(["", "   ", null], (blank) {
+        out ::api/resolve-from({api-key: blank}, CTX)
+        assert(is-err(out), "never falls back to context")
+        assert(contains(err-message(out), "api-key"))
+        true
+    })
+    assert-eq(3, length(results))
+    assert(contains(err-message(::exa/search("q", {}, {api-key: ""})), "blank or null"), "the error reaches the caller")
+}
+
+// A live context key proves the search stops before any request: it would
+// otherwise be sent.
+test-search-never-falls-through-to-a-context-key
+meta ["test"] fn () {
+    before ::hot::ctx/get("exa.api.key")
+    ::hot::ctx/set-secret("exa.api.key", "ctx_secret_key")
+    assert-eq("ctx_secret_key", ::api/resolve({}).api-key, "control: the live context key is set")
+    out ::exa/search("q", {}, {api-key: ""})
+    assert(is-err(out))
+    assert(contains(err-message(out), "blank or null"))
+    assert(not(contains(err-message(out), "ctx_secret_key")), "the key stays out of messages")
+    ::hot::ctx/set-secret("exa.api.key", before)
+}
+
+test-missing-key-names-what-to-set
+meta ["test"] fn () {
+    out ::api/resolve-from({}, {})
+    assert(is-err(out))
+    assert(contains(err-message(out), "exa.api.key"))
+    assert(contains(err-message(out), "api-key"))
+}
+
+test-unconfigured-search-errors
+meta ["test"] fn () {
+    before ::hot::ctx/get("exa.api.key")
+    ::hot::ctx/set("exa.api.key", "")
+    out ::exa/search("anything")
+    assert(is-err(out))
+    assert(contains(err-message(out), "exa.api.key"))
+    ::hot::ctx/set("exa.api.key", before)
+}
+
+test-build-request-uses-the-key-it-was-given
+meta ["test"] fn () {
+    request ::exa/build-request("/search", {query: "q", skip: null}, "exa-a")
+    assert-eq("POST", request.method)
+    assert-eq("https://api.exa.ai/search", request.url)
+    assert-eq("exa-a", request.headers.x-api-key)
+    assert-eq({query: "q"}, from-json(request.body), "nulls are dropped")
+}
+
+// A blank credential error can only come from the call's own opts, so it
+// proves the opts reached the resolver, without any network traffic. The
+// message is not the unset-key one, which also names `api-key`.
+stops-at-blank fn (result: Result): Bool {
+    and(is-err(result), contains(err-message(result), "blank or null"))
+}
+
+test-opts-reach-every-function
+meta ["test"] fn () {
+    assert(stops-at-blank(::exa/search("q", {}, {api-key: ""})))
+    assert(stops-at-blank(::exa/get-contents(["https://example.com"], {}, {api-key: ""})))
+    assert(stops-at-blank(::exa/find-similar("https://example.com", {}, {api-key: ""})))
+}
+
+test-explicit-key-arity-still-works
+meta ["test"] fn () {
+    assert(stops-at-blank(::exa/post("/search", {query: "q"}, "")))
+}

@@ -1,0 +1,21 @@
+::exa::integration ns
+meta ["test"]
+
+// Requires EXA_API_KEY; skips without it. Read-only: one small search.
+// Run with: hot test --project pkg-integration-exa
+
+::ctx ::exa::integration::ctx
+
+test-search
+meta ["test"] fn () {
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip(::ctx/UNCONFIGURED) }
+        => {
+            out ::exa/search("hot.dev programming language", {numResults: 3})
+            assert(not(is-err(out)), `search: ${if-err(out, (e) { err-message(e) })}`)
+            assert(gt(length(out.results), 0), "should return results")
+            assert(lte(length(out.results), 3), "respects numResults")
+            assert(starts-with(first(out.results).url, "http"), "returns URLs")
+        }
+    }
+}

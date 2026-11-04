@@ -1,0 +1,174 @@
+::ofac::test::parsers ns
+meta ["test"]
+
+::fx ::ofac::test::fixtures
+::ofac ::ofac
+::http ::ofac::http
+
+by-id fn (entries: Vec, id: Str): Map {
+  untype(find-first(entries, (e) { eq(e.id, id) }))
+}
+
+// ============================================================================
+// OFAC CSV
+// ============================================================================
+
+test-ofac-parse-csv-quoted-and-null-fields
+meta ["test"]
+fn () {
+    rows ::ofac/parse-csv("36,\"AEROCARIBBEAN AIRLINES\",-0- \r\n173,\"ANGLO-CARIBBEAN CO., LTD.\",\"a \"\"b\"\"\"\r\n", 3)
+    assert-eq([["36", "AEROCARIBBEAN AIRLINES", null], ["173", "ANGLO-CARIBBEAN CO., LTD.", "a \"b\""]], rows)
+}
+
+test-ofac-parse-entries
+meta ["test"]
+fn () {
+    es ::ofac/parse("ofac-sdn", ::fx/OFAC_SDN, ::fx/OFAC_ALT, ::fx/OFAC_ADD, ::fx/OFAC_COMMENTS)
+    assert-eq(5, length(es))
+    bank by-id(es, "306")
+    assert-eq("BANCO NACIONAL DE CUBA", bank.name)
+    assert-eq("entity", bank.kind)
+    assert-eq(["NATIONAL BANK OF CUBA"], bank.aliases)
+    assert-eq(["CUBA"], bank.programs)
+    assert-eq(["Zweierstrasse 35, Zurich CH-8022, Switzerland", "Avenida de Concha Espina 8, Madrid E-28036, Spain"], bank.addresses)
+    assert-eq("ofac-sdn", bank.source)
+    assert-eq("OFAC SDN List", bank.list)
+    assert-eq("https://sanctionssearch.ofac.treas.gov/Details.aspx?id=306", bank.url)
+}
+
+test-ofac-individual-dob-from-remarks
+meta ["test"]
+fn () {
+    es ::ofac/parse("ofac-sdn", ::fx/OFAC_SDN, ::fx/OFAC_ALT, ::fx/OFAC_ADD, "")
+    z by-id(es, "2676")
+    assert-eq("individual", z.kind)
+    assert-eq("AL ZAWAHIRI, Dr. Ayman", z.name)
+    assert-eq("Operational and Military Leader of JIHAD GROUP", z.title)
+    assert-eq(["AL-ZAWAHIRI, Ayman", "SALIM, Ahmad Fuad", "AL-ZAWAHIRI, Aiman Muhammad Rabi"], z.aliases)
+    assert-eq(["1951-06-19"], z.dobs)
+    assert-eq([], z.addresses, "an all -0- address row is dropped")
+}
+
+test-ofac-vessel-aircraft-and-programs
+meta ["test"]
+fn () {
+    es ::ofac/parse("ofac-sdn", ::fx/OFAC_SDN, "", "", ::fx/OFAC_COMMENTS)
+    ship by-id(es, "4243")
+    assert-eq("vessel", ship.kind)
+    assert-eq("General Cargo", ship.vessel-type)
+    assert-eq("2595", ship.tonnage)
+    assert-eq("1865", ship.grt)
+    assert-eq("Panama", ship.vessel-flag)
+    assert-eq(null, ship.call-sign)
+    assert-eq("aircraft", by-id(es, "15432").kind)
+    gpb by-id(es, "17016")
+    assert-eq(["UKRAINE-EO13662", "RUSSIA-EO14024"], gpb.programs)
+    assert(::hot::str/contains(gpb.remarks, "Legal Entity Number 253400WSS48YWMBUA688"), "comments continue the remarks")
+}
+
+test-ofac-parse-remarks
+meta ["test"]
+fn () {
+    assert-eq({dobs: ["1951-06-19"], nationalities: ["Egypt"]}, ::ofac/parse-remarks("DOB 19 Jun 1951; POB Giza, Egypt; nationality Egypt."))
+    r ::ofac/parse-remarks("DOB 01 Jan 1960 to 31 Dec 1962; alt. DOB 1959; citizen Iran; alt. nationality Russia (USSR).")
+    assert-eq(["1960/1962", "1959"], r.dobs)
+    assert-eq(["Russia (USSR)", "Iran"], r.nationalities, "nationality items, then citizen items, as published")
+    assert-eq({dobs: [], nationalities: []}, ::ofac/parse-remarks(null))
+}
+
+test-ofac-manifest-and-version
+meta ["test"]
+fn () {
+    files ::ofac/parse-manifest(::fx/SLS_MANIFEST)
+    assert-eq("5f240bed79d504e7a5aa0000000000000000000000000000000000000000beef", get(files, "SDN.CSV").sha256)
+    assert-eq(null, get(files, "SDNLIST.PDF").sha256)
+    assert-eq("5f240bed79d504e7", ::ofac/version("ofac-sdn", files))
+    assert-eq(null, ::ofac/version("ofac-cons", files), "no CONS_PRIM.CSV in this listing")
+    assert-eq({}, ::ofac/parse-manifest(null))
+}
+
+test-ofac-export-url-encodes-file
+meta ["test"]
+fn () {
+    assert-eq("https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN.CSV", ::ofac/export-url("SDN.CSV"))
+    assert-eq("https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/A%20B.CSV", ::ofac/export-url("A B.CSV"))
+}
+
+test-ofac-consolidated-list-name
+meta ["test"]
+fn () {
+    es ::ofac/parse("ofac-cons", ::fx/OFAC_SDN, "", "", "")
+    assert-eq("ofac-cons", first(es).source)
+    assert-eq("OFAC Consolidated (non-SDN) List", first(es).list)
+}
+
+// ============================================================================
+// Sources
+// ============================================================================
+
+test-unknown-source-is-an-err
+meta ["test"]
+fn () {
+    assert-eq(["ofac-sdn", "ofac-cons"], ::ofac/SOURCES)
+    assert(is-err(::ofac/manifest("ofac-sdm")), "manifest")
+    assert(is-err(::ofac/fetch("ofac-sdm")), "fetch")
+    assert(is-err(::ofac/current-version("ofac-sdm")), "current-version")
+    assert(contains(err-message(::ofac/fetch("ofac-sdm")), "ofac-sdn, ofac-cons"), "names the sources")
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+test-iso-date-formats
+meta ["test"]
+fn () {
+    assert-eq("1948-12-10", ::ofac/iso-date("10 Dec 1948"))
+    assert-eq("1948-12-10", ::ofac/iso-date("1948-12-10"))
+    assert-eq("1948-12", ::ofac/iso-date("Dec 1948"))
+    assert-eq("1948", ::ofac/iso-date("circa 1948"))
+    assert-eq("1963", ::ofac/iso-date("dd/mm/1963"))
+    assert-eq("1972-01-30", ::ofac/iso-date("30/01/1972"))
+    assert-eq("1959/1962", ::ofac/iso-date("1959 to 1962"))
+    assert-eq("1960/1962", ::ofac/iso-date("01 Jan 1960 to 31 Dec 1962"))
+    assert-eq(null, ::ofac/iso-date("unknown"))
+    assert-eq(null, ::ofac/iso-date(null))
+}
+
+test-clean-list-and-other-names
+meta ["test"]
+fn () {
+    assert-eq(["Acme Two"], ::ofac/other-names(["acme", " Acme Two ", "", null, "Acme Two"], "ACME"), "blanks, duplicates and the primary name are dropped")
+    assert-eq(["a", "b"], ::ofac/clean-list([" a ", "b", "a", "  ", null]))
+}
+
+test-require-entries
+meta ["test"]
+fn () {
+    assert-eq(["a"], ::ofac/require-entries(["a"]))
+    out ::ofac/require-entries([])
+    assert(is-err(out), "an empty list must not pass for a list with nobody on it")
+    assert(contains(err-message(out), "no records"), err-message(out))
+}
+
+// ============================================================================
+// HTTP helpers
+// ============================================================================
+
+test-http-error
+meta ["test"]
+fn () {
+    e untype(::http/http-error(::hot::http/HttpResponse({status: 404, headers: {}, body: "not here"}), "https://example.test/x"))
+    assert-eq(404, e.status)
+    assert-eq("HTTP 404 from https://example.test/x: not here", e.message)
+    blank untype(::http/http-error(::hot::http/HttpResponse({status: 500, headers: {}, body: null}), "https://example.test/y"))
+    assert-eq("HTTP 500 from https://example.test/y", blank.message)
+}
+
+test-body-text
+meta ["test"]
+fn () {
+    assert-eq("a,b", ::http/body-text({body: "a,b"}))
+    assert-eq("Hi", ::http/body-text({body: Bytes("Hi"), body-bytes: Bytes("Hi")}))
+    assert-eq("[1,2]", ::http/body-text({body: [1, 2], body-bytes: Bytes("[1,2]")}), "prefers the raw bytes")
+}
