@@ -1,0 +1,697 @@
+::sec::iapd ns
+meta {
+    ctx: {"sec.iapd.user-agent": {required: false}},
+    doc: """
+    The SEC's Investment Adviser Public Disclosure data (no key): the
+    monthly Form ADV Part 1 data files, the monthly ADV-W withdrawal
+    files, and firm lookups by name or CRD number.
+
+    Form ADV isn't filed on EDGAR, so `sec-edgar` can't read it. An
+    adviser files through IARD, and the SEC publishes the result here.
+
+    **A monthly file holds that month's filings, not every adviser.** A
+    firm appears when it files. Most annual updates land in March, so a
+    change in a firm's assets can sit unseen for most of a year. To watch
+    for a change, store each firm's last value.
+
+    **Exempt reporting advisers have no regulatory assets.** They don't
+    file Item 5, so `regulatory-aum` is null for them. Read
+    `private-fund-assets` instead.
+
+    **Accuracy.** The SEC says neither it nor the states approved what's
+    filed on Form ADV, and that it can't guarantee its accuracy.
+
+    Hosts: `reports.adviserinfo.sec.gov` (files),
+    `api.adviserinfo.sec.gov` (firm lookups).
+    """
+}
+
+::api ::sec::iapd::api
+::re ::hot::regex
+::zip ::hot::zip
+
+REPORTS "https://reports.adviserinfo.sec.gov/reports"
+SEARCH "https://api.adviserinfo.sec.gov/search"
+
+FILING_DATA "advFilingData"
+WITHDRAWALS "advW"
+
+CSV_OPTS {trim: true, strict: false}
+
+// Spots where a quote can't be a cell's own.
+STRAY_INSIDE "([^,\"\\r\\n])\"([^,\"\\r\\n])"
+STRAY_BEFORE_COMMA "([^,\"\\r\\n])\"\",([^ ])"
+STRAY_BEFORE_LINE_END "([^,\"\\r\\n])\"\"(\\r?\\n)"
+STRAY_AT_CELL_START ",\"\"([^,\"\\r\\n])"
+STRAY_BEFORE_COMMA_SPACE "([^,\"\\r\\n])\"(, )"
+SPACES_AFTER_CELL "\"[ \\t]+(\\r?\\n)"
+
+// What `filings` reads: each table with the columns it keeps, or null for all
+// of them. A March base table is 243 columns wide, and Hot records what a named
+// function is passed, so whole tables mustn't travel between functions.
+FUND_COLUMNS ["FilingID", "Feeder Fund", "Gross Asset Value"]
+FORM_D_COLUMNS ["FilingID", "Form D File Number"]
+DEFAULT_TABLES {
+  ADV_Filing_Types: null,
+  IA_ADV_Base_A: ["FilingID", "DateSubmitted", "1A", "1D", "1E1", "5F2c"],
+  ERA_ADV_Base: ["FilingID", "DateSubmitted", "1A", "1D", "1E1"],
+  IA_Schedule_D_7B1: FUND_COLUMNS,
+  ERA_Schedule_D_7B1: FUND_COLUMNS,
+  IA_Schedule_D_7B1A22: FORM_D_COLUMNS,
+  ERA_Schedule_D_7B1A22: FORM_D_COLUMNS,
+  IA_1D3_CIK: null,
+  ERA_1D3_CIK: null
+}
+
+// The file's headers, lower-cased with the spelling of "annual" repaired.
+FILING_TYPES {
+  "initial sec registration request": "initial-registration",
+  "initial state registration request": "initial-state-registration",
+  "annual updating amendment for registered adviser": "annual-amendment",
+  "other-than annual amendment for registered adviser": "other-amendment",
+  "initial sec era report": "initial-exempt-report",
+  "initial state era report": "initial-state-exempt-report",
+  "annual updating amendment era report": "annual-exempt-amendment",
+  "other-than annual amendment era report": "other-exempt-amendment",
+  "final sec era report": "final-exempt-report",
+  "final state era report": "final-state-exempt-report"
+}
+
+// ---------------------------------------------------------------------------
+// URLs (pure)
+// ---------------------------------------------------------------------------
+
+reports-index-url
+meta {
+    doc: """The index of every published data file."""
+}
+fn (): Str {
+  `${REPORTS}/foia/reports_metadata.json`
+}
+
+report-url
+meta {
+    doc: """
+    A data file's URL from its section, year and file name (pure). The
+    index gives all three.
+
+    **Example**
+
+    ```hot
+    ::sec::iapd/report-url("advW", 2026, "ADVW_20261001_20261031.zip")
+    ```
+    """
+}
+fn (file-type: Str, year: Any, file-name: Str): Str {
+  `${REPORTS}/foia/${file-type}/${year}/${file-name}`
+}
+
+firm-feed-url
+meta {
+    doc: """
+    The daily list of every firm for a `YYYY-MM-DD` date (pure). `scope`
+    is `"SEC"` (the default) or `"STATE"`. It's XML in gzip, about 7 MB
+    packed and 79 MB unpacked, which is past the default
+    `compression.max-output-bytes`. This package only builds the address.
+    """
+}
+fn
+(date: Str): Str {
+  firm-feed-url(date, "SEC")
+},
+(date: Str, scope: Str): Str {
+  parts split(date, "-")
+  cond {
+    not(in(scope, ["SEC", "STATE"])) => { err(`sec-iapd: unknown firm feed scope '${scope}'`) }
+    not(::re/is-match(date, "^\\d{4}-\\d{2}-\\d{2}$")) => { err(`sec-iapd: invalid date '${date}'`) }
+    => { `${REPORTS}/CompilationReports/IA_FIRM_${scope}_Feed_${parts[1]}_${parts[2]}_${parts[0]}.xml.gz` }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The index of data files
+// ---------------------------------------------------------------------------
+
+reports
+meta {
+    doc: """The index of published data files, as served: one section per file type, each with its years."""
+}
+fn
+(): Map {
+  reports({})
+},
+(opts: Map): Map {
+  h ::api/headers(opts)
+  if(is-err(h), h, ::api/get-json(reports-index-url(), h))
+}
+
+report-month fn (name: Str): Int? {
+  found ::re/capture(name, "_\\d{4}(\\d{2})\\d{2}_")
+  if(is-null(found), null, Int(found.groups[0]))
+}
+
+report-row fn (file-type: Str, file: Map): Map {
+  {
+    file-type,
+    year: Int(file.year),
+    month: report-month(file.fileName),
+    name: file.fileName,
+    url: report-url(file-type, file.year, file.fileName),
+    size: file.size,
+    uploaded-on: file.uploadedOn
+  }
+}
+
+report-files
+meta {
+    doc: """
+    One section of the index as rows, oldest first (pure):
+    `{file-type, year, month, name, url, size, uploaded-on}`. `month` is
+    null when the file name holds no date.
+
+    **Example**
+
+    ```hot
+    index ::sec::iapd/reports()
+    last(::sec::iapd/report-files(index, "advFilingData")).name
+    ```
+    """
+}
+fn (index: Map, file-type: Str): Vec<Map> {
+  section get(index, file-type, {})
+  years filter(keys(section), (k) { ::re/is-match(Str(k), "^\\d{4}$") })
+  rows reduce(years, (acc, y) {
+    concat(acc, map(get(get(section, y), "files", []), (f) { report-row(file-type, f) }))
+  }, [])
+  sort-by(rows, (r) { r.name })
+}
+
+find-report
+meta {
+    doc: """The row for one month in a section of the index, or null when it isn't posted (pure)."""
+}
+fn (index: Map, file-type: Str, year: Int, month: Int): Map? {
+  find-first(report-files(index, file-type), (r) { and(eq(r.year, year), eq(r.month, month)) })
+}
+
+fetch-report fn (file-type: Str, year: Int, month: Int, opts: Map): Any {
+  h ::api/headers(opts)
+  index if(is-err(h), h, reports(opts))
+  row if(is-err(index), null, find-report(index, file-type, year, month))
+  cond {
+    is-err(index) => { index }
+    is-null(row) => { null }
+    => {
+      response ::api/request(row.url, h)
+      if(is-err(response), response, {url: row.url, archive: response.body-bytes})
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Form ADV Part 1 data files
+// ---------------------------------------------------------------------------
+
+table-name
+meta {
+    doc: """A zip entry's table name, without its dates (pure): `IA_ADV_Base_A_20261001_20261031.csv` gives `IA_ADV_Base_A`."""
+}
+fn (entry: Str): Str {
+  ::re/replace-all(entry, "_\\d{8}_\\d{8}\\.csv$", "")
+}
+
+table-names
+meta {
+    doc: """The table names in a Form ADV zip, as Bytes or a file path (pure for Bytes)."""
+}
+fn (archive: Bytes | Str): Vec<Str> {
+  listing ::zip/entries(archive)
+  if(is-err(listing), listing, map(listing, (e) { table-name(e.name) }))
+}
+
+repair-quotes
+meta {
+    doc: """
+    Fix the quotes a strict CSV reader stops at (pure). The files don't
+    escape quotes consistently, so a cell can read `"KF ("X") LP"`, end
+    `"HEDGE FUND""` or carry spaces after its closing quote. Each rule
+    matches one of those spots. A few cells are still ambiguous, so some
+    tables stay unreadable; the README names them.
+
+    **Example**
+
+    ```hot
+    ::sec::iapd/repair-quotes("\\"KF (\\"X\\") LP\\",1\\n")
+    // "\\"KF (\\"\\"X\\"\\") LP\\",1\\n"
+    ```
+    """
+}
+fn (text: Str): Str {
+  // Twice, because one match can use up the letter the next one needs.
+  inner ::re/replace-all(::re/replace-all(text, STRAY_INSIDE, "$1\"\"$2"), STRAY_INSIDE, "$1\"\"$2")
+  ending ::re/replace-all(inner, STRAY_BEFORE_COMMA, "$1\"\"\",$2")
+  line-ending ::re/replace-all(ending, STRAY_BEFORE_LINE_END, "$1\"\"\"$2")
+  opening ::re/replace-all(line-ending, STRAY_AT_CELL_START, ",\"\"\"$1")
+  spaced ::re/replace-all(opening, STRAY_BEFORE_COMMA_SPACE, "$1\"\"$2")
+  ::re/replace-all(spaced, SPACES_AFTER_CELL, "\"$1")
+}
+
+parse-table
+meta {
+    doc: """
+    One table's text as rows (pure), keeping only `columns` when given.
+    A table that parses as it stands is left alone. One that doesn't goes
+    through `repair-quotes` first. Rows are read with `strict: false`,
+    because a few rows in the files have too many cells: the first ones
+    are kept, and a short row is padded with null.
+
+    Rows are read one at a time, so a wide table is never held whole when
+    `columns` is given.
+    """
+}
+fn
+(text: Str): Vec<Map> {
+  parse-table(text, null)
+},
+(text: Str, columns: Vec<Str>?): Vec<Map> {
+  keep if(is-null(columns), (r) { r }, (r) { zipmap(columns, map(columns, (c) { get(r, c) })) })
+  rows map(iter-csv(text, CSV_OPTS), keep)
+  if(is-err(rows), map(iter-csv(repair-quotes(text), CSV_OPTS), keep), rows)
+}
+
+table-text
+meta {
+    doc: """
+    A table's bytes as text (pure), or an Err naming it when they aren't
+    UTF-8. Most files from January to July 2025 are Latin-1, and hot-std
+    has no reader for that.
+    """
+}
+fn (data: Bytes, table: Str): Str {
+  text ::hot::bytes/to-str(data)
+  if(is-err(text), err(`sec-iapd: table ${table} isn't UTF-8, which most files from January to July 2025 aren't`), text)
+}
+
+read-table fn (archive: Bytes | Str, names: Vec<Str>, table: Str, columns: Vec<Str>?): Vec<Map> {
+  entry find-first(names, (n) { eq(table-name(n), table) })
+  data if(is-null(entry), null, ::zip/read-entry(archive, entry))
+  text if(or(is-null(data), is-err(data)), null, table-text(data, table))
+  cond {
+    is-null(entry) => { err(`sec-iapd: the data file has no table ${table}`) }
+    is-err(data) => { data }
+    is-err(text) => { text }
+    => { parse-table(text, columns) }
+  }
+}
+
+read-tables fn (archive: Bytes | Str, names: Vec<Str>, tables: Map, todo: Vec<Str>, acc: Map): Map {
+  table if(is-empty(todo), null, first(todo))
+  rows if(is-null(table), null, read-table(archive, names, table, get(tables, table)))
+  cond {
+    is-null(table) => { acc }
+    is-err(rows) => { rows }
+    => { read-tables(archive, names, tables, rest(todo), assoc(acc, table, rows)) }
+  }
+}
+
+parse-filing-data
+meta {
+    doc: """
+    Read tables from a Form ADV Part 1 zip, as Bytes or a file path.
+    Returns a Map of table name to rows, keyed by the file's own column
+    names, with every value a Str. Rows of one filing share `FilingID`.
+
+    By default this reads what `filings` needs, and only those columns.
+    That leaves out the firm's address, which can be a home, and every
+    table that names people.
+
+    `opts.tables` picks whole tables by name instead (see `table-names`).
+    Those are wide, and Hot records what a named function is passed, so
+    don't hand them on to other functions in a large run. Tables that
+    name people: `IA_Schedule_A_B`, `ERA_Schedule_A_B` (owners and
+    officers), the `*_DRP_*` tables (disciplinary events) and
+    `IA_ADV_1J_1K` (the chief compliance officer).
+    """
+}
+fn
+(archive: Bytes | Str): Map {
+  parse-filing-data(archive, {})
+},
+(archive: Bytes | Str, opts: Map): Map {
+  picked get(opts, "tables")
+  tables if(is-null(picked), DEFAULT_TABLES, zipmap(picked, map(picked, (t) { null })))
+  listing ::zip/entries(archive)
+  cond {
+    is-err(listing) => { listing }
+    => { read-tables(archive, map(listing, (e) { e.name }), tables, keys(tables), {}) }
+  }
+}
+
+filing-data
+meta {
+    doc: """
+    One month of Form ADV Part 1 filings. Two requests, the index and the
+    zip. Returns `{year, month, url, ...tables}`, or null when that month
+    isn't posted. `opts.tables` is as in `parse-filing-data`.
+
+    Most months are 7 to 9 MB. **March is about 31 MB**, past the default
+    `http.max-response-bytes` of 16 MiB, because most firms file their
+    annual update then. Set `hot.http.max-response-bytes` in `hot.hot` to
+    read it, and see the README on memory.
+
+    Most files from January to July 2025 are Latin-1, and those months
+    are an Err.
+
+    **Example**
+
+    ```hot
+    data ::sec::iapd/filing-data(2026, 10)
+    length(::sec::iapd/filings(data))
+    ```
+    """
+}
+fn
+(year: Int, month: Int): Map? {
+  filing-data(year, month, {})
+},
+(year: Int, month: Int, opts: Map): Map? {
+  report fetch-report(FILING_DATA, year, month, opts)
+  cond {
+    is-err(report) => { report }
+    is-null(report) => { null }
+    => {
+      tables parse-filing-data(report.archive, opts)
+      if(is-err(tables), tables, {year, month, url: report.url, ...tables})
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// One row per filing (pure)
+// ---------------------------------------------------------------------------
+
+amount
+meta {
+    doc: """A whole-dollar cell as an Int, or null for a blank or anything else (pure)."""
+}
+fn (cell: Any): Int? {
+  text if(is-str(cell), ::hot::str/replace(trim(cell), ",", ""), "")
+  if(::re/is-match(text, "^\\d+$"), Int(text), null)
+}
+
+iso-date
+meta {
+    doc: """`MM/DD/YYYY`, with or without a time, as `YYYY-MM-DD`; null for anything else (pure)."""
+}
+fn (cell: Any): Str? {
+  found if(is-str(cell), ::re/capture(cell, "^(\\d{2})/(\\d{2})/(\\d{4})"), null)
+  if(is-null(found), null, `${found.groups[2]}-${found.groups[0]}-${found.groups[1]}`)
+}
+
+filing-type-label fn (header: Str): Str {
+  key ::hot::str/replace(lowercase(trim(header)), "anual ", "annual ")
+  get(FILING_TYPES, key, key)
+}
+
+filing-type-labels
+meta {
+    doc: """The labels for one `ADV_Filing_Types` row, from its columns marked `Y` (pure). A filing can carry more than one."""
+}
+fn (row: Map): Vec<Str> {
+  map(keys(filter-vals(row, (v) { eq(v, "Y") })), filing-type-label)
+}
+
+fund-total fn (funds: Vec<Map>): Int {
+  own filter(funds, (f) { ne(get(f, "Feeder Fund"), "Y") })
+  amounts filter(map(own, (f) { amount(get(f, "Gross Asset Value")) }), is-some)
+  reduce(amounts, add(%1, %2), 0)
+}
+
+by-filing fn (data: Map, table: Str): Map {
+  group-by(get(data, table, []), (r) { r.FilingID })
+}
+
+filing-row fn (row: Map, adviser-type: Str, types: Map, funds: Map, form-ds: Map, ciks: Map): Map {
+  id row.FilingID
+  own-funds get(funds, id, [])
+  type-row get(types, id)
+  {
+    filing-id: id,
+    adviser-type,
+    name: get(row, "1A"),
+    crd: get(row, "1E1"),
+    sec-number: get(row, "1D"),
+    submitted: iso-date(get(row, "DateSubmitted")),
+    types: if(is-null(type-row), [], filing-type-labels(type-row)),
+    regulatory-aum: amount(get(row, "5F2c")),
+    private-funds: length(own-funds),
+    private-fund-assets: fund-total(own-funds),
+    form-d-numbers: map(get(form-ds, id, []), (r) { get(r, "Form D File Number") }),
+    ciks: map(get(ciks, id, []), (r) { r.CIK })
+  }
+}
+
+adviser-rows fn (data: Map, prefix: Str, base: Str, adviser-type: Str, types: Map): Vec<Map> {
+  funds by-filing(data, `${prefix}_Schedule_D_7B1`)
+  form-ds by-filing(data, `${prefix}_Schedule_D_7B1A22`)
+  ciks by-filing(data, `${prefix}_1D3_CIK`)
+  map(get(data, base, []), (r) { filing-row(r, adviser-type, types, funds, form-ds, ciks) })
+}
+
+filings
+meta {
+    doc: """
+    One Map per filing from `filing-data` or `parse-filing-data`, joining
+    the default tables (pure):
+
+    | Key | Meaning |
+    |---|---|
+    | `filing-id` | `FilingID`, as a Str |
+    | `adviser-type` | `"registered"` or `"exempt"` |
+    | `name`, `crd`, `sec-number` | Items 1A, 1E and 1D |
+    | `submitted` | `YYYY-MM-DD` |
+    | `types` | labels such as `"initial-registration"` or `"other-amendment"` |
+    | `regulatory-aum` | Item 5.F(2)(c) as an Int; null for exempt advisers |
+    | `private-funds` | funds listed in Schedule D 7.B.(1) |
+    | `private-fund-assets` | gross asset value of those funds, leaving out feeders |
+    | `form-d-numbers` | the funds' Form D file numbers, as in `sec-edgar`'s `file-numbers` |
+    | `ciks` | CIKs from Item 1.D(3), for `sec-edgar` |
+
+    `private-fund-assets` leaves out feeder funds, because a master fund
+    holds the same money. It's a sum of what the funds report. It isn't
+    the private fund adviser exemption's test, which also counts uncalled
+    commitments.
+
+    **Example**
+
+    ```hot
+    rows ::sec::iapd/filings(::sec::iapd/filing-data(2026, 10))
+    filter(rows, (r) { in("initial-registration", r.types) })
+    ```
+    """
+}
+fn (data: Map): Vec<Map> {
+  types index-by(get(data, "ADV_Filing_Types", []), (r) { r.FilingID })
+  concat(
+    adviser-rows(data, "IA", "IA_ADV_Base_A", "registered", types),
+    adviser-rows(data, "ERA", "ERA_ADV_Base", "exempt", types)
+  )
+}
+
+// ---------------------------------------------------------------------------
+// ADV-W withdrawals
+// ---------------------------------------------------------------------------
+
+withdrawal-row fn (row: Map): Map {
+  {
+    filing-id: get(row, "Filing ID"),
+    name: get(row, "Full Legal Name"),
+    crd: get(row, "CRD Number"),
+    sec-number: get(row, "SEC File Number"),
+    filing-type: get(row, "Filing Type"),
+    filed: iso-date(get(row, "Filing Date")),
+    business-ceased: eq(get(row, "Business Ceased"), "Y"),
+    date-ceased: iso-date(get(row, "Date Ceased")),
+    reason: get(row, "Reasons for Withdrawal")
+  }
+}
+
+parse-withdrawals
+meta {
+    doc: """
+    Read the firms from an ADV-W zip, as Bytes or a file path:
+    `{filing-id, name, crd, sec-number, filing-type, filed,
+    business-ceased, date-ceased, reason}`.
+
+    The file also holds each firm's contact person, email and phone.
+    Rows are read one at a time and only these fields are kept, so those
+    details stay out of what Hot records as rows.
+    """
+}
+fn (archive: Bytes | Str): Vec<Map> {
+  listing ::zip/entries(archive)
+  entry if(is-err(listing), null, find-first(map(listing, (e) { e.name }), (n) { eq(table-name(n), "ADVW") }))
+  data if(is-null(entry), null, ::zip/read-entry(archive, entry))
+  text if(or(is-null(data), is-err(data)), null, table-text(data, "ADVW"))
+  cond {
+    is-err(listing) => { listing }
+    is-null(entry) => { err("sec-iapd: the data file has no table ADVW") }
+    is-err(data) => { data }
+    is-err(text) => { text }
+    => {
+      rows map(iter-csv(text, CSV_OPTS), (r) { withdrawal-row(r) })
+      if(is-err(rows), map(iter-csv(repair-quotes(text), CSV_OPTS), (r) { withdrawal-row(r) }), rows)
+    }
+  }
+}
+
+withdrawals
+meta {
+    doc: """
+    One month of ADV-W filings, as `parse-withdrawals` rows, or null when
+    that month isn't posted. Two requests, the index and the zip.
+
+    **Example**
+
+    ```hot
+    ::sec::iapd/withdrawals(2026, 10)
+    ```
+    """
+}
+fn
+(year: Int, month: Int): Vec<Map>? {
+  withdrawals(year, month, {})
+},
+(year: Int, month: Int, opts: Map): Vec<Map>? {
+  report fetch-report(WITHDRAWALS, year, month, opts)
+  cond {
+    is-err(report) => { report }
+    is-null(report) => { null }
+    => { parse-withdrawals(report.archive) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Firm lookups
+// ---------------------------------------------------------------------------
+
+crd-digits
+meta {
+    doc: """A CRD number's digits as a Str; an Err for anything else (pure)."""
+}
+fn (crd: Any): Str {
+  s trim(Str(crd))
+  if(::re/is-match(s, "^\\d{1,10}$"), s, err(`sec-iapd: invalid CRD number '${crd}'`))
+}
+
+firm-url
+meta {
+    doc: """The firm record URL for a CRD number (pure)."""
+}
+fn (crd: Any): Str {
+  digits crd-digits(crd)
+  if(is-err(digits), digits, `${SEARCH}/firm/${digits}`)
+}
+
+firm-search-url
+meta {
+    doc: """The firm search URL (pure). `opts.limit` defaults to 12, and `opts.start` to 0."""
+}
+fn (query: Str, opts: Map): Str {
+  params ::api/query-string({query, nrows: get(opts, "limit", 12), start: get(opts, "start", 0), wt: "json"})
+  `${SEARCH}/firm${params}`
+}
+
+office-address fn (details: Any): Map? {
+  parsed if(is-str(details), from-json(details), null)
+  if(is-null(parsed), null, get(parsed, "officeAddress"))
+}
+
+firm-hit fn (hit: Map): Map {
+  s hit._source
+  {
+    crd: get(s, "firm_source_id"),
+    name: get(s, "firm_name"),
+    other-names: get(s, "firm_other_names", []),
+    sec-number: get(s, "firm_ia_full_sec_number"),
+    scope: get(s, "firm_ia_scope"),
+    has-disclosures: eq(get(s, "firm_ia_disclosure_fl"), "Y"),
+    office: office-address(get(s, "firm_ia_address_details"))
+  }
+}
+
+parse-firm-search
+meta {
+    doc: """The `{total, firms}` of a firm search body (pure). Each firm is `{crd, name, other-names, sec-number, scope, has-disclosures, office}`."""
+}
+fn (body: Map): Map {
+  {total: body.hits.total, firms: map(get(body.hits, "hits", []), firm-hit)}
+}
+
+firm-search
+meta {
+    doc: """
+    Search firms by name or CRD number. `opts.limit` and `opts.start`
+    page through the results.
+
+    This is the endpoint behind the IAPD site. The SEC doesn't document
+    it as a public API, so its response shape can change.
+
+    **Example**
+
+    ```hot
+    res ::sec::iapd/firm-search("Acme Capital", {limit: 5})
+    first(res.firms).crd
+    ```
+    """
+}
+fn
+(query: Str): Map {
+  firm-search(query, {})
+},
+(query: Str, opts: Map): Map {
+  h ::api/headers(opts)
+  body if(is-err(h), h, ::api/get-json(firm-search-url(query, opts), h))
+  if(is-err(body), body, parse-firm-search(body))
+}
+
+parse-firm
+meta {
+    doc: """The firm record in a firm response's `iacontent`, or null when there's no such firm (pure)."""
+}
+fn (body: Map): Map? {
+  hit first(get(body.hits, "hits", []))
+  content if(is-null(hit), null, get(hit._source, "iacontent"))
+  if(is-str(content), from-json(content), null)
+}
+
+firm
+meta {
+    doc: """
+    The current record for a CRD number, as the IAPD site shows it, or
+    null when there's no such adviser. `basicInformation` holds the name,
+    SEC number and status. The same note applies as for `firm-search`.
+
+    **Example**
+
+    ```hot
+    ::sec::iapd/firm(174673).basicInformation.firmName
+    ```
+    """
+}
+fn
+(crd: Any): Map? {
+  firm(crd, {})
+},
+(crd: Any, opts: Map): Map? {
+  h ::api/headers(opts)
+  url firm-url(crd)
+  cond {
+    is-err(h) => { h }
+    is-err(url) => { url }
+    => {
+      body ::api/get-json(url, h)
+      if(is-err(body), body, parse-firm(body))
+    }
+  }
+}

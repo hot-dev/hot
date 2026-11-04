@@ -1,0 +1,447 @@
+::sec::iapd::test::iapd ns
+meta ["test"]
+
+::api ::sec::iapd::api
+::iapd ::sec::iapd
+
+// ============================================================================
+// Fixtures: invented firms, with the files' column names and oddities
+// ============================================================================
+
+TYPES_CSV """
+"FilingID","Initial SEC Registration Request","Other-Than Anual Amendment For Registered Adviser","Initial SEC ERA Report"," Final SEC ERA Report"
+1,"Y","","",""
+2,"","Y","",""
+3,"","","Y","Y"
+"""
+
+IA_BASE_CSV """
+"FilingID","DateSubmitted","1A","1D","1E1","5F2c"
+1,10/12/2026 11:23:12 AM,"NORTHWICK ADVISERS, LLC","801-1",100,"117053746"
+2,10/13/2026 09:00:00 AM,"TALLOW PEAK LLC","801-2",200,""
+"""
+
+ERA_BASE_CSV """
+"FilingID","DateSubmitted","1A","1D","1E1"
+3,10/14/2026,"QUILLON FUNDS LP","802-3",300
+"""
+
+ERA_FUNDS_CSV """
+"FilingID","Fund Name","Feeder Fund","Gross Asset Value"
+3,"Quillon Master","N","140000000"
+3,"Quillon Feeder","Y","90000000"
+3,"Quillon II","N","20000000"
+"""
+
+IA_FUNDS_CSV """
+"FilingID","Fund Name","Feeder Fund","Gross Asset Value"
+"""
+
+ERA_FORM_D_CSV """
+"FilingID","ReferenceID","Form D File Number"
+3,1,"021-111111"
+"""
+
+CIK_CSV """
+"FilingID","CIK"
+1,1234567
+"""
+
+EMPTY_A22 """
+"FilingID","ReferenceID","Form D File Number"
+"""
+
+EMPTY_CIK """
+"FilingID","CIK"
+"""
+
+ADVW_CSV """
+"Primary Business Name","Filing ID","Filing Type","Filing Date","Full Legal Name","SEC File Number","CRD Number","Contact Name","Contact Email","Business Ceased","Date Ceased","Reasons for Withdrawal"
+"NORTHWICK","9","FULL","10/01/2026 08:44:58 AM","NORTHWICK ADVISERS, LLC","801-1",100,"A PERSON","person@example.test","Y","05/29/2026","Firm sold"
+"""
+
+entry fn (table: Str, data: Str): Map {
+    {name: `${table}_20261001_20261031.csv`, data: data}
+}
+
+filing-zip fn (): Bytes {
+    ::hot::zip/create([
+      entry("ADV_Filing_Types", TYPES_CSV),
+      entry("IA_ADV_Base_A", IA_BASE_CSV),
+      entry("ERA_ADV_Base", ERA_BASE_CSV),
+      entry("IA_Schedule_D_7B1", IA_FUNDS_CSV),
+      entry("ERA_Schedule_D_7B1", ERA_FUNDS_CSV),
+      entry("IA_Schedule_D_7B1A22", EMPTY_A22),
+      entry("ERA_Schedule_D_7B1A22", ERA_FORM_D_CSV),
+      entry("IA_1D3_CIK", CIK_CSV),
+      entry("ERA_1D3_CIK", EMPTY_CIK),
+      entry("IA_Schedule_A_B", "\"FilingID\",\"Full Legal Name\"\n1,\"A PERSON\"\n")
+    ])
+}
+
+INDEX {
+  advW: {
+    sectionDisplayName: "Form ADV-W Data Files",
+    sectionDisplayOrder: 4,
+    "2026": {files: [
+      {fileName: "ADVW_20261001_20261031.zip", size: 24388, year: "2026", fileType: "advW", uploadedOn: "2026-11-02 17:22:09"}
+    ]}
+  },
+  advFilingData: {
+    sectionDisplayName: "Form ADV Part 1 Data Files",
+    sectionDisplayOrder: 1,
+    "2024": {files: []},
+    "2026": {files: [
+      {fileName: "ADV_Filing_Data_20261001_20261031.zip", size: 7021164, year: "2026", fileType: "advFilingData", uploadedOn: "2026-11-02 17:22:10"},
+      {fileName: "ADV_Filing_Data_20260401_20260430.zip", size: 7338147, year: "2026", fileType: "advFilingData", uploadedOn: "2026-05-01 14:49:27"}
+    ]},
+    "2025": {files: [
+      {fileName: "ADV_Filing_Data_20251201_20251231.zip", size: 6788653, year: "2025", fileType: "advFilingData", uploadedOn: "2026-05-04 16:32:10"}
+    ]}
+  }
+}
+
+// ============================================================================
+// Settings
+// ============================================================================
+
+test-resolve-default
+meta ["test"]
+fn () {
+    assert-eq("hot-dev-sec-iapd-pkg/0.1 (+https://hot.dev)", ::api/resolve({}).user-agent)
+}
+
+test-resolve-opts-override
+meta ["test"]
+fn () {
+    assert-eq("Acme ops@acme.test", ::api/resolve({user-agent: "Acme ops@acme.test"}).user-agent)
+    assert-eq(null, ::hot::ctx/get("sec.iapd.user-agent"), "a per-call user-agent is never written to ctx")
+}
+
+test-resolve-blank-is-an-error
+meta ["test"]
+fn () {
+    assert(is-err(::api/resolve({user-agent: ""})), "blank")
+    assert(is-err(::api/resolve({user-agent: null})), "null")
+    assert(is-err(::iapd/filing-data(2026, 10, {user-agent: ""})), "filing-data stops before any request")
+    assert(is-err(::iapd/firm(100, {user-agent: ""})), "firm stops before any request")
+}
+
+// ============================================================================
+// URLs
+// ============================================================================
+
+test-report-url
+meta ["test"]
+fn () {
+    assert-eq(
+      "https://reports.adviserinfo.sec.gov/reports/foia/advW/2026/ADVW_20261001_20261031.zip",
+      ::iapd/report-url("advW", 2026, "ADVW_20261001_20261031.zip")
+    )
+}
+
+test-firm-feed-url
+meta ["test"]
+fn () {
+    assert-eq("https://reports.adviserinfo.sec.gov/reports/CompilationReports/IA_FIRM_SEC_Feed_11_04_2026.xml.gz", ::iapd/firm-feed-url("2026-11-04"))
+    assert-eq("https://reports.adviserinfo.sec.gov/reports/CompilationReports/IA_FIRM_STATE_Feed_11_04_2026.xml.gz", ::iapd/firm-feed-url("2026-11-04", "STATE"))
+    assert(is-err(::iapd/firm-feed-url("11/04/2026")), "bad date")
+    assert(is-err(::iapd/firm-feed-url("2026-11-04", "NOPE")), "bad scope")
+}
+
+test-firm-urls
+meta ["test"]
+fn () {
+    assert-eq("https://api.adviserinfo.sec.gov/search/firm/174673", ::iapd/firm-url(174673))
+    assert(is-err(::iapd/firm-url("12/../34")), "not a CRD number")
+    url ::iapd/firm-search-url("acme capital", {limit: 5})
+    assert(contains(url, "nrows=5"), "limit")
+    assert(contains(url, "wt=json"), "json")
+    assert(not(contains(url, "acme capital")), "the query is encoded")
+}
+
+// ============================================================================
+// The index
+// ============================================================================
+
+test-report-files-oldest-first
+meta ["test"]
+fn () {
+    rows ::iapd/report-files(INDEX, "advFilingData")
+    assert-eq(3, length(rows))
+    assert-eq("ADV_Filing_Data_20251201_20251231.zip", first(rows).name)
+    assert-eq(10, last(rows).month)
+    assert-eq(2026, last(rows).year)
+    assert-eq("https://reports.adviserinfo.sec.gov/reports/foia/advFilingData/2026/ADV_Filing_Data_20261001_20261031.zip", last(rows).url)
+    assert-eq([], ::iapd/report-files(INDEX, "nope"))
+}
+
+test-find-report
+meta ["test"]
+fn () {
+    assert-eq(4, ::iapd/find-report(INDEX, "advFilingData", 2026, 4).month)
+    assert-eq(null, ::iapd/find-report(INDEX, "advFilingData", 2026, 11), "not posted yet")
+}
+
+// ============================================================================
+// Form ADV Part 1
+// ============================================================================
+
+test-table-names
+meta ["test"]
+fn () {
+    assert-eq("IA_ADV_Base_A", ::iapd/table-name("IA_ADV_Base_A_20261001_20261031.csv"))
+    assert(in("IA_Schedule_A_B", ::iapd/table-names(filing-zip())), "listed")
+}
+
+test-default-tables-leave-out-people
+meta ["test"]
+fn () {
+    d ::iapd/parse-filing-data(filing-zip())
+    assert(in("IA_ADV_Base_A", keys(d)), "base table")
+    assert(not(in("IA_Schedule_A_B", keys(d))), "Schedule A is opt-in")
+}
+
+test-default-tables-keep-only-what-filings-reads
+meta ["test"]
+fn () {
+    archive ::hot::zip/create([
+      entry("ADV_Filing_Types", TYPES_CSV),
+      entry("IA_ADV_Base_A", "\"FilingID\",\"1A\",\"1F1-Street 1\"\n1,\"NORTHWICK\",\"1 HOME LANE\"\n"),
+      entry("ERA_ADV_Base", ERA_BASE_CSV),
+      entry("IA_Schedule_D_7B1", IA_FUNDS_CSV),
+      entry("ERA_Schedule_D_7B1", ERA_FUNDS_CSV),
+      entry("IA_Schedule_D_7B1A22", EMPTY_A22),
+      entry("ERA_Schedule_D_7B1A22", ERA_FORM_D_CSV),
+      entry("IA_1D3_CIK", CIK_CSV),
+      entry("ERA_1D3_CIK", EMPTY_CIK)
+    ])
+    row first(::iapd/parse-filing-data(archive).IA_ADV_Base_A)
+    assert-eq("NORTHWICK", get(row, "1A"))
+    assert(not(in("1F1-Street 1", keys(row))), "no street address")
+    whole first(get(::iapd/parse-filing-data(archive, {tables: ["IA_ADV_Base_A"]}), "IA_ADV_Base_A"))
+    assert-eq("1 HOME LANE", get(whole, "1F1-Street 1"), "a table asked for by name is whole")
+}
+
+test-tables-are-exact
+meta ["test"]
+fn () {
+    d ::iapd/parse-filing-data(filing-zip(), {tables: ["IA_Schedule_D_7B1"]})
+    assert-eq(["IA_Schedule_D_7B1"], keys(d))
+    picked ::iapd/parse-filing-data(filing-zip(), {tables: ["IA_Schedule_A_B"]})
+    assert-eq("A PERSON", get(first(picked.IA_Schedule_A_B), "Full Legal Name"))
+}
+
+test-parse-filing-data-errs
+meta ["test"]
+fn () {
+    assert(is-err(::iapd/parse-filing-data(Bytes("not a zip"))), "not a zip")
+    assert(is-err(::iapd/parse-filing-data(filing-zip(), {tables: ["nope"]})), "unknown table")
+}
+
+test-amount
+meta ["test"]
+fn () {
+    assert-eq(117053746, ::iapd/amount("117053746"))
+    assert-eq(1500, ::iapd/amount("1,500"))
+    assert-eq(0, ::iapd/amount("0"))
+    assert-eq(null, ::iapd/amount(""))
+    assert-eq(null, ::iapd/amount(null))
+    assert-eq(null, ::iapd/amount("n/a"))
+}
+
+test-iso-date
+meta ["test"]
+fn () {
+    assert-eq("2026-10-12", ::iapd/iso-date("10/12/2026 11:23:12 AM"))
+    assert-eq("2026-10-14", ::iapd/iso-date("10/14/2026"))
+    assert-eq(null, ::iapd/iso-date(""))
+}
+
+find-filing fn (rows: Vec<Map>, id: Str): Map {
+    find-first(rows, (r) { eq(r.filing-id, id) })
+}
+
+test-filings-registered
+meta ["test"]
+fn () {
+    rows ::iapd/filings(::iapd/parse-filing-data(filing-zip()))
+    assert-eq(3, length(rows))
+    r find-filing(rows, "1")
+    assert-eq("registered", r.adviser-type)
+    assert-eq("NORTHWICK ADVISERS, LLC", r.name)
+    assert-eq("100", r.crd)
+    assert-eq("2026-10-12", r.submitted)
+    assert-eq(["initial-registration"], r.types)
+    assert-eq(117053746, r.regulatory-aum)
+    assert-eq(["1234567"], r.ciks)
+    assert-eq(null, find-filing(rows, "2").regulatory-aum, "a blank stays null")
+    assert-eq(["other-amendment"], find-filing(rows, "2").types, "the header's misspelling")
+}
+
+test-filings-exempt-private-funds
+meta ["test"]
+fn () {
+    r find-filing(::iapd/filings(::iapd/parse-filing-data(filing-zip())), "3")
+    assert-eq("exempt", r.adviser-type)
+    assert-eq(null, r.regulatory-aum, "exempt advisers don't file Item 5")
+    assert-eq(3, r.private-funds)
+    assert-eq(160000000, r.private-fund-assets, "feeders left out")
+    assert-eq(["021-111111"], r.form-d-numbers)
+    assert-eq("2026-10-14", r.submitted)
+    assert(in("initial-exempt-report", r.types), "first of two")
+    assert(in("final-exempt-report", r.types), "the header's leading space")
+}
+
+test-filings-without-optional-tables
+meta ["test"]
+fn () {
+    d ::iapd/parse-filing-data(filing-zip(), {tables: ["IA_ADV_Base_A"]})
+    rows ::iapd/filings(d)
+    assert-eq(2, length(rows))
+    assert-eq([], first(rows).types)
+    assert-eq(0, first(rows).private-fund-assets)
+}
+
+test-unknown-filing-type-keeps-its-header
+meta ["test"]
+fn () {
+    assert-eq(["some new type"], ::iapd/filing-type-labels({FilingID: "1", "Some New Type": "Y", Other: ""}))
+}
+
+// ============================================================================
+// Quotes
+// ============================================================================
+
+test-repair-quotes-unescaped-inside-a-cell
+meta ["test"]
+fn () {
+    rows ::iapd/parse-table("\"Name\",\"N\"\n\"KF (\"X\") LP\",1\n")
+    assert-eq("KF (\"X\") LP", first(rows).Name)
+    assert-eq("1", first(rows).N)
+}
+
+test-repair-quotes-stray-quote-at-the-end-of-a-cell
+meta ["test"]
+fn () {
+    rows ::iapd/parse-table("\"Name\",\"N\"\n\"HEDGE \"FUND\"\",1\n\"NEXT\",2\n")
+    assert-eq("HEDGE \"FUND\"", first(rows).Name)
+    assert-eq("NEXT", last(rows).Name)
+}
+
+test-repair-quotes-keeps-an-escaped-quote-before-a-comma
+meta ["test"]
+fn () {
+    rows ::iapd/parse-table("\"Name\",\"N\"\n\"FUND \"\"B\"\", L.P.\",1\n\"KF (\"X\") LP\",2\n")
+    assert-eq("FUND \"B\", L.P.", first(rows).Name)
+    assert-eq("KF (\"X\") LP", last(rows).Name)
+}
+
+test-repair-quotes-keeps-escaped-quotes-and-line-breaks
+meta ["test"]
+fn () {
+    text "\"A\",\"B\"\n\"one \"\"two\"\" three\",\"line\nbreak (\"x\")\"\n"
+    rows ::iapd/parse-table(text)
+    assert-eq("one \"two\" three", first(rows).A)
+    assert-eq("line\nbreak (\"x\")", first(rows).B)
+}
+
+test-parse-table-leaves-a-clean-table-alone
+meta ["test"]
+fn () {
+    rows ::iapd/parse-table("\"A\",\"B\"\n\"x \"\"y\"\", z\",1\n")
+    assert-eq("x \"y\", z", first(rows).A, "a proper escape before a comma")
+}
+
+test-parse-table-keeps-a-row-of-the-wrong-width
+meta ["test"]
+fn () {
+    rows ::iapd/parse-table("A,B\n1\n2,3,4\n")
+    assert-eq(null, first(rows).B, "short")
+    assert-eq("3", last(rows).B, "long")
+}
+
+// ============================================================================
+// ADV-W
+// ============================================================================
+
+test-parse-withdrawals-keeps-firm-fields
+meta ["test"]
+fn () {
+    archive ::hot::zip/create([entry("ADVW", ADVW_CSV), entry("ADVW_W2", "\"Filing ID\"\n9\n")])
+    r first(::iapd/parse-withdrawals(archive))
+    assert-eq("NORTHWICK ADVISERS, LLC", r.name)
+    assert-eq("100", r.crd)
+    assert-eq("2026-10-01", r.filed)
+    assert-eq("2026-05-29", r.date-ceased)
+    assert-eq(true, r.business-ceased)
+    assert-eq("Firm sold", r.reason)
+    assert(not(in("person@example.test", vals(r))), "no contact email")
+    assert(not(in("Contact Name", keys(r))), "no contact name")
+}
+
+test-parse-withdrawals-reads-unescaped-quotes
+meta ["test"]
+fn () {
+    text "\"Filing ID\",\"Full Legal Name\",\"Reasons for Withdrawal\"\n9,\"KF GROUP, LP\",\"Other: KF GROUP, LP (\"KF\") WAS INTEGRATED\"\n"
+    r first(::iapd/parse-withdrawals(::hot::zip/create([entry("ADVW", text)])))
+    assert-eq("Other: KF GROUP, LP (\"KF\") WAS INTEGRATED", r.reason)
+}
+
+test-latin-1-file-is-an-err-naming-the-table
+meta ["test"]
+fn () {
+    latin Bytes([34, 65, 34, 10, 34, 83, 195, 79, 34, 10, 34, 83, 195, 34, 10])
+    bad ::hot::zip/create([{name: "ADVW_20250101_20250131.csv", data: latin}])
+    assert(is-err(::iapd/parse-withdrawals(bad)), "ADV-W")
+    assert(is-err(::iapd/parse-filing-data(bad, {tables: ["ADVW"]})), "a table by name")
+}
+
+test-parse-withdrawals-errs
+meta ["test"]
+fn () {
+    assert(is-err(::iapd/parse-withdrawals(Bytes("not a zip"))), "not a zip")
+    assert(is-err(::iapd/parse-withdrawals(filing-zip())), "no ADVW table")
+}
+
+// ============================================================================
+// Firm lookups
+// ============================================================================
+
+SEARCH_BODY {
+  hits: {
+    total: 1,
+    hits: [
+      {_source: {
+        firm_source_id: "100",
+        firm_name: "NORTHWICK ADVISERS, LLC",
+        firm_other_names: ["NORTHWICK"],
+        firm_ia_full_sec_number: "801-1",
+        firm_ia_scope: "ACTIVE",
+        firm_ia_disclosure_fl: "N",
+        firm_ia_address_details: "{\"officeAddress\": {\"city\": \"EXAMPLE\"}}"
+      }}
+    ]
+  }
+}
+
+test-parse-firm-search
+meta ["test"]
+fn () {
+    res ::iapd/parse-firm-search(SEARCH_BODY)
+    assert-eq(1, res.total)
+    f first(res.firms)
+    assert-eq("100", f.crd)
+    assert-eq("ACTIVE", f.scope)
+    assert-eq(false, f.has-disclosures)
+    assert-eq("EXAMPLE", f.office.city)
+}
+
+test-parse-firm
+meta ["test"]
+fn () {
+    body {hits: {total: 1, hits: [{_source: {iacontent: "{\"basicInformation\": {\"firmId\": 100}}"}}]}}
+    assert-eq(100, ::iapd/parse-firm(body).basicInformation.firmId)
+    assert-eq(null, ::iapd/parse-firm({hits: {total: 0, hits: []}}), "no such firm")
+    assert-eq(null, ::iapd/parse-firm({hits: {total: 1, hits: [{_source: {}}]}}), "a broker-dealer with no adviser record")
+}

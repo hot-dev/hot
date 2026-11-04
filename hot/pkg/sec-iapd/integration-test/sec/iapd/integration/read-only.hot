@@ -1,0 +1,65 @@
+::sec::iapd::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration smoke tests (live, read-only)
+// =============================================================================
+// SEC_IAPD_LIVE=1 (no key). Without the setting they record a skip and pass.
+// Run with: hot test -p pkg-integration-sec-iapd
+
+::ctx ::sec::iapd::integration::ctx
+::iapd ::sec::iapd
+
+test-index-lists-filing-data
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("SEC_IAPD_LIVE is not set") }
+        => {
+            files ::iapd/report-files(::iapd/reports(), "advFilingData")
+            assert(gt(length(files), 12), "a year of files")
+            assert(starts-with(last(files).name, "ADV_Filing_Data_"), "file name")
+        }
+    }
+}
+
+test-filing-data-month
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("SEC_IAPD_LIVE is not set") }
+        => {
+            rows ::iapd/filings(::iapd/filing-data(2026, 10))
+            assert(gt(length(rows), 1000), "a month of filings")
+            assert(some(rows, (r) { in("initial-registration", r.types) }), "new registrations")
+            assert(some(rows, (r) { gt(r.private-fund-assets, 0) }), "private funds")
+            assert(all(filter(rows, (r) { eq(r.adviser-type, "exempt") }), (r) { is-null(r.regulatory-aum) }), "no Item 5 for exempt advisers")
+            assert-eq(null, ::iapd/filing-data(2001, 1), "a month that isn't posted")
+        }
+    }
+}
+
+test-withdrawals-month
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("SEC_IAPD_LIVE is not set") }
+        => {
+            rows ::iapd/withdrawals(2026, 10)
+            assert(gt(length(rows), 10), "a month of withdrawals")
+            assert(is-some(first(rows).crd), "a CRD number")
+        }
+    }
+}
+
+test-firm-lookups
+meta ["test"] fn () {
+    cond {
+        not(::ctx/live()) => { ::ctx/skip("SEC_IAPD_LIVE is not set") }
+        => {
+            res ::iapd/firm-search("capital", {limit: 2})
+            assert(gt(res.total, 2), "matches")
+            assert-eq(2, length(res.firms))
+            one ::iapd/firm(first(res.firms).crd)
+            assert(is-some(one.basicInformation.firmName), "a firm record")
+            assert-eq(null, ::iapd/firm(999999999), "no such firm")
+        }
+    }
+}
