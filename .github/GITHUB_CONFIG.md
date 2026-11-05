@@ -16,6 +16,24 @@ This public repository has these workflow groups:
 
 No custom secrets or variables are required for the normal `hot.yml` check/test workflow.
 
+The Rust-heavy jobs (Clippy, Rust tests, Hot tests, and the Kata compile check)
+use the organization's `ubuntu-24.04-8core` GitHub-hosted runner in the `hot-ci`
+runner group: Ubuntu 24.04 x64, 8 cores, 32 GB RAM, and 300 GB SSD. The pool
+allows up to eight concurrent jobs, and the group grants access only to
+`hot-dev/hot`, including this public repository. `CARGO_BUILD_JOBS=8` matches
+the pool size. Browser checks and the final required-check gate use standard
+`ubuntu-24.04` runners.
+
+The enterprise billing account has a repository-scoped Actions budget for
+`hot-dev/hot` with a **$0 monthly overage limit** and **Stop usage when budget
+limit is reached** enabled. Larger runners draw from the shared included
+compute allowance; paid Actions usage for this repository is blocked when
+that allowance is exhausted. Included usage alerts are enabled. Other
+repositories retain their existing budgets. Manage the pool in
+[organization runner settings](https://github.com/organizations/hot-dev/settings/actions/runners)
+and the cap in
+[enterprise budgets](https://github.com/enterprises/hot-dev/billing/budgets).
+
 ## Required For Public Releases
 
 These are needed only when `release.yml` publishes artifacts to S3/CDN or updates external repositories. Put them in repository settings or organization settings. The public `hot` release workflow intentionally does not bind jobs to GitHub Environments; staging and production environments belong to `hot-cloud`.
