@@ -6208,7 +6208,7 @@ impl Compiler {
     }
 
     fn build_field_type_info_from_expr(&self, type_expr: &TypeExpr, include_builtin: bool) -> Val {
-        match type_expr {
+        let mut info = match type_expr {
             TypeExpr::Union(parts) => {
                 let members = parts
                     .iter()
@@ -6244,7 +6244,18 @@ impl Compiler {
                     Val::map_empty()
                 }
             }
-            TypeExpr::Generic(name, _) if name == "Map" => Val::map_empty(),
+            TypeExpr::Generic(name, _) if name == "Map" => {
+                if include_builtin {
+                    let mut map_info = Self::simple_type_info("Map");
+                    if let Val::Map(entries) = &mut map_info {
+                        std::sync::Arc::make_mut(entries)
+                            .insert(Val::from("$after_records"), Val::Bool(true));
+                    }
+                    map_info
+                } else {
+                    Val::map_empty()
+                }
+            }
             TypeExpr::Builtin(builtin) => self.build_builtin_type_info(builtin, include_builtin),
             TypeExpr::Any => {
                 if include_builtin {
@@ -6278,7 +6289,24 @@ impl Compiler {
                 Val::map(type_info)
             }
             TypeExpr::Generic(name, _) => self.build_custom_type_info(name),
+        };
+
+        // A union may mix built-in and constructed members, so its checks
+        // must follow the member selected by construction. An outer field's
+        // plain check cannot describe the constructed alternatives.
+        if include_builtin
+            && let Some(spec) = constraint_specs::plain_field_spec(type_expr)
+            && let Val::Map(entries) = &mut info
+            && let Some(Val::Str(type_name)) = entries.get(&Val::from("$type"))
+        {
+            let check = crate::val!({
+                "boundary": "constructor",
+                "declared-type": type_name.as_ref(),
+                "type": spec
+            });
+            std::sync::Arc::make_mut(entries).insert(Val::from("$check"), check);
         }
+        info
     }
 
     fn build_builtin_type_info(&self, builtin: &BuiltinType, include_builtin: bool) -> Val {

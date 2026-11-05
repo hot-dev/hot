@@ -2241,10 +2241,6 @@ impl Schedule {
             }
         }
 
-        if let Some(org_id) = org_id {
-            Self::enforce_active_count_for_org(db, org_id, 1, policy).await?;
-        }
-
         let cron_field = schedule_type.to_cron_field();
         // A dynamic schedule always stores its args, [] for none: the
         // scheduler passes them, where a metadata schedule (no value) gets the
@@ -2255,6 +2251,27 @@ impl Schedule {
         // One text for one set of arguments: JSONB orders map keys itself, and
         // SQLite compares the text it's given.
         args.sort_all_objects();
+
+        if let Some(org_id) = org_id
+            && policy.max_active_per_org >= 0
+        {
+            // A repeat of an active or spent call reserves no new capacity.
+            // Admission below locks the account and validates the actual
+            // count too, including a cancellation racing this read.
+            let repeats: bool = match db {
+                crate::db::DatabasePool::Postgres(pool) => sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM schedule s WHERE build_id=$1 AND ns=$2 AND var=$3 AND cron=$4 AND md5(COALESCE(value::text, ''))=md5($5::jsonb::text) AND (s.active OR (s.cron LIKE '@at:%' AND EXISTS(SELECT 1 FROM schedule_log l WHERE l.schedule_id=s.schedule_id))))"
+                ).bind(build_id).bind(ns).bind(var).bind(&cron_field).bind(&args)
+                    .fetch_one(pool).await?,
+                crate::db::DatabasePool::Sqlite(pool) => sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM schedule s WHERE build_id=? AND ns=? AND var=? AND cron=? AND COALESCE(value, '')=? AND (s.active OR (s.cron LIKE '@at:%' AND EXISTS(SELECT 1 FROM schedule_log l WHERE l.schedule_id=s.schedule_id))))"
+                ).bind(build_id).bind(ns).bind(var).bind(&cron_field).bind(args.to_string())
+                    .fetch_one(pool).await?,
+            };
+            if !repeats {
+                Self::enforce_active_count_for_org(db, org_id, 1, policy).await?;
+            }
+        }
 
         let admission = quota::Admission::begin(db, build_id, policy.max_active_per_org).await?;
         let stored_id = match admission {
@@ -3450,6 +3467,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repeating_a_schedule_at_quota_reserves_no_capacity() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        crate::db::Build::deploy_build(&db, &data.build_id, &data.user_id)
+            .await
+            .unwrap();
+        assert_repeating_schedule_at_quota(&db, &data.build_id, &data.org_id).await;
+    }
+
+    async fn assert_repeating_schedule_at_quota(
+        db: &crate::db::DatabasePool,
+        build_id: &Uuid,
+        org_id: &Uuid,
+    ) {
+        let at = ScheduleType::At(Utc::now() + chrono::Duration::hours(1));
+        let policy = SchedulePolicy {
+            max_active_per_org: 1,
+            ..SchedulePolicy::self_hosted_default()
+        };
+        let arm = |args: serde_json::Value| {
+            let at = &at;
+            async move {
+                Schedule::insert_dynamic_schedule(
+                    db,
+                    &Uuid::now_v7(),
+                    build_id,
+                    at,
+                    Some(org_id),
+                    policy,
+                    "::demo",
+                    "once",
+                    None,
+                    Some(&args),
+                )
+                .await
+            }
+        };
+        let args = serde_json::json!([{"a": 1, "b": 2}]);
+        let first = arm(args.clone()).await.unwrap();
+        assert_eq!(
+            arm(serde_json::json!([{"b": 2, "a": 1}])).await.unwrap(),
+            first
+        );
+        assert!(matches!(
+            arm(serde_json::json!(["another"])).await,
+            Err(ScheduleError::PolicyError(_))
+        ));
+        assert_eq!(
+            Schedule::get_active_count_by_org(db, org_id).await.unwrap(),
+            1
+        );
+        crate::db::ScheduleLog::insert(db, &first, None, Utc::now(), false)
+            .await
+            .unwrap();
+        Schedule::cancel_schedule(db, &first).await.unwrap();
+        let another = arm(serde_json::json!(["another"])).await.unwrap();
+        assert_eq!(arm(args).await.unwrap(), first);
+        assert!(!Schedule::get_schedule(db, &first).await.unwrap().active);
+        Schedule::cancel_schedule(db, &another).await.unwrap();
+        arm(serde_json::json!(["third"])).await.unwrap();
+        assert!(matches!(
+            arm(serde_json::json!(["another"])).await,
+            Err(ScheduleError::PolicyError(_))
+        ));
+    }
+
+    #[tokio::test]
     async fn postgres_a_schedule_is_one_call() {
         let Ok(uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
             eprintln!("skipping: HOT_TEST_POSTGRES_URI not set");
@@ -3510,6 +3594,13 @@ mod tests {
         let long = serde_json::json!(["x".repeat(100_000)]);
         let id = arm_at(&db, &build, &org, at, long.clone()).await;
         assert_eq!(arm_at(&db, &build, &org, at, long).await, id);
+        Schedule::delete_schedules_by_build(&db, &build)
+            .await
+            .unwrap();
+        crate::db::Build::deploy_build(&db, &build, &user)
+            .await
+            .unwrap();
+        assert_repeating_schedule_at_quota(&db, &build, &org).await;
     }
 
     #[test]

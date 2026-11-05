@@ -1192,6 +1192,7 @@ impl TypeChecker {
             }
         }
         self.register_type_imports(program);
+        self.resolve_inline_refinement_bases(program);
         tracing::debug!(
             "TypeChecker: Discovered {} type definitions ({} core), {} implementations",
             self.qualified_types.len(),
@@ -1240,6 +1241,146 @@ impl TypeChecker {
             if imports.len() == before {
                 break;
             }
+        }
+    }
+
+    /// An inline refinement is a synthesized alias. Resolve its base in the
+    /// declaration's namespace, just as the annotation without `where` does.
+    /// Reading only the alias's immediate AST leaves `Money` as a nominal
+    /// name while `Money(5.0)` is inferred as its base `Dec`.
+    fn resolve_inline_refinement_bases(&mut self, program: &Program) {
+        use crate::lang::ast::{TypeExpr as AstType, is_inline_refinement_type};
+        let mut aliases = AHashMap::new();
+        let mut namespaces = AHashMap::new();
+        for (path, namespace) in &program.namespaces {
+            let ns = path.to_string();
+            let ns_aliases: AHashMap<_, _> = namespace
+                .aliases
+                .iter()
+                .map(|(alias, target)| (alias.to_string(), target.to_string()))
+                .collect();
+            for (var, value) in &namespace.scope.vars {
+                let mut is_root = true;
+                walk_values(value, &mut |value| {
+                    let top_level = std::mem::replace(&mut is_root, false);
+                    if let Value::TypeDef(def) = value
+                        && let Some(base) = &def.type_alias
+                    {
+                        let key = format!("{ns}/{}", def.name.name());
+                        let entry = (ns.clone(), base.clone());
+                        if top_level {
+                            aliases.insert(key, entry);
+                        } else {
+                            aliases.entry(key).or_insert(entry);
+                        }
+                    }
+                });
+                if let Some(target) = Self::imported_function(value, &ns_aliases) {
+                    aliases.insert(
+                        format!("{ns}/{}", var.sym.name()),
+                        (ns.clone(), AstType::Named(target)),
+                    );
+                }
+            }
+            namespaces.insert(ns, ns_aliases);
+        }
+        let refinements: Vec<_> = aliases
+            .iter()
+            .filter(|(name, _)| is_inline_refinement_type(name))
+            .map(|(name, (ns, base))| (name.clone(), ns.clone(), base.clone()))
+            .collect();
+        for (name, ns, base) in refinements {
+            let resolved = self.resolve_refinement_base(
+                &base,
+                &ns,
+                &aliases,
+                &namespaces,
+                &mut AHashSet::new(),
+            );
+            self.qualified_types.insert(name, resolved);
+        }
+    }
+
+    fn resolve_refinement_base(
+        &self,
+        base: &crate::lang::ast::TypeExpr,
+        namespace: &str,
+        aliases: &AHashMap<String, (String, crate::lang::ast::TypeExpr)>,
+        namespaces: &AHashMap<String, AHashMap<String, String>>,
+        seen: &mut AHashSet<String>,
+    ) -> TypeExpr {
+        use crate::lang::ast::TypeExpr as AstType;
+        match base {
+            AstType::Simple(name) | AstType::Named(name) => {
+                if let Some(builtin) = self.try_resolve_builtin_type(name) {
+                    return builtin;
+                }
+                let qualified = if let Some((ns, short)) = name.rsplit_once('/') {
+                    let ns = namespaces
+                        .get(namespace)
+                        .and_then(|a| a.get(ns))
+                        .map_or(ns, String::as_str);
+                    format!("{ns}/{short}")
+                } else {
+                    let local = format!("{namespace}/{name}");
+                    if aliases.contains_key(&local) || self.qualified_types.contains_key(&local) {
+                        local
+                    } else {
+                        self.core_types.get(name).cloned().unwrap_or(local)
+                    }
+                };
+                // Open literal unions accumulate across declarations; their
+                // registry entry holds all members, not just the last alias.
+                if self
+                    .context
+                    .types
+                    .get(&qualified)
+                    .is_some_and(|def| def.is_literal_union)
+                    && let Some(resolved) = self.qualified_types.get(&qualified)
+                {
+                    return resolved.clone();
+                }
+                if !seen.insert(qualified.clone()) {
+                    return TypeExpr::Named(qualified);
+                }
+                let resolved = match aliases.get(&qualified) {
+                    Some((ns, target)) => {
+                        self.resolve_refinement_base(target, ns, aliases, namespaces, seen)
+                    }
+                    None => self
+                        .qualified_types
+                        .get(&qualified)
+                        .cloned()
+                        .unwrap_or_else(|| TypeExpr::Named(qualified.clone())),
+                };
+                seen.remove(&qualified);
+                resolved
+            }
+            AstType::Optional(inner) => TypeExpr::Optional(Box::new(
+                self.resolve_refinement_base(inner, namespace, aliases, namespaces, seen),
+            )),
+            AstType::Union(members) => TypeExpr::Union(
+                members
+                    .iter()
+                    .map(|member| {
+                        self.resolve_refinement_base(member, namespace, aliases, namespaces, seen)
+                    })
+                    .collect(),
+            ),
+            AstType::Generic(name, params) if name == "Vec" && params.len() == 1 => {
+                TypeExpr::Vec(Box::new(self.resolve_refinement_base(
+                    &params[0], namespace, aliases, namespaces, seen,
+                )))
+            }
+            AstType::Generic(name, params) if name == "Map" && params.len() == 2 => TypeExpr::Map(
+                Box::new(
+                    self.resolve_refinement_base(&params[0], namespace, aliases, namespaces, seen),
+                ),
+                Box::new(
+                    self.resolve_refinement_base(&params[1], namespace, aliases, namespaces, seen),
+                ),
+            ),
+            _ => Self::ast_type_to_type_expr(base),
         }
     }
 

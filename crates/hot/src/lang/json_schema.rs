@@ -316,11 +316,19 @@ impl SchemaContext {
     }
 }
 
-/// Sanitize a type name for use as a JSON Pointer fragment in `$defs`.
+/// Encode a full type name as a JSON Pointer and URI-fragment-safe key.
+/// Escape the escape character too, so distinct names cannot share a key.
 fn sanitize_def_name(name: &str) -> String {
-    name.trim_start_matches("::")
-        .replace('/', "_")
-        .replace("::", "_")
+    use std::fmt::Write;
+    let mut key = String::new();
+    for byte in name.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.') {
+            key.push(char::from(byte));
+        } else {
+            write!(key, "_{byte:02X}").expect("writing to a String");
+        }
+    }
+    key
 }
 
 /// Convert a Hot type annotation string to JSON Schema with type registry
@@ -1910,13 +1918,58 @@ Tree type { left: Tree?, label: Str }
         assert_eq!(a["properties"]["value"]["type"], "integer");
         assert_eq!(b["properties"]["label"]["type"], "string");
         assert_eq!(
-            a["$defs"]["a_Tree"]["properties"]["value"]["type"],
+            a["$defs"][sanitize_def_name("::a/Tree")]["properties"]["value"]["type"],
             "integer"
         );
         assert_eq!(
-            b["$defs"]["b_Tree"]["properties"]["label"]["type"],
+            b["$defs"][sanitize_def_name("::b/Tree")]["properties"]["label"]["type"],
             "string"
         );
+    }
+
+    #[test]
+    fn recursive_schema_keys_cannot_alias_namespace_separators() {
+        let registry = registry_from_source(
+            r#"::a_b ns
+Tree type { next: Tree?, amount: Int }
+::a::b ns
+Tree type { next: Tree?, label: Str }
+::t ns
+Input type { first: ::a_b/Tree, second: ::a::b/Tree }
+"#,
+        );
+        let schema = schema_json("::t/Input", &registry);
+        let first = &schema["properties"]["first"]["$ref"];
+        let second = &schema["properties"]["second"]["$ref"];
+        assert_ne!(first, second);
+        let resolve = |reference: &serde_json::Value| {
+            schema
+                .pointer(reference.as_str().unwrap().strip_prefix('#').unwrap())
+                .unwrap()
+        };
+        assert_eq!(schema["$defs"].as_object().unwrap().len(), 2);
+        assert_eq!(resolve(first)["properties"]["amount"]["type"], "integer");
+        assert_eq!(resolve(second)["properties"]["label"]["type"], "string");
+        assert_eq!(
+            resolve(first)["properties"]["next"]["anyOf"][0]["$ref"],
+            *first
+        );
+        assert_eq!(
+            resolve(second)["properties"]["next"]["anyOf"][0]["$ref"],
+            *second
+        );
+        let names = [
+            "::a_b/Tree",
+            "::a::b/Tree",
+            "::a/b_Tree",
+            "::a_3A/Tree",
+            "::a~b/Tree",
+            "a/b",
+            "a_2Fb",
+            "::a/b",
+        ];
+        let keys: AHashSet<_> = names.into_iter().map(sanitize_def_name).collect();
+        assert_eq!(keys.len(), names.len());
     }
 
     #[test]

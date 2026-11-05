@@ -11,6 +11,175 @@ mod run_tests {
     use crate::val::Val;
     use std::sync::Arc;
 
+    #[test]
+    fn collection_members_of_mixed_unions_are_checked_and_kept() {
+        let source = r#"::t ns
+Other type { name: Str }
+Numbers type { values: Vec<Int> | Other }
+Lookup type { values: Map<Str, Int> | Other }
+EitherList type { values: Vec<Int> | Vec<Str> | Other }
+probe fn (data: Any): Vec {
+    [is-err(Numbers({values: data})), is-err(Lookup({values: data})),
+     is-err(EitherList({values: data}))]
+}
+all fn (): Vec {
+    [probe([1, "bad"]), probe([1, 2]), probe(["a", "b"]),
+     probe({a: 1}), probe({name: "valid record"}),
+     probe({a: "bad"}), probe(null),
+     Numbers({values: [1.0, 2]}).values]
+}
+all()
+all()"#;
+        assert_same_with_and_without_jit(source, &val!([
+            [true, true, true], [false, true, false], [true, true, false],
+            [true, false, true], [false, false, false],
+            [true, true, true], [true, true, true], [1, 2]
+        ]));
+    }
+
+    #[test]
+    fn generic_map_members_wait_for_record_members() {
+        let source = r#"::t ns
+Other type { name: Str }
+Pet type { name: Str }
+Strict type { values: Map<Str, Str> | Other }
+Reversed type { values: Other | Map<Str, Str> }
+Loose type { values: Map<Str, Any> | Other }
+Nullable type { values: Map<Str, Str>? | Other }
+Plain type { values: Map | Other }
+Both type { values: Map<Str, Str> | Other | Pet }
+all fn (): Vec {
+    record {name: "x"}
+    colors {color: "red"}
+    [is-type(Strict({values: record}).values, Other),
+     is-type(Reversed({values: record}).values, Other),
+     is-type(Loose({values: record}).values, Other),
+     is-type(Nullable({values: record}).values, Other),
+     eq(Strict({values: colors}).values, colors),
+     eq(Reversed({values: colors}).values, colors),
+     eq(Loose({values: {a: 1}}).values, {a: 1}),
+     is-err(Strict({values: {a: 1}})),
+     is-err(Both({values: record})),
+     eq(Plain({values: record}).values, record)]
+}
+all()
+all()"#;
+        assert_same_with_and_without_jit(
+            source,
+            &val!([true, true, true, true, true, true, true, true, true, true]),
+        );
+    }
+
+    #[test]
+    fn failed_map_keys_leave_the_check_path_as_they_found_it() {
+        let cases = [
+            // The first entry passes its second member after the first
+            // member refused its key.
+            (
+                r#"::t ns
+K type { m: Vec<Map<Str, Int> | Map<Int, Str>> }
+K({m: [assoc({}, 7, "ok"), {a: "bad"}]})"#,
+                val!(["m", 1, "a"]),
+                "at `m[1].a` expected Int, got Str",
+            ),
+            (
+                r#"::t ns
+K type { m: Map<Str, Int> | Map<Int, Str> }
+K({m: assoc({}, 7, 8)})"#,
+                val!(["m", 7]),
+                "at `m[7]` expected Str, got Int",
+            ),
+        ];
+        for (source, path, message) in cases {
+            for conf in [None, Some(crate::val!({"jit": {"threshold": 1}}))] {
+                let out = compile_and_run_with_std_conf(source, conf).unwrap();
+                assert!(out.is_err(), "{out:?}");
+                let violation = out.get("$val").unwrap().get("$val").unwrap();
+                assert_eq!(violation.get("path").unwrap(), path);
+                let text = violation.get("message").unwrap().to_string();
+                assert!(text.contains(message), "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn number_keyed_maps_take_the_keys_json_gives_them() {
+        let source = r#"::t ns
+Counts type { counts: Map<Int, Int> }
+Prices type { prices: Map<Dec, Str> }
+Named type { counts: Map<Str, Int> }
+Positive type Int where gt(%, 0)
+PositiveKeys type { counts: Map<Positive, Int> }
+all fn (): Vec {
+    [keys(Counts({counts: from-json("{\"1\": 2}")}).counts),
+     eq(keys(Prices({prices: {"1.5": "a"}}).prices), [1.5]),
+     keys(Named({counts: {"1": 2}}).counts),
+     keys(PositiveKeys({counts: {"1": 2}}).counts),
+     is-err(PositiveKeys({counts: {"0": 2}})),
+     is-err(Counts({counts: {"1.5": 2}})),
+     is-err(Counts({counts: {"01": 2}})),
+     is-err(Counts({counts: {"+1": 2}})),
+     is-err(Counts({counts: {one: 2}})),
+     is-err(Counts({counts: {"1": 2, "1.0": 3}}))]
+}
+all()
+all()"#;
+        assert_same_with_and_without_jit(
+            source,
+            &val!([[1], true, ["1"], [1], true, true, true, true, true, true]),
+        );
+    }
+
+    #[test]
+    fn map_fields_validate_keys_without_losing_converted_entries() {
+        let source = r#"::t ns
+Counts type { counts: Map<Str, Int> }
+Numeric type { counts: Map<Int, Int> }
+Loose type { counts: Map<Any, Int> }
+Optional type { counts: Map<Str, Int>? }
+Positive type Int where gt(%, 0)
+PositiveKeys type { counts: Map<Positive, Int> }
+probe fn (data: Any): Vec {
+    [is-err(Counts({counts: data})), is-err(Numeric({counts: data})),
+     is-err(Loose({counts: data})), is-err(Optional({counts: data}))]
+}
+all fn (): Vec {
+    [probe({a: 2}), probe(assoc({}, 1, 2)), probe(assoc({}, 1.0, 2)),
+     probe(assoc(assoc({}, 1, 2), 1.0, 3)), probe(null),
+     keys(Numeric({counts: assoc({}, 1.0, 2)}).counts),
+     is-err(PositiveKeys({counts: assoc({}, 0, 2)})),
+     is-ok(PositiveKeys({counts: assoc({}, 1, 2)}))]
+}
+all()
+all()"#;
+        assert_same_with_and_without_jit(source, &val!([
+            [false, true, false, false], [true, false, false, true],
+            [true, false, false, true], [true, true, false, true],
+                [true, true, true, false], [1], true, true
+        ]));
+    }
+
+    #[test]
+    fn inline_refinements_resolve_named_numeric_bases() {
+        let source = r#"::numbers ns
+Money type Dec
+::t ns
+::n ::numbers
+Amount ::numbers/Money
+positive fn (x: Amount where gt(%, 0)): Bool { true }
+qualified fn (x: ::n/Money where gt(%, 0)): Bool { true }
+probe fn (): Vec {
+    [positive(::n/Money(5.0)), qualified(::n/Money(5.0)),
+     is-err(positive(::n/Money(-5.0))), is-err(qualified(::n/Money(-5.0)))]
+}
+// Top-level calls must check too: body inference alone suppresses some errors.
+positive(::n/Money(5.0))
+qualified(::n/Money(5.0))
+probe()
+probe()"#;
+        assert_same_with_and_without_jit(source, &val!([true, true, true, true]));
+    }
+
     /// Helper to compile and execute Hot code without `hot-std`. Uses
     /// `compile_program_unchecked` because the synthetic source has no
     /// stdlib loaded and would not survive name resolution.
