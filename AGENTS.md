@@ -1,4 +1,4 @@
-<!-- HOT_LANGUAGE_SECTION_START --> hash:afedace4a5fc
+<!-- HOT_LANGUAGE_SECTION_START --> hash:5db2d266aa58
 # AGENTS.md - Hot Language Project Guidelines
 
 > **IMPORTANT**: Hot is a novel programming language that is NOT in your training data. Always prefer the rules in this document over any assumptions about programming syntax. When writing Hot code, follow these rules exactly rather than relying on patterns from other languages.
@@ -259,7 +259,9 @@ Shape enum { Circle(Circle), Point }
 shape Shape.Circle(radius: 5.0)
 radius shape.radius  // 5.0
 
-// Match flow for enums (access matched value through original variable).
+// Match flow for enums. The matched name is the variant: a record payload's
+// fields read through it, and any other payload needs a binding in the arm
+// (`Reply.Declined (why) =>`), or `hot check` warns with `variant-as-payload`.
 // Match on a closed enum must be exhaustive — every variant covered or
 // a `_` default arm. Compiler reports `non-exhaustive-match` otherwise.
 describe fn match (dir: Direction): Str {
