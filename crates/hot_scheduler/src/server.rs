@@ -2814,6 +2814,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn both_schedules_of_one_function_at_one_time_fire_with_their_args() {
+        let db = Arc::new(hot::db::test_db().await);
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        hot::db::Build::activate_build_directly(&db, &data.build_id, &data.user_id)
+            .await
+            .unwrap();
+        let due = Utc::now() - chrono::Duration::seconds(1);
+        for step in ["step-1", "step-2"] {
+            Schedule::insert_dynamic_schedule(
+                &db,
+                &Uuid::now_v7(),
+                &data.build_id,
+                &hot::db::ScheduleType::At(due),
+                Some(&data.org_id),
+                SchedulePolicy::self_hosted_default(),
+                "::app::steps",
+                "check-due",
+                None,
+                Some(&serde_json::to_value(val!([step]).to_hot_data_repr()).unwrap()),
+            )
+            .await
+            .unwrap();
+        }
+
+        let queue: Arc<dyn Queue<Message>> = Arc::new(
+            MemQueue::new(format!("test:schedule-same-time:{}", Uuid::now_v7()))
+                .expect("memory queue"),
+        );
+        process_due_at_schedules(&db, &queue, None).await.unwrap();
+
+        let mut fired = Vec::new();
+        while let Some(message) = queue.dequeue().await.unwrap() {
+            let event = EventMessage::try_from(message).unwrap().body.event;
+            let stored = hot::db::Event::get_event(&db, &event.event_id)
+                .await
+                .unwrap();
+            let data: Val = serde_json::from_value(stored.event_data).unwrap();
+            fired.push(data.get("args").unwrap());
+        }
+        fired.sort_by_key(|args| args.to_string());
+        assert_eq!(fired, [val!(["step-1"]), val!(["step-2"])]);
+    }
+
+    #[tokio::test]
     async fn metadata_schedules_pass_the_schedule_that_fired() {
         let db = Arc::new(hot::db::test_db().await);
         let data = hot::db::insert_test_data(&db).await.unwrap();

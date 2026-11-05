@@ -41,8 +41,13 @@ const POSTGRES_ONLY_COLUMNS: &[&str] = &[
 ];
 
 /// Indexes both have whose definitions only differ in engine syntax:
-/// PostgreSQL's UNIQUE NULLS NOT DISTINCT is SQLite's zero-sentinel COALESCE.
-const DIALECT_INDEXES: &[&str] = &["usage_file_org_id_env_id_slot_key"];
+/// PostgreSQL's UNIQUE NULLS NOT DISTINCT is SQLite's zero-sentinel COALESCE,
+/// and PostgreSQL hashes schedule arguments a btree entry can't hold, where
+/// SQLite indexes their text.
+const DIALECT_INDEXES: &[&str] = &[
+    "usage_file_org_id_env_id_slot_key",
+    "idx_schedule_unique_call",
+];
 
 /// Tables whose PostgreSQL primary key is a SQLite UNIQUE constraint: SQLite
 /// only autoincrements an INTEGER PRIMARY KEY, so `seq` takes that role there.

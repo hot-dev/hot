@@ -187,6 +187,24 @@ fn () {
     assert-eq(["check early", "pong early", "check late", "pong late"], map(::hot::ctx/get("test-notes"), %.what), "a due time equal to now is due")
 }
 
+test-a-schedule-is-one-call
+meta ["test"]
+fn () {
+    ::hot::ctx/set("test-notes", [])
+    ::test/set-now("2026-10-14T09:00:00Z")
+    send("hot:schedule:new", {fn: ::hot::test::test/check, args: ["step-1"], schedule: "2026-10-14T10:00:00Z"})
+    send("hot:schedule:new", {fn: ::hot::test::test/check, args: ["step-2"], schedule: "2026-10-14T10:00:00Z"})
+    send("hot:schedule:new", {fn: ::hot::test::test/check, args: ["step-1"], schedule: "2026-10-14T10:00:00Z"})
+    ::test/deliver()
+    assert-eq([["step-1"], ["step-2"]], map(::test/schedules(), %.args), "other args at one moment are another schedule, the same args are not")
+    ::test/advance(::time/hours(1))
+    ::test/run-due()
+    assert-eq(
+        ["check step-1", "check step-2"],
+        ::hot::ctx/get("test-notes") |> filter(starts-with(%.what, "check")) |> map(%.what),
+        "both fire")
+}
+
 test-recurring-schedule-fires-each-occurrence
 meta ["test"]
 fn () {
