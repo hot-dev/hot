@@ -36,6 +36,14 @@ fn collect_fn_defs<'a>(value: &'a Value, out: &mut Vec<&'a FnDef>) {
     }
 }
 
+/// A type alias as declared, until every name it could mention is known.
+struct AliasBase {
+    namespace: String,
+    base: crate::lang::ast::TypeExpr,
+    /// Declared inside a function body.
+    nested: bool,
+}
+
 /// Recursively traverse a `Value`, invoking `visit` on every nested `Value`
 /// (including the value itself). Used by `collect_known_types` to find
 /// `TypeDef`s declared inside function bodies, lambda bodies, flow arms, etc.
@@ -656,6 +664,10 @@ pub struct TypeChecker {
     /// `qualified_types`, which holds only the types declared in each
     /// namespace.
     type_imports: AHashMap<String, TypeExpr>,
+    /// Var imports by name (`::c/Port` → `::a/Port`), of types or anything else.
+    import_targets: AHashMap<String, String>,
+    /// Aliases waiting for `resolve_alias_bases`, by qualified name.
+    alias_bases: AHashMap<String, AliasBase>,
     /// Short name → fully-qualified name for any type declared with `core: true`
     /// metadata. Lets unqualified references like `Account` resolve when the
     /// declaration lives in another namespace, the same way the compiler
@@ -781,6 +793,8 @@ impl TypeChecker {
             qualified_types: AHashMap::new(),
             custom_constructors: AHashSet::new(),
             type_imports: AHashMap::new(),
+            import_targets: AHashMap::new(),
+            alias_bases: AHashMap::new(),
             core_types: AHashMap::new(),
             impl_registry: AHashSet::new(),
             impl_locations: AHashMap::new(),
@@ -1016,18 +1030,7 @@ impl TypeChecker {
         // Alias maps are per-namespace and constant across rounds; building
         // them once keeps re-inference linear in the number of deferred
         // entries rather than rescanning every namespace for each one.
-        let alias_maps: AHashMap<String, AHashMap<String, String>> = program
-            .namespaces
-            .iter()
-            .map(|(ns_path, namespace)| {
-                let aliases = namespace
-                    .aliases
-                    .iter()
-                    .map(|(alias, target)| (alias.to_string(), target.to_string()))
-                    .collect();
-                (ns_path.to_string(), aliases)
-            })
-            .collect();
+        let alias_maps = std::mem::take(&mut self.namespace_aliases);
 
         // Bound the rounds by the number of variables that were deferred.
         //
@@ -1164,6 +1167,14 @@ impl TypeChecker {
             crate::lang::ast::inline_refinement_displays(program.namespaces.values());
         for (ns_path, namespace) in &program.namespaces {
             let ns_str = ns_path.to_string();
+            self.namespace_aliases.insert(
+                ns_str.clone(),
+                namespace
+                    .aliases
+                    .iter()
+                    .map(|(alias, target)| (alias.to_string(), target.to_string()))
+                    .collect(),
+            );
             for (var, value) in &namespace.scope.vars {
                 // Top-level vars: keep the original (var, value) so we can read
                 // `core: true` metadata off the var. Locally-declared types
@@ -1191,8 +1202,10 @@ impl TypeChecker {
                 });
             }
         }
-        self.register_type_imports(program);
-        self.resolve_inline_refinement_bases(program);
+        let imports = self.collect_var_imports(program);
+        self.import_targets = imports.iter().cloned().collect();
+        self.resolve_alias_bases();
+        self.register_type_imports(imports);
         tracing::debug!(
             "TypeChecker: Discovered {} type definitions ({} core), {} implementations",
             self.qualified_types.len(),
@@ -1201,27 +1214,31 @@ impl TypeChecker {
         );
     }
 
-    /// Record each var import of a type (`Port ::a/Port`) in `type_imports`,
-    /// so an annotation naming the import resolves as the full path does.
-    /// An import of an import resolves on a later round.
-    fn register_type_imports(&mut self, program: &Program) {
+    /// Every var import (`Port ::a/Port`), as its qualified name and target.
+    /// A deep assignment (`cfg.port ::a/Port`) imports nothing.
+    fn collect_var_imports(&self, program: &Program) -> Vec<(String, String)> {
         let mut imports = Vec::new();
         for (ns_path, namespace) in &program.namespaces {
             let ns_str = ns_path.to_string();
-            let alias_map: AHashMap<String, String> = namespace
-                .aliases
-                .iter()
-                .map(|(alias, target)| (alias.to_string(), target.to_string()))
-                .collect();
+            let Some(alias_map) = self.namespace_aliases.get(&ns_str) else {
+                continue;
+            };
             for (var, value) in &namespace.scope.vars {
                 if var.deep_set.is_some() || var.deep_path.is_some() {
                     continue;
                 }
-                if let Some(target) = Self::imported_function(value, &alias_map) {
+                if let Some(target) = Self::imported_function(value, alias_map) {
                     imports.push((format!("{}/{}", ns_str, var.sym.name()), target));
                 }
             }
         }
+        imports
+    }
+
+    /// Record each var import of a type in `type_imports`, so an annotation
+    /// naming the import resolves as the full path does. An import of an
+    /// import resolves on a later round.
+    fn register_type_imports(&mut self, mut imports: Vec<(String, String)>) {
         loop {
             let before = imports.len();
             imports.retain(|(name, target)| {
@@ -1244,144 +1261,90 @@ impl TypeChecker {
         }
     }
 
-    /// An inline refinement is a synthesized alias. Resolve its base in the
-    /// declaration's namespace, just as the annotation without `where` does.
-    /// Reading only the alias's immediate AST leaves `Money` as a nominal
-    /// name while `Money(5.0)` is inferred as its base `Dec`.
-    fn resolve_inline_refinement_bases(&mut self, program: &Program) {
-        use crate::lang::ast::{TypeExpr as AstType, is_inline_refinement_type};
-        let mut aliases = AHashMap::new();
-        let mut namespaces = AHashMap::new();
-        for (path, namespace) in &program.namespaces {
-            let ns = path.to_string();
-            let ns_aliases: AHashMap<_, _> = namespace
-                .aliases
-                .iter()
-                .map(|(alias, target)| (alias.to_string(), target.to_string()))
-                .collect();
-            for (var, value) in &namespace.scope.vars {
-                let mut is_root = true;
-                walk_values(value, &mut |value| {
-                    let top_level = std::mem::replace(&mut is_root, false);
-                    if let Value::TypeDef(def) = value
-                        && let Some(base) = &def.type_alias
-                    {
-                        let key = format!("{ns}/{}", def.name.name());
-                        let entry = (ns.clone(), base.clone());
-                        if top_level {
-                            aliases.insert(key, entry);
-                        } else {
-                            aliases.entry(key).or_insert(entry);
-                        }
-                    }
-                });
-                if let Some(target) = Self::imported_function(value, &ns_aliases) {
-                    aliases.insert(
-                        format!("{ns}/{}", var.sym.name()),
-                        (ns.clone(), AstType::Named(target)),
-                    );
-                }
-            }
-            namespaces.insert(ns, ns_aliases);
-        }
-        let refinements: Vec<_> = aliases
+    /// Resolve each alias's base in the namespace that declares it, now that
+    /// every name it could mention is registered. Reading `Money` as a bare
+    /// name would leave it nominal while `Money(5.0)` is inferred as its base
+    /// `Dec`, and would look it up wherever the alias happens to be used.
+    fn resolve_alias_bases(&mut self) {
+        use crate::lang::ast::is_inline_refinement_type;
+        // Function bodies may each declare their own type of one name, so
+        // such a type stays by name once the aliases over it have read it. An
+        // inline refinement's name is unique to its base.
+        let local: Vec<String> = self
+            .alias_bases
             .iter()
-            .filter(|(name, _)| is_inline_refinement_type(name))
-            .map(|(name, (ns, base))| (name.clone(), ns.clone(), base.clone()))
+            .filter(|(name, alias)| alias.nested && !is_inline_refinement_type(name))
+            .map(|(name, _)| name.clone())
             .collect();
-        for (name, ns, base) in refinements {
-            let resolved = self.resolve_refinement_base(
-                &base,
-                &ns,
-                &aliases,
-                &namespaces,
-                &mut AHashSet::new(),
-            );
-            self.qualified_types.insert(name, resolved);
+        let names: Vec<String> = self.alias_bases.keys().cloned().collect();
+        for name in names {
+            self.resolve_alias_base(&name);
+        }
+        for name in local {
+            let short = Self::short_type_name(&name);
+            self.qualified_types.insert(name, TypeExpr::Named(short));
         }
     }
 
-    fn resolve_refinement_base(
-        &self,
-        base: &crate::lang::ast::TypeExpr,
-        namespace: &str,
-        aliases: &AHashMap<String, (String, crate::lang::ast::TypeExpr)>,
-        namespaces: &AHashMap<String, AHashMap<String, String>>,
-        seen: &mut AHashSet<String>,
-    ) -> TypeExpr {
-        use crate::lang::ast::TypeExpr as AstType;
-        match base {
-            AstType::Simple(name) | AstType::Named(name) => {
-                if let Some(builtin) = self.try_resolve_builtin_type(name) {
-                    return builtin;
-                }
-                let qualified = if let Some((ns, short)) = name.rsplit_once('/') {
-                    let ns = namespaces
-                        .get(namespace)
-                        .and_then(|a| a.get(ns))
-                        .map_or(ns, String::as_str);
-                    format!("{ns}/{short}")
-                } else {
-                    let local = format!("{namespace}/{name}");
-                    if aliases.contains_key(&local) || self.qualified_types.contains_key(&local) {
-                        local
-                    } else {
-                        self.core_types.get(name).cloned().unwrap_or(local)
-                    }
-                };
-                // Open literal unions accumulate across declarations; their
-                // registry entry holds all members, not just the last alias.
-                if self
-                    .context
-                    .types
-                    .get(&qualified)
-                    .is_some_and(|def| def.is_literal_union)
-                    && let Some(resolved) = self.qualified_types.get(&qualified)
-                {
-                    return resolved.clone();
-                }
-                if !seen.insert(qualified.clone()) {
-                    return TypeExpr::Named(qualified);
-                }
-                let resolved = match aliases.get(&qualified) {
-                    Some((ns, target)) => {
-                        self.resolve_refinement_base(target, ns, aliases, namespaces, seen)
-                    }
-                    None => self
-                        .qualified_types
-                        .get(&qualified)
-                        .cloned()
-                        .unwrap_or_else(|| TypeExpr::Named(qualified.clone())),
-                };
-                seen.remove(&qualified);
-                resolved
-            }
-            AstType::Optional(inner) => TypeExpr::Optional(Box::new(
-                self.resolve_refinement_base(inner, namespace, aliases, namespaces, seen),
-            )),
-            AstType::Union(members) => TypeExpr::Union(
-                members
-                    .iter()
-                    .map(|member| {
-                        self.resolve_refinement_base(member, namespace, aliases, namespaces, seen)
-                    })
-                    .collect(),
-            ),
-            AstType::Generic(name, params) if name == "Vec" && params.len() == 1 => {
-                TypeExpr::Vec(Box::new(self.resolve_refinement_base(
-                    &params[0], namespace, aliases, namespaces, seen,
-                )))
-            }
-            AstType::Generic(name, params) if name == "Map" && params.len() == 2 => TypeExpr::Map(
-                Box::new(
-                    self.resolve_refinement_base(&params[0], namespace, aliases, namespaces, seen),
-                ),
-                Box::new(
-                    self.resolve_refinement_base(&params[1], namespace, aliases, namespaces, seen),
-                ),
-            ),
-            _ => Self::ast_type_to_type_expr(base),
+    fn resolve_alias_base(&mut self, name: &str) {
+        let Some(alias) = self.alias_bases.remove(name) else {
+            return;
+        };
+        // A reference back to this alias, as in a recursive type, stays by
+        // its full name.
+        self.qualified_types
+            .insert(name.to_string(), TypeExpr::Named(name.to_string()));
+        let mut mentioned = Vec::new();
+        Self::mentioned_types(&alias.base, &mut mentioned);
+        for type_name in mentioned {
+            let qualified = self.qualified_type_name(type_name, &alias.namespace);
+            self.resolve_alias_base(&qualified);
         }
+        let resolved = self.ast_type_to_type_expr_in_namespace(&alias.base, &alias.namespace);
+        self.qualified_types.insert(name.to_string(), resolved);
+    }
+
+    fn mentioned_types<'a>(expr: &'a crate::lang::ast::TypeExpr, names: &mut Vec<&'a str>) {
+        use crate::lang::ast::TypeExpr as AstType;
+        match expr {
+            AstType::Simple(name) | AstType::Named(name) => names.push(name),
+            AstType::Generic(_, parts) | AstType::Union(parts) => {
+                for part in parts {
+                    Self::mentioned_types(part, names);
+                }
+            }
+            AstType::Optional(inner) => Self::mentioned_types(inner, names),
+            AstType::Builtin(_) | AstType::Literal(_) | AstType::Any => {}
+        }
+    }
+
+    /// The `qualified_types` key of `name` as written in `namespace`: through
+    /// the namespace's aliases and var imports, then the core types.
+    fn qualified_type_name(&self, name: &str, namespace: &str) -> String {
+        let mut qualified = if let Some((prefix, short)) = name.rsplit_once('/') {
+            let prefix = self
+                .namespace_aliases
+                .get(namespace)
+                .and_then(|aliases| aliases.get(prefix))
+                .map_or(prefix, String::as_str);
+            format!("{prefix}/{short}")
+        } else {
+            let local = format!("{namespace}/{name}");
+            if self.qualified_types.contains_key(&local) || self.import_targets.contains_key(&local)
+            {
+                local
+            } else {
+                self.core_types.get(name).cloned().unwrap_or(local)
+            }
+        };
+        // Bounded, as imports can name each other.
+        for _ in 0..self.import_targets.len() {
+            match self.import_targets.get(&qualified) {
+                Some(target) => qualified.clone_from(target),
+                None => break,
+            }
+        }
+        qualified
     }
 
     /// Walk every namespace and register the inferred type of each top-level
@@ -1716,6 +1679,7 @@ impl TypeChecker {
                 // resolved expression to reflect the union).
                 self.register_enum_metadata(&short, ns_str, type_def, var.src.as_ref());
 
+                self.alias_bases.remove(&qualified);
                 let resolved = if ns_str == "::hot::type"
                     && let Some(primitive) = self.try_resolve_builtin_type(&short)
                 {
@@ -1734,6 +1698,14 @@ impl TypeChecker {
                 } else if let Some(alias) = &type_def.type_alias {
                     // Mixed/non-literal aliases (e.g. `Foo type Int | Str`)
                     // fall through here.
+                    self.alias_bases.insert(
+                        qualified.clone(),
+                        AliasBase {
+                            namespace: ns_str.to_string(),
+                            base: alias.clone(),
+                            nested: false,
+                        },
+                    );
                     Self::ast_type_to_type_expr(alias)
                 } else {
                     TypeExpr::Named(qualified.clone())
@@ -2776,6 +2748,16 @@ impl TypeChecker {
                 self.known_types.insert(short.clone());
 
                 if !self.qualified_types.contains_key(&qualified) {
+                    if let Some(base) = &type_def.type_alias {
+                        self.alias_bases.insert(
+                            qualified.clone(),
+                            AliasBase {
+                                namespace: ns_str.to_string(),
+                                base: base.clone(),
+                                nested: true,
+                            },
+                        );
+                    }
                     self.qualified_types
                         .insert(qualified, TypeExpr::Named(short.clone()));
                 }
@@ -2931,10 +2913,11 @@ impl TypeChecker {
                     return builtin;
                 }
 
-                if name.starts_with("::") {
-                    return self
-                        .try_resolve_namespaced_type(name)
-                        .unwrap_or_else(|| TypeExpr::Named(name.clone()));
+                if let Some(declared) = self
+                    .qualified_types
+                    .get(&self.qualified_type_name(name, ns_str))
+                {
+                    return declared.clone();
                 }
 
                 let local_qualified = format!("{}/{}", ns_str, name);
@@ -2942,17 +2925,8 @@ impl TypeChecker {
                     return alias_target.clone();
                 }
 
-                if let Some(local_type) = self.qualified_types.get(&local_qualified) {
-                    return local_type.clone();
-                }
-
-                if let Some(core_qualified) = self.core_types.get(name)
-                    && let Some(core_type) = self.qualified_types.get(core_qualified)
-                {
-                    return core_type.clone();
-                }
-
-                TypeExpr::Named(name.clone())
+                self.try_resolve_namespaced_type(name)
+                    .unwrap_or_else(|| TypeExpr::Named(name.clone()))
             }
             a::TypeExpr::Generic(name, params) => match (name.as_str(), params.as_slice()) {
                 ("Vec", [inner]) => TypeExpr::Vec(Box::new(

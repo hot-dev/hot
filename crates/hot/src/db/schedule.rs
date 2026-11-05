@@ -379,6 +379,13 @@ pub fn validate_recurring_schedule_interval(
     }
 }
 
+/// SQL for whether the `schedule` row is a one-time call that already fired.
+macro_rules! spent_call {
+    () => {
+        "schedule.cron LIKE '@at:%' AND EXISTS (SELECT 1 FROM schedule_log l WHERE l.schedule_id = schedule.schedule_id)"
+    };
+}
+
 pub fn validate_one_time_schedule_delay(
     run_at: DateTime<Utc>,
     min_delay_secs: i64,
@@ -1875,30 +1882,6 @@ impl Schedule {
         Ok(())
     }
 
-    pub async fn enforce_active_count_for_org(
-        db: &crate::db::DatabasePool,
-        org_id: &Uuid,
-        additional_schedules: i64,
-        policy: SchedulePolicy,
-    ) -> Result<(), ScheduleError> {
-        if policy.max_active_per_org < 0 {
-            return Ok(());
-        }
-
-        let current = Self::get_active_count_by_account(db, org_id).await?;
-        let projected = current + additional_schedules.max(0);
-        if projected > policy.max_active_per_org.max(current) {
-            return Err(ScheduleError::PolicyError(format!(
-                "Active schedule limit exceeded: {} active schedule(s) plus {} new schedule(s) would exceed the org limit of {}",
-                current,
-                additional_schedules.max(0),
-                policy.max_active_per_org
-            )));
-        }
-
-        Ok(())
-    }
-
     /// Get all schedules for deployed builds (only for active projects)
     pub async fn get_schedules_for_deployed_builds(
         db: &crate::db::DatabasePool,
@@ -2223,22 +2206,15 @@ impl Schedule {
         schedule_id: &Uuid,
         build_id: &Uuid,
         schedule_type: &ScheduleType,
-        org_id: Option<&Uuid>,
         policy: SchedulePolicy,
         ns: &str,
         var: &str,
         meta: Option<&JsonValue>,
         args: Option<&JsonValue>,
     ) -> Result<Uuid, ScheduleError> {
-        match schedule_type {
-            ScheduleType::Cron(cron) => {
-                validate_recurring_schedule_interval(cron, policy.min_interval_secs)
-                    .map_err(|e| ScheduleError::PolicyError(e.message()))?
-            }
-            ScheduleType::At(run_at) => {
-                validate_one_time_schedule_delay(*run_at, policy.min_delay_secs)
-                    .map_err(ScheduleError::PolicyError)?
-            }
+        if let ScheduleType::Cron(cron) = schedule_type {
+            validate_recurring_schedule_interval(cron, policy.min_interval_secs)
+                .map_err(|e| ScheduleError::PolicyError(e.message()))?;
         }
 
         let cron_field = schedule_type.to_cron_field();
@@ -2252,25 +2228,14 @@ impl Schedule {
         // SQLite compares the text it's given.
         args.sort_all_objects();
 
-        if let Some(org_id) = org_id
-            && policy.max_active_per_org >= 0
+        // A repeat of a call that's armed or spent changes nothing, however
+        // near or past its time is by now. Only the rare call that's too soon
+        // pays for the lookup.
+        if let ScheduleType::At(run_at) = schedule_type
+            && let Err(too_soon) = validate_one_time_schedule_delay(*run_at, policy.min_delay_secs)
+            && !Self::repeats_call(db, build_id, ns, var, &cron_field, &args).await?
         {
-            // A repeat of an active or spent call reserves no new capacity.
-            // Admission below locks the account and validates the actual
-            // count too, including a cancellation racing this read.
-            let repeats: bool = match db {
-                crate::db::DatabasePool::Postgres(pool) => sqlx::query_scalar(
-                    "SELECT EXISTS(SELECT 1 FROM schedule s WHERE build_id=$1 AND ns=$2 AND var=$3 AND cron=$4 AND md5(COALESCE(value::text, ''))=md5($5::jsonb::text) AND (s.active OR (s.cron LIKE '@at:%' AND EXISTS(SELECT 1 FROM schedule_log l WHERE l.schedule_id=s.schedule_id))))"
-                ).bind(build_id).bind(ns).bind(var).bind(&cron_field).bind(&args)
-                    .fetch_one(pool).await?,
-                crate::db::DatabasePool::Sqlite(pool) => sqlx::query_scalar(
-                    "SELECT EXISTS(SELECT 1 FROM schedule s WHERE build_id=? AND ns=? AND var=? AND cron=? AND COALESCE(value, '')=? AND (s.active OR (s.cron LIKE '@at:%' AND EXISTS(SELECT 1 FROM schedule_log l WHERE l.schedule_id=s.schedule_id))))"
-                ).bind(build_id).bind(ns).bind(var).bind(&cron_field).bind(args.to_string())
-                    .fetch_one(pool).await?,
-            };
-            if !repeats {
-                Self::enforce_active_count_for_org(db, org_id, 1, policy).await?;
-            }
+            return Err(ScheduleError::PolicyError(too_soon));
         }
 
         let admission = quota::Admission::begin(db, build_id, policy.max_active_per_org).await?;
@@ -2281,13 +2246,19 @@ impl Schedule {
                 limit,
             } => {
                 let stored_id: Uuid = sqlx::query_scalar(
-                    "INSERT INTO schedule (schedule_id, build_id, cron, ns, var, meta, value, active)
+                    concat!(
+                        "INSERT INTO schedule (schedule_id, build_id, cron, ns, var, meta, value, active)
                      VALUES ($1, $2, $3, $4, $5, $6, $7, true)
                      ON CONFLICT (build_id, ns, var, cron, md5(COALESCE(value::text, '')))
                      DO UPDATE SET
-                         active = schedule.active OR NOT (schedule.cron LIKE '@at:%' AND EXISTS (SELECT 1 FROM schedule_log l WHERE l.schedule_id = schedule.schedule_id)),
-                         deactivated_at = CASE WHEN schedule.cron LIKE '@at:%' AND EXISTS (SELECT 1 FROM schedule_log l WHERE l.schedule_id = schedule.schedule_id) THEN schedule.deactivated_at END
+                         active = schedule.active OR NOT (",
+                        spent_call!(),
+                        "),
+                         deactivated_at = CASE WHEN ",
+                        spent_call!(),
+                        " THEN schedule.deactivated_at END
                      RETURNING schedule_id"
+                    )
                 )
                 .bind(schedule_id)
                 .bind(build_id)
@@ -2315,13 +2286,19 @@ impl Schedule {
                     .map_err(|e| ScheduleError::SerializationError(e.to_string()))?;
 
                 let stored_id: Uuid = sqlx::query_scalar(
-                    "INSERT INTO schedule (schedule_id, build_id, cron, ns, var, meta, value, active)
+                    concat!(
+                        "INSERT INTO schedule (schedule_id, build_id, cron, ns, var, meta, value, active)
                      VALUES (?, ?, ?, ?, ?, ?, ?, 1)
                      ON CONFLICT (build_id, ns, var, cron, COALESCE(value, ''))
                      DO UPDATE SET
-                         active = schedule.active OR NOT (schedule.cron LIKE '@at:%' AND EXISTS (SELECT 1 FROM schedule_log l WHERE l.schedule_id = schedule.schedule_id)),
-                         deactivated_at = CASE WHEN schedule.cron LIKE '@at:%' AND EXISTS (SELECT 1 FROM schedule_log l WHERE l.schedule_id = schedule.schedule_id) THEN schedule.deactivated_at END
+                         active = schedule.active OR NOT (",
+                        spent_call!(),
+                        "),
+                         deactivated_at = CASE WHEN ",
+                        spent_call!(),
+                        " THEN schedule.deactivated_at END
                      RETURNING schedule_id"
+                    )
                 )
                 .bind(schedule_id)
                 .bind(build_id)
@@ -2338,6 +2315,43 @@ impl Schedule {
             }
         };
         Ok(stored_id)
+    }
+
+    /// Whether this call is already armed, or fired and spent.
+    async fn repeats_call(
+        db: &crate::db::DatabasePool,
+        build_id: &Uuid,
+        ns: &str,
+        var: &str,
+        cron: &str,
+        args: &JsonValue,
+    ) -> Result<bool, ScheduleError> {
+        Ok(match db {
+            crate::db::DatabasePool::Postgres(pool) => sqlx::query_scalar(concat!(
+                "SELECT EXISTS(SELECT 1 FROM schedule WHERE build_id=$1 AND ns=$2 AND var=$3 AND cron=$4 AND md5(COALESCE(value::text, ''))=md5($5::jsonb::text) AND (active OR (",
+                spent_call!(),
+                ")))"
+            ))
+            .bind(build_id)
+            .bind(ns)
+            .bind(var)
+            .bind(cron)
+            .bind(args)
+            .fetch_one(pool)
+            .await?,
+            crate::db::DatabasePool::Sqlite(pool) => sqlx::query_scalar(concat!(
+                "SELECT EXISTS(SELECT 1 FROM schedule WHERE build_id=? AND ns=? AND var=? AND cron=? AND COALESCE(value, '')=? AND (active OR (",
+                spent_call!(),
+                ")))"
+            ))
+            .bind(build_id)
+            .bind(ns)
+            .bind(var)
+            .bind(cron)
+            .bind(args.to_string())
+            .fetch_one(pool)
+            .await?,
+        })
     }
 }
 
@@ -3204,7 +3218,6 @@ mod tests {
             &Uuid::now_v7(),
             &data.build_id,
             &ScheduleType::Cron("every second".to_string()),
-            Some(&data.org_id),
             SchedulePolicy {
                 min_interval_secs: 300,
                 min_delay_secs: 0,
@@ -3228,7 +3241,6 @@ mod tests {
             &Uuid::now_v7(),
             &data.build_id,
             &ScheduleType::At(chrono::Utc::now() + chrono::Duration::seconds(5)),
-            Some(&data.org_id),
             SchedulePolicy {
                 min_interval_secs: 1,
                 min_delay_secs: 60,
@@ -3247,12 +3259,16 @@ mod tests {
                 .contains("below the minimum delay of 60")
         );
 
+        // Only a deployed build's schedules count, so the limit applies once
+        // the call would change that count; deploying checks the rest.
+        crate::db::Build::deploy_build(&db, &data.build_id, &data.user_id)
+            .await
+            .unwrap();
         let over_quota = Schedule::insert_dynamic_schedule(
             &db,
             &Uuid::now_v7(),
             &data.build_id,
             &ScheduleType::Cron("every 5 minutes".to_string()),
-            Some(&data.org_id),
             SchedulePolicy {
                 min_interval_secs: 1,
                 min_delay_secs: 0,
@@ -3268,7 +3284,7 @@ mod tests {
             over_quota
                 .unwrap_err()
                 .to_string()
-                .contains("Active schedule limit exceeded")
+                .contains("active schedule limit exceeded")
         );
     }
 
@@ -3276,7 +3292,6 @@ mod tests {
     async fn arm_at(
         db: &crate::db::DatabasePool,
         build_id: &Uuid,
-        org_id: &Uuid,
         at: DateTime<Utc>,
         args: serde_json::Value,
     ) -> Uuid {
@@ -3285,7 +3300,6 @@ mod tests {
             &Uuid::now_v7(),
             build_id,
             &ScheduleType::At(at),
-            Some(org_id),
             SchedulePolicy::self_hosted_default(),
             "::app::steps",
             "check-due",
@@ -3298,55 +3312,31 @@ mod tests {
 
     /// What a schedule is, on either database: one call of a function at a
     /// time with its arguments.
-    async fn assert_a_schedule_is_one_call(
-        db: &crate::db::DatabasePool,
-        build_id: &Uuid,
-        org_id: &Uuid,
-    ) {
+    async fn assert_a_schedule_is_one_call(db: &crate::db::DatabasePool, build_id: &Uuid) {
         use serde_json::json;
         let at = chrono::Utc::now() + chrono::Duration::hours(1);
 
         // Other args at one moment are another schedule.
-        let first = arm_at(db, build_id, org_id, at, json!(["step-1"])).await;
-        let second = arm_at(db, build_id, org_id, at, json!(["step-2"])).await;
+        let first = arm_at(db, build_id, at, json!(["step-1"])).await;
+        let second = arm_at(db, build_id, at, json!(["step-2"])).await;
         assert_ne!(first, second);
         for id in [first, second] {
             assert!(Schedule::get_schedule(db, &id).await.unwrap().active);
         }
 
         // The same call again is that schedule.
-        assert_eq!(
-            arm_at(db, build_id, org_id, at, json!(["step-1"])).await,
-            first
-        );
+        assert_eq!(arm_at(db, build_id, at, json!(["step-1"])).await, first);
 
         // The order of a map's keys doesn't change its value.
-        let map = arm_at(
-            db,
-            build_id,
-            org_id,
-            at,
-            json!([{"a": 1, "b": {"c": 2, "d": 3}}]),
-        )
-        .await;
+        let map = arm_at(db, build_id, at, json!([{"a": 1, "b": {"c": 2, "d": 3}}])).await;
         assert_eq!(
-            arm_at(
-                db,
-                build_id,
-                org_id,
-                at,
-                json!([{"b": {"d": 3, "c": 2}, "a": 1}])
-            )
-            .await,
+            arm_at(db, build_id, at, json!([{"b": {"d": 3, "c": 2}, "a": 1}])).await,
             map
         );
 
         // Cancelled and armed again, it fires.
         assert!(Schedule::cancel_schedule(db, &first).await.unwrap());
-        assert_eq!(
-            arm_at(db, build_id, org_id, at, json!(["step-1"])).await,
-            first
-        );
+        assert_eq!(arm_at(db, build_id, at, json!(["step-1"])).await, first);
         let armed_again = Schedule::get_schedule(db, &first).await.unwrap();
         assert!(armed_again.active);
         assert_eq!(armed_again.deactivated_at, None);
@@ -3356,10 +3346,7 @@ mod tests {
             .await
             .unwrap();
         assert!(Schedule::cancel_schedule(db, &second).await.unwrap());
-        assert_eq!(
-            arm_at(db, build_id, org_id, at, json!(["step-2"])).await,
-            second
-        );
+        assert_eq!(arm_at(db, build_id, at, json!(["step-2"])).await, second);
         let spent = Schedule::get_schedule(db, &second).await.unwrap();
         assert!(!spent.active);
         assert!(spent.deactivated_at.is_some());
@@ -3371,7 +3358,6 @@ mod tests {
                 &id,
                 build_id,
                 &ScheduleType::Cron("0 0 9 * * *".to_string()),
-                Some(org_id),
                 SchedulePolicy::self_hosted_default(),
                 "::app::steps",
                 "check-due",
@@ -3463,7 +3449,7 @@ mod tests {
     async fn a_schedule_is_one_call() {
         let db = crate::db::test_db().await;
         let data = crate::db::insert_test_data(&db).await.unwrap();
-        assert_a_schedule_is_one_call(&db, &data.build_id, &data.org_id).await;
+        assert_a_schedule_is_one_call(&db, &data.build_id).await;
     }
 
     #[tokio::test]
@@ -3474,6 +3460,59 @@ mod tests {
             .await
             .unwrap();
         assert_repeating_schedule_at_quota(&db, &data.build_id, &data.org_id).await;
+    }
+
+    #[tokio::test]
+    async fn repeating_a_call_past_the_minimum_delay_returns_its_id() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        assert_repeats_pass_the_minimum_delay(&db, &data.build_id).await;
+    }
+
+    async fn assert_repeats_pass_the_minimum_delay(db: &crate::db::DatabasePool, build_id: &Uuid) {
+        let at = ScheduleType::At(Utc::now() + chrono::Duration::seconds(5));
+        let arm = |min_delay_secs: i64, var: &'static str| {
+            let at = &at;
+            async move {
+                let policy = SchedulePolicy {
+                    min_delay_secs,
+                    ..SchedulePolicy::self_hosted_default()
+                };
+                Schedule::insert_dynamic_schedule(
+                    db,
+                    &Uuid::now_v7(),
+                    build_id,
+                    at,
+                    policy,
+                    "::demo",
+                    var,
+                    None,
+                    None,
+                )
+                .await
+            }
+        };
+        let too_soon = |result: Result<Uuid, ScheduleError>| matches!(result, Err(ScheduleError::PolicyError(message)) if message.contains("below the minimum delay"));
+
+        // Armed before the delay applied, then repeated too near its time.
+        let armed = arm(0, "armed").await.unwrap();
+        assert_eq!(arm(60, "armed").await.unwrap(), armed);
+
+        // Spent: the repeat gets the ID and doesn't come back.
+        crate::db::ScheduleLog::insert(db, &armed, None, Utc::now(), false)
+            .await
+            .unwrap();
+        Schedule::cancel_schedule(db, &armed).await.unwrap();
+        assert_eq!(arm(60, "armed").await.unwrap(), armed);
+        assert!(!Schedule::get_schedule(db, &armed).await.unwrap().active);
+
+        // A cancelled call that never fired would run again, so it's new work
+        // and the delay applies, as it does to a call never seen.
+        let cancelled = arm(0, "cancelled").await.unwrap();
+        Schedule::cancel_schedule(db, &cancelled).await.unwrap();
+        assert!(too_soon(arm(60, "cancelled").await));
+        assert!(!Schedule::get_schedule(db, &cancelled).await.unwrap().active);
+        assert!(too_soon(arm(60, "fresh").await));
     }
 
     async fn assert_repeating_schedule_at_quota(
@@ -3494,7 +3533,6 @@ mod tests {
                     &Uuid::now_v7(),
                     build_id,
                     at,
-                    Some(org_id),
                     policy,
                     "::demo",
                     "once",
@@ -3587,13 +3625,13 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_a_schedule_is_one_call(&db, &build, &org).await;
+        assert_a_schedule_is_one_call(&db, &build).await;
 
         // Arguments past the size of a btree entry still arm.
         let at = chrono::Utc::now() + chrono::Duration::hours(1);
         let long = serde_json::json!(["x".repeat(100_000)]);
-        let id = arm_at(&db, &build, &org, at, long.clone()).await;
-        assert_eq!(arm_at(&db, &build, &org, at, long).await, id);
+        let id = arm_at(&db, &build, at, long.clone()).await;
+        assert_eq!(arm_at(&db, &build, at, long).await, id);
         Schedule::delete_schedules_by_build(&db, &build)
             .await
             .unwrap();
@@ -3601,6 +3639,7 @@ mod tests {
             .await
             .unwrap();
         assert_repeating_schedule_at_quota(&db, &build, &org).await;
+        assert_repeats_pass_the_minimum_delay(&db, &build).await;
     }
 
     #[test]

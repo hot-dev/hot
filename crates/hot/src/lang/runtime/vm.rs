@@ -4402,8 +4402,8 @@ impl VirtualMachine {
     /// type_info format: {
     ///   $type: "TypeName",
     ///   $fields: {field_name: {$type: "FieldType", ...}, ...},
-    ///   $checks: {field_name: [kinds, item_kinds, spec], ...},
-    ///   $base: [kinds, item_kinds, spec],  // What a type over a built-in one holds
+    ///   $checks: {field_name: [kinds, item_kinds, key_kinds, spec], ...},
+    ///   $base: [kinds, item_kinds, key_kinds, spec],  // What a type over a built-in one holds
     ///   $required: ["field1", "field2", ...],
     ///   $all_fields: ["field1", "field2", ...]
     /// }
