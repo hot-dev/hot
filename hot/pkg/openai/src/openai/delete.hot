@@ -291,9 +291,9 @@ DeleteResponseRequest type {
 }
 
 DeleteResponseResponse type {
-    code: Str,
+    code: Str?,
     message: Str,
-    param: Str,
+    param: Str?,
     type: Str
 }
 

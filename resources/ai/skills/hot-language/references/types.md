@@ -69,6 +69,38 @@ email user.email
 is-active user.active
 ```
 
+### Field Checks
+
+A record's constructor checks each field against its declared type when it
+runs, in both forms, the way a function checks a parameter. A value of
+another type, such as one from parsed JSON that `hot check` can't see, is
+`Err(ConstraintError.Violation)` with the field in its `path`:
+
+```hot
+Server type { host: Str, port: Int }
+
+body from-json("{\"host\": \"a.example\", \"port\": \"443\"}")
+Server(body)   // Err: constructor of `Server` at `port` expected Int, got Str
+```
+
+- Built-in types follow a parameter's rules: `Int` becomes `Dec` at a `Dec`
+  field, a whole `Dec` becomes `Int` at an `Int` field, null fails unless the
+  type has `?`, and a value of a type over a built-in one (`Port(80)` from
+  `Port type Int`) keeps its tag.
+- Unlike a parameter, `Vec<T>` and `Map<K, V>` check their contents. The
+  error names the item: `values[1]`.
+- A record or enum field takes a value of that type, a Map to build it from,
+  or what a declared constructor takes. Any other value fails, null included
+  unless the field allows it.
+- A failure in a nested record reports the whole path from the outermost one:
+  `constructor of `Order` at `items[2].price` expected Dec, got Str`.
+- An `Err` given for a field comes back as itself, unless the field is `Any`.
+- `Any`, `Fn` and plain declared types such as `Port type Int` aren't checked.
+- `assoc` and the other updates only check `where` constraints. Call the
+  constructor again if the fields may have changed.
+- An enum variant's payload is checked as a field of that type is:
+  `Due.Days("x")` is an Err for `Due enum { Days(Int) }`.
+
 ### Named Arguments
 
 `User(id: "123", email: "a@b.com", active: true)` builds the same value as
@@ -126,7 +158,8 @@ A record field or enum payload of such a type builds through the constructor
 that takes the value's type, as `Email(value)` would. A
 `::hot::time/PlainDate` field takes `"2026-01-02"` this way, and a string
 that doesn't parse makes the record an `Err`. A value no constructor takes by
-its type is kept as given.
+its type is an `Err` at a record or enum field, and is kept as given at a plain
+declared type such as `Email type Str`.
 
 Empty marker types are useful for tags and capabilities:
 

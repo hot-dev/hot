@@ -16,7 +16,7 @@ Str ::hot::type/Str
 
 OptionalData type {
     value: Str,
-    description: Str
+    description: Str?
 }
 
 OptionalData -> Str fn (data: OptionalData): Str {

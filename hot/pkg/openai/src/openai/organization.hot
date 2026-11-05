@@ -11,11 +11,11 @@ ProjectCreateRequest type {
 AdminApiKey type {
     object: Str,
     id: Str,
-    name: Str,
+    name: Str?,
     redacted_value: Str,
     value: Str?,
     created_at: Int,
-    last_used_at: Int,
+    last_used_at: Int?,
     owner: Map
 }
 
@@ -73,7 +73,7 @@ ProjectRole type open "owner" | "member"
 ProjectUser type {
     object: "organization.project.user",
     id: Str,
-    name: Str,
+    name: Str?,
     email: Str,
     role: ProjectRole,
     added_at: Int
@@ -105,7 +105,7 @@ Invite type {
     role: OrganizationRole,
     status: InviteStatus,
     invited_at: Int,
-    expires_at: Int,
+    expires_at: Int?,
     accepted_at: Int?,
     projects: Vec<Map>?
 }
@@ -156,9 +156,9 @@ UsageTimeBucket type {
 ProjectApiKey type {
     object: "organization.project.api_key",
     redacted_value: Str,
-    name: Str,
+    name: Str?,
     created_at: Int,
-    last_used_at: Int,
+    last_used_at: Int?,
     id: Str,
     owner: Map
 }
@@ -223,7 +223,7 @@ ProjectRateLimitListResponse type {
 ProjectServiceAccount type {
     object: "organization.project.service_account",
     id: Str,
-    name: Str,
+    name: Str?,
     role: ProjectRole,
     created_at: Int
 }
@@ -261,7 +261,7 @@ ProjectRateLimitUpdateRequest type {
 User type {
     object: "organization.user",
     id: Str,
-    name: Str,
+    name: Str?,
     email: Str,
     role: OrganizationRole,
     added_at: Int
@@ -306,7 +306,7 @@ AuditLogActorApiKey type {
 ProjectServiceAccountApiKey type {
     object: "organization.project.service_account.api_key",
     value: Str,
-    name: Str,
+    name: Str?,
     created_at: Int,
     id: Str
 }
@@ -320,7 +320,7 @@ ProjectStatus type open "active" | "archived"
 Project type {
     id: Str,
     object: "organization.project",
-    name: Str,
+    name: Str?,
     created_at: Int,
     archived_at: Int?,
     status: ProjectStatus
@@ -377,11 +377,11 @@ AdminApiKeysCreateRequest type {
 AdminApiKeysCreateResponse type {
     object: Str,
     id: Str,
-    name: Str,
+    name: Str?,
     redacted_value: Str,
     value: Str?,
     created_at: Int,
-    last_used_at: Int,
+    last_used_at: Int?,
     owner: Map
 }
 
@@ -408,11 +408,11 @@ AdminApiKeysGetRequest type {
 AdminApiKeysGetResponse type {
     object: Str,
     id: Str,
-    name: Str,
+    name: Str?,
     redacted_value: Str,
     value: Str?,
     created_at: Int,
-    last_used_at: Int,
+    last_used_at: Int?,
     owner: Map
 }
 
@@ -473,8 +473,8 @@ ListAuditLogsRequest type {
 ListAuditLogsResponse type {
     object: "list",
     data: Vec<AuditLog>,
-    first_id: Str,
-    last_id: Str,
+    first_id: Str?,
+    last_id: Str?,
     has_more: Bool
 }
 
@@ -508,7 +508,7 @@ UsageCostsResponse type {
     object: "page",
     data: Vec<UsageTimeBucket>,
     has_more: Bool,
-    next_page: Str
+    next_page: Str?
 }
 
 
@@ -567,7 +567,7 @@ RetrieveInviteResponse type {
     role: OrganizationRole,
     status: InviteStatus,
     invited_at: Int,
-    expires_at: Int,
+    expires_at: Int?,
     accepted_at: Int?,
     projects: Vec<Map>?
 }
@@ -623,8 +623,8 @@ ListProjectsRequest type {
 ListProjectsResponse type {
     object: "list",
     data: Vec<Project>,
-    first_id: Str,
-    last_id: Str,
+    first_id: Str?,
+    last_id: Str?,
     has_more: Bool
 }
 
@@ -651,7 +651,7 @@ CreateProjectRequest type {
 CreateProjectResponse type {
     id: Str,
     object: "organization.project",
-    name: Str,
+    name: Str?,
     created_at: Int,
     archived_at: Int?,
     status: ProjectStatus
@@ -680,7 +680,7 @@ RetrieveProjectRequest type {
 RetrieveProjectResponse type {
     id: Str,
     object: "organization.project",
-    name: Str,
+    name: Str?,
     created_at: Int,
     archived_at: Int?,
     status: ProjectStatus
@@ -709,7 +709,7 @@ ModifyProjectRequest type {
 ModifyProjectResponse type {
     id: Str,
     object: "organization.project",
-    name: Str,
+    name: Str?,
     created_at: Int,
     archived_at: Int?,
     status: ProjectStatus
@@ -740,8 +740,8 @@ ListProjectApiKeysRequest type {
 ListProjectApiKeysResponse type {
     object: "list",
     data: Vec<ProjectApiKey>,
-    first_id: Str,
-    last_id: Str,
+    first_id: Str?,
+    last_id: Str?,
     has_more: Bool
 }
 
@@ -771,9 +771,9 @@ RetrieveProjectApiKeyRequest type {
 RetrieveProjectApiKeyResponse type {
     object: "organization.project.api_key",
     redacted_value: Str,
-    name: Str,
+    name: Str?,
     created_at: Int,
-    last_used_at: Int,
+    last_used_at: Int?,
     id: Str,
     owner: Map
 }
@@ -832,7 +832,7 @@ ArchiveProjectRequest type {
 ArchiveProjectResponse type {
     id: Str,
     object: "organization.project",
-    name: Str,
+    name: Str?,
     created_at: Int,
     archived_at: Int?,
     status: ProjectStatus
@@ -864,8 +864,8 @@ ListProjectRateLimitsRequest type {
 ListProjectRateLimitsResponse type {
     object: "list",
     data: Vec<ProjectRateLimit>,
-    first_id: Str,
-    last_id: Str,
+    first_id: Str?,
+    last_id: Str?,
     has_more: Bool
 }
 
@@ -935,8 +935,8 @@ ListProjectServiceAccountsRequest type {
 ListProjectServiceAccountsResponse type {
     object: "list",
     data: Vec<ProjectServiceAccount>,
-    first_id: Str,
-    last_id: Str,
+    first_id: Str?,
+    last_id: Str?,
     has_more: Bool
 }
 
@@ -965,7 +965,7 @@ CreateProjectServiceAccountRequest type {
 CreateProjectServiceAccountResponse type {
     object: "organization.project.service_account",
     id: Str,
-    name: Str,
+    name: Str?,
     role: "member",
     created_at: Int,
     api_key: ProjectServiceAccountApiKey
@@ -997,7 +997,7 @@ RetrieveProjectServiceAccountRequest type {
 RetrieveProjectServiceAccountResponse type {
     object: "organization.project.service_account",
     id: Str,
-    name: Str,
+    name: Str?,
     role: ProjectRole,
     created_at: Int
 }
@@ -1058,8 +1058,8 @@ ListProjectUsersRequest type {
 ListProjectUsersResponse type {
     object: Str,
     data: Vec<ProjectUser>,
-    first_id: Str,
-    last_id: Str,
+    first_id: Str?,
+    last_id: Str?,
     has_more: Bool
 }
 
@@ -1087,7 +1087,7 @@ CreateProjectUserRequest type {
 CreateProjectUserResponse type {
     object: "organization.project.user",
     id: Str,
-    name: Str,
+    name: Str?,
     email: Str,
     role: ProjectRole,
     added_at: Int
@@ -1117,7 +1117,7 @@ RetrieveProjectUserRequest type {
 RetrieveProjectUserResponse type {
     object: "organization.project.user",
     id: Str,
-    name: Str,
+    name: Str?,
     email: Str,
     role: ProjectRole,
     added_at: Int
@@ -1148,7 +1148,7 @@ ModifyProjectUserRequest type {
 ModifyProjectUserResponse type {
     object: "organization.project.user",
     id: Str,
-    name: Str,
+    name: Str?,
     email: Str,
     role: ProjectRole,
     added_at: Int
@@ -1218,7 +1218,7 @@ UsageAudioSpeechesResponse type {
     object: "page",
     data: Vec<UsageTimeBucket>,
     has_more: Bool,
-    next_page: Str
+    next_page: Str?
 }
 
 
@@ -1254,7 +1254,7 @@ UsageAudioTranscriptionsResponse type {
     object: "page",
     data: Vec<UsageTimeBucket>,
     has_more: Bool,
-    next_page: Str
+    next_page: Str?
 }
 
 
@@ -1287,7 +1287,7 @@ UsageCodeInterpreterSessionsResponse type {
     object: "page",
     data: Vec<UsageTimeBucket>,
     has_more: Bool,
-    next_page: Str
+    next_page: Str?
 }
 
 
@@ -1326,7 +1326,7 @@ UsageCompletionsResponse type {
     object: "page",
     data: Vec<UsageTimeBucket>,
     has_more: Bool,
-    next_page: Str
+    next_page: Str?
 }
 
 
@@ -1362,7 +1362,7 @@ UsageEmbeddingsResponse type {
     object: "page",
     data: Vec<UsageTimeBucket>,
     has_more: Bool,
-    next_page: Str
+    next_page: Str?
 }
 
 
@@ -1400,7 +1400,7 @@ UsageImagesResponse type {
     object: "page",
     data: Vec<UsageTimeBucket>,
     has_more: Bool,
-    next_page: Str
+    next_page: Str?
 }
 
 
@@ -1436,7 +1436,7 @@ UsageModerationsResponse type {
     object: "page",
     data: Vec<UsageTimeBucket>,
     has_more: Bool,
-    next_page: Str
+    next_page: Str?
 }
 
 
@@ -1469,7 +1469,7 @@ UsageVectorStoresResponse type {
     object: "page",
     data: Vec<UsageTimeBucket>,
     has_more: Bool,
-    next_page: Str
+    next_page: Str?
 }
 
 
@@ -1497,8 +1497,8 @@ ListUsersRequest type {
 ListUsersResponse type {
     object: "list",
     data: Vec<User>,
-    first_id: Str,
-    last_id: Str,
+    first_id: Str?,
+    last_id: Str?,
     has_more: Bool
 }
 
@@ -1525,7 +1525,7 @@ RetrieveUserRequest type {
 RetrieveUserResponse type {
     object: "organization.user",
     id: Str,
-    name: Str,
+    name: Str?,
     email: Str,
     role: OrganizationRole,
     added_at: Int
@@ -1554,7 +1554,7 @@ ModifyUserRequest type {
 ModifyUserResponse type {
     object: "organization.user",
     id: Str,
-    name: Str,
+    name: Str?,
     email: Str,
     role: OrganizationRole,
     added_at: Int

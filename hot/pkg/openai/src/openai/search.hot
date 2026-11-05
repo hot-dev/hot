@@ -49,7 +49,7 @@ SearchVectorStoreResponse type {
     search_query: Vec<Str>,
     data: Vec<VectorStoreSearchResultItem>,
     has_more: Bool,
-    next_page: Str
+    next_page: Str?
 }
 
 

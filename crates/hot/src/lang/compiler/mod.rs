@@ -5826,17 +5826,10 @@ impl Compiler {
 
             let associated_type_info = match &payload_expr {
                 Some(expr) => self.build_field_type_info_from_expr(expr, true),
-                None => {
-                    // Resolve the associated type reference to fully qualified name
-                    let (resolved_type_ref, _) = self.resolve_type_path(type_ref);
-
-                    // Build type_info for the associated type (for ConstructTyped instruction)
-                    let mut associated_type_info = indexmap::IndexMap::new();
-                    associated_type_info
-                        .insert(Val::from("$type"), Val::from(resolved_type_ref.clone()));
-                    // Mark this as a nested type reference (no $all_fields means VM will call the constructor)
-                    Val::map(associated_type_info)
-                }
+                // Type_info for the associated type (for ConstructTyped
+                // instruction). It has no $all_fields, so the VM calls the
+                // type's constructor.
+                None => self.build_custom_type_info(type_ref),
             };
             let associated_type_info_constant = self
                 .program
@@ -5846,18 +5839,26 @@ impl Compiler {
             // union, alone or inside a type expression such as `Vec<Port>`)
             // is checked here, as a record's constructor checks such fields.
             // A record payload's own constructor checks it.
-            let payload_check = if payload_expr.is_some() || self.names_constrained_alias(type_ref)
-            {
-                self.constraint_spec_for_annotation(type_ref).map(|spec| {
+            let constrained_payload =
+                if payload_expr.is_some() || self.names_constrained_alias(type_ref) {
+                    self.constraint_spec_for_annotation(type_ref)
+                } else {
+                    None
+                };
+            // A built-in payload is checked the same way, as a field of that
+            // type is at a record's constructor.
+            let payload_check = constrained_payload
+                .or_else(|| {
+                    crate::lang::parser::parse_type_annotation(type_ref)
+                        .and_then(|expr| constraint_specs::plain_field_spec(&expr))
+                })
+                .map(|spec| {
                     let boundary = constraint_specs::Boundary {
                         declared_type: Some(&constructor_name),
                         ..constraint_specs::Boundary::new("constructor")
                     };
                     self.constraint_boundary_constant(spec, &boundary)
-                })
-            } else {
-                None
-            };
+                });
 
             let empty_map_constant = self.program.add_constant(Constant::Val(Val::map_empty()));
             let data_var_constant = self.program.add_constant(Constant::Val(Val::from("data")));
@@ -6138,6 +6139,7 @@ impl Compiler {
     /// Format: {
     ///   $type: "TypeName",
     ///   $fields: {field_name: {$type: "FieldType", ...}, ...},
+    ///   $checks: {field_name: [kinds, item_kinds, spec], ...},  // Built-in annotations; see `field_check`
     ///   $required: ["field1", "field2", ...],
     ///   $all_fields: ["field1", "field2", ...]  // All expected field names for validation
     /// }
@@ -6148,6 +6150,7 @@ impl Compiler {
         // Build field type info if this type has fields
         if let Some(ref fields) = type_def.fields {
             let mut fields_info = indexmap::IndexMap::new();
+            let mut field_checks = indexmap::IndexMap::new();
             let mut required_fields = Vec::new();
             let mut all_fields = Vec::new();
 
@@ -6162,6 +6165,13 @@ impl Compiler {
                     required_fields.push(Val::from(field_name.clone()));
                 }
 
+                if let Some(spec) = constraint_specs::plain_field_spec(&field.type_expr) {
+                    field_checks.insert(
+                        Val::from(field_name.clone()),
+                        constraint_specs::field_check(spec),
+                    );
+                }
+
                 // Check if this field has a custom (non-builtin) type that needs construction
                 let field_type_info = self.build_field_type_info_from_expr(&field.type_expr, false);
                 if !Self::is_empty_map(&field_type_info) {
@@ -6171,6 +6181,10 @@ impl Compiler {
 
             if !fields_info.is_empty() {
                 type_info.insert(Val::from("$fields"), Val::map(fields_info));
+            }
+
+            if !field_checks.is_empty() {
+                type_info.insert(Val::from("$checks"), Val::map(field_checks));
             }
 
             if !required_fields.is_empty() {
@@ -6274,6 +6288,9 @@ impl Compiler {
         let (qualified_name, _found) = self.resolve_type_path(type_name);
 
         let mut type_info = indexmap::IndexMap::new();
+        if self.is_structured_type(&qualified_name) {
+            type_info.insert(Val::from("$structured"), Val::Bool(true));
+        }
         type_info.insert(Val::from("$type"), Val::from(qualified_name));
         Val::map(type_info)
     }

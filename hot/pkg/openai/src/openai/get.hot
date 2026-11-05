@@ -27,7 +27,7 @@ VectorStoreExpirationAfter type {
 EvalRunOutputItem type {
     object: "eval.run.output_item",
     id: Str,
-    run_id: Str,
+    run_id: Str?,
     eval_id: Str,
     created_at: Int,
     status: Str,
@@ -54,7 +54,7 @@ ThreadObject type {
 }
 
 EvalApiError type {
-    code: Str,
+    code: Str?,
     message: Str
 }
 
@@ -67,7 +67,7 @@ VectorStoreFileObject type {
     created_at: Int,
     vector_store_id: Str,
     status: VectorStoreFileStatus,
-    last_error: Map,
+    last_error: Map?,
     chunking_strategy: ChunkingStrategyResponse?,
     attributes: VectorStoreFileAttributes?
 }
@@ -99,19 +99,19 @@ RunStepObject type {
     id: Str,
     object: "thread.run.step",
     created_at: Int,
-    assistant_id: Str,
+    assistant_id: Str?,
     thread_id: Str,
-    run_id: Str,
+    run_id: Str?,
     type: RunStepType,
     status: RunStepStatus,
     step_details: Map,
-    last_error: Map,
-    expired_at: Int,
-    cancelled_at: Int,
-    failed_at: Int,
-    completed_at: Int,
+    last_error: Map?,
+    expired_at: Int?,
+    cancelled_at: Int?,
+    failed_at: Int?,
+    completed_at: Int?,
     metadata: Metadata,
-    usage: RunStepCompletionUsage
+    usage: RunStepCompletionUsage?
 }
 
 MessageStatus type open "in_progress" | "incomplete" | "completed"
@@ -123,14 +123,14 @@ MessageObject type {
     created_at: Int,
     thread_id: Str,
     status: MessageStatus,
-    incomplete_details: Map,
-    completed_at: Int,
-    incomplete_at: Int,
+    incomplete_details: Map?,
+    completed_at: Int?,
+    incomplete_at: Int?,
     role: MessageRole,
     content: Vec<MessageContent>,
-    assistant_id: Str,
-    run_id: Str,
-    attachments: Vec<Map>,
+    assistant_id: Str?,
+    run_id: Str?,
+    attachments: Vec<Map>?,
     metadata: Metadata
 }
 
@@ -143,15 +143,15 @@ EvalRun type {
     eval_id: Str,
     status: Str,
     model: Str,
-    name: Str,
+    name: Str?,
     created_at: Int,
-    report_url: Str,
+    report_url: Str?,
     result_counts: Map,
     per_model_usage: Vec<Map>,
     per_testing_criteria_results: Vec<Map>,
     data_source: Map,
     metadata: Metadata,
-    error: EvalApiError
+    error: EvalApiError?
 }
 
 VectorStoreStatus type open "expired" | "in_progress" | "completed"
@@ -160,13 +160,13 @@ VectorStoreObject type {
     id: Str,
     object: "vector_store",
     created_at: Int,
-    name: Str,
+    name: Str?,
     usage_bytes: Int,
     file_counts: Map,
     status: VectorStoreStatus,
     expires_after: VectorStoreExpirationAfter?,
     expires_at: Int?,
-    last_active_at: Int,
+    last_active_at: Int?,
     metadata: Metadata
 }
 
@@ -193,10 +193,10 @@ AssistantObject type {
     id: Str,
     object: "assistant",
     created_at: Int,
-    name: Str,
-    description: Str,
+    name: Str?,
+    description: Str?,
     model: Str,
-    instructions: Str,
+    instructions: Str?,
     tools: Vec<AssistantTool>,
     tool_resources: Map?,
     metadata: Metadata,
@@ -213,25 +213,25 @@ RunObject type {
     object: "thread.run",
     created_at: Int,
     thread_id: Str,
-    assistant_id: Str,
+    assistant_id: Str?,
     status: RunStatus,
-    required_action: Map,
-    last_error: Map,
-    expires_at: Int,
-    started_at: Int,
-    cancelled_at: Int,
-    failed_at: Int,
-    completed_at: Int,
-    incomplete_details: Map,
+    required_action: Map?,
+    last_error: Map?,
+    expires_at: Int?,
+    started_at: Int?,
+    cancelled_at: Int?,
+    failed_at: Int?,
+    completed_at: Int?,
+    incomplete_details: Map?,
     model: Str,
-    instructions: Str,
+    instructions: Str?,
     tools: Vec<AssistantTool>,
     metadata: Metadata,
-    usage: RunCompletionUsage,
+    usage: RunCompletionUsage?,
     temperature: Dec?,
     top_p: Dec?,
-    max_prompt_tokens: Int,
-    max_completion_tokens: Int,
+    max_prompt_tokens: Int?,
+    max_completion_tokens: Int?,
     truncation_strategy: Any,
     tool_choice: Any,
     parallel_tool_calls: ParallelToolCalls,
@@ -252,7 +252,7 @@ CertificateObjectType type open "certificate" | "organization.certificate" | "or
 Certificate type {
     object: CertificateObjectType,
     id: Str,
-    name: Str,
+    name: Str?,
     created_at: Int,
     certificate_details: Map,
     active: Bool?
@@ -272,7 +272,7 @@ ChatCompletionMessageList type {
 Eval type {
     object: "eval",
     id: Str,
-    name: Str,
+    name: Str?,
     data_source_config: Map,
     testing_criteria: Vec,
     created_at: Int,
@@ -293,10 +293,10 @@ GetAssistantResponse type {
     id: Str,
     object: "assistant",
     created_at: Int,
-    name: Str,
-    description: Str,
+    name: Str?,
+    description: Str?,
     model: Str,
-    instructions: Str,
+    instructions: Str?,
     tools: Vec<AssistantTool>,
     tool_resources: Map?,
     metadata: Metadata,
@@ -364,8 +364,8 @@ GetChatCompletionMessagesRequest type {
 GetChatCompletionMessagesResponse type {
     object: "list",
     data: Vec,
-    first_id: Str,
-    last_id: Str,
+    first_id: Str?,
+    last_id: Str?,
     has_more: Bool
 }
 
@@ -394,7 +394,7 @@ GetEvalRequest type {
 GetEvalResponse type {
     object: "eval",
     id: Str,
-    name: Str,
+    name: Str?,
     data_source_config: Map,
     testing_criteria: Vec,
     created_at: Int,
@@ -428,8 +428,8 @@ GetEvalRunsRequest type {
 GetEvalRunsResponse type {
     object: "list",
     data: Vec<EvalRun>,
-    first_id: Str,
-    last_id: Str,
+    first_id: Str?,
+    last_id: Str?,
     has_more: Bool
 }
 
@@ -460,15 +460,15 @@ GetEvalRunResponse type {
     eval_id: Str,
     status: Str,
     model: Str,
-    name: Str,
+    name: Str?,
     created_at: Int,
-    report_url: Str,
+    report_url: Str?,
     result_counts: Map,
     per_model_usage: Vec<Map>,
     per_testing_criteria_results: Vec<Map>,
     data_source: Map,
     metadata: Metadata,
-    error: EvalApiError
+    error: EvalApiError?
 }
 
 
@@ -501,8 +501,8 @@ GetEvalRunOutputItemsRequest type {
 GetEvalRunOutputItemsResponse type {
     object: "list",
     data: Vec<EvalRunOutputItem>,
-    first_id: Str,
-    last_id: Str,
+    first_id: Str?,
+    last_id: Str?,
     has_more: Bool
 }
 
@@ -533,7 +533,7 @@ GetEvalRunOutputItemRequest type {
 GetEvalRunOutputItemResponse type {
     object: "eval.run.output_item",
     id: Str,
-    run_id: Str,
+    run_id: Str?,
     eval_id: Str,
     created_at: Int,
     status: Str,
@@ -569,7 +569,7 @@ GetCertificateRequest type {
 GetCertificateResponse type {
     object: CertificateObjectType,
     id: Str,
-    name: Str,
+    name: Str?,
     created_at: Int,
     certificate_details: Map,
     active: Bool?
@@ -628,7 +628,7 @@ GetThreadResponse type {
     id: Str,
     object: "thread",
     created_at: Int,
-    tool_resources: Map,
+    tool_resources: Map?,
     metadata: Metadata
 }
 
@@ -659,14 +659,14 @@ GetMessageResponse type {
     created_at: Int,
     thread_id: Str,
     status: MessageStatus,
-    incomplete_details: Map,
-    completed_at: Int,
-    incomplete_at: Int,
+    incomplete_details: Map?,
+    completed_at: Int?,
+    incomplete_at: Int?,
     role: MessageRole,
     content: Vec<MessageContent>,
-    assistant_id: Str,
-    run_id: Str,
-    attachments: Vec<Map>,
+    assistant_id: Str?,
+    run_id: Str?,
+    attachments: Vec<Map>?,
     metadata: Metadata
 }
 
@@ -698,25 +698,25 @@ GetRunResponse type {
     object: "thread.run",
     created_at: Int,
     thread_id: Str,
-    assistant_id: Str,
+    assistant_id: Str?,
     status: RunStatus,
-    required_action: Map,
-    last_error: Map,
-    expires_at: Int,
-    started_at: Int,
-    cancelled_at: Int,
-    failed_at: Int,
-    completed_at: Int,
-    incomplete_details: Map,
+    required_action: Map?,
+    last_error: Map?,
+    expires_at: Int?,
+    started_at: Int?,
+    cancelled_at: Int?,
+    failed_at: Int?,
+    completed_at: Int?,
+    incomplete_details: Map?,
     model: Str,
-    instructions: Str,
+    instructions: Str?,
     tools: Vec<AssistantTool>,
     metadata: Metadata,
-    usage: RunCompletionUsage,
+    usage: RunCompletionUsage?,
     temperature: Dec?,
     top_p: Dec?,
-    max_prompt_tokens: Int,
-    max_completion_tokens: Int,
+    max_prompt_tokens: Int?,
+    max_completion_tokens: Int?,
     truncation_strategy: Any,
     tool_choice: Any,
     parallel_tool_calls: ParallelToolCalls,
@@ -752,19 +752,19 @@ GetRunStepResponse type {
     id: Str,
     object: "thread.run.step",
     created_at: Int,
-    assistant_id: Str,
+    assistant_id: Str?,
     thread_id: Str,
-    run_id: Str,
+    run_id: Str?,
     type: RunStepType,
     status: RunStepStatus,
     step_details: Map,
-    last_error: Map,
-    expired_at: Int,
-    cancelled_at: Int,
-    failed_at: Int,
-    completed_at: Int,
+    last_error: Map?,
+    expired_at: Int?,
+    cancelled_at: Int?,
+    failed_at: Int?,
+    completed_at: Int?,
     metadata: Metadata,
-    usage: RunStepCompletionUsage
+    usage: RunStepCompletionUsage?
 }
 
 
@@ -793,13 +793,13 @@ GetVectorStoreResponse type {
     id: Str,
     object: "vector_store",
     created_at: Int,
-    name: Str,
+    name: Str?,
     usage_bytes: Int,
     file_counts: Map,
     status: VectorStoreStatus,
     expires_after: VectorStoreExpirationAfter?,
     expires_at: Int?,
-    last_active_at: Int,
+    last_active_at: Int?,
     metadata: Metadata
 }
 
@@ -865,7 +865,7 @@ GetVectorStoreFileResponse type {
     created_at: Int,
     vector_store_id: Str,
     status: VectorStoreFileStatus,
-    last_error: Map,
+    last_error: Map?,
     chunking_strategy: ChunkingStrategyResponse?,
     attributes: VectorStoreFileAttributes?
 }

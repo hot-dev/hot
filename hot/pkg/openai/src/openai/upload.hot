@@ -14,7 +14,7 @@ CertificateObjectType type open "certificate" | "organization.certificate" | "or
 Certificate type {
     object: CertificateObjectType,
     id: Str,
-    name: Str,
+    name: Str?,
     created_at: Int,
     certificate_details: Map,
     active: Bool?
@@ -28,7 +28,7 @@ UploadCertificateRequest type {
 UploadCertificateResponse type {
     object: CertificateObjectType,
     id: Str,
-    name: Str,
+    name: Str?,
     created_at: Int,
     certificate_details: Map,
     active: Bool?
