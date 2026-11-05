@@ -561,6 +561,31 @@ A failed check returns `Err(ConstraintError.Violation)` from the call, before th
 body runs. Using that value halts as any `Err` does, but `if`, `and`, `or` and `not`
 treat an `Err` as false, so use `is-err` where a bad value needs its own branch.
 
+### Comparing Values of Declared Types
+
+`gt`, `gte`, `lt`, `lte`, `between` and `sort` read a value of a declared type over
+a number or a string as what it holds:
+
+```hot
+Money type Dec
+
+gt(Money(80.0), 100)              // false
+gt(Money(200.0), Money(80.0))     // true
+sort([Money(200), Money(80.5)])   // [Money(80.5), Money(200)]
+```
+
+They go by the number alone, so `gt(Money(200.0), Weight(80.0))` is true: comparing
+two different types is yours to rule out. An enum variant isn't read this way, as
+`Temp.Celsius(30.0)` is a case of its enum rather than a number.
+
+Other operations keep the type. `add(Money(80.0), 1)` gives an `Err`, so convert
+with `Dec(x)` first, and `eq(Money(80.0), 80.0)` is false, because the type is part
+of the value.
+
+Values with no order give an `Err`, such as `gt(1, null)` or two vectors. As with
+any `Err`, `if` reads that as false, so use `is-err` where a missing value needs its
+own branch.
+
 ## Result Types
 
 Hot doesn't have exceptions. Instead, use `Result` for operations that can fail:

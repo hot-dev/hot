@@ -1,6 +1,8 @@
 use crate::lang::hot::r#type::HotResult;
-use crate::val::Val;
+use crate::val::{Val, as_scalar};
 use crate::validate_args;
+use fastnum::D256;
+use std::cmp::Ordering;
 
 // ---------------------------------------------------------------------------
 // Fast-path helpers for the VM hot loop (Int+Int only, zero overhead).
@@ -62,70 +64,52 @@ pub fn ne(args: &[Val]) -> HotResult<Val> {
 /// Check if first value is greater than second
 pub fn gt(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::cmp", args, 2);
-    {
-        let a = &args[0];
-        let b = &args[1];
-        let result = compare_vals(a, b) == std::cmp::Ordering::Greater;
-        HotResult::Ok(Val::Bool(result))
-    }
+    answer("gt", args, Ordering::is_gt)
 }
 
 /// Check if first value is less than second
 pub fn lt(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::cmp", args, 2);
-    {
-        let a = &args[0];
-        let b = &args[1];
-        let result = compare_vals(a, b) == std::cmp::Ordering::Less;
-        HotResult::Ok(Val::Bool(result))
-    }
+    answer("lt", args, Ordering::is_lt)
 }
 
 /// Check if first value is greater than or equal to second
 pub fn gte(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::cmp", args, 2);
-    {
-        let a = &args[0];
-        let b = &args[1];
-        let ordering = compare_vals(a, b);
-        let result =
-            ordering == std::cmp::Ordering::Greater || ordering == std::cmp::Ordering::Equal;
-        HotResult::Ok(Val::Bool(result))
-    }
+    answer("gte", args, Ordering::is_ge)
 }
 
 /// Check if first value is less than or equal to second
 pub fn lte(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::cmp", args, 2);
-    {
-        let a = &args[0];
-        let b = &args[1];
-        let ordering = compare_vals(a, b);
-        let result = ordering == std::cmp::Ordering::Less || ordering == std::cmp::Ordering::Equal;
-        HotResult::Ok(Val::Bool(result))
+    answer("lte", args, Ordering::is_le)
+}
+
+/// What `name` says of how its two arguments order, or its Err when they have
+/// no order, as `add` gives for a value that isn't a number.
+fn answer(name: &str, args: &[Val], test: fn(Ordering) -> bool) -> HotResult<Val> {
+    match compare_vals(&args[0], &args[1]) {
+        Some(ordering) => HotResult::Ok(Val::Bool(test(ordering))),
+        None => HotResult::Err(Val::from(format!("{name} requires numbers"))),
     }
 }
 
-/// Compare two values for ordering
-fn compare_vals(a: &Val, b: &Val) -> std::cmp::Ordering {
-    use crate::val::Val;
-    use std::cmp::Ordering;
-
-    match (a, b) {
-        (Val::Int(a), Val::Int(b)) => a.cmp(b),
-        (Val::Dec(a), Val::Dec(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
-        (Val::Str(a), Val::Str(b)) => a.cmp(b),
-        (Val::Bool(a), Val::Bool(b)) => a.cmp(b),
+/// How two values order, reading a declared type over a scalar as that scalar.
+/// Int and Dec order together, as do two strings and two bools. Nothing else
+/// has an order to report.
+fn compare_vals(a: &Val, b: &Val) -> Option<Ordering> {
+    match (as_scalar(a), as_scalar(b)) {
+        (Val::Int(a), Val::Int(b)) => Some(a.cmp(b)),
+        (Val::Dec(a), Val::Dec(b)) => Some(a.partial_cmp(b).unwrap_or(Ordering::Equal)),
+        (Val::Str(a), Val::Str(b)) => Some(a.cmp(b)),
+        (Val::Bool(a), Val::Bool(b)) => Some(a.cmp(b)),
         // Type coercion for numbers
         (Val::Int(a), Val::Dec(b)) => {
-            use fastnum::D256;
-            D256::from(*a).partial_cmp(b).unwrap_or(Ordering::Equal)
+            Some(D256::from(*a).partial_cmp(b).unwrap_or(Ordering::Equal))
         }
         (Val::Dec(a), Val::Int(b)) => {
-            use fastnum::D256;
-            a.partial_cmp(&D256::from(*b)).unwrap_or(Ordering::Equal)
+            Some(a.partial_cmp(&D256::from(*b)).unwrap_or(Ordering::Equal))
         }
-        // For other types, use string comparison as fallback
-        _ => format!("{:?}", a).cmp(&format!("{:?}", b)),
+        _ => None,
     }
 }
