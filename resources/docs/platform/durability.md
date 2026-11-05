@@ -180,6 +180,8 @@ Hot guarantees **at-least-once delivery** for events. Events are persisted befor
 - Infrastructure redelivery can deliver an event more than once
 - Strict event ordering is not guaranteed across concurrent workers
 
+A caller outside Hot that resends a publish after a timeout can give the event an `event_id`, so the resend [starts nothing new](/docs/api#sending-a-publish-again).
+
 If your handler has side effects that shouldn't happen twice (charging a payment, sending an email), use idempotency techniques — check whether the work was already done before doing it again.
 
 Queue envelopes are additive for rolling deploy compatibility. Workers hydrate the full event payload from the database before routing, so old queue messages remain readable while newer workers can still rely on the database as the source of truth.
