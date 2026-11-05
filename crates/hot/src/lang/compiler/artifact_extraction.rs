@@ -150,6 +150,15 @@ pub(super) fn resolve_alias_target_qualified_name(
     None
 }
 
+/// The namespace a function's signature is written in, which decides what
+/// its type names mean: `ns` for its own function, and for an alias the
+/// namespace of the function it points at.
+fn signature_namespace(program: &Program, ns: &str, value: &Value) -> String {
+    resolve_alias_target_qualified_name(program, ns, value)
+        .and_then(|name| name.rsplit_once('/').map(|(ns, _)| ns.to_string()))
+        .unwrap_or_else(|| ns.to_string())
+}
+
 /// Resolve a namespace path through the containing namespace's alias
 /// table: if `ns_path` is the LHS of an alias declaration in the
 /// containing namespace, return the RHS (the real path); otherwise
@@ -459,14 +468,17 @@ impl Compiler {
                 let var_name = var.sym.to_string();
                 let fq_name = format!("{}/{}", ns_str, var_name);
 
+                let signature_ns = signature_namespace(program, &ns_str, value);
                 let input_schema = crate::lang::json_schema::args_to_input_schema_with_registry(
                     &fn_def.args.args,
                     &type_registry,
+                    &signature_ns,
                 );
                 let output_schema =
                     crate::lang::json_schema::return_type_to_output_schema_with_registry(
                         fn_def.return_type.as_deref(),
                         &type_registry,
+                        &signature_ns,
                     );
 
                 let (display_name, description) = harvest_tool_meta(&effective_var);
@@ -609,27 +621,7 @@ impl Compiler {
     /// Build a type registry from all type definitions in the program
     fn build_type_registry(&self, program: &Program) -> crate::lang::json_schema::TypeRegistry {
         let mut registry = crate::lang::json_schema::TypeRegistry::new();
-
-        for (ns_path, namespace) in &program.namespaces {
-            let ns_str = ns_path.to_string();
-
-            for (var, value) in &namespace.scope.vars {
-                if let Value::TypeDef(type_def) = value {
-                    let type_name = var.sym.name();
-                    let qualified_name = format!("{}/{}", ns_str, type_name);
-
-                    // Register with both simple and qualified names
-                    registry.register_qualified(&qualified_name, type_def);
-
-                    tracing::trace!(
-                        "Registered type {} ({}) with {} fields",
-                        type_name,
-                        qualified_name,
-                        type_def.fields.as_ref().map(|f| f.len()).unwrap_or(0)
-                    );
-                }
-            }
-        }
+        registry.register_program(program);
 
         // What each type's `where` clause adds to its schema.
         for (ns_path, namespace) in &program.namespaces {
@@ -789,11 +781,13 @@ impl Compiler {
                 // even though its own value is a `Value::Ref`.
                 let (input_schema, output_schema) = if let Value::Fn(fn_defs) = schema_value {
                     if let Some(fn_def) = fn_defs.first() {
+                        let signature_ns = signature_namespace(program, ns_name, value);
                         let auto_input = if explicit_input_schema.is_none() {
                             Some(
                                 crate::lang::json_schema::args_to_input_schema_with_registry(
                                     &fn_def.args.args,
                                     type_registry,
+                                    &signature_ns,
                                 ),
                             )
                         } else {
@@ -804,6 +798,7 @@ impl Compiler {
                             crate::lang::json_schema::return_type_to_output_schema_with_registry(
                                 fn_def.return_type.as_deref(),
                                 type_registry,
+                                &signature_ns,
                             )
                         } else {
                             explicit_output_schema
