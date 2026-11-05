@@ -12,6 +12,18 @@ verified scope, and a query without a scope sees no protected rows.
 This page covers the logins Hot needs, a new installation, upgrading a Hot 2.x
 database, and backups. SQLite projects don't use any of it.
 
+## Requirements
+
+Hot needs PostgreSQL 18 or newer, with the
+[pgvector](https://github.com/pgvector/pgvector) extension available. Its
+migrations call `uuidv7()`, which PostgreSQL added in version 18. On an older
+server, `hot db migrate` says so and applies nothing.
+
+In Docker, use an image built for 18, such as `pgvector/pgvector:pg18`. Those images
+keep their data under `/var/lib/postgresql/18/docker`, so mount a volume at
+`/var/lib/postgresql`: they refuse to start with one at `/var/lib/postgresql/data`,
+the path older images use.
+
 ## Two Logins
 
 Hot connects to PostgreSQL with two logins:

@@ -374,6 +374,51 @@ async fn sqlite_upgrades_preserve_populated_data_and_retire_management_credentia
 /// under its own spelling. The oldest active one answers to any other spelling,
 /// and no later account can join the set.
 #[tokio::test]
+async fn sqlite_030_keys_schedules_by_their_args() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("existing.db");
+    let pool = existing_database(&path, 29).await?;
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&pool)
+        .await?;
+    let build = Uuid::now_v7();
+    let insert = |value: Option<&'static str>, cron: &'static str| {
+        sqlx::query("INSERT INTO schedule(schedule_id,build_id,cron,ns,var,value) VALUES(?,?,?,'::app','step',?)")
+            .bind(Uuid::now_v7())
+            .bind(build)
+            .bind(cron)
+            .bind(value)
+    };
+    let at = "@at:2030-01-01T00:00:00+00:00";
+    insert(None, "0 0 9 * * *").execute(&pool).await?;
+    insert(Some(r#"["one"]"#), at).execute(&pool).await?;
+    assert!(
+        insert(Some(r#"["two"]"#), at).execute(&pool).await.is_err(),
+        "before 030, a function has one schedule per time"
+    );
+    pool.close().await;
+
+    db::run_migrations(&hot::val!({"uri": format!("sqlite:{}", path.display())})).await?;
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(&path)
+                .foreign_keys(false),
+        )
+        .await?;
+
+    insert(Some(r#"["two"]"#), at).execute(&pool).await?;
+    assert!(insert(Some(r#"["one"]"#), at).execute(&pool).await.is_err());
+    assert!(insert(None, "0 0 9 * * *").execute(&pool).await.is_err());
+    let schedules: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM schedule")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(schedules, 3);
+    Ok(())
+}
+
+#[tokio::test]
 async fn sqlite_028_keeps_accounts_that_differ_only_in_capitals() -> TestResult {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("existing.db");

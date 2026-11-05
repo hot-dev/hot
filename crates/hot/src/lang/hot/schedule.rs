@@ -223,15 +223,15 @@ pub fn create_schedule(
     });
 
     match result {
-        Ok(()) => {
+        Ok(stored_id) => {
             tracing::info!(
-                "Created dynamic schedule {}: {}:{} @ {:?}",
-                schedule_id,
+                "Armed dynamic schedule {}: {}:{} @ {:?}",
+                stored_id,
                 ns,
                 var,
                 schedule_type
             );
-            HotResult::Ok(Val::from(schedule_id.to_string()))
+            HotResult::Ok(Val::from(stored_id.to_string()))
         }
         Err(e) => HotResult::Err(Val::from(format!("Failed to create schedule: {}", e))),
     }

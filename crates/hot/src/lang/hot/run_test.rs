@@ -919,6 +919,122 @@ probe()"#;
         );
     }
 
+    /// A value can call a function before the function's namespace has run.
+    /// The type aliases that function names are bound by then, so the run
+    /// doesn't depend on which namespace sorts first.
+    #[test]
+    fn value_calling_a_function_finds_its_type_aliases() {
+        let src = r#"::aa::c ns
+made ::o::b/make()
+
+::o::b ns
+Thing ::o::a/Thing
+make fn (): Thing { Thing(n: 1) }
+
+::o::a ns
+Thing type { n: Int }
+
+::main ns
+::aa::c/made.n"#;
+        assert_same_with_and_without_jit(src, &Val::Int(1));
+    }
+
+    /// Every name for a type or variant is there before any namespace runs.
+    /// These namespaces read each other's values, so no order would help:
+    /// `::aa::c` runs first, and calls into `::o::b` before it has run. Each
+    /// alias gets its own program, since a local alias is a value that would
+    /// otherwise move `::o::b` first for the aliases beside it.
+    #[test]
+    fn type_aliases_are_bound_before_any_namespace_runs() {
+        let cases = [
+            ("record", "Thing ::o::a/Thing", "Thing(n: 1).n", val!(1)),
+            ("enum", "Dir ::o::a/Dir", "eq(Dir.Up, ::o::a/Dir.Up)", val!(true)),
+            (
+                "record variant",
+                "Round ::o::a/Shape.Circle",
+                "Round(r: 2).r",
+                val!(2),
+            ),
+            (
+                "plain variant",
+                "Pack ::o::a/Shape.Boxed",
+                r#"eq(Pack("x"), ::o::a/Shape.Boxed("x"))"#,
+                val!(true),
+            ),
+            (
+                "unit variant",
+                "Spot ::o::a/Shape.Dot",
+                "eq(Spot, ::o::a/Shape.Dot)",
+                val!(true),
+            ),
+            ("where type", "Port ::o::a/Port", "Port(80)", val!(80)),
+            (
+                "literal union",
+                "Fruit ::o::a/Fruit",
+                r#"Fruit("apple")"#,
+                val!("apple"),
+            ),
+            (
+                "alias of an alias",
+                "Relayed ::o::d/Thing",
+                "Relayed(n: 3).n",
+                val!(3),
+            ),
+            (
+                "local alias",
+                "Thing ::o::a/Thing\nNear Thing",
+                "Near({n: 4}).n",
+                val!(4),
+            ),
+            (
+                "alias of a local alias",
+                "Thing ::o::a/Thing\nNear Thing\nNearer Near",
+                "Nearer({n: 5}).n",
+                val!(5),
+            ),
+            (
+                "local variant",
+                "Dir ::o::a/Dir\nDown Dir.Down",
+                "eq(Down, ::o::a/Dir.Down)",
+                val!(true),
+            ),
+        ];
+        let mut failures = Vec::new();
+        for (kind, aliases, expression, expected) in &cases {
+            let src = format!(
+                r#"::aa::c ns
+base 5
+made ::o::b/make()
+
+::o::b ns
+{aliases}
+limit ::aa::c/base
+make fn (): Any {{ {expression} }}
+
+::o::d ns
+Thing ::o::a/Thing
+
+::o::a ns
+Thing type {{ n: Int }}
+Dir enum {{ Up, Down }}
+Circle type {{ r: Int }}
+Shape enum {{ Circle(Circle), Boxed(Str), Dot }}
+Port type Int where between(%, 1, 65535)
+Fruit type "apple" | "banana"
+
+::main ns
+::aa::c/made"#
+            );
+            for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+                let got = compile_and_run_with_std_conf(&src, conf);
+                if got.as_ref() != Ok(expected) {
+                    failures.push(format!("{kind}: {got:?}"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
     /// A value whose Map or Vec literal calls into another namespace waits
     /// for that namespace to run, so the callee finds its own constants.
     /// Calls held inside a literal were invisible to the ordering, and the

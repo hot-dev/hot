@@ -856,10 +856,18 @@ impl DependencyResolver {
             tracing::debug!("Repository already cached at: {}", repo_path.display());
 
             // For branches, try to update (fetch + checkout)
-            // For tags/commits, assume they're immutable and skip update
+            // For tags/commits, assume they're immutable and skip update.
+            // Hot once left a clone of the default branch in the cache when it
+            // could not check a ref out, so a clone not on its ref is replaced.
             if branch.is_some() {
                 tracing::debug!("Updating branch...");
-                Self::update_git_repo(&repo_path, git_url, branch)?;
+                if let Err(error) = Self::update_git_repo(&repo_path, git_url, branch) {
+                    tracing::debug!("Replacing cached clone: {}", error);
+                    Self::replace_git_repo(git_url, &repo_path, ref_name)?;
+                }
+            } else if tag.is_some_and(|tag| !Self::is_checked_out_at(&repo_path, tag)) {
+                tracing::debug!("Replacing cached clone that is not at its tag");
+                Self::replace_git_repo(git_url, &repo_path, ref_name)?;
             } else {
                 tracing::debug!("Using cached tag/commit (immutable)");
             }
@@ -914,12 +922,16 @@ impl DependencyResolver {
         // Rewrite SSH URLs to HTTPS for CI compatibility
         let effective_url = Self::rewrite_git_url_for_https(git_url);
 
+        // `--depth 1` on its own fetches the default branch and no tags, so a
+        // shallow clone has to name its ref. `--branch` takes a branch or a
+        // tag but not a commit, which needs a full clone to check out.
+        let commit = ref_name.filter(|ref_val| Self::looks_like_commit(ref_val));
+
         let mut cmd = Command::new("git");
         cmd.arg("clone");
 
-        // Add depth=1 for faster clones when possible
-        if ref_name.is_some() {
-            cmd.arg("--depth").arg("1");
+        if let Some(ref_val) = ref_name.filter(|_| commit.is_none()) {
+            cmd.arg("--depth").arg("1").arg("--branch").arg(ref_val);
         }
 
         cmd.arg(&effective_url);
@@ -952,12 +964,54 @@ impl DependencyResolver {
             ));
         }
 
-        // Checkout the specific branch, tag, or commit if specified
-        if let Some(ref_val) = ref_name {
-            Self::checkout_ref(target_path, ref_val)?;
+        if let Some(commit) = commit
+            && let Err(error) = Self::checkout_ref(target_path, commit)
+        {
+            // Left in place, the next run would take it for this commit.
+            let _ = std::fs::remove_dir_all(target_path);
+            return Err(error);
         }
 
         Ok(())
+    }
+
+    /// Clone again over a cached clone that can't be used.
+    fn replace_git_repo(
+        git_url: &str,
+        repo_path: &Path,
+        ref_name: Option<&str>,
+    ) -> Result<(), String> {
+        std::fs::remove_dir_all(repo_path).map_err(|e| {
+            format!(
+                "Failed to remove cached clone {}: {}",
+                repo_path.display(),
+                e
+            )
+        })?;
+        Self::clone_git_repo(git_url, repo_path, ref_name)
+    }
+
+    /// Whether a ref is spelled like a full or abbreviated commit SHA.
+    fn looks_like_commit(ref_name: &str) -> bool {
+        (7..=64).contains(&ref_name.len()) && ref_name.bytes().all(|b| b.is_ascii_hexdigit())
+    }
+
+    /// Whether a cached clone has the tag or commit `ref_name` checked out.
+    fn is_checked_out_at(repo_path: &Path, ref_name: &str) -> bool {
+        let commit_of = |rev: &str| {
+            Command::new("git")
+                .args(["rev-parse", "--verify", "--quiet"])
+                .arg(format!("{rev}^{{commit}}"))
+                .current_dir(repo_path)
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .map(|output| output.stdout)
+        };
+        match (commit_of("HEAD"), commit_of(ref_name)) {
+            (Some(head), Some(wanted)) => head == wanted,
+            _ => false,
+        }
     }
 
     /// Update an existing git repository (fetch + checkout)
@@ -1015,7 +1069,7 @@ impl DependencyResolver {
         Ok(())
     }
 
-    /// Checkout a specific ref (branch, tag, or commit SHA)
+    /// Checkout a commit SHA in a full clone
     fn checkout_ref(repo_path: &Path, ref_name: &str) -> Result<(), String> {
         tracing::debug!("Checking out ref: {}", ref_name);
 
@@ -1522,6 +1576,181 @@ mod tests {
         let mut names: Vec<String> = resolved.iter().map(|dep| dep.name.clone()).collect();
         names.sort();
         names
+    }
+
+    /// A repository with one file, `version`, that says which commit it's on.
+    /// `v1.0.0` (lightweight) and `v1.0.1` (annotated) sit on the first commit,
+    /// and `feature` is a commit that `main` doesn't have.
+    struct GitDep {
+        _dir: tempfile::TempDir,
+        repo: PathBuf,
+        url: String,
+        first_commit: String,
+    }
+
+    impl GitDep {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = dir.path().join("dep");
+            std::fs::create_dir(&repo).unwrap();
+            // A file:// URL: git ignores --depth for a plain path.
+            let url = url::Url::from_file_path(&repo).unwrap().to_string();
+            let dep = Self {
+                _dir: dir,
+                repo,
+                url,
+                first_commit: String::new(),
+            };
+            dep.git(&["init", "--quiet", "--initial-branch", "main"]);
+            dep.commit("tagged");
+            let first_commit = dep.git(&["rev-parse", "HEAD"]);
+            dep.git(&["tag", "v1.0.0"]);
+            dep.git(&["tag", "--annotate", "v1.0.1", "--message", "annotated"]);
+            dep.commit("main");
+            dep.git(&["checkout", "--quiet", "-b", "feature"]);
+            dep.commit("feature");
+            dep.git(&["checkout", "--quiet", "main"]);
+            Self {
+                first_commit,
+                ..dep
+            }
+        }
+
+        fn git(&self, args: &[&str]) -> String {
+            let output = Command::new("git")
+                .args(["-c", "user.name=Test", "-c", "user.email=test@example.test"])
+                .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"])
+                .args(args)
+                .current_dir(&self.repo)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
+
+        fn commit(&self, version: &str) {
+            std::fs::write(self.repo.join("version"), version).unwrap();
+            self.git(&["add", "version"]);
+            self.git(&["commit", "--quiet", "--message", version]);
+        }
+
+        /// What `version` says in a clone of this repository at `branch` or `tag`.
+        fn resolve(
+            &self,
+            cache: &Path,
+            branch: Option<&str>,
+            tag: Option<&str>,
+        ) -> Result<String, String> {
+            let repo = DependencyResolver::clone_or_update_repo(&self.url, cache, branch, tag)?;
+            Ok(std::fs::read_to_string(repo.join("version")).unwrap())
+        }
+
+        /// A clone of the default branch where `ref_name`'s clone belongs, as
+        /// an earlier release left behind when it could not check the ref out.
+        fn leave_default_branch_clone(&self, cache: &Path, ref_name: &str) {
+            let name = DependencyResolver::get_repo_cache_name(&self.url, Some(ref_name));
+            self.git(&[
+                "clone",
+                "--quiet",
+                "--depth",
+                "1",
+                &self.url,
+                cache.join(name).to_str().unwrap(),
+            ]);
+        }
+    }
+
+    #[test]
+    fn a_tag_off_the_default_branch_is_checked_out() {
+        let dep = GitDep::new();
+        let cache = tempfile::tempdir().unwrap();
+        for tag in ["v1.0.0", "v1.0.1"] {
+            assert_eq!(
+                dep.resolve(cache.path(), None, Some(tag)).unwrap(),
+                "tagged"
+            );
+            // From the cache this time.
+            assert_eq!(
+                dep.resolve(cache.path(), None, Some(tag)).unwrap(),
+                "tagged"
+            );
+        }
+    }
+
+    #[test]
+    fn a_commit_sha_is_checked_out() {
+        let dep = GitDep::new();
+        let cache = tempfile::tempdir().unwrap();
+        let sha = dep.first_commit.as_str();
+        assert_eq!(
+            dep.resolve(cache.path(), None, Some(sha)).unwrap(),
+            "tagged"
+        );
+        assert_eq!(
+            dep.resolve(cache.path(), None, Some(sha)).unwrap(),
+            "tagged"
+        );
+        assert_eq!(
+            dep.resolve(cache.path(), None, Some(&sha[..10])).unwrap(),
+            "tagged",
+            "an abbreviated SHA"
+        );
+    }
+
+    #[test]
+    fn a_branch_other_than_the_default_is_checked_out_and_followed() {
+        let dep = GitDep::new();
+        let cache = tempfile::tempdir().unwrap();
+        let feature = Some("feature");
+        assert_eq!(dep.resolve(cache.path(), feature, None).unwrap(), "feature");
+
+        dep.git(&["checkout", "--quiet", "feature"]);
+        dep.commit("feature, later");
+        dep.git(&["checkout", "--quiet", "main"]);
+        assert_eq!(
+            dep.resolve(cache.path(), feature, None).unwrap(),
+            "feature, later"
+        );
+    }
+
+    #[test]
+    fn a_ref_the_repository_lacks_fails_every_time() {
+        let dep = GitDep::new();
+        let cache = tempfile::tempdir().unwrap();
+        // The second attempt must not take what the first left for the ref.
+        for attempt in 1..=2 {
+            let error = dep.resolve(cache.path(), None, Some("v9.9.9")).unwrap_err();
+            assert!(error.contains("v9.9.9"), "attempt {attempt}: {error}");
+            let error = dep
+                .resolve(cache.path(), None, Some("0123456789abcdef"))
+                .unwrap_err();
+            assert!(
+                error.contains("0123456789abcdef"),
+                "attempt {attempt}: {error}"
+            );
+        }
+    }
+
+    /// An earlier release's clone holds the default branch, which is the wrong
+    /// code for a tag and has no way to reach another branch.
+    #[test]
+    fn a_clone_on_the_wrong_commit_is_replaced() {
+        let dep = GitDep::new();
+        let cache = tempfile::tempdir().unwrap();
+        dep.leave_default_branch_clone(cache.path(), "v1.0.0");
+        assert_eq!(
+            dep.resolve(cache.path(), None, Some("v1.0.0")).unwrap(),
+            "tagged"
+        );
+        dep.leave_default_branch_clone(cache.path(), "feature");
+        assert_eq!(
+            dep.resolve(cache.path(), Some("feature"), None).unwrap(),
+            "feature"
+        );
     }
 
     /// Two packages with the same name in different orgs are two
