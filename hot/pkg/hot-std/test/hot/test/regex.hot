@@ -45,6 +45,8 @@ meta ["test"] fn () {
     // Test capture function (first match with capture groups)
     expected-capture {match: "Hello John", groups: ["Hello", "John"]}
     assert-eq(expected-capture, ::hot::regex/capture("Hello John Doe world", "(\\w+)\\s+(\\w+)"), "capture returns groups")
+    assert-eq(null, ::hot::regex/capture("no digits", "(\\d+)"), "capture returns null without a match")
+    assert-eq({match: "a", groups: ["a", null]}, ::hot::regex/capture("a", "(a)|(b)"), "a group that took no part is null")
 
     // Test capture-all function (all matches with capture groups)
     expected-captures [
