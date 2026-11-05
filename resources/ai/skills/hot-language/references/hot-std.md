@@ -541,7 +541,7 @@ replace fn (value: Str, pattern: Str, replacement: Str): Str      // Replace fir
 replace-all fn (value: Str, pattern: Str, replacement: Str): Str  // Replace all matches
 split fn (value: Str, pattern: Str): Vec<Str>            // Split by pattern
 is-match fn (value: Str, pattern: Str): Bool             // true if pattern matches
-capture fn (value: Str, pattern: Str): Str               // First captured group
+capture fn (value: Str, pattern: Str): Map?              // First match as {match, groups}, or null
 capture-all fn (value: Str, pattern: Str): Vec<Str>      // All captured groups
 escape fn (value: Str): Str                              // Escape special regex chars
 ```
