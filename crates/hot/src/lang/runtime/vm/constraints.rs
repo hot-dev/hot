@@ -784,10 +784,13 @@ impl VirtualMachine {
                     }
                 }
                 // No member's base type matched: say what all of them accept.
+                // A mismatch further in means the member's own base did.
                 let expected: Vec<&str> = failures
                     .iter()
                     .filter_map(|f| match &f.kind {
-                        FailureKind::BaseMismatch { expected } => Some(expected.as_str()),
+                        FailureKind::BaseMismatch { expected } if f.path.len() == path.len() => {
+                            Some(expected.as_str())
+                        }
                         _ => None,
                     })
                     .collect();
@@ -799,7 +802,10 @@ impl VirtualMachine {
                 // says more than "expected another type".
                 let index = failures
                     .iter()
-                    .position(|f| !matches!(f.kind, FailureKind::BaseMismatch { .. }))
+                    .position(|f| {
+                        !matches!(f.kind, FailureKind::BaseMismatch { .. })
+                            || f.path.len() > path.len()
+                    })
                     .unwrap_or(0);
                 match failures.into_iter().nth(index) {
                     Some(failure) => Ok(Err(failure)),
@@ -845,25 +851,18 @@ impl VirtualMachine {
                 let mut checked_entries = indexmap::IndexMap::with_capacity(entries.len());
                 for (key, item) in std::sync::Arc::unwrap_or_clone(entries).into_iter() {
                     path.push(key.clone());
-                    let checked_key = match &key_spec {
-                        Some(spec) => match self.check_value(key.clone(), spec, path)? {
-                            Ok(checked) => checked,
-                            Err(failure) => return Ok(Err(failure)),
-                        },
-                        None => key,
-                    };
-                    if checked_entries.contains_key(&checked_key) {
-                        return Ok(Err(self.base_mismatch(
-                            "distinct map keys after conversion",
-                            &checked_key,
-                            path,
-                        )));
-                    }
-                    let result = self.check_value(item, &elem, path)?;
+                    let entry = self.check_map_entry(
+                        key,
+                        item,
+                        key_spec.as_ref(),
+                        &elem,
+                        &checked_entries,
+                        path,
+                    )?;
                     path.pop();
-                    match result {
-                        Ok(checked) => {
-                            checked_entries.insert(checked_key, checked);
+                    match entry {
+                        Ok((key, item)) => {
+                            checked_entries.insert(key, item);
                         }
                         Err(failure) => return Ok(Err(failure)),
                     }
@@ -898,6 +897,51 @@ impl VirtualMachine {
             "refine" => self.check_refinement(value, node, path),
             _ => Ok(Ok(value)),
         }
+    }
+
+    /// Check one entry of a map, whose key the caller has put on `path`.
+    fn check_map_entry(
+        &mut self,
+        key: Val,
+        item: Val,
+        key_spec: Option<&Val>,
+        elem: &Val,
+        checked: &indexmap::IndexMap<Val, Val>,
+        path: &mut Vec<Val>,
+    ) -> VmResult<Result<(Val, Val), Box<Failure>>> {
+        let key = match key_spec {
+            Some(spec) => match self.check_map_key(key, spec, path)? {
+                Ok(key) => key,
+                Err(failure) => return Ok(Err(failure)),
+            },
+            None => key,
+        };
+        if checked.contains_key(&key) {
+            return Ok(Err(self.base_mismatch(
+                "distinct map keys after conversion",
+                &key,
+                path,
+            )));
+        }
+        Ok(self.check_value(item, elem, path)?.map(|item| (key, item)))
+    }
+
+    /// Check a map key. JSON object keys are all strings, so a key that spells
+    /// a JSON number also passes as that number: `"1"` at `Map<Int, V>`.
+    fn check_map_key(
+        &mut self,
+        key: Val,
+        spec: &Val,
+        path: &mut Vec<Val>,
+    ) -> VmResult<Result<Val, Box<Failure>>> {
+        let result = self.check_value(key.clone(), spec, path)?;
+        if result.is_err()
+            && let Val::Str(text) = &key
+            && let Some(number) = crate::val::json_number_key(text)
+        {
+            return Ok(self.check_value(number, spec, path)?.or(result));
+        }
+        Ok(result)
     }
 
     fn base_mismatch(&self, expected: &str, value: &Val, path: &[Val]) -> Box<Failure> {

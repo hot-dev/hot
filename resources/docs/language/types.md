@@ -221,6 +221,8 @@ Server(body)  // Err: constructor of `Server` at `port` expected Int, got Str
 
 - Built-in types follow a parameter's rules. Numbers convert only when nothing is lost, null fails unless the type allows it, and a value of a declared type over a built-in one, such as `Port(80)` from `Port type Int`, keeps its tag.
 - Unlike a parameter, `Vec<T>` and `Map<K, V>` check their contents: `Numbers type { values: Vec<Int> }` refuses `{values: [1, "x"]}`, and the error names `values[1]`.
+- A `Map<K, V>` field checks its keys too. JSON keys are strings, so a key that spells a number takes that number where `K` is numeric: `{"1": 2}` at `Map<Int, Int>` has the key `1`. Two keys that become one fail rather than losing an entry.
+- In a union, `Map<K, V>` comes after any record member, so data that builds the record is that record, whatever the order of the union.
 - A field typed as a record or enum takes a value of that type, a Map to build it from, or whatever a constructor it declares takes. Any other value fails, null included unless the field allows it.
 - A failure inside a nested record or a `Vec` of records is reported from the outermost record, with the whole path: `constructor of `Order` at `items[2].price` expected Dec, got Str`.
 - An `Err` given for a field stops the construction and comes back as itself, unless the field is `Any`.

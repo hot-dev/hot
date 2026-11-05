@@ -4957,12 +4957,20 @@ impl VirtualMachine {
         }
 
         let mut check_failure = None;
+        let mut after_records = Vec::new();
         for matched in members.iter().filter(|member| {
             Self::value_matches_builtin_type(data, member)
                 || Self::value_matches_literal_type(data, member)
         }) {
             if Self::value_matches_literal_type(data, matched) {
                 return Ok(data.clone());
+            }
+            // Record data is also a Map, so a `Map<K, V>` member waits for
+            // the record members: `{name: "x"}` at `Map<Str, Str> | Other`
+            // is an `Other`, in either order.
+            if matches!(matched.get("$after_records"), Some(Val::Bool(true))) {
+                after_records.push(matched);
+                continue;
             }
             let constructed = self.construct_typed_recursive(data, matched)?;
             if !constructed.is_err() {
@@ -4985,12 +4993,21 @@ impl VirtualMachine {
 
         match constructed_matches.len() {
             1 => Ok(constructed_matches.remove(0)),
-            0 => Ok(check_failure.unwrap_or_else(|| {
-                Val::err(Val::from(format!(
-                    "Value does not match any member of union {}",
-                    Self::format_union_members(members)
-                )))
-            })),
+            0 => {
+                for member in after_records {
+                    let constructed = self.construct_typed_recursive(data, member)?;
+                    if !constructed.is_err() {
+                        return Ok(constructed);
+                    }
+                    check_failure.get_or_insert(constructed);
+                }
+                Ok(check_failure.unwrap_or_else(|| {
+                    Val::err(Val::from(format!(
+                        "Value does not match any member of union {}",
+                        Self::format_union_members(members)
+                    )))
+                }))
+            }
             _ => Ok(Val::err(Val::from(format!(
                 "Value ambiguously matches multiple members of union {}",
                 Self::format_union_members(members)

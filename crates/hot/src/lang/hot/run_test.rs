@@ -38,6 +38,99 @@ all()"#;
     }
 
     #[test]
+    fn generic_map_members_wait_for_record_members() {
+        let source = r#"::t ns
+Other type { name: Str }
+Pet type { name: Str }
+Strict type { values: Map<Str, Str> | Other }
+Reversed type { values: Other | Map<Str, Str> }
+Loose type { values: Map<Str, Any> | Other }
+Nullable type { values: Map<Str, Str>? | Other }
+Plain type { values: Map | Other }
+Both type { values: Map<Str, Str> | Other | Pet }
+all fn (): Vec {
+    record {name: "x"}
+    colors {color: "red"}
+    [is-type(Strict({values: record}).values, Other),
+     is-type(Reversed({values: record}).values, Other),
+     is-type(Loose({values: record}).values, Other),
+     is-type(Nullable({values: record}).values, Other),
+     eq(Strict({values: colors}).values, colors),
+     eq(Reversed({values: colors}).values, colors),
+     eq(Loose({values: {a: 1}}).values, {a: 1}),
+     is-err(Strict({values: {a: 1}})),
+     is-err(Both({values: record})),
+     eq(Plain({values: record}).values, record)]
+}
+all()
+all()"#;
+        assert_same_with_and_without_jit(
+            source,
+            &val!([true, true, true, true, true, true, true, true, true, true]),
+        );
+    }
+
+    #[test]
+    fn failed_map_keys_leave_the_check_path_as_they_found_it() {
+        let cases = [
+            // The first entry passes its second member after the first
+            // member refused its key.
+            (
+                r#"::t ns
+K type { m: Vec<Map<Str, Int> | Map<Int, Str>> }
+K({m: [assoc({}, 7, "ok"), {a: "bad"}]})"#,
+                val!(["m", 1, "a"]),
+                "at `m[1].a` expected Int, got Str",
+            ),
+            (
+                r#"::t ns
+K type { m: Map<Str, Int> | Map<Int, Str> }
+K({m: assoc({}, 7, 8)})"#,
+                val!(["m", 7]),
+                "at `m[7]` expected Str, got Int",
+            ),
+        ];
+        for (source, path, message) in cases {
+            for conf in [None, Some(crate::val!({"jit": {"threshold": 1}}))] {
+                let out = compile_and_run_with_std_conf(source, conf).unwrap();
+                assert!(out.is_err(), "{out:?}");
+                let violation = out.get("$val").unwrap().get("$val").unwrap();
+                assert_eq!(violation.get("path").unwrap(), path);
+                let text = violation.get("message").unwrap().to_string();
+                assert!(text.contains(message), "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn number_keyed_maps_take_the_keys_json_gives_them() {
+        let source = r#"::t ns
+Counts type { counts: Map<Int, Int> }
+Prices type { prices: Map<Dec, Str> }
+Named type { counts: Map<Str, Int> }
+Positive type Int where gt(%, 0)
+PositiveKeys type { counts: Map<Positive, Int> }
+all fn (): Vec {
+    [keys(Counts({counts: from-json("{\"1\": 2}")}).counts),
+     eq(keys(Prices({prices: {"1.5": "a"}}).prices), [1.5]),
+     keys(Named({counts: {"1": 2}}).counts),
+     keys(PositiveKeys({counts: {"1": 2}}).counts),
+     is-err(PositiveKeys({counts: {"0": 2}})),
+     is-err(Counts({counts: {"1.5": 2}})),
+     is-err(Counts({counts: {"01": 2}})),
+     is-err(Counts({counts: {"+1": 2}})),
+     is-err(Counts({counts: {one: 2}})),
+     is-err(Counts({counts: {"1": 2, "1.0": 3}}))]
+}
+all()
+all()"#;
+        assert_same_with_and_without_jit(
+            source,
+            &val!([[1], true, ["1"], [1], true, true, true, true, true, true]),
+        );
+    }
+
+    #[test]
     fn map_fields_validate_keys_without_losing_converted_entries() {
         let source = r#"::t ns
 Counts type { counts: Map<Str, Int> }

@@ -1647,6 +1647,19 @@ fn json_number_text_to_val<E: serde::de::Error>(text: &str) -> Result<Val, E> {
         .map_err(E::custom)
 }
 
+/// The number a JSON object key spells, in JSON's own number syntax. `"01"` and
+/// `"+1"` spell none. The text is parsed once more for a `Dec`, since
+/// `serde_json::Number` holds it as an `f64`.
+pub(crate) fn json_number_key(text: &str) -> Option<Val> {
+    let number = text.parse::<serde_json::Number>().ok()?;
+    match number.as_i64() {
+        Some(n) => Some(Val::Int(n)),
+        None => D256::from_str(text, fastnum::decimal::Context::default())
+            .ok()
+            .map(Val::Dec),
+    }
+}
+
 fn json_number_to_val(n: &serde_json::Number) -> Val {
     if let Some(i) = n.as_i64() {
         Val::Int(i)

@@ -10,7 +10,8 @@
 //!   over that kind passes as it is, as it does at a parameter.
 //! - `literal`: the value must equal one of `values`.
 //! - `vec` / `map`: every element, or every map value, must pass `elem`.
-//!   A map's keys must also pass `key` when present. With `tagged`, as for `base`.
+//!   A map's keys must also pass `key` when present, as themselves or as the
+//!   JSON number they spell. With `tagged`, as for `base`.
 //! - `optional`: `null`, or `inner`.
 //! - `union`: at least one of `members`.
 //! - `struct`: each constrained field passes its spec, then `invariant`.

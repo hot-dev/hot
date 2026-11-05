@@ -6241,7 +6241,12 @@ impl Compiler {
             }
             TypeExpr::Generic(name, _) if name == "Map" => {
                 if include_builtin {
-                    Self::simple_type_info("Map")
+                    let mut map_info = Self::simple_type_info("Map");
+                    if let Val::Map(entries) = &mut map_info {
+                        std::sync::Arc::make_mut(entries)
+                            .insert(Val::from("$after_records"), Val::Bool(true));
+                    }
+                    map_info
                 } else {
                     Val::map_empty()
                 }
