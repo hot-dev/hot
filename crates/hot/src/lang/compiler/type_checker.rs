@@ -608,6 +608,16 @@ struct DeferredVariable {
     value: Value,
 }
 
+/// A value known to be an enum variant whose payload isn't a record, so it
+/// can't be read through the variant: an arm has to bind it.
+struct PlainVariant {
+    /// The variant's type, as `Named` holds it: `::ns/Enum.Variant`.
+    type_name: String,
+    /// `Enum.Variant`, for diagnostics.
+    display: String,
+    payload: TypeExpr,
+}
+
 /// The implicit subject of a `fn match` / `fn match-all` body: the
 /// function's first parameter.
 struct FnMatchSubject {
@@ -744,6 +754,12 @@ pub struct TypeChecker {
     /// project-file location are dropped by the check pipeline's project
     /// scoping, so a definition-site fallback keeps them visible.
     current_def_src: Option<Source>,
+    /// Type of the value a pipe passes to the stage being walked. Only that
+    /// stage's call takes it, not the calls in its arguments.
+    piped_type: Option<TypeExpr>,
+    /// Where each variant type (`::ns/Enum.Variant`) was last read by name.
+    /// A use found later, such as in the type a body returns, reports there.
+    variant_reads: AHashMap<String, Source>,
 }
 
 impl Default for TypeChecker {
@@ -776,6 +792,8 @@ impl TypeChecker {
             deprecated_defs: AHashMap::new(),
             current_def: None,
             current_def_src: None,
+            piped_type: None,
+            variant_reads: AHashMap::new(),
         }
     }
 
@@ -3183,10 +3201,7 @@ impl TypeChecker {
         // Direct arrow lookup (covers both `Source -> Target` and dotted
         // variant targets like `Source -> Enum.Variant` since both are
         // stored under their resolved target FQN).
-        if self
-            .impl_registry
-            .contains(&(src_fqn.clone(), target_fqn.clone()))
-        {
+        if self.has_implementation(&src_fqn, &target_fqn) {
             return true;
         }
         // For variant-shaped enums, also accept `actual -> Enum` when the
@@ -3239,6 +3254,19 @@ impl TypeChecker {
             }
         }
         false
+    }
+
+    /// Whether an arrow runs from `source` to `target`. A variant takes its
+    /// enum's arrows.
+    fn has_implementation(&self, source: &str, target: &str) -> bool {
+        let arrow = |from: &str| {
+            self.impl_registry
+                .contains(&(from.to_string(), target.to_string()))
+        };
+        arrow(source)
+            || source
+                .split_once('.')
+                .is_some_and(|(enum_fqn, _)| arrow(enum_fqn))
     }
 
     fn check_namespace(&mut self, namespace: &Namespace) -> CompilerResult<()> {
@@ -3327,6 +3355,12 @@ impl TypeChecker {
                     &inferred_type,
                     var.src.as_ref(),
                 );
+                self.check_variant_result(
+                    "bound as",
+                    &constraint,
+                    &inferred_type,
+                    var.src.as_ref(),
+                );
                 self.apply_annotation_constraint(inferred_type, &constraint)
             } else {
                 self.untyped_binding_type(value, inferred_type)
@@ -3393,6 +3427,12 @@ impl TypeChecker {
                             .map(|s| self.source_to_error_location(s));
                         self.resolve_deep_path_type(&base, path, location.as_ref())
                     } else {
+                        if let TypeExpr::Named(name) = &base
+                            && name.contains('.')
+                            && let Some(src) = var_ref.src.as_ref().or(var_ref.var.src.as_ref())
+                        {
+                            self.variant_reads.insert(name.clone(), src.clone());
+                        }
                         base
                     }
                 }
@@ -3441,7 +3481,8 @@ impl TypeChecker {
                 // so a wrong-arity call inside a template is reported.
                 for part in &template.parts {
                     if let crate::lang::ast::TemplatePart::Expression(expr) = part {
-                        let _ = self.infer_argument_type(expr);
+                        let part_type = self.infer_argument_type(expr);
+                        self.check_variant_in_template(&part_type);
                     }
                 }
                 TypeExpr::Str
@@ -3542,6 +3583,13 @@ impl TypeChecker {
                         false,
                         false,
                     )
+                } else if arm_types
+                    .iter()
+                    .any(|arm_type| !self.plain_variants_in(arm_type).is_empty())
+                {
+                    // The last arm doesn't stand for the others here: an
+                    // earlier one yields a variant a declaration can rule out.
+                    TypeExpr::Union(arm_types)
                 } else {
                     arm_types.pop().unwrap_or(TypeExpr::Any)
                 }
@@ -3567,6 +3615,12 @@ impl TypeChecker {
                         self.warn_annotation_mismatch(
                             var_ref.var.sym.name(),
                             ann,
+                            &constraint,
+                            &inferred,
+                            var_ref.src.as_ref().or(var_ref.var.src.as_ref()),
+                        );
+                        self.check_variant_result(
+                            "bound as",
                             &constraint,
                             &inferred,
                             var_ref.src.as_ref().or(var_ref.var.src.as_ref()),
@@ -3917,35 +3971,35 @@ impl TypeChecker {
 
     /// Walk a match arm's body. Inside an `Enum.Variant` arm the arm's
     /// binding holds that variant's payload. The matched name keeps the
-    /// variant, whose fields read through to a record payload, so it is
-    /// bound to the payload type only for a record payload. A binding
-    /// whose type the pattern doesn't tell is bound as `Any`, so it still
-    /// shadows an outer name or a function of the same name.
+    /// variant. It is bound to the payload type for a record payload, whose
+    /// fields read through it, and otherwise to the variant's own type, so
+    /// that using it as the payload is reported (`variant-as-payload`). A
+    /// binding whose type the pattern doesn't tell is bound as `Any`, so it
+    /// still shadows an outer name or a function of the same name.
     fn infer_match_arm_body(&mut self, arm: &MatchArm, subject: Option<&str>) -> TypeExpr {
-        let (payload, subject) = match (&arm.type_name, &arm.variant) {
+        let (payload, matched) = match (&arm.type_name, &arm.variant) {
             (Some(type_name), Some(variant)) if arm.alternatives.is_empty() => {
                 let payload = self.variant_payload_type(type_name, variant);
-                let reads_through = payload.as_ref().is_some_and(|p| self.is_record_type(p));
-                (payload, subject.filter(|_| reads_through))
+                let matched = match &payload {
+                    Some(payload) if self.payload_reads_through(payload) => Some(payload.clone()),
+                    Some(_) => self.variant_type(type_name, variant),
+                    None => None,
+                };
+                (payload, matched)
             }
             (Some(type_name), None) if arm.alternatives.is_empty() => {
-                (self.union_member_named(subject, type_name), subject)
+                let member = self.union_member_named(subject, type_name);
+                (member.clone(), member)
             }
-            _ => (None, subject),
+            _ => (None, None),
         };
-        let bindings: Vec<(&str, TypeExpr)> = match payload {
-            Some(payload) => subject
-                .into_iter()
-                .chain(arm.binding.as_deref())
-                .map(|name| (name, payload.clone()))
-                .collect(),
-            None => arm
-                .binding
-                .as_deref()
-                .map(|name| (name, TypeExpr::Any))
-                .into_iter()
-                .collect(),
-        };
+        let mut bindings: Vec<(&str, TypeExpr)> = Vec::new();
+        if let (Some(name), Some(matched)) = (subject, matched) {
+            bindings.push((name, matched));
+        }
+        if let Some(name) = arm.binding.as_deref() {
+            bindings.push((name, payload.unwrap_or(TypeExpr::Any)));
+        }
         if bindings.is_empty() {
             return self.infer_value_type(&arm.body);
         }
@@ -3956,6 +4010,312 @@ impl TypeChecker {
         let body_type = self.infer_value_type(&arm.body);
         self.context.pop_scope();
         body_type
+    }
+
+    /// The type of a matched name inside an `Enum.Variant` arm whose payload
+    /// isn't a record. `None` for `Result`, whose arms bind the name to the
+    /// payload itself.
+    fn variant_type(&self, enum_name: &str, variant: &str) -> Option<TypeExpr> {
+        if self.atom_names_result(&Some(enum_name.to_string()), &None) {
+            return None;
+        }
+        let enum_fqn = self.enum_fqn(enum_name)?;
+        Some(TypeExpr::Named(format!("{enum_fqn}.{variant}")))
+    }
+
+    /// The variants `ty` can be whose payload can only be reached by binding
+    /// it.
+    fn plain_variants_in(&mut self, ty: &TypeExpr) -> Vec<PlainVariant> {
+        let mut found = Vec::new();
+        self.collect_plain_variants(ty, &mut found);
+        found
+    }
+
+    fn collect_plain_variants(&mut self, ty: &TypeExpr, found: &mut Vec<PlainVariant>) {
+        match ty {
+            TypeExpr::Union(members) => {
+                for member in members {
+                    self.collect_plain_variants(member, found);
+                }
+            }
+            TypeExpr::Optional(inner) => self.collect_plain_variants(inner, found),
+            TypeExpr::Named(name) => {
+                let Some((enum_name, variant)) = name.rsplit_once('.') else {
+                    return;
+                };
+                if found.iter().any(|known| known.type_name == *name)
+                    || self.variant_type(enum_name, variant).is_none()
+                {
+                    return;
+                }
+                if let Some(payload) = self.variant_payload_type(enum_name, variant)
+                    && !self.payload_reads_through(&payload)
+                {
+                    found.push(PlainVariant {
+                        type_name: name.clone(),
+                        display: Self::short_type_name(name),
+                        payload,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether a payload's fields read through its variant: it is always a
+    /// record.
+    fn payload_reads_through(&self, payload: &TypeExpr) -> bool {
+        match payload {
+            TypeExpr::Union(members) => members.iter().all(|m| self.is_record_type(m)),
+            _ => self.is_record_type(payload),
+        }
+    }
+
+    /// Whether `expected` calls for `variant`'s payload: it takes a value of
+    /// the payload's type, and doesn't take the variant.
+    fn expects_payload(&self, expected: &TypeExpr, variant: &PlainVariant) -> bool {
+        !self.takes_variant(expected, variant) && self.takes_payload(expected, &variant.payload)
+    }
+
+    /// Whether `expected` takes `variant` as it is: it takes anything, or
+    /// names the variant or its enum, or there's an arrow to it.
+    fn takes_variant(&self, expected: &TypeExpr, variant: &PlainVariant) -> bool {
+        match expected {
+            TypeExpr::Any => true,
+            TypeExpr::Optional(inner)
+            | TypeExpr::Lazy(inner)
+            | TypeExpr::Variadic(inner)
+            | TypeExpr::Constrained(inner, _) => self.takes_variant(inner, variant),
+            TypeExpr::Union(members) => members.iter().any(|m| self.takes_variant(m, variant)),
+            _ if Self::names_result(expected) => true,
+            TypeExpr::Named(_) => {
+                let actual = TypeExpr::Named(variant.type_name.clone());
+                self.types_are_compatible(expected, &actual)
+                    || self.coercion_available(&actual, expected)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `expected` takes a value of a variant's `payload` type. This
+    /// asks more of a declared type than `types_are_compatible` does, which
+    /// lets any `Vec` or `Map` flow into one: a payload of `Vec` says nothing
+    /// about a parameter declared `User`.
+    fn takes_payload(&self, expected: &TypeExpr, payload: &TypeExpr) -> bool {
+        match (expected, payload) {
+            (TypeExpr::Any, _) => false,
+            (
+                TypeExpr::Optional(inner)
+                | TypeExpr::Lazy(inner)
+                | TypeExpr::Variadic(inner)
+                | TypeExpr::Constrained(inner, _),
+                _,
+            ) => self.takes_payload(inner, payload),
+            (TypeExpr::Union(members), _) => members.iter().any(|m| self.takes_payload(m, payload)),
+            (_, TypeExpr::Union(members)) => {
+                members.iter().any(|m| self.takes_payload(expected, m))
+            }
+            (_, TypeExpr::Optional(inner)) => self.takes_payload(expected, inner),
+            (
+                TypeExpr::Named(_) | TypeExpr::Generic(_, _),
+                TypeExpr::Named(_) | TypeExpr::Generic(_, _),
+            ) => self.types_are_compatible(expected, payload),
+            (TypeExpr::Named(_) | TypeExpr::Generic(_, _), _) => false,
+            // `Any` can be anything `expected` takes, and the variant can't.
+            (_, TypeExpr::Any) => true,
+            // The element types don't matter: the variant isn't a collection.
+            (TypeExpr::Vec(_), TypeExpr::Vec(_)) | (TypeExpr::Map(_, _), TypeExpr::Map(_, _)) => {
+                true
+            }
+            _ => self.types_are_compatible(expected, payload),
+        }
+    }
+
+    fn warn_variant_as_payload(
+        &mut self,
+        variant: &PlainVariant,
+        message: String,
+        location: Option<ErrorLocation>,
+    ) {
+        if self.warned_at("variant-as-payload", &location) {
+            return;
+        }
+        self.errors.add_warning(CompilerError::Constraint {
+            code: "variant-as-payload",
+            message,
+            help: Some(format!(
+                "bind the payload in the arm: `{} (payload) =>`",
+                variant.display
+            )),
+            warning: true,
+            location,
+        });
+    }
+
+    /// Where `variant` was last read by name, or else `fallback`.
+    fn variant_location(
+        &self,
+        variant: &PlainVariant,
+        fallback: Option<&Source>,
+    ) -> Option<ErrorLocation> {
+        self.variant_reads
+            .get(&variant.type_name)
+            .or(fallback)
+            .map(|src| self.source_to_error_location(src))
+    }
+
+    /// `variant-as-payload` for a value declared `constraint`: a return type
+    /// or a binding's annotation. `how` says what the value is, as in
+    /// "returned as". Every variant `inferred` can be is checked.
+    fn check_variant_result(
+        &mut self,
+        how: &str,
+        constraint: &TypeExpr,
+        inferred: &TypeExpr,
+        src: Option<&Source>,
+    ) {
+        for variant in self.plain_variants_in(inferred) {
+            if !self.expects_payload(constraint, &variant) {
+                continue;
+            }
+            let message = format!(
+                "`{}` is {how} `{constraint}`, which takes its `{}` payload, not the variant",
+                variant.display, variant.payload
+            );
+            let location = self.variant_location(&variant, src);
+            self.warn_variant_as_payload(&variant, message, location);
+        }
+    }
+
+    /// `variant-as-payload` for a call's arguments, and for `piped`, the
+    /// value a pipe passes first. An overload that takes the variant settles
+    /// it, as the call may reach that one.
+    fn check_variant_arguments(
+        &mut self,
+        fn_call: &FnCall,
+        arg_types: &[TypeExpr],
+        piped: Option<&TypeExpr>,
+        signatures: &[FunctionSignature],
+    ) {
+        let offset = usize::from(self.in_pipe_flow);
+        let arity = fn_call.args.len() + offset;
+        let mut passed: Vec<(usize, &TypeExpr, Option<&Source>)> = Vec::new();
+        if let Some(piped) = piped {
+            passed.push((0, piped, fn_call.src.as_ref()));
+        }
+        for (i, (arg, arg_type)) in fn_call.args.iter().zip(arg_types).enumerate() {
+            // A spread makes the later positions unknown.
+            if arg.spread {
+                break;
+            }
+            passed.push((
+                i + offset,
+                arg_type,
+                arg.src.as_ref().or(fn_call.src.as_ref()),
+            ));
+        }
+        for (position, passed_type, src) in passed {
+            for variant in self.plain_variants_in(passed_type) {
+                let mut declared = None;
+                let mut takes_variant = false;
+                for sig in signatures {
+                    let count = sig.parameter_types.len();
+                    let fits = if sig.variadic {
+                        arity + 1 >= count
+                    } else {
+                        arity == count
+                    };
+                    let param = sig
+                        .parameter_types
+                        .get(position)
+                        .or_else(|| sig.parameter_types.last().filter(|_| sig.variadic))
+                        .filter(|_| fits);
+                    let Some(param) = param else {
+                        continue;
+                    };
+                    takes_variant |= self.takes_variant(param, &variant);
+                    if self.takes_payload(param, &variant.payload) {
+                        declared = declared.or(Some(param));
+                    }
+                }
+                let Some(declared) = declared.filter(|_| !takes_variant) else {
+                    continue;
+                };
+                let declared = match declared {
+                    TypeExpr::Lazy(inner) | TypeExpr::Variadic(inner) => &**inner,
+                    other => other,
+                };
+                let message = format!(
+                    "`{}` is passed to a parameter declared `{declared}`, which takes its `{}` \
+                     payload, not the variant",
+                    variant.display, variant.payload
+                );
+                let location = src.map(|s| self.source_to_error_location(s));
+                self.warn_variant_as_payload(&variant, message, location);
+            }
+        }
+    }
+
+    /// `variant-as-payload` for a record's fields, given by name. A field's
+    /// value is a bare name here: other expressions in a Map literal aren't
+    /// walked.
+    fn check_variant_fields(&mut self, record: &TypeExpr, fn_call: &FnCall) {
+        let Some(Value::Val(Val::Map(entries), _)) = fn_call.args.first().map(|arg| &arg.value)
+        else {
+            return;
+        };
+        let Some(fields) = self.known_fields_for_type(record) else {
+            return;
+        };
+        for (key, value) in entries.iter() {
+            let (Val::Str(field), Val::Box(boxed)) = (key, value) else {
+                continue;
+            };
+            let Some(crate::lang::ast::AstNode(given @ Value::Ref(Ref::Var(_)))) =
+                boxed.as_any().downcast_ref()
+            else {
+                continue;
+            };
+            let Some(declared) = fields.get(field.as_ref()) else {
+                continue;
+            };
+            let given_type = self.infer_value_type(given);
+            for variant in self.plain_variants_in(&given_type) {
+                if !self.expects_payload(declared, &variant) {
+                    continue;
+                }
+                let message = format!(
+                    "`{}` is given to field `{field}` declared `{declared}`, which takes its \
+                     `{}` payload, not the variant",
+                    variant.display, variant.payload
+                );
+                let location = self.variant_location(&variant, fn_call.src.as_ref());
+                self.warn_variant_as_payload(&variant, message, location);
+            }
+        }
+    }
+
+    /// `variant-as-payload` for a `${...}` part. A template takes any value,
+    /// but text for a variant holding a scalar is the variant's own form, not
+    /// the scalar: `::ns/Enum.Variant("reason")`.
+    fn check_variant_in_template(&mut self, part_type: &TypeExpr) {
+        let scalar = TypeExpr::Union(vec![
+            TypeExpr::Str,
+            TypeExpr::Int,
+            TypeExpr::Dec,
+            TypeExpr::Bool,
+        ]);
+        for variant in self.plain_variants_in(part_type) {
+            if !self.takes_payload(&scalar, &variant.payload) {
+                continue;
+            }
+            let message = format!(
+                "`{}` in a template shows the variant, not its `{}` payload",
+                variant.display, variant.payload
+            );
+            let location = self.variant_location(&variant, None);
+            self.warn_variant_as_payload(&variant, message, location);
+        }
     }
 
     /// Whether `ty` is a record: a record shape or a named struct.
@@ -4000,14 +4360,8 @@ impl TypeChecker {
     /// The declared payload type of `enum_name.variant`, resolved in the
     /// enum's own namespace. `None` for payload-free variants and for names
     /// that are not known enums.
-    fn variant_payload_type(&self, enum_name: &str, variant: &str) -> Option<TypeExpr> {
-        let TypeExpr::Named(enum_fqn) = self
-            .try_resolve_local_type(enum_name)
-            .or_else(|| self.try_resolve_core_type(enum_name))
-            .or_else(|| self.try_resolve_namespaced_type(enum_name))?
-        else {
-            return None;
-        };
+    fn variant_payload_type(&mut self, enum_name: &str, variant: &str) -> Option<TypeExpr> {
+        let enum_fqn = self.enum_fqn(enum_name)?;
         let td = self
             .named_type_definition(&enum_fqn)
             .filter(|td| td.is_enum)?;
@@ -4017,7 +4371,25 @@ impl TypeChecker {
             return Some(builtin);
         }
         let payload_fqn = self.resolve_to_fqn(&payload, &enum_ns);
-        self.qualified_types.get(&payload_fqn).cloned()
+        if let Some(declared) = self.qualified_types.get(&payload_fqn) {
+            return Some(declared.clone());
+        }
+        // A type expression: `Vec<Ask>`, `Ask?`, `Int | Dec`.
+        payload
+            .contains(['<', '?', '|'])
+            .then(|| self.parse_type_annotation_in(&payload, &enum_ns))
+    }
+
+    /// The qualified name of the type `enum_name` resolves to.
+    fn enum_fqn(&self, enum_name: &str) -> Option<String> {
+        match self
+            .try_resolve_local_type(enum_name)
+            .or_else(|| self.try_resolve_core_type(enum_name))
+            .or_else(|| self.try_resolve_namespaced_type(enum_name))?
+        {
+            TypeExpr::Named(enum_fqn) => Some(enum_fqn),
+            _ => None,
+        }
     }
 
     /// Check if two types are compatible (for assignment, parameter passing, etc.)
@@ -4360,6 +4732,27 @@ impl TypeChecker {
         if literal == LiteralType::Null {
             return;
         }
+        let compared = TypeExpr::Literal(literal.clone());
+        for variant in self.plain_variants_in(other_type) {
+            if self.takes_payload(&compared, &variant.payload) {
+                let outcome = if short == "eq" {
+                    "always false"
+                } else {
+                    "always true"
+                };
+                let message = format!(
+                    "`{}` is compared with {literal}, which only its `{}` payload can equal, so \
+                     this `{short}` is {outcome}",
+                    variant.display, variant.payload
+                );
+                let location = literal_arg
+                    .src
+                    .as_ref()
+                    .or(fn_call.src.as_ref())
+                    .map(|s| self.source_to_error_location(s));
+                self.warn_variant_as_payload(&variant, message, location);
+            }
+        }
         let Some(subject) = self.literal_union_subject(other_type) else {
             return;
         };
@@ -4630,6 +5023,7 @@ impl TypeChecker {
     }
 
     fn infer_function_call_type(&mut self, fn_call: &FnCall) -> TypeExpr {
+        let piped = self.piped_type.take();
         // A variant constructor, `Shape.Circle(...)`.
         self.check_variant_reference(&fn_call.function);
         // Check for type conversion calls like `::hot::type/Str(value)`. These
@@ -4683,7 +5077,7 @@ impl TypeChecker {
                     && (source_short == target_short
                         || Self::is_primitive_type_name(&target_short));
 
-                if !always_allowed && !self.impl_registry.contains(&(source_fqn, target_fqn)) {
+                if !always_allowed && !self.has_implementation(&source_fqn, &target_fqn) {
                     self.errors
                         .errors
                         .push(CompilerError::MissingTypeImplementation {
@@ -4762,6 +5156,7 @@ impl TypeChecker {
                 for arg in &fn_call.args {
                     arg_types.push(self.infer_argument_type(&arg.value));
                 }
+                self.check_variant_fields(&t, fn_call);
                 if let Some(first_arg_type) = arg_types.first()
                     && matches!(first_arg_type, TypeExpr::Record { .. })
                     && self.types_are_compatible(&t, first_arg_type)
@@ -4776,6 +5171,7 @@ impl TypeChecker {
                 for arg in &fn_call.args {
                     arg_types.push(self.infer_argument_type(&arg.value));
                 }
+                self.check_variant_fields(&t, fn_call);
                 if let Some(first_arg_type) = arg_types.first()
                     && matches!(first_arg_type, TypeExpr::Record { .. })
                     && self.types_are_compatible(&t, first_arg_type)
@@ -4834,6 +5230,7 @@ impl TypeChecker {
                     .collect();
 
                 self.check_null_arguments(fn_call, &signatures);
+                self.check_variant_arguments(fn_call, &arg_types, piped.as_ref(), &signatures);
 
                 // Validate argument types against parameter types for all arities
                 // Find the first matching arity signature
@@ -4982,6 +5379,7 @@ impl TypeChecker {
                     &body_type,
                     src.as_ref(),
                 );
+                self.check_variant_result("returned as", &constraint, &body_type, src.as_ref());
             }
 
             self.in_pipe_flow = saved_pipe;
@@ -5896,14 +6294,18 @@ impl TypeChecker {
             if let (Value::Ref(Ref::Var(var_ref)), Some(value)) = (cur, next)
                 && var_ref.var.deep_path.is_none()
                 && var_ref.var.deep_set.is_none()
-                && !matches!(
-                    value,
-                    Value::Ref(Ref::Var(v)) if v.var.deep_path.is_none()
-                        && v.var.deep_set.is_none()
-                )
             {
                 let mut inferred = self.infer_value_type(value);
-                if var_ref.var.type_annotation.is_none() {
+                if let Some(annotation) = &var_ref.var.type_annotation {
+                    let namespace = self.context.current_namespace.clone();
+                    let constraint = self.parse_type_annotation_in(annotation, &namespace);
+                    self.check_variant_result(
+                        "bound as",
+                        &constraint,
+                        &inferred,
+                        var_ref.src.as_ref().or(var_ref.var.src.as_ref()),
+                    );
+                } else {
                     inferred = self.untyped_binding_type(value, inferred);
                 }
                 let name = var_ref.var.sym.name().to_string();
@@ -6010,7 +6412,9 @@ impl TypeChecker {
                 let mut stage_types = vec![last_type.clone()];
                 self.in_pipe_flow = true;
                 for expr in flow.expressions.iter().skip(1) {
+                    self.piped_type = Some(last_type.clone());
                     last_type = self.infer_value_type(expr);
+                    self.piped_type = None;
                     stage_types.push(last_type.clone());
                 }
                 self.in_pipe_flow = false;

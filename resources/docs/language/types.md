@@ -342,6 +342,15 @@ its fields read through to the payload. A unit variant has no payload:
 A union arm (`Reply.Steps | Reply.Declined =>`) and a type-level arm
 (`Reply =>`) keep the whole variant, since their payloads can differ.
 
+Using the matched name as the payload fails at run time or gives a wrong
+value: `length(r)` counts the variant's own keys, and `${r}` shows
+`::shop/Reply.Declined("no budget")`. `hot check` warns with
+`variant-as-payload` when the name reaches a place that takes the payload's
+type but not the variant: a call's argument, a declared return type, an
+annotated binding or a record field. It also warns when a template shows a
+variant holding a scalar, and when `eq` or `ne` compares one with a literal
+its payload could equal. Bind the payload in the arm to fix it.
+
 Use `is-type` for dynamic type checking:
 
 {{snippet:types#type-checking}}
