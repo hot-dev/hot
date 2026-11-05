@@ -2894,19 +2894,14 @@ pub fn sort(args: &[Val]) -> HotResult<Val> {
     }
 }
 
-/// The order `sort` and `sort-by` use. Int and Dec compare by value, as
-/// `lt` does; an Int and a Dec of equal value keep a fixed order (Int
-/// first) so the order stays total. Other values follow `Val`'s own total
-/// order, which groups them by type, numbers together.
+/// The order `sort` and `sort-by` use: `Val`'s own total order, which groups
+/// values by type, with numbers together by value. A value of a declared type
+/// over a scalar sorts with that scalar, as `lt` reads it, and after a plain
+/// one that holds the same, so the order stays total.
 fn compare_vals(a: &Val, b: &Val) -> std::cmp::Ordering {
-    use fastnum::D256;
-    use std::cmp::Ordering;
-
-    match (a, b) {
-        (Val::Int(a), Val::Dec(b)) => D256::from(*a).cmp(b).then(Ordering::Less),
-        (Val::Dec(a), Val::Int(b)) => a.cmp(&D256::from(*b)).then(Ordering::Greater),
-        _ => a.cmp(b),
-    }
+    crate::val::as_scalar(a)
+        .cmp(crate::val::as_scalar(b))
+        .then_with(|| a.cmp(b))
 }
 
 /// Sort a collection by applying a function to each element

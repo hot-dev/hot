@@ -4,18 +4,37 @@
 //! to JSON Schema format for MCP tool definitions.
 
 use crate::lang::ast::{
-    FnArg, LiteralType, Ref, TypeDef, TypeExpr, TypeField, Value, split_top_level,
+    FnArg, LiteralType, Program, Ref, TypeDef, TypeExpr, TypeField, Value, split_top_level,
 };
+use crate::lang::compiler::core_registry::CoreVariableRegistry;
 use crate::val::Val;
 use ahash::{AHashMap, AHashSet};
 use fastnum::D256;
 use indexmap::IndexMap;
 
-/// Registry of type definitions for resolving custom types
+/// Registry of type definitions for resolving custom types. Types are keyed
+/// by full name, as two namespaces can each declare a `Facts`. A name in an
+/// annotation means what it means in the namespace it's written in; see
+/// [`TypeRegistry::resolve`].
 #[derive(Debug, Default, Clone)]
 pub struct TypeRegistry {
-    /// Maps type names (simple or fully qualified) to their definitions
+    /// Definitions by full name (`::ns/Type`)
     types: AHashMap<String, TypeDefInfo>,
+    /// What each namespace's annotations can name besides its own types
+    scopes: AHashMap<String, TypeScope>,
+    /// Full names of `meta {core: true}` types, which any namespace can name
+    core: AHashMap<String, String>,
+    /// Full names by simple name, for a name written outside any namespace
+    by_simple_name: AHashMap<String, Vec<String>>,
+}
+
+/// The names one namespace brings in.
+#[derive(Debug, Default, Clone)]
+struct TypeScope {
+    /// Namespace aliases (`::errs ::lib::errors`), without the leading `::`
+    aliases: AHashMap<String, String>,
+    /// Imported types (`Failure ::lib::errors/TradeError`), to their full names
+    imports: AHashMap<String, String>,
 }
 
 /// One variant of an enum, normalized for schema emission
@@ -63,8 +82,49 @@ pub struct RefinementSchema {
 
 impl TypeRegistry {
     pub fn new() -> Self {
-        Self {
-            types: AHashMap::new(),
+        Self::default()
+    }
+
+    /// Register every type a program declares, and what each namespace needs
+    /// to name them.
+    pub fn register_program(&mut self, program: &Program) {
+        for (ns_path, namespace) in &program.namespaces {
+            let ns = ns_path.to_string();
+            let mut scope = TypeScope::default();
+            for (alias, target) in &namespace.aliases {
+                scope
+                    .aliases
+                    .insert(ns_key(&alias.to_string()), target.to_string());
+            }
+            for (var, value) in &namespace.scope.vars {
+                let name = var.sym.name();
+                match value {
+                    Value::TypeDef(type_def) => {
+                        let qualified_name = format!("{ns}/{name}");
+                        self.register_qualified(&qualified_name, type_def);
+                        // The last core declaration of a name wins, as in
+                        // the runtime core registry.
+                        if CoreVariableRegistry::has_core_metadata(var) {
+                            self.core.insert(name.to_string(), qualified_name);
+                        }
+                    }
+                    Value::Ref(Ref::Ns(ns_ref)) => {
+                        if let Some(target) = &ns_ref.function_name {
+                            let target_ns = ns_ref.ns.to_string();
+                            let target_ns = scope
+                                .aliases
+                                .get(&ns_key(&target_ns))
+                                .cloned()
+                                .unwrap_or(target_ns);
+                            scope
+                                .imports
+                                .insert(name.to_string(), format!("{target_ns}/{target}"));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            self.scopes.insert(ns, scope);
         }
     }
 
@@ -78,40 +138,32 @@ impl TypeRegistry {
         self.types.is_empty()
     }
 
-    /// Register a type definition
+    /// Register a type definition under `name` alone, outside any namespace
     pub fn register(&mut self, name: &str, type_def: &TypeDef) {
         let info = self.info_for(name, type_def);
-
-        // Register with simple name
-        self.types.insert(name.to_string(), info.clone());
-
-        // Also register with type_def.name if different
-        let def_name = type_def.name.to_string();
-        if def_name != name {
-            self.types.insert(def_name, info);
-        }
+        self.types.insert(name.to_string(), info);
     }
 
     /// Register a type with its fully qualified name
     pub fn register_qualified(&mut self, qualified_name: &str, type_def: &TypeDef) {
         let info = self.info_for(qualified_name, type_def);
+        self.types.insert(qualified_name.to_string(), info);
 
-        self.types.insert(qualified_name.to_string(), info.clone());
-
-        // Also register with simple name (last part after /)
-        if let Some(simple_name) = qualified_name.rsplit('/').next() {
-            self.types.insert(simple_name.to_string(), info);
+        let simple_name = qualified_name.rsplit('/').next().unwrap_or(qualified_name);
+        let same_name = self
+            .by_simple_name
+            .entry(simple_name.to_string())
+            .or_default();
+        if !same_name.iter().any(|name| name == qualified_name) {
+            same_name.push(qualified_name.to_string());
         }
     }
 
     /// Record what a registered type's `where` clause contributes to its
-    /// schema, under its qualified and simple names.
+    /// schema.
     pub fn set_refinement(&mut self, qualified_name: &str, refinement: RefinementSchema) {
-        let simple_name = qualified_name.rsplit('/').next().unwrap_or(qualified_name);
-        for name in [qualified_name, simple_name] {
-            if let Some(info) = self.types.get_mut(name) {
-                info.refinement = Some(refinement.clone());
-            }
+        if let Some(info) = self.types.get_mut(qualified_name) {
+            info.refinement = Some(refinement);
         }
     }
 
@@ -148,33 +200,60 @@ impl TypeRegistry {
         info
     }
 
-    /// Look up a type by name, returning the (possibly fully-qualified) match key alongside it.
-    pub fn get_with_key(&self, name: &str) -> Option<(String, &TypeDefInfo)> {
-        if let Some(info) = self.types.get(name) {
-            return Some((name.to_string(), info));
+    /// The full name `name` stands for in namespace `scope`, as the compiler
+    /// resolves it: a full name or a namespace alias, then the namespace's own
+    /// type, an import, and a core type. Outside any namespace, a simple name
+    /// is only answered when one type has it: a guess between two could give
+    /// a tool the wrong schema.
+    pub fn resolve(&self, name: &str, scope: Option<&str>) -> Option<String> {
+        if self.types.contains_key(name) {
+            return Some(name.to_string());
         }
-        if let Some(simple_name) = name.rsplit('/').next()
-            && let Some(info) = self.types.get(simple_name)
-        {
-            return Some((simple_name.to_string(), info));
+        let names = scope.and_then(|scope| self.scopes.get(scope));
+        if let Some((ns, type_name)) = name.rsplit_once('/') {
+            let target = names
+                .and_then(|names| names.aliases.get(&ns_key(ns)))
+                .map_or(ns, String::as_str);
+            return self.followed_import(target, type_name);
+        }
+        if let Some(scope) = scope {
+            return self
+                .followed_import(scope, name)
+                .or_else(|| self.core.get(name).cloned());
+        }
+        if let Some(core) = self.core.get(name) {
+            return Some(core.clone());
+        }
+        match self.by_simple_name.get(name).map(Vec::as_slice) {
+            Some([only]) => Some(only.clone()),
+            _ => None,
+        }
+    }
+
+    /// The type `name` is in namespace `ns`: declared there, or imported,
+    /// through any namespaces that import it in turn.
+    fn followed_import(&self, ns: &str, name: &str) -> Option<String> {
+        let mut full_name = format!("{ns}/{name}");
+        // A chain of imports is short; the bound stops one that loops.
+        for _ in 0..16 {
+            if self.types.contains_key(&full_name) {
+                return Some(full_name);
+            }
+            let (ns, name) = full_name.rsplit_once('/')?;
+            full_name = self.scopes.get(ns)?.imports.get(name)?.clone();
         }
         None
     }
 
-    /// Look up a type by name
+    /// Look up a type by its full name, or a simple name only one type has
     pub fn get(&self, name: &str) -> Option<&TypeDefInfo> {
-        // Try exact match first
-        if let Some(info) = self.types.get(name) {
-            return Some(info);
-        }
-
-        // Try without namespace prefix (::ns/Type -> Type)
-        if let Some(simple_name) = name.rsplit('/').next() {
-            return self.types.get(simple_name);
-        }
-
-        None
+        self.types.get(&self.resolve(name, None)?)
     }
+}
+
+/// A namespace path as a lookup key: `::a::b` and `a::b` name the same one.
+fn ns_key(ns: &str) -> String {
+    ns.trim_start_matches("::").to_string()
 }
 
 /// Build the `VariantInfo` list for an enum-shaped TypeDef.
@@ -218,11 +297,22 @@ pub struct SchemaContext {
     pub hoisted: AHashSet<String>,
     /// Captured warnings (e.g. untyped fn params used as tools).
     pub warnings: Vec<String>,
+    /// The namespace the annotation being read is written in, which decides
+    /// what the names in it mean.
+    pub scope: Option<String>,
 }
 
 impl SchemaContext {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A context for annotations written in namespace `ns`.
+    pub fn in_namespace(ns: &str) -> Self {
+        Self {
+            scope: Some(ns.to_string()),
+            ..Self::default()
+        }
     }
 }
 
@@ -598,8 +688,7 @@ fn custom_type_to_schema_ctx(
     ctx: &mut SchemaContext,
 ) -> Val {
     let resolved_key = registry
-        .get_with_key(type_name)
-        .map(|(k, _)| k)
+        .resolve(type_name, ctx.scope.as_deref())
         .unwrap_or_else(|| type_name.to_string());
 
     // Cycle detected — hoist this type into $defs and emit a $ref.
@@ -615,7 +704,13 @@ fn custom_type_to_schema_ctx(
 
     ctx.visited.insert(resolved_key.clone());
 
-    let schema = if let Some(type_info) = registry.get(&resolved_key) {
+    // A type's own annotations mean what they do where it's declared.
+    let caller_scope = match resolved_key.rsplit_once('/') {
+        Some((ns, _)) => ctx.scope.replace(ns.to_string()),
+        None => ctx.scope.clone(),
+    };
+
+    let schema = if let Some(type_info) = registry.types.get(&resolved_key) {
         let schema = if let Some(ref literals) = type_info.literals {
             literals_to_schema(literals)
         } else if let Some(ref alias) = type_info.type_alias {
@@ -643,6 +738,7 @@ fn custom_type_to_schema_ctx(
         Val::map(map)
     };
 
+    ctx.scope = caller_scope;
     ctx.visited.remove(&resolved_key);
 
     // If this type ended up hoisted (it's part of a cycle), record the
@@ -1069,8 +1165,12 @@ fn fields_to_schema_ctx(
 }
 
 /// Generate input schema from function arguments with type registry
-pub fn args_to_input_schema_with_registry(args: &[FnArg], registry: &TypeRegistry) -> Val {
-    let mut ctx = SchemaContext::new();
+pub fn args_to_input_schema_with_registry(
+    args: &[FnArg],
+    registry: &TypeRegistry,
+    ns: &str,
+) -> Val {
+    let mut ctx = SchemaContext::in_namespace(ns);
     let schema = args_to_input_schema_with_ctx(args, registry, &mut ctx);
     wrap_with_defs(schema, &ctx)
 }
@@ -1130,17 +1230,22 @@ pub fn args_to_input_schema_with_ctx(
 /// Generate input schema from function arguments (without registry)
 pub fn args_to_input_schema(args: &[FnArg]) -> Val {
     let registry = TypeRegistry::new();
-    args_to_input_schema_with_registry(args, &registry)
+    let mut ctx = SchemaContext::new();
+    let schema = args_to_input_schema_with_ctx(args, &registry, &mut ctx);
+    wrap_with_defs(schema, &ctx)
 }
 
 /// Generate output schema from return type annotation with type registry
 pub fn return_type_to_output_schema_with_registry(
     return_type: Option<&str>,
     registry: &TypeRegistry,
+    ns: &str,
 ) -> Option<Val> {
     match return_type {
         Some(rt) if !rt.is_empty() && rt != "Any" => {
-            Some(type_to_json_schema_with_registry(rt, registry))
+            let mut ctx = SchemaContext::in_namespace(ns);
+            let schema = type_to_schema_ctx(rt, registry, &mut ctx);
+            Some(wrap_with_defs(schema, &ctx))
         }
         _ => None,
     }
@@ -1149,7 +1254,12 @@ pub fn return_type_to_output_schema_with_registry(
 /// Generate output schema from return type annotation (without registry)
 pub fn return_type_to_output_schema(return_type: Option<&str>) -> Option<Val> {
     let registry = TypeRegistry::new();
-    return_type_to_output_schema_with_registry(return_type, &registry)
+    match return_type {
+        Some(rt) if !rt.is_empty() && rt != "Any" => {
+            Some(type_to_json_schema_with_registry(rt, &registry))
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -1646,26 +1756,167 @@ mod tests {
         crate::lang::parser::parse_hot(source).expect("source should parse")
     }
 
-    /// Register the program's types the way `build_type_registry` does.
-    fn register_program(registry: &mut TypeRegistry, program: &crate::lang::ast::Program) {
-        for (ns_path, namespace) in &program.namespaces {
-            for (var, value) in &namespace.scope.vars {
-                if let crate::lang::ast::Value::TypeDef(type_def) = value {
-                    let qualified_name = format!("{}/{}", ns_path, var.sym.name());
-                    registry.register_qualified(&qualified_name, type_def);
-                }
-            }
-        }
-    }
-
     fn registry_from_source(source: &str) -> TypeRegistry {
         let mut registry = TypeRegistry::new();
-        register_program(&mut registry, &parse(source));
+        registry.register_program(&parse(source));
         registry
     }
 
     fn schema_json(type_str: &str, registry: &TypeRegistry) -> serde_json::Value {
         serde_json::to_value(type_to_json_schema_with_registry(type_str, registry)).unwrap()
+    }
+
+    /// A type's fields name other types relative to its own namespace, so two
+    /// namespaces can each declare a `Facts` and keep their own schema.
+    #[test]
+    fn same_named_types_keep_their_own_schemas() {
+        let registry = registry_from_source(
+            r#"
+::tax::a ns
+Facts type { income: Int }
+Order type { facts: Facts }
+
+::tax::b ns
+Facts type { region: Str }
+Order type { facts: Facts, list: Vec<Facts>, maybe: Facts? }
+"#,
+        );
+        let a = schema_json("::tax::a/Order", &registry);
+        let b = schema_json("::tax::b/Order", &registry);
+        assert_eq!(
+            a["properties"]["facts"]["properties"]["income"]["type"],
+            "integer"
+        );
+        assert!(
+            a["properties"]["facts"]["properties"]
+                .get("region")
+                .is_none()
+        );
+        assert_eq!(
+            b["properties"]["facts"]["properties"]["region"]["type"],
+            "string"
+        );
+        assert!(
+            b["properties"]["facts"]["properties"]
+                .get("income")
+                .is_none()
+        );
+        assert_eq!(
+            b["properties"]["list"]["items"]["properties"]["region"]["type"],
+            "string"
+        );
+        assert_eq!(
+            b["properties"]["maybe"]["anyOf"][0]["properties"]["region"]["type"],
+            "string"
+        );
+    }
+
+    /// An import and a namespace alias name the type they point at, whatever
+    /// else has that simple name.
+    #[test]
+    fn imports_and_aliases_name_their_targets() {
+        let registry = registry_from_source(
+            r#"
+::lib::errors ns
+TradeError type { code: Int }
+
+::other ns
+TradeError type { text: Str }
+
+::by-import ns
+TradeError ::lib::errors/TradeError
+Order type { error: TradeError }
+
+::by-alias ns
+::errs ::lib::errors
+Order type { error: ::errs/TradeError }
+
+::by-rename ns
+Failure ::lib::errors/TradeError
+Order type { error: Failure }
+"#,
+        );
+        for order in ["::by-import/Order", "::by-alias/Order", "::by-rename/Order"] {
+            let schema = schema_json(order, &registry);
+            assert_eq!(
+                schema["properties"]["error"]["properties"]["code"]["type"], "integer",
+                "{order}: {schema}"
+            );
+        }
+    }
+
+    /// An enum's payloads resolve in the enum's namespace, and a variant's tag
+    /// is its full name, as a value of it holds.
+    #[test]
+    fn enum_payloads_resolve_in_the_enums_namespace() {
+        let registry = registry_from_source(
+            r#"
+::geo ns
+Spot type { x: Int }
+Shape enum { Dot(Spot), Empty }
+
+::other ns
+Spot type { label: Str }
+Holder type { shape: ::geo/Shape }
+"#,
+        );
+        let schema = schema_json("::other/Holder", &registry);
+        let dot = &schema["properties"]["shape"]["oneOf"][0];
+        assert_eq!(dot["properties"]["$type"]["const"], "::geo/Shape.Dot");
+        assert_eq!(
+            dot["properties"]["$val"]["properties"]["x"]["type"],
+            "integer"
+        );
+    }
+
+    /// A name written with no namespace to resolve it in is only answered when
+    /// one type has it: a guess between two could be the wrong schema.
+    #[test]
+    fn a_name_two_namespaces_declare_is_not_guessed() {
+        let registry = registry_from_source(
+            r#"
+::a ns
+Facts type { income: Int }
+Only type { n: Int }
+
+::b ns
+Facts type { region: Str }
+"#,
+        );
+        assert_eq!(
+            schema_json("Facts", &registry)["description"],
+            "Custom type: Facts"
+        );
+        assert_eq!(
+            schema_json("Only", &registry)["properties"]["n"]["type"],
+            "integer"
+        );
+    }
+
+    /// Recursive types of the same name get separate `$defs` entries.
+    #[test]
+    fn recursive_types_of_one_name_keep_separate_defs() {
+        let registry = registry_from_source(
+            r#"
+::a ns
+Tree type { left: Tree?, value: Int }
+
+::b ns
+Tree type { left: Tree?, label: Str }
+"#,
+        );
+        let a = schema_json("::a/Tree", &registry);
+        let b = schema_json("::b/Tree", &registry);
+        assert_eq!(a["properties"]["value"]["type"], "integer");
+        assert_eq!(b["properties"]["label"]["type"], "string");
+        assert_eq!(
+            a["$defs"]["a_Tree"]["properties"]["value"]["type"],
+            "integer"
+        );
+        assert_eq!(
+            b["$defs"]["b_Tree"]["properties"]["label"]["type"],
+            "string"
+        );
     }
 
     #[test]
@@ -1678,7 +1929,7 @@ search fn (query: Str, fruit: Fruit): Vec<Str> { [] }
 "#,
         );
         let mut registry = TypeRegistry::new();
-        register_program(&mut registry, &program);
+        registry.register_program(&program);
         let fn_def = program
             .namespaces
             .values()
@@ -1691,7 +1942,8 @@ search fn (query: Str, fruit: Fruit): Vec<Str> { [] }
             })
             .expect("search fn");
 
-        let schema = args_to_input_schema_with_registry(&fn_def.args.args, &registry);
+        let schema =
+            args_to_input_schema_with_registry(&fn_def.args.args, &registry, "::probe::thirteen");
         assert_eq!(
             serde_json::to_value(schema).unwrap(),
             json!({
@@ -1784,15 +2036,12 @@ HttpMethod type open "POST" | "OPTIONS"
         assert_eq!(schema_json("::t/HttpMethod", &registry), expected);
 
         // A same-named open union in another namespace stays separate.
-        register_program(
-            &mut registry,
-            &parse(
-                r#"
+        registry.register_program(&parse(
+            r#"
 ::other ns
 HttpMethod type open "BREW"
 "#,
-            ),
-        );
+        ));
         assert_eq!(schema_json("::t/HttpMethod", &registry), expected);
         assert_eq!(
             schema_json("::other/HttpMethod", &registry),
