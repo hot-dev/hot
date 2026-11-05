@@ -24,6 +24,9 @@ on:
       - '.github/workflows/ai-skills-mirror.yml'
   pull_request:
     branches: [ main ]
+    # The default types leave out ready_for_review, so a pull request leaving
+    # draft would keep the skipped jobs of its last draft push.
+    types: [ opened, synchronize, reopened, ready_for_review ]
     paths:
       - 'resources/ai/skills/**'
       - 'resources/ai/hot-skills-mirror.toml'
