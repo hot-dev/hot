@@ -442,6 +442,10 @@ impl Build {
     /// We only ever resume the exact build the user requested for deployment
     /// (`p.deployment_sequence > 0 AND b.deployment_sequence = p.deployment_sequence`),
     /// never a build that was merely uploaded but never deployed.
+    ///
+    /// That includes a deployed build marked `superseded`, which earlier
+    /// releases could leave when recovery and the deployment's own message
+    /// raced: nothing else would ever bring it back.
     pub async fn get_recoverable_bundle_deployments(
         db: &crate::db::DatabasePool,
         limit: i64,
@@ -459,7 +463,8 @@ impl Build {
                        AND e.active = true
                        AND b.active = true
                        AND b.build_type_id = $1
-                       AND b.runtime_status IN ('pending', 'loading', 'failed')
+                       AND (b.runtime_status IN ('pending', 'loading', 'failed')
+                            OR (b.deployed = true AND b.runtime_status = 'superseded'))
                        AND p.deployment_sequence > 0
                        AND b.deployment_sequence = p.deployment_sequence
                        AND NOT EXISTS (
@@ -489,7 +494,8 @@ impl Build {
                        AND e.active = 1
                        AND b.active = 1
                        AND b.build_type_id = ?
-                       AND b.runtime_status IN ('pending', 'loading', 'failed')
+                       AND (b.runtime_status IN ('pending', 'loading', 'failed')
+                            OR (b.deployed = 1 AND b.runtime_status = 'superseded'))
                        AND p.deployment_sequence > 0
                        AND b.deployment_sequence = p.deployment_sequence
                        AND NOT EXISTS (
@@ -510,6 +516,58 @@ impl Build {
             }
         };
         Ok(builds)
+    }
+
+    /// Whether a project in this environment has a requested bundle deployment
+    /// a worker hasn't finished preparing. Events that find no handler wait
+    /// for it instead of being acknowledged as unhandled.
+    pub async fn has_deployment_in_progress(
+        db: &crate::db::DatabasePool,
+        env_id: &Uuid,
+    ) -> Result<bool, BuildError> {
+        let in_progress = match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                sqlx::query_scalar(
+                    "SELECT EXISTS (
+                       SELECT 1
+                       FROM build b
+                       JOIN project p ON b.project_id = p.project_id
+                       WHERE p.env_id = $1
+                         AND p.active = true
+                         AND b.active = true
+                         AND b.build_type_id = $2
+                         AND b.runtime_status IN ('pending', 'loading')
+                         AND p.deployment_sequence > 0
+                         AND b.deployment_sequence = p.deployment_sequence
+                     )",
+                )
+                .bind(env_id)
+                .bind(Self::BUILD_TYPE_BUNDLE)
+                .fetch_one(pg_pool)
+                .await?
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                sqlx::query_scalar(
+                    "SELECT EXISTS (
+                       SELECT 1
+                       FROM build b
+                       JOIN project p ON b.project_id = p.project_id
+                       WHERE p.env_id = ?
+                         AND p.active = 1
+                         AND b.active = 1
+                         AND b.build_type_id = ?
+                         AND b.runtime_status IN ('pending', 'loading')
+                         AND p.deployment_sequence > 0
+                         AND b.deployment_sequence = p.deployment_sequence
+                     )",
+                )
+                .bind(env_id)
+                .bind(Self::BUILD_TYPE_BUNDLE)
+                .fetch_one(sqlite_pool)
+                .await?
+            }
+        };
+        Ok(in_progress)
     }
 
     /// Deployed bundle builds whose manifest version metadata has not yet been
@@ -1417,6 +1475,9 @@ impl Build {
         .await
     }
 
+    /// Set a build's runtime status. A live build leaves `ready` only through
+    /// a new deployment request, so anything else marking it is ignored: no
+    /// handler matches a build that isn't ready, and no error would say so.
     async fn mark_runtime_status(
         db: &crate::db::DatabasePool,
         build_id: &Uuid,
@@ -1437,7 +1498,7 @@ impl Build {
                     .await?;
                 } else {
                     sqlx::query(
-                        "UPDATE build SET runtime_status = $2, runtime_ready_at = NULL, runtime_error = $3, updated_at = NOW() WHERE build_id = $1"
+                        "UPDATE build SET runtime_status = $2, runtime_ready_at = NULL, runtime_error = $3, updated_at = NOW() WHERE build_id = $1 AND NOT (deployed AND runtime_status = 'ready')"
                     )
                     .bind(build_id)
                     .bind(runtime_status)
@@ -1458,7 +1519,7 @@ impl Build {
                     .await?;
                 } else {
                     sqlx::query(
-                        "UPDATE build SET runtime_status = ?, runtime_ready_at = NULL, runtime_error = ?, updated_at = CURRENT_TIMESTAMP WHERE build_id = ?"
+                        "UPDATE build SET runtime_status = ?, runtime_ready_at = NULL, runtime_error = ?, updated_at = CURRENT_TIMESTAMP WHERE build_id = ? AND NOT (deployed = 1 AND runtime_status = 'ready')"
                     )
                     .bind(runtime_status)
                     .bind(runtime_error)
@@ -2093,6 +2154,110 @@ mod tests {
         assert_eq!(build_ids(&ready), vec![build_id]);
 
         // A ready, deployed build is never a recovery candidate.
+        assert!(
+            Build::get_recoverable_bundle_deployments(&db, 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// Startup recovery and a deployment's queued message both work on one
+    /// build. Whichever comes second finds it live, and whatever it then
+    /// reports must not take the build away: no handler matches a build that
+    /// isn't ready, and nothing would say so.
+    #[tokio::test]
+    async fn a_late_status_leaves_a_live_build_live() {
+        let db = test_db().await;
+        let user_id = Uuid::now_v7();
+        let (_, project_id) = insert_test_project(&db, &user_id).await;
+        let build_id = insert_test_build(&db, &project_id, &user_id).await;
+        Build::request_bundle_deployment(&db, &build_id, &user_id)
+            .await
+            .unwrap();
+        assert!(
+            Build::activate_prepared_build(&db, &build_id, &user_id)
+                .await
+                .unwrap()
+        );
+        let assert_live = async || {
+            let build = Build::get_build(&db, &build_id).await.unwrap();
+            assert!(build.deployed);
+            assert_eq!(build.runtime_status, Build::RUNTIME_STATUS_READY);
+            assert!(build.runtime_ready_at.is_some());
+            assert!(build.runtime_error.is_none());
+        };
+
+        Build::mark_runtime_loading(&db, &build_id).await.unwrap();
+        assert_live().await;
+        Build::mark_runtime_superseded(&db, &build_id, "superseded")
+            .await
+            .unwrap();
+        assert_live().await;
+        Build::mark_runtime_failed(&db, &build_id, "failed")
+            .await
+            .unwrap();
+        assert_live().await;
+
+        // A new deployment of the same build is a new request: it can fail.
+        Build::request_bundle_deployment(&db, &build_id, &user_id)
+            .await
+            .unwrap();
+        Build::mark_runtime_failed(&db, &build_id, "failed")
+            .await
+            .unwrap();
+        let build = Build::get_build(&db, &build_id).await.unwrap();
+        assert_eq!(build.runtime_status, Build::RUNTIME_STATUS_FAILED);
+    }
+
+    /// Earlier releases could leave the requested build deployed and marked
+    /// superseded. Nothing else would ever bring it back.
+    #[tokio::test]
+    async fn recovery_finds_a_deployed_build_marked_superseded() {
+        let db = test_db().await;
+        let user_id = Uuid::now_v7();
+        let (_, project_id) = insert_test_project(&db, &user_id).await;
+        let build_id = insert_test_build(&db, &project_id, &user_id).await;
+        Build::request_bundle_deployment(&db, &build_id, &user_id)
+            .await
+            .unwrap();
+        assert!(
+            Build::activate_prepared_build(&db, &build_id, &user_id)
+                .await
+                .unwrap()
+        );
+        let crate::db::DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        sqlx::query("UPDATE build SET runtime_status = 'superseded' WHERE build_id = ?")
+            .bind(build_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        Build::invalidate_build_cache(&build_id);
+
+        let recoverable = Build::get_recoverable_bundle_deployments(&db, 100)
+            .await
+            .unwrap();
+        assert_eq!(build_ids(&recoverable), vec![build_id]);
+        assert!(
+            Build::activate_prepared_build(&db, &build_id, &user_id)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            Build::get_build(&db, &build_id)
+                .await
+                .unwrap()
+                .runtime_status,
+            Build::RUNTIME_STATUS_READY
+        );
+
+        // A superseded build no one deployed is what it says it is.
+        let replaced = insert_test_build(&db, &project_id, &user_id).await;
+        Build::mark_runtime_superseded(&db, &replaced, "superseded")
+            .await
+            .unwrap();
         assert!(
             Build::get_recoverable_bundle_deployments(&db, 100)
                 .await

@@ -51,11 +51,15 @@ pub(crate) fn is_tagged_wrapper(map: &IndexMap<Val, Val>) -> bool {
         );
     }
 
-    map.len() == 1
-        && type_name
-            .rsplit('/')
-            .next()
-            .is_some_and(|local_name| local_name.contains('.'))
+    map.len() == 1 && names_variant(type_name)
+}
+
+/// Whether a type name has the `Enum.Variant` form.
+fn names_variant(type_name: &str) -> bool {
+    type_name
+        .rsplit('/')
+        .next()
+        .is_some_and(|local_name| local_name.contains('.'))
 }
 
 /// The entries a map spread (`{...source}`) contributes, or `None` when
@@ -103,6 +107,24 @@ fn typed_fields(val: &Val) -> Option<&Val> {
 /// `keys`, `length`, `reduce` and the rest follow suit.
 pub(crate) fn as_fields(val: &Val) -> &Val {
     typed_fields(val).unwrap_or(val)
+}
+
+/// How comparisons see a value: a value of a declared type over a scalar
+/// (`Money(80.0)` from `Money type Dec`) is the scalar it holds, and anything
+/// else is itself. The checker reads such a type as its scalar and it passes a
+/// parameter of that scalar, so `gt`, `lt` and `sort` go by what it holds. An
+/// enum variant is a case of its enum rather than the value it carries.
+pub(crate) fn as_scalar(val: &Val) -> &Val {
+    let Val::Map(map) = val else {
+        return val;
+    };
+    if !is_tagged_wrapper(map) || tagged_type_name(map).is_some_and(names_variant) {
+        return val;
+    }
+    match map.get(tagged_payload_key()) {
+        Some(scalar @ (Val::Int(_) | Val::Dec(_) | Val::Str(_) | Val::Bool(_))) => scalar,
+        _ => val,
+    }
 }
 
 /// Give `fields` the type of `original` when `original` is a constructed
@@ -332,13 +354,14 @@ impl Ord for Val {
             (Val::Bool(_), _) => Ordering::Less,
             (_, Val::Bool(_)) => Ordering::Greater,
 
+            // Numbers go by value, whichever variant holds them. An Int and a
+            // Dec of equal value aren't equal, so the Int comes first.
             (Val::Int(a), Val::Int(b)) => a.cmp(b),
-            (Val::Int(_), _) => Ordering::Less,
-            (_, Val::Int(_)) => Ordering::Greater,
-
             (Val::Dec(a), Val::Dec(b)) => a.cmp(b),
-            (Val::Dec(_), _) => Ordering::Less,
-            (_, Val::Dec(_)) => Ordering::Greater,
+            (Val::Int(a), Val::Dec(b)) => D256::from(*a).cmp(b).then(Ordering::Less),
+            (Val::Dec(a), Val::Int(b)) => a.cmp(&D256::from(*b)).then(Ordering::Greater),
+            (Val::Int(_) | Val::Dec(_), _) => Ordering::Less,
+            (_, Val::Int(_) | Val::Dec(_)) => Ordering::Greater,
 
             (Val::Str(a), Val::Str(b)) => a.cmp(b),
             (Val::Str(_), _) => Ordering::Less,
@@ -3500,6 +3523,70 @@ impl Val {
 mod tests {
     use super::*;
     use fastnum::decimal::Context;
+
+    /// Numbers order by value whichever variant holds them, and an Int and a
+    /// Dec of equal value stay distinct, since they aren't equal.
+    #[test]
+    fn val_order_is_numeric_across_int_and_dec() {
+        let dec = |text: &str| Val::Dec(text.parse().expect("a decimal"));
+        assert!(Val::Int(200) > dec("80.5"));
+        assert!(dec("80.5") < Val::Int(200));
+        assert!(Val::Int(80) < dec("80.5"));
+        assert!(dec("80.5") > Val::Int(80));
+        assert_ne!(Val::Int(1), dec("1.0"));
+        assert_eq!(Val::Int(1).cmp(&dec("1.0")), Ordering::Less);
+        assert_eq!(dec("1.0").cmp(&Val::Int(1)), Ordering::Greater);
+
+        // The order stays total, with numbers in the place they had.
+        let mut values = vec![
+            Val::from("a"),
+            dec("2.5"),
+            Val::Int(3),
+            Val::Null,
+            Val::Int(2),
+            Val::Bool(true),
+            dec("2.0"),
+        ];
+        values.sort();
+        let expected = vec![
+            Val::Null,
+            Val::Bool(true),
+            Val::Int(2),
+            dec("2.0"),
+            dec("2.5"),
+            Val::Int(3),
+            Val::from("a"),
+        ];
+        assert_eq!(values, expected);
+
+        // Inside other values too, which is where `sort` meets a typed value.
+        assert!(val!([200]) > Val::vec(vec![dec("80.5")]));
+        let money = |amount: Val| val!({"$type": "::test/Money", "$val": (amount)});
+        assert!(money(Val::Int(200)) > money(dec("80.5")));
+    }
+
+    /// Only a declared type over a scalar stands for what it holds: a struct
+    /// keeps its fields to itself, and a variant is a case, not a value.
+    #[test]
+    fn as_scalar_reads_declared_types_over_scalars() {
+        let money = val!({"$type": "::test/Money", "$val": 80});
+        assert_eq!(as_scalar(&money), &Val::Int(80));
+        let with_origin = val!({"$type": "::test/Code", "$val": "a", "$origin": "::test"});
+        assert_eq!(as_scalar(&with_origin), &Val::from("a"));
+
+        for unchanged in [
+            val!({"$type": "::test/Point", "$val": {"x": 1}}),
+            val!({"$type": "::test/Tags", "$val": ["a"]}),
+            val!({"$type": "::test/Temp.Celsius", "$val": 30}),
+            val!({"$type": "::test/Color.Red"}),
+            val!({"$val": 80}),
+            Val::err(Val::Int(1)),
+            Val::Int(80),
+            Val::Null,
+        ] {
+            assert_eq!(as_scalar(&unchanged), &unchanged);
+        }
+    }
 
     #[test]
     fn as_fields_and_with_type_of_round_trip_constructed_values() {

@@ -2574,7 +2574,7 @@ async fn should_defer_missing_event_handlers(
     event_type: &str,
     infra_retry_backoff_ms: u64,
 ) -> Result<bool, WorkerError> {
-    let builds = Build::get_builds_by_env(db, env_id, Some(8), None)
+    let deployment_in_progress = Build::has_deployment_in_progress(db, env_id)
         .await
         .map_err(|e| {
             let err_msg = format!(
@@ -2584,13 +2584,6 @@ async fn should_defer_missing_event_handlers(
             error!("hot.dev: WORKER {} {}", worker_id, err_msg);
             worker_infrastructure_retry_error(err_msg, infra_retry_backoff_ms)
         })?;
-
-    let deployment_in_progress = builds.iter().any(|build| {
-        build.is_bundle()
-            && build.deployment_sequence > 0
-            && (build.runtime_status == Build::RUNTIME_STATUS_PENDING
-                || build.runtime_status == Build::RUNTIME_STATUS_LOADING)
-    });
 
     if deployment_in_progress {
         debug!(
@@ -3810,6 +3803,91 @@ async fn warm_ready_bundle_runtimes(
     }
 }
 
+/// What [`activate_prepared_bundle`] found and did.
+#[derive(Debug, PartialEq, Eq)]
+enum BundleActivation {
+    /// Its manifest is loaded and the build is live.
+    Activated,
+    /// It was already live, so nothing was loaded.
+    AlreadyLive,
+    /// It's no longer the project's latest deployment, or its environment is
+    /// inactive.
+    Stale,
+    /// Another worker is activating it.
+    Busy,
+}
+
+#[derive(Debug)]
+enum BundleActivationError {
+    Load(String),
+    Activate(hot::db::build::BuildError),
+}
+
+/// The session lock on one build's activation. A version 7 UUID keeps its
+/// random bits in its last 8 bytes.
+fn bundle_activation_lock_id(build_id: &Uuid) -> i64 {
+    let bytes = build_id.as_bytes();
+    i64::from_be_bytes([
+        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+    ])
+}
+
+/// Load a prepared bundle's manifest and make it live, once.
+///
+/// Startup recovery and a deployment's queued message both reach this for one
+/// build, and a backlog ahead of the message decides which comes first. Loading
+/// a manifest deletes and reinserts the build's handlers and deactivates its
+/// schedules, so it must never run against a live build: an event in that gap
+/// matches nothing, and a schedule armed since activation would be lost.
+///
+/// Callers hold the build's extraction lock across this, because SQLite's
+/// advisory lock coordinates nothing; on PostgreSQL the advisory lock also
+/// covers workers in other processes.
+async fn activate_prepared_bundle(
+    db: &DatabasePool,
+    build_id: &Uuid,
+    env_id: &Uuid,
+    build_data: &[u8],
+) -> Result<BundleActivation, BundleActivationError> {
+    let Some(lock) = hot::db::try_acquire_advisory_lock(db, bundle_activation_lock_id(build_id))
+        .await
+        .map_err(|e| BundleActivationError::Activate(hot::db::build::BuildError::Database(e)))?
+    else {
+        return Ok(BundleActivation::Busy);
+    };
+    let activation = load_and_activate_unless_live(db, build_id, env_id, build_data).await;
+    lock.release().await;
+    activation
+}
+
+async fn load_and_activate_unless_live(
+    db: &DatabasePool,
+    build_id: &Uuid,
+    env_id: &Uuid,
+    build_data: &[u8],
+) -> Result<BundleActivation, BundleActivationError> {
+    let build = Build::get_build(db, build_id)
+        .await
+        .map_err(BundleActivationError::Activate)?;
+    if build.deployed && build.runtime_status == Build::RUNTIME_STATUS_READY {
+        return Ok(BundleActivation::AlreadyLive);
+    }
+
+    hot::build::load_build_manifest_data(db, build_id, env_id, build_data)
+        .await
+        .map_err(BundleActivationError::Load)?;
+
+    let deployment_user_id = build.updated_by_user_id.unwrap_or(build.created_by_user_id);
+    let activated = Build::activate_prepared_build(db, build_id, &deployment_user_id)
+        .await
+        .map_err(BundleActivationError::Activate)?;
+    Ok(if activated {
+        BundleActivation::Activated
+    } else {
+        BundleActivation::Stale
+    })
+}
+
 /// Re-prepare and activate bundle deployments left interrupted (pending/loading/
 /// failed with no ready build) by a prior worker rollout. Mutates the database,
 /// so callers MUST run this under [`WORKER_RUNTIME_REPAIR_LOCK_ID`].
@@ -3892,21 +3970,12 @@ async fn recover_interrupted_bundle_deployments(
             continue;
         };
 
-        if let Err(e) =
-            hot::build::load_build_manifest_data(db, &build.build_id, &project.env_id, build_data)
-                .await
-        {
-            failed_count += 1;
-            warn!(
-                "hot.dev: WORKER startup recovery could not load manifest for build {}: {}",
-                build.build_id, e
-            );
-            continue;
-        }
-
-        let deployment_user_id = build.updated_by_user_id.unwrap_or(build.created_by_user_id);
-        match Build::activate_prepared_build(db, &build.build_id, &deployment_user_id).await {
-            Ok(true) => {
+        // The deployment's own message may be here too: it holds this lock
+        // through its activation.
+        let activation_lock = build_path_cache.get_extraction_lock(&build.build_id);
+        let _activation_guard = activation_lock.lock().await;
+        match activate_prepared_bundle(db, &build.build_id, &project.env_id, build_data).await {
+            Ok(BundleActivation::Activated) => {
                 repaired_count += 1;
                 info!(
                     "hot.dev: WORKER startup recovery activated build {} for project {} from {}",
@@ -3914,14 +3983,29 @@ async fn recover_interrupted_bundle_deployments(
                     project.name,
                     prepared.extract_dir.display()
                 );
+                hot::db::alert::publish_deploy_succeeded_alert(
+                    db,
+                    &env.org_id,
+                    &project.env_id,
+                    &build.build_id,
+                    &project.name,
+                )
+                .await;
             }
-            Ok(false) => {
+            Ok(outcome) => {
                 debug!(
-                    "hot.dev: WORKER startup recovery skipped activation for build {} (already ready, stale, or inactive)",
-                    build.build_id
+                    "hot.dev: WORKER startup recovery left build {} as it is: {:?}",
+                    build.build_id, outcome
                 );
             }
-            Err(e) => {
+            Err(BundleActivationError::Load(e)) => {
+                failed_count += 1;
+                warn!(
+                    "hot.dev: WORKER startup recovery could not load manifest for build {}: {}",
+                    build.build_id, e
+                );
+            }
+            Err(BundleActivationError::Activate(e)) => {
                 failed_count += 1;
                 warn!(
                     "hot.dev: WORKER startup recovery could not activate build {}: {}",
@@ -9212,68 +9296,58 @@ pub async fn run_with_components_shared_context_and_db(
                                                                                             }
                                                                                         }
 
-                                                                                        // Load handlers, schedules, and agents from the build
-                                                                                        match hot::build::load_build_manifest_data(
-                                                                                            db,
-                                                                                            &build.build_id,
-                                                                                            &project.env_id,
-                                                                                            &build_data,
-                                                                                        ).await {
-                                                                                            Ok(()) => {
-                                                                                                debug!("hot.dev: WORKER {} successfully loaded handlers and schedules for build {}",
+                                                                                        // Load handlers, schedules, and agents from the build and make it live,
+                                                                                        // unless startup recovery already did. The extraction lock taken above is
+                                                                                        // still held, which `activate_prepared_bundle` relies on.
+                                                                                        match activate_prepared_bundle(db, &build.build_id, &project.env_id, &build_data).await {
+                                                                                            Ok(BundleActivation::Activated) => {
+                                                                                                // Publish deploy:succeeded alert only after the atomic activation flip succeeds.
+                                                                                                hot::db::alert::publish_deploy_succeeded_alert(
+                                                                                                    db,
+                                                                                                    &env.org_id,
+                                                                                                    &project.env_id,
+                                                                                                    &build.build_id,
+                                                                                                    &project.name,
+                                                                                                ).await;
+                                                                                            }
+                                                                                            Ok(BundleActivation::AlreadyLive) => {
+                                                                                                debug!("hot.dev: WORKER {} found build {} already live",
                                                                                                     worker_id,
                                                                                                     build.build_id);
-
-                                                                                                let deployment_user_id = build
-                                                                                                    .updated_by_user_id
-                                                                                                    .unwrap_or(build.created_by_user_id);
-                                                                                                match Build::activate_prepared_build(db, &build.build_id, &deployment_user_id).await {
-                                                                                                    Ok(true) => {
-                                                                                                        // Publish deploy:succeeded alert only after the atomic activation flip succeeds.
-                                                                                                        hot::db::alert::publish_deploy_succeeded_alert(
-                                                                                                            db,
-                                                                                                            &env.org_id,
-                                                                                                            &project.env_id,
-                                                                                                            &build.build_id,
-                                                                                                            &project.name,
-                                                                                                        ).await;
-                                                                                                    }
-                                                                                                    Ok(false) => {
-                                                                                                        debug!("hot.dev: WORKER {} skipped activation for stale or inactive build {}",
-                                                                                                            worker_id,
-                                                                                                            build.build_id);
-                                                                                                        if !already_ready
-                                                                                                            && let Err(status_err) = Build::mark_runtime_superseded(db, &build.build_id, "superseded by newer deployment or inactive environment").await
-                                                                                                        {
-                                                                                                            warn!("hot.dev: WORKER {} failed to mark build {} superseded: {}",
-                                                                                                                worker_id,
-                                                                                                                build.build_id,
-                                                                                                                status_err);
-                                                                                                        }
-                                                                                                    }
-                                                                                                    Err(hot::db::build::BuildError::Database(error))=>return Err(worker_infrastructure_retry_error(format!("Build activation is waiting for its database: {error}"),5_000)),
-                                                                                                    Err(e) => {
-                                                                                                        let err_msg = format!("Failed to activate build {}: {}", build.build_id, e);
-                                                                                                        error!("hot.dev: WORKER {} {}", worker_id, err_msg);
-                                                                                                        if let Err(status_err) = Build::mark_runtime_failed(db, &build.build_id, &err_msg).await {
-                                                                                                            warn!("hot.dev: WORKER {} failed to mark build {} failed: {}",
-                                                                                                                worker_id,
-                                                                                                                build.build_id,
-                                                                                                                status_err);
-                                                                                                        }
-                                                                                                        hot::db::alert::publish_deploy_failed_alert(
-                                                                                                            db,
-                                                                                                            &env.org_id,
-                                                                                                            &project.env_id,
-                                                                                                            &build.build_id,
-                                                                                                            &project.name,
-                                                                                                            &err_msg,
-                                                                                                        ).await;
-                                                                                                        return Err(Box::new(std::io::Error::other(err_msg)) as Box<dyn std::error::Error + Send + Sync>);
-                                                                                                    }
+                                                                                            }
+                                                                                            Ok(BundleActivation::Stale) => {
+                                                                                                debug!("hot.dev: WORKER {} skipped activation for stale or inactive build {}",
+                                                                                                    worker_id,
+                                                                                                    build.build_id);
+                                                                                                if let Err(status_err) = Build::mark_runtime_superseded(db, &build.build_id, "superseded by newer deployment or inactive environment").await {
+                                                                                                    warn!("hot.dev: WORKER {} failed to mark build {} superseded: {}",
+                                                                                                        worker_id,
+                                                                                                        build.build_id,
+                                                                                                        status_err);
                                                                                                 }
                                                                                             }
-                                                                                            Err(e) => {
+                                                                                            Ok(BundleActivation::Busy) => return Err(worker_infrastructure_retry_error(format!("Build {} is being activated by another worker", build.build_id), 5_000)),
+                                                                                            Err(BundleActivationError::Activate(hot::db::build::BuildError::Database(error))) => return Err(worker_infrastructure_retry_error(format!("Build activation is waiting for its database: {error}"), 5_000)),
+                                                                                            Err(BundleActivationError::Activate(e)) => {
+                                                                                                let err_msg = format!("Failed to activate build {}: {}", build.build_id, e);
+                                                                                                error!("hot.dev: WORKER {} {}", worker_id, err_msg);
+                                                                                                if let Err(status_err) = Build::mark_runtime_failed(db, &build.build_id, &err_msg).await {
+                                                                                                    warn!("hot.dev: WORKER {} failed to mark build {} failed: {}",
+                                                                                                        worker_id,
+                                                                                                        build.build_id,
+                                                                                                        status_err);
+                                                                                                }
+                                                                                                hot::db::alert::publish_deploy_failed_alert(
+                                                                                                    db,
+                                                                                                    &env.org_id,
+                                                                                                    &project.env_id,
+                                                                                                    &build.build_id,
+                                                                                                    &project.name,
+                                                                                                    &err_msg,
+                                                                                                ).await;
+                                                                                                return Err(Box::new(std::io::Error::other(err_msg)) as Box<dyn std::error::Error + Send + Sync>);
+                                                                                            }
+                                                                                            Err(BundleActivationError::Load(e)) => {
                                                                                                 let err_msg = format!("Failed to load handlers and schedules for build {}: {}", build.build_id, e);
                                                                                                 error!("hot.dev: WORKER {} {}", worker_id, err_msg);
                                                                                                 if let Err(status_err) = Build::mark_runtime_failed(db, &build.build_id, &err_msg).await {
@@ -13257,6 +13331,227 @@ handler fn () { initialized }
         .await
         .expect_err("deployment in progress should defer missing handlers");
 
+        assert!(err.downcast_ref::<QueueInfrastructureError>().is_some());
+
+        if let DatabasePool::Sqlite(pool) = &db {
+            pool.close().await;
+        }
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    /// A real build of the project `demo`, with a handler and a metadata
+    /// schedule, requested for deployment, and its stored bundle.
+    async fn requested_bundle(
+        db: &DatabasePool,
+        data: &hot::db::TestData,
+        work: &std::path::Path,
+        name: &str,
+    ) -> (Uuid, Vec<u8>) {
+        let src = work.join(name).join("hot/src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("main.hot"),
+            format!(
+                r#"::app ns
+
+on-ping meta {{on-event: "ping"}}
+fn (event) {{ "{name}" }}
+
+nightly meta {{schedule: "0 2 * * *"}}
+fn (event) {{ "{name}" }}
+"#
+            ),
+        )
+        .unwrap();
+        let context = hot::build::BuildContext::new(
+            Some(data.user_id),
+            Some(data.env_id),
+            Some(data.org_id),
+            None,
+            "demo".to_string(),
+            vec![src.to_string_lossy().into_owned()],
+            Vec::new(),
+        );
+        let build_dir = work.join(name).join("build");
+        let result =
+            hot::build::build_create(db, Some(&build_dir.to_string_lossy()), context, None)
+                .await
+                .unwrap();
+        let build_id = result.build.build_id;
+        Build::request_bundle_deployment(db, &build_id, &data.user_id)
+            .await
+            .unwrap();
+        (build_id, std::fs::read(&result.zip_path).unwrap())
+    }
+
+    /// Startup recovery activates a build, a run arms a one-time schedule, and
+    /// then the deployment's message, late behind a backlog, gets there too.
+    #[tokio::test]
+    async fn a_second_activation_leaves_the_live_build_alone() {
+        let workspace = tempfile::tempdir().unwrap();
+        let db = hot::db::test_db().await;
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let (build_id, bundle) = requested_bundle(&db, &data, workspace.path(), "demo").await;
+        let handlers = async || {
+            EventHandler::get_event_handlers_by_env_and_event_type(&db, &data.env_id, "ping")
+                .await
+                .unwrap()
+                .iter()
+                .map(|handler| handler.event_handler_id)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            activate_prepared_bundle(&db, &build_id, &data.env_id, &bundle)
+                .await
+                .unwrap(),
+            BundleActivation::Activated
+        );
+        let live_handlers = handlers().await;
+        assert_eq!(live_handlers.len(), 1);
+        let armed = Uuid::now_v7();
+        Schedule::insert_dynamic_schedule(
+            &db,
+            &armed,
+            &build_id,
+            &hot::db::ScheduleType::At(chrono::Utc::now() + chrono::Duration::hours(1)),
+            Some(&data.org_id),
+            hot::db::SchedulePolicy::self_hosted_default(),
+            "::app",
+            "nightly",
+            None,
+            Some(&serde_json::json!(["step-1"])),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            activate_prepared_bundle(&db, &build_id, &data.env_id, &bundle)
+                .await
+                .unwrap(),
+            BundleActivation::AlreadyLive
+        );
+
+        assert_eq!(
+            handlers().await,
+            live_handlers,
+            "the handlers were never deleted and inserted again"
+        );
+        assert!(
+            Schedule::get_schedule(&db, &armed).await.unwrap().active,
+            "the schedule armed since activation is still armed"
+        );
+        let build = Build::get_build(&db, &build_id).await.unwrap();
+        assert!(build.deployed);
+        assert_eq!(build.runtime_status, Build::RUNTIME_STATUS_READY);
+    }
+
+    #[tokio::test]
+    async fn a_replaced_deployment_stays_out() {
+        let workspace = tempfile::tempdir().unwrap();
+        let db = hot::db::test_db().await;
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let (replaced, bundle) = requested_bundle(&db, &data, workspace.path(), "first").await;
+        let (latest, _) = requested_bundle(&db, &data, workspace.path(), "second").await;
+
+        assert_eq!(
+            activate_prepared_bundle(&db, &replaced, &data.env_id, &bundle)
+                .await
+                .unwrap(),
+            BundleActivation::Stale
+        );
+        assert!(!Build::get_build(&db, &replaced).await.unwrap().deployed);
+        assert_eq!(
+            Build::get_build(&db, &latest).await.unwrap().runtime_status,
+            Build::RUNTIME_STATUS_PENDING
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_a_build_activating_elsewhere_is_busy() {
+        let Ok(uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
+            eprintln!("skipping: HOT_TEST_POSTGRES_URI not set");
+            return;
+        };
+        let conf = val!({"uri": uri, "schema": "hot", "rls": {"enforce": false}});
+        hot::db::run_migrations(&conf).await.unwrap();
+        let db = hot::db::create_db_pool(&conf).await.unwrap();
+        let build_id = Uuid::now_v7();
+        let held = hot::db::try_acquire_advisory_lock(&db, bundle_activation_lock_id(&build_id))
+            .await
+            .unwrap()
+            .expect("no one else holds this build's lock");
+
+        assert_eq!(
+            activate_prepared_bundle(&db, &build_id, &Uuid::now_v7(), &[])
+                .await
+                .unwrap(),
+            BundleActivation::Busy
+        );
+        held.release().await;
+    }
+
+    /// Deployed builds sort first in the environment's build list, so one
+    /// pending behind them must still count, however many there are.
+    #[tokio::test]
+    async fn missing_event_handlers_defer_behind_many_deployed_builds() {
+        let (db, db_path) = migrated_sqlite_file_db().await;
+        let test_data = hot::db::insert_test_data(&db)
+            .await
+            .expect("test data should insert");
+        for index in 0..9 {
+            let project_id = Uuid::now_v7();
+            let build_id = Uuid::now_v7();
+            Project::insert_project(
+                &db,
+                &project_id,
+                &test_data.env_id,
+                &format!("deployed-{index}"),
+                &test_data.user_id,
+            )
+            .await
+            .unwrap();
+            Build::insert_build(
+                &db,
+                &build_id,
+                &project_id,
+                "deployed-hash",
+                0,
+                Build::BUILD_TYPE_BUNDLE,
+                &test_data.user_id,
+            )
+            .await
+            .unwrap();
+            Build::activate_build_directly(&db, &build_id, &test_data.user_id)
+                .await
+                .unwrap();
+        }
+        let pending_build_id = Uuid::now_v7();
+        Build::insert_build(
+            &db,
+            &pending_build_id,
+            &test_data.project_id,
+            "pending-bundle-hash",
+            0,
+            Build::BUILD_TYPE_BUNDLE,
+            &test_data.user_id,
+        )
+        .await
+        .unwrap();
+        Build::request_bundle_deployment(&db, &pending_build_id, &test_data.user_id)
+            .await
+            .unwrap();
+
+        let err = acknowledge_unhandled_event_if_stable(
+            0,
+            &db,
+            &test_data.env_id,
+            "slack:post",
+            "No event handlers found for event type 'slack:post'".to_string(),
+            250,
+        )
+        .await
+        .expect_err("a deployment in progress should defer missing handlers");
         assert!(err.downcast_ref::<QueueInfrastructureError>().is_some());
 
         if let DatabasePool::Sqlite(pool) = &db {
