@@ -145,7 +145,7 @@ pub fn send_event(
                     let event_env_id = env_id;
                     let event_env_name = ctx.env_name.clone();
 
-                    if let Err(e) = publisher.publish_checked(ctx, event) {
+                    if let Err(e) = publisher.publish_checked(&ctx.for_sent_event(), event) {
                         return HotResult::Err(Val::from(format!(
                             "::hot::event/send: failed to store event: {}",
                             e
@@ -267,4 +267,95 @@ pub fn create_event(args: &[Val]) -> HotResult<Val> {
     }
 
     HotResult::Ok(Val::map(event_map))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lang::compiler::Compiler;
+    use crate::lang::compiler::core_registry::CoreVariableRegistry;
+    use crate::lang::event::{Event, EventPublisher, ExecutionContext};
+    use crate::lang::parser::parse_hot;
+    use crate::lang::runtime::vm::VirtualMachine;
+    use std::sync::{Arc, Mutex};
+    use uuid::Uuid;
+
+    #[derive(Default)]
+    struct RecordingPublisher {
+        contexts: Mutex<Vec<ExecutionContext>>,
+    }
+
+    impl EventPublisher for RecordingPublisher {
+        fn publish(&self, ctx: &ExecutionContext, _event: Event) {
+            self.contexts.lock().unwrap().push(ctx.clone());
+        }
+    }
+
+    /// The context `send` publishes an event with, from a run of `sender`.
+    fn context_of_event_sent_by(sender: ExecutionContext) -> ExecutionContext {
+        let mut program = parse_hot("::test ns").expect("test source should parse");
+        let mut compiler = Compiler::new();
+        compiler
+            .compile_program_unchecked(&mut program)
+            .expect("test source should compile");
+        let mut vm = VirtualMachine::new(
+            compiler.get_program_arc(),
+            None,
+            compiler.get_function_mapping_arc(),
+            compiler.get_core_functions_arc(),
+            compiler.get_type_implementations_arc(),
+            Arc::new(CoreVariableRegistry::new()),
+            None,
+        );
+        let publisher = Arc::new(RecordingPublisher::default());
+        vm.set_execution_context(sender);
+        vm.set_event_publisher(publisher.clone());
+
+        let sent = send_event(&mut vm, &[Val::from("order:paid"), Val::Null]);
+        assert!(matches!(sent, HotResult::Ok(_)), "send failed: {sent:?}");
+
+        publisher.contexts.lock().unwrap().remove(0)
+    }
+
+    fn sender_context() -> ExecutionContext {
+        ExecutionContext::new(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            crate::db::run::RunType::Event.as_id(),
+            Some(Uuid::now_v7()),
+            Some(Uuid::now_v7()),
+            Some(Uuid::now_v7()),
+            Some(Uuid::now_v7()),
+        )
+    }
+
+    /// Hot counts a run's retries from the attempt it starts at, so a handler
+    /// woken by a retry's last attempt would get no retries of its own.
+    #[test]
+    fn a_sent_event_starts_its_handlers_at_attempt_zero() {
+        let mut retried = sender_context().with_retry_attempt(2);
+        retried.max_retries = 3;
+        retried.retry_delay_ms = 1000;
+
+        let sent = context_of_event_sent_by(retried);
+
+        assert_eq!(sent.retry_attempt, 0);
+        assert_eq!(sent.max_retries, 0);
+        assert_eq!(sent.retry_delay_ms, 0);
+    }
+
+    #[test]
+    fn a_sent_event_keeps_the_lineage_of_the_run_that_sent_it() {
+        let mut retried = sender_context().with_retry_attempt(2);
+        let origin_run_id = Uuid::now_v7();
+        retried.origin_run_id = Some(origin_run_id);
+        let sender_run_id = retried.run_id;
+        let stream_id = retried.stream_id;
+
+        let sent = context_of_event_sent_by(retried);
+
+        assert_eq!(sent.origin_run_id, Some(origin_run_id));
+        assert_eq!(sent.run_id, sender_run_id);
+        assert_eq!(sent.stream_id, stream_id);
+    }
 }
