@@ -1278,6 +1278,43 @@ mod type_checking_tests {
         );
     }
 
+    // `capture` returns `{match, groups}`, or null when nothing matches. An
+    // untyped binding takes the type the callee declares.
+    #[test]
+    fn test_regex_capture_is_declared_as_a_nullable_map() {
+        let as_map = r#"
+            ::test ns
+
+            keep fn (found: Map?): Any { found }
+
+            found ::hot::regex/capture("user@domain", "(\\w+)@(\\w+)")
+            kept keep(found)
+        "#;
+        let errors = compile_and_get_type_errors(as_map);
+        assert!(
+            errors.is_empty(),
+            "A nullable Map parameter takes `capture`'s result. Got: {:?}",
+            errors
+        );
+
+        let as_str = r#"
+            ::test ns
+
+            shout fn (text: Str): Str { uppercase(text) }
+
+            found ::hot::regex/capture("user@domain", "(\\w+)@(\\w+)")
+            loud shout(found)
+        "#;
+        let errors = compile_and_get_type_errors(as_str);
+        assert!(
+            errors
+                .iter()
+                .any(|error| matches!(error, CompilerError::TypeMismatch { .. })),
+            "A Str parameter doesn't take `capture`'s result. Got: {:?}",
+            errors
+        );
+    }
+
     // A core type declared in two hot-std namespaces resolves by load order,
     // so only deliberate pairs may exist: `::hot::exec` re-declares `run`'s
     // `Failure` and `Cancellation` as its context-aware forms.
