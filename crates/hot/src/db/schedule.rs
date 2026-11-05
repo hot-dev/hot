@@ -1115,8 +1115,8 @@ impl Schedule {
     }
 
     /// Insert or update multiple schedules for a build (UPSERT)
-    /// Matches on (build_id, ns, var, cron) and:
-    /// - If found: reactivates and updates meta, value, file, line, column, position
+    /// Matches on (build_id, ns, var, cron, value) and:
+    /// - If found: reactivates and updates meta, file, line, column, position
     /// - If not found: inserts new schedule
     pub async fn insert_schedules_for_build(
         db: &crate::db::DatabasePool,
@@ -1226,7 +1226,7 @@ impl Schedule {
     }
 
     /// Upsert a schedule (insert or reactivate+update if exists)
-    /// Matches on (build_id, ns, var, cron)
+    /// Matches on (build_id, ns, var, cron, value)
     #[allow(clippy::too_many_arguments)]
     pub async fn upsert_schedule(
         db: &crate::db::DatabasePool,
@@ -1251,10 +1251,9 @@ impl Schedule {
                 sqlx::query(
                     "INSERT INTO schedule (schedule_id, build_id, cron, ns, var, meta, value, file, line, \"column\", position, active, created_at, deactivated_at)
                      VALUES (uuidv7(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true, NOW(), NULL)
-                     ON CONFLICT (build_id, ns, var, cron)
+                     ON CONFLICT (build_id, ns, var, cron, md5(COALESCE(value::text, '')))
                      DO UPDATE SET
                          meta = EXCLUDED.meta,
-                         value = EXCLUDED.value,
                          file = EXCLUDED.file,
                          line = EXCLUDED.line,
                          \"column\" = EXCLUDED.\"column\",
@@ -1294,10 +1293,9 @@ impl Schedule {
                 sqlx::query(
                     "INSERT INTO schedule (schedule_id, build_id, cron, ns, var, meta, value, file, line, \"column\", position, active, created_at, deactivated_at)
                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, strftime('%Y-%m-%d %H:%M:%f', 'now'), NULL)
-                     ON CONFLICT (build_id, ns, var, cron)
+                     ON CONFLICT (build_id, ns, var, cron, COALESCE(value, ''))
                      DO UPDATE SET
                          meta = EXCLUDED.meta,
-                         value = EXCLUDED.value,
                          file = EXCLUDED.file,
                          line = EXCLUDED.line,
                          \"column\" = EXCLUDED.\"column\",
@@ -2210,8 +2208,15 @@ impl Schedule {
         }
     }
 
-    /// Insert a dynamic schedule (created via hot:schedule:new event)
-    /// This is different from insert_schedule which is used during build compilation
+    /// Insert a dynamic schedule (created via hot:schedule:new event) and
+    /// return the ID it has. This is different from insert_schedule which is
+    /// used during build compilation.
+    ///
+    /// A schedule is one call: a function, a time and its arguments. The same
+    /// call again is that schedule, so a redelivered event or a retried run
+    /// can't arm it twice, and this returns its ID, not `schedule_id`. A
+    /// cancelled schedule comes back. A one-time schedule that fired stays
+    /// spent, or a late repeat would run it a second time.
     #[allow(clippy::too_many_arguments)]
     pub async fn insert_dynamic_schedule(
         db: &crate::db::DatabasePool,
@@ -2224,7 +2229,7 @@ impl Schedule {
         var: &str,
         meta: Option<&JsonValue>,
         args: Option<&JsonValue>,
-    ) -> Result<(), ScheduleError> {
+    ) -> Result<Uuid, ScheduleError> {
         match schedule_type {
             ScheduleType::Cron(cron) => {
                 validate_recurring_schedule_interval(cron, policy.min_interval_secs)
@@ -2244,18 +2249,28 @@ impl Schedule {
         // A dynamic schedule always stores its args, [] for none: the
         // scheduler passes them, where a metadata schedule (no value) gets the
         // argument describing the schedule that fired.
-        let no_args = JsonValue::Array(Vec::new());
-        let args = Some(args.unwrap_or(&no_args));
+        let mut args = args
+            .cloned()
+            .unwrap_or_else(|| JsonValue::Array(Vec::new()));
+        // One text for one set of arguments: JSONB orders map keys itself, and
+        // SQLite compares the text it's given.
+        args.sort_all_objects();
 
         let admission = quota::Admission::begin(db, build_id, policy.max_active_per_org).await?;
-        match admission {
+        let stored_id = match admission {
             quota::Admission::Postgres {
                 mut tx,
                 root,
                 limit,
             } => {
-                sqlx::query(
-                    "INSERT INTO schedule (schedule_id, build_id, cron, ns, var, meta, value, active) VALUES ($1, $2, $3, $4, $5, $6, $7, true)"
+                let stored_id: Uuid = sqlx::query_scalar(
+                    "INSERT INTO schedule (schedule_id, build_id, cron, ns, var, meta, value, active)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, true)
+                     ON CONFLICT (build_id, ns, var, cron, md5(COALESCE(value::text, '')))
+                     DO UPDATE SET
+                         active = schedule.active OR NOT (schedule.cron LIKE '@at:%' AND EXISTS (SELECT 1 FROM schedule_log l WHERE l.schedule_id = schedule.schedule_id)),
+                         deactivated_at = CASE WHEN schedule.cron LIKE '@at:%' AND EXISTS (SELECT 1 FROM schedule_log l WHERE l.schedule_id = schedule.schedule_id) THEN schedule.deactivated_at END
+                     RETURNING schedule_id"
                 )
                 .bind(schedule_id)
                 .bind(build_id)
@@ -2263,11 +2278,12 @@ impl Schedule {
                 .bind(ns)
                 .bind(var)
                 .bind(meta)
-                .bind(args)
-                .execute(&mut *tx)
+                .bind(&args)
+                .fetch_one(&mut *tx)
                 .await?;
                 quota::validate_postgres(&mut tx, root, limit).await?;
                 tx.commit().await?;
+                stored_id
             }
             quota::Admission::Sqlite {
                 mut tx,
@@ -2278,13 +2294,17 @@ impl Schedule {
                     .map(serde_json::to_string)
                     .transpose()
                     .map_err(|e| ScheduleError::SerializationError(e.to_string()))?;
-                let args_json = args
-                    .map(serde_json::to_string)
-                    .transpose()
+                let args_json = serde_json::to_string(&args)
                     .map_err(|e| ScheduleError::SerializationError(e.to_string()))?;
 
-                sqlx::query(
-                    "INSERT INTO schedule (schedule_id, build_id, cron, ns, var, meta, value, active) VALUES (?, ?, ?, ?, ?, ?, ?, 1)"
+                let stored_id: Uuid = sqlx::query_scalar(
+                    "INSERT INTO schedule (schedule_id, build_id, cron, ns, var, meta, value, active)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+                     ON CONFLICT (build_id, ns, var, cron, COALESCE(value, ''))
+                     DO UPDATE SET
+                         active = schedule.active OR NOT (schedule.cron LIKE '@at:%' AND EXISTS (SELECT 1 FROM schedule_log l WHERE l.schedule_id = schedule.schedule_id)),
+                         deactivated_at = CASE WHEN schedule.cron LIKE '@at:%' AND EXISTS (SELECT 1 FROM schedule_log l WHERE l.schedule_id = schedule.schedule_id) THEN schedule.deactivated_at END
+                     RETURNING schedule_id"
                 )
                 .bind(schedule_id)
                 .bind(build_id)
@@ -2293,13 +2313,14 @@ impl Schedule {
                 .bind(var)
                 .bind(meta_json)
                 .bind(args_json)
-                .execute(&mut *tx)
+                .fetch_one(&mut *tx)
                 .await?;
                 quota::validate_sqlite(&mut tx, root, limit).await?;
                 tx.commit().await?;
+                stored_id
             }
-        }
-        Ok(())
+        };
+        Ok(stored_id)
     }
 }
 
@@ -3232,6 +3253,263 @@ mod tests {
                 .to_string()
                 .contains("Active schedule limit exceeded")
         );
+    }
+
+    /// Arm `::app::steps/check-due` as `::hot::schedule/create` arms it.
+    async fn arm_at(
+        db: &crate::db::DatabasePool,
+        build_id: &Uuid,
+        org_id: &Uuid,
+        at: DateTime<Utc>,
+        args: serde_json::Value,
+    ) -> Uuid {
+        Schedule::insert_dynamic_schedule(
+            db,
+            &Uuid::now_v7(),
+            build_id,
+            &ScheduleType::At(at),
+            Some(org_id),
+            SchedulePolicy::self_hosted_default(),
+            "::app::steps",
+            "check-due",
+            None,
+            Some(&args),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// What a schedule is, on either database: one call of a function at a
+    /// time with its arguments.
+    async fn assert_a_schedule_is_one_call(
+        db: &crate::db::DatabasePool,
+        build_id: &Uuid,
+        org_id: &Uuid,
+    ) {
+        use serde_json::json;
+        let at = chrono::Utc::now() + chrono::Duration::hours(1);
+
+        // Other args at one moment are another schedule.
+        let first = arm_at(db, build_id, org_id, at, json!(["step-1"])).await;
+        let second = arm_at(db, build_id, org_id, at, json!(["step-2"])).await;
+        assert_ne!(first, second);
+        for id in [first, second] {
+            assert!(Schedule::get_schedule(db, &id).await.unwrap().active);
+        }
+
+        // The same call again is that schedule.
+        assert_eq!(
+            arm_at(db, build_id, org_id, at, json!(["step-1"])).await,
+            first
+        );
+
+        // The order of a map's keys doesn't change its value.
+        let map = arm_at(
+            db,
+            build_id,
+            org_id,
+            at,
+            json!([{"a": 1, "b": {"c": 2, "d": 3}}]),
+        )
+        .await;
+        assert_eq!(
+            arm_at(
+                db,
+                build_id,
+                org_id,
+                at,
+                json!([{"b": {"d": 3, "c": 2}, "a": 1}])
+            )
+            .await,
+            map
+        );
+
+        // Cancelled and armed again, it fires.
+        assert!(Schedule::cancel_schedule(db, &first).await.unwrap());
+        assert_eq!(
+            arm_at(db, build_id, org_id, at, json!(["step-1"])).await,
+            first
+        );
+        let armed_again = Schedule::get_schedule(db, &first).await.unwrap();
+        assert!(armed_again.active);
+        assert_eq!(armed_again.deactivated_at, None);
+
+        // Fired, the same call must not run again.
+        crate::db::ScheduleLog::insert(db, &second, None, at, false)
+            .await
+            .unwrap();
+        assert!(Schedule::cancel_schedule(db, &second).await.unwrap());
+        assert_eq!(
+            arm_at(db, build_id, org_id, at, json!(["step-2"])).await,
+            second
+        );
+        let spent = Schedule::get_schedule(db, &second).await.unwrap();
+        assert!(!spent.active);
+        assert!(spent.deactivated_at.is_some());
+
+        // A recurring schedule that fired and was cancelled can start again.
+        let recurring = |id: Uuid| async move {
+            Schedule::insert_dynamic_schedule(
+                db,
+                &id,
+                build_id,
+                &ScheduleType::Cron("0 0 9 * * *".to_string()),
+                Some(org_id),
+                SchedulePolicy::self_hosted_default(),
+                "::app::steps",
+                "check-due",
+                None,
+                Some(&json!(["daily"])),
+            )
+            .await
+            .unwrap()
+        };
+        let daily = recurring(Uuid::now_v7()).await;
+        crate::db::ScheduleLog::insert(db, &daily, None, at, false)
+            .await
+            .unwrap();
+        assert!(Schedule::cancel_schedule(db, &daily).await.unwrap());
+        assert_eq!(recurring(Uuid::now_v7()).await, daily);
+        assert!(Schedule::get_schedule(db, &daily).await.unwrap().active);
+
+        // A dynamic schedule is not the metadata schedule of its function and
+        // time: a reload keeps both, and the args stay on the dynamic one.
+        let dynamic = recurring(Uuid::now_v7()).await;
+        Schedule::upsert_schedule(
+            db,
+            build_id,
+            "0 0 9 * * *",
+            "::app::steps",
+            "check-due",
+            Some(&json!({"schedule": "0 0 9 * * *"})),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let stored = Schedule::get_schedule(db, &dynamic).await.unwrap();
+        assert_eq!(stored.value, Some(json!(["daily"])));
+        assert_eq!(stored.meta, None);
+        let of_function = |schedules: Vec<Schedule>| {
+            schedules
+                .into_iter()
+                .filter(|schedule| schedule.cron == "0 0 9 * * *")
+                .collect::<Vec<_>>()
+        };
+        let both = of_function(
+            Schedule::get_schedules_by_build(db, build_id, None, None)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(both.len(), 2);
+        let metadata = both
+            .iter()
+            .find(|schedule| schedule.value.is_none())
+            .unwrap()
+            .schedule_id;
+
+        // A reload reactivates a metadata schedule under the ID it had.
+        Schedule::deactivate_schedules_by_build(db, build_id)
+            .await
+            .unwrap();
+        Schedule::upsert_schedule(
+            db,
+            build_id,
+            "0 0 9 * * *",
+            "::app::steps",
+            "check-due",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(Schedule::get_schedule(db, &metadata).await.unwrap().active);
+        assert_eq!(
+            of_function(
+                Schedule::get_schedules_by_build(db, build_id, None, None)
+                    .await
+                    .unwrap()
+            )
+            .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn a_schedule_is_one_call() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        assert_a_schedule_is_one_call(&db, &data.build_id, &data.org_id).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_a_schedule_is_one_call() {
+        let Ok(uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
+            eprintln!("skipping: HOT_TEST_POSTGRES_URI not set");
+            return;
+        };
+        let conf = crate::val!({"uri": uri, "schema": "hot", "rls": {"enforce": false}});
+        crate::db::run_migrations(&conf).await.unwrap();
+        let pool = crate::db::create_db_pool(&conf).await.unwrap();
+        let onboarding = pool.with_scope(crate::db::DatabaseScope::Bootstrap(
+            crate::db::BootstrapOperation::Onboarding,
+        ));
+        let (user, org, env) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        crate::db::User::insert_user(
+            &onboarding,
+            &user,
+            &format!("schedule-{user}@example.test"),
+            None,
+            Some(&user),
+        )
+        .await
+        .unwrap();
+        crate::db::Org::insert_org(
+            &onboarding,
+            &org,
+            "Schedule fixture",
+            &format!("schedule-{org}"),
+            "individual",
+            &user,
+        )
+        .await
+        .unwrap();
+        crate::db::Env::insert_env(&onboarding, &env, &org, "development", &user)
+            .await
+            .unwrap();
+        let db = pool.with_scope(crate::db::DatabaseScope::Environment {
+            org_id: org,
+            env_id: env,
+        });
+        let (project, build) = (Uuid::now_v7(), Uuid::now_v7());
+        crate::db::Project::insert_project(&db, &project, &env, "schedules", &user)
+            .await
+            .unwrap();
+        crate::db::Build::insert_build(
+            &db,
+            &build,
+            &project,
+            "hash",
+            1,
+            crate::db::Build::BUILD_TYPE_BUNDLE,
+            &user,
+        )
+        .await
+        .unwrap();
+        assert_a_schedule_is_one_call(&db, &build, &org).await;
+
+        // Arguments past the size of a btree entry still arm.
+        let at = chrono::Utc::now() + chrono::Duration::hours(1);
+        let long = serde_json::json!(["x".repeat(100_000)]);
+        let id = arm_at(&db, &build, &org, at, long.clone()).await;
+        assert_eq!(arm_at(&db, &build, &org, at, long).await, id);
     }
 
     #[test]

@@ -10,6 +10,8 @@
 //! [`initialization_order`] keeps source order wherever it can and moves a
 //! namespace only after the namespaces whose values it reads. Namespaces
 //! that read each other's values keep their source order among themselves.
+//! Aliases of types need no waiting: `bind_type_aliases` binds them before
+//! any namespace runs.
 
 use super::call_graph::collect_callees_from_value;
 use crate::lang::ast::{Namespace, NsPath, Program, Ref, Value};
