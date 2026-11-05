@@ -6,11 +6,13 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
 };
+use hot::data::msg::Message;
 use hot::db::DatabasePool;
 use hot::db::api_key::ApiKey;
 use hot::db::event::Event;
 use hot::db::stream::{Stream as DbStream, StreamError};
 use hot::permission::actions;
+use hot::queue::Queue;
 use hot::val::Val;
 use once_cell::sync::OnceCell;
 use std::str::FromStr;
@@ -30,12 +32,11 @@ const API_EVENT_QUEUE_NAME: &str = "hot:event";
 const RESERVED_EVENT_PREFIX: &str = "hot:";
 const EXTERNAL_CALL_EVENT_TYPE: &str = "hot:call";
 
-static API_EVENT_QUEUE: OnceCell<Arc<hot::queue::ProcessingQueue<hot::data::msg::Message>>> =
-    OnceCell::new();
+static API_EVENT_QUEUE: OnceCell<Arc<hot::queue::ProcessingQueue<Message>>> = OnceCell::new();
 
 fn get_event_queue(
     conf: &Val,
-) -> Result<&'static Arc<hot::queue::ProcessingQueue<hot::data::msg::Message>>, String> {
+) -> Result<&'static Arc<hot::queue::ProcessingQueue<Message>>, String> {
     API_EVENT_QUEUE.get_or_try_init(|| {
         let queue_type_str = conf.get_str_or_default("queue.type", "sqlite");
         let queue_type = hot::queue::QueueType::from_str(&queue_type_str)
@@ -54,7 +55,7 @@ fn get_event_queue(
         let serialization = hot::data::serialization::Serialization::from_str(&serialization_str)
             .unwrap_or_default();
 
-        let queue = hot::queue::ProcessingQueue::<hot::data::msg::Message>::new_with_cluster(
+        let queue = hot::queue::ProcessingQueue::<Message>::new_with_cluster(
             queue_type,
             API_EVENT_QUEUE_NAME.to_string(),
             redis_uri,
@@ -107,6 +108,37 @@ pub(super) fn require_external_event_type(
 pub async fn publish_event_internal(
     db: &DatabasePool,
     conf: &Val,
+    auth: &AuthContext,
+    actor_user_id: Uuid,
+    event_type: &str,
+    event_data: &serde_json::Value,
+    stream_id: Uuid,
+    access_id: Option<Uuid>,
+) -> Result<PublishedEvent, (StatusCode, Json<ApiErrorResponse>)> {
+    let queue = get_event_queue(conf).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiErrorResponse::internal_error(&e)),
+        )
+    })?;
+
+    publish_event_to_queue(
+        queue.as_ref(),
+        db,
+        auth,
+        actor_user_id,
+        event_type,
+        event_data,
+        stream_id,
+        access_id,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn publish_event_to_queue(
+    queue: &dyn Queue<Message>,
+    db: &DatabasePool,
     auth: &AuthContext,
     actor_user_id: Uuid,
     event_type: &str,
@@ -209,26 +241,21 @@ pub async fn publish_event_internal(
     };
 
     // Convert to unified Message format and enqueue
-    let message: hot::data::msg::Message = event_message.into();
+    let message: Message = event_message.into();
 
-    use hot::queue::Queue;
-
-    let queue = get_event_queue(conf).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiErrorResponse::internal_error(&e)),
-        )
-    })?;
-
-    queue.enqueue(message).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiErrorResponse::internal_error(&format!(
-                "Failed to enqueue event: {}",
-                e
-            ))),
-        )
-    })?;
+    // The event row is already written, so a failed enqueue would lose the
+    // event: try a few times, as a handler's `send()` does.
+    hot::queue::enqueue_with_retries(queue, message, &hot::queue::PUBLISH_RETRY_DELAYS)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiErrorResponse::internal_error(&format!(
+                    "Failed to enqueue event: {}",
+                    e
+                ))),
+            )
+        })?;
 
     tracing::info!(
         "Event {} ({}) published and queued for processing",
@@ -527,6 +554,8 @@ pub async fn get_event_runs(
 mod tests {
     use super::*;
     use hot::val;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn api_event_queue_is_cached() {
@@ -557,24 +586,9 @@ mod tests {
         assert!(require_external_event_type("user:created").is_ok());
     }
 
-    #[tokio::test]
-    async fn published_event_context_carries_no_deadline() {
-        use hot::queue::Queue;
-
-        let db = hot::db::test_db().await;
-        let data = hot::db::insert_test_data(&db).await.unwrap();
-
-        let conf = val!({
-            "queue": {
-                "type": "memory",
-            },
-            "serialization": {
-                "type": "json",
-            },
-        });
-
+    fn test_api_key(data: &hot::db::TestData) -> ApiKey {
         let now = chrono::Utc::now();
-        let api_key = ApiKey {
+        ApiKey {
             api_key_id: Uuid::now_v7(),
             env_id: data.env_id,
             description: "test".to_string(),
@@ -587,7 +601,135 @@ mod tests {
             active_toggle_at: None,
             active_toggle_by_user_id: None,
             permissions: serde_json::Value::Null,
-        };
+        }
+    }
+
+    /// A queue whose first enqueues fail, as Redis's do through a restart.
+    #[derive(Default)]
+    struct FlakyQueue {
+        failures_left: AtomicUsize,
+        attempts: AtomicUsize,
+        messages: Mutex<Vec<Message>>,
+    }
+
+    impl FlakyQueue {
+        fn failing(failures: usize) -> Self {
+            Self {
+                failures_left: AtomicUsize::new(failures),
+                ..Self::default()
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Queue<Message> for FlakyQueue {
+        async fn enqueue(
+            &self,
+            item: Message,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            let failing = self
+                .failures_left
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok();
+            if failing {
+                return Err("queue unavailable".into());
+            }
+            self.messages.lock().unwrap().push(item);
+            Ok(())
+        }
+
+        async fn dequeue(
+            &self,
+        ) -> Result<Option<Message>, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(None)
+        }
+
+        async fn len(&self) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(self.messages.lock().unwrap().len())
+        }
+
+        async fn move_to_dead_letter_queue(
+            &self,
+            _item: Message,
+            _reason: String,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            Ok(())
+        }
+    }
+
+    async fn publish_to(
+        queue: &FlakyQueue,
+        db: &DatabasePool,
+        data: &hot::db::TestData,
+    ) -> Result<PublishedEvent, (StatusCode, Json<ApiErrorResponse>)> {
+        let api_key = test_api_key(data);
+        publish_event_to_queue(
+            queue,
+            db,
+            &AuthContext::ApiKey(api_key.clone()),
+            api_key.created_by_user_id,
+            "order:created",
+            &serde_json::json!({"answer": 42}),
+            data.stream_id,
+            None,
+        )
+        .await
+    }
+
+    /// The event row is written before the enqueue, and nothing else queues
+    /// it: a failed enqueue leaves the row for no worker to process.
+    #[tokio::test]
+    async fn a_publish_outlasts_a_queue_that_fails_for_a_moment() {
+        let db = hot::db::test_db().await;
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let queue = FlakyQueue::failing(1);
+
+        let published = publish_to(&queue, &db, &data)
+            .await
+            .expect("the retried enqueue should succeed");
+
+        assert_eq!(queue.attempts.load(Ordering::SeqCst), 2);
+        let messages = queue.messages.lock().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, published.event_id);
+    }
+
+    #[tokio::test]
+    async fn a_publish_reports_a_queue_that_stays_down() {
+        let db = hot::db::test_db().await;
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let queue = FlakyQueue::failing(usize::MAX);
+
+        let (status, _) = publish_to(&queue, &db, &data)
+            .await
+            .err()
+            .expect("the publish should fail");
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            queue.attempts.load(Ordering::SeqCst),
+            1 + hot::queue::PUBLISH_RETRY_DELAYS.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn published_event_context_carries_no_deadline() {
+        let db = hot::db::test_db().await;
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+
+        let conf = val!({
+            "queue": {
+                "type": "memory",
+            },
+            "serialization": {
+                "type": "json",
+            },
+        });
+
+        let api_key = test_api_key(&data);
 
         let published = publish_event_internal(
             &db,
