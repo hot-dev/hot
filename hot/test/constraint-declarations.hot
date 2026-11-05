@@ -110,6 +110,6 @@ meta ["test"] fn () {
     assert(is-type("holiday", Workday), "is-type agrees")
     assert-eq("sun", Day(dynamic("sun")), "a composed union's value stays plain")
     assert-eq("violation", constraint-kind(Day(dynamic("fri"))), "its constructor checks the members")
-    assert-eq("holiday", untype(Shift.On(dynamic("holiday"))), "a composed union as a payload")
+    assert-eq({On: "holiday"}, untype(Shift.On(dynamic("holiday"))), "a composed union as a payload")
     assert-eq("violation", constraint-kind(Shift.On(dynamic("fri"))), "a payload outside it")
 }

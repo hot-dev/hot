@@ -1096,10 +1096,26 @@ pub fn untype(args: &[Val]) -> HotResult<Val> {
     untype_recursive(form)
 }
 
+/// The variant a tagged value is, from its `::ns/Enum.Variant` tag. A `Result`
+/// has none here: it holds a value rather than being data of its own.
+fn untyped_variant_name(map: &IndexMap<Val, Val>) -> Option<&str> {
+    if !crate::val::is_tagged_wrapper(map) {
+        return None;
+    }
+    let type_name = crate::val::tagged_type_name(map)?;
+    if type_name.starts_with("::hot::type/Result.") {
+        return None;
+    }
+    let (_, variant) = type_name.rsplit('/').next()?.rsplit_once('.')?;
+    Some(variant)
+}
+
 /// Recursively remove type metadata from a structure.
 ///
 /// Strips `$type`/`$val` wrapping at every level:
 /// - `{$type: "Foo", $val: inner}` → recurse into `inner`
+/// - `{$type: "Enum.Unit"}` → `"Unit"`, the variant's name
+/// - `{$type: "Enum.Variant", $val: inner}` → `{Variant: inner}`, recursed
 /// - `{$type: "Foo", field: …}` → new map without `$`-prefixed keys, values recursed
 /// - Regular maps/vecs → recurse into values/elements
 /// - Scalars → returned as-is
@@ -1107,8 +1123,19 @@ pub fn untype_recursive(form: &Val) -> HotResult<Val> {
     match form {
         Val::Map(map) => {
             if crate::val::tagged_type_name(map).is_some() {
+                let variant = untyped_variant_name(map);
                 if let Some(val_content) = map.get(&Val::from("$val")) {
-                    return untype_recursive(val_content);
+                    let payload = match untype_recursive(val_content) {
+                        HotResult::Ok(payload) => payload,
+                        HotResult::Err(err) => return HotResult::Err(err),
+                    };
+                    return HotResult::Ok(match variant {
+                        Some(variant) => Val::map_from_iter([(Val::from(variant), payload)]),
+                        None => payload,
+                    });
+                }
+                if let Some(variant) = variant {
+                    return HotResult::Ok(Val::from(variant));
                 }
 
                 // Otherwise, construct a new map excluding metadata keys (those starting with '$')

@@ -575,6 +575,15 @@ meta {
     // Remove type wrapper
     untype(user)  // {"name": "Alice"}
     ```
+
+    An enum variant keeps its name: one with no payload becomes its name, and
+    one with a payload a Map from its name to the payload. A record or variant
+    field of an enum type reads that form back. A `Result` becomes its value.
+
+    ```hot
+    untype(Outcome.Passed)    // "Passed"
+    untype(Status.Owed(5))    // {Owed: 5}
+    ```
     """
 }
 fn (form: Any): Any {

@@ -1,0 +1,156 @@
+// `untype` keeps a variant's name: a unit variant is its name, and a variant
+// with a payload a Map from its name to the payload. A record or variant field
+// reads that form back, so a value survives being stored or sent as plain
+// data.
+::hot::test::variant-untype ns
+meta ["test"]
+
+::store ::hot::store
+
+// Values reach their boundary at run time, where a literal would be
+// rejected by `hot check` already.
+dynamic fn (value: Any): Any {
+    value
+}
+
+Outcome enum { Passed, Failed }
+Status enum { NotOwed(Str), Owed(Int), Unknown }
+Point type {
+    x: Int
+}
+
+Shape enum { Dot(Point), Line(Vec<Point>), Maybe(Point?), Empty }
+
+Animal enum open { Dog }
+Bird type {
+    species: Str
+}
+
+Bird -> Animal.Bird
+
+Holder type {
+    outcome: Outcome,
+    status: Status,
+    shape: Shape?,
+    history: Vec<Outcome>,
+}
+
+Report enum { Of(Outcome), Empty }
+
+holder fn (): Holder {
+    Holder({
+        outcome: Outcome.Failed,
+        status: Status.Owed(3),
+        shape: Shape.Dot({x: 1}),
+        history: [Outcome.Passed, Outcome.Failed],
+    })
+}
+
+variant-of fn (value: Any): Str {
+    match value {
+        Outcome.Passed => { "Outcome.Passed" }
+        Outcome.Failed => { "Outcome.Failed" }
+        Status.NotOwed => { "Status.NotOwed" }
+        Status.Owed => { "Status.Owed" }
+        _ => { "something else" }
+    }
+}
+
+test-a-unit-variant-is-its-name
+meta ["test"] fn () {
+    assert-eq("Passed", untype(Outcome.Passed))
+    assert-eq("Unknown", untype(Status.Unknown))
+    assert-eq("\"Passed\"", to-json(untype(Outcome.Passed)))
+}
+
+test-a-variant-with-a-payload-is-a-map-of-its-name
+meta ["test"] fn () {
+    assert-eq({NotOwed: "no tax"}, untype(Status.NotOwed("no tax")))
+    assert-eq({Owed: 1}, untype(Status.Owed(1)))
+    assert-eq({Dot: {x: 1}}, untype(Shape.Dot({x: 1})))
+    assert-eq({Line: [{x: 1}, {x: 2}]}, untype(Shape.Line([{x: 1}, {x: 2}])))
+    assert-eq({Maybe: null}, untype(Shape.Maybe(null)))
+    assert-eq("{\"Owed\":1}", to-json(untype(Status.Owed(1))))
+}
+
+test-an-enrolled-variant-keeps-its-name-too
+meta ["test"] fn () {
+    assert-eq({Bird: {species: "Eagle"}}, untype(Animal.Bird({species: "Eagle"})))
+    assert-eq("Dog", untype(Animal.Dog))
+}
+
+test-variants-inside-a-value-keep-their-names
+meta ["test"] fn () {
+    assert-eq(
+        {
+            outcome: "Failed",
+            status: {Owed: 3},
+            shape: {Dot: {x: 1}},
+            history: ["Passed", "Failed"],
+        },
+        untype(holder())
+    )
+    assert-eq(["Passed", {Owed: 1}], untype([Outcome.Passed, Status.Owed(1)]))
+    assert-eq({a: "Failed"}, untype({a: Outcome.Failed}))
+}
+
+test-records-and-results-are-as-they-were
+meta ["test"] fn () {
+    assert-eq({x: 1}, untype(Point({x: 1})))
+    assert-eq(5, untype(ok(5)), "a Result is its value")
+    assert-eq({a: 5}, untype({a: ok(5)}))
+}
+
+test-a-record-reads-its-untyped-form-back
+meta ["test"] fn () {
+    assert-eq(holder(), Holder(untype(holder())))
+    rebuilt Holder(dynamic(from-json(to-json(untype(holder())))))
+    assert-eq("Outcome.Failed", variant-of(rebuilt.outcome))
+    assert-eq("Status.Owed", variant-of(rebuilt.status))
+    assert-eq(["Outcome.Passed", "Outcome.Failed"], map(rebuilt.history, variant-of))
+}
+
+test-a-spread-keeps-a-variant-field
+meta ["test"] fn () {
+    changed Holder({...untype(holder()), outcome: "Passed"})
+    assert-eq("Outcome.Passed", variant-of(changed.outcome))
+    assert-eq("Status.Owed", variant-of(changed.status))
+}
+
+test-a-variant-payload-reads-its-untyped-form-back
+meta ["test"] fn () {
+    assert-eq(Report.Of(Outcome.Passed), Report.Of(dynamic("Passed")))
+}
+
+test-a-name-that-is-no-variant-is-refused
+meta ["test"] fn () {
+    made Holder(dynamic({outcome: "Maybe", status: "Unknown", history: []}))
+    assert(is-err(made))
+    assert-eq("constructor of `Holder` at `outcome` expected Outcome, got Str", err-value(made).message)
+    assert(is-err(Holder(dynamic({outcome: "Passed", status: {Owed: "x"}, history: []}))), "the payload is checked")
+    assert(is-err(Holder(dynamic({outcome: "Passed", status: "Owed", history: []}))), "Owed carries a payload")
+}
+
+test-typed-values-survive-the-store
+meta ["test"] fn () {
+    values ::store/Map({name: "test-variant-untype-typed"})
+    ::store/put(values, "unit", Outcome.Passed)
+    ::store/put(values, "payload", Status.NotOwed("no tax"))
+    ::store/put(values, "record", holder())
+    assert-eq("Outcome.Passed", variant-of(::store/get(values, "unit")))
+    assert-eq("Status.NotOwed", variant-of(::store/get(values, "payload")))
+    assert-eq(holder(), ::store/get(values, "record"))
+    assert(is-type(::store/get(values, "record"), Holder))
+    assert-eq("Status.Owed", variant-of(::store/get(values, "record").status))
+    assert(some(::store/vals(values), is-type(%, Holder)), "vals reads them the same way")
+    ::store/destroy(values)
+}
+
+test-an-untyped-value-comes-back-from-the-store
+meta ["test"] fn () {
+    plain ::store/Map({name: "test-variant-untype-plain"})
+    ::store/put(plain, "record", untype(holder()))
+    assert-eq("Failed", ::store/get(plain, "record").outcome, "stored as plain data")
+    assert-eq(holder(), Holder(::store/get(plain, "record")))
+    ::store/destroy(plain)
+}

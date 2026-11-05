@@ -741,6 +741,35 @@ untype(order)
 // {customer: {name: "Bob", age: 25}, items: [{name: "Widget", price: 9.99}]}
 ```
 
+### Enums and `untype`
+
+A plain value keeps a variant's name, so nothing is lost when it leaves Hot. A variant with no payload becomes its name, and a variant with a payload becomes a Map from its name to the payload:
+
+```hot
+Outcome enum { Passed, Failed }
+Status enum { NotOwed(Str), Owed(Int) }
+
+untype(Outcome.Passed)           // "Passed"
+untype(Status.NotOwed("no tax")) // {NotOwed: "no tax"}
+untype(Status.Owed(5))           // {Owed: 5}
+```
+
+A record or variant field of an enum type reads this form back, so the constructor rebuilds what `untype` took apart. A name that isn't a variant of the enum is an `Err`:
+
+```hot
+Filing type { outcome: Outcome, status: Status }
+
+filing Filing({outcome: Outcome.Passed, status: Status.Owed(5)})
+plain untype(filing)  // {outcome: "Passed", status: {Owed: 5}}
+Filing(plain)         // the same Filing
+```
+
+A `Result` isn't data of its own, so `untype(ok(5))` is `5`. To read a payload in code, use [`match`](#matching-a-variants-payload) or field access rather than `untype`.
+
+### Typed Values in the Store
+
+`::hot::store` keeps a typed value as it is: `put` then `get` gives back the same record or variant, nested values included, and `match` and `is-type` work on it. Call `untype` first when something else reads the store and expects plain JSON, and rebuild the value with its constructor when you read it back.
+
 ## Summary
 
 - Types are **optional** — add them where they help

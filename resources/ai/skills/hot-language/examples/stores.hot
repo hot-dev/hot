@@ -21,6 +21,7 @@ knowledge ::store/Map({
 
 save-profile fn (profile: UserProfile): UserProfile {
     // Store typed values as plain JSON-shaped maps for external readability.
+    // UserProfile(stored) rebuilds the record, enum variants included.
     ::store/put(profiles, profile.id, untype(profile))
     profile
 }
