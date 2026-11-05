@@ -1191,12 +1191,36 @@ impl Compiler {
         Some(node("named", vec![("type", Val::from(qualified))]))
     }
 
-    /// Whether `qualified` is a record with fields or an enum: no plain value
-    /// is one, so a field of that type can't just wrap what it was given.
-    pub(super) fn is_structured_type(&self, qualified: &str) -> bool {
+    /// Whether a value of `qualified` comes only from its constructor: a record
+    /// with fields, an enum, or a type declared over a built-in one. A field of
+    /// that type can't just wrap what it was given.
+    pub(super) fn is_constructed_type(&self, qualified: &str) -> bool {
         self.constraint_type_defs.get(qualified).is_some_and(|def| {
-            def.variants.is_some() || def.fields.as_ref().is_some_and(|f| !f.is_empty())
+            def.variants.is_some()
+                || def.fields.as_ref().is_some_and(|f| !f.is_empty())
+                || self.declared_base_spec(def).is_some()
         })
+    }
+
+    /// The check of what a type declared over a built-in one holds, as for
+    /// `Meters type Int` or `Distance type Meters` over it; `None` for any
+    /// other type, such as one over `Any`, `Fn` or a record.
+    pub(super) fn declared_base_spec(&self, type_def: &TypeDef) -> Option<Val> {
+        let mut seen = AHashSet::new();
+        let mut alias = type_def.type_alias.as_ref()?;
+        loop {
+            match alias {
+                TypeExpr::Simple(name) | TypeExpr::Named(name) if !is_base_type_name(name) => {
+                    let qualified = self.resolve_constraint_type(name)?;
+                    let declared = self.constraint_type_defs.get(&qualified)?;
+                    alias = declared.type_alias.as_ref()?;
+                    if !seen.insert(qualified) {
+                        return None;
+                    }
+                }
+                _ => return plain_field_spec(alias),
+            }
+        }
     }
 
     /// Whether a type name resolves to a constrained alias, or an alias

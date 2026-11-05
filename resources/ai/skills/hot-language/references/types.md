@@ -95,7 +95,10 @@ Server(body)   // Err: constructor of `Server` at `port` expected Int, got Str
 - A failure in a nested record reports the whole path from the outermost one:
   `constructor of `Order` at `items[2].price` expected Dec, got Str`.
 - An `Err` given for a field comes back as itself, unless the field is `Any`.
-- `Any`, `Fn` and plain declared types such as `Port type Int` aren't checked.
+- A type over a built-in one checks its value the same way, at its constructor
+  and at a field: with `Meters type Int`, `Meters("x")` and a `distance: Meters`
+  field given a Str are both an `Err`, and `hot check` reports the literal.
+- `Any` and `Fn` aren't checked.
 - `assoc` and the other updates only check `where` constraints. Call the
   constructor again if the fields may have changed.
 - An enum variant's payload is checked as a field of that type is:
@@ -158,8 +161,7 @@ A record field or enum payload of such a type builds through the constructor
 that takes the value's type, as `Email(value)` would. A
 `::hot::time/PlainDate` field takes `"2026-01-02"` this way, and a string
 that doesn't parse makes the record an `Err`. A value no constructor takes by
-its type is an `Err` at a record or enum field, and is kept as given at a plain
-declared type such as `Email type Str`.
+its type is an `Err`.
 
 Empty marker types are useful for tags and capabilities:
 

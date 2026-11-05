@@ -32,7 +32,7 @@ VectorStoreSearchResultItem type {
     file_id: Str,
     filename: Str,
     score: Dec,
-    attributes: VectorStoreFileAttributes,
+    attributes: VectorStoreFileAttributes?,
     content: Vec<VectorStoreSearchResultContentObject>
 }
 

@@ -4403,6 +4403,7 @@ impl VirtualMachine {
     ///   $type: "TypeName",
     ///   $fields: {field_name: {$type: "FieldType", ...}, ...},
     ///   $checks: {field_name: [kinds, item_kinds, spec], ...},
+    ///   $base: [kinds, item_kinds, spec],  // What a type over a built-in one holds
     ///   $required: ["field1", "field2", ...],
     ///   $all_fields: ["field1", "field2", ...]
     /// }
@@ -4544,25 +4545,25 @@ impl VirtualMachine {
 
             // Non-map data (strings, numbers, etc.) goes through a constructor
             // declared for its type, as `Type(data)` would: a time type parses
-            // a Str. A record or enum's own constructor decides what else it
-            // takes, as no plain value is one. Otherwise it is just wrapped
-            // with $type/$val, since a one-argument constructor need not
-            // convert (`Uuid(7)` makes a new id).
+            // a Str. The constructor of a record, an enum or a type over a
+            // built-in one decides what else it takes. Otherwise it is just
+            // wrapped with $type/$val, since a one-argument constructor need
+            // not convert (`Uuid(7)` makes a new id).
             if !matches!(data, Val::Map(_)) {
                 let typed_key = format!("{}/1:{}", type_name, self.get_val_type_name(data));
-                let structured = matches!(
-                    type_info_map.get(&Val::from("$structured")),
+                let constructed = matches!(
+                    type_info_map.get(&Val::from("$constructed")),
                     Some(Val::Bool(true))
                 );
                 if self.function_mapping.contains_key(&typed_key)
-                    || (structured && has_direct_constructor)
+                    || (constructed && has_direct_constructor)
                 {
                     return self.execute_function_call_by_qualified_name(
                         &type_name,
                         std::slice::from_ref(data),
                     );
                 }
-                if structured {
+                if constructed {
                     return Ok(self.constructor_mismatch(&type_name, data));
                 }
                 let mut result_map = indexmap::IndexMap::new();
@@ -4701,6 +4702,24 @@ impl VirtualMachine {
             && let Some(coerced) = self.coerce_tagged_via_arrow(data, existing, &type_name)?
         {
             return Ok(coerced);
+        }
+
+        // A type over a built-in one holds a value of it, whatever tag that
+        // value came with.
+        if let Some(check) = type_info_map.get(&Val::from("$base")) {
+            let held = match data {
+                Val::Map(m) if crate::val::tagged_type_name(m).is_some() => {
+                    m.get(&Val::from("$val")).unwrap_or(data)
+                }
+                _ => data,
+            };
+            return Ok(match self.check_declared_base(held, check, &type_name)? {
+                Ok(value) => Val::map_from_iter([
+                    (Val::from("$type"), Val::from(type_name)),
+                    (Val::from("$val"), value),
+                ]),
+                Err(error) => error,
+            });
         }
 
         // Get all_fields list to check for newtypes

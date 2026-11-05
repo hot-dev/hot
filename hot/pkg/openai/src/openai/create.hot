@@ -230,7 +230,7 @@ RunObject type {
     model: Str,
     instructions: Str?,
     tools: Vec<AssistantTool>,
-    metadata: Metadata,
+    metadata: Metadata?,
     usage: RunCompletionUsage?,
     temperature: Dec?,
     top_p: Dec?,
@@ -297,7 +297,7 @@ MessageObject type {
     assistant_id: Str?,
     run_id: Str?,
     attachments: Vec<Map>?,
-    metadata: Metadata
+    metadata: Metadata?
 }
 
 CreateVectorStoreFileRequest type {
@@ -415,7 +415,7 @@ VectorStoreObject type {
     expires_after: VectorStoreExpirationAfter?,
     expires_at: Int?,
     last_active_at: Int?,
-    metadata: Metadata
+    metadata: Metadata?
 }
 
 // Custom key-value attributes for a vector store file (used for filtering)
@@ -428,7 +428,7 @@ Eval type {
     data_source_config: Map,
     testing_criteria: Vec,
     created_at: Int,
-    metadata: Metadata
+    metadata: Metadata?
 }
 
 // Chunking strategy used for a vector store file
@@ -445,7 +445,7 @@ ThreadObject type {
     object: "thread",
     created_at: Int,
     tool_resources: Map,
-    metadata: Metadata
+    metadata: Metadata?
 }
 
 // Chunking strategy configuration for vector store file creation
@@ -584,7 +584,7 @@ EvalRun type {
     per_model_usage: Vec<Map>,
     per_testing_criteria_results: Vec<Map>,
     data_source: Map,
-    metadata: Metadata,
+    metadata: Metadata?,
     error: EvalApiError?
 }
 
@@ -674,7 +674,7 @@ AssistantObject type {
     instructions: Str?,
     tools: Vec<AssistantTool>,
     tool_resources: Map?,
-    metadata: Metadata,
+    metadata: Metadata?,
     temperature: Dec?,
     top_p: Dec?,
     response_format: AssistantsApiResponseFormatOption?
@@ -726,7 +726,7 @@ CreateAssistantResponse type {
     instructions: Str?,
     tools: Vec<AssistantTool>,
     tool_resources: Map?,
-    metadata: Metadata,
+    metadata: Metadata?,
     temperature: Dec?,
     top_p: Dec?,
     response_format: AssistantsApiResponseFormatOption?
@@ -1205,7 +1205,7 @@ CreateEvalResponse type {
     data_source_config: Map,
     testing_criteria: Vec,
     created_at: Int,
-    metadata: Metadata
+    metadata: Metadata?
 }
 
 
@@ -1245,7 +1245,7 @@ CreateEvalRunResponse type {
     per_model_usage: Vec<Map>,
     per_testing_criteria_results: Vec<Map>,
     data_source: Map,
-    metadata: Metadata,
+    metadata: Metadata?,
     error: EvalApiError?
 }
 
@@ -1640,7 +1640,7 @@ CreateThreadResponse type {
     object: "thread",
     created_at: Int,
     tool_resources: Map?,
-    metadata: Metadata
+    metadata: Metadata?
 }
 
 
@@ -1696,7 +1696,7 @@ CreateThreadAndRunResponse type {
     model: Str,
     instructions: Str?,
     tools: Vec<AssistantTool>,
-    metadata: Metadata,
+    metadata: Metadata?,
     usage: RunCompletionUsage?,
     temperature: Dec?,
     top_p: Dec?,
@@ -1747,7 +1747,7 @@ CreateMessageResponse type {
     assistant_id: Str?,
     run_id: Str?,
     attachments: Vec<Map>?,
-    metadata: Metadata
+    metadata: Metadata?
 }
 
 
@@ -1804,7 +1804,7 @@ CreateRunResponse type {
     model: Str,
     instructions: Str?,
     tools: Vec<AssistantTool>,
-    metadata: Metadata,
+    metadata: Metadata?,
     usage: RunCompletionUsage?,
     temperature: Dec?,
     top_p: Dec?,
@@ -1888,7 +1888,7 @@ CreateVectorStoreResponse type {
     expires_after: VectorStoreExpirationAfter?,
     expires_at: Int?,
     last_active_at: Int?,
-    metadata: Metadata
+    metadata: Metadata?
 }
 
 

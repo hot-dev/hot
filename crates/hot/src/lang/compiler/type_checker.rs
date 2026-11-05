@@ -649,6 +649,8 @@ pub struct TypeChecker {
     /// types — they're variables holding `Value::TypeDef`, looked up by
     /// fully-qualified name.
     qualified_types: AHashMap<String, TypeExpr>,
+    /// Qualified names of the types that declare a constructor of their own.
+    custom_constructors: AHashSet<String>,
     /// Var imports of a type (`::c/Port` for `Port ::a/Port` in `::c`) →
     /// what the type they name resolves to. Kept apart from
     /// `qualified_types`, which holds only the types declared in each
@@ -777,6 +779,7 @@ impl TypeChecker {
             in_pipe_flow: false,
             known_types: AHashSet::new(),
             qualified_types: AHashMap::new(),
+            custom_constructors: AHashSet::new(),
             type_imports: AHashMap::new(),
             core_types: AHashMap::new(),
             impl_registry: AHashSet::new(),
@@ -1543,6 +1546,7 @@ impl TypeChecker {
         // side-effect-free for valid annotations.
         let mut tmp = TypeChecker::new();
         tmp.qualified_types = self.qualified_types.clone();
+        tmp.custom_constructors = self.custom_constructors.clone();
         tmp.core_types = self.core_types.clone();
         tmp.known_types = self.known_types.clone();
         tmp.parse_type_annotation(annotation, None)
@@ -1595,6 +1599,9 @@ impl TypeChecker {
                 };
 
                 self.qualified_types.insert(qualified.clone(), resolved);
+                if type_def.constructor_functions.is_some() {
+                    self.custom_constructors.insert(qualified.clone());
+                }
 
                 if CoreVariableRegistry::has_core_metadata(var) {
                     self.core_types.insert(short, qualified);
@@ -5157,6 +5164,7 @@ impl TypeChecker {
                     arg_types.push(self.infer_argument_type(&arg.value));
                 }
                 self.check_variant_fields(&t, fn_call);
+                self.check_declared_type_literal(fn_call, &arg_types, lookup_name, &t);
                 if let Some(first_arg_type) = arg_types.first()
                     && matches!(first_arg_type, TypeExpr::Record { .. })
                     && self.types_are_compatible(&t, first_arg_type)
@@ -5172,6 +5180,7 @@ impl TypeChecker {
                     arg_types.push(self.infer_argument_type(&arg.value));
                 }
                 self.check_variant_fields(&t, fn_call);
+                self.check_declared_type_literal(fn_call, &arg_types, &qualified_lookup, &t);
                 if let Some(first_arg_type) = arg_types.first()
                     && matches!(first_arg_type, TypeExpr::Record { .. })
                     && self.types_are_compatible(&t, first_arg_type)
@@ -5271,6 +5280,81 @@ impl TypeChecker {
 
         // Default return type for unknown functions
         TypeExpr::Any
+    }
+
+    /// Report a scalar literal that the constructor of a type declared over a
+    /// built-in one refuses: `Meters("x")` for `Meters type Int`. A number
+    /// isn't reported, as the constructor converts it when nothing is lost,
+    /// and neither is an argument a declared constructor may take.
+    fn check_declared_type_literal(
+        &mut self,
+        fn_call: &FnCall,
+        arg_types: &[TypeExpr],
+        type_name: &str,
+        declared: &TypeExpr,
+    ) {
+        let ([arg], [actual]) = (fn_call.args.as_slice(), arg_types) else {
+            return;
+        };
+        if self.in_pipe_flow
+            || !Self::is_scalar_literal(&arg.value)
+            || self.custom_constructors.contains(type_name)
+        {
+            return;
+        }
+        let expected = match declared {
+            TypeExpr::Named(name) => self.try_resolve_builtin_type(name),
+            other => Some(other.clone()),
+        };
+        let Some(expected) = expected.filter(Self::is_built_in) else {
+            return;
+        };
+        let is_number = |t: &TypeExpr| matches!(t, TypeExpr::Int | TypeExpr::Dec);
+        if self.types_are_compatible(&expected, actual)
+            || (is_number(actual) && Self::accepts(&expected, &is_number))
+        {
+            return;
+        }
+        self.errors.errors.push(CompilerError::TypeMismatch {
+            expected: format!("{}", expected),
+            actual: format!("{}", actual),
+            var_name: None,
+            message: format!(
+                "Type mismatch in constructor of '{}': expected {}, got {}",
+                Self::short_type_name(type_name),
+                expected,
+                actual
+            ),
+            location: arg
+                .src
+                .as_ref()
+                .map(|s| self.source_to_error_location(s))
+                .or_else(|| self.create_error_location_for_function_call(type_name)),
+        });
+    }
+
+    fn is_built_in(type_expr: &TypeExpr) -> bool {
+        match type_expr {
+            TypeExpr::Int
+            | TypeExpr::Dec
+            | TypeExpr::Str
+            | TypeExpr::Bool
+            | TypeExpr::Bytes
+            | TypeExpr::Vec(_)
+            | TypeExpr::Map(_, _) => true,
+            TypeExpr::Optional(inner) => Self::is_built_in(inner),
+            TypeExpr::Union(members) => members.iter().all(Self::is_built_in),
+            _ => false,
+        }
+    }
+
+    /// Whether `type_expr`, or a member of it, satisfies `test`.
+    fn accepts(type_expr: &TypeExpr, test: &dyn Fn(&TypeExpr) -> bool) -> bool {
+        match type_expr {
+            TypeExpr::Optional(inner) => Self::accepts(inner, test),
+            TypeExpr::Union(members) => members.iter().any(|m| Self::accepts(m, test)),
+            other => test(other),
+        }
     }
 
     /// Infer the type of a call's argument. An argument is never itself a
@@ -7326,6 +7410,64 @@ mod tests {
         assert_eq!(
             arity,
             vec![Some(line_of("takes-int(n, 2)"))],
+            "got: {:?}",
+            checker.errors.errors
+        );
+    }
+
+    #[test]
+    fn test_declared_type_refuses_a_literal_of_another_kind() {
+        use crate::lang::parser::parse_hot;
+
+        let source = r#"
+        ::t ns
+        Meters type Int
+        Money type Dec
+        Note type Str?
+        Id type Str | Int
+        Anything type Any
+        Trip type { name: Str }
+        Celsius type Dec
+        Celsius type fn (text: Str): Celsius { Celsius(Dec(text)) }
+        Early type fn (text: Str): Early { Early(Dec(text)) }
+        Early type Dec
+
+        bad-meters Meters("x")
+        bad-note Note(5)
+        bad-id Id(true)
+
+        good-meters Meters(5)
+        whole-dec Meters(5.0)
+        int-as-dec Money(5)
+        some-note Note("a")
+        no-note Note(null)
+        some-id Id(5)
+        anything Anything("x")
+        record Trip({name: "a"})
+        custom Celsius("36.6")
+        custom-first Early("36.6")
+        "#;
+        let program = parse_hot(source).expect("parse");
+        let mut checker = TypeChecker::new();
+        let _ = checker.check_program(&program);
+
+        let mut mismatches = checker
+            .errors
+            .errors
+            .iter()
+            .filter_map(|e| match e {
+                CompilerError::TypeMismatch { message, .. } => Some(message.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        mismatches.sort();
+        assert_eq!(
+            mismatches,
+            vec![
+                "Type mismatch in constructor of 'Id': expected Str | Int, got Bool",
+                "Type mismatch in constructor of 'Meters': expected Int, got Str",
+                "Type mismatch in constructor of 'Note': expected Str?, got Int",
+            ],
             "got: {:?}",
             checker.errors.errors
         );

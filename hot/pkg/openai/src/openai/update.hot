@@ -36,7 +36,7 @@ Eval type {
     data_source_config: Map,
     testing_criteria: Vec,
     created_at: Int,
-    metadata: Metadata
+    metadata: Metadata?
 }
 
 // Arbitrary key-value metadata associated with an API object
@@ -65,11 +65,11 @@ CompletionUsage type {
 }
 
 UpdateVectorStoreFileAttributesRequest type {
-    attributes: VectorStoreFileAttributes
+    attributes: VectorStoreFileAttributes?
 }
 
 UpdateChatCompletionRequest type {
-    metadata: Metadata
+    metadata: Metadata?
 }
 
 UpdateChatCompletionResponse type {
@@ -113,7 +113,7 @@ UpdateEvalResponse type {
     data_source_config: Map,
     testing_criteria: Vec,
     created_at: Int,
-    metadata: Metadata
+    metadata: Metadata?
 }
 
 
@@ -133,7 +133,7 @@ fn
 }
 
 UpdateVectorStoreFileAttributesRequest type {
-    attributes: VectorStoreFileAttributes
+    attributes: VectorStoreFileAttributes?
 }
 
 UpdateVectorStoreFileAttributesResponse type {

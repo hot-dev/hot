@@ -224,9 +224,26 @@ Server(body)  // Err: constructor of `Server` at `port` expected Int, got Str
 - A field typed as a record or enum takes a value of that type, a Map to build it from, or whatever a constructor it declares takes. Any other value fails, null included unless the field allows it.
 - A failure inside a nested record or a `Vec` of records is reported from the outermost record, with the whole path: `constructor of `Order` at `items[2].price` expected Dec, got Str`.
 - An `Err` given for a field stops the construction and comes back as itself, unless the field is `Any`.
-- Fields of type `Any` or `Fn` aren't checked, and neither are fields of a plain declared type such as `Port type Int`.
+- A field of a type declared over a built-in one, such as `Port type Int`, checks its value as that type and holds a `Port`.
+- Fields of type `Any` or `Fn` aren't checked.
 
 A failed check returns `Err(ConstraintError.Violation)`, with the field in its `path`. A required field that's missing is its own `Err`, naming the field. `assoc` and the other updates only check `where` constraints, so call the constructor again if the fields may have changed: `Server(assoc(server, "port", value))`.
+
+### Types over Built-in Types
+
+A type declared over a built-in one holds a value of that type. Its constructor checks what it's given the way a field is checked, and keeps the tag:
+
+```hot
+Meters type Int
+
+body from-json("{\"distance\": \"5\"}")
+
+Meters(5)              // Meters(5)
+Meters(5.0)            // Meters(5): the whole Dec converts
+Meters(body.distance)  // Err: constructor of `Meters` expected Int, got Str
+```
+
+Null fails unless the type allows it, as `Note type Str?` does, and `Tags type Vec<Str>` reads into its contents. A type over `Any` or `Fn` takes any value. `hot check` reports a literal of the wrong kind, so `Meters("x")` fails before it runs.
 
 ### Types with Custom Constructors
 
@@ -259,7 +276,7 @@ Temp({c: 30.0}).celsius  // 30.0
 
 Inside the custom constructors, `Temp({...})` still calls the default constructor, and so does `Temp(data)` in the constructor that takes Maps. If several constructors take a Map, one typed `Map` gets them before a union or nullable type.
 
-A record field or enum payload of such a type builds through the constructor that takes the value's type, as `Temp(value)` would. With `temp: Temp`, `Reading({temp: "21.5"})` runs `Temp("21.5")`. That is how a `::hot::time/PlainDate` field takes `"2026-01-02"`, and a string that doesn't parse makes the record an `Err`. A value that no constructor takes by its type is kept as given.
+A record field or enum payload of such a type builds through the constructor that takes the value's type, as `Temp(value)` would. With `temp: Temp`, `Reading({temp: "21.5"})` runs `Temp("21.5")`. That is how a `::hot::time/PlainDate` field takes `"2026-01-02"`, and a string that doesn't parse makes the record an `Err`. A value that no constructor takes by its type is an `Err`.
 
 ### Empty Types (Markers)
 
