@@ -31,6 +31,11 @@ The installer installs for the whole machine on its own when it runs as root
 machine and you have no user install. `--prefix <folder>` installs for your user somewhere other than
 `~/.local`.
 
+To run Hot without installing it, as on a server, unpack a release archive from
+[GitHub](https://github.com/hot-dev/hot/releases) and run `hot` from where it
+lands. Hot finds `db/`, `app/`, and `pkg/` beside the binary. With the binary
+somewhere else, set `HOT_HOME` to the unpacked folder.
+
 ### Windows (PowerShell)
 
 ```powershell
