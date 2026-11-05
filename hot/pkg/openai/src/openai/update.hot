@@ -24,7 +24,7 @@ VectorStoreFileObject type {
     created_at: Int,
     vector_store_id: Str,
     status: VectorStoreFileStatus,
-    last_error: Map,
+    last_error: Map?,
     chunking_strategy: ChunkingStrategyResponse?,
     attributes: VectorStoreFileAttributes?
 }
@@ -32,7 +32,7 @@ VectorStoreFileObject type {
 Eval type {
     object: "eval",
     id: Str,
-    name: Str,
+    name: Str?,
     data_source_config: Map,
     testing_criteria: Vec,
     created_at: Int,
@@ -109,7 +109,7 @@ UpdateEvalRequest type {
 UpdateEvalResponse type {
     object: "eval",
     id: Str,
-    name: Str,
+    name: Str?,
     data_source_config: Map,
     testing_criteria: Vec,
     created_at: Int,
@@ -143,7 +143,7 @@ UpdateVectorStoreFileAttributesResponse type {
     created_at: Int,
     vector_store_id: Str,
     status: VectorStoreFileStatus,
-    last_error: Map,
+    last_error: Map?,
     chunking_strategy: ChunkingStrategyResponse?,
     attributes: VectorStoreFileAttributes?
 }

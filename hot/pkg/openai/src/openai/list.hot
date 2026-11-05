@@ -14,19 +14,19 @@ RunStepObject type {
     id: Str,
     object: "thread.run.step",
     created_at: Int,
-    assistant_id: Str,
+    assistant_id: Str?,
     thread_id: Str,
-    run_id: Str,
+    run_id: Str?,
     type: RunStepType,
     status: RunStepStatus,
     step_details: Map,
-    last_error: Map,
-    expired_at: Int,
-    cancelled_at: Int,
-    failed_at: Int,
-    completed_at: Int,
+    last_error: Map?,
+    expired_at: Int?,
+    cancelled_at: Int?,
+    failed_at: Int?,
+    completed_at: Int?,
     metadata: Metadata,
-    usage: RunStepCompletionUsage
+    usage: RunStepCompletionUsage?
 }
 
 FineTuningJobEventLevel type open "info" | "warn" | "error"
@@ -93,14 +93,14 @@ MessageObject type {
     created_at: Int,
     thread_id: Str,
     status: MessageStatus,
-    incomplete_details: Map,
-    completed_at: Int,
-    incomplete_at: Int,
+    incomplete_details: Map?,
+    completed_at: Int?,
+    incomplete_at: Int?,
     role: MessageRole,
     content: Vec<MessageContent>,
-    assistant_id: Str,
-    run_id: Str,
-    attachments: Vec<Map>,
+    assistant_id: Str?,
+    run_id: Str?,
+    attachments: Vec<Map>?,
     metadata: Metadata
 }
 
@@ -139,10 +139,10 @@ AssistantObject type {
     id: Str,
     object: "assistant",
     created_at: Int,
-    name: Str,
-    description: Str,
+    name: Str?,
+    description: Str?,
     model: Str,
-    instructions: Str,
+    instructions: Str?,
     tools: Vec<AssistantTool>,
     tool_resources: Map?,
     metadata: Metadata,
@@ -167,25 +167,25 @@ RunObject type {
     object: "thread.run",
     created_at: Int,
     thread_id: Str,
-    assistant_id: Str,
+    assistant_id: Str?,
     status: RunStatus,
-    required_action: Map,
-    last_error: Map,
-    expires_at: Int,
-    started_at: Int,
-    cancelled_at: Int,
-    failed_at: Int,
-    completed_at: Int,
-    incomplete_details: Map,
+    required_action: Map?,
+    last_error: Map?,
+    expires_at: Int?,
+    started_at: Int?,
+    cancelled_at: Int?,
+    failed_at: Int?,
+    completed_at: Int?,
+    incomplete_details: Map?,
     model: Str,
-    instructions: Str,
+    instructions: Str?,
     tools: Vec<AssistantTool>,
     metadata: Metadata,
-    usage: RunCompletionUsage,
+    usage: RunCompletionUsage?,
     temperature: Dec?,
     top_p: Dec?,
-    max_prompt_tokens: Int,
-    max_completion_tokens: Int,
+    max_prompt_tokens: Int?,
+    max_completion_tokens: Int?,
     truncation_strategy: Any,
     tool_choice: Any,
     parallel_tool_calls: ParallelToolCalls,
@@ -313,7 +313,7 @@ ListFineTuningJobCheckpointsResponse type {
 Eval type {
     object: "eval",
     id: Str,
-    name: Str,
+    name: Str?,
     data_source_config: Map,
     testing_criteria: Vec,
     created_at: Int,
@@ -401,13 +401,13 @@ VectorStoreObject type {
     id: Str,
     object: "vector_store",
     created_at: Int,
-    name: Str,
+    name: Str?,
     usage_bytes: Int,
     file_counts: Map,
     status: VectorStoreStatus,
     expires_after: VectorStoreExpirationAfter?,
     expires_at: Int?,
-    last_active_at: Int,
+    last_active_at: Int?,
     metadata: Metadata
 }
 
@@ -416,7 +416,7 @@ CertificateObjectType type open "certificate" | "organization.certificate" | "or
 Certificate type {
     object: CertificateObjectType,
     id: Str,
-    name: Str,
+    name: Str?,
     created_at: Int,
     certificate_details: Map,
     active: Bool?
@@ -431,7 +431,7 @@ VectorStoreFileObject type {
     created_at: Int,
     vector_store_id: Str,
     status: VectorStoreFileStatus,
-    last_error: Map,
+    last_error: Map?,
     chunking_strategy: ChunkingStrategyResponse?,
     attributes: VectorStoreFileAttributes?
 }
@@ -473,18 +473,18 @@ FineTuningJobStatus type open "validating_files" | "queued" | "running" | "succe
 FineTuningJob type {
     id: Str,
     created_at: Int,
-    error: Map,
-    fine_tuned_model: Str,
-    finished_at: Int,
+    error: Map?,
+    fine_tuned_model: Str?,
+    finished_at: Int?,
     hyperparameters: Map,
     model: Str,
     object: "fine_tuning.job",
     organization_id: Str,
     result_files: Vec<Str>,
     status: FineTuningJobStatus,
-    trained_tokens: Int,
+    trained_tokens: Int?,
     training_file: Str,
-    validation_file: Str,
+    validation_file: Str?,
     integrations: Vec?,
     seed: Int,
     estimated_finish: Int?,
@@ -502,8 +502,8 @@ ListAssistantsRequest type {
 ListAssistantsResponse type {
     object: Str,
     data: Vec<AssistantObject>,
-    first_id: Str,
-    last_id: Str,
+    first_id: Str?,
+    last_id: Str?,
     has_more: Bool
 }
 
@@ -567,8 +567,8 @@ ListChatCompletionsRequest type {
 ListChatCompletionsResponse type {
     object: "list",
     data: Vec<CreateChatCompletionResponse>,
-    first_id: Str,
-    last_id: Str,
+    first_id: Str?,
+    last_id: Str?,
     has_more: Bool
 }
 
@@ -600,8 +600,8 @@ ListEvalsRequest type {
 ListEvalsResponse type {
     object: "list",
     data: Vec<Eval>,
-    first_id: Str,
-    last_id: Str,
+    first_id: Str?,
+    last_id: Str?,
     has_more: Bool
 }
 
@@ -631,8 +631,8 @@ ListFilesRequest type {
 ListFilesResponse type {
     object: Str,
     data: Vec<OpenAIFile>,
-    first_id: Str,
-    last_id: Str,
+    first_id: Str?,
+    last_id: Str?,
     has_more: Bool
 }
 
@@ -892,8 +892,8 @@ ListInputItemsResponse type {
     object: Any,
     data: Vec<ItemResource>,
     has_more: Bool,
-    first_id: Str,
-    last_id: Str
+    first_id: Str?,
+    last_id: Str?
 }
 
 
@@ -926,8 +926,8 @@ ListMessagesRequest type {
 ListMessagesResponse type {
     object: Str,
     data: Vec<MessageObject>,
-    first_id: Str,
-    last_id: Str,
+    first_id: Str?,
+    last_id: Str?,
     has_more: Bool
 }
 
@@ -958,8 +958,8 @@ ListRunsRequest type {
 ListRunsResponse type {
     object: Str,
     data: Vec<RunObject>,
-    first_id: Str,
-    last_id: Str,
+    first_id: Str?,
+    last_id: Str?,
     has_more: Bool
 }
 
@@ -992,8 +992,8 @@ ListRunStepsRequest type {
 ListRunStepsResponse type {
     object: Str,
     data: Vec<RunStepObject>,
-    first_id: Str,
-    last_id: Str,
+    first_id: Str?,
+    last_id: Str?,
     has_more: Bool
 }
 
@@ -1025,8 +1025,8 @@ ListVectorStoresRequest type {
 ListVectorStoresResponse type {
     object: Str,
     data: Vec<VectorStoreObject>,
-    first_id: Str,
-    last_id: Str,
+    first_id: Str?,
+    last_id: Str?,
     has_more: Bool
 }
 
@@ -1059,8 +1059,8 @@ ListFilesInVectorStoreBatchRequest type {
 ListFilesInVectorStoreBatchResponse type {
     object: Str,
     data: Vec<VectorStoreFileObject>,
-    first_id: Str,
-    last_id: Str,
+    first_id: Str?,
+    last_id: Str?,
     has_more: Bool
 }
 
@@ -1094,8 +1094,8 @@ ListVectorStoreFilesRequest type {
 ListVectorStoreFilesResponse type {
     object: Str,
     data: Vec<VectorStoreFileObject>,
-    first_id: Str,
-    last_id: Str,
+    first_id: Str?,
+    last_id: Str?,
     has_more: Bool
 }
 

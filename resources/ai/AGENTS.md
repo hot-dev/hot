@@ -91,6 +91,11 @@ shadows a function, and `hot test` warns about a test with no assertions.
   value returns `Err` before the body runs, including null unless the annotation
   has `?`. An `Int` becomes a `Dec` at `x: Dec`, and a whole `Dec` an `Int` at
   `x: Int`. User types, `Any` and `Fn` aren't checked.
+- A record's constructor checks its fields the same way, named or Map form,
+  and reads into `Vec<T>` and `Map<K, V>`. A field that doesn't fit makes the
+  record an `Err(ConstraintError.Violation)` naming the field. A record or enum
+  field refuses a plain value no constructor of its type takes. An enum
+  variant's payload is checked as a field is.
 - Values have immutable semantics. Name reuse and deep-path assignment create
   later bindings rather than shared-object mutation.
 - Parameters marked `lazy` hold their argument expressions as non-memoized

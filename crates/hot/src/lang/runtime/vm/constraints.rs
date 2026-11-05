@@ -171,6 +171,38 @@ fn get_str<'a>(map: &'a Val, key: &str) -> Option<&'a str> {
     }
 }
 
+/// Whether a spec node takes a value tagged with a type over its kind.
+fn is_tagged_node(node: &Val) -> bool {
+    matches!(get(node, "tagged"), Some(Val::Bool(true)))
+}
+
+/// Whether `value` is tagged with a type, an Err aside, over a value that
+/// `accepts` takes.
+fn is_tagged_over(value: &Val, accepts: impl Fn(&Val) -> bool) -> bool {
+    let Val::Map(map) = value else {
+        return false;
+    };
+    !value.is_err()
+        && crate::val::tagged_type_name(map).is_some()
+        && map.get(&Val::from("$val")).is_some_and(accepts)
+}
+
+/// Whether a field's value needs no checked path: it is of `kinds`, and when
+/// `item_kinds` isn't 0 so is each item. An Err is a `Map`, but no field's
+/// value.
+fn passes_as_is(value: &Val, kinds: u32, item_kinds: u32) -> bool {
+    let plain = |value: &Val, kinds: u32| param_mask::accepts(value, kinds) && !value.is_err();
+    if !plain(value, kinds) {
+        return false;
+    }
+    match value {
+        _ if item_kinds == 0 => true,
+        Val::Vec(items) => items.iter().all(|item| plain(item, item_kinds)),
+        Val::Map(entries) => entries.values().all(|item| plain(item, item_kinds)),
+        _ => false,
+    }
+}
+
 fn short_name(name: &str) -> &str {
     name.rsplit('/').next().unwrap_or(name)
 }
@@ -215,6 +247,16 @@ impl ConstraintGuard {
 }
 
 impl Boundary {
+    fn constructor(declared_type: &str) -> Self {
+        Self {
+            kind: "constructor".to_string(),
+            function: None,
+            parameter: None,
+            binding: None,
+            declared_type: Some(declared_type.to_string()),
+        }
+    }
+
     fn from_spec(spec: &Val) -> Self {
         let field = |key: &str| get_str(spec, key).map(str::to_string);
         Self {
@@ -403,6 +445,91 @@ impl VirtualMachine {
         } else {
             ParamCheck::Converted(checked)
         })
+    }
+
+    /// Check a value given for a record field against its entry in the
+    /// record's `$checks` (see `compiler::constraint_specs::field_check`).
+    /// The result is the value to store, exactly converted where it had to
+    /// be, or the `ConstraintError` to return from the constructor.
+    pub(crate) fn check_field(
+        &mut self,
+        value: &Val,
+        check: &Val,
+        field: &Val,
+        record: &str,
+    ) -> VmResult<Result<Val, Val>> {
+        let Val::Vec(check) = check else {
+            return Ok(Ok(value.clone()));
+        };
+        let [Val::Int(kinds), Val::Int(item_kinds), spec] = check.as_slice() else {
+            return Ok(Ok(value.clone()));
+        };
+        if passes_as_is(value, *kinds as u32, *item_kinds as u32) {
+            return Ok(Ok(value.clone()));
+        }
+        let mut path = vec![field.clone()];
+        Ok(self
+            .check_value(value.clone(), spec, &mut path)?
+            .map_err(|failure| self.constraint_error(&failure, &Boundary::constructor(record))))
+    }
+
+    /// The `ConstraintError` of `value`, which isn't a `type_name` and can't
+    /// become one.
+    pub(crate) fn constructor_mismatch(&self, type_name: &str, value: &Val) -> Val {
+        let failure = self.base_mismatch(short_name(type_name), value, &[]);
+        self.constraint_error(&failure, &Boundary::constructor(type_name))
+    }
+
+    /// A constructor's `ConstraintError` for a value inside a larger one, as
+    /// the larger one reports it: `step` leads its path, and with `record` it
+    /// is that record's constructor which refused. `None` for any other Err.
+    pub(crate) fn constraint_error_within(
+        error: &Val,
+        step: Val,
+        record: Option<&str>,
+    ) -> Option<Val> {
+        let cause = error.unwrap_err()?;
+        let Val::Map(tagged) = cause else {
+            return None;
+        };
+        let type_name = crate::val::tagged_type_name(tagged)?;
+        if !type_name.starts_with("::hot::type/ConstraintError.") {
+            return None;
+        }
+        let payload = tagged.get(&Val::from("$val"))?;
+        if get_str(payload, "boundary") != Some("constructor") {
+            return None;
+        }
+        let Some(Val::Vec(inner_path)) = get(payload, "path") else {
+            return None;
+        };
+        let inner_record = get_str(payload, "declared-type")?;
+        let record = record.unwrap_or(inner_record);
+        let opening = |record: &str, path: &[Val]| {
+            let subject = Boundary::constructor(record).subject();
+            if path.is_empty() {
+                subject
+            } else {
+                format!("{subject} at `{}`", path_text(path))
+            }
+        };
+        let mut path = Vec::with_capacity(inner_path.len() + 1);
+        path.push(step);
+        path.extend(inner_path.iter().cloned());
+        let rest = get_str(payload, "message")?.strip_prefix(&opening(inner_record, inner_path))?;
+        let message = format!("{}{rest}", opening(record, &path));
+
+        let Val::Map(payload) = payload else {
+            return None;
+        };
+        let mut payload = payload.as_ref().clone();
+        payload.insert(Val::from("message"), Val::from(message));
+        payload.insert(Val::from("path"), Val::vec(path));
+        payload.insert(Val::from("declared-type"), Val::from(record));
+        Some(Val::err(Val::map_from_iter([
+            (Val::from("$type"), Val::from(type_name)),
+            (Val::from("$val"), Val::map(payload)),
+        ])))
     }
 
     /// The spec cache, rebuilt when the program's table has changed.
@@ -617,7 +744,13 @@ impl VirtualMachine {
         path: &mut Vec<Val>,
     ) -> VmResult<Result<Val, Box<Failure>>> {
         match get_str(node, "kind").unwrap_or("any") {
-            "base" => Ok(self.check_base(value, get_str(node, "type").unwrap_or("Any"), path)),
+            "base" => {
+                let expected = get_str(node, "type").unwrap_or("Any");
+                if is_tagged_node(node) {
+                    return Ok(self.check_tagged_base(value, expected, path));
+                }
+                Ok(self.check_base(value, expected, path))
+            }
             "literal" => {
                 let values = match get(node, "values") {
                     Some(Val::Vec(values)) => values.to_vec(),
@@ -674,6 +807,11 @@ impl VirtualMachine {
                 }
             }
             "vec" => {
+                if is_tagged_node(node)
+                    && is_tagged_over(&value, |inner| matches!(inner, Val::Vec(_)))
+                {
+                    return Ok(Ok(value));
+                }
                 let Val::Vec(items) = value else {
                     return Ok(Err(self.base_mismatch("Vec", &value, path)));
                 };
@@ -694,6 +832,11 @@ impl VirtualMachine {
                 Ok(Ok(Val::vec(checked_items)))
             }
             "map" => {
+                if is_tagged_node(node)
+                    && is_tagged_over(&value, |inner| matches!(inner, Val::Map(_)))
+                {
+                    return Ok(Ok(value));
+                }
                 let Val::Map(entries) = value else {
                     return Ok(Err(self.base_mismatch("Map", &value, path)));
                 };
@@ -783,6 +926,26 @@ impl VirtualMachine {
         } else {
             Err(self.base_mismatch(expected, &value, path))
         }
+    }
+
+    /// `check_base` for a field or payload. A value tagged with a type over
+    /// `expected` keeps its tag, as at a parameter (`Port(80)` at `x: Int`).
+    /// An Err is no field's value, though it is a `Map`.
+    fn check_tagged_base(
+        &self,
+        value: Val,
+        expected: &str,
+        path: &[Val],
+    ) -> Result<Val, Box<Failure>> {
+        if value.is_err() {
+            return Err(self.base_mismatch(expected, &value, path));
+        }
+        if is_tagged_over(&value, |inner| {
+            self.check_base(inner.clone(), expected, path).is_ok()
+        }) {
+            return Ok(value);
+        }
+        self.check_base(value, expected, path)
     }
 
     fn check_struct(

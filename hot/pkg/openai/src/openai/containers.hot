@@ -23,7 +23,7 @@ ContainerListResource type {
 ContainerResource type {
     id: Str,
     object: Str,
-    name: Str,
+    name: Str?,
     created_at: Int,
     status: Str,
     expires_after: Map?
@@ -59,8 +59,8 @@ ListContainersRequest type {
 ListContainersResponse type {
     object: Any,
     data: Vec<ContainerResource>,
-    first_id: Str,
-    last_id: Str,
+    first_id: Str?,
+    last_id: Str?,
     has_more: Bool
 }
 
@@ -91,7 +91,7 @@ CreateContainerRequest type {
 CreateContainerResponse type {
     id: Str,
     object: Str,
-    name: Str,
+    name: Str?,
     created_at: Int,
     status: Str,
     expires_after: Map?
@@ -120,7 +120,7 @@ RetrieveContainerRequest type {
 RetrieveContainerResponse type {
     id: Str,
     object: Str,
-    name: Str,
+    name: Str?,
     created_at: Int,
     status: Str,
     expires_after: Map?
@@ -177,8 +177,8 @@ ListContainerFilesRequest type {
 ListContainerFilesResponse type {
     object: Any,
     data: Vec<ContainerFileResource>,
-    first_id: Str,
-    last_id: Str,
+    first_id: Str?,
+    last_id: Str?,
     has_more: Bool
 }
 

@@ -25,7 +25,7 @@ RunGraderRequest type {
 
 RunGraderResponse type {
     reward: Dec,
-    metadata: Map,
+    metadata: Map?,
     sub_rewards: Map,
     model_grader_token_usage_per_model: Map
 }

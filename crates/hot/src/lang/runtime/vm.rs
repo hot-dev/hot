@@ -4402,6 +4402,7 @@ impl VirtualMachine {
     /// type_info format: {
     ///   $type: "TypeName",
     ///   $fields: {field_name: {$type: "FieldType", ...}, ...},
+    ///   $checks: {field_name: [kinds, item_kinds, spec], ...},
     ///   $required: ["field1", "field2", ...],
     ///   $all_fields: ["field1", "field2", ...]
     /// }
@@ -4477,6 +4478,10 @@ impl VirtualMachine {
 
                     // Check if item construction returned an error
                     if result.is_err() {
+                        let step = Val::Int(idx as i64);
+                        if let Some(error) = Self::constraint_error_within(&result, step, None) {
+                            return Ok(error);
+                        }
                         let inner_error = result.get("$val").unwrap_or(Val::Null);
                         let error_msg = format!("In Vec item {}: {}", idx, inner_error);
                         return Ok(Val::err(Val::from(error_msg)));
@@ -4524,30 +4529,40 @@ impl VirtualMachine {
                 }
             }
 
+            // Check if this type has a direct constructor (struct types do)
+            let has_direct_constructor = self.function_mapping.contains_key(&type_name)
+                || self
+                    .function_mapping
+                    .contains_key(&format!("{}/1", type_name));
+
             // Non-map data (strings, numbers, etc.) goes through a constructor
             // declared for its type, as `Type(data)` would: a time type parses
-            // a Str. Otherwise it is just wrapped with $type/$val, since a
-            // one-argument constructor need not convert (`Uuid(7)` makes a
-            // new id).
+            // a Str. A record or enum's own constructor decides what else it
+            // takes, as no plain value is one. Otherwise it is just wrapped
+            // with $type/$val, since a one-argument constructor need not
+            // convert (`Uuid(7)` makes a new id).
             if !matches!(data, Val::Map(_)) {
                 let typed_key = format!("{}/1:{}", type_name, self.get_val_type_name(data));
-                if self.function_mapping.contains_key(&typed_key) {
+                let structured = matches!(
+                    type_info_map.get(&Val::from("$structured")),
+                    Some(Val::Bool(true))
+                );
+                if self.function_mapping.contains_key(&typed_key)
+                    || (structured && has_direct_constructor)
+                {
                     return self.execute_function_call_by_qualified_name(
                         &type_name,
                         std::slice::from_ref(data),
                     );
+                }
+                if structured {
+                    return Ok(self.constructor_mismatch(&type_name, data));
                 }
                 let mut result_map = indexmap::IndexMap::new();
                 result_map.insert(Val::from("$type"), Val::from(type_name.clone()));
                 result_map.insert(Val::from("$val"), data.clone());
                 return Ok(Val::map(result_map));
             }
-
-            // Check if this type has a direct constructor (struct types do)
-            let has_direct_constructor = self.function_mapping.contains_key(&type_name)
-                || self
-                    .function_mapping
-                    .contains_key(&format!("{}/1", type_name));
 
             if has_direct_constructor {
                 // Call the struct type's constructor
@@ -4723,6 +4738,14 @@ impl VirtualMachine {
                 _ => None,
             });
 
+        // Get the checks of built-in field annotations (if any)
+        let field_checks = type_info_map
+            .get(&Val::from("$checks"))
+            .and_then(|v| match v {
+                Val::Map(m) => Some(m.as_ref()),
+                _ => None,
+            });
+
         // Handle newtypes (types with no fields that wrap a single value)
         // If $all_fields is empty and data is not a map, just wrap with $type/$val
         if all_fields.is_empty() && !matches!(data, Val::Map(_)) {
@@ -4765,38 +4788,61 @@ impl VirtualMachine {
                 let mut new_map = indexmap::IndexMap::new();
 
                 for (key, value) in data_map.iter() {
-                    let key_str = match key {
-                        Val::Str(s) => (**s).to_string(),
-                        _ => {
-                            new_map.insert(key.clone(), value.clone());
-                            continue;
-                        }
+                    let Val::Str(key_str) = key else {
+                        new_map.insert(key.clone(), value.clone());
+                        continue;
                     };
 
-                    // Check if this field has a type definition
-                    let processed_value = if let Some(field_types_map) = field_types {
-                        if let Some(field_type_info) =
-                            field_types_map.get(&Val::from(key_str.as_str()))
-                        {
-                            // Recursively construct the field value
-                            let result = self.construct_typed_recursive(value, field_type_info)?;
+                    let field_check = field_checks.and_then(|checks| checks.get(key));
+                    let field_type = field_types.and_then(|types| types.get(key));
 
-                            // Check if nested construction returned an error
-                            if result.is_err()
-                                && !Self::type_info_preserves_result_values(field_type_info)
-                            {
-                                // Propagate the error with context
-                                let inner_error = result.get("$val").unwrap_or(Val::Null);
-                                let error_msg = format!(
-                                    "In field '{}' of type {}: {}",
-                                    key_str, type_name, inner_error
-                                );
-                                return Ok(Val::err(Val::from(error_msg)));
+                    // An Err is no field's value: it stops the construction
+                    // as itself, and isn't read as the data it carries.
+                    if value.is_err()
+                        && (field_check.is_some()
+                            || field_type.is_some_and(|field_type| {
+                                !Self::type_info_preserves_result_values(field_type)
+                            }))
+                    {
+                        return Ok(value.clone());
+                    }
+
+                    // A built-in annotation checks the value, exact numeric
+                    // conversions included.
+                    let checked_value = match field_check {
+                        Some(check) => match self.check_field(value, check, key, &type_name)? {
+                            Ok(checked) => Some(checked),
+                            Err(error) => return Ok(error),
+                        },
+                        None => None,
+                    };
+                    let value = checked_value.as_ref().unwrap_or(value);
+
+                    // Check if this field has a type definition
+                    let processed_value = if let Some(field_type_info) = field_type {
+                        // Recursively construct the field value
+                        let result = self.construct_typed_recursive(value, field_type_info)?;
+
+                        // Check if nested construction returned an error
+                        if result.is_err()
+                            && !Self::type_info_preserves_result_values(field_type_info)
+                        {
+                            if let Some(error) = Self::constraint_error_within(
+                                &result,
+                                key.clone(),
+                                Some(&type_name),
+                            ) {
+                                return Ok(error);
                             }
-                            result
-                        } else {
-                            value.clone()
+                            // Propagate the error with context
+                            let inner_error = result.get("$val").unwrap_or(Val::Null);
+                            let error_msg = format!(
+                                "In field '{}' of type {}: {}",
+                                key_str, type_name, inner_error
+                            );
+                            return Ok(Val::err(Val::from(error_msg)));
                         }
+                        result
                     } else {
                         value.clone()
                     };
@@ -4818,6 +4864,12 @@ impl VirtualMachine {
 
                         // Check if item construction returned an error
                         if result.is_err() {
+                            let step = Val::Int(idx as i64);
+                            if let Some(error) =
+                                Self::constraint_error_within(&result, step, Some(&type_name))
+                            {
+                                return Ok(error);
+                            }
                             let inner_error = result.get("$val").unwrap_or(Val::Null);
                             let error_msg =
                                 format!("In item {} of {}: {}", idx, type_name, inner_error);
@@ -4830,24 +4882,8 @@ impl VirtualMachine {
                     raw_data.clone()
                 }
             }
-            _ => {
-                // Expected a map for struct type construction
-                let got_type = match &raw_data {
-                    Val::Int(_) => "Int",
-                    Val::Dec(_) => "Dec",
-                    Val::Str(_) => "Str",
-                    Val::Bool(_) => "Bool",
-                    Val::Vec(_) => "Vec",
-                    Val::Map(_) => "Map",
-                    Val::Null => "Null",
-                    Val::Byte(_) => "Byte",
-                    Val::Bytes(_) => "Bytes",
-                    Val::Box(_) => "Box",
-                };
-                let error_msg =
-                    format!("Type {} expected a map/object, got {}", type_name, got_type);
-                return Ok(Val::err(Val::from(error_msg)));
-            }
+            // Expected a map for struct type construction
+            _ => return Ok(self.constructor_mismatch(&type_name, &raw_data)),
         };
 
         // Wrap in typed structure: {$type: "...", $val: processed_val}
