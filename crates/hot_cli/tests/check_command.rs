@@ -131,6 +131,106 @@ fn allowlisted_resource_and_allow_all_pass() {
     assert!(json_diagnostics(&output).is_empty());
 }
 
+/// `hot check` on one file, in a project that depends on a package with some types.
+fn check_with_lib(source: &str, args: &[&str]) -> Output {
+    let lib = tempfile::tempdir().unwrap();
+    write(
+        &lib.path().join("hot/src/lib/types.hot"),
+        "::lib::types ns\n\n\
+         Real type {n: Int}\n\
+         Shape enum { Dot, Line }\n\
+         Id type Int where gt(%, 0)\n",
+    );
+    write(
+        &lib.path().join("hot/src/lib/more.hot"),
+        "::lib::more ns\n\nReal ::lib::types/Real\n",
+    );
+    let dir = project(
+        &format!(
+            "hot.project.sec.deps {{\"example.com/lib\": {{\"local\": \"{}\"}}}}\n",
+            lib.path().display()
+        ),
+        &[("hot/src/sec/m.hot", source)],
+    );
+    let mut all = vec!["check"];
+    all.extend_from_slice(args);
+    run_hot(dir.path(), &all)
+}
+
+#[test]
+fn a_parameter_of_a_missing_qualified_type_is_an_error() {
+    for annotation in [
+        "::lib::types/Missing",
+        "::types/Missing",
+        "::sec::m/Missing",
+        "Vec<::lib::types/Missing>",
+        "::lib::types/Missing?",
+        "::lib::types/Missing.Dot",
+    ] {
+        let source =
+            format!("::sec::m ns\n\n::types ::lib::types\n\nf fn (a: {annotation}): Int {{ 1 }}\n");
+        let output = check_with_lib(&source, &["--check.format", "simple"]);
+        let said = text(&output);
+        assert_eq!(output.status.code(), Some(1), "{annotation}: {said}");
+        assert!(said.contains("unresolved-type"), "{annotation}: {said}");
+    }
+}
+
+#[test]
+fn a_return_or_field_of_a_missing_qualified_type_is_a_warning() {
+    for source in [
+        "::sec::m ns\n\nf fn (): ::lib::types/Missing { 1 }\n",
+        "::sec::m ns\n\nR type {a: ::lib::types/Missing}\n",
+    ] {
+        let output = check_with_lib(source, &["--check.format", "simple"]);
+        let said = text(&output);
+        assert_eq!(output.status.code(), Some(0), "{source}: {said}");
+        assert!(said.contains("unresolved-type"), "{source}: {said}");
+        let denied = check_with_lib(source, &["--check.deny-warnings"]);
+        assert_eq!(denied.status.code(), Some(1), "{source}");
+    }
+}
+
+#[test]
+fn a_declared_qualified_type_has_no_finding() {
+    for annotation in [
+        "::lib::types/Real",
+        "::types/Real",
+        "::lib::more/Real",
+        "::lib::types/Shape",
+        "::lib::types/Shape.Dot",
+        "::lib::types/Id",
+        "Vec<::lib::types/Real>",
+        "::lib::types/Real?",
+        "::hot::type/Str",
+        "::hot::http/HttpResponse",
+    ] {
+        let source =
+            format!("::sec::m ns\n\n::types ::lib::types\n\nf fn (a: {annotation}): Int {{ 1 }}\n");
+        let output = check_with_lib(&source, &["--check.format", "json-min"]);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{annotation}: {}",
+            text(&output)
+        );
+        assert_eq!(
+            json_diagnostics(&output),
+            Vec::<serde_json::Value>::new(),
+            "{annotation}"
+        );
+    }
+}
+
+#[test]
+fn a_type_declared_in_a_function_body_has_no_finding() {
+    let source = "::sec::m ns\n\n\
+                  make fn (): Int {\n    Local type {n: Int}\n    1\n}\n\n\
+                  f fn (a: ::sec::m/Local): Int { 1 }\n";
+    let output = check_with_lib(source, &["--check.format", "json-min"]);
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output));
+}
+
 #[test]
 fn allowlisted_dependency_fixture_passes() {
     let lib = tempfile::tempdir().unwrap();
