@@ -66,7 +66,7 @@ Verify it works:
 hot version
 ```
 
-> **Already have Hot?** Update to the latest version with `hot update`. To install a specific release from an older `hot` binary, use `curl -fsSL https://get.hot.dev/install.sh | sh -s -- --version <version>`.
+> **Already have Hot?** Update to the latest version with `hot update`. To install a specific release from an older `hot` binary, use `curl -fsSL https://get.hot.dev/install.sh | sh -s -- --version <version>`. To remove Hot, see [Uninstalling Hot](/docs/uninstalling).
 
 ## 2. Install Editor Extension
 

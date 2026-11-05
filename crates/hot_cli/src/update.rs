@@ -22,7 +22,7 @@ const INSTALL_SCRIPT_URL: &str = "https://get.hot.dev/install.sh";
 /// The file `install.sh` (from the release archive) and the per-user macOS
 /// package leave in `<prefix>/share/hot`, so `hot update` can update that
 /// install in place.
-const ARCHIVE_RECEIPT: &str = "install-receipt.json";
+pub(crate) const ARCHIVE_RECEIPT: &str = "install-receipt.json";
 
 fn release_base_url(target_version: Option<&str>) -> Option<String> {
     if std::env::var("HOT_UPDATE_DISABLED")
@@ -400,7 +400,7 @@ pub enum InstallMethod {
 
 /// The prefix of an install that `install.sh` made from the release archive:
 /// the binary is `<prefix>/bin/hot` and its receipt is in `<prefix>/share/hot`.
-fn archive_install_prefix(exe: &Path) -> Option<PathBuf> {
+pub(crate) fn archive_install_prefix(exe: &Path) -> Option<PathBuf> {
     let exe = exe.canonicalize().ok()?;
     let bin_dir = exe.parent()?;
     if bin_dir.file_name()? != "bin" {
@@ -415,10 +415,19 @@ fn archive_install_prefix(exe: &Path) -> Option<PathBuf> {
         .then(|| prefix.to_path_buf())
 }
 
+/// A Windows path in one comparable spelling
+pub(crate) fn normalize_windows_path(path: &str) -> String {
+    path.trim_matches('"')
+        .replace('/', "\\")
+        .trim_start_matches(r"\\?\")
+        .trim_end_matches('\\')
+        .to_lowercase()
+}
+
 /// The installer records its scope beside the executable. Older per-user
 /// installers can be recognized by their HKCU uninstall registration, even
 /// when the user chose a directory outside LOCALAPPDATA.
-fn is_windows_user_install(
+pub(crate) fn is_windows_user_install(
     exe: &Path,
     local_app_data: Option<&Path>,
     user_uninstaller: Option<&str>,
@@ -432,16 +441,9 @@ fn is_windows_user_install(
             _ => {}
         }
     }
-    let normalize = |path: &str| {
-        path.trim_matches('"')
-            .replace('/', "\\")
-            .trim_start_matches(r"\\?\")
-            .trim_end_matches('\\')
-            .to_lowercase()
-    };
-    let exe = normalize(&exe.to_string_lossy());
+    let exe = normalize_windows_path(&exe.to_string_lossy());
     if let Some(uninstaller) = user_uninstaller {
-        let uninstaller = normalize(uninstaller);
+        let uninstaller = normalize_windows_path(uninstaller);
         if let Some(dir) = uninstaller.strip_suffix(r"\uninstall.exe")
             && exe == format!(r"{dir}\hot.exe")
         {
@@ -453,27 +455,31 @@ fn is_windows_user_install(
     let Some(local_app_data) = local_app_data else {
         return false;
     };
-    let base = normalize(&local_app_data.to_string_lossy());
+    let base = normalize_windows_path(&local_app_data.to_string_lossy());
     !base.is_empty()
         && exe
             .strip_prefix(&base)
             .is_some_and(|rest| rest.starts_with('\\'))
 }
 
-fn windows_user_uninstaller() -> Option<String> {
+pub(crate) fn windows_user_uninstaller() -> Option<String> {
+    windows_registered_uninstaller("CurrentUser")
+}
+
+/// The uninstaller registered in `hive`, a `RegistryHive` name
+pub(crate) fn windows_registered_uninstaller(hive: &str) -> Option<String> {
     // NSIS writes its uninstall registration in the 32-bit view. Use JSON and
     // UTF-8 output so paths containing non-ASCII characters survive capture.
+    let script = format!(
+        "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding; \
+         $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey(\
+             [Microsoft.Win32.RegistryHive]::{hive}, \
+             [Microsoft.Win32.RegistryView]::Registry32).OpenSubKey(\
+             'Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\HotDev'); \
+         if ($key) {{ $key.GetValue('UninstallString') | ConvertTo-Json -Compress }}"
+    );
     let output = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-Command",
-            "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding; \
-             $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey(\
-                 [Microsoft.Win32.RegistryHive]::CurrentUser, \
-                 [Microsoft.Win32.RegistryView]::Registry32).OpenSubKey(\
-                 'Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\HotDev'); \
-             if ($key) { $key.GetValue('UninstallString') | ConvertTo-Json -Compress }",
-        ])
+        .args(["-NoProfile", "-Command", &script])
         .output()
         .ok()?;
     if !output.status.success() {
@@ -482,7 +488,7 @@ fn windows_user_uninstaller() -> Option<String> {
     serde_json::from_slice(&output.stdout).ok()
 }
 
-fn powershell_literal(value: &str) -> String {
+pub(crate) fn powershell_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 

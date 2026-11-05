@@ -16,6 +16,7 @@ migrations, editor reference).
 - [Getting Started](getting-started)
   - [Adopting Hot](adopting-hot)
   - [AI Coding Assistants](ai-coding)
+  - [Uninstalling Hot](uninstalling)
 - [Demos](demos)
   - [Hot Chat](demos/hot-chat)
 - [Hot Language](language)

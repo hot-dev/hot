@@ -866,8 +866,18 @@ pub(crate) enum Command {
         #[arg(long = "version", short = 'v', value_name = "VERSION")]
         version: Option<String>,
     },
-    /// Display help information
+    /// Remove the Hot install this command runs from
     #[command(display_order = 72)]
+    Uninstall {
+        /// Don't ask before removing
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Show what would be removed, and remove nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Display help information
+    #[command(display_order = 73)]
     Help {
         /// Command path to get help for (for example: deps, deps add)
         #[arg(trailing_var_arg = true)]
@@ -1186,6 +1196,7 @@ Commands:
   Info:
     version      Display version information
     update       Update Hot to the latest version, or install a specific version
+    uninstall    Remove the Hot install this command runs from
     help         Display help information
 
 Options:
