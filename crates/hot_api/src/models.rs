@@ -273,6 +273,14 @@ pub struct EventResponse {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct PublishEventRequest {
+    /// Optional id for this event, which makes the publish safe to send again.
+    /// A second publish with the same id, `event_type`, `event_data` and
+    /// `stream_id` starts nothing new and gets the first publish's answer. An
+    /// id names one event across all environments: if it's in use by a
+    /// different event, or in another environment, the publish gets a 409.
+    /// If not provided, Hot generates one and every publish is a new event.
+    #[serde(default)]
+    pub event_id: Option<uuid::Uuid>,
     pub event_type: String,
     pub event_data: serde_json::Value,
     /// Optional stream ID to add this event to an existing stream.

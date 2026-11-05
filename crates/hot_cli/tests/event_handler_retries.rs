@@ -402,3 +402,126 @@ async fn failed_runs_retry_on_their_own_handler_alone_on_postgres() {
     .await
     .expect("drop the test database");
 }
+
+/// How many times the handler of `resends:event` has executed. Each execution
+/// sends an event: a second one of the same run keeps the run's row and id.
+async fn resent_event_executions(home: &Path) -> i64 {
+    let uri = format!("sqlite:{}?mode=ro", home.join("db/hot.sqlite.db").display());
+    let pool = sqlx::SqlitePool::connect(&uri).await.unwrap();
+    let executions =
+        sqlx::query_scalar("SELECT COUNT(*) FROM event WHERE event_type = 'resends:ran'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    pool.close().await;
+    executions
+}
+
+/// A publish sent again with its event's id runs the event once, even when the
+/// first publish died before saying it had enqueued the event: the second
+/// message is then a redelivery only the worker can recognize.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resent_publish_runs_its_event_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path();
+    write(
+        &project.join("hot.hot"),
+        "::hot::conf ns\n\nhot.set.project \"resends\"\nhot.project.resends.src.paths [\"./hot/src\"]\n",
+    );
+    write(
+        &project.join("hot/src/resends.hot"),
+        "::resends ns\n\nhandle meta {on-event: \"resends:event\"}\nfn (event) { send(\"resends:ran\", {}) }\n",
+    );
+    let home = hot_home(project);
+
+    let log = project.join("dev.log");
+    let log_file = std::fs::File::create(&log).unwrap();
+    let (api_port, app_port) = (free_port(), free_port());
+    let _dev = Dev(hot(project, &home)
+        .arg("dev")
+        // The worker's line for a redelivery with nothing left to run.
+        .env("HOT_LOG_LEVEL", "debug")
+        .args(["--api.port", &api_port.to_string()])
+        .args(["--app.port", &app_port.to_string()])
+        .stdout(log_file.try_clone().unwrap())
+        .stderr(log_file)
+        .spawn()
+        .expect("start hot dev"));
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while TcpStream::connect(("127.0.0.1", api_port)).is_err() {
+        assert!(
+            Instant::now() < deadline,
+            "hot dev did not start: {}",
+            std::fs::read_to_string(&log).unwrap()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let key = hot(project, &home)
+        .args(["key", "create"])
+        .output()
+        .expect("create an API key");
+    assert!(key.status.success(), "{key:?}");
+    let key = String::from_utf8(key.stdout).unwrap();
+    let key = key.trim().lines().last().unwrap().trim().to_string();
+
+    let event_id = Uuid::new_v4();
+    let publish = async || {
+        let response = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{api_port}/v1/events"))
+            .bearer_auth(&key)
+            .json(&serde_json::json!({
+                "event_id": event_id,
+                "event_type": "resends:event",
+                "event_data": {}
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+        response.json::<Value>().await.unwrap()["data"].clone()
+    };
+    let wait_until = async |what: &str, done: &dyn Fn(String, i64) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let log_text = std::fs::read_to_string(&log).unwrap();
+            if done(log_text, resent_event_executions(&home).await) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {what}: {}",
+                std::fs::read_to_string(&log).unwrap()
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    };
+
+    let first = publish().await;
+    assert_eq!(first["event_id"], event_id.to_string());
+    wait_until("the handler to execute", &|_, executions| executions == 1).await;
+
+    assert_eq!(publish().await, first);
+
+    // As a publish leaves its event when it dies between the enqueue and
+    // settling the lease, before the worker's run marks the event handled.
+    let uri = format!("sqlite:{}", home.join("db/hot.sqlite.db").display());
+    let pool = sqlx::SqlitePool::connect(&uri).await.unwrap();
+    sqlx::query(
+        "UPDATE event SET handled = 0, enqueue_leased_until = '2000-01-01 00:00:00+00:00' \
+         WHERE event_id = ?",
+    )
+    .bind(event_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+
+    assert_eq!(publish().await, first);
+    let acknowledged = format!("acknowledges redelivered event {event_id}");
+    wait_until("the second message to be acknowledged", &|log_text, _| {
+        log_text.contains(&acknowledged)
+    })
+    .await;
+    assert_eq!(resent_event_executions(&home).await, 1);
+}

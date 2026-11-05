@@ -354,6 +354,12 @@ impl TryFrom<Message> for MaintenanceMessage {
 /// Message head key naming the one event handler (`ns/var`) a retry is for.
 pub const RETRIED_HANDLER_HEAD: &str = "retried_event_handler_fn";
 
+/// Message head of an event another message may already have delivered. A
+/// publish that names its event can enqueue it twice: a resend takes over from
+/// a publish that died before saying it had enqueued, and a retried enqueue
+/// repeats one that timed out but arrived. The queue sees separate messages.
+pub const MAY_REPEAT_HEAD: &str = "may_repeat";
+
 /// Message format for queue events
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventMessage {
@@ -366,6 +372,11 @@ impl EventMessage {
     /// The handler a retry is for. Any other event runs all its handlers.
     pub fn retried_handler(&self) -> Option<&str> {
         self.head.get(RETRIED_HANDLER_HEAD).map(String::as_str)
+    }
+
+    /// Whether this message may repeat a delivery its queue has no record of.
+    pub fn may_repeat(&self) -> bool {
+        self.head.contains_key(MAY_REPEAT_HEAD)
     }
 }
 
