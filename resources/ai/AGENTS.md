@@ -361,6 +361,8 @@ is-str(value)             // true if Str (also: is-int, is-dec, is-vec, is-map, 
 alice Person({name: "Alice", age: 30})
 tagged to-json(alice)
 plain to-json(untype(alice)) // {"name":"Alice","age":30}
+// A variant keeps its name: untype(Outcome.Passed) is "Passed", and
+// untype(Status.Owed(5)) is {Owed: 5}. Person(plain) reads the form back
 
 // Built-in: Str, Int, Dec, Bool, Null, Vec, Map, Fn, Any, Bytes, Result
 ```

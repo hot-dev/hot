@@ -777,6 +777,23 @@ to-json(user)          // tagged JSON that preserves the User type
 to-json(untype(user))  // {"id":"u1","email":"a@example.com"}
 ```
 
+`untype` keeps a variant's name: a variant with no payload becomes its name,
+and one with a payload a Map from its name to the payload. A `Result` isn't
+data of its own, so `untype(ok(5))` is `5`.
+
+```hot
+untype(Outcome.Passed)           // "Passed"
+untype(Status.NotOwed("no tax")) // {NotOwed: "no tax"}
+```
+
+A record or variant field of an enum type reads that form back, so
+`Filing(untype(filing))` rebuilds the same value. Read a payload in code with
+`match` or field access, not `untype`.
+
+`::hot::store` keeps typed values as they are, nested variants included. Call
+`untype` first only when something else reads the store as plain JSON, and
+rebuild with the constructor after `get`.
+
 ## Type Aliases
 
 Create aliases for complex types:

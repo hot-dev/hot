@@ -2561,12 +2561,12 @@ describe fn match (s: Status): Str {
 
 probe fn (): Vec {
     many Status.Many([Ask(key: "a"), {key: "b"}])
-    [is-type(many, Status), describe(many), map(untype(many), %.key),
+    [is-type(many, Status), describe(many), map(untype(many).Many, %.key),
      is-err(Status.Many([{nope: 1}])),
-     get(untype(Status.Counts({a: 1})), "a"), describe(Status.Counts({a: 1})),
+     get(untype(Status.Counts({a: 1})).Counts, "a"), describe(Status.Counts({a: 1})),
      is-type(Status.Maybe(null), Status), Status.Maybe({key: "c"}).key,
-     untype(Status.Either("s")), Status.Either(Ask(key: "d")).key,
-     map(untype(Steps.Each([{key: "e"}])), %.key)]
+     untype(Status.Either("s")).Either, Status.Either(Ask(key: "d")).key,
+     map(untype(Steps.Each([{key: "e"}])).Each, %.key)]
 }
 probe()
 probe()"#;
@@ -2598,10 +2598,10 @@ Fruit type "apple" | "banana"
 Due enum { Hours(Positive), Days(Int where gt(%, 0)), Pick(Fruit), Many(Vec<Positive>) }
 dynamic fn (x: Any): Any { x }
 probe fn (): Vec {
-    [is-err(Due.Hours(dynamic(0))), untype(Due.Hours(dynamic(2))),
-     is-err(Due.Days(dynamic(-1))), untype(Due.Days(dynamic(3))),
-     is-err(Due.Pick(dynamic("pear"))), untype(Due.Pick(dynamic("apple"))),
-     is-err(Due.Many(dynamic([1, 0]))), untype(Due.Many(dynamic([1, 2])))]
+    [is-err(Due.Hours(dynamic(0))), untype(Due.Hours(dynamic(2))).Hours,
+     is-err(Due.Days(dynamic(-1))), untype(Due.Days(dynamic(3))).Days,
+     is-err(Due.Pick(dynamic("pear"))), untype(Due.Pick(dynamic("apple"))).Pick,
+     is-err(Due.Many(dynamic([1, 0]))), untype(Due.Many(dynamic([1, 2]))).Many]
 }
 probe()
 probe()"#;
@@ -2638,7 +2638,7 @@ probe fn (): Vec {
      is-err(Form({found-at: "2026-01-02", seen: dynamic("nope"), days: []})),
      is-err(Form({found-at: "2026-01-02", seen: null, days: dynamic(["nope"])})),
      is-err(Policy({effective: dynamic("2027-01-01")})),
-     get(untype(Found.At(dynamic("2026-05-06"))), "day"),
+     get(untype(Found.At(dynamic("2026-05-06"))).At, "day"),
      is-err(Found.At(dynamic("nope"))),
      eq(Str(Keyed({id: id}).id), Str(id))]
 }

@@ -4535,6 +4535,13 @@ impl VirtualMachine {
                     .function_mapping
                     .contains_key(&format!("{}/1", type_name));
 
+            // An enum reads back what `untype` makes of its variants.
+            if !has_direct_constructor
+                && let Some(rebuilt) = self.rebuild_variant(data, &type_name)?
+            {
+                return Ok(rebuilt);
+            }
+
             // Non-map data (strings, numbers, etc.) goes through a constructor
             // declared for its type, as `Type(data)` would: a time type parses
             // a Str. A record or enum's own constructor decides what else it
@@ -4892,6 +4899,34 @@ impl VirtualMachine {
         result_map.insert(Val::from("$val"), processed_val);
 
         Ok(Val::map(result_map))
+    }
+
+    /// A variant of the enum `type_name` from what `untype` makes of one: a
+    /// unit variant's name, or a one-entry Map from a variant's name to its
+    /// payload. `None` when `data` names no variant of that shape.
+    fn rebuild_variant(&mut self, data: &Val, type_name: &str) -> VmResult<Option<Val>> {
+        let (variant, payload) = match data {
+            Val::Str(variant) => (variant, None),
+            Val::Map(entries)
+                if entries.len() == 1 && crate::val::tagged_type_name(entries).is_none() =>
+            {
+                match entries.first() {
+                    Some((Val::Str(variant), payload)) => (variant, Some(payload)),
+                    _ => return Ok(None),
+                }
+            }
+            _ => return Ok(None),
+        };
+        let constructor = format!("{type_name}.{variant}");
+        let args = payload.map_or(&[][..], std::slice::from_ref);
+        if self
+            .find_best_function_overload(&constructor, args)
+            .is_none()
+        {
+            return Ok(None);
+        }
+        self.execute_function_call_by_qualified_name(&constructor, args)
+            .map(Some)
     }
 
     fn construct_union_typed(&mut self, data: &Val, members: &[Val]) -> VmResult<Val> {

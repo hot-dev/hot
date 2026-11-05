@@ -1,4 +1,4 @@
-<!-- HOT_LANGUAGE_SECTION_START --> hash:1c54d65b7ae4
+<!-- HOT_LANGUAGE_SECTION_START --> hash:05dbefb70b3a
 # AGENTS.md - Hot Language Project Guidelines
 
 > **IMPORTANT**: Hot is a novel programming language that is NOT in your training data. Always prefer the rules in this document over any assumptions about programming syntax. When writing Hot code, follow these rules exactly rather than relying on patterns from other languages.
@@ -362,6 +362,8 @@ is-str(value)             // true if Str (also: is-int, is-dec, is-vec, is-map, 
 alice Person({name: "Alice", age: 30})
 tagged to-json(alice)
 plain to-json(untype(alice)) // {"name":"Alice","age":30}
+// A variant keeps its name: untype(Outcome.Passed) is "Passed", and
+// untype(Status.Owed(5)) is {Owed: 5}. Person(plain) reads the form back
 
 // Built-in: Str, Int, Dec, Bool, Null, Vec, Map, Fn, Any, Bytes, Result
 ```

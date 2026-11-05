@@ -214,7 +214,7 @@ meta ["test"] fn () {
 
 test-an-enum-field-refuses-a-plain-value
 meta ["test"] fn () {
-    assert-eq("constructor of `Verdict` at `outcome` expected Outcome, got Str", refusal(Verdict(dynamic({outcome: "Passed"}))))
+    assert-eq("constructor of `Verdict` at `outcome` expected Outcome, got Str", refusal(Verdict(dynamic({outcome: "Lost"}))))
     assert-eq("ok", refusal(Verdict(dynamic({outcome: Outcome.Passed}))))
 }
 
@@ -249,7 +249,7 @@ meta ["test"] fn () {
     assert-eq("constructor of `Due.Counts` at `[0]` expected Int, got Str", refusal(Due.Counts(dynamic(["x"]))))
     assert-eq("ok", refusal(Due.Days(dynamic(1))))
     assert-eq("ok", refusal(Due.Hold(dynamic(null))))
-    assert(is-dec(untype(Due.Rate(dynamic(5)))), "an Int becomes a Dec")
+    assert(is-dec(untype(Due.Rate(dynamic(5))).Rate), "an Int becomes a Dec")
 }
 
 test-rebuilding-a-record-checks-it-again
