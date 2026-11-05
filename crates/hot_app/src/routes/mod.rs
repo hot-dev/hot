@@ -304,6 +304,10 @@ pub fn routes(
             axum::routing::post(crate::handlers::sub_orgs::revoke_org_api_key),
         )
         .route(
+            "/@{org_slug}/org-api-keys/{key_id}/rotate",
+            axum::routing::post(crate::handlers::sub_orgs::rotate_org_api_key),
+        )
+        .route(
             "/@{org_slug}/edit",
             get(orgs_edit_handler).post(orgs_update_handler),
         )

@@ -12,6 +12,9 @@ pub enum ApiKeyError {
     InvalidKey,
     HashingError,
     SerializationError,
+    /// A rotation's overlap is running, and the previous secret works until
+    /// this time. Only a rotation with no overlap may end it early.
+    OverlapRunning(DateTime<Utc>),
 }
 
 impl fmt::Display for ApiKeyError {
@@ -22,6 +25,9 @@ impl fmt::Display for ApiKeyError {
             ApiKeyError::InvalidKey => write!(f, "Invalid API key"),
             ApiKeyError::HashingError => write!(f, "Failed to hash API key"),
             ApiKeyError::SerializationError => write!(f, "Failed to serialize API key data"),
+            ApiKeyError::OverlapRunning(until) => {
+                write!(f, "The previous secret works until {until}")
+            }
         }
     }
 }
@@ -797,43 +803,81 @@ impl ApiKey {
 
     /// Issue a new secret for the same key ID. The previous secret keeps
     /// working until `overlap` ends; lineage, grants and expiry are unchanged.
+    ///
+    /// A key keeps one previous secret, so a rotation during a running overlap
+    /// would stop that secret before the time the last rotation promised. It
+    /// fails with [`ApiKeyError::OverlapRunning`], unless `overlap` is zero:
+    /// then the caller is ending the overlap, and every older secret stops.
     pub async fn rotate(
         db: &crate::db::DatabasePool,
         api_key_id: &Uuid,
         overlap: chrono::Duration,
         updated_by_user_id: &Uuid,
-    ) -> Result<String, ApiKeyError> {
+    ) -> Result<RotatedSecret, ApiKeyError> {
         let (token, hash) = Self::generate_api_key(api_key_id)?;
         let key_data: serde_json::Value =
             serde_json::from_str(&hash).map_err(|_| ApiKeyError::SerializationError)?;
-        let until = Utc::now() + overlap;
+        let now = Utc::now();
+        let until = now + overlap;
+        let ends_overlap = overlap.is_zero();
+        // The overlap is checked by the update, so that of two rotations at
+        // once only one can pass it.
         let result = match db {
             crate::db::DatabasePool::Sqlite(pool) => {
-                sqlx::query("UPDATE api_key SET previous_key_data = key_data, previous_key_expires_at = ?, key_data = ?, updated_at = CURRENT_TIMESTAMP, updated_by_user_id = ? WHERE api_key_id = ? AND active = 1")
+                sqlx::query("UPDATE api_key SET previous_key_data = key_data, previous_key_expires_at = ?, key_data = ?, updated_at = CURRENT_TIMESTAMP, updated_by_user_id = ? WHERE api_key_id = ? AND active = 1 AND (? OR previous_key_expires_at IS NULL OR previous_key_expires_at <= ?)")
                     .bind(until)
                     .bind(key_data.to_string())
                     .bind(updated_by_user_id)
                     .bind(api_key_id)
+                    .bind(ends_overlap)
+                    .bind(now)
                     .execute(pool)
                     .await?
                     .rows_affected()
             }
             crate::db::DatabasePool::Postgres(pool) => {
-                sqlx::query("UPDATE api_key SET previous_key_data = key_data, previous_key_expires_at = $1, key_data = $2, updated_at = now(), updated_by_user_id = $3 WHERE api_key_id = $4 AND active")
+                sqlx::query("UPDATE api_key SET previous_key_data = key_data, previous_key_expires_at = $1, key_data = $2, updated_at = now(), updated_by_user_id = $3 WHERE api_key_id = $4 AND active AND ($5 OR previous_key_expires_at IS NULL OR previous_key_expires_at <= $6)")
                     .bind(until)
                     .bind(&key_data)
                     .bind(updated_by_user_id)
                     .bind(api_key_id)
+                    .bind(ends_overlap)
+                    .bind(now)
                     .execute(pool)
                     .await?
                     .rows_affected()
             }
         };
+        let state = Self::get_credential_state(db, api_key_id).await?;
         if result == 0 {
-            return Err(ApiKeyError::NotFound);
+            let active = Self::get_api_key(db, api_key_id).await?.active;
+            return Err(state
+                .previous_secret_expires_at()
+                .filter(|_| active)
+                .map_or(ApiKeyError::NotFound, ApiKeyError::OverlapRunning));
         }
-        Ok(token)
+        Ok(RotatedSecret {
+            token,
+            previous_secret_expires_at: state.expires_at.map_or(until, |at| at.min(until)),
+        })
     }
+}
+
+/// A rotation's new secret, and when the secret it replaced stops working.
+#[derive(Debug, Clone)]
+pub struct RotatedSecret {
+    pub token: String,
+    pub previous_secret_expires_at: DateTime<Utc>,
+}
+
+/// When a rotated key's previous secret stops working, while it still does.
+/// It can't outlive the key.
+pub(crate) fn previous_secret_expiry(
+    previous_key_expires_at: Option<DateTime<Utc>>,
+    key_expires_at: Option<DateTime<Utc>>,
+) -> Option<DateTime<Utc>> {
+    let until = previous_key_expires_at.filter(|until| *until > Utc::now())?;
+    Some(key_expires_at.map_or(until, |at| at.min(until)))
 }
 
 /// Expiry and rotation state of an environment API key.
@@ -847,6 +891,11 @@ pub struct ApiKeyCredentialState {
 impl ApiKeyCredentialState {
     pub fn is_expired(&self) -> bool {
         self.expires_at.is_some_and(|at| at <= Utc::now())
+    }
+
+    /// When the previous secret stops working, during a rotation's overlap.
+    pub fn previous_secret_expires_at(&self) -> Option<DateTime<Utc>> {
+        previous_secret_expiry(self.previous_key_expires_at, self.expires_at)
     }
 }
 
@@ -889,6 +938,48 @@ mod tests {
             .await
             .unwrap();
         assert!(chosen.is_none_or(|key| key.api_key_id != issued));
+    }
+
+    #[tokio::test]
+    async fn a_rotation_during_an_overlap_is_refused_unless_it_ends_the_overlap() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let id = Uuid::now_v7();
+        ApiKey::insert_api_key(
+            &db,
+            &id,
+            &data.env_id,
+            "rotated",
+            &serde_json::json!({}),
+            &data.user_id,
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        let overlap = chrono::Duration::seconds(60);
+        let first = ApiKey::rotate(&db, &id, overlap, &data.user_id)
+            .await
+            .unwrap();
+        let state = ApiKey::get_credential_state(&db, &id).await.unwrap();
+        assert_eq!(
+            state.previous_secret_expires_at(),
+            Some(first.previous_secret_expires_at)
+        );
+
+        let error = ApiKey::rotate(&db, &id, overlap, &data.user_id)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ApiKeyError::OverlapRunning(until)
+                if until == first.previous_secret_expires_at),
+            "{error:?}"
+        );
+
+        ApiKey::rotate(&db, &id, chrono::Duration::zero(), &data.user_id)
+            .await
+            .unwrap();
+        let state = ApiKey::get_credential_state(&db, &id).await.unwrap();
+        assert_eq!(state.previous_secret_expires_at(), None);
     }
 
     #[tokio::test]
