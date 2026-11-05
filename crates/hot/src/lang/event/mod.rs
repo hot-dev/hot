@@ -345,6 +345,19 @@ impl ExecutionContext {
         self
     }
 
+    /// The context of an event this run sends. It's a new event, so its
+    /// handlers count their own attempts and retries: this run's would leave a
+    /// handler woken by a last attempt with no retries. The rest, lineage
+    /// included, is this run's.
+    pub fn for_sent_event(&self) -> Self {
+        Self {
+            retry_attempt: 0,
+            max_retries: 0,
+            retry_delay_ms: 0,
+            ..self.clone()
+        }
+    }
+
     /// Helper to set the retry policy Hot applies if this run fails. A policy
     /// that makes no retries has no delay, whatever its meta says.
     pub fn with_retry_config(mut self, retry: &crate::env::retry::RetryConfig) -> Self {
