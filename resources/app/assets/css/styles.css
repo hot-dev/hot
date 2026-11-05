@@ -437,20 +437,8 @@
   .z-50 {
     z-index: 50;
   }
-  .order-1 {
-    order: 1;
-  }
-  .order-42 {
-    order: 42;
-  }
   .order-123 {
     order: 123;
-  }
-  .order-first {
-    order: -9999;
-  }
-  .row-44 {
-    grid-row: 44;
   }
   .float-right {
     float: right;
@@ -661,9 +649,6 @@
   }
   .table-cell {
     display: table-cell;
-  }
-  .table-row {
-    display: table-row;
   }
   .size-4 {
     width: calc(var(--spacing) * 4);
@@ -1978,9 +1963,6 @@
   .text-yellow-900 {
     color: var(--color-yellow-900);
   }
-  .capitalize {
-    text-transform: capitalize;
-  }
   .lowercase {
     text-transform: lowercase;
   }
@@ -2000,9 +1982,6 @@
   .tabular-nums {
     --tw-numeric-spacing: tabular-nums;
     font-variant-numeric: var(--tw-ordinal,) var(--tw-slashed-zero,) var(--tw-numeric-figure,) var(--tw-numeric-spacing,) var(--tw-numeric-fraction,);
-  }
-  .no-underline {
-    text-decoration-line: none;
   }
   .underline {
     text-decoration-line: underline;
@@ -2150,9 +2129,6 @@
   .select-none {
     -webkit-user-select: none;
     user-select: none;
-  }
-  .\[-\:TZ\] {
-    -: TZ;
   }
   .\[hash\:\.\.\.\] {
     hash: ...;
