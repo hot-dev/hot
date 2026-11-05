@@ -21,6 +21,9 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+    # The default types leave out ready_for_review, so a pull request leaving
+    # draft would keep the skipped jobs of its last draft push.
+    types: [ opened, synchronize, reopened, ready_for_review ]
   schedule:
     # Weekly rot check: dependency updates and runner-image changes break
     # cross-platform builds even when nothing is pushed.
