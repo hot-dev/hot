@@ -4646,13 +4646,19 @@ impl VirtualMachine {
                     }
                 }
 
+                // A closed enum has no value but its variants. An open one
+                // may have variants this program doesn't know, so a Map it
+                // can't place stays as it is, for a `_` arm.
+                let closed = matches!(
+                    type_info_map.get(&Val::from("$closed")),
+                    Some(Val::Bool(true))
+                );
                 match successful_constructions.len() {
                     0 => {
-                        // No variant matched - leave as raw map
-                        tracing::trace!(
-                            "VM: No enum variant matched for {}, leaving as raw map",
-                            type_name
-                        );
+                        tracing::trace!("VM: No enum variant matched for {}", type_name);
+                        if closed {
+                            return Ok(self.constructor_mismatch(&type_name, data));
+                        }
                         return Ok(data.clone());
                     }
                     1 => {
@@ -4672,12 +4678,14 @@ impl VirtualMachine {
                         return Ok(constructed);
                     }
                     _ => {
-                        // Multiple matches (tie) - leave as raw map
                         tracing::trace!(
-                            "VM: Ambiguous enum variant match for {} ({} matched), leaving as raw map",
+                            "VM: Ambiguous enum variant match for {} ({} matched)",
                             type_name,
                             successful_constructions.len()
                         );
+                        if closed {
+                            return Ok(self.constructor_ambiguity(&type_name, data));
+                        }
                         return Ok(data.clone());
                     }
                 }

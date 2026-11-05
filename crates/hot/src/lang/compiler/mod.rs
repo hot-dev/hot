@@ -6296,6 +6296,9 @@ impl Compiler {
         if self.is_constructed_type(&qualified_name) {
             type_info.insert(Val::from("$constructed"), Val::Bool(true));
         }
+        if self.is_closed_enum(&qualified_name) {
+            type_info.insert(Val::from("$closed"), Val::Bool(true));
+        }
         type_info.insert(Val::from("$type"), Val::from(qualified_name));
         Val::map(type_info)
     }

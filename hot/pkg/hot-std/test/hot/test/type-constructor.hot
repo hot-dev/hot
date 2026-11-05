@@ -477,7 +477,7 @@ meta ["test"] fn () {
 }
 
 // ============================================================================
-// Test 19: Enum Variant Inference - Ambiguous (Tie) Leaves Raw Map
+// Test 19: Enum Variant Inference - Ambiguous (Tie) Is Refused
 // ============================================================================
 
 // Two variants with identical field structure
@@ -499,13 +499,11 @@ meta ["test"] fn () {
     // Pass raw map that matches BOTH variants equally
     result TieContainer({item: {value: 42}})
 
-    assert(not(is-err(result)), "Container should succeed")
-    assert(is-map(result.item), "Ambiguous match should leave a raw map")
-    assert-eq(42, result.item.value, "Value should be preserved")
+    assert(is-err(result), "A closed enum has no value that isn't one variant")
 }
 
 // ============================================================================
-// Test 20: Enum Variant Inference - No Match Leaves Raw Map
+// Test 20: Enum Variant Inference - No Match Is Refused
 // ============================================================================
 
 // Variant requires specific fields
@@ -523,9 +521,7 @@ meta ["test"] fn () {
     // Pass raw map that doesn't match any variant (missing required-field)
     result NoMatchHolder({data: {other-field: "test"}})
 
-    assert(not(is-err(result)), "Holder should succeed")
-    assert(is-map(result.data), "No matching variant should leave a raw map")
-    assert-eq("test", result.data.other-field, "Field should be preserved")
+    assert(is-err(result), "A closed enum has no value that isn't one variant")
 }
 
 

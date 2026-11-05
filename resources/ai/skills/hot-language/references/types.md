@@ -92,6 +92,9 @@ Server(body)   // Err: constructor of `Server` at `port` expected Int, got Str
 - A record or enum field takes a value of that type, a Map to build it from,
   or what a declared constructor takes. Any other value fails, null included
   unless the field allows it.
+- A Map at an enum field builds the one variant it fits. At a closed enum, a
+  Map that fits no variant, or more than one, fails. At an open enum it stays
+  a Map, for a `_` arm.
 - A failure in a nested record reports the whole path from the outermost one:
   `constructor of `Order` at `items[2].price` expected Dec, got Str`.
 - An `Err` given for a field comes back as itself, unless the field is `Any`.

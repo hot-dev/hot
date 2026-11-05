@@ -1202,6 +1202,13 @@ impl Compiler {
         })
     }
 
+    /// Whether `qualified` is an enum with no variants but those it declares.
+    pub(super) fn is_closed_enum(&self, qualified: &str) -> bool {
+        self.constraint_type_defs
+            .get(qualified)
+            .is_some_and(|def| def.variants.is_some() && !def.is_open)
+    }
+
     /// The check of what a type declared over a built-in one holds, as for
     /// `Meters type Int` or `Distance type Meters` over it; `None` for any
     /// other type, such as one over `Any`, `Fn` or a record.

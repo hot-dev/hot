@@ -1,0 +1,225 @@
+// A Map at a field of an enum type builds the one variant it fits. A closed
+// enum has no other values, so a Map that fits none of its variants, or more
+// than one, is an `Err(ConstraintError.Violation)`. An open enum has variants
+// this program doesn't know: there the Map stays as it is, for a `_` arm.
+::hot::test::enum-field-maps ns
+meta ["test"]
+
+// Values reach the constructor at run time, where a literal would be
+// rejected by `hot check` already.
+dynamic fn (value: Any): Any {
+    value
+}
+
+// What a refused construction reports, or "ok".
+refusal fn (lazy result: Any): Str {
+    forced do result
+    cond {
+        is-ok(forced) => { "ok" }
+        => {
+            match err-value(forced) {
+                ConstraintError.Violation => { err-value(forced).message }
+                _ => { `not a violation: ${err-value(forced)}` }
+            }
+        }
+    }
+}
+
+Circle type {
+    radius: Dec,
+}
+
+Square type {
+    side: Dec,
+}
+
+Shape enum {
+    Circle(Circle),
+    Square(Square),
+    Nothing,
+}
+
+Sketch type {
+    shape: Shape,
+}
+
+MaybeSketch type {
+    shape: Shape?,
+}
+
+Gallery type {
+    shapes: Vec<Shape>,
+}
+
+Frame type {
+    sketch: Sketch,
+}
+
+Twin1 type {
+    value: Int,
+}
+
+Twin2 type {
+    value: Int,
+}
+
+Twins enum {
+    One(Twin1),
+    Two(Twin2),
+}
+
+TwinBox type {
+    twin: Twins,
+}
+
+Wrapped enum {
+    Holding(Shape),
+}
+
+Other type {
+    name: Str,
+}
+
+Animal enum open {
+    Dog(Circle),
+    Disc(Circle),
+}
+
+OneAnimal enum open {
+    Dog(Circle),
+}
+
+Pen type {
+    animal: OneAnimal,
+}
+
+Kennel type {
+    animal: Animal,
+}
+
+Outcome type {
+    result: Result,
+}
+
+describe fn match (animal: OneAnimal): Str {
+    OneAnimal.Dog => { "dog" }
+    _ => { "something new" }
+}
+
+// ============================================================================
+// A closed enum
+// ============================================================================
+
+test-a-map-builds-the-variant-it-fits
+meta ["test"] fn () {
+    sketch Sketch({shape: dynamic({radius: 5.0})})
+    assert(is-type(sketch.shape, Shape.Circle))
+    assert-eq(5.0, sketch.shape.radius)
+}
+
+test-a-map-that-fits-no-variant-is-refused
+meta ["test"] fn () {
+    expected "constructor of `Sketch` at `shape` expected Shape, got Map"
+    assert-eq(expected, refusal(Sketch({shape: dynamic({sides: 3})})))
+    assert-eq(expected, refusal(Sketch(shape: dynamic({sides: 3}))))
+}
+
+test-an-empty-map-fits-no-variant
+meta ["test"] fn () {
+    assert-eq(
+        "constructor of `Sketch` at `shape` expected Shape, got Map",
+        refusal(Sketch(shape: dynamic({}))),
+    )
+}
+
+test-a-map-that-fits-two-variants-is-refused
+meta ["test"] fn () {
+    assert-eq(
+        "constructor of `TwinBox` at `twin` expected Twins, got a Map that fits more than one variant",
+        refusal(TwinBox(twin: dynamic({value: 42}))),
+    )
+}
+
+test-a-field-that-allows-null-still-refuses-the-map
+meta ["test"] fn () {
+    assert(is-null(MaybeSketch(shape: dynamic(null)).shape))
+    assert-eq(
+        "constructor of `MaybeSketch` at `shape` expected Shape, got Map",
+        refusal(MaybeSketch(shape: dynamic({sides: 3}))),
+    )
+}
+
+test-a-vec-of-a-closed-enum-names-the-item
+meta ["test"] fn () {
+    assert-eq(
+        "constructor of `Gallery` at `shapes[1]` expected Shape, got Map",
+        refusal(Gallery(shapes: dynamic([{radius: 1.0}, {sides: 3}]))),
+    )
+}
+
+test-a-nested-record-reports-the-whole-path
+meta ["test"] fn () {
+    assert-eq(
+        "constructor of `Frame` at `sketch.shape` expected Shape, got Map",
+        refusal(Frame({sketch: dynamic({shape: {sides: 3}})})),
+    )
+}
+
+test-a-variant-payload-is-refused-the-same-way
+meta ["test"] fn () {
+    assert(contains(refusal(Wrapped.Holding(dynamic({sides: 3}))), "expected Shape, got Map"))
+}
+
+test-a-value-of-another-record-is-refused
+meta ["test"] fn () {
+    assert-eq(
+        "constructor of `Sketch` at `shape` expected Shape, got Other",
+        refusal(Sketch(shape: Other(name: "a"))),
+    )
+}
+
+test-a-variant-still-passes-as-it-is
+meta ["test"] fn () {
+    circle Shape.Circle({radius: 1.0})
+    assert-eq(circle, Sketch(shape: circle).shape)
+    assert(is-type(Sketch(shape: Shape.Nothing).shape, Shape.Nothing))
+}
+
+test-what-untype-makes-of-a-variant-reads-back
+meta ["test"] fn () {
+    circle Sketch(shape: Shape.Circle({radius: 1.0}))
+    nothing Sketch(shape: Shape.Nothing)
+    assert-eq(circle, Sketch(untype(circle)))
+    assert-eq(nothing, Sketch(untype(nothing)))
+}
+
+// ============================================================================
+// An open enum
+// ============================================================================
+
+test-an-open-enum-builds-the-variant-it-knows
+meta ["test"] fn () {
+    assert(is-type(Pen(animal: dynamic({radius: 1.0})).animal, OneAnimal.Dog))
+}
+
+test-an-open-enum-keeps-a-map-it-does-not-know
+meta ["test"] fn () {
+    pen Pen(animal: dynamic({wingspan: 2.1}))
+    assert(is-map(pen.animal))
+    assert-eq(2.1, pen.animal.wingspan)
+    assert-eq("something new", describe(pen.animal))
+}
+
+test-an-open-enum-keeps-a-map-that-fits-two-variants
+meta ["test"] fn () {
+    assert(is-map(Kennel(animal: dynamic({radius: 1.0})).animal))
+}
+
+// ============================================================================
+// Result
+// ============================================================================
+
+test-a-result-field-still-holds-a-map
+meta ["test"] fn () {
+    assert-eq({a: 1}, Outcome(result: dynamic({a: 1})).result)
+}

@@ -66,6 +66,7 @@ struct Failure {
 enum FailureKind {
     Violation,
     BaseMismatch { expected: String },
+    Ambiguous { expected: String },
     NotOneOf,
     Evaluation { cause: Val },
     Budget { budget: &'static str, limit: i64 },
@@ -497,6 +498,19 @@ impl VirtualMachine {
     /// become one.
     pub(crate) fn constructor_mismatch(&self, type_name: &str, value: &Val) -> Val {
         let failure = self.base_mismatch(short_name(type_name), value, &[]);
+        self.constraint_error(&failure, &Boundary::constructor(type_name))
+    }
+
+    /// The `ConstraintError` of `value`, which fits more than one variant of
+    /// `type_name` and so can't become any of them.
+    pub(crate) fn constructor_ambiguity(&self, type_name: &str, value: &Val) -> Val {
+        let failure = self.failure(
+            FailureKind::Ambiguous {
+                expected: short_name(type_name).to_string(),
+            },
+            value,
+            &[],
+        );
         self.constraint_error(&failure, &Boundary::constructor(type_name))
     }
 
@@ -1152,6 +1166,14 @@ impl VirtualMachine {
                 "Violation",
                 format!(
                     "{subject}{at} expected {expected}, got {}",
+                    failure.value_type
+                ),
+                vec![],
+            ),
+            FailureKind::Ambiguous { expected } => (
+                "Violation",
+                format!(
+                    "{subject}{at} expected {expected}, got a {} that fits more than one variant",
                     failure.value_type
                 ),
                 vec![],

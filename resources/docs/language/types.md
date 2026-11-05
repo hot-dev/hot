@@ -222,6 +222,7 @@ Server(body)  // Err: constructor of `Server` at `port` expected Int, got Str
 - Built-in types follow a parameter's rules. Numbers convert only when nothing is lost, null fails unless the type allows it, and a value of a declared type over a built-in one, such as `Port(80)` from `Port type Int`, keeps its tag.
 - Unlike a parameter, `Vec<T>` and `Map<K, V>` check their contents: `Numbers type { values: Vec<Int> }` refuses `{values: [1, "x"]}`, and the error names `values[1]`.
 - A field typed as a record or enum takes a value of that type, a Map to build it from, or whatever a constructor it declares takes. Any other value fails, null included unless the field allows it.
+- A Map at an enum field builds the one variant it fits. At a closed enum, a Map that fits no variant, or more than one, fails. An open enum can have variants this program doesn't know, so there the Map stays as it is, for a `_` arm.
 - A failure inside a nested record or a `Vec` of records is reported from the outermost record, with the whole path: `constructor of `Order` at `items[2].price` expected Dec, got Str`.
 - An `Err` given for a field stops the construction and comes back as itself, unless the field is `Any`.
 - A field of a type declared over a built-in one, such as `Port type Int`, checks its value as that type and holds a `Port`.
