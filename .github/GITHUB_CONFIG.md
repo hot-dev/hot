@@ -21,8 +21,9 @@ use the organization's `ubuntu-24.04-8core` GitHub-hosted runner in the `hot-ci`
 runner group: Ubuntu 24.04 x64, 8 cores, 32 GB RAM, and 300 GB SSD. The pool
 allows up to eight concurrent jobs, and the group grants access only to
 `hot-dev/hot`, including this public repository. `CARGO_BUILD_JOBS=8` matches
-the pool size. Browser checks and the final required-check gate use standard
-`ubuntu-24.04` runners.
+the pool size. The setup action applies it after cache restoration so runner
+size changes reuse existing build artifacts. Browser checks and the final
+required-check gate use standard `ubuntu-24.04` runners.
 
 The enterprise billing account has a repository-scoped Actions budget for
 `hot-dev/hot` with a **$0 monthly overage limit** and **Stop usage when budget

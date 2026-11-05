@@ -28,8 +28,6 @@ env:
   # builds against a shared cache, not the inner-loop edit pattern that
   # incremental is designed for.
   CARGO_INCREMENTAL: '0'
-  # Match the 8-core Linux pool; override the checkout's 16-job default.
-  CARGO_BUILD_JOBS: '8'
   CARGO_NET_RETRY: 2
   CARGO_HTTP_TIMEOUT: 30
   SQLX_OFFLINE: 'true'
@@ -72,6 +70,7 @@ jobs:
           tailwind-version: ${{ env.TAILWIND_VERSION }}
           save-cache: ${{ github.ref == 'refs/heads/main' }}
           ci-tuning: "true"
+          cargo-build-jobs: '8'
 
       - name: Cargo fmt
         run: cargo fmt --all --check
@@ -196,6 +195,7 @@ jobs:
           tailwind-version: ${{ env.TAILWIND_VERSION }}
           save-cache: ${{ github.ref == 'refs/heads/main' }}
           ci-tuning: "true"
+          cargo-build-jobs: '8'
 
       - name: Install psql for upgrade provisioning tests
         run: |
@@ -274,6 +274,7 @@ jobs:
           tailwind-version: ${{ env.TAILWIND_VERSION }}
           save-cache: ${{ github.ref == 'refs/heads/main' }}
           ci-tuning: "true"
+          cargo-build-jobs: '8'
 
       - name: Run Hot init
         run: cargo run --locked --bin hot -- init -c hot.test.hot --ctx hot/ci.ctx.hot
@@ -370,6 +371,7 @@ jobs:
           tailwind-version: ${{ env.TAILWIND_VERSION }}
           save-cache: ${{ github.ref == 'refs/heads/main' }}
           ci-tuning: "true"
+          cargo-build-jobs: '8'
 
       - name: Install protobuf compiler (for containerd-client)
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
