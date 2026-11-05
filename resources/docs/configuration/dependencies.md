@@ -74,6 +74,10 @@ hot.project.my-app.deps {
 }
 ```
 
+Hot clones only the `branch` or `tag` you name. A commit SHA needs the whole
+history, so its first clone takes longer. A `tag` or commit is cloned once and then
+read from the cache, and a `branch` is updated on each resolve.
+
 ### Local with Git Fallback
 
 The recommended pattern for packages in a monorepo - prefer local during development, fall back to Git for distribution:
@@ -140,8 +144,8 @@ When using a specification object, these fields are available:
 |-------|------|-------------|
 | `local` | String | Local filesystem path (relative or absolute) |
 | `git` | String | Git repository URL (HTTPS or SSH) |
-| `branch` | String | Git branch name (mutually exclusive with `tag`) |
-| `tag` | String | Git tag or commit SHA (mutually exclusive with `branch`) |
+| `branch` | String | Git branch name, on any branch of the repository (mutually exclusive with `tag`) |
+| `tag` | String | Git tag or commit SHA, of at least seven characters (mutually exclusive with `branch`) |
 | `path` | String | Path within the Git repository (for monorepos) |
 
 ## Examples
