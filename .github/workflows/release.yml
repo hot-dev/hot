@@ -129,6 +129,36 @@ jobs:
         fi
         echo "The hot workflow passed for ${GITHUB_SHA}"
 
+  # The local reusable workflow tests this release's exact commit. Run it
+  # alongside binary builds, but keep every publication behind its result.
+  cross-platform-tests:
+    name: Cross-platform Tests
+    needs: validate-release
+    if: ${{ needs.validate-release.outputs.is_package_only != 'true' }}
+    uses: ./.github/workflows/cross-platform.yml
+    permissions:
+      contents: read
+
+  release-ready:
+    name: Release Test Gate
+    needs: [validate-release, cross-platform-tests]
+    if: ${{ always() && !cancelled() && needs.validate-release.result == 'success' }}
+    runs-on: ubuntu-24.04
+    steps:
+    - name: Check release test results
+      env:
+        IS_PACKAGE_ONLY: ${{ needs.validate-release.outputs.is_package_only }}
+        PLATFORM_RESULT: ${{ needs.cross-platform-tests.result }}
+      run: |
+        if [[ "$PLATFORM_RESULT" == "success" ]]; then
+          echo "macOS and Windows tests passed for this release commit."
+        elif [[ "$IS_PACKAGE_ONLY" == "true" && "$PLATFORM_RESULT" == "skipped" ]]; then
+          echo "Package-only release: no native binaries to test."
+        else
+          echo "::error::macOS and Windows tests must pass before publishing (result: $PLATFORM_RESULT)."
+          exit 1
+        fi
+
   # Compile each published package with the versions it pins before anything
   # publishes. CI runs this only when packages change, but removing a hot-std
   # function can break an old pin without touching hot/pkg.
@@ -164,7 +194,14 @@ jobs:
 
   package-cdn:
     name: Generate Package CDN
-    needs: [validate-release, package-pins]
+    needs: [validate-release, package-pins, release-ready]
+    # Package-only releases intentionally skip the native matrix. Override
+    # inherited skip propagation, while requiring every direct prerequisite.
+    if: >-
+      ${{ !cancelled() &&
+          needs.validate-release.result == 'success' &&
+          needs.package-pins.result == 'success' &&
+          needs.release-ready.result == 'success' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -978,7 +1015,7 @@ jobs:
   # and prerelease-tag builds publish no manifest.
   selfhost-image:
     name: Self-host runtime image
-    needs: validate-release
+    needs: [validate-release, release-ready]
     if: ${{ needs.validate-release.outputs.is_package_only != 'true' }}
     runs-on: ubuntu-24.04
     permissions:
@@ -1065,7 +1102,7 @@ jobs:
 
   # Create GitHub Release with all packages
   create-release:
-    needs: [validate-release, release-checks, package-pins, package-linux, package-macos, package-homebrew, package-windows, determine-release-channel]
+    needs: [validate-release, release-ready, release-checks, package-pins, package-linux, package-macos, package-homebrew, package-windows, determine-release-channel]
     if: ${{ needs.validate-release.outputs.is_package_only != 'true' }}
     runs-on: ubuntu-latest
     permissions:
