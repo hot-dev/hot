@@ -3501,6 +3501,47 @@ mod tests {
     use super::*;
     use fastnum::decimal::Context;
 
+    /// Numbers order by value whichever variant holds them, and an Int and a
+    /// Dec of equal value stay distinct, since they aren't equal.
+    #[test]
+    fn val_order_is_numeric_across_int_and_dec() {
+        let dec = |text: &str| Val::Dec(text.parse().expect("a decimal"));
+        assert!(Val::Int(200) > dec("80.5"));
+        assert!(dec("80.5") < Val::Int(200));
+        assert!(Val::Int(80) < dec("80.5"));
+        assert!(dec("80.5") > Val::Int(80));
+        assert_ne!(Val::Int(1), dec("1.0"));
+        assert_eq!(Val::Int(1).cmp(&dec("1.0")), Ordering::Less);
+        assert_eq!(dec("1.0").cmp(&Val::Int(1)), Ordering::Greater);
+
+        // The order stays total, with numbers in the place they had.
+        let mut values = vec![
+            Val::from("a"),
+            dec("2.5"),
+            Val::Int(3),
+            Val::Null,
+            Val::Int(2),
+            Val::Bool(true),
+            dec("2.0"),
+        ];
+        values.sort();
+        let expected = vec![
+            Val::Null,
+            Val::Bool(true),
+            Val::Int(2),
+            dec("2.0"),
+            dec("2.5"),
+            Val::Int(3),
+            Val::from("a"),
+        ];
+        assert_eq!(values, expected);
+
+        // Inside other values too, which is where `sort` meets a typed value.
+        assert!(val!([200]) > Val::vec(vec![dec("80.5")]));
+        let money = |amount: Val| val!({"$type": "::test/Money", "$val": (amount)});
+        assert!(money(Val::Int(200)) > money(dec("80.5")));
+    }
+
     #[test]
     fn as_fields_and_with_type_of_round_trip_constructed_values() {
         let server = val!({

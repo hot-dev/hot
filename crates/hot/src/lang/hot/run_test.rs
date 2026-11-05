@@ -1043,6 +1043,236 @@ probe("abc")"#;
         }
     }
 
+    /// A value of a declared type over a number compares as the number it
+    /// holds, in both tiers, for `Dec` and `Int` alike. Compared any other way,
+    /// 80 comes out above 100 and 200 below 80.
+    #[test]
+    fn named_numbers_compare_as_the_numbers_they_hold() {
+        let mut cases = Vec::new();
+        for (low, high) in [("Money(80.0)", "Money(200.0)"), ("Count(80)", "Count(200)")] {
+            cases.extend([
+                (format!("gt-any({low}, 100)"), false),
+                (format!("lt-any({low}, 100)"), true),
+                (format!("gte-any({low}, 100)"), false),
+                (format!("lte-any({low}, 100)"), true),
+                (format!("gt-any({high}, 100)"), true),
+                (format!("lt-any({high}, 100)"), false),
+                (format!("gte-any({high}, 100)"), true),
+                (format!("lte-any({high}, 100)"), false),
+                (format!("gt-any(100, {low})"), true),
+                (format!("lt-any(100, {low})"), false),
+                (format!("gt-any(100.5, {high})"), false),
+                (format!("lt-any(100.5, {high})"), true),
+                (format!("gt-any({high}, {low})"), true),
+                (format!("lt-any({high}, {low})"), false),
+                (format!("gt-any({low}, {low})"), false),
+                (format!("gte-any({low}, {low})"), true),
+                (format!("lte-any({low}, {low})"), true),
+                // No `Any` needed: the checker reads the type as its number.
+                (format!("gt({low}, 100)"), false),
+                (format!("lt({low}, 100)"), true),
+                (format!("gt({high}, {low})"), true),
+            ]);
+        }
+        cases.extend([
+            // Payloads of each kind inside one type.
+            ("gt-any(Money(200), Money(80.5))".to_string(), true),
+            ("lt-any(Money(200), Money(80.5))".to_string(), false),
+            // A parameter or a field of the type, not only a constructor call.
+            ("cost-over(Line(cost: Money(80.0)), 100.0)".to_string(), false),
+            ("cost-over(Line(cost: Money(200.0)), 100.0)".to_string(), true),
+            ("count-under(Count(80), 100)".to_string(), true),
+            ("count-under(Count(200), 100)".to_string(), false),
+            ("between-any(Money(80.0), 1, 100)".to_string(), true),
+            ("between-any(Money(200.0), 1, 100)".to_string(), false),
+            ("between-any(Count(80), 1, 100)".to_string(), true),
+        ]);
+        let exprs: Vec<&str> = cases.iter().map(|(expr, _)| expr.as_str()).collect();
+        let src = format!(
+            r#"::t ns
+Money type Dec
+Count type Int
+Line type {{ cost: Money }}
+gt-any fn (a: Any, b: Any): Any {{ gt(a, b) }}
+gte-any fn (a: Any, b: Any): Any {{ gte(a, b) }}
+lt-any fn (a: Any, b: Any): Any {{ lt(a, b) }}
+lte-any fn (a: Any, b: Any): Any {{ lte(a, b) }}
+between-any fn (x: Any, low: Any, high: Any): Any {{ between(x, low, high) }}
+cost-over fn (line: Line, limit: Dec): Bool {{ gt(line.cost, limit) }}
+count-under fn (count: Count, limit: Int): Bool {{ lt(count, limit) }}
+[{}]"#,
+            exprs.join(", ")
+        );
+        let expected = Val::vec(cases.iter().map(|(_, want)| Val::Bool(*want)).collect());
+        assert_same_with_and_without_jit(&src, &expected);
+    }
+
+    /// The answer a comparison gives a named number decides a branch the same
+    /// way in both tiers, and in a pipeline: an Err here would read as false.
+    #[test]
+    fn named_numbers_take_the_right_branch() {
+        let src = r#"::t ns
+Money type Dec
+Count type Int
+Line type { cost: Money }
+by-if fn (cost: Any, limit: Any): Str { if(gt(cost, limit), "over", "within") }
+by-cond fn (cost: Any, limit: Any): Str {
+    cond {
+        gt(cost, limit) => { "over" }
+        => { "within" }
+    }
+}
+by-not fn (cost: Any, limit: Any): Bool { not(gt(cost, limit)) }
+by-and fn (cost: Any, limit: Any): Bool { and(gt(cost, 0), lt(cost, limit)) }
+over fn (lines: Vec, limit: Any): Int { length(filter(lines, gt(%.cost, limit))) }
+counted fn (items: Vec, limit: Any): Int {
+    reduce(items, (total, item) { if(lt(item, limit), add(total, 1), total) }, 0)
+}
+[
+    by-if(Money(200.0), 100), by-if(Money(80.0), 100),
+    by-if(Count(200), 100), by-if(Count(80), 100),
+    by-cond(Money(200.0), 100), by-cond(Money(80.0), 100),
+    by-not(Money(80.0), 100), by-not(Money(200.0), 100),
+    by-and(Money(80.0), 100), by-and(Money(200.0), 100),
+    over([Line(cost: Money(80.0)), Line(cost: Money(200.0))], 100),
+    length(filter([Money(80.0), Money(200.0)], gt(%, 100))),
+    counted([Count(80), Count(200), Count(99)], 100),
+]"#;
+        let expected = val!([
+            "over", "within", "over", "within", "over", "within", true, false, true, false, 1, 1, 2
+        ]);
+        assert_same_with_and_without_jit(src, &expected);
+    }
+
+    /// Operands with no order give an Err, as `add` does for a value that isn't
+    /// a number, and never an answer read from how the values print. Compiled
+    /// code keeps that Err a value, so each tier sees the same thing, including
+    /// where a function has already run on numbers.
+    #[test]
+    fn a_comparison_with_no_order_gives_an_err_in_both_tiers() {
+        let operands = [
+            "Money(80.0), null",
+            "null, Money(80.0)",
+            "Count(80), \"100\"",
+            "null, 1",
+            "1, null",
+            "\"b\", 1",
+            "[10], [9]",
+            "{a: 1}, {a: 2}",
+            "Point(x: 1), Point(x: 2)",
+            "Temp.Celsius(30.0), 100",
+            "Temp.Celsius(30.0), Temp.Fahrenheit(80.0)",
+        ];
+        let calls: Vec<String> = operands
+            .iter()
+            .map(|args| {
+                format!(
+                    "[is-err(gt-any({args})), is-err(lt-any({args})), \
+                     is-err(gte-any({args})), is-err(lte-any({args})), \
+                     tested({args}), kept({args}), negated({args})]"
+                )
+            })
+            .collect();
+        let src = format!(
+            r#"::t ns
+Money type Dec
+Count type Int
+Point type {{ x: Int }}
+Temp enum {{ Celsius(Dec), Fahrenheit(Dec) }}
+gt-any fn (a: Any, b: Any): Bool {{ gt(a, b) }}
+gte-any fn (a: Any, b: Any): Any {{ gte(a, b) }}
+lt-any fn (a: Any, b: Any): Any {{ lt(a, b) }}
+lte-any fn (a: Any, b: Any): Any {{ lte(a, b) }}
+tested fn (a: Any, b: Any): Str {{ if(gt(a, b), "then", "else") }}
+kept fn (a: Any, b: Any): Bool {{
+    result gt(a, b)
+    is-err(result)
+}}
+negated fn (a: Any, b: Any): Bool {{ not(lt(a, b)) }}
+[gt-any(2, 1), lt-any(2, 1), gte-any(2, 1), lte-any(2, 1), tested(2, 1), kept(2, 1), negated(2, 1)]
+[{}]"#,
+            calls.join(", ")
+        );
+        let row = val!([true, true, true, true, "else", true, true]);
+        let expected = Val::vec(vec![row; operands.len()]);
+        assert_same_with_and_without_jit(&src, &expected);
+    }
+
+    /// Consuming that Err halts, and compiled code names what consumed it as
+    /// the interpreter does, after running on numbers first.
+    #[test]
+    fn a_comparison_err_that_is_consumed_halts() {
+        let cases = [
+            (
+                "takes fn (x: Bool): Bool { x }\nprobe fn (a: Any, b: Any): Bool { takes(gt(a, b)) }",
+                "gt requires numbers (an Err passed to parameter `x` of ::t/takes;",
+            ),
+            (
+                "probe fn (a: Any, b: Any): Any { concat(Str(lte(a, b)), \"x\") }",
+                "lte requires numbers (an Err passed as argument 1 of ::hot::type/Str",
+            ),
+        ];
+        for (body, expected) in cases {
+            let src = format!("::t ns\nMoney type Dec\n{body}\nprobe(1, 2)\nprobe(1, 2)\nprobe(Money(1.0), null)");
+            for (mode, conf) in [
+                ("jit", crate::val!({"jit": {"threshold": 1}})),
+                ("interpreter", crate::val!({"jit": {"mode": "off"}})),
+            ] {
+                let error = compile_and_run_with_std_conf(&src, Some(conf))
+                    .expect_err("the Err is consumed");
+                assert!(
+                    error.contains(&format!("Result error: {expected}")),
+                    "{mode}: {error}\n{src}"
+                );
+            }
+        }
+    }
+
+    /// Values a comparison could already order keep their answers, read
+    /// through a declared type as numbers are.
+    #[test]
+    fn strings_and_bools_keep_their_order() {
+        let src = r#"::t ns
+Code type Str
+Flag type Bool
+gt-any fn (a: Any, b: Any): Any { gt(a, b) }
+lt-any fn (a: Any, b: Any): Any { lt(a, b) }
+[
+    gt-any("b", "a"), lt-any("b", "a"), gt-any(true, false), lt-any(true, false),
+    gt-any(Code("b"), Code("a")), lt-any(Code("b"), "c"), gt-any(Flag(true), false),
+]"#;
+        let expected = val!([true, false, true, false, true, true, true]);
+        assert_same_with_and_without_jit(src, &expected);
+    }
+
+    /// `sort` agrees with `lt`: named numbers go by the number they hold,
+    /// whichever kind holds it, among plain numbers, and inside other values.
+    #[test]
+    fn sort_orders_named_numbers_by_the_number_they_hold() {
+        let src = r#"::t ns
+Money type Dec
+Count type Int
+shown fn (values: Vec): Vec { map(values, (value) { Str(untype(value)) }) }
+costs fn (values: Vec): Vec { map(values, (value) { Str(untype(value.cost)) }) }
+[
+    shown(sort([Money(200), Money(80.5), Money(100.0), Money(9)])),
+    shown(sort([Count(200), Count(80), Count(100)])),
+    shown(sort([Money(200.0), 100, Money(80.0), 90.5, Count(95)])),
+    shown(sort-by([Money(200), Money(80.5), Money(9)], (value) { value })),
+    shown(sort-by([{n: 1}, {n: 2}], (value) { Money(sub(0, value.n)) }) |> map(%.n)),
+    costs(sort([{cost: Money(200)}, {cost: Money(80.5)}])),
+]"#;
+        let expected = val!([
+            ["9", "80.5", "100.0", "200"],
+            ["80", "100", "200"],
+            ["80.0", "90.5", "95", "100", "200.0"],
+            ["9", "80.5", "200"],
+            ["2", "1"],
+            ["80.5", "200"]
+        ]);
+        assert_same_with_and_without_jit(src, &expected);
+    }
+
     /// Serve `requests` HTTP requests on a local port with a fixed JSON reply,
     /// and return the port's base URL.
     fn serve_json(requests: usize) -> String {
