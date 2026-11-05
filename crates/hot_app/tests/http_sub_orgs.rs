@@ -798,3 +798,99 @@ async fn org_keys_show_their_issuer_chain_status() {
         page.body
     );
 }
+
+/// A key a person made has no issuer to rotate it, and no key rotates itself,
+/// so the page is the only way to replace its secret.
+#[tokio::test]
+async fn an_administrator_rotates_an_org_key_and_sees_the_overlap() {
+    use hot::db::org_api_key::{CreateOrgApiKey, OrgApiKey};
+    let mut client = TestClient::new().await;
+    let td = insert_test_data(client.db()).await.unwrap();
+    sqlx::query("UPDATE org SET org_type='organization' WHERE org_id=?")
+        .bind(td.org_id)
+        .execute(sqlite(&client))
+        .await
+        .unwrap();
+    let root = Org::get_org_uncached(client.db(), &td.org_id)
+        .await
+        .unwrap();
+    let (key, first) = OrgApiKey::create_for_user(
+        client.db(),
+        td.org_id,
+        td.user_id,
+        &CreateOrgApiKey {
+            description: "person-made".into(),
+            permissions: serde_json::json!({"org:*": ["read"]}),
+            expires_at: None,
+        },
+    )
+    .await
+    .unwrap();
+    let id = key.org_api_key_id;
+    client.login_as(&td.user_id);
+    let page_path = format!("/@{}/children", root.slug);
+    let rotate = format!("/@{}/org-api-keys/{id}/rotate", root.slug);
+
+    let page = client.get(&page_path).await;
+    assert!(page.body.contains(&rotate), "{}", page.body);
+    assert!(!page.body.contains("the previous secret works until"));
+
+    let page = client
+        .post_form(&rotate, &[("overlap_seconds", "3600")])
+        .await;
+    page.assert_status(StatusCode::OK);
+    let token = page
+        .body
+        .split("<code class=\"block break-all mt-2\">")
+        .nth(1)
+        .and_then(|rest| rest.split('<').next())
+        .expect("the new secret is shown once")
+        .to_string();
+    assert_ne!(token, first);
+    assert_eq!(
+        OrgApiKey::verify_token(client.db(), &token)
+            .await
+            .unwrap()
+            .org_api_key_id,
+        id,
+        "the same key"
+    );
+    assert!(OrgApiKey::verify_token(client.db(), &first).await.is_ok());
+    assert!(
+        page.body.contains("the previous secret works until"),
+        "{}",
+        page.body
+    );
+    let page = client.get(&page_path).await;
+    assert!(!page.body.contains(&token), "shown only once");
+    assert!(page.body.contains("the previous secret works until"));
+
+    // Another rotation would stop the secret the page just promised.
+    let page = client
+        .post_form(&rotate, &[("overlap_seconds", "3600")])
+        .await;
+    page.assert_status(StatusCode::BAD_REQUEST);
+    assert!(page.body.contains("Rotate after that"), "{}", page.body);
+    assert!(OrgApiKey::verify_token(client.db(), &first).await.is_ok());
+    assert!(OrgApiKey::verify_token(client.db(), &token).await.is_ok());
+
+    let page = client.post_form(&rotate, &[("overlap_seconds", "0")]).await;
+    page.assert_status(StatusCode::OK);
+    assert!(OrgApiKey::verify_token(client.db(), &first).await.is_err());
+    assert!(OrgApiKey::verify_token(client.db(), &token).await.is_err());
+    assert!(!page.body.contains("the previous secret works until"));
+
+    client
+        .post_form(&rotate, &[("overlap_seconds", "999999")])
+        .await
+        .assert_status(StatusCode::BAD_REQUEST);
+    OrgApiKey::revoke_for_user(client.db(), td.org_id, td.user_id, id)
+        .await
+        .unwrap();
+    let page = client.get(&page_path).await;
+    assert!(!page.body.contains(&rotate), "a dead key offers no rotate");
+    client
+        .post_form(&rotate, &[("overlap_seconds", "0")])
+        .await
+        .assert_status(StatusCode::BAD_REQUEST);
+}

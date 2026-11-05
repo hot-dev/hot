@@ -82,7 +82,7 @@ scope errors), `crates/hot_app/src/handlers/sub_orgs.rs` (App issuance).
 | Q10 | Audit on the key's own org for every request (not the target org, as recommended); the target is in the path |
 | Q11 | Not built: key minting has no idempotency key |
 | Q12 | IDs only in routes and grants |
-| Q13 | Environment keys an org key minted rotate through `/v1/api-keys/{id}/rotate`; no App rotate button yet |
+| Q13 | Environment keys an org key minted rotate through `/v1/api-keys/{id}/rotate`; root admins rotate org keys in the App, and environment keys have no App rotate button yet |
 | Q14 | Org keys revoke irreversibly (`revoked_at`); environment keys still use the reversible `active` toggle |
 | Q15 | Projects, context, builds, schedules and event-handler reads |
 | Q16 | At most two org keys in a chain; environment keys below either |
@@ -545,8 +545,10 @@ its stored grants.
 **Rotation.** `POST /v1/api-keys/{id}/rotate` (`overlap_seconds`, default
 86400, maximum 7 days) issues a new secret for the **same key ID**. The old
 secret's hash moves to `previous_key_data` with `previous_expires_at`. Both
-verify until then; rotating again during the overlap replaces the previous
-secret. Lineage, grants, expiry and descendants are untouched because they
+verify until then, and key reads report that time. Rotating again during the
+overlap would stop the previous secret before the time the last rotation
+promised, so it answers `409` unless `overlap_seconds` is 0, which ends the
+overlap. Lineage, grants, expiry and descendants are untouched because they
 hang on the ID. Rotation is audited.
 
 **Who may revoke, narrow or rotate a key.** A key may act on a key only if

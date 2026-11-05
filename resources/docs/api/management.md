@@ -152,7 +152,17 @@ ID, its lineage, and the keys it issued do not change. Rotating, narrowing, or
 revoking needs more than a grant: the caller must have issued the key, directly
 or through keys it issued. Rotation returns the new secret, so a grant alone
 would hand over another key's secret. No key rotates or revokes itself; an
-administrator of the parent organization can revoke any org key in the app.
+administrator of the parent organization can rotate or revoke any org key on its
+**Sub-orgs** page in the app. That's the way to rotate an org key a person made,
+since no key issued it.
+
+While an overlap runs, key responses report when it ends in
+`previous_secret_expires_at`, and leave the field out otherwise. It's never later
+than the key's own `expires_at`. A key keeps one previous secret, so during the
+overlap another rotation answers `409` `rotation_overlap_running` and changes
+nothing: both secrets keep working. Wait for the overlap to end, or rotate with
+`"overlap_seconds": 0`, which is always accepted and stops every older secret at
+once.
 
 Revoking an org key is permanent. `DELETE /v1/api-keys/{id}` on an environment
 key deactivates it, and an administrator can re-enable it in the app. If a

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use uuid::Uuid;
 
-use super::api_key::ApiKey;
+use super::api_key::{ApiKey, RotatedSecret, previous_secret_expiry};
 use super::env::EnvError;
 use super::org::OrgError;
 use super::{BootstrapOperation, DatabasePool, DatabaseScope, Env, Org};
@@ -37,6 +37,10 @@ pub enum OrgApiKeyError {
     /// The target child organization is suspended or archived.
     #[error("The organization is suspended or archived")]
     OrgSuspended,
+    /// A rotation's overlap is running, and the previous secret works until
+    /// this time. Only a rotation with no overlap may end it early.
+    #[error("The previous secret works until {0}")]
+    OverlapRunning(DateTime<Utc>),
     #[error(transparent)]
     Database(#[from] sqlx::Error),
 }
@@ -769,33 +773,54 @@ impl OrgApiKey {
         Ok(false)
     }
 
+    /// When the previous secret stops working, during a rotation's overlap.
+    pub fn previous_secret_expires_at(&self) -> Option<DateTime<Utc>> {
+        previous_secret_expiry(self.previous_key_expires_at, self.expires_at)
+    }
+
     /// Issue a new secret for the same key ID; the previous one works until
     /// `overlap` ends. Lineage, grants and expiry are unchanged.
+    ///
+    /// A key keeps one previous secret, so a rotation during a running overlap
+    /// would stop that secret before the time the last rotation promised. It
+    /// fails with [`OrgApiKeyError::OverlapRunning`], unless `overlap` is zero:
+    /// then the caller is ending the overlap, and every older secret stops.
     pub async fn rotate(
         &self,
         db: &DatabasePool,
         overlap: Duration,
-    ) -> Result<String, OrgApiKeyError> {
+    ) -> Result<RotatedSecret, OrgApiKeyError> {
         let (token, hash) = ApiKey::generate_api_key(&self.org_api_key_id)
             .map_err(|_| OrgApiKeyError::Unauthorized)?;
         let key_data: serde_json::Value =
             serde_json::from_str(&hash).map_err(|_| OrgApiKeyError::Unauthorized)?;
-        let until = Utc::now() + overlap;
+        let now = Utc::now();
+        let until = now + overlap;
+        let ends_overlap = overlap.is_zero();
         let scoped = db.with_scope(DatabaseScope::Organization {
             org_id: self.org_id,
         });
+        // The overlap is checked by the update, so that of two rotations at
+        // once only one can pass it.
         let updated = match &scoped {
-            DatabasePool::Postgres(pool) => sqlx::query("UPDATE org_api_key SET previous_key_data = key_data, previous_key_expires_at = $1, key_data = $2, updated_at = now() WHERE org_api_key_id = $3 AND revoked_at IS NULL")
-                .bind(until).bind(&key_data).bind(self.org_api_key_id)
+            DatabasePool::Postgres(pool) => sqlx::query("UPDATE org_api_key SET previous_key_data = key_data, previous_key_expires_at = $1, key_data = $2, updated_at = now() WHERE org_api_key_id = $3 AND revoked_at IS NULL AND ($4 OR previous_key_expires_at IS NULL OR previous_key_expires_at <= $5)")
+                .bind(until).bind(&key_data).bind(self.org_api_key_id).bind(ends_overlap).bind(now)
                 .execute(pool).await?.rows_affected(),
-            DatabasePool::Sqlite(pool) => sqlx::query("UPDATE org_api_key SET previous_key_data = key_data, previous_key_expires_at = ?, key_data = ?, updated_at = CURRENT_TIMESTAMP WHERE org_api_key_id = ? AND revoked_at IS NULL")
-                .bind(until).bind(key_data.to_string()).bind(self.org_api_key_id)
+            DatabasePool::Sqlite(pool) => sqlx::query("UPDATE org_api_key SET previous_key_data = key_data, previous_key_expires_at = ?, key_data = ?, updated_at = CURRENT_TIMESTAMP WHERE org_api_key_id = ? AND revoked_at IS NULL AND (? OR previous_key_expires_at IS NULL OR previous_key_expires_at <= ?)")
+                .bind(until).bind(key_data.to_string()).bind(self.org_api_key_id).bind(ends_overlap).bind(now)
                 .execute(pool).await?.rows_affected(),
         };
         if updated == 0 {
-            return Err(OrgApiKeyError::NotFound);
+            let current = Self::get(&scoped, self.org_api_key_id).await?;
+            return Err(current
+                .previous_secret_expires_at()
+                .filter(|_| current.revoked_at.is_none())
+                .map_or(OrgApiKeyError::NotFound, OrgApiKeyError::OverlapRunning));
         }
-        Ok(token)
+        Ok(RotatedSecret {
+            token,
+            previous_secret_expires_at: self.expires_at.map_or(until, |at| at.min(until)),
+        })
     }
 
     /// Irreversible. Every key this one issued stops on its next request.
@@ -875,6 +900,46 @@ impl OrgApiKey {
         .await
         .map_err(|e| OrgApiKeyError::Invalid(e.to_string()))?;
         key.revoke(db).await
+    }
+
+    /// Root administrators rotate any org key of their root in the App. It is
+    /// the only way to rotate a key a person made: the API rotates only keys
+    /// the caller issued, and no key rotates itself.
+    pub async fn rotate_for_user(
+        db: &DatabasePool,
+        root_id: Uuid,
+        user_id: Uuid,
+        id: Uuid,
+        overlap: Duration,
+    ) -> Result<RotatedSecret, OrgApiKeyError> {
+        require_root_admin(db, root_id, user_id).await?;
+        let scoped = db.with_scope(DatabaseScope::Organization { org_id: root_id });
+        let key = Self::get(&scoped, id).await?;
+        if key.org_id != root_id || !key.status(db).await?.is_active() {
+            return Err(OrgApiKeyError::NotFound);
+        }
+        // Here too, so a refused rotation leaves no note. `rotate` has the say.
+        if let Some(until) = key
+            .previous_secret_expires_at()
+            .filter(|_| !overlap.is_zero())
+        {
+            return Err(OrgApiKeyError::OverlapRunning(until));
+        }
+        super::org_note::OrgNote::create(
+            &scoped,
+            &root_id,
+            "security",
+            "org-api-key.rotate",
+            "An administrator rotated an org API key",
+            Some(&serde_json::json!({
+                "org_api_key_id": id,
+                "overlap_seconds": overlap.num_seconds(),
+            })),
+            Some(&user_id),
+        )
+        .await
+        .map_err(|e| OrgApiKeyError::Invalid(e.to_string()))?;
+        key.rotate(db, overlap).await
     }
 
     /// Root administrators list their root's org keys in the App.
@@ -976,7 +1041,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let new = key.rotate(&db, Duration::seconds(60)).await.unwrap();
+        let new = key.rotate(&db, Duration::seconds(60)).await.unwrap().token;
         assert_ne!(old, new);
         assert_eq!(
             OrgApiKey::verify_token(&db, &new)
@@ -987,13 +1052,154 @@ mod tests {
         );
         assert!(OrgApiKey::verify_token(&db, &old).await.is_ok());
         let key = OrgApiKey::get(&db, key.org_api_key_id).await.unwrap();
-        let newer = key.rotate(&db, Duration::seconds(0)).await.unwrap();
+        let newer = key.rotate(&db, Duration::seconds(0)).await.unwrap().token;
         assert!(
             OrgApiKey::verify_token(&db, &new).await.is_err(),
             "overlap ended"
         );
         assert!(OrgApiKey::verify_token(&db, &old).await.is_err());
         assert!(OrgApiKey::verify_token(&db, &newer).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_rotation_during_an_overlap_is_refused_unless_it_ends_the_overlap() {
+        let (db, data) = fixture().await;
+        let (key, first) = OrgApiKey::create_for_user(
+            &db,
+            data.org_id,
+            data.user_id,
+            &request(json!({"org:*": ["read"]})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(key.previous_secret_expires_at(), None);
+        let rotated = key.rotate(&db, Duration::seconds(60)).await.unwrap();
+        let promised = rotated.previous_secret_expires_at;
+
+        let error = key.rotate(&db, Duration::seconds(60)).await.unwrap_err();
+        assert!(
+            matches!(error, OrgApiKeyError::OverlapRunning(until) if until == promised),
+            "{error:?}"
+        );
+        for token in [&first, &rotated.token] {
+            assert!(OrgApiKey::verify_token(&db, token).await.is_ok());
+        }
+        let stored = OrgApiKey::get(&db, key.org_api_key_id).await.unwrap();
+        assert_eq!(stored.previous_secret_expires_at(), Some(promised));
+
+        // An overlap that has run out holds nothing up.
+        let crate::db::DatabasePool::Sqlite(pool) = &db else {
+            unreachable!("SQLite fixture");
+        };
+        sqlx::query("UPDATE org_api_key SET previous_key_expires_at = ? WHERE org_api_key_id = ?")
+            .bind(Utc::now() - Duration::seconds(1))
+            .bind(key.org_api_key_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        let stored = OrgApiKey::get(&db, key.org_api_key_id).await.unwrap();
+        assert_eq!(stored.previous_secret_expires_at(), None);
+        assert!(key.rotate(&db, Duration::seconds(60)).await.is_ok());
+    }
+
+    /// Two rotations at once can't both find the overlap free: the loser would
+    /// stop the secret the winner just promised.
+    #[tokio::test]
+    async fn only_one_of_two_rotations_at_once_starts_an_overlap() {
+        let (db, data) = fixture().await;
+        let (key, _) = OrgApiKey::create_for_user(
+            &db,
+            data.org_id,
+            data.user_id,
+            &request(json!({"org:*": ["read"]})),
+        )
+        .await
+        .unwrap();
+        let overlap = Duration::seconds(60);
+        let (a, b) = tokio::join!(key.rotate(&db, overlap), key.rotate(&db, overlap));
+        assert_eq!(
+            [a.is_ok(), b.is_ok()].iter().filter(|ok| **ok).count(),
+            1,
+            "{a:?} {b:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_previous_secret_is_reported_only_as_long_as_the_key_lasts() {
+        let (db, data) = fixture().await;
+        let expires_at = Utc::now() + Duration::seconds(30);
+        let (key, _) = OrgApiKey::create_for_user(
+            &db,
+            data.org_id,
+            data.user_id,
+            &CreateOrgApiKey {
+                expires_at: Some(expires_at),
+                ..request(json!({"org:*": ["read"]}))
+            },
+        )
+        .await
+        .unwrap();
+        let key = OrgApiKey::get(&db, key.org_api_key_id).await.unwrap();
+        let expires_at = key.expires_at.unwrap();
+        let rotated = key.rotate(&db, Duration::seconds(3600)).await.unwrap();
+        assert_eq!(rotated.previous_secret_expires_at, expires_at);
+        let stored = OrgApiKey::get(&db, key.org_api_key_id).await.unwrap();
+        assert_eq!(stored.previous_secret_expires_at(), Some(expires_at));
+    }
+
+    #[tokio::test]
+    async fn root_administrators_rotate_a_key_a_person_made() {
+        let (db, data) = fixture().await;
+        let (key, first) = OrgApiKey::create_for_user(
+            &db,
+            data.org_id,
+            data.user_id,
+            &request(json!({"org:*": ["read"]})),
+        )
+        .await
+        .unwrap();
+        let rotate = |user_id, overlap| {
+            OrgApiKey::rotate_for_user(&db, data.org_id, user_id, key.org_api_key_id, overlap)
+        };
+        let overlap = Duration::seconds(60);
+        assert!(
+            matches!(
+                rotate(Uuid::now_v7(), overlap).await,
+                Err(OrgApiKeyError::Unauthorized)
+            ),
+            "a stranger"
+        );
+        let rotated = rotate(data.user_id, overlap).await.unwrap();
+        assert!(OrgApiKey::verify_token(&db, &first).await.is_ok());
+        assert!(OrgApiKey::verify_token(&db, &rotated.token).await.is_ok());
+        assert!(matches!(
+            rotate(data.user_id, overlap).await,
+            Err(OrgApiKeyError::OverlapRunning(_))
+        ));
+        let notes = super::super::org_note::OrgNote::list_by_org(&db, &data.org_id, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            notes
+                .iter()
+                .filter(|note| note.note_type == "org-api-key.rotate")
+                .count(),
+            1,
+            "a refused rotation leaves no note"
+        );
+
+        let ended = rotate(data.user_id, Duration::zero()).await.unwrap();
+        assert!(OrgApiKey::verify_token(&db, &first).await.is_err());
+        assert!(OrgApiKey::verify_token(&db, &rotated.token).await.is_err());
+        assert!(OrgApiKey::verify_token(&db, &ended.token).await.is_ok());
+
+        OrgApiKey::revoke_for_user(&db, data.org_id, data.user_id, key.org_api_key_id)
+            .await
+            .unwrap();
+        assert!(matches!(
+            rotate(data.user_id, overlap).await,
+            Err(OrgApiKeyError::NotFound)
+        ));
     }
 
     #[tokio::test]

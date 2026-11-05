@@ -1344,7 +1344,7 @@ fn api_keys_update_doc() {}
 fn api_keys_revoke_doc() {}
 
 #[utoipa::path(post, path = "/v1/api-keys/{key_id}/rotate", tag = "Orgs", security(("bearer_auth" = [])),
-    description = "Issue a new secret for a key the caller issued (`update`). The key ID, lineage and keys it issued are unchanged; the previous secret works until the overlap ends.",
+    description = "Issue a new secret for a key the caller issued (`update`). The key ID, lineage and keys it issued are unchanged; the previous secret works until the overlap ends, which key responses report in `previous_secret_expires_at`. During an overlap, another rotation answers 409 `rotation_overlap_running` unless `overlap_seconds` is 0, which stops every older secret at once.",
     params(("key_id" = Uuid, Path, description = "Org or environment API key UUID")), request_body(content = Option<crate::handlers::orgs::RotateApiKeyRequest>),
     responses((status = 200, description = "API key with its new token", body = ApiResponse<ApiKeyResponse>), (status = "default", description = "Error", body = ApiErrorResponse)))]
 fn api_keys_rotate_doc() {}
