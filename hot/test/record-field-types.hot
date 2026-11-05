@@ -241,6 +241,12 @@ meta ["test"] fn () {
     assert-eq("ok", refusal(Anything({value: err("boom")})), "an Any field holds it")
 }
 
+test-an-err-in-a-vec-stays-that-err
+meta ["test"] fn () {
+    assert-eq({value: 1}, err-value(Group({members: [err({value: 1})]})), "its payload isn't read as an item")
+    assert-eq({value: 1}, err-value(Group(members: [{value: 1}, err({value: 1})])), "at any position")
+}
+
 test-a-variant-checks-its-plain-payload
 meta ["test"] fn () {
     assert-eq("constructor of `Due.Days` expected Int, got Str", refusal(Due.Days(dynamic("x"))))

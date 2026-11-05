@@ -184,11 +184,22 @@ meta ["test"] fn () {
     )
 }
 
-test-an-err-value-stops-the-construction
+test-an-err-value-comes-back-as-itself
 meta ["test"] fn () {
-    result Album(photos: {a: err("broken")})
-    assert(is-err(result))
-    assert(contains(Str(err-value(result)), "broken"))
+    assert-eq({code: 7}, err-value(Album(photos: {a: err({code: 7})})))
+    assert-eq({code: 7}, err-value(Album({photos: {a: err({code: 7})}})))
+}
+
+test-an-err-deep-in-the-values-comes-back-as-itself
+meta ["test"] fn () {
+    assert-eq({code: 7}, err-value(Nested(groups: {a: {b: err({code: 7})}})))
+    assert-eq({code: 7}, err-value(Grid(rows: {a: [err({code: 7})]})))
+    assert-eq({code: 7}, err-value(Pages(pages: [{a: err({code: 7})}])))
+}
+
+test-an-err-in-a-payload-comes-back-as-itself
+meta ["test"] fn () {
+    assert-eq({code: 7}, err-value(Shelf.Holding({a: err({code: 7})})))
 }
 
 // ============================================================================

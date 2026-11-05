@@ -100,10 +100,15 @@ Server(body)   // Err: constructor of `Server` at `port` expected Int, got Str
   and a value that can't be one fails.
 - A failure in a nested record reports the whole path from the outermost one:
   `constructor of `Order` at `items[2].price` expected Dec, got Str`.
-- An `Err` given for a field comes back as itself, unless the field is `Any`.
+- An `Err` given for a field, or among the items or values of a `Vec` or `Map`
+  of records or enums, comes back as itself, unless the field is `Any`.
 - A type over a built-in one checks its value the same way, at its constructor
   and at a field: with `Meters type Int`, `Meters("x")` and a `distance: Meters`
   field given a Str are both an `Err`, and `hot check` reports the literal.
+- A type over a `Vec` or `Map` of records or enums builds what it holds:
+  `Circles type Vec<Circle>` builds every item into a `Circle`. A `where`
+  refinement of one builds them too, and its value stays a plain `Vec` or
+  `Map`. A parameter of such a type checks and doesn't build.
 - `Any` and `Fn` aren't checked.
 - `assoc` and the other updates only check `where` constraints. Call the
   constructor again if the fields may have changed.

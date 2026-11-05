@@ -2,8 +2,20 @@
 // constructor checks what it's given the way a parameter does, and so does a
 // field of that type. A value of another kind is an
 // `Err(ConstraintError.Violation)`.
+::hot::test::declared-base-types::elsewhere ns
+
+// Not the `Circle` of the tests below, so a name read in the wrong namespace
+// shows: a type over `Circles` builds this one.
+Circle type {
+    diameter: Int,
+}
+
+Circles type Vec<Circle>
+
 ::hot::test::declared-base-types ns
 meta ["test"]
+
+::elsewhere ::hot::test::declared-base-types::elsewhere
 
 // Values reach the constructor at run time, where a literal would be
 // rejected by `hot check` already.
@@ -58,6 +70,81 @@ Walk type {
 Step enum {
     Stride(Meters),
     Rest,
+}
+
+Circle type {
+    radius: Dec,
+}
+
+Square type {
+    side: Dec,
+}
+
+Shape enum {
+    Circle(Circle),
+    Square(Square),
+}
+
+Circles type Vec<Circle>
+CircleMap type Map<Str, Circle>
+Shapes type Vec<Shape>
+Ring type Circles
+Rows type Vec<Vec<Circle>>
+Stretch type Vec<Meters>
+Hoop type ::elsewhere/Circles
+MaybeCircles type Vec<Circle>?
+CirclesOrName type Vec<Circle> | Str
+
+Drawing type {
+    circles: Circles,
+}
+
+Sheet enum {
+    Drawn(Circles),
+    Blank,
+}
+
+Crowd type Vec<Circle> where gt(length(%), 0)
+CrowdMap type Map<Str, Circle> where gt(length(%), 0)
+ShapeRow type Vec<Shape> where gt(length(%), 0)
+Stops type Vec<Meters> where gt(length(%), 0)
+Wide type Vec<Circle> where all(%, %(gt(%.radius, 1)))
+SizedCircles type Circles where gt(length(%), 0)
+SameCrowd type Crowd
+Evens type Vec<Int> where all(%, %(eq(mod(%, 2), 0)))
+
+Gathering type {
+    crowd: Crowd,
+}
+
+Gatherings type {
+    crowds: Vec<Crowd>,
+}
+
+NamedGatherings type {
+    crowds: Map<Str, Crowd>,
+}
+
+MaybeGathering type {
+    crowd: Crowd?,
+}
+
+GatheringOrName type {
+    value: Crowd | Str,
+}
+
+Scene enum {
+    Crowded(Crowd),
+    Quiet,
+}
+
+first-is-a-circle fn (crowd: Crowd): Bool {
+    is-type(crowd[0], Circle)
+}
+
+classify fn match (value: Any): Str {
+    Crowd => { "crowd" }
+    _ => { "other" }
 }
 
 // ============================================================================
@@ -194,4 +281,290 @@ test-a-variant-payload-is-checked-as-a-field-is
 meta ["test"] fn () {
     assert-eq({Stride: 5}, untype(Step.Stride(dynamic(5))))
     assert(contains(refusal(Step.Stride(dynamic("x"))), "expected Int, got Str"))
+}
+
+// ============================================================================
+// Collections of records and enums
+// ============================================================================
+
+test-a-type-over-a-vec-builds-its-items
+meta ["test"] fn () {
+    circles Circles(dynamic([{radius: 1.0}, {radius: 2.0}]))
+    assert(is-type(circles, Circles))
+    assert(is-type(circles[1], Circle))
+    assert-eq(2.0, circles[1].radius)
+}
+
+test-a-type-over-a-map-builds-its-values
+meta ["test"] fn () {
+    circles CircleMap(dynamic({a: {radius: 1.0}}))
+    assert(is-type(circles, CircleMap))
+    assert(is-type(circles.a, Circle))
+}
+
+test-a-type-over-a-collection-refuses-an-item-naming-it
+meta ["test"] fn () {
+    assert-eq(
+        "constructor of `Circles` at `[1].radius` expected Dec, got Str",
+        refusal(Circles(dynamic([{radius: 1.0}, {radius: "x"}]))),
+    )
+    assert-eq(
+        "constructor of `CircleMap` at `a.radius` expected Dec, got Str",
+        refusal(CircleMap(dynamic({a: {radius: "x"}}))),
+    )
+}
+
+test-a-type-over-a-collection-refuses-another-kind
+meta ["test"] fn () {
+    assert-eq("constructor of `Circles` expected Vec, got Str", refusal(Circles(dynamic("x"))))
+    assert-eq("constructor of `CircleMap` expected Map, got Str", refusal(CircleMap(dynamic("x"))))
+}
+
+test-a-type-over-a-collection-of-an-enum-builds-the-variant
+meta ["test"] fn () {
+    assert(is-type(Shapes(dynamic([{radius: 1.0}]))[0], Shape.Circle))
+    assert-eq(
+        "constructor of `Shapes` at `[0]` expected Shape, got Map",
+        refusal(Shapes(dynamic([{sides: 3}]))),
+    )
+}
+
+test-a-type-over-a-collection-of-a-declared-type-builds-it
+meta ["test"] fn () {
+    assert(is-type(Stretch(dynamic([5]))[0], Meters))
+    assert-eq(
+        "constructor of `Stretch` at `[0]` expected Int, got Str",
+        refusal(Stretch(dynamic(["x"]))),
+    )
+}
+
+test-a-type-over-a-collection-type-builds-through-it
+meta ["test"] fn () {
+    ring Ring(dynamic([{radius: 1.0}]))
+    assert(is-type(ring, Ring))
+    assert(is-type(ring[0], Circle))
+    assert-eq(
+        "constructor of `Ring` at `[0].radius` expected Dec, got Str",
+        refusal(Ring(dynamic([{radius: "x"}]))),
+    )
+}
+
+test-a-type-from-another-namespace-builds-its-own-contents
+meta ["test"] fn () {
+    assert(is-type(Hoop(dynamic([{diameter: 1}]))[0], ::elsewhere/Circle))
+    assert(is-err(Hoop(dynamic([{radius: 1.0}]))))
+}
+
+test-a-nested-collection-builds-all-the-way-down
+meta ["test"] fn () {
+    assert(is-type(Rows(dynamic([[{radius: 1.0}]]))[0][0], Circle))
+    assert-eq(
+        "constructor of `Rows` at `[0][0].radius` expected Dec, got Str",
+        refusal(Rows(dynamic([[{radius: "x"}]]))),
+    )
+}
+
+test-a-collection-type-that-allows-null-builds-or-keeps-it
+meta ["test"] fn () {
+    assert(is-type(MaybeCircles(dynamic([{radius: 1.0}]))[0], Circle))
+    assert-eq("ok", refusal(MaybeCircles(dynamic(null))))
+}
+
+test-a-union-type-builds-its-collection-member
+meta ["test"] fn () {
+    assert(is-type(CirclesOrName(dynamic([{radius: 1.0}]))[0], Circle))
+    assert-eq("name", untype(CirclesOrName(dynamic("name"))))
+}
+
+test-a-field-of-a-collection-type-reports-the-whole-path
+meta ["test"] fn () {
+    drawing Drawing(circles: dynamic([{radius: 1.0}]))
+    assert(is-type(drawing.circles, Circles))
+    assert(is-type(drawing.circles[0], Circle))
+    assert-eq(
+        "constructor of `Drawing` at `circles[0].radius` expected Dec, got Str",
+        refusal(Drawing(circles: dynamic([{radius: "x"}]))),
+    )
+}
+
+test-a-variant-payload-of-a-collection-type-is-built
+meta ["test"] fn () {
+    assert(contains(refusal(Sheet.Drawn(dynamic([{radius: "x"}]))), "expected Dec, got Str"))
+}
+
+test-a-collection-type-takes-its-own-value
+meta ["test"] fn () {
+    circles Circles(dynamic([{radius: 1.0}]))
+    assert-eq(circles, Circles(circles))
+    assert-eq(circles, Drawing(circles: circles).circles)
+}
+
+test-a-built-item-passes-as-it-is
+meta ["test"] fn () {
+    circle Circle(radius: 1.0)
+    assert-eq(circle, Circles([circle])[0])
+}
+
+test-what-untype-makes-of-a-collection-type-reads-back
+meta ["test"] fn () {
+    circles Circles(dynamic([{radius: 1.0}]))
+    assert-eq([{radius: 1.0}], untype(circles))
+    assert-eq(circles, Circles(untype(circles)))
+}
+
+test-an-err-item-comes-back-as-itself
+meta ["test"] fn () {
+    assert-eq({code: 7}, err-value(Circles([err({code: 7})])))
+    assert-eq({code: 7}, err-value(CircleMap({a: err({code: 7})})))
+}
+
+// ============================================================================
+// Refinements of collections
+// ============================================================================
+
+test-a-refinement-builds-its-items-and-stays-plain
+meta ["test"] fn () {
+    crowd Crowd(dynamic([{radius: 1.0}]))
+    assert(is-vec(crowd))
+    assert(is-type(crowd[0], Circle))
+    assert(is-type(CrowdMap(dynamic({a: {radius: 1.0}})).a, Circle))
+    assert(is-map(untype(CrowdMap(dynamic({a: {radius: 1.0}})))))
+}
+
+test-a-refinement-refuses-an-item-naming-it
+meta ["test"] fn () {
+    assert-eq(
+        "constructor of `Crowd` at `[0].radius` expected Dec, got Str",
+        refusal(Crowd(dynamic([{radius: "x"}]))),
+    )
+    assert-eq(
+        "constructor of `CrowdMap` at `a.radius` expected Dec, got Str",
+        refusal(CrowdMap(dynamic({a: {radius: "x"}}))),
+    )
+}
+
+test-a-refinement-still-holds-its-predicate
+meta ["test"] fn () {
+    assert-eq("constructor of `Crowd` failed `gt(length(%), 0)`", refusal(Crowd(dynamic([]))))
+    assert-eq("ok", refusal(Wide(dynamic([{radius: 5.0}]))))
+    assert(contains(refusal(Wide(dynamic([{radius: 0.5}]))), "constructor of `Wide` failed"))
+}
+
+test-a-refinement-of-an-enum-builds-the-variant
+meta ["test"] fn () {
+    assert(is-type(ShapeRow(dynamic([{radius: 1.0}]))[0], Shape.Circle))
+    assert-eq(
+        "constructor of `ShapeRow` at `[0]` expected Shape, got Map",
+        refusal(ShapeRow(dynamic([{sides: 3}]))),
+    )
+}
+
+test-a-refinement-of-a-declared-type-builds-it
+meta ["test"] fn () {
+    assert(is-type(Stops(dynamic([5]))[0], Meters))
+    assert-eq(
+        "constructor of `Stops` at `[0]` expected Int, got Str",
+        refusal(Stops(dynamic(["x"]))),
+    )
+}
+
+test-a-refinement-over-a-collection-type-holds-the-items
+meta ["test"] fn () {
+    sized SizedCircles(dynamic([{radius: 1.0}]))
+    assert(is-vec(sized))
+    assert(is-type(sized[0], Circle))
+    assert-eq(
+        "constructor of `SizedCircles` at `[0].radius` expected Dec, got Str",
+        refusal(SizedCircles(dynamic([{radius: "x"}]))),
+    )
+}
+
+test-a-type-over-a-refinement-builds-through-it
+meta ["test"] fn () {
+    same SameCrowd(dynamic([{radius: 1.0}]))
+    assert(is-vec(same))
+    assert(is-type(same[0], Circle))
+    assert(is-err(SameCrowd(dynamic([{radius: "x"}]))))
+    assert(is-err(SameCrowd(dynamic([]))))
+}
+
+test-a-field-of-a-refinement-builds-its-items
+meta ["test"] fn () {
+    gathering Gathering(crowd: dynamic([{radius: 1.0}]))
+    assert(is-vec(gathering.crowd))
+    assert(is-type(gathering.crowd[0], Circle))
+    assert-eq(
+        "constructor of `Gathering` at `crowd[0].radius` expected Dec, got Str",
+        refusal(Gathering({crowd: dynamic([{radius: "x"}])})),
+    )
+    assert-eq(
+        "constructor of `Gathering` at `crowd` failed `Crowd` (gt(length(%), 0))",
+        refusal(Gathering(crowd: dynamic([]))),
+    )
+}
+
+test-a-refinement-inside-a-collection-is-built
+meta ["test"] fn () {
+    assert(is-type(Gatherings(crowds: dynamic([[{radius: 1.0}]])).crowds[0][0], Circle))
+    assert(is-type(NamedGatherings(crowds: dynamic({a: [{radius: 1.0}]})).crowds.a[0], Circle))
+    assert(contains(refusal(Gatherings(crowds: dynamic([[{radius: "x"}]]))), "expected Dec, got Str"))
+}
+
+test-a-field-that-allows-null-builds-a-refinement
+meta ["test"] fn () {
+    assert(is-null(MaybeGathering(crowd: dynamic(null)).crowd))
+    assert(is-type(MaybeGathering(crowd: dynamic([{radius: 1.0}])).crowd[0], Circle))
+}
+
+test-a-union-with-a-refinement-builds-it
+meta ["test"] fn () {
+    assert(is-type(GatheringOrName(value: dynamic([{radius: 1.0}])).value[0], Circle))
+    assert-eq("name", GatheringOrName(value: dynamic("name")).value)
+    assert(is-err(GatheringOrName(value: dynamic([{radius: "x"}]))))
+}
+
+test-a-variant-payload-of-a-refinement-is-built
+meta ["test"] fn () {
+    assert-eq({Crowded: [{radius: 1.0}]}, untype(Scene.Crowded(dynamic([{radius: 1.0}]))))
+    assert(contains(refusal(Scene.Crowded(dynamic([{radius: "x"}]))), "expected Dec, got Str"))
+}
+
+test-a-parameter-of-a-refinement-checks-and-does-not-build
+meta ["test"] fn () {
+    assert-eq(false, first-is-a-circle(dynamic([{radius: 1.0}])))
+    assert(first-is-a-circle(Crowd(dynamic([{radius: 1.0}]))))
+    assert(is-err(first-is-a-circle(dynamic([]))))
+}
+
+test-a-built-refinement-still-matches-its-guards
+meta ["test"] fn () {
+    crowd Crowd(dynamic([{radius: 1.0}]))
+    assert(is-type(crowd, Crowd))
+    assert-eq("crowd", classify(crowd))
+    assert-eq("other", classify(dynamic([])))
+}
+
+test-a-refinement-takes-built-items-as-they-are
+meta ["test"] fn () {
+    circle Circle(radius: 1.0)
+    assert-eq(circle, Crowd([circle])[0])
+}
+
+test-what-untype-makes-of-a-refinement-reads-back
+meta ["test"] fn () {
+    crowd Crowd(dynamic([{radius: 1.0}]))
+    assert-eq([{radius: 1.0}], untype(crowd))
+    assert-eq(crowd, Crowd(untype(crowd)))
+}
+
+test-an-err-item-in-a-refinement-comes-back-as-itself
+meta ["test"] fn () {
+    assert-eq({code: 7}, err-value(Crowd([err({code: 7})])))
+}
+
+test-a-refinement-of-plain-items-stays-as-it-was
+meta ["test"] fn () {
+    assert-eq([2, 4], Evens(dynamic([2, 4])))
+    assert(is-vec(Evens(dynamic([2]))))
+    assert(contains(refusal(Evens(dynamic([1]))), "constructor of `Evens` failed"))
 }

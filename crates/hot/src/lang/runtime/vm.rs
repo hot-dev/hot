@@ -4474,6 +4474,12 @@ impl VirtualMachine {
             return Ok(data.clone());
         }
 
+        if (has_item_type || value_type.is_some())
+            && let Some(given) = Self::err_in_contents(data, type_info)
+        {
+            return Ok(given.clone());
+        }
+
         if type_name == "Map"
             && let Some(value_type) = value_type
         {
@@ -4740,13 +4746,35 @@ impl VirtualMachine {
                 }
                 _ => data,
             };
-            return Ok(match self.check_declared_base(held, check, &type_name)? {
-                Ok(value) => Val::map_from_iter([
-                    (Val::from("$type"), Val::from(type_name)),
-                    (Val::from("$val"), value),
-                ]),
-                Err(error) => error,
-            });
+            let value = match self.check_declared_base(held, check, &type_name)? {
+                Ok(value) => value,
+                Err(error) => return Ok(error),
+            };
+            let value = match type_info_map.get(&Val::from("$contents")) {
+                Some(contents) => {
+                    let built = self.construct_typed_recursive(&value, contents)?;
+                    if built.is_err() {
+                        let error = Self::constraint_error_of(&built, &type_name);
+                        return Ok(error.unwrap_or(built));
+                    }
+                    // A type this one is declared over tags what it builds.
+                    match &built {
+                        Val::Map(m) if crate::val::tagged_type_name(m).is_some() => {
+                            m.get(&Val::from("$val")).cloned().unwrap_or(Val::Null)
+                        }
+                        _ => built,
+                    }
+                }
+                None => value,
+            };
+            // A refinement's value stays plain, whatever it holds.
+            if type_info_map.contains_key(&Val::from("$plain")) {
+                return Ok(value);
+            }
+            return Ok(Val::map_from_iter([
+                (Val::from("$type"), Val::from(type_name)),
+                (Val::from("$val"), value),
+            ]));
         }
 
         // Get all_fields list to check for newtypes
@@ -4859,6 +4887,11 @@ impl VirtualMachine {
                     {
                         return Ok(value.clone());
                     }
+                    if let Some(given) =
+                        field_type.and_then(|field_type| Self::err_in_contents(value, field_type))
+                    {
+                        return Ok(given.clone());
+                    }
 
                     // A built-in annotation checks the value, exact numeric
                     // conversions included.
@@ -4950,6 +4983,33 @@ impl VirtualMachine {
         Ok(Val::map(result_map))
     }
 
+    /// The first Err among the items of a `Vec<T>` or values of a `Map<K, V>`
+    /// that `type_info` builds, at any depth. An Err is no `T`: it stops the
+    /// construction as itself, and isn't read as the data it carries.
+    fn err_in_contents<'a>(data: &'a Val, type_info: &Val) -> Option<&'a Val> {
+        if data.is_err() {
+            return (!Self::type_info_preserves_result_values(type_info)).then_some(data);
+        }
+        let Val::Map(info) = type_info else {
+            return None;
+        };
+        match data {
+            Val::Vec(items) => {
+                let item_type = info.get(&Val::from("$item_type"))?;
+                items
+                    .iter()
+                    .find_map(|item| Self::err_in_contents(item, item_type))
+            }
+            Val::Map(entries) if crate::val::tagged_type_name(entries).is_none() => {
+                let value_type = info.get(&Val::from("$value_type"))?;
+                entries
+                    .values()
+                    .find_map(|value| Self::err_in_contents(value, value_type))
+            }
+            _ => None,
+        }
+    }
+
     /// Build each value of a `Map<K, V>` whose `V` is constructed. A tagged
     /// value is already built, and passed its check as a whole.
     fn construct_map_values(&mut self, data: &Val, value_type: &Val) -> VmResult<Val> {
@@ -4963,11 +5023,6 @@ impl VirtualMachine {
         let holds_results = Self::type_info_preserves_result_values(value_type);
         let mut built = indexmap::IndexMap::with_capacity(entries.len());
         for (key, value) in entries.iter() {
-            // An Err is no value of `V`: it stops the construction, and isn't
-            // read as the data it carries.
-            if value.is_err() && !holds_results {
-                return Ok(value.clone());
-            }
             let result = self.construct_typed_recursive(value, value_type)?;
             if result.is_err() && !holds_results {
                 if let Some(error) = Self::constraint_error_within(&result, key.clone(), None) {
@@ -5107,7 +5162,10 @@ impl VirtualMachine {
     }
 
     fn constructed_value_matches_type(value: &Val, type_info: &Val) -> bool {
-        if Self::value_matches_literal_type(value, type_info) {
+        // A refinement's constructor took it, and its value has no tag to read.
+        if Self::value_matches_literal_type(value, type_info)
+            || matches!(type_info.get("$plain"), Some(Val::Bool(true)))
+        {
             return true;
         }
 

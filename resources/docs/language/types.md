@@ -227,8 +227,9 @@ Server(body)  // Err: constructor of `Server` at `port` expected Int, got Str
 - A Map at an enum field builds the one variant it fits. At a closed enum, a Map that fits no variant, or more than one, fails. An open enum can have variants this program doesn't know, so there the Map stays as it is, for a `_` arm.
 - A `Vec<T>` or `Map<K, V>` of a record or enum treats each item or value as such a field: `Album type { photos: Map<Str, Photo> }` builds every value into a `Photo`, and a value that can't be one fails.
 - A failure inside a nested record, or a `Vec` or `Map` of records, is reported from the outermost record, with the whole path: `constructor of `Order` at `items[2].price` expected Dec, got Str`.
-- An `Err` given for a field stops the construction and comes back as itself, unless the field is `Any`.
+- An `Err` given for a field, or among the items or values of a `Vec` or `Map` of records or enums, stops the construction and comes back as itself, unless the field is `Any`.
 - A field of a type declared over a built-in one, such as `Port type Int`, checks its value as that type and holds a `Port`.
+- A type declared over a `Vec` or `Map` of records or enums builds what it holds the same way: `Circles type Vec<Circle>` builds every item into a `Circle`, and `Circles([{radius: "x"}])` fails at `[0].radius`. A `where` refinement of one builds them too, and its value stays a plain `Vec` or `Map`. A parameter of such a type checks what it's given and doesn't build it.
 - Fields of type `Any` or `Fn` aren't checked.
 
 A failed check returns `Err(ConstraintError.Violation)`, with the field in its `path`. A required field that's missing is its own `Err`, naming the field. `assoc` and the other updates only check `where` constraints, so call the constructor again if the fields may have changed: `Server(assoc(server, "port", value))`.

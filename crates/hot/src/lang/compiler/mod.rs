@@ -6039,10 +6039,11 @@ impl Compiler {
 
         // `where` constraints: a constrained alias checks the value and keeps
         // it a plain base value; a constrained struct checks its input before
-        // constructing it.
+        // constructing it, as an alias does whose contents need building.
         let check = self.constructor_check_constant(&type_tag_name);
         if let Some(check) = check
             && self.is_plain_alias(&type_tag_name)
+            && self.declared_contents_info(type_def).is_none()
         {
             let data = self.program.add_constant(Constant::Val(Val::from("data")));
             let function_info = FunctionInfo {
@@ -6202,6 +6203,12 @@ impl Compiler {
 
         if let Some(spec) = self.declared_base_spec(type_def) {
             type_info.insert(Val::from("$base"), constraint_specs::field_check(spec));
+            if let Some(contents) = self.declared_contents_info(type_def) {
+                type_info.insert(Val::from("$contents"), contents);
+                if self.is_plain_alias(type_name) {
+                    type_info.insert(Val::from("$plain"), Val::Bool(true));
+                }
+            }
         }
 
         Val::map(type_info)
@@ -6282,7 +6289,15 @@ impl Compiler {
                 } else if self.names_constrained_alias(name) {
                     // A constrained alias's values stay plain base values; the
                     // constructor's constraint check already validated them.
-                    if include_builtin {
+                    // Its constructor is still what builds their contents.
+                    if self.builds_declared_contents(name) {
+                        let mut info = self.build_custom_type_info(name);
+                        if let Val::Map(entries) = &mut info {
+                            std::sync::Arc::make_mut(entries)
+                                .insert(Val::from("$plain"), Val::Bool(true));
+                        }
+                        info
+                    } else if include_builtin {
                         Self::simple_type_info("Any")
                     } else {
                         Val::map_empty()
