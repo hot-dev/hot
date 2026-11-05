@@ -61,6 +61,8 @@ When a retryable run fails:
 
 Each handler of an event retries on its own. When several handlers share an event, one with `retry` retries on its own policy, one without isn't retried, and a retry runs only the handler that failed.
 
+An event a run sends is a new event, so its handlers start at attempt 0 with their own `retry`, whichever attempt sent it.
+
 In Hot App, retries are shown with retry badges (for example `↻1`, `↻2`) and linked run history.
 
 ## Limits and Clamping
