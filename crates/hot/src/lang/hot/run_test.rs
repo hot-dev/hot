@@ -11,6 +11,82 @@ mod run_tests {
     use crate::val::Val;
     use std::sync::Arc;
 
+    #[test]
+    fn collection_members_of_mixed_unions_are_checked_and_kept() {
+        let source = r#"::t ns
+Other type { name: Str }
+Numbers type { values: Vec<Int> | Other }
+Lookup type { values: Map<Str, Int> | Other }
+EitherList type { values: Vec<Int> | Vec<Str> | Other }
+probe fn (data: Any): Vec {
+    [is-err(Numbers({values: data})), is-err(Lookup({values: data})),
+     is-err(EitherList({values: data}))]
+}
+all fn (): Vec {
+    [probe([1, "bad"]), probe([1, 2]), probe(["a", "b"]),
+     probe({a: 1}), probe({name: "valid record"}),
+     probe({a: "bad"}), probe(null),
+     Numbers({values: [1.0, 2]}).values]
+}
+all()
+all()"#;
+        assert_same_with_and_without_jit(source, &val!([
+            [true, true, true], [false, true, false], [true, true, false],
+            [true, false, true], [false, false, false],
+            [true, true, true], [true, true, true], [1, 2]
+        ]));
+    }
+
+    #[test]
+    fn map_fields_validate_keys_without_losing_converted_entries() {
+        let source = r#"::t ns
+Counts type { counts: Map<Str, Int> }
+Numeric type { counts: Map<Int, Int> }
+Loose type { counts: Map<Any, Int> }
+Optional type { counts: Map<Str, Int>? }
+Positive type Int where gt(%, 0)
+PositiveKeys type { counts: Map<Positive, Int> }
+probe fn (data: Any): Vec {
+    [is-err(Counts({counts: data})), is-err(Numeric({counts: data})),
+     is-err(Loose({counts: data})), is-err(Optional({counts: data}))]
+}
+all fn (): Vec {
+    [probe({a: 2}), probe(assoc({}, 1, 2)), probe(assoc({}, 1.0, 2)),
+     probe(assoc(assoc({}, 1, 2), 1.0, 3)), probe(null),
+     keys(Numeric({counts: assoc({}, 1.0, 2)}).counts),
+     is-err(PositiveKeys({counts: assoc({}, 0, 2)})),
+     is-ok(PositiveKeys({counts: assoc({}, 1, 2)}))]
+}
+all()
+all()"#;
+        assert_same_with_and_without_jit(source, &val!([
+            [false, true, false, false], [true, false, false, true],
+            [true, false, false, true], [true, true, false, true],
+                [true, true, true, false], [1], true, true
+        ]));
+    }
+
+    #[test]
+    fn inline_refinements_resolve_named_numeric_bases() {
+        let source = r#"::numbers ns
+Money type Dec
+::t ns
+::n ::numbers
+Amount ::numbers/Money
+positive fn (x: Amount where gt(%, 0)): Bool { true }
+qualified fn (x: ::n/Money where gt(%, 0)): Bool { true }
+probe fn (): Vec {
+    [positive(::n/Money(5.0)), qualified(::n/Money(5.0)),
+     is-err(positive(::n/Money(-5.0))), is-err(qualified(::n/Money(-5.0)))]
+}
+// Top-level calls must check too: body inference alone suppresses some errors.
+positive(::n/Money(5.0))
+qualified(::n/Money(5.0))
+probe()
+probe()"#;
+        assert_same_with_and_without_jit(source, &val!([true, true, true, true]));
+    }
+
     /// Helper to compile and execute Hot code without `hot-std`. Uses
     /// `compile_program_unchecked` because the synthetic source has no
     /// stdlib loaded and would not survive name resolution.

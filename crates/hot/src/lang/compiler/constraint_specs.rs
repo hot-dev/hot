@@ -9,8 +9,8 @@
 //!   numeric conversions apply). With `tagged`, a value tagged with a type
 //!   over that kind passes as it is, as it does at a parameter.
 //! - `literal`: the value must equal one of `values`.
-//! - `vec` / `map`: every element, or every map value, must pass `elem`. With
-//!   `tagged`, as for `base`.
+//! - `vec` / `map`: every element, or every map value, must pass `elem`.
+//!   A map's keys must also pass `key` when present. With `tagged`, as for `base`.
 //! - `optional`: `null`, or `inner`.
 //! - `union`: at least one of `members`.
 //! - `struct`: each constrained field passes its spec, then `invariant`.
@@ -181,7 +181,19 @@ pub(super) fn plain_field_spec(type_expr: &TypeExpr) -> Option<Val> {
         TypeExpr::Simple(name) | TypeExpr::Named(name) => primitive(name).then(|| base(name)),
         TypeExpr::Generic(name, params) => match (name.as_str(), params.as_slice()) {
             ("Vec", [elem]) => Some(contents("vec", "Vec", elem)),
-            ("Map", [_, value]) => Some(contents("map", "Map", value)),
+            ("Map", [key, value]) => {
+                let mut entries = vec![
+                    (
+                        "elem",
+                        plain_field_spec(value).unwrap_or_else(|| node("any", vec![])),
+                    ),
+                    ("tagged", Val::Bool(true)),
+                ];
+                if let Some(key) = plain_field_spec(key) {
+                    entries.push(("key", key));
+                }
+                Some(node("map", entries))
+            }
             ("Vec" | "Map", _) => Some(base(name)),
             _ => None,
         },
@@ -208,7 +220,8 @@ pub(super) fn field_check(spec: Val) -> Val {
     let items = spec_entry(&spec, "elem").map_or(0, spec_mask);
     let accepted = match get_str(&spec, "kind") {
         Some("vec") if items != 0 => kinds::VEC,
-        Some("map") if items != 0 => kinds::MAP,
+        // The fast entry only describes values, not keys.
+        Some("map") if items != 0 && spec_entry(&spec, "key").is_none() => kinds::MAP,
         _ => spec_mask(&spec),
     };
     Val::vec(vec![
@@ -424,9 +437,19 @@ impl Compiler {
                     let elem = self.constraint_spec(elem)?;
                     Some(node("vec", vec![("elem", elem)]))
                 }
-                ("Map", [_, value]) => {
-                    let value = self.constraint_spec(value)?;
-                    Some(node("map", vec![("elem", value)]))
+                ("Map", [key, value]) => {
+                    let key_spec = self.constraint_spec(key);
+                    let value_spec = self.constraint_spec(value);
+                    if key_spec.is_none() && value_spec.is_none() {
+                        return None;
+                    }
+                    Some(node(
+                        "map",
+                        vec![
+                            ("key", key_spec.unwrap_or_else(|| self.base_spec(key))),
+                            ("elem", value_spec.unwrap_or_else(|| self.base_spec(value))),
+                        ],
+                    ))
                 }
                 _ => None,
             },
@@ -484,9 +507,10 @@ impl Compiler {
                     let elem = self.full_spec(elem);
                     node("vec", vec![("elem", elem)])
                 }
-                ("Map", [_, value]) => {
+                ("Map", [key, value]) => {
+                    let key = self.full_spec(key);
                     let value = self.full_spec(value);
-                    node("map", vec![("elem", value)])
+                    node("map", vec![("key", key), ("elem", value)])
                 }
                 ("Vec", _) | ("Map", _) => node("base", vec![("type", Val::from(name.as_str()))]),
                 _ => node("any", vec![]),

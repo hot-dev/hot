@@ -841,14 +841,29 @@ impl VirtualMachine {
                     return Ok(Err(self.base_mismatch("Map", &value, path)));
                 };
                 let elem = get(node, "elem").cloned().unwrap_or(Val::Null);
+                let key_spec = get(node, "key").cloned();
                 let mut checked_entries = indexmap::IndexMap::with_capacity(entries.len());
                 for (key, item) in std::sync::Arc::unwrap_or_clone(entries).into_iter() {
                     path.push(key.clone());
+                    let checked_key = match &key_spec {
+                        Some(spec) => match self.check_value(key.clone(), spec, path)? {
+                            Ok(checked) => checked,
+                            Err(failure) => return Ok(Err(failure)),
+                        },
+                        None => key,
+                    };
+                    if checked_entries.contains_key(&checked_key) {
+                        return Ok(Err(self.base_mismatch(
+                            "distinct map keys after conversion",
+                            &checked_key,
+                            path,
+                        )));
+                    }
                     let result = self.check_value(item, &elem, path)?;
                     path.pop();
                     match result {
                         Ok(checked) => {
-                            checked_entries.insert(key, checked);
+                            checked_entries.insert(checked_key, checked);
                         }
                         Err(failure) => return Ok(Err(failure)),
                     }

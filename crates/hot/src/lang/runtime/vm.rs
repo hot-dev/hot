@@ -4444,6 +4444,17 @@ impl VirtualMachine {
             return self.construct_union_typed(data, members);
         }
 
+        let checked;
+        let data = if let Some(spec) = type_info_map.get(&Val::from("$check")) {
+            checked = self.execute_check_constraint(data.clone(), spec, false)?;
+            if checked.is_err() {
+                return Ok(checked);
+            }
+            &checked
+        } else {
+            data
+        };
+
         // Get the type name
         let type_name = match type_info_map.get(&Val::from("$type")) {
             Some(Val::Str(s)) => (**s).to_string(),
@@ -4859,6 +4870,9 @@ impl VirtualMachine {
 
                 Val::map(new_map)
             }
+            Val::Vec(_) if !all_fields.is_empty() => {
+                return Ok(self.constructor_mismatch(&type_name, &raw_data));
+            }
             Val::Vec(vec) => {
                 // For vector data, check if we have item type info
                 let item_type_info = type_info_map.get(&Val::from("$item_type"));
@@ -4942,14 +4956,19 @@ impl VirtualMachine {
             return Ok(data.clone());
         }
 
-        if let Some(matched) = members.iter().find(|member| {
+        let mut check_failure = None;
+        for matched in members.iter().filter(|member| {
             Self::value_matches_builtin_type(data, member)
                 || Self::value_matches_literal_type(data, member)
         }) {
             if Self::value_matches_literal_type(data, matched) {
                 return Ok(data.clone());
             }
-            return self.construct_typed_recursive(data, matched);
+            let constructed = self.construct_typed_recursive(data, matched)?;
+            if !constructed.is_err() {
+                return Ok(constructed);
+            }
+            check_failure.get_or_insert(constructed);
         }
 
         let mut constructed_matches = Vec::new();
@@ -4966,10 +4985,12 @@ impl VirtualMachine {
 
         match constructed_matches.len() {
             1 => Ok(constructed_matches.remove(0)),
-            0 => Ok(Val::err(Val::from(format!(
-                "Value does not match any member of union {}",
-                Self::format_union_members(members)
-            )))),
+            0 => Ok(check_failure.unwrap_or_else(|| {
+                Val::err(Val::from(format!(
+                    "Value does not match any member of union {}",
+                    Self::format_union_members(members)
+                )))
+            })),
             _ => Ok(Val::err(Val::from(format!(
                 "Value ambiguously matches multiple members of union {}",
                 Self::format_union_members(members)
