@@ -199,6 +199,8 @@ send-email ::notifications::email/send
 response HttpResponse({status: 200})
 ```
 
+An import of a type or an enum variant needs nothing to run first, so it's bound before any namespace's top-level values are. A value in one namespace can call a function in another that uses that namespace's type imports, whichever namespace loads first.
+
 ## Core Vars
 
 Vars marked with `core: true` in their metadata are available everywhere without namespace qualification.
