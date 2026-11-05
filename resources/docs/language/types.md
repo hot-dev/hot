@@ -224,6 +224,7 @@ Server(body)  // Err: constructor of `Server` at `port` expected Int, got Str
 - A `Map<K, V>` field checks its keys too. JSON keys are strings, so a key that spells a number takes that number where `K` is numeric: `{"1": 2}` at `Map<Int, Int>` has the key `1`. Two keys that become one fail rather than losing an entry.
 - In a union, `Map<K, V>` comes after any record member, so data that builds the record is that record, whatever the order of the union.
 - A field typed as a record or enum takes a value of that type, a Map to build it from, or whatever a constructor it declares takes. Any other value fails, null included unless the field allows it.
+- A Map at an enum field builds the one variant it fits. At a closed enum, a Map that fits no variant, or more than one, fails. An open enum can have variants this program doesn't know, so there the Map stays as it is, for a `_` arm.
 - A failure inside a nested record or a `Vec` of records is reported from the outermost record, with the whole path: `constructor of `Order` at `items[2].price` expected Dec, got Str`.
 - An `Err` given for a field stops the construction and comes back as itself, unless the field is `Any`.
 - A field of a type declared over a built-in one, such as `Port type Int`, checks its value as that type and holds a `Port`.
