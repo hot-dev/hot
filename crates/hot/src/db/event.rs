@@ -12,6 +12,20 @@ pub enum EventError {
     Database(#[from] sqlx::Error),
     #[error("Event not found")]
     NotFound,
+    #[error("Event {0} already exists")]
+    AlreadyExists(Uuid),
+}
+
+/// Where a resend of a publish stands with its event's enqueue (see
+/// [`Event::claim_enqueue`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnqueueClaim {
+    /// The event is enqueued, so nothing is owed.
+    Settled,
+    /// Another publish holds the lease, and may be enqueuing right now.
+    Held,
+    /// The lease had ended and is now the caller's, who owes the enqueue.
+    Claimed,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -710,6 +724,71 @@ impl Event {
         created_by_user_id: &Uuid,
         access_id: Option<&Uuid>,
     ) -> Result<(), EventError> {
+        let inserted = Self::insert_row(
+            db,
+            event_id,
+            env_id,
+            stream_id,
+            event_type,
+            event_data,
+            event_time,
+            created_by_user_id,
+            access_id,
+            None,
+        )
+        .await?;
+        if inserted {
+            Ok(())
+        } else {
+            Err(EventError::AlreadyExists(*event_id))
+        }
+    }
+
+    /// Insert an event its publisher named, unless the id is taken, and report
+    /// whether it was inserted. A resend of the publish finds the row, so the
+    /// row starts with its enqueue leased to this publisher, who then settles
+    /// it with [`Event::finish_enqueue`] or [`Event::release_enqueue`].
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_event_if_absent(
+        db: &crate::db::DatabasePool,
+        event_id: &Uuid,
+        env_id: &Uuid,
+        stream_id: &Uuid,
+        event_type: &str,
+        event_data: &JsonValue,
+        event_time: DateTime<Utc>,
+        created_by_user_id: &Uuid,
+        access_id: Option<&Uuid>,
+        enqueue_leased_until: DateTime<Utc>,
+    ) -> Result<bool, EventError> {
+        Self::insert_row(
+            db,
+            event_id,
+            env_id,
+            stream_id,
+            event_type,
+            event_data,
+            event_time,
+            created_by_user_id,
+            access_id,
+            Some(enqueue_leased_until),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn insert_row(
+        db: &crate::db::DatabasePool,
+        event_id: &Uuid,
+        env_id: &Uuid,
+        stream_id: &Uuid,
+        event_type: &str,
+        event_data: &JsonValue,
+        event_time: DateTime<Utc>,
+        created_by_user_id: &Uuid,
+        access_id: Option<&Uuid>,
+        enqueue_leased_until: Option<DateTime<Utc>>,
+    ) -> Result<bool, EventError> {
         // Ensure the stream exists (create if it doesn't)
         crate::db::stream::Stream::create_or_get_stream(db, *stream_id, *env_id)
             .await
@@ -720,11 +799,11 @@ impl Event {
                 )))
             })?;
 
-        match db {
+        let inserted = match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 // Keep PostgreSQL's database-clock DEFAULT now() as the
                 // authoritative durable-creation timestamp.
-                sqlx::query("INSERT INTO event (event_id, env_id, stream_id, event_type, event_data, event_time, created_by_user_id, access_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)")
+                sqlx::query("INSERT INTO event (event_id, env_id, stream_id, event_type, event_data, event_time, created_by_user_id, access_id, enqueue_leased_until) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (event_id) DO NOTHING")
                     .bind(event_id)
                     .bind(env_id)
                     .bind(stream_id)
@@ -733,8 +812,10 @@ impl Event {
                     .bind(event_time)
                     .bind(created_by_user_id)
                     .bind(access_id)
+                    .bind(enqueue_leased_until)
                     .execute(pg_pool)
-                    .await?;
+                    .await?
+                    .rows_affected()
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 // Bind this explicitly so SQLite retains sub-second precision
@@ -748,20 +829,25 @@ impl Event {
                 })?;
 
                 sqlx::query(
-                    "INSERT INTO event (event_id, env_id, stream_id, event_type, event_data, event_time, created_at, created_by_user_id, access_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO event (event_id, env_id, stream_id, event_type, event_data, event_time, created_at, created_by_user_id, access_id, enqueue_leased_until) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (event_id) DO NOTHING",
                 )
-                .bind(event_id)
-                .bind(env_id)
-                .bind(stream_id)
-                .bind(event_type)
-                .bind(event_data_str)
-                .bind(event_time)
-                .bind(created_at)
-                .bind(created_by_user_id)
-                .bind(access_id)
-                .execute(sqlite_pool)
-                .await?;
+                    .bind(event_id)
+                    .bind(env_id)
+                    .bind(stream_id)
+                    .bind(event_type)
+                    .bind(event_data_str)
+                    .bind(event_time)
+                    .bind(created_at)
+                    .bind(created_by_user_id)
+                    .bind(access_id)
+                    .bind(enqueue_leased_until)
+                    .execute(sqlite_pool)
+                    .await?
+                    .rows_affected()
             }
+        };
+        if inserted == 0 {
+            return Ok(false);
         }
 
         // A successful insert only changes the event count and activity time.
@@ -774,6 +860,96 @@ impl Event {
                 )))
             })?;
 
+        Ok(true)
+    }
+
+    /// Take over an event's enqueue if its lease has ended, until
+    /// `leased_until`. One caller gets it: others find it held.
+    pub async fn claim_enqueue(
+        db: &crate::db::DatabasePool,
+        event_id: &Uuid,
+        now: DateTime<Utc>,
+        leased_until: DateTime<Utc>,
+    ) -> Result<EnqueueClaim, EventError> {
+        let claim = "UPDATE event SET enqueue_leased_until = $1 WHERE event_id = $2 AND enqueue_leased_until <= $3";
+        let read = "SELECT enqueue_leased_until FROM event WHERE event_id = $1";
+        let (claimed, lease): (u64, Option<DateTime<Utc>>) = match db {
+            crate::db::DatabasePool::Postgres(pool) => {
+                let claimed = sqlx::query(claim)
+                    .bind(leased_until)
+                    .bind(event_id)
+                    .bind(now)
+                    .execute(pool)
+                    .await?
+                    .rows_affected();
+                let lease = sqlx::query_scalar(read)
+                    .bind(event_id)
+                    .fetch_one(pool)
+                    .await?;
+                (claimed, lease)
+            }
+            crate::db::DatabasePool::Sqlite(pool) => {
+                let claimed = sqlx::query(claim)
+                    .bind(leased_until)
+                    .bind(event_id)
+                    .bind(now)
+                    .execute(pool)
+                    .await?
+                    .rows_affected();
+                let lease = sqlx::query_scalar(read)
+                    .bind(event_id)
+                    .fetch_one(pool)
+                    .await?;
+                (claimed, lease)
+            }
+        };
+        Ok(match (claimed, lease) {
+            (0, None) => EnqueueClaim::Settled,
+            (0, Some(_)) => EnqueueClaim::Held,
+            _ => EnqueueClaim::Claimed,
+        })
+    }
+
+    /// The event is enqueued: its publishers owe nothing more.
+    pub async fn finish_enqueue(
+        db: &crate::db::DatabasePool,
+        event_id: &Uuid,
+    ) -> Result<(), EventError> {
+        let sql = "UPDATE event SET enqueue_leased_until = NULL WHERE event_id = $1";
+        match db {
+            crate::db::DatabasePool::Postgres(pool) => {
+                sqlx::query(sql).bind(event_id).execute(pool).await?;
+            }
+            crate::db::DatabasePool::Sqlite(pool) => {
+                sqlx::query(sql).bind(event_id).execute(pool).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// End a lease whose enqueue failed, so a resend need not wait it out.
+    pub async fn release_enqueue(
+        db: &crate::db::DatabasePool,
+        event_id: &Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<(), EventError> {
+        let sql = "UPDATE event SET enqueue_leased_until = $1 WHERE event_id = $2 AND enqueue_leased_until IS NOT NULL";
+        match db {
+            crate::db::DatabasePool::Postgres(pool) => {
+                sqlx::query(sql)
+                    .bind(now)
+                    .bind(event_id)
+                    .execute(pool)
+                    .await?;
+            }
+            crate::db::DatabasePool::Sqlite(pool) => {
+                sqlx::query(sql)
+                    .bind(now)
+                    .bind(event_id)
+                    .execute(pool)
+                    .await?;
+            }
+        }
         Ok(())
     }
 
@@ -1014,8 +1190,94 @@ impl Event {
 
 #[cfg(test)]
 mod tests {
+    use super::{EnqueueClaim, Event, EventError};
     use crate::db::create_db_pool;
     use crate::val;
+    use chrono::{Duration, Utc};
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn an_enqueue_lease_goes_to_one_publisher_at_a_time() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let event_id = Uuid::new_v4();
+        let now = Utc::now();
+        let lease = now + Duration::minutes(2);
+        let insert = |leased_until| {
+            let db = &db;
+            let data = &data;
+            async move {
+                Event::insert_event_if_absent(
+                    db,
+                    &event_id,
+                    &data.env_id,
+                    &data.stream_id,
+                    "order:created",
+                    &serde_json::json!({}),
+                    now,
+                    &data.user_id,
+                    None,
+                    leased_until,
+                )
+                .await
+                .unwrap()
+            }
+        };
+        let claim = |at| Event::claim_enqueue(&db, &event_id, at, lease);
+
+        assert!(insert(lease).await);
+        assert!(!insert(lease).await, "the id is taken");
+
+        assert_eq!(claim(now).await.unwrap(), EnqueueClaim::Held);
+        let after_the_lease = lease + Duration::seconds(1);
+        assert_eq!(claim(after_the_lease).await.unwrap(), EnqueueClaim::Claimed);
+        assert_eq!(claim(now).await.unwrap(), EnqueueClaim::Held);
+
+        Event::release_enqueue(&db, &event_id, now).await.unwrap();
+        assert_eq!(claim(now).await.unwrap(), EnqueueClaim::Claimed);
+
+        Event::finish_enqueue(&db, &event_id).await.unwrap();
+        assert_eq!(claim(now).await.unwrap(), EnqueueClaim::Settled);
+
+        // A settled event stays settled.
+        Event::release_enqueue(&db, &event_id, now).await.unwrap();
+        assert_eq!(claim(now).await.unwrap(), EnqueueClaim::Settled);
+    }
+
+    #[tokio::test]
+    async fn an_event_inserted_without_a_lease_owes_nothing() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let event_id = Uuid::now_v7();
+        let insert = async || {
+            Event::insert_event(
+                &db,
+                &event_id,
+                &data.env_id,
+                &data.stream_id,
+                "order:created",
+                &serde_json::json!({}),
+                Utc::now(),
+                &data.user_id,
+                None,
+            )
+            .await
+        };
+
+        insert().await.unwrap();
+
+        assert!(matches!(
+            insert().await,
+            Err(EventError::AlreadyExists(id)) if id == event_id
+        ));
+        let now = Utc::now();
+        assert_eq!(
+            Event::claim_enqueue(&db, &event_id, now, now)
+                .await
+                .unwrap(),
+            EnqueueClaim::Settled
+        );
+    }
 
     #[tokio::test]
     async fn test_event_operations() {

@@ -8646,8 +8646,9 @@ pub async fn run_with_components_shared_context_and_db(
                                                         // the runs of its earlier deliveries say what is left:
                                                         // handlers that finished don't run again, and runs crash
                                                         // recovery held are reopened before their handlers execute.
-                                                        // A first delivery has no earlier runs to read.
-                                                        let earlier_runs = if queue_lease_timing.redelivered {
+                                                        // A first delivery has no earlier runs to read, but the queue
+                                                        // can't tell that some messages repeat a delivery.
+                                                        let earlier_runs = if queue_lease_timing.redelivered || event_message.may_repeat() {
                                                             hot::db::run::Run::earlier_deliveries(db, &event_message.body.event.event_id).await
                                                                 .map_err(|e| worker_infrastructure_retry_error(format!("Cannot read the event's earlier runs: {e}"), infra_retry_backoff_ms.max(5_000)))?
                                                         } else {

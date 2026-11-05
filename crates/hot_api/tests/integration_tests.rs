@@ -599,6 +599,66 @@ async fn test_events_publish_and_list() {
 }
 
 #[tokio::test]
+async fn test_publish_with_a_caller_event_id_is_safe_to_resend() {
+    let db = create_test_db().await;
+    let (_api_key_id, api_key) = create_test_api_key(&db.0).await;
+
+    let api_v1_routes = axum::Router::new()
+        .route(
+            "/v1/events",
+            axum::routing::post(hot_api::handlers::publish_event),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            db.clone(),
+            hot_api::auth::api_key_auth_middleware,
+        ));
+    let app = axum::Router::new()
+        .merge(api_v1_routes)
+        .with_state(db.clone());
+
+    let event_id = Uuid::new_v4();
+    let publish = json!({
+        "event_id": event_id,
+        "event_type": "invoice:paid",
+        "event_data": {"invoice": 7}
+    });
+    let (status, first) = make_request(
+        &app,
+        Method::POST,
+        "/v1/events",
+        &api_key,
+        Some(publish.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(first["data"]["event_id"], event_id.to_string());
+
+    // A resend is the same event, answered as the first publish was.
+    let (status, resent) =
+        make_request(&app, Method::POST, "/v1/events", &api_key, Some(publish)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(resent["data"], first["data"]);
+    assert_eq!(Event::get_count(&db.0).await.unwrap(), 1);
+
+    // The id can't name a second event.
+    let (status, refused) = make_request(
+        &app,
+        Method::POST,
+        "/v1/events",
+        &api_key,
+        Some(json!({
+            "event_id": event_id,
+            "event_type": "invoice:paid",
+            "event_data": {"invoice": 8}
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(refused["error"]["code"], "event_id_conflict");
+    assert_eq!(Event::get_count(&db.0).await.unwrap(), 1);
+}
+
+#[tokio::test]
 async fn test_run_stats() {
     let db = create_test_db().await;
     let (_api_key_id, api_key) = create_test_api_key(&db.0).await;

@@ -595,7 +595,12 @@ fn subscribe_to_task_doc() {}
     tag = "Events",
     request_body = PublishEventRequest,
     security(("bearer_auth" = [])),
-    responses((status = 201, description = "Published event", body = ApiResponse<EventResponse>), (status = "default", description = "Error", body = ApiErrorResponse))
+    responses(
+        (status = 201, description = "Published event. A publish sent again with the same `event_id` gets the same answer and starts nothing new", body = ApiResponse<EventResponse>),
+        (status = 409, description = "`event_id_conflict`: the `event_id` is in use by a different event, or in another environment. Sending it again won't help", body = ApiErrorResponse),
+        (status = 503, description = "`event_publish_in_progress`: an earlier publish with this `event_id` hasn't finished. Send it again after `retry_after` seconds", body = ApiErrorResponse),
+        (status = "default", description = "Error", body = ApiErrorResponse)
+    )
 )]
 fn publish_event_doc() {}
 

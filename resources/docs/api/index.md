@@ -946,6 +946,40 @@ For comparison:
 }
 ```
 
+| Field | Required | Description |
+|-------|----------|-------------|
+| `event_type` | Yes | The event's type |
+| `event_data` | Yes | The event's data, any JSON value |
+| `stream_id` | No | UUID of a stream to add the event to. Without one, the event starts a new stream |
+| `event_id` | No | UUID you choose for the event, which makes the publish safe to send again. Without one, Hot generates it and every publish is a new event |
+
+##### Sending a Publish Again
+
+A timeout or a `5xx` doesn't tell you whether Hot kept the event. To send a publish again without risking a second event, give it an `event_id` of your own and keep it with the event, so that every attempt uses the same one:
+
+```json
+{
+  "event_id": "0f8fad5b-d9cb-469f-a165-70867728950e",
+  "event_type": "invoice:paid",
+  "event_data": {
+    "invoice": "INV-1042"
+  }
+}
+```
+
+| Response | Meaning |
+|----------|---------|
+| `201 Created` | The event is published. A publish sent again gets the same event back, with the same `event_id`, `stream_id` and times, and starts nothing new |
+| `503` with code `event_publish_in_progress` | An earlier publish of this `event_id` hasn't finished. Send it again after `retry_after` seconds |
+| `409` with code `event_id_conflict` | The `event_id` is in use by a different event. Sending it again won't help |
+| Another `5xx`, or a timeout | Send it again. If an earlier publish kept the event but didn't reach the queue, this one finishes it |
+
+The same event means the same `event_id`, `event_type` and `event_data`, and the same `stream_id` if you give one. The order of keys in `event_data` doesn't matter.
+
+An `event_id` is unique across every environment, so a publish in another environment also gets the `409`. The answer doesn't say which case it is. If you publish the same work to two environments, use a different id in each, such as a [version 5 UUID](https://www.rfc-editor.org/rfc/rfc9562#name-uuid-version-5) of the environment's name and your own record id. Keep ids hard to guess: another environment that uses an id first can't read your event, but your publish of that id would get the `409`.
+
+Your handlers still run at least once: a queue redelivery can run one again, so see [At-Least-Once Delivery](/docs/platform/durability#at-least-once-delivery).
+
 #### List Events
 
 ```http

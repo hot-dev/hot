@@ -428,9 +428,10 @@ pub trait EventPublisher: Send + Sync {
 // Re-export the publisher implementations
 pub use database::DatabaseEventPublisher;
 pub use queue::{
-    DeploymentMessage, DeploymentMessageBody, EventMessage, EventMessageBody, MaintenanceMessage,
-    MaintenanceMessageBody, QueueAndDatabaseEventPublisher, QueueEventPublisher,
-    RETRIED_HANDLER_HEAD, enqueue_deployment_message, enqueue_redeploy_for_project_reactivation,
+    DeploymentMessage, DeploymentMessageBody, EventMessage, EventMessageBody, MAY_REPEAT_HEAD,
+    MaintenanceMessage, MaintenanceMessageBody, QueueAndDatabaseEventPublisher,
+    QueueEventPublisher, RETRIED_HANDLER_HEAD, enqueue_deployment_message,
+    enqueue_redeploy_for_project_reactivation,
 };
 
 #[cfg(test)]
