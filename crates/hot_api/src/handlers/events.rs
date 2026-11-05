@@ -1158,8 +1158,7 @@ mod tests {
         ] {
             let (status, Json(body)) = publish_as(&api_key, &queue, &db, &different)
                 .await
-                .err()
-                .expect("a different event should be refused");
+                .expect_err("a different event should be refused");
             assert_eq!(status, StatusCode::CONFLICT);
             assert_eq!(body.error.code, "event_id_conflict");
         }
@@ -1192,8 +1191,7 @@ mod tests {
 
         let (status, Json(body)) = publish_as(&other_key, &queue, &db, &req)
             .await
-            .err()
-            .expect("the id is taken");
+            .expect_err("the id is taken");
 
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body.error.code, "event_id_conflict");
@@ -1215,8 +1213,7 @@ mod tests {
             &named_publish(Uuid::nil()),
         )
         .await
-        .err()
-        .expect("a zero value is a caller's bug");
+        .expect_err("a zero value is a caller's bug");
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(Event::get_count(&db).await.unwrap(), 0);
@@ -1235,8 +1232,7 @@ mod tests {
 
         let (status, _) = publish_as(&api_key, &queue, &db, &req)
             .await
-            .err()
-            .expect("the queue is down");
+            .expect_err("the queue is down");
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(Event::get_count(&db).await.unwrap(), 1);
         assert!(queued_ids(&queue).is_empty());
@@ -1268,8 +1264,7 @@ mod tests {
 
         let (status, Json(body)) = publish_as(&test_api_key(&data), &queue, &db, &req)
             .await
-            .err()
-            .expect("the first publish hasn't finished");
+            .expect_err("the first publish hasn't finished");
 
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body.error.code, "event_publish_in_progress");
