@@ -12,6 +12,7 @@ const LINUX_PACKAGE_RESOURCES: &str = "/usr/share/hot";
 ///   Linux packages (`/usr/local`, `/usr`), Homebrew (`/opt/homebrew`) and
 ///   user installs (`~/.local`)
 /// - `<exe_dir>/resources`: Windows and bundled installs
+/// - `<exe_dir>`: an unpacked release archive (see [`is_unpacked_archive`])
 ///
 /// Both the path the binary was started from and its symlink-resolved path
 /// are tried, so a symlink to `hot` finds the installation it points to.
@@ -39,13 +40,36 @@ fn installation_resource_dirs_for(exe: &Path) -> Vec<PathBuf> {
             .parent()
             .filter(|_| exe_dir.file_name().is_some_and(|name| name == "bin"))
             .map(|prefix| prefix.join("share").join("hot"));
-        for dir in share.into_iter().chain([exe_dir.join("resources")]) {
+        let unpacked = is_unpacked_archive(exe_dir).then(|| exe_dir.to_path_buf());
+        for dir in share
+            .into_iter()
+            .chain([exe_dir.join("resources")])
+            .chain(unpacked)
+        {
             if dir.is_dir() && !dirs.contains(&dir) {
                 dirs.push(dir);
             }
         }
     }
     dirs
+}
+
+/// Whether `dir` is an unpacked release archive, which keeps `db/`, `app/`,
+/// `pkg/` and the rest beside the binary, with no `resources/` folder. It asks
+/// for the migrations, since `$HOT_HOME/db` is also where a database lives.
+fn is_unpacked_archive(dir: &Path) -> bool {
+    dir.join("db").join("sqlite").join("migrations").is_dir()
+}
+
+/// The resources under `HOT_HOME`: its `resources/` folder, or `HOT_HOME`
+/// itself when a release archive was unpacked there.
+fn hot_home_resources(home: &Path) -> Option<PathBuf> {
+    let resources = home.join("resources");
+    if resources.exists() {
+        Some(resources)
+    } else {
+        is_unpacked_archive(home).then(|| home.to_path_buf())
+    }
 }
 
 /// Directories that hold hot.dev's bundled packages (hot-std and the others),
@@ -77,7 +101,8 @@ pub fn bundled_pkg_dirs() -> Vec<PathBuf> {
 /// Gets the resources directory path based on the current binary location and installation type.
 ///
 /// This function handles different deployment scenarios:
-/// - HOT_HOME environment variable: Uses `$HOT_HOME/resources` (highest priority)
+/// - HOT_HOME environment variable: Uses `$HOT_HOME/resources`, or `$HOT_HOME`
+///   for an unpacked release archive (highest priority)
 /// - Installed binary: Uses its installation's resources (see [`installation_resource_dirs`])
 /// - Development: Uses workspace-relative resources directory
 pub fn get_resources_path() -> Result<PathBuf, String> {
@@ -93,11 +118,10 @@ pub fn get_resources_path() -> Result<PathBuf, String> {
     // Check for different installation patterns
 
     // Case 0: HOT_HOME environment variable (highest priority)
-    if let Ok(hot_home) = std::env::var("HOT_HOME") {
-        let resources_path = PathBuf::from(hot_home).join("resources");
-        if resources_path.exists() {
-            return Ok(resources_path);
-        }
+    if let Ok(hot_home) = std::env::var("HOT_HOME")
+        && let Some(resources_path) = hot_home_resources(Path::new(&hot_home))
+    {
+        return Ok(resources_path);
     }
 
     // Cases 1-3: the binary's own installation
@@ -343,6 +367,51 @@ pub fn read_init_template(template_file: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Lays out a release archive as it unpacks: the binary beside `db/`,
+    /// `app/` and the rest.
+    fn unpacked_archive(root: &Path) -> PathBuf {
+        let exe = root.join("hot");
+        std::fs::write(&exe, "").unwrap();
+        std::fs::create_dir_all(root.join("db/sqlite/migrations")).unwrap();
+        std::fs::create_dir_all(root.join("pkg/hot-std")).unwrap();
+        exe
+    }
+
+    #[test]
+    fn an_unpacked_release_archive_holds_its_own_resources() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let exe = unpacked_archive(&root);
+        assert_eq!(installation_resource_dirs_for(&exe), vec![root]);
+    }
+
+    #[test]
+    fn a_folder_holding_a_binary_is_not_a_release_archive() {
+        let root = tempfile::tempdir().unwrap();
+        let exe = root.path().join("hot");
+        std::fs::write(&exe, "").unwrap();
+        // `$HOT_HOME/db` holds a database, and a project's `db/` its own files.
+        std::fs::create_dir(root.path().join("db")).unwrap();
+        assert!(installation_resource_dirs_for(&exe).is_empty());
+    }
+
+    #[test]
+    fn hot_home_holds_resources_in_a_folder_or_as_an_unpacked_archive() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path();
+        assert_eq!(hot_home_resources(home), None);
+
+        unpacked_archive(home);
+        assert_eq!(hot_home_resources(home), Some(home.to_path_buf()));
+
+        std::fs::create_dir(home.join("resources")).unwrap();
+        assert_eq!(
+            hot_home_resources(home),
+            Some(home.join("resources")),
+            "the resources folder wins"
+        );
+    }
 
     /// Lays out `<prefix>/bin/hot` and `<prefix>/share/hot` under `root`.
     fn install_prefix(root: &Path, prefix: &str) -> (PathBuf, PathBuf) {
