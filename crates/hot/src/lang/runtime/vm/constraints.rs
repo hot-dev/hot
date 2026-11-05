@@ -522,6 +522,20 @@ impl VirtualMachine {
         step: Val,
         record: Option<&str>,
     ) -> Option<Val> {
+        Self::reframe_constraint_error(error, Some(step), record)
+    }
+
+    /// A constructor's `ConstraintError` for what `record` holds, as `record`
+    /// reports it. `None` for any other Err.
+    pub(crate) fn constraint_error_of(error: &Val, record: &str) -> Option<Val> {
+        Self::reframe_constraint_error(error, None, Some(record))
+    }
+
+    fn reframe_constraint_error(
+        error: &Val,
+        step: Option<Val>,
+        record: Option<&str>,
+    ) -> Option<Val> {
         let cause = error.unwrap_err()?;
         let Val::Map(tagged) = cause else {
             return None;
@@ -548,7 +562,7 @@ impl VirtualMachine {
             }
         };
         let mut path = Vec::with_capacity(inner_path.len() + 1);
-        path.push(step);
+        path.extend(step);
         path.extend(inner_path.iter().cloned());
         let rest = get_str(payload, "message")?.strip_prefix(&opening(inner_record, inner_path))?;
         let message = format!("{}{rest}", opening(record, &path));

@@ -1255,6 +1255,44 @@ impl Compiler {
         }
     }
 
+    /// How to build what a type over a built-in one holds, where that takes
+    /// more than its check: `Circles type Vec<Circle>` builds each `Circle`.
+    /// Over another declared type it's that type's constructor, which builds
+    /// its contents in the namespace that declares them.
+    pub(super) fn declared_contents_info(&self, type_def: &TypeDef) -> Option<Val> {
+        self.declared_base_spec(type_def)?;
+        let alias = type_def.type_alias.as_ref()?;
+        let info = self.build_field_type_info_from_expr(alias, false);
+        let builds = match alias {
+            TypeExpr::Simple(name) | TypeExpr::Named(name) => self.builds_declared_contents(name),
+            _ => Self::builds_contents(&info),
+        };
+        builds.then_some(info)
+    }
+
+    /// Whether the type `name` is one over a built-in one whose constructor
+    /// builds what it holds.
+    pub(super) fn builds_declared_contents(&self, name: &str) -> bool {
+        self.resolve_constraint_type(name)
+            .and_then(|qualified| self.constraint_type_defs.get(&qualified))
+            .is_some_and(|def| self.declared_contents_info(def).is_some())
+    }
+
+    /// Whether this type info builds the items of a `Vec` or values of a
+    /// `Map`, for itself or a member of its union.
+    fn builds_contents(type_info: &Val) -> bool {
+        let Val::Map(entries) = type_info else {
+            return false;
+        };
+        match entries.get(&Val::from("$union")) {
+            Some(Val::Vec(members)) => members.iter().any(Self::builds_contents),
+            _ => {
+                entries.contains_key(&Val::from("$item_type"))
+                    || entries.contains_key(&Val::from("$value_type"))
+            }
+        }
+    }
+
     /// Whether a type name resolves to a constrained alias, or an alias
     /// composed of them.
     pub(super) fn names_constrained_alias(&self, name: &str) -> bool {
