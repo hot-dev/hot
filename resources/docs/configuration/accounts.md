@@ -34,8 +34,14 @@ One trailing newline in the file is ignored, and the password must be at least
 eight characters. Running it again changes nothing, even with a different
 password, so a deployment can run it on every start.
 
-The administrator then signs in, creates an organization, and invites
-teammates from the organization's **Users** page.
+The administrator then signs in and creates an organization under
+**Organizations**, then invites teammates from the organization's **Users** page.
+Choose the account type **Organization** there: only an organization can have
+[sub-organizations](/docs/api/management), and an **Individual** account can't.
+
+Outside local development the app's cookies are `Secure`, so reach it over HTTPS,
+such as through a proxy that terminates TLS. A browser on plain HTTP doesn't send
+them back, and signing in answers "Your session expired".
 
 ## Who can sign up
 
