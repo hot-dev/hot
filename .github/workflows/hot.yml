@@ -373,7 +373,14 @@ jobs:
         run: sccache --show-stats || true
 
   lint-and-test:
-    name: Lint, Rust Tests, and Hot Tests
+    # main requires this check by name. The name comes from a matrix so that a
+    # skipped run reports under the unexpanded expression instead: a head last
+    # pushed as a draft then has no skipped gate to merge on while its tests
+    # run. Keep the value equal to the required check in the ruleset.
+    name: ${{ matrix.required-check }}
+    strategy:
+      matrix:
+        required-check: [ 'Lint, Rust Tests, and Hot Tests' ]
     runs-on: ubuntu-24.04
     needs: [clippy-and-checks, rust-tests, hot-tests, kata-check]
     if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
