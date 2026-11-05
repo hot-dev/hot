@@ -1081,6 +1081,167 @@ async fn rotation_narrowing_and_revocation_follow_lineage() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
+/// A key's rotation state, read back the two ways a client can.
+async fn overlap_ends(app: &App, token: &str, list: &str, key_id: &str) -> [Value; 2] {
+    let read = app
+        .expect(
+            "GET",
+            &format!("/v1/api-keys/{key_id}"),
+            token,
+            None,
+            StatusCode::OK,
+        )
+        .await;
+    let listed = app.expect("GET", list, token, None, StatusCode::OK).await;
+    let row = listed["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["api_key_id"] == key_id)
+        .unwrap();
+    [
+        read["data"]["previous_secret_expires_at"].clone(),
+        row["previous_secret_expires_at"].clone(),
+    ]
+}
+
+/// What `rotate` promises about the old secret is what reads report, and a
+/// later rotation can't break that promise unless the caller ends the overlap.
+#[tokio::test]
+async fn reads_report_the_overlap_and_a_second_rotation_keeps_it() {
+    let app = App::new().await;
+    let (_, token) = app.org_key(provisioner()).await;
+    let (org, env) = app.create_child(&token, "globex").await;
+    let list = format!("/v1/orgs/{org}/envs/{env}/api-keys");
+    let minted = app
+        .expect(
+            "POST",
+            &list,
+            &token,
+            Some(json!({"description": "events", "permissions": {"env:*": ["read"]}})),
+            StatusCode::CREATED,
+        )
+        .await;
+    let key_id = minted["data"]["api_key_id"].as_str().unwrap().to_owned();
+    let first = minted["data"]["token"].as_str().unwrap().to_owned();
+    assert_eq!(
+        overlap_ends(&app, &token, &list, &key_id).await,
+        [Value::Null, Value::Null],
+        "nothing to report before a rotation"
+    );
+
+    let rotate = format!("/v1/api-keys/{key_id}/rotate");
+    let rotated = app
+        .expect(
+            "POST",
+            &rotate,
+            &token,
+            Some(json!({"overlap_seconds": 3600})),
+            StatusCode::OK,
+        )
+        .await;
+    let second = rotated["data"]["token"].as_str().unwrap().to_owned();
+    let promised = rotated["data"]["previous_secret_expires_at"].clone();
+    assert!(promised.is_string(), "{rotated}");
+    assert_eq!(
+        overlap_ends(&app, &token, &list, &key_id).await,
+        [promised.clone(), promised.clone()],
+        "reads report the rotation's own answer"
+    );
+
+    let refused = app
+        .expect(
+            "POST",
+            &rotate,
+            &token,
+            Some(json!({"overlap_seconds": 3600})),
+            StatusCode::CONFLICT,
+        )
+        .await;
+    assert_eq!(refused["error"]["code"], "rotation_overlap_running");
+    // With no body too: the default overlap is an overlap.
+    app.expect("POST", &rotate, &token, None, StatusCode::CONFLICT)
+        .await;
+    app.expect("GET", "/v1/env", &first, None, StatusCode::OK)
+        .await;
+    app.expect("GET", "/v1/env", &second, None, StatusCode::OK)
+        .await;
+    assert_eq!(
+        overlap_ends(&app, &token, &list, &key_id).await,
+        [promised.clone(), promised],
+        "a refused rotation changes nothing"
+    );
+
+    // Ending the overlap is explicit, and works at any time.
+    let third = app
+        .expect(
+            "POST",
+            &rotate,
+            &token,
+            Some(json!({"overlap_seconds": 0})),
+            StatusCode::OK,
+        )
+        .await["data"]["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for old in [&first, &second] {
+        app.expect("GET", "/v1/env", old, None, StatusCode::UNAUTHORIZED)
+            .await;
+    }
+    app.expect("GET", "/v1/env", &third, None, StatusCode::OK)
+        .await;
+    assert_eq!(
+        overlap_ends(&app, &token, &list, &key_id).await,
+        [Value::Null, Value::Null],
+        "the overlap is over"
+    );
+}
+
+#[tokio::test]
+async fn org_keys_report_their_overlap_and_a_second_rotation_keeps_it() {
+    let app = App::new().await;
+    let org = app.data.org_id;
+    let (_, issuer_token) = app
+        .org_key(json!({
+            "org:*": ["read"],
+            format!("org:{org}/api-key:*"): ["create", "read", "update"],
+        }))
+        .await;
+    let minted = app
+        .expect(
+            "POST",
+            &format!("/v1/orgs/{org}/api-keys"),
+            &issuer_token,
+            Some(json!({"description": "child", "permissions": {"org:*": ["read"]}})),
+            StatusCode::CREATED,
+        )
+        .await;
+    let key_id = minted["data"]["api_key_id"].as_str().unwrap().to_owned();
+    let first = minted["data"]["token"].as_str().unwrap().to_owned();
+    let list = format!("/v1/orgs/{org}/api-keys");
+    let rotate = format!("/v1/api-keys/{key_id}/rotate");
+    let rotated = app
+        .expect(
+            "POST",
+            &rotate,
+            &issuer_token,
+            Some(json!({"overlap_seconds": 3600})),
+            StatusCode::OK,
+        )
+        .await;
+    let promised = rotated["data"]["previous_secret_expires_at"].clone();
+    assert!(promised.is_string(), "{rotated}");
+    assert_eq!(
+        overlap_ends(&app, &issuer_token, &list, &key_id).await,
+        [promised.clone(), promised]
+    );
+    app.expect("POST", &rotate, &issuer_token, None, StatusCode::CONFLICT)
+        .await;
+    app.expect("GET", "/v1/orgs", &first, None, StatusCode::OK)
+        .await;
+}
+
 #[tokio::test]
 async fn org_keys_mint_narrower_org_keys_and_suspension_blocks_children() {
     let app = App::new().await;

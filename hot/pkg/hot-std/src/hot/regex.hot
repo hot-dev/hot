@@ -158,17 +158,25 @@ fn (value: Str): Str {
 capture
 meta {
     doc: """
-    Return first captured group for regex `pattern` in `value`.
+    Return the first match of regex `pattern` in `value` with its capture
+    groups, or null if nothing matches. The result is `{match, groups}`:
+    `match` is the whole match, and `groups` holds each group's text in order,
+    with null for a group that took no part in the match.
 
     **Example**
 
     ```hot
     ::hot::regex/capture("user@domain", "(\\w+)@(\\w+)")
     // {"match": "user@domain", "groups": ["user", "domain"]}
+
+    ::hot::regex/capture("a", "(a)|(b)")
+    // {"match": "a", "groups": ["a", null]}
+
+    ::hot::regex/capture("no digits", "(\\d+)")  // null
     ```
     """
 }
-fn (value: Str, pattern: Str): Str {
+fn (value: Str, pattern: Str): Map? {
     call-lib(::hot::regex/capture, [value, pattern])
 }
 

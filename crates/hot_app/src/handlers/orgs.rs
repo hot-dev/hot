@@ -24,6 +24,19 @@ pub struct OrgForm {
     pub display_timezone: Option<String>,
 }
 
+/// What the New Organization page posts, through `_org_handle_fields.html`.
+/// An individual account hides the name, so it can arrive blank.
+#[derive(Deserialize, Debug)]
+pub struct NewOrgForm {
+    #[serde(rename = "org_name", default)]
+    pub name: String,
+    #[serde(rename = "org_slug")]
+    pub slug: String,
+    pub account_type: Option<String>,
+    pub plan_id: Option<String>,
+    pub billing_period: Option<String>,
+}
+
 // Form data structure for inviting users
 #[derive(Deserialize, Debug)]
 pub struct InviteForm {
@@ -232,7 +245,7 @@ pub async fn orgs_create_handler(
     axum::extract::Extension(conf): axum::extract::Extension<Val>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
     jar: axum_extra::extract::CookieJar,
-    Form(form): Form<OrgForm>,
+    Form(form): Form<NewOrgForm>,
 ) -> Result<(axum_extra::extract::CookieJar, Redirect), Html<String>> {
     let billing_enabled = hot::product::billing_enabled(&conf);
 
@@ -245,13 +258,18 @@ pub async fn orgs_create_handler(
     let selected_plan = form.plan_id.as_deref().unwrap_or("");
     let selected_billing = form.billing_period.as_deref().unwrap_or("monthly");
     let account_type = form.account_type.as_deref().unwrap_or("organization");
+    let name = if account_type == "individual" {
+        session.user_name.as_str()
+    } else {
+        form.name.trim()
+    };
 
     // Local-dev experience is single-user oriented; self-host creates orgs directly.
     if session.is_local_dev_experience() {
         return Err(render_orgs_new_with_error(
             &session,
             "Creating organizations is not available in local development.",
-            &form.name,
+            name,
             &form.slug,
             account_type,
             plans,
@@ -261,7 +279,7 @@ pub async fn orgs_create_handler(
     }
 
     // Validate form data
-    if form.name.trim().is_empty() {
+    if name.is_empty() {
         return Err(render_orgs_new_with_error(
             &session,
             "Organization name is required",
@@ -278,7 +296,7 @@ pub async fn orgs_create_handler(
         return Err(render_orgs_new_with_error(
             &session,
             "Organization slug is required",
-            &form.name,
+            name,
             "",
             account_type,
             plans,
@@ -292,7 +310,7 @@ pub async fn orgs_create_handler(
         return Err(render_orgs_new_with_error(
             &session,
             "Please select a plan",
-            &form.name,
+            name,
             &form.slug,
             account_type,
             plans,
@@ -309,7 +327,7 @@ pub async fn orgs_create_handler(
         return Err(render_orgs_new_with_error(
             &session,
             "You already have an individual organization. Choose \"Organization\" to create a team org.",
-            &form.name,
+            name,
             &form.slug,
             account_type,
             plans,
@@ -325,7 +343,7 @@ pub async fn orgs_create_handler(
         return Err(render_orgs_new_with_error(
             &session,
             e.message(),
-            &form.name,
+            name,
             &form.slug,
             account_type,
             plans,
@@ -368,7 +386,7 @@ pub async fn orgs_create_handler(
                 crate::slug::SlugError::Taken.message(),
                 suggestion
             ),
-            &form.name,
+            name,
             &suggestion,
             account_type,
             plans,
@@ -385,7 +403,7 @@ pub async fn orgs_create_handler(
     match hot::db::org::Org::insert_org(
         &db,
         &org_id,
-        &form.name,
+        name,
         &form.slug,
         account_type,
         &session.current_user_id(),
@@ -468,7 +486,7 @@ pub async fn orgs_create_handler(
                     conf: &conf,
                     org_id,
                     org_slug: &form.slug,
-                    org_name: &form.name,
+                    org_name: name,
                     user_id: session.user.user_id,
                     user_email: &session.user.email,
                     plan_id: &plan_id_str,
@@ -493,7 +511,7 @@ pub async fn orgs_create_handler(
         Err(_) => Err(render_orgs_new_with_error(
             &session,
             "Failed to create organization",
-            &form.name,
+            name,
             &form.slug,
             account_type,
             plans,

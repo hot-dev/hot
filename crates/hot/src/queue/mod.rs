@@ -211,8 +211,8 @@ pub trait Queue<T>: Send + Sync {
     ) -> Result<(), Box<dyn Error + Send + Sync>>;
 }
 
-/// Delays between enqueue attempts of a handler's `send()` (see
-/// `enqueue_with_retries`). They fit the 5 s a one-shot CLI command waits
+/// Delays between enqueue attempts of a handler's `send()` or an API publish
+/// (see `enqueue_with_retries`). They fit the 5 s a one-shot CLI command waits
 /// for its pending enqueues on shutdown.
 pub const PUBLISH_RETRY_DELAYS: [Duration; 3] = [
     Duration::from_millis(250),
@@ -222,10 +222,10 @@ pub const PUBLISH_RETRY_DELAYS: [Duration; 3] = [
 
 /// Enqueue `item`, trying again after each of `delays` while it fails. For
 /// producers whose enqueue is the only copy of the work, such as a handler's
-/// `send()` (the event row is already written) or a scheduled run: a Redis
-/// restart or failover otherwise loses it. The Redis queue already resends
-/// once on a fresh connection when its cached one was dropped; these retries
-/// cover a server that takes a moment to come back.
+/// `send()` or an API publish (the event row is already written) or a
+/// scheduled run: a Redis restart or failover otherwise loses it. The Redis
+/// queue already resends once on a fresh connection when its cached one was
+/// dropped; these retries cover a server that takes a moment to come back.
 pub async fn enqueue_with_retries<T, Q>(
     queue: &Q,
     item: T,

@@ -872,6 +872,42 @@ impl Drop for PartialZip {
     }
 }
 
+/// Put a bundle built on this machine into build storage, where workers and
+/// deploy checks read it. `hot build` and `hot deploy` write bundles under
+/// `build_dir`, whatever storage the installation has.
+pub async fn ensure_bundle_in_storage(
+    db: &DatabasePool,
+    build: &Build,
+    storage: &dyn crate::storage::BuildStorage,
+    build_dir: &Path,
+    org_id: &Uuid,
+    env_id: &Uuid,
+) -> Result<(), String> {
+    use crate::storage::BuildStorage;
+    let id = &build.build_id;
+    if storage.exists(id, org_id, env_id).await? {
+        return Ok(());
+    }
+    let built = crate::storage::LocalBuildStorage::new(build_dir.to_path_buf());
+    let path = built.build_path(id, org_id, env_id);
+    if !built.exists(id, org_id, env_id).await? {
+        return Err(format!(
+            "Build {id} isn't in build storage ({}), or at {path}. Deploy it from the directory that built it.",
+            storage.build_path(id, org_id, env_id)
+        ));
+    }
+    let stored = storage
+        .store_build_from_path(id, org_id, env_id, Path::new(&path))
+        .await?;
+    // Locally the record's relative path stays right, under the storage path.
+    if build.storage_backend.as_deref() != Some(storage.storage_type()) {
+        Build::update_build_storage(db, id, &stored, storage.storage_type())
+            .await
+            .map_err(|e| format!("Failed to record where build {id} is stored: {e}"))?;
+    }
+    Ok(())
+}
+
 /// Main build creation function with database integration
 pub async fn build_create(
     db: &DatabasePool,
@@ -2877,6 +2913,168 @@ pub fn format_missing_ctx_message(missing: &[&CtxRequirementEntry], strict: bool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A store elsewhere: a local directory that reports another backend.
+    struct RemoteStore(crate::storage::LocalBuildStorage);
+
+    #[async_trait::async_trait]
+    impl crate::storage::BuildStorage for RemoteStore {
+        async fn store_build(
+            &self,
+            build_id: &Uuid,
+            org_id: &Uuid,
+            env_id: &Uuid,
+            data: Vec<u8>,
+        ) -> Result<String, String> {
+            self.0.store_build(build_id, org_id, env_id, data).await?;
+            Ok(format!("builds/{build_id}"))
+        }
+        async fn retrieve_build(
+            &self,
+            build_id: &Uuid,
+            org_id: &Uuid,
+            env_id: &Uuid,
+        ) -> Result<Vec<u8>, String> {
+            self.0.retrieve_build(build_id, org_id, env_id).await
+        }
+        async fn exists(
+            &self,
+            build_id: &Uuid,
+            org_id: &Uuid,
+            env_id: &Uuid,
+        ) -> Result<bool, String> {
+            self.0.exists(build_id, org_id, env_id).await
+        }
+        async fn delete_build(
+            &self,
+            build_id: &Uuid,
+            org_id: &Uuid,
+            env_id: &Uuid,
+        ) -> Result<(), String> {
+            self.0.delete_build(build_id, org_id, env_id).await
+        }
+        fn build_path(&self, build_id: &Uuid, org_id: &Uuid, env_id: &Uuid) -> String {
+            self.0.build_path(build_id, org_id, env_id)
+        }
+        fn storage_type(&self) -> &str {
+            "s3"
+        }
+    }
+
+    /// A bundle `hot build` wrote under `dir`, with the record it makes.
+    async fn built_bundle(
+        db: &DatabasePool,
+        data: &crate::db::TestData,
+        dir: &Path,
+    ) -> crate::db::Build {
+        use crate::storage::BuildStorage;
+        let build_id = Uuid::now_v7();
+        let relative = format!(
+            "{}/{}/{}.hot.zip",
+            data.org_id.simple(),
+            data.env_id.simple(),
+            build_id.simple()
+        );
+        crate::storage::LocalBuildStorage::new(dir.to_path_buf())
+            .store_build(&build_id, &data.org_id, &data.env_id, b"zip".to_vec())
+            .await
+            .unwrap();
+        Build::insert_build_with_storage(
+            db,
+            &build_id,
+            &data.project_id,
+            &build_id.simple().to_string(),
+            3,
+            Build::BUILD_TYPE_BUNDLE,
+            &data.user_id,
+            Some(&relative),
+            Some("local"),
+        )
+        .await
+        .unwrap();
+        Build::get_build(db, &build_id).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_local_bundle_moves_into_local_storage_elsewhere() {
+        use crate::storage::{BuildStorage, LocalBuildStorage};
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (built, stored) = (dir.path().join("built"), dir.path().join("stored"));
+        let build = built_bundle(&db, &data, &built).await;
+        let storage = LocalBuildStorage::new(stored);
+
+        ensure_bundle_in_storage(&db, &build, &storage, &built, &data.org_id, &data.env_id)
+            .await
+            .unwrap();
+
+        let in_storage = storage
+            .retrieve_build(&build.build_id, &data.org_id, &data.env_id)
+            .await
+            .unwrap();
+        assert_eq!(in_storage, b"zip");
+        let recorded = Build::get_build(&db, &build.build_id).await.unwrap();
+        assert_eq!(recorded.storage_path, build.storage_path);
+        assert_eq!(recorded.storage_backend.as_deref(), Some("local"));
+    }
+
+    /// Where the bundle is already in storage, as with the default path, the
+    /// file must not be copied over itself.
+    #[tokio::test]
+    async fn a_bundle_already_in_storage_is_left_alone() {
+        use crate::storage::{BuildStorage, LocalBuildStorage};
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let build = built_bundle(&db, &data, dir.path()).await;
+        let storage = LocalBuildStorage::new(dir.path().to_path_buf());
+
+        ensure_bundle_in_storage(
+            &db,
+            &build,
+            &storage,
+            dir.path(),
+            &data.org_id,
+            &data.env_id,
+        )
+        .await
+        .unwrap();
+
+        let in_storage = storage
+            .retrieve_build(&build.build_id, &data.org_id, &data.env_id)
+            .await
+            .unwrap();
+        assert_eq!(in_storage, b"zip");
+    }
+
+    #[tokio::test]
+    async fn a_remote_store_receives_the_bundle_and_the_record_says_so() {
+        use crate::storage::{BuildStorage, LocalBuildStorage};
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let built = dir.path().join("built");
+        let build = built_bundle(&db, &data, &built).await;
+        let storage = RemoteStore(LocalBuildStorage::new(dir.path().join("remote")));
+
+        ensure_bundle_in_storage(&db, &build, &storage, &built, &data.org_id, &data.env_id)
+            .await
+            .unwrap();
+
+        assert!(
+            storage
+                .exists(&build.build_id, &data.org_id, &data.env_id)
+                .await
+                .unwrap()
+        );
+        let recorded = Build::get_build(&db, &build.build_id).await.unwrap();
+        assert_eq!(recorded.storage_backend.as_deref(), Some("s3"));
+        assert_eq!(
+            recorded.storage_path,
+            Some(format!("builds/{}", build.build_id))
+        );
+    }
     use crate::bundle::BundleFile;
     use std::{fs, path::PathBuf};
 

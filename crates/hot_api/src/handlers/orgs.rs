@@ -32,7 +32,7 @@ use axum::{
     routing::{any, delete, get, post},
 };
 use chrono::{DateTime, Duration, Utc};
-use hot::db::api_key::ApiKey;
+use hot::db::api_key::{ApiKey, ApiKeyError};
 use hot::db::org::{CreateChild, OrgLifecycle};
 use hot::db::org_api_key::{
     CreateOrgApiKey, DEFAULT_ROTATION_OVERLAP_SECONDS, EffectiveOrgGrants, KeyStatus,
@@ -191,8 +191,19 @@ fn key_error(error: OrgApiKeyError, what: &str) -> ApiError {
         OrgApiKeyError::OrgSuspended => {
             forbidden("org_suspended", "The organization is suspended or archived")
         }
+        OrgApiKeyError::OverlapRunning(until) => overlap_running(until),
         OrgApiKeyError::Database(error) => internal(error),
     }
+}
+
+fn overlap_running(until: DateTime<Utc>) -> ApiError {
+    let until = until.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    conflict(
+        "rotation_overlap_running",
+        &format!(
+            "The previous secret works until {until}. Rotate after that, or pass overlap_seconds 0 to stop it now."
+        ),
+    )
 }
 
 fn org_error(error: hot::db::org::OrgError) -> ApiError {
@@ -713,7 +724,8 @@ pub struct ApiKeyResponse {
     /// Returned once, when the key is created or rotated.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
-    /// When the previous secret stops working, after a rotation.
+    /// When the previous secret stops working, while a rotation's overlap
+    /// runs. Absent otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub previous_secret_expires_at: Option<DateTime<Utc>>,
 }
@@ -733,7 +745,9 @@ async fn org_key_response(db: &DatabasePool, key: &OrgApiKey) -> Result<ApiKeyRe
         issuer_api_key_id: key.issuer_org_api_key_id,
         created_at: key.created_at,
         token: None,
-        previous_secret_expires_at: None,
+        previous_secret_expires_at: key
+            .previous_secret_expires_at()
+            .filter(|_| status.is_active()),
     })
 }
 
@@ -765,7 +779,9 @@ async fn env_key_response(
         issuer_api_key_id: issuer,
         created_at: key.created_at,
         token: None,
-        previous_secret_expires_at: None,
+        previous_secret_expires_at: state
+            .previous_secret_expires_at()
+            .filter(|_| status.is_active()),
     })
 }
 
@@ -1123,6 +1139,7 @@ pub async fn revoke_api_key(
 #[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
 pub struct RotateApiKeyRequest {
     /// Seconds the previous secret keeps working (default 86400, maximum 604800).
+    /// 0 stops it now, and ends a running overlap.
     #[serde(default)]
     pub overlap_seconds: Option<i64>,
 }
@@ -1149,35 +1166,35 @@ pub async fn rotate_api_key(
     let overlap = Duration::seconds(overlap);
     let target = resolve_target(&db, &principal, key_id).await?;
     require_descendant(&db, &principal, &target, actions::UPDATE).await?;
-    let mut response = match &target {
+    let (mut response, rotated) = match &target {
         Target::Org(key) => {
-            let token = key
+            let rotated = key
                 .rotate(&db, overlap)
                 .await
                 .map_err(|e| key_error(e, "API key"))?;
-            let mut response = org_key_response(&db, key).await?;
-            response.token = Some(token);
-            response
+            (org_key_response(&db, key).await?, rotated)
         }
         Target::Env { key, env } => {
             let scoped = db.with_scope(DatabaseScope::Environment {
                 org_id: env.org_id,
                 env_id: env.env_id,
             });
-            let token = ApiKey::rotate(
+            let rotated = ApiKey::rotate(
                 &scoped,
                 &key.api_key_id,
                 overlap,
                 &principal.key.created_by_user_id,
             )
             .await
-            .map_err(|_| not_found("API key"))?;
-            let mut response = env_key_response(&db, env, key).await?;
-            response.token = Some(token);
-            response
+            .map_err(|error| match error {
+                ApiKeyError::OverlapRunning(until) => overlap_running(until),
+                _ => not_found("API key"),
+            })?;
+            (env_key_response(&db, env, key).await?, rotated)
         }
     };
-    response.previous_secret_expires_at = Some(Utc::now() + overlap);
+    response.token = Some(rotated.token);
+    response.previous_secret_expires_at = Some(rotated.previous_secret_expires_at);
     tracing::info!(org_api_key_id = %principal.key.org_api_key_id, api_key_id = %key_id, action = "api-key.rotate", "org API mutation");
     Ok(Json(ApiResponse::new(response)))
 }

@@ -62,7 +62,14 @@
         <div class="mt-4 border-t border-gray-200 dark:border-gray-700 pt-3"><p>{{ row.key.description }} · {{ row.key.org_api_key_id }}{% match row.expires_at %}{% when Some with (at) %} · expires {{ at }}{% when None %}{% endmatch %}{% match row.key.issuer_org_api_key_id %}{% when Some with (issuer) %} · created by key {{ issuer }}{% when None %}{% endmatch %}</p>
             <pre class="text-xs text-gray-500 dark:text-gray-400 whitespace-pre-wrap">{{ row.key.permissions }}</pre>
             {% match row.status_label %}{% when Some with (label) %}<span class="badge badge-neutral">{{ label }}</span>{% when None %}{% endmatch %}
-            {% if row.revocable %}<form method="post" action="/@{{ root.slug }}/org-api-keys/{{ row.key.org_api_key_id }}/revoke"><button class="btn btn-secondary" type="submit">Revoke</button></form>{% endif %}
+            {% match row.previous_secret_expires_at %}{% when Some with (at) %}<p class="text-sm">Rotated: the previous secret works until {{ at }}.</p>{% when None %}{% endmatch %}
+            {% if row.revocable %}<div class="flex flex-wrap items-end gap-2 mt-2">
+                <form method="post" action="/@{{ root.slug }}/org-api-keys/{{ row.key.org_api_key_id }}/rotate" class="flex flex-wrap items-end gap-2">
+                    <label class="form-label">Keep the previous secret working for <select class="form-input block mt-1" name="overlap_seconds"><option value="3600">1 hour</option><option value="86400" selected>1 day</option><option value="604800">7 days</option><option value="0">No overlap: stop it now</option></select></label>
+                    <button class="btn btn-secondary" type="submit">Rotate</button>
+                </form>
+                <form method="post" action="/@{{ root.slug }}/org-api-keys/{{ row.key.org_api_key_id }}/revoke"><button class="btn btn-secondary" type="submit">Revoke</button></form>
+            </div>{% endif %}
         </div>
         {% endfor %}
     </details>
