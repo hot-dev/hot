@@ -2375,3 +2375,42 @@ fn parallel_dependency_levels_are_in_source_order() {
         }
     }
 }
+
+#[test]
+fn a_field_has_one_check_and_a_union_member_its_own() {
+    let info = |annotation: &str| {
+        let expr = crate::lang::parser::parse_type_annotation(annotation).unwrap();
+        Compiler::new().build_field_type_info_from_expr(&expr, false)
+    };
+    // The field's `$checks` entry covers it.
+    assert_eq!(info("Vec<Int>?").get("$check"), None);
+    let union = info("Vec<Int>? | Foo");
+    let Some(Val::Vec(members)) = union.get("$union") else {
+        panic!("no members in {union}");
+    };
+    assert!(members[0].get("$check").is_some(), "{union}");
+}
+
+#[test]
+fn a_field_check_scans_what_it_can() {
+    use crate::lang::bytecode::param_mask as kinds;
+    let masks = |annotation: &str| {
+        let expr = crate::lang::parser::parse_type_annotation(annotation).unwrap();
+        let check =
+            constraint_specs::field_check(constraint_specs::plain_field_spec(&expr).unwrap());
+        let Val::Vec(check) = check else {
+            panic!("{check} isn't an entry");
+        };
+        let [Val::Int(accepted), Val::Int(items), Val::Int(keys), _] = check.as_slice() else {
+            panic!("{check:?} isn't an entry");
+        };
+        (*accepted as u32, *items as u32, *keys as u32)
+    };
+    assert_eq!(masks("Map<Str, Int>"), (kinds::MAP, kinds::INT, kinds::STR));
+    assert_eq!(masks("Map<Str, Any>"), (kinds::MAP, 0, kinds::STR));
+    assert_eq!(masks("Map<Any, Int>"), (kinds::MAP, kinds::INT, 0));
+    assert_eq!(masks("Map<Any, Foo>"), (kinds::MAP, 0, 0));
+    assert_eq!(masks("Map<Any, Any>"), (kinds::MAP, 0, 0));
+    // Nothing simple describes these items, so they take the checked path.
+    assert_eq!(masks("Map<Str, Vec<Int>>").0, 0);
+}

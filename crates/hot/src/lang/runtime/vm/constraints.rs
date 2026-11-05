@@ -188,18 +188,21 @@ fn is_tagged_over(value: &Val, accepts: impl Fn(&Val) -> bool) -> bool {
         && map.get(&Val::from("$val")).is_some_and(accepts)
 }
 
-/// Whether a field's value needs no checked path: it is of `kinds`, and when
-/// `item_kinds` isn't 0 so is each item. An Err is a `Map`, but no field's
-/// value.
-fn passes_as_is(value: &Val, kinds: u32, item_kinds: u32) -> bool {
+/// Whether a field's value needs no checked path: it is of `kinds`, and each
+/// item and key is of `item_kinds` and `key_kinds` when those aren't 0. An Err
+/// is a `Map`, but no field's value.
+fn passes_as_is(value: &Val, kinds: u32, item_kinds: u32, key_kinds: u32) -> bool {
     let plain = |value: &Val, kinds: u32| param_mask::accepts(value, kinds) && !value.is_err();
+    let is_of = |value: &Val, kinds: u32| kinds == 0 || plain(value, kinds);
     if !plain(value, kinds) {
         return false;
     }
     match value {
-        _ if item_kinds == 0 => true,
-        Val::Vec(items) => items.iter().all(|item| plain(item, item_kinds)),
-        Val::Map(entries) => entries.values().all(|item| plain(item, item_kinds)),
+        _ if item_kinds == 0 && key_kinds == 0 => true,
+        Val::Vec(items) => items.iter().all(|item| is_of(item, item_kinds)),
+        Val::Map(entries) => entries
+            .iter()
+            .all(|(key, item)| is_of(key, key_kinds) && is_of(item, item_kinds)),
         _ => false,
     }
 }
@@ -483,10 +486,16 @@ impl VirtualMachine {
         let Val::Vec(check) = check else {
             return Ok(Ok(value.clone()));
         };
-        let [Val::Int(kinds), Val::Int(item_kinds), spec] = check.as_slice() else {
+        let [
+            Val::Int(kinds),
+            Val::Int(item_kinds),
+            Val::Int(key_kinds),
+            spec,
+        ] = check.as_slice()
+        else {
             return Ok(Ok(value.clone()));
         };
-        if passes_as_is(value, *kinds as u32, *item_kinds as u32) {
+        if passes_as_is(value, *kinds as u32, *item_kinds as u32, *key_kinds as u32) {
             return Ok(Ok(value.clone()));
         }
         Ok(self
@@ -885,20 +894,24 @@ impl VirtualMachine {
                 let mut checked_entries = indexmap::IndexMap::with_capacity(entries.len());
                 for (key, item) in std::sync::Arc::unwrap_or_clone(entries).into_iter() {
                     path.push(key.clone());
-                    let entry = self.check_map_entry(
-                        key,
-                        item,
-                        key_spec.as_ref(),
-                        &elem,
-                        &checked_entries,
-                        path,
-                    )?;
+                    let failure =
+                        match self.check_map_entry(key, item, key_spec.as_ref(), &elem, path)? {
+                            Ok((key, item)) => match checked_entries.entry(key) {
+                                indexmap::map::Entry::Vacant(slot) => {
+                                    slot.insert(item);
+                                    None
+                                }
+                                indexmap::map::Entry::Occupied(slot) => Some(self.base_mismatch(
+                                    "distinct map keys after conversion",
+                                    slot.key(),
+                                    path,
+                                )),
+                            },
+                            Err(failure) => Some(failure),
+                        };
                     path.pop();
-                    match entry {
-                        Ok((key, item)) => {
-                            checked_entries.insert(key, item);
-                        }
-                        Err(failure) => return Ok(Err(failure)),
+                    if let Some(failure) = failure {
+                        return Ok(Err(failure));
                     }
                 }
                 Ok(Ok(Val::map(checked_entries)))
@@ -940,7 +953,6 @@ impl VirtualMachine {
         item: Val,
         key_spec: Option<&Val>,
         elem: &Val,
-        checked: &indexmap::IndexMap<Val, Val>,
         path: &mut Vec<Val>,
     ) -> VmResult<Result<(Val, Val), Box<Failure>>> {
         let key = match key_spec {
@@ -950,13 +962,6 @@ impl VirtualMachine {
             },
             None => key,
         };
-        if checked.contains_key(&key) {
-            return Ok(Err(self.base_mismatch(
-                "distinct map keys after conversion",
-                &key,
-                path,
-            )));
-        }
         Ok(self.check_value(item, elem, path)?.map(|item| (key, item)))
     }
 

@@ -343,7 +343,6 @@ async fn test_schedule_cancel_is_scoped_to_the_callers_env() {
         &schedule_id,
         &td.build_id,
         &ScheduleType::Cron("0 * * * *".to_string()),
-        Some(&td.org_id),
         SchedulePolicy::self_hosted_default(),
         "::app",
         "hourly",

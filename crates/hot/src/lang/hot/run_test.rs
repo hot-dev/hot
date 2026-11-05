@@ -131,6 +131,78 @@ all()"#;
     }
 
     #[test]
+    fn maps_of_valid_keys_stay_on_the_fast_path_and_others_are_refused() {
+        let source = r#"::t ns
+Foo type { a: Int }
+Any-values type { m: Map<Str, Any> }
+Str-values type { m: Map<Str, Str> }
+Int-keys type { m: Map<Int, Any> }
+Dec-keys type { m: Map<Dec, Str> }
+Custom type { m: Map<Any, Foo> }
+Whatever type { m: Map<Any, Any> }
+all fn (): Vec {
+    numbered assoc({}, 7, "x")
+    [eq(Any-values({m: {a: 1, b: "x"}}).m, {a: 1, b: "x"}),
+     is-err(Any-values({m: numbered})),
+     eq(Str-values({m: {a: "x"}}).m, {a: "x"}),
+     is-err(Str-values({m: numbered})),
+     is-err(Str-values({m: {a: 1}})),
+     eq(keys(Int-keys({m: numbered}).m), [7]),
+     eq(keys(Int-keys({m: {"7": "x"}}).m), [7]),
+     eq(keys(Dec-keys({m: numbered}).m), [7.0]),
+     eq(Custom({m: {x: {a: 1}}}).m, {x: {a: 1}}),
+     eq(Whatever({m: numbered}).m, numbered),
+     is-err(Whatever({m: "x"}))]
+}
+all()
+all()"#;
+        assert_same_with_and_without_jit(
+            source,
+            &val!([
+                true, true, true, true, true, true, true, true, true, true, true
+            ]),
+        );
+    }
+
+    #[test]
+    fn converted_map_keys_collide_in_either_order() {
+        let source = r#"::t ns
+Counts type { m: Map<Int, Str> }
+all fn (): Vec {
+    [is-err(Counts({m: assoc({"1": "a"}, 1, "b")})),
+     is-err(Counts({m: assoc(assoc({}, 1, "a"), "1", "b")})),
+     get(Counts({m: assoc({"1": "a"}, 2, "b")}).m, 2)]
+}
+all()
+all()"#;
+        assert_same_with_and_without_jit(source, &val!([true, true, "b"]));
+    }
+
+    #[test]
+    fn optional_collections_are_checked_once_and_still_converted() {
+        let source = r#"::t ns
+Other type { name: Str }
+Field type { xs: Vec<Dec>? }
+Member type { xs: Vec<Dec>? | Other }
+Shape enum { Many(Vec<Dec>?) }
+all fn (): Vec {
+    [eq(Field({xs: [1]}).xs, [1.0]),
+     eq(Field({xs: null}).xs, null),
+     is-err(Field({xs: ["x"]})),
+     eq(Member({xs: [1]}).xs, [1.0]),
+     is-type(Member({xs: {name: "x"}}).xs, Other),
+     is-err(Member({xs: ["x"]})),
+     is-err(Shape.Many(["x"]))]
+}
+all()
+all()"#;
+        assert_same_with_and_without_jit(
+            source,
+            &val!([true, true, true, true, true, true, true]),
+        );
+    }
+
+    #[test]
     fn map_fields_validate_keys_without_losing_converted_entries() {
         let source = r#"::t ns
 Counts type { counts: Map<Str, Int> }

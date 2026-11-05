@@ -2948,7 +2948,6 @@ mod tests {
             &Uuid::now_v7(),
             &data.build_id,
             &crate::db::ScheduleType::Cron("0 * * * * *".to_string()),
-            Some(&data.org_id),
             crate::db::SchedulePolicy::self_hosted_default(),
             "::app::jobs",
             "nightly",

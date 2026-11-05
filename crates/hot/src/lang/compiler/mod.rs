@@ -5825,7 +5825,7 @@ impl Compiler {
             let data_reg = if payload_expr.is_some() { 1 } else { 6 };
 
             let associated_type_info = match &payload_expr {
-                Some(expr) => self.build_field_type_info_from_expr(expr, true),
+                Some(expr) => self.build_checked_type_info(expr),
                 // Type_info for the associated type (for ConstructTyped
                 // instruction). It has no $all_fields, so the VM calls the
                 // type's constructor.
@@ -6208,11 +6208,11 @@ impl Compiler {
     }
 
     fn build_field_type_info_from_expr(&self, type_expr: &TypeExpr, include_builtin: bool) -> Val {
-        let mut info = match type_expr {
+        match type_expr {
             TypeExpr::Union(parts) => {
                 let members = parts
                     .iter()
-                    .map(|part| self.build_field_type_info_from_expr(part, true))
+                    .map(|part| self.build_checked_type_info(part))
                     .filter(|info| !Self::is_empty_map(info))
                     .collect::<Vec<_>>();
 
@@ -6289,13 +6289,15 @@ impl Compiler {
                 Val::map(type_info)
             }
             TypeExpr::Generic(name, _) => self.build_custom_type_info(name),
-        };
+        }
+    }
 
-        // A union may mix built-in and constructed members, so its checks
-        // must follow the member selected by construction. An outer field's
-        // plain check cannot describe the constructed alternatives.
-        if include_builtin
-            && let Some(spec) = constraint_specs::plain_field_spec(type_expr)
+    /// Type info for a value no field's `$checks` entry describes: a union
+    /// member or an enum payload. A union may mix built-in and constructed
+    /// members, so its checks must follow the member selected by construction.
+    fn build_checked_type_info(&self, type_expr: &TypeExpr) -> Val {
+        let mut info = self.build_field_type_info_from_expr(type_expr, true);
+        if let Some(spec) = constraint_specs::plain_field_spec(type_expr)
             && let Val::Map(entries) = &mut info
             && let Some(Val::Str(type_name)) = entries.get(&Val::from("$type"))
         {

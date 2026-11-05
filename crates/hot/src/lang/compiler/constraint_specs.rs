@@ -182,19 +182,15 @@ pub(super) fn plain_field_spec(type_expr: &TypeExpr) -> Option<Val> {
         TypeExpr::Simple(name) | TypeExpr::Named(name) => primitive(name).then(|| base(name)),
         TypeExpr::Generic(name, params) => match (name.as_str(), params.as_slice()) {
             ("Vec", [elem]) => Some(contents("vec", "Vec", elem)),
-            ("Map", [key, value]) => {
-                let mut entries = vec![
-                    (
-                        "elem",
-                        plain_field_spec(value).unwrap_or_else(|| node("any", vec![])),
-                    ),
-                    ("tagged", Val::Bool(true)),
-                ];
-                if let Some(key) = plain_field_spec(key) {
-                    entries.push(("key", key));
+            ("Map", [key, value]) => match (plain_field_spec(key), plain_field_spec(value)) {
+                (None, None) => Some(base("Map")),
+                (key, value) => {
+                    let elem = value.unwrap_or_else(|| node("any", vec![]));
+                    let mut entries = vec![("elem", elem), ("tagged", Val::Bool(true))];
+                    entries.extend(key.map(|key| ("key", key)));
+                    Some(node("map", entries))
                 }
-                Some(node("map", entries))
-            }
+            },
             ("Vec" | "Map", _) => Some(base(name)),
             _ => None,
         },
@@ -213,21 +209,26 @@ pub(super) fn plain_field_spec(type_expr: &TypeExpr) -> Option<Val> {
     }
 }
 
-/// A field's entry in a record's `$checks`: `[kinds, item kinds, spec]`. A
-/// value of `kinds`, whose items are of `item kinds` when that isn't 0, passes
-/// as it is; any other value takes the checked path with `spec`.
+/// A field's entry in a record's `$checks`: `[kinds, item kinds, key kinds,
+/// spec]`. A value of `kinds`, whose items are of `item kinds` and whose keys
+/// are of `key kinds` when those aren't 0, passes as it is; any other value
+/// takes the checked path with `spec`.
 pub(super) fn field_check(spec: Val) -> Val {
     use crate::lang::bytecode::param_mask as kinds;
-    let items = spec_entry(&spec, "elem").map_or(0, spec_mask);
+    let elem = spec_entry(&spec, "elem");
+    let items = elem.map_or(0, spec_mask);
+    let any_items = elem.is_some_and(|elem| get_str(elem, "kind") == Some("any"));
+    let key = spec_entry(&spec, "key");
+    let keys = key.map_or(0, spec_mask);
     let accepted = match get_str(&spec, "kind") {
         Some("vec") if items != 0 => kinds::VEC,
-        // The fast entry only describes values, not keys.
-        Some("map") if items != 0 && spec_entry(&spec, "key").is_none() => kinds::MAP,
+        Some("map") if (items != 0 || any_items) && (key.is_none() || keys != 0) => kinds::MAP,
         _ => spec_mask(&spec),
     };
     Val::vec(vec![
         Val::Int(i64::from(accepted)),
         Val::Int(i64::from(items)),
+        Val::Int(i64::from(keys)),
         spec,
     ])
 }
