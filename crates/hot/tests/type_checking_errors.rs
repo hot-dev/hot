@@ -1315,6 +1315,102 @@ mod type_checking_tests {
         );
     }
 
+    fn mismatches(source: &str) -> Vec<String> {
+        compile_and_get_type_errors(source)
+            .iter()
+            .filter(|error| matches!(error, CompilerError::TypeMismatch { .. }))
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    // An alias means what it means where it's declared, wherever it's used.
+    #[test]
+    fn test_aliases_resolve_in_their_own_namespace() {
+        let aliases = r#"
+            ::money ns
+            Money type Dec
+            Cost type Money
+            Costs type Vec<Money>?
+            Early type Later
+            Later type Dec
+            Looped type Vec<Looped>?
+
+            ::test ns
+            Money type Str
+            ::m ::money
+            spend fn (x: ::m/Cost): ::m/Cost { x }
+            spend-all fn (x: ::m/Costs): ::m/Costs { x }
+            spend-early fn (x: ::m/Early): ::m/Early { x }
+            spend-looped fn (x: ::m/Looped): ::m/Looped { x }
+            a spend(::m/Money(5.0))
+            b spend-all([::m/Money(5.0)])
+            c spend-early(::m/Later(5.0))
+            d spend-looped([[]])
+        "#;
+        assert_eq!(mismatches(aliases), Vec::<String>::new());
+
+        let wrong = r#"
+            ::money ns
+            Money type Dec
+            Cost type Money
+
+            ::test ns
+            Money type Str
+            ::m ::money
+            spend fn (x: ::m/Cost): ::m/Cost { x }
+            a spend("five")
+        "#;
+        assert_eq!(mismatches(wrong).len(), 1);
+    }
+
+    #[test]
+    fn test_inline_refinements_resolve_inside_generics() {
+        let source = r#"
+            ::money ns
+            Money type Dec
+
+            ::test ns
+            ::m ::money
+            keep fn (x: Result<::m/Money> where is-ok(%)): Bool { true }
+            all fn (x: Vec<::m/Money> where gt(length(%), 0)): Bool { true }
+            a keep(Ok(::m/Money(5.0)))
+            b all([::m/Money(5.0)])
+        "#;
+        assert_eq!(mismatches(source), Vec::<String>::new());
+    }
+
+    // Function bodies may each declare their own type of one name.
+    #[test]
+    fn test_local_aliases_of_one_name_stay_apart() {
+        let source = r#"
+            ::test ns
+            first fn (): Dec {
+                Local type Dec
+                Local(5.0)
+            }
+            second fn (): Str {
+                Local type Str
+                Local("five")
+            }
+        "#;
+        assert_eq!(mismatches(source), Vec::<String>::new());
+    }
+
+    // A deep assignment to a type's name imports nothing over it.
+    #[test]
+    fn test_deep_assignments_leave_aliases_alone() {
+        let source = r#"
+            ::test ns
+            Money type Dec
+            Money.rate ::hot::math/abs
+            pay fn (x: Money where gt(%, 0)): Money { x }
+            a pay("nope")
+        "#;
+        let errors = mismatches(source);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(!errors[0].contains("abs"), "{errors:?}");
+    }
+
     // A core type declared in two hot-std namespaces resolves by load order,
     // so only deliberate pairs may exist: `::hot::exec` re-declares `run`'s
     // `Failure` and `Cancellation` as its context-aware forms.
