@@ -1144,6 +1144,28 @@ counted fn (items: Vec, limit: Any): Int {
         assert_same_with_and_without_jit(src, &expected);
     }
 
+    /// A `where` predicate compares the same way, so a constraint on a named
+    /// number holds the number to its bound in both directions.
+    #[test]
+    fn constraints_compare_named_numbers_as_their_numbers() {
+        let src = r#"::t ns
+Money type Dec
+Count type Int
+Capped type { cost: Money where lte(%, 100) }
+Owed type { amount: Money where gt(%, 0) }
+Few type { count: Count where lt(%, 10) }
+capped fn (cost: Any): Bool { is-err(Capped(cost: cost)) }
+owed fn (amount: Any): Bool { is-err(Owed(amount: amount)) }
+few fn (count: Any): Bool { is-err(Few(count: count)) }
+[
+    capped(Money(80.0)), capped(Money(200.0)), capped(Money(100.0)),
+    owed(Money(5.0)), owed(Money(-5.0)),
+    few(Count(9)), few(Count(10)),
+]"#;
+        let expected = val!([false, true, false, false, true, false, true]);
+        assert_same_with_and_without_jit(src, &expected);
+    }
+
     /// Operands with no order give an Err, as `add` does for a value that isn't
     /// a number, and never an answer read from how the values print. Compiled
     /// code keeps that Err a value, so each tier sees the same thing, including
@@ -1196,6 +1218,137 @@ negated fn (a: Any, b: Any): Bool {{ not(lt(a, b)) }}
         let row = val!([true, true, true, true, "else", true, true]);
         let expected = Val::vec(vec![row; operands.len()]);
         assert_same_with_and_without_jit(&src, &expected);
+    }
+
+    /// A field's kind isn't known when a function compiles, so compiled code
+    /// reaches the comparison that takes any value. That comparison has to keep
+    /// an Err a value: a raw Bool would turn it into `false`, and where the
+    /// interpreter halts or returns the Err, the run would go on with an answer.
+    #[test]
+    fn a_compiled_comparison_on_a_field_keeps_its_err() {
+        let src = r#"::t ns
+Money type Dec
+kept fn (m: Map): Bool {
+    result gt(m.a, m.b)
+    is-err(result)
+}
+returned fn (m: Map): Bool { lt(m.a, m.b) }
+returned-any fn (m: Map): Any { gte(m.a, m.b) }
+tested fn (m: Map): Str { if(lte(m.a, m.b), "then", "else") }
+negated fn (m: Map): Bool { not(gt(m.a, m.b)) }
+both fn (m: Map): Bool { and(gt(m.a, 0), lt(m.a, m.b)) }
+good {a: 2, b: 1}
+named {a: Money(200.0), b: 100}
+bad {a: Money(80.0), b: null}
+[
+    kept(good), kept(good), kept(good), kept(named), kept(bad),
+    returned(good), returned(good), returned(good), returned(named), is-err(returned(bad)),
+    returned-any(good), returned-any(good), returned-any(named), is-err(returned-any(bad)),
+    tested(good), tested(good), tested(good), tested(named), tested(bad),
+    negated(good), negated(good), negated(good), negated(named), negated(bad),
+    both(good), both(good), both(good), both(named),
+]"#;
+        let expected = val!([
+            false, false, false, false, true,
+            false, false, false, false, true,
+            true, true, true, true,
+            "else", "else", "else", "else", "else",
+            false, false, false, false, true,
+            false, false, false, false
+        ]);
+        assert_same_with_and_without_jit(src, &expected);
+    }
+
+    /// A compiled order on a field is owned, so it meets raw values where
+    /// flows and calls join: a raw `true` read as a pointer would crash here.
+    #[test]
+    fn a_compiled_order_on_a_field_mixes_with_raw_results() {
+        let src = r#"::t ns
+Money type Dec
+joined fn (m: Map, known: Bool): Bool {
+    cond {
+        known => { true }
+        => { gt(m.a, m.b) }
+    }
+}
+joined-other-way fn (m: Map, known: Bool): Bool {
+    cond {
+        known => { lt(m.a, m.b) }
+        => { false }
+    }
+}
+by-if fn (m: Map, known: Bool): Bool { if(known, gte(m.a, m.b), eq(m.a, m.b)) }
+counted fn cond (m: Map, n: Int, total: Int): Int {
+    eq(n, 0) => { total }
+    gt(m.a, m.b) => { counted(m, sub(n, 1), add(total, 1)) }
+    => { counted(m, sub(n, 1), total) }
+}
+last-is-over fn cond (m: Map, n: Int): Bool {
+    eq(n, 0) => { gt(m.a, m.b) }
+    => { last-is-over(m, sub(n, 1)) }
+}
+over {a: Money(200.0), b: 100}
+under {a: Money(80.0), b: 100}
+[
+    joined(over, true), joined(over, false), joined(under, false), joined(under, true),
+    joined(under, false), joined(over, false),
+    joined-other-way(under, true), joined-other-way(over, true), joined-other-way(over, false),
+    joined-other-way(under, true),
+    by-if(over, true), by-if(under, true), by-if(under, false), by-if(over, true),
+    counted(over, 5, 0), counted(under, 5, 0), counted(over, 5, 0),
+    last-is-over(over, 3), last-is-over(under, 3), last-is-over(over, 3),
+]"#;
+        let expected = val!([
+            true, true, false, true, false, true, true, false, false, true, true, false, false,
+            true, 5, 0, 5, true, false, true
+        ]);
+        assert_same_with_and_without_jit(src, &expected);
+    }
+
+    /// The same on a field, with the Err consumed after compiling.
+    #[test]
+    fn a_compiled_comparison_on_a_field_halts_when_its_err_is_consumed() {
+        let cases = [
+            (
+                "takes fn (x: Bool): Bool { x }\nprobe fn (m: Map): Bool { takes(gt(m.a, m.b)) }",
+                "gt requires numbers (an Err passed to parameter `x` of ::t/takes;",
+            ),
+            (
+                "probe fn (m: Map): Any {\n    result lte(m.a, m.b)\n    Str(result)\n}",
+                "lte requires numbers (an Err passed",
+            ),
+        ];
+        for (body, expected) in cases {
+            let src = format!(
+                "::t ns\nMoney type Dec\n{body}\nprobe({{a: 1, b: 2}})\nprobe({{a: 1, b: 2}})\nprobe({{a: 1, b: 2}})\nprobe({{a: Money(1.0), b: null}})"
+            );
+            for (mode, conf) in [
+                ("jit", crate::val!({"jit": {"threshold": 1}})),
+                ("interpreter", crate::val!({"jit": {"mode": "off"}})),
+            ] {
+                let error = compile_and_run_with_std_conf(&src, Some(conf))
+                    .expect_err("the Err is consumed");
+                assert!(
+                    error.contains(&format!("Result error: {expected}")),
+                    "{mode}: {error}\n{src}"
+                );
+            }
+        }
+    }
+
+    /// A pipeline's comparison on a value with no order stops the run in both
+    /// tiers, fused or not, as `add` does there.
+    #[test]
+    fn a_pipeline_comparison_with_no_order_halts() {
+        let src = "::t ns\nMoney type Dec\nprobe fn (xs: Vec): Int { length(filter(xs, gt(%, 0))) }\nprobe([1, 2])\nprobe([1, 2])\nprobe([1, 2])\nprobe([1, null])";
+        for (mode, conf) in [
+            ("jit", crate::val!({"jit": {"threshold": 1}})),
+            ("interpreter", crate::val!({"jit": {"mode": "off"}})),
+        ] {
+            let error = compile_and_run_with_std_conf(src, Some(conf))
+                .expect_err("the predicate's Err is consumed");
+            assert!(error.contains("gt requires numbers"), "{mode}: {error}");
+        }
     }
 
     /// Consuming that Err halts, and compiled code names what consumed it as
