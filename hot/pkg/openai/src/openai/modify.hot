@@ -45,7 +45,7 @@ MessageObject type {
     assistant_id: Str?,
     run_id: Str?,
     attachments: Vec<Map>?,
-    metadata: Metadata
+    metadata: Metadata?
 }
 
 // Reasoning effort level (e.g. "low", "medium", "high")
@@ -56,7 +56,7 @@ ThreadObject type {
     object: "thread",
     created_at: Int,
     tool_resources: Map,
-    metadata: Metadata
+    metadata: Metadata?
 }
 
 ModifyThreadRequest type {
@@ -86,7 +86,7 @@ VectorStoreObject type {
     expires_after: VectorStoreExpirationAfter?,
     expires_at: Int?,
     last_active_at: Int?,
-    metadata: Metadata
+    metadata: Metadata?
 }
 
 // Response format: "auto", or {type: "json_object"}, or {type: "json_schema", json_schema: {...}}
@@ -129,7 +129,7 @@ RunObject type {
     model: Str,
     instructions: Str?,
     tools: Vec<AssistantTool>,
-    metadata: Metadata,
+    metadata: Metadata?,
     usage: RunCompletionUsage?,
     temperature: Dec?,
     top_p: Dec?,
@@ -161,7 +161,7 @@ AssistantObject type {
     instructions: Str?,
     tools: Vec<AssistantTool>,
     tool_resources: Map?,
-    metadata: Metadata,
+    metadata: Metadata?,
     temperature: Dec?,
     top_p: Dec?,
     response_format: AssistantsApiResponseFormatOption?
@@ -198,7 +198,7 @@ ModifyAssistantResponse type {
     instructions: Str?,
     tools: Vec<AssistantTool>,
     tool_resources: Map?,
-    metadata: Metadata,
+    metadata: Metadata?,
     temperature: Dec?,
     top_p: Dec?,
     response_format: AssistantsApiResponseFormatOption?
@@ -263,7 +263,7 @@ ModifyThreadResponse type {
     object: "thread",
     created_at: Int,
     tool_resources: Map?,
-    metadata: Metadata
+    metadata: Metadata?
 }
 
 
@@ -302,7 +302,7 @@ ModifyMessageResponse type {
     assistant_id: Str?,
     run_id: Str?,
     attachments: Vec<Map>?,
-    metadata: Metadata
+    metadata: Metadata?
 }
 
 
@@ -345,7 +345,7 @@ ModifyRunResponse type {
     model: Str,
     instructions: Str?,
     tools: Vec<AssistantTool>,
-    metadata: Metadata,
+    metadata: Metadata?,
     usage: RunCompletionUsage?,
     temperature: Dec?,
     top_p: Dec?,
@@ -390,7 +390,7 @@ ModifyVectorStoreResponse type {
     expires_after: VectorStoreExpirationAfter?,
     expires_at: Int?,
     last_active_at: Int?,
-    metadata: Metadata
+    metadata: Metadata?
 }
 
 

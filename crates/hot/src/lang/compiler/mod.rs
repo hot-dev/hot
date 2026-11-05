@@ -6140,6 +6140,7 @@ impl Compiler {
     ///   $type: "TypeName",
     ///   $fields: {field_name: {$type: "FieldType", ...}, ...},
     ///   $checks: {field_name: [kinds, item_kinds, spec], ...},  // Built-in annotations; see `field_check`
+    ///   $base: [kinds, item_kinds, spec],  // What a type over a built-in one holds
     ///   $required: ["field1", "field2", ...],
     ///   $all_fields: ["field1", "field2", ...]  // All expected field names for validation
     /// }
@@ -6197,6 +6198,10 @@ impl Compiler {
         } else {
             // No fields defined - still mark as top-level type_info with empty $all_fields
             type_info.insert(Val::from("$all_fields"), Val::vec(vec![]));
+        }
+
+        if let Some(spec) = self.declared_base_spec(type_def) {
+            type_info.insert(Val::from("$base"), constraint_specs::field_check(spec));
         }
 
         Val::map(type_info)
@@ -6288,8 +6293,8 @@ impl Compiler {
         let (qualified_name, _found) = self.resolve_type_path(type_name);
 
         let mut type_info = indexmap::IndexMap::new();
-        if self.is_structured_type(&qualified_name) {
-            type_info.insert(Val::from("$structured"), Val::Bool(true));
+        if self.is_constructed_type(&qualified_name) {
+            type_info.insert(Val::from("$constructed"), Val::Bool(true));
         }
         type_info.insert(Val::from("$type"), Val::from(qualified_name));
         Val::map(type_info)

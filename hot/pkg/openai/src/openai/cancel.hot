@@ -93,7 +93,7 @@ RunObject type {
     model: Str,
     instructions: Str?,
     tools: Vec<AssistantTool>,
-    metadata: Metadata,
+    metadata: Metadata?,
     usage: RunCompletionUsage?,
     temperature: Dec?,
     top_p: Dec?,
@@ -169,7 +169,7 @@ EvalRun type {
     per_model_usage: Vec<Map>,
     per_testing_criteria_results: Vec<Map>,
     data_source: Map,
-    metadata: Metadata,
+    metadata: Metadata?,
     error: EvalApiError?
 }
 
@@ -277,7 +277,7 @@ CancelEvalRunResponse type {
     per_model_usage: Vec<Map>,
     per_testing_criteria_results: Vec<Map>,
     data_source: Map,
-    metadata: Metadata,
+    metadata: Metadata?,
     error: EvalApiError?
 }
 
@@ -391,7 +391,7 @@ CancelRunResponse type {
     model: Str,
     instructions: Str?,
     tools: Vec<AssistantTool>,
-    metadata: Metadata,
+    metadata: Metadata?,
     usage: RunCompletionUsage?,
     temperature: Dec?,
     top_p: Dec?,

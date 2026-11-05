@@ -458,6 +458,27 @@ impl VirtualMachine {
         field: &Val,
         record: &str,
     ) -> VmResult<Result<Val, Val>> {
+        self.check_constructed(value, check, vec![field.clone()], record)
+    }
+
+    /// Check what a type over a built-in one is given against its `$base`, an
+    /// entry of the same shape as a field's.
+    pub(crate) fn check_declared_base(
+        &mut self,
+        value: &Val,
+        check: &Val,
+        type_name: &str,
+    ) -> VmResult<Result<Val, Val>> {
+        self.check_constructed(value, check, Vec::new(), type_name)
+    }
+
+    fn check_constructed(
+        &mut self,
+        value: &Val,
+        check: &Val,
+        mut path: Vec<Val>,
+        type_name: &str,
+    ) -> VmResult<Result<Val, Val>> {
         let Val::Vec(check) = check else {
             return Ok(Ok(value.clone()));
         };
@@ -467,10 +488,9 @@ impl VirtualMachine {
         if passes_as_is(value, *kinds as u32, *item_kinds as u32) {
             return Ok(Ok(value.clone()));
         }
-        let mut path = vec![field.clone()];
         Ok(self
             .check_value(value.clone(), spec, &mut path)?
-            .map_err(|failure| self.constraint_error(&failure, &Boundary::constructor(record))))
+            .map_err(|failure| self.constraint_error(&failure, &Boundary::constructor(type_name))))
     }
 
     /// The `ConstraintError` of `value`, which isn't a `type_name` and can't

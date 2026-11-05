@@ -1,0 +1,197 @@
+// A type declared over a built-in one holds a value of that type: its
+// constructor checks what it's given the way a parameter does, and so does a
+// field of that type. A value of another kind is an
+// `Err(ConstraintError.Violation)`.
+::hot::test::declared-base-types ns
+meta ["test"]
+
+// Values reach the constructor at run time, where a literal would be
+// rejected by `hot check` already.
+dynamic fn (value: Any): Any {
+    value
+}
+
+// What a refused construction reports, or "ok".
+refusal fn (lazy result: Any): Str {
+    forced do result
+    cond {
+        is-ok(forced) => { "ok" }
+        => {
+            match err-value(forced) {
+                ConstraintError.Violation => { err-value(forced).message }
+                _ => { `not a violation: ${err-value(forced)}` }
+            }
+        }
+    }
+}
+
+Meters type Int
+Money type Dec
+Label type Str
+Enabled type Bool
+Tags type Vec<Str>
+Bag type Map
+Scores type Map<Str, Int>
+Note type Str?
+Identifier type Str | Int
+Anything type Any
+Handler type Fn
+Distance type Meters
+
+Trip type {
+    name: Str,
+    distance: Meters,
+}
+
+Leg type {
+    distance: Meters?,
+}
+
+Route type {
+    legs: Vec<Meters>,
+}
+
+Walk type {
+    steps: Int,
+}
+
+Step enum {
+    Stride(Meters),
+    Rest,
+}
+
+// ============================================================================
+// The constructor
+// ============================================================================
+
+test-a-declared-type-keeps-a-value-of-its-base
+meta ["test"] fn () {
+    assert-eq(5, untype(Meters(dynamic(5))))
+    assert(is-type(Meters(dynamic(5)), Meters))
+    assert-eq("a", untype(Label(dynamic("a"))))
+    assert-eq(true, untype(Enabled(dynamic(true))))
+    assert-eq(["a"], untype(Tags(dynamic(["a"]))))
+    assert-eq({a: 1}, untype(Bag(dynamic({a: 1}))))
+    assert-eq({a: 1}, untype(Scores(dynamic({a: 1}))))
+}
+
+test-a-declared-type-refuses-another-kind
+meta ["test"] fn () {
+    assert-eq("constructor of `Meters` expected Int, got Str", refusal(Meters(dynamic("x"))))
+    assert-eq("constructor of `Label` expected Str, got Int", refusal(Label(dynamic(5))))
+    assert-eq("constructor of `Enabled` expected Bool, got Str", refusal(Enabled(dynamic("x"))))
+    assert-eq("constructor of `Tags` expected Vec, got Str", refusal(Tags(dynamic("x"))))
+    assert-eq("constructor of `Bag` expected Map, got Vec", refusal(Bag(dynamic([1]))))
+}
+
+test-a-declared-type-refuses-a-map-for-a-plain-base
+meta ["test"] fn () {
+    assert-eq("constructor of `Meters` expected Int, got Map", refusal(Meters(dynamic({a: 1}))))
+}
+
+test-a-declared-type-refuses-null-unless-its-base-allows-it
+meta ["test"] fn () {
+    assert-eq("constructor of `Meters` expected Int, got Null", refusal(Meters(dynamic(null))))
+    assert-eq("ok", refusal(Note(dynamic(null))))
+    assert-eq("ok", refusal(Note(dynamic("a"))))
+}
+
+test-a-declared-type-converts-a-number-as-a-parameter-does
+meta ["test"] fn () {
+    assert-eq(5, untype(Meters(dynamic(5.0))))
+    assert(is-int(untype(Meters(dynamic(5.0)))))
+    assert(is-dec(untype(Money(dynamic(5)))))
+    assert-eq("constructor of `Meters` expected Int, got Dec", refusal(Meters(dynamic(5.5))))
+}
+
+test-a-declared-type-reads-into-its-contents
+meta ["test"] fn () {
+    assert-eq("constructor of `Tags` at `[1]` expected Str, got Int", refusal(Tags(dynamic(["a", 1]))))
+    assert-eq("constructor of `Scores` at `a` expected Int, got Str", refusal(Scores(dynamic({a: "x"}))))
+}
+
+test-a-declared-union-takes-any-of-its-members
+meta ["test"] fn () {
+    assert-eq("ok", refusal(Identifier(dynamic("a"))))
+    assert-eq("ok", refusal(Identifier(dynamic(5))))
+    assert(contains(refusal(Identifier(dynamic(true))), "constructor of `Identifier`"))
+}
+
+test-a-declared-any-or-fn-stays-unchecked
+meta ["test"] fn () {
+    assert-eq("ok", refusal(Anything(dynamic("x"))))
+    assert-eq("ok", refusal(Anything(dynamic(5))))
+    assert-eq("ok", refusal(Handler(dynamic("x"))))
+}
+
+test-a-declared-type-takes-its-own-value
+meta ["test"] fn () {
+    assert-eq(Meters(dynamic(5)), Meters(Meters(dynamic(5))))
+}
+
+test-a-declared-type-takes-a-value-over-the-same-base
+meta ["test"] fn () {
+    assert-eq(5, untype(Meters(Distance(dynamic(5)))))
+}
+
+test-a-type-declared-over-a-declared-type-checks-the-base
+meta ["test"] fn () {
+    assert-eq("ok", refusal(Distance(dynamic(5))))
+    assert-eq("ok", refusal(Distance(Meters(dynamic(5)))))
+    assert-eq("constructor of `Distance` expected Int, got Str", refusal(Distance(dynamic("x"))))
+}
+
+// ============================================================================
+// Fields
+// ============================================================================
+
+test-a-field-builds-its-declared-type
+meta ["test"] fn () {
+    trip Trip(name: "a", distance: dynamic(5))
+    assert(is-type(trip.distance, Meters))
+    assert-eq(5, untype(trip.distance))
+}
+
+test-a-field-refuses-another-kind-in-either-form
+meta ["test"] fn () {
+    expected "constructor of `Trip` at `distance` expected Int, got Str"
+    assert-eq(expected, refusal(Trip(name: "a", distance: dynamic("x"))))
+    assert-eq(expected, refusal(Trip({name: "a", distance: dynamic("x")})))
+}
+
+test-a-field-refuses-a-map-for-a-plain-base
+meta ["test"] fn () {
+    assert-eq(
+        "constructor of `Trip` at `distance` expected Int, got Map",
+        refusal(Trip(name: "a", distance: dynamic({a: 1}))),
+    )
+}
+
+test-a-field-refuses-null-unless-it-allows-it
+meta ["test"] fn () {
+    assert-eq(
+        "constructor of `Trip` at `distance` expected Int, got Null",
+        refusal(Trip(name: "a", distance: dynamic(null))),
+    )
+    assert(is-null(Leg(distance: dynamic(null)).distance))
+}
+
+test-a-field-keeps-a-value-of-its-type
+meta ["test"] fn () {
+    meters Meters(dynamic(5))
+    assert-eq(meters, Trip(name: "a", distance: meters).distance)
+}
+
+test-a-vec-of-a-declared-type-names-the-item
+meta ["test"] fn () {
+    assert-eq(
+        "constructor of `Route` at `legs[1]` expected Int, got Str",
+        refusal(Route(legs: dynamic([1, "x"]))),
+    )
+}
+
+test-a-variant-payload-is-checked-as-a-field-is
+meta ["test"] fn () {
+    assert-eq({Stride: 5}, untype(Step.Stride(dynamic(5))))
+    assert(contains(refusal(Step.Stride(dynamic("x"))), "expected Int, got Str"))
+}

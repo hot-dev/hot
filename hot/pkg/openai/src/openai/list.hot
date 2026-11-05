@@ -25,7 +25,7 @@ RunStepObject type {
     cancelled_at: Int?,
     failed_at: Int?,
     completed_at: Int?,
-    metadata: Metadata,
+    metadata: Metadata?,
     usage: RunStepCompletionUsage?
 }
 
@@ -101,7 +101,7 @@ MessageObject type {
     assistant_id: Str?,
     run_id: Str?,
     attachments: Vec<Map>?,
-    metadata: Metadata
+    metadata: Metadata?
 }
 
 BatchStatus type open "validating" | "failed" | "in_progress" | "finalizing" | "completed" | "expired" | "cancelling" | "cancelled"
@@ -145,7 +145,7 @@ AssistantObject type {
     instructions: Str?,
     tools: Vec<AssistantTool>,
     tool_resources: Map?,
-    metadata: Metadata,
+    metadata: Metadata?,
     temperature: Dec?,
     top_p: Dec?,
     response_format: AssistantsApiResponseFormatOption?
@@ -180,7 +180,7 @@ RunObject type {
     model: Str,
     instructions: Str?,
     tools: Vec<AssistantTool>,
-    metadata: Metadata,
+    metadata: Metadata?,
     usage: RunCompletionUsage?,
     temperature: Dec?,
     top_p: Dec?,
@@ -317,7 +317,7 @@ Eval type {
     data_source_config: Map,
     testing_criteria: Vec,
     created_at: Int,
-    metadata: Metadata
+    metadata: Metadata?
 }
 
 // Tool definition for an assistant (code_interpreter, file_search, or function)
@@ -408,7 +408,7 @@ VectorStoreObject type {
     expires_after: VectorStoreExpirationAfter?,
     expires_at: Int?,
     last_active_at: Int?,
-    metadata: Metadata
+    metadata: Metadata?
 }
 
 CertificateObjectType type open "certificate" | "organization.certificate" | "organization.project.certificate"

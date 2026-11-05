@@ -94,3 +94,38 @@ meta ["test"] fn () {
     }))
     assert(is-err(bad))
 }
+
+test-metadata-can-be-null
+meta ["test"] fn () {
+    run ::openai::cancel/RunObject(body({
+        id: "run_abc",
+        object: "thread.run",
+        created_at: 1699075072,
+        thread_id: "thread_abc",
+        assistant_id: "asst_abc",
+        status: "in_progress",
+        required_action: null,
+        last_error: null,
+        expires_at: 1699075672,
+        started_at: null,
+        cancelled_at: null,
+        failed_at: null,
+        completed_at: null,
+        incomplete_details: null,
+        model: "gpt-4o",
+        instructions: null,
+        tools: [],
+        metadata: null,
+        usage: null,
+        temperature: 1.0,
+        top_p: 1.0,
+        max_prompt_tokens: null,
+        max_completion_tokens: null,
+        truncation_strategy: {type: "auto", last_messages: null},
+        tool_choice: "auto",
+        parallel_tool_calls: true,
+        response_format: "auto",
+    }))
+    assert(is-ok(run))
+    assert(is-null(run.metadata))
+}
