@@ -20,7 +20,7 @@ Invite type {
     role: OrganizationRole,
     status: InviteStatus,
     invited_at: Int,
-    expires_at: Int,
+    expires_at: Int?,
     accepted_at: Int?,
     projects: Vec<Map>?
 }
@@ -38,7 +38,7 @@ InviteUserResponse type {
     role: OrganizationRole,
     status: InviteStatus,
     invited_at: Int,
-    expires_at: Int,
+    expires_at: Int?,
     accepted_at: Int?,
     projects: Vec<Map>?
 }

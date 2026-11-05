@@ -1,0 +1,96 @@
+::openai::test::response-records ns
+meta ["test"]
+
+// A record refuses null at a required field, so the records these responses
+// fill must say which of their fields OpenAI leaves null. The bodies are
+// ordinary ones: an empty list, a run that hasn't finished, a message a user
+// wrote, a job still queued.
+
+// A body as it arrives, past what `hot check` can see.
+body fn (value: Any): Any {
+    from-json(to-json(value))
+}
+
+test-an-empty-list-has-no-first-or-last-id
+meta ["test"] fn () {
+    list ::openai::containers/ListContainersResponse(body({
+        object: "list",
+        data: [],
+        first_id: null,
+        last_id: null,
+        has_more: false,
+    }))
+    assert(is-ok(list))
+    assert(is-null(list.first_id))
+}
+
+test-a-run-in-progress-has-not-finished-anything
+meta ["test"] fn () {
+    run ::openai::cancel/RunObject(body({
+        id: "run_abc",
+        object: "thread.run",
+        created_at: 1699075072,
+        thread_id: "thread_abc",
+        assistant_id: "asst_abc",
+        status: "in_progress",
+        required_action: null,
+        last_error: null,
+        expires_at: 1699075672,
+        started_at: null,
+        cancelled_at: null,
+        failed_at: null,
+        completed_at: null,
+        incomplete_details: null,
+        model: "gpt-4o",
+        instructions: null,
+        tools: [],
+        metadata: {},
+        usage: null,
+        temperature: 1.0,
+        top_p: 1.0,
+        max_prompt_tokens: null,
+        max_completion_tokens: null,
+        truncation_strategy: {type: "auto", last_messages: null},
+        tool_choice: "auto",
+        parallel_tool_calls: true,
+        response_format: "auto",
+    }))
+    assert(is-ok(run))
+    assert(is-null(run.usage))
+    assert(is-null(run.completed_at))
+}
+
+test-a-queued-job-has-no-model-yet
+meta ["test"] fn () {
+    job ::openai::cancel/FineTuningJob(body({
+        id: "ftjob_abc",
+        created_at: 1721764800,
+        error: null,
+        fine_tuned_model: null,
+        finished_at: null,
+        hyperparameters: {},
+        model: "gpt-4o-mini",
+        object: "fine_tuning.job",
+        organization_id: "org_abc",
+        result_files: [],
+        seed: 42,
+        status: "queued",
+        trained_tokens: null,
+        training_file: "file_abc",
+        validation_file: null,
+    }))
+    assert(is-ok(job))
+    assert(is-null(job.fine_tuned_model))
+}
+
+test-a-field-openai-always-sends-still-holds-its-type
+meta ["test"] fn () {
+    bad ::openai::containers/ListContainersResponse(body({
+        object: "list",
+        data: [],
+        first_id: null,
+        last_id: null,
+        has_more: "no",
+    }))
+    assert(is-err(bad))
+}

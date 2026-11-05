@@ -293,3 +293,69 @@ fn (
         Some(&Val::Int(0))
     );
 }
+
+/// Two namespaces declaring a type of the same name each describe their own:
+/// a tool's schema must not take the other namespace's fields.
+#[test]
+fn test_tool_schemas_keep_same_named_types_apart() {
+    let _g = TEST_LOCK.lock();
+    internal_mcp::clear_registry();
+
+    let src = r#"
+::desk::a ns
+TradeError type { code: Int }
+Facts type { income: Dec, error: TradeError }
+
+review fn (facts: Facts): TradeError {
+    facts.error
+}
+
+::desk::b ns
+TradeError type { reason: Str }
+Facts type { region: Str, error: TradeError }
+
+review fn (facts: Facts): TradeError {
+    facts.error
+}
+
+::desk::c ns
+Facts type { unrelated: Bool }
+review ::desk::a/review
+"#;
+    compile_and_extract(src);
+
+    let schema = |name: &str, field: &str| -> serde_json::Value {
+        let result = internal_mcp::schema_from_fn(&[function_ref(name.to_string())]);
+        let HotResult::Ok(Val::Map(map)) = result else {
+            panic!("expected Ok(Map) for {name}, got: {result:?}");
+        };
+        serde_json::to_value(map.get(&Val::from(field)).expect("schema field")).unwrap()
+    };
+
+    let a = schema("::desk::a/review", "input-schema");
+    let b = schema("::desk::b/review", "input-schema");
+    let facts_a = &a["properties"]["facts"]["properties"];
+    let facts_b = &b["properties"]["facts"]["properties"];
+    assert!(facts_a.get("income").is_some(), "{a}");
+    assert!(facts_a.get("region").is_none(), "{a}");
+    assert!(facts_b.get("region").is_some(), "{b}");
+    assert!(facts_b.get("income").is_none(), "{b}");
+    assert!(facts_a["error"]["properties"].get("code").is_some(), "{a}");
+    assert!(
+        facts_b["error"]["properties"].get("reason").is_some(),
+        "{b}"
+    );
+
+    let aliased = schema("::desk::c/review", "input-schema");
+    assert!(
+        aliased["properties"]["facts"]["properties"]
+            .get("income")
+            .is_some(),
+        "an alias's signature means what it does at its target: {aliased}"
+    );
+
+    let out_a = schema("::desk::a/review", "output-schema");
+    let out_b = schema("::desk::b/review", "output-schema");
+    assert!(out_a["properties"].get("code").is_some(), "{out_a}");
+    assert!(out_b["properties"].get("reason").is_some(), "{out_b}");
+}

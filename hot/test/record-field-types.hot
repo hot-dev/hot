@@ -1,0 +1,259 @@
+// A record's constructor checks each field against its declared type, the
+// way a parameter checks its argument: a value of another kind is an
+// `Err(ConstraintError.Violation)`, whichever form the fields came in.
+::hot::test::record-field-types ns
+meta ["test"]
+
+// Values reach the constructor at run time, where a literal would be
+// rejected by `hot check` already.
+dynamic fn (value: Any): Any {
+    value
+}
+
+// What a refused construction reports, or "ok".
+refusal fn (lazy result: Any): Str {
+    forced do result
+    cond {
+        is-ok(forced) => { "ok" }
+        => {
+            match err-value(forced) {
+                ConstraintError.Violation => { err-value(forced).message }
+                _ => { `not a violation: ${err-value(forced)}` }
+            }
+        }
+    }
+}
+
+Count type {
+    n: Int
+}
+
+Price type {
+    amount: Dec
+}
+
+Name type {
+    text: Str
+}
+
+Flag type {
+    on: Bool
+}
+
+Items type {
+    list: Vec
+}
+
+Attrs type {
+    attrs: Map
+}
+
+Blob type {
+    data: Bytes
+}
+
+Maybe type {
+    n: Int?
+}
+
+Numbers type {
+    values: Vec<Int>
+}
+
+Scores type {
+    scores: Map<Str, Int>
+}
+
+Either type {
+    value: Int | Str
+}
+
+Anything type {
+    value: Any
+}
+
+Callback type {
+    call: Fn
+}
+
+Inner type {
+    value: Int
+}
+
+Outer type {
+    inner: Inner
+}
+
+Group type {
+    members: Vec<Inner>
+}
+
+Optional type {
+    inner: Inner?
+}
+
+Stamp type {
+    on: ::hot::time/PlainDate
+}
+
+Outcome enum { Passed, Failed }
+Verdict type {
+    outcome: Outcome
+}
+
+Limited type {
+    n: Int where gt(%, 0),
+    label: Str
+}
+
+Meters type Int
+
+Due enum { Days(Int), Note(Str), Rate(Dec), Hold(Int?), Counts(Vec<Int>), Never }
+
+test-the-map-form-refuses-another-kind
+meta ["test"] fn () {
+    assert-eq("constructor of `Count` at `n` expected Int, got Str", refusal(Count(dynamic({n: "not an int"}))))
+    assert-eq("constructor of `Price` at `amount` expected Dec, got Str", refusal(Price(dynamic({amount: "lots"}))))
+    assert-eq("constructor of `Name` at `text` expected Str, got Int", refusal(Name(dynamic({text: 5}))))
+    assert-eq("constructor of `Flag` at `on` expected Bool, got Str", refusal(Flag(dynamic({on: "true"}))))
+    assert-eq("constructor of `Items` at `list` expected Vec, got Str", refusal(Items(dynamic({list: "x"}))))
+    assert-eq("constructor of `Attrs` at `attrs` expected Map, got Vec", refusal(Attrs(dynamic({attrs: [1]}))))
+    assert-eq("constructor of `Blob` at `data` expected Bytes, got Str", refusal(Blob(dynamic({data: "x"}))))
+}
+
+test-the-named-form-refuses-the-same-way
+meta ["test"] fn () {
+    assert-eq("constructor of `Count` at `n` expected Int, got Str", refusal(Count(n: dynamic("not an int"))))
+    assert-eq("constructor of `Price` at `amount` expected Dec, got Str", refusal(Price(amount: dynamic("lots"))))
+}
+
+test-the-violation-names-the-field
+meta ["test"] fn () {
+    violation err-value(Count(dynamic({n: "not an int"})))
+    assert-eq("constructor", violation.boundary)
+    assert-eq(["n"], violation.path)
+    assert-eq("::hot::test::record-field-types/Count", violation.declared-type)
+    assert-eq("Str", violation.value-type)
+}
+
+test-a-required-field-refuses-null
+meta ["test"] fn () {
+    assert-eq("constructor of `Count` at `n` expected Int, got Null", refusal(Count(dynamic({n: null}))))
+}
+
+test-a-missing-field-is-still-reported-as-missing
+meta ["test"] fn () {
+    assert(contains(Str(err-value(Count(dynamic({})))), "missing required field(s): n"))
+}
+
+test-numbers-convert-as-at-a-parameter
+meta ["test"] fn () {
+    assert(is-dec(Price(dynamic({amount: 5})).amount), "an Int becomes a Dec")
+    assert(is-int(Count(dynamic({n: 2.0})).n), "a whole Dec becomes an Int")
+    assert-eq("constructor of `Count` at `n` expected Int, got Dec", refusal(Count(dynamic({n: 1.5}))))
+}
+
+test-nullable-fields-take-null-or-the-type
+meta ["test"] fn () {
+    assert-eq("ok", refusal(Maybe(dynamic({n: null}))))
+    assert-eq("ok", refusal(Maybe(dynamic({}))))
+    assert-eq("ok", refusal(Maybe(dynamic({n: 1}))))
+    assert-eq("constructor of `Maybe` at `n` expected Int, got Str", refusal(Maybe(dynamic({n: "x"}))))
+}
+
+test-vec-and-map-check-their-contents
+meta ["test"] fn () {
+    assert-eq("ok", refusal(Numbers(dynamic({values: [1, 2]}))))
+    assert-eq("constructor of `Numbers` at `values` expected Vec, got Str", refusal(Numbers(dynamic({values: "x"}))))
+    assert-eq("constructor of `Numbers` at `values[1]` expected Int, got Str", refusal(Numbers(dynamic({values: [1, "x"]}))))
+    assert-eq("ok", refusal(Scores(dynamic({scores: {a: 1}}))))
+    assert-eq("constructor of `Scores` at `scores` expected Map, got Str", refusal(Scores(dynamic({scores: "x"}))))
+    assert-eq("constructor of `Scores` at `scores.a` expected Int, got Str", refusal(Scores(dynamic({scores: {a: "x"}}))))
+}
+
+test-a-union-takes-any-of-its-members
+meta ["test"] fn () {
+    assert-eq("ok", refusal(Either(dynamic({value: 1}))))
+    assert-eq("ok", refusal(Either(dynamic({value: "x"}))))
+    assert-eq("constructor of `Either` at `value` expected Int | Str, got Bool", refusal(Either(dynamic({value: true}))))
+}
+
+test-any-and-fn-are-not-checked
+meta ["test"] fn () {
+    assert-eq("ok", refusal(Anything(dynamic({value: "x"}))))
+    assert-eq("ok", refusal(Anything(dynamic({value: null}))))
+    assert-eq("ok", refusal(Callback({call: (x) { x }})))
+}
+
+test-a-tagged-value-over-the-kind-keeps-its-tag
+meta ["test"] fn () {
+    made Count(dynamic({n: Meters(5)}))
+    assert(is-type(made.n, Meters), "as at a parameter")
+    assert-eq("constructor of `Count` at `n` expected Int, got Inner", refusal(Count(dynamic({n: Inner({value: 1})}))))
+    assert-eq("ok", refusal(Numbers({values: [Meters(1)]})), "inside a Vec too")
+    assert-eq("ok", refusal(Scores({scores: Inner({value: 1})})), "a record is a Map of its fields")
+}
+
+test-a-nested-record-reports-the-whole-path
+meta ["test"] fn () {
+    assert-eq("constructor of `Outer` at `inner.value` expected Int, got Str", refusal(Outer(dynamic({inner: {value: "x"}}))))
+    assert-eq("constructor of `Group` at `members[1].value` expected Int, got Str", refusal(Group(dynamic({members: [{value: 1}, {value: "x"}]}))))
+    assert-eq(["inner", "value"], err-value(Outer(dynamic({inner: {value: "x"}}))).path)
+    assert-eq("::hot::test::record-field-types/Outer", err-value(Outer(dynamic({inner: {value: "x"}}))).declared-type)
+}
+
+test-a-record-field-refuses-a-plain-value
+meta ["test"] fn () {
+    assert-eq("constructor of `Outer` at `inner` expected Inner, got Str", refusal(Outer(dynamic({inner: "x"}))))
+    assert-eq("constructor of `Outer` at `inner` expected Inner, got Null", refusal(Outer(dynamic({inner: null}))))
+    assert-eq("constructor of `Group` at `members` expected Vec, got Str", refusal(Group(dynamic({members: "x"}))))
+    assert-eq("constructor of `Group` at `members[0]` expected Inner, got Int", refusal(Group(dynamic({members: [1]}))))
+    assert-eq("ok", refusal(Optional(dynamic({inner: null}))))
+    assert-eq("constructor of `Optional` at `inner` expected Inner, got Str", refusal(Optional(dynamic({inner: "x"}))))
+}
+
+test-an-enum-field-refuses-a-plain-value
+meta ["test"] fn () {
+    assert-eq("constructor of `Verdict` at `outcome` expected Outcome, got Str", refusal(Verdict(dynamic({outcome: "Passed"}))))
+    assert-eq("ok", refusal(Verdict(dynamic({outcome: Outcome.Passed}))))
+}
+
+test-a-declared-constructor-still-takes-its-input
+meta ["test"] fn () {
+    assert-eq("ok", refusal(Stamp(dynamic({on: "2026-05-06"}))))
+    assert-eq("ok", refusal(Outer(dynamic({inner: Inner({value: 1})}))))
+    assert-eq("ok", refusal(Outer(dynamic({inner: {value: 1}}))))
+}
+
+test-a-where-field-and-a-plain-field-both-hold
+meta ["test"] fn () {
+    assert-eq("ok", refusal(Limited(dynamic({n: 1, label: "a"}))))
+    assert-eq("constructor of `Limited` at `label` expected Str, got Int", refusal(Limited(dynamic({n: 1, label: 2}))))
+    assert-eq("constructor of `Limited` at `n` failed `gt(%, 0)`", refusal(Limited(dynamic({n: 0, label: "a"}))))
+}
+
+test-an-err-in-a-field-stays-that-err
+meta ["test"] fn () {
+    made Count({n: err("boom")})
+    assert(is-err(made))
+    assert-eq("boom", err-value(made))
+    assert-eq({value: 1}, err-value(Outer({inner: err({value: 1})})), "its payload isn't read as the field's data")
+    assert-eq("ok", refusal(Anything({value: err("boom")})), "an Any field holds it")
+}
+
+test-a-variant-checks-its-plain-payload
+meta ["test"] fn () {
+    assert-eq("constructor of `Due.Days` expected Int, got Str", refusal(Due.Days(dynamic("x"))))
+    assert-eq("constructor of `Due.Note` expected Str, got Int", refusal(Due.Note(dynamic(5))))
+    assert-eq("constructor of `Due.Hold` expected Int, got Str", refusal(Due.Hold(dynamic("x"))))
+    assert-eq("constructor of `Due.Counts` at `[0]` expected Int, got Str", refusal(Due.Counts(dynamic(["x"]))))
+    assert-eq("ok", refusal(Due.Days(dynamic(1))))
+    assert-eq("ok", refusal(Due.Hold(dynamic(null))))
+    assert(is-dec(untype(Due.Rate(dynamic(5)))), "an Int becomes a Dec")
+}
+
+test-rebuilding-a-record-checks-it-again
+meta ["test"] fn () {
+    changed assoc(Count({n: 1}), "n", dynamic("x"))
+    assert-eq("constructor of `Count` at `n` expected Int, got Str", refusal(Count(changed)))
+}

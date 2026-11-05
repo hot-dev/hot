@@ -14,7 +14,7 @@ meta ["test"] fn () {
         id: run-id,
         type: "event",
         status: "completed",
-        start-time: null,
+        start-time: ::hot::time/now(),
         retry-attempt: 0,
         max-retries: 0,
         retry-delay: 0,

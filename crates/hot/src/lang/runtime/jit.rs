@@ -588,6 +588,7 @@ struct JitHelperRefs {
     call_vm_local: FuncRef,
     binop_general: FuncRef,
     cmp_general: FuncRef,
+    order_general: FuncRef,
     is_err: FuncRef,
     failure_err: FuncRef,
     consume_err: FuncRef,
@@ -647,7 +648,7 @@ impl JitHelperRefs {
     /// The helpers that never look up a name in the calling frame or run
     /// Hot code that could. A call to a top-level function runs in its own
     /// frame.
-    fn scope_free(&self) -> [FuncRef; 47] {
+    fn scope_free(&self) -> [FuncRef; 48] {
         [
             self.call_vm,
             self.template_interpolate,
@@ -673,6 +674,7 @@ impl JitHelperRefs {
             self.drop_owned_val,
             self.binop_general,
             self.cmp_general,
+            self.order_general,
             self.is_err,
             self.failure_err,
             self.consume_err,
@@ -1964,6 +1966,7 @@ fn compile_with_return_kind(
     builder.symbol("hot_jit_call_vm_local", hot_jit_call_vm as *const u8);
     builder.symbol("hot_jit_binop_general", hot_jit_binop_general as *const u8);
     builder.symbol("hot_jit_cmp_general", hot_jit_cmp_general as *const u8);
+    builder.symbol("hot_jit_order_general", hot_jit_order_general as *const u8);
     builder.symbol("hot_jit_is_err", hot_jit_is_err as *const u8);
     builder.symbol("hot_jit_failure_err", hot_jit_failure_err as *const u8);
     builder.symbol("hot_jit_consume_err", hot_jit_consume_err as *const u8);
@@ -2486,6 +2489,9 @@ contained_helpers! {
         op: i64, left_kind: i64, left_raw: i64, right_kind: i64, right_raw: i64
     ) -> HALT_SENTINEL;
     hot_jit_cmp_general = hot_jit_cmp_general_body(
+        op: i64, left_kind: i64, left_raw: i64, right_kind: i64, right_raw: i64
+    ) -> HALT_SENTINEL;
+    hot_jit_order_general = hot_jit_order_general_body(
         op: i64, left_kind: i64, left_raw: i64, right_kind: i64, right_raw: i64
     ) -> HALT_SENTINEL;
 
@@ -3040,7 +3046,10 @@ fn binop_core_name(op: i64) -> &'static str {
     }
 }
 
-/// The core function a lowered comparison op (`hot_jit_cmp_general`) stands for.
+/// The op code of `ne` among the comparisons `cmp_core_name` names.
+const CMP_OP_NE: i64 = 5;
+
+/// The core function a lowered comparison op stands for.
 fn cmp_core_name(op: i64) -> &'static str {
     match op {
         0 => "lt",
@@ -3098,8 +3107,34 @@ unsafe fn hot_jit_binop_general_body(
     }
 }
 
-/// JIT helper: type-preserving comparison for operands that include OwnedVal.
-/// Returns 1 (true) or 0 (false).
+/// The operands of a lowered comparison that may hold any value.
+/// Strict-argument law: Result operands unwrap (Ok) or halt (Err) as at
+/// interpreter call boundaries. `None` is that halt: the failure state is
+/// set, and the enclosing frame's boundary observes it.
+unsafe fn cmp_general_operands(
+    op: i64,
+    left_kind: i64,
+    left_raw: i64,
+    right_kind: i64,
+    right_raw: i64,
+) -> Option<[Val; 2]> {
+    let left = strict_prepare_operand(
+        unsafe { decode_helper_val(left_kind, left_raw) },
+        cmp_core_name(op),
+        0,
+    )
+    .ok()?;
+    let right = strict_prepare_operand(
+        unsafe { decode_helper_val(right_kind, right_raw) },
+        cmp_core_name(op),
+        1,
+    )
+    .ok()?;
+    Some([left, right])
+}
+
+/// JIT helper: type-preserving equality for operands that include OwnedVal.
+/// Returns 1 (true) or 0 (false): any two values have an answer.
 unsafe fn hot_jit_cmp_general_body(
     op: i64,
     left_kind: i64,
@@ -3107,33 +3142,13 @@ unsafe fn hot_jit_cmp_general_body(
     right_kind: i64,
     right_raw: i64,
 ) -> i64 {
-    // Strict-argument law: Result operands unwrap (Ok) or halt (Err) as at
-    // interpreter call boundaries. On halt the failure state is set and 0
-    // is the only in-band value for the bare-bool ABI; the enclosing
-    // frame's boundary observes the halt.
-    let left = match strict_prepare_operand(
-        unsafe { decode_helper_val(left_kind, left_raw) },
-        cmp_core_name(op),
-        0,
-    ) {
-        Ok(v) => v,
-        Err(_) => return HALT_SENTINEL,
+    let Some(args) =
+        (unsafe { cmp_general_operands(op, left_kind, left_raw, right_kind, right_raw) })
+    else {
+        return HALT_SENTINEL;
     };
-    let right = match strict_prepare_operand(
-        unsafe { decode_helper_val(right_kind, right_raw) },
-        cmp_core_name(op),
-        1,
-    ) {
-        Ok(v) => v,
-        Err(_) => return HALT_SENTINEL,
-    };
-    let args = [left, right];
     use crate::lang::hot::r#type::HotResult;
     let result = match op {
-        0 => crate::lang::hot::cmp::lt(&args),
-        1 => crate::lang::hot::cmp::gt(&args),
-        2 => crate::lang::hot::cmp::lte(&args),
-        3 => crate::lang::hot::cmp::gte(&args),
         4 => crate::lang::hot::cmp::eq(&args),
         5 => crate::lang::hot::cmp::ne(&args),
         _ => return 0,
@@ -3154,6 +3169,39 @@ unsafe fn hot_jit_cmp_general_body(
             }
         }
         HotResult::Err(_) => 0,
+    }
+}
+
+/// JIT helper: `lt`, `gt`, `lte` or `gte` for operands that include OwnedVal.
+/// Operands with no order give an Err, which a raw Bool can't hold, so this
+/// gives an owned value, as `hot_jit_binop_general` does.
+unsafe fn hot_jit_order_general_body(
+    op: i64,
+    left_kind: i64,
+    left_raw: i64,
+    right_kind: i64,
+    right_raw: i64,
+) -> i64 {
+    let Some(args) =
+        (unsafe { cmp_general_operands(op, left_kind, left_raw, right_kind, right_raw) })
+    else {
+        return HALT_SENTINEL;
+    };
+    use crate::lang::hot::r#type::HotResult;
+    let result = match op {
+        0 => crate::lang::hot::cmp::lt(&args),
+        1 => crate::lang::hot::cmp::gt(&args),
+        2 => crate::lang::hot::cmp::lte(&args),
+        3 => crate::lang::hot::cmp::gte(&args),
+        _ => {
+            return new_owned_val(Val::err(Val::Str(
+                format!("unknown comparison op {}", op).into(),
+            )));
+        }
+    };
+    match result {
+        HotResult::Ok(val) => new_owned_val(val),
+        HotResult::Err(err) => new_owned_val(Val::err(err)),
     }
 }
 
@@ -4402,6 +4450,14 @@ fn declare_jit_helpers(
             func,
             ptr_ty,
             "hot_jit_cmp_general",
+            &[types::I64, types::I64, types::I64, types::I64, types::I64],
+            &[types::I64],
+        )?,
+        order_general: declare_helper_func(
+            module,
+            func,
+            ptr_ty,
+            "hot_jit_order_general",
             &[types::I64, types::I64, types::I64, types::I64, types::I64],
             &[types::I64],
         )?,
@@ -7533,7 +7589,7 @@ impl<'a> EmitCtx<'a> {
                 Ok(EmitResult::Handled)
             }
             Instruction::Gt { dest, left, right } => {
-                let (value, halt_block) = numeric_compare(
+                let (kind, value, halt_block) = numeric_compare(
                     builder,
                     self.helper_refs.gt_numeric,
                     &self.helper_refs,
@@ -7545,7 +7601,7 @@ impl<'a> EmitCtx<'a> {
                     *right,
                     cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThan,
                 )?;
-                self.define_register(builder, *dest, RawKind::Bool, value)?;
+                self.define_register(builder, *dest, kind, value)?;
                 self.jump_to_next(builder, ip)?;
                 if let Some(halt_block) = halt_block {
                     self.emit_halt_return(builder, halt_block);
@@ -7553,7 +7609,7 @@ impl<'a> EmitCtx<'a> {
                 Ok(EmitResult::Handled)
             }
             Instruction::Lt { dest, left, right } => {
-                let (value, halt_block) = numeric_compare(
+                let (kind, value, halt_block) = numeric_compare(
                     builder,
                     self.helper_refs.lt_numeric,
                     &self.helper_refs,
@@ -7565,7 +7621,7 @@ impl<'a> EmitCtx<'a> {
                     *right,
                     cranelift_codegen::ir::condcodes::IntCC::SignedLessThan,
                 )?;
-                self.define_register(builder, *dest, RawKind::Bool, value)?;
+                self.define_register(builder, *dest, kind, value)?;
                 self.jump_to_next(builder, ip)?;
                 if let Some(halt_block) = halt_block {
                     self.emit_halt_return(builder, halt_block);
@@ -9970,12 +10026,23 @@ fn intrinsic_call_kind(
     let first = reg_kinds.get(&args_start).copied();
     let second = reg_kinds.get(&(args_start + 1)).copied();
     match (known_core_call(name?)?, args_count) {
-        (Eq | Ne | Gt | Gte | Lt | Lte, 2) | (Not | IsNull | IsSome, 1) => Some(RawKind::Bool),
+        (Eq | Ne, 2) | (Not | IsNull | IsSome, 1) => Some(RawKind::Bool),
+        (Gt | Gte | Lt | Lte, 2) => Some(order_result_kind(first, second)),
         (IsZero, 1) if first == Some(RawKind::Int) => Some(RawKind::Bool),
         (Length, 1) if first == Some(RawKind::OwnedVal) => Some(RawKind::Int),
         (Add | Sub | Mul | Mod, 2) => arithmetic_result_kind(first, second),
         (Div, 2) => division_result_kind(first, second),
         _ => None,
+    }
+}
+
+/// The kind `numeric_compare` gives an order of two operands: owned when
+/// either is, since the answer may then be an Err, else `Bool`.
+fn order_result_kind(left: Option<RawKind>, right: Option<RawKind>) -> RawKind {
+    if left == Some(RawKind::OwnedVal) || right == Some(RawKind::OwnedVal) {
+        RawKind::OwnedVal
+    } else {
+        RawKind::Bool
     }
 }
 
@@ -10229,7 +10296,7 @@ fn try_lower_known_core_call(
             }
         }
         KnownCoreCall::Gt => {
-            let (value, halt_block) = numeric_compare(
+            let (kind, value, halt_block) = numeric_compare(
                 builder,
                 helper_refs.gt_numeric,
                 &helper_refs,
@@ -10242,10 +10309,10 @@ fn try_lower_known_core_call(
                 cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThan,
             )?;
             exits.halt = halt_block;
-            (RawKind::Bool, value)
+            (kind, value)
         }
         KnownCoreCall::Gte => {
-            let (value, halt_block) = numeric_compare(
+            let (kind, value, halt_block) = numeric_compare(
                 builder,
                 helper_refs.gte_numeric,
                 &helper_refs,
@@ -10258,10 +10325,10 @@ fn try_lower_known_core_call(
                 cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThanOrEqual,
             )?;
             exits.halt = halt_block;
-            (RawKind::Bool, value)
+            (kind, value)
         }
         KnownCoreCall::Lt => {
-            let (value, halt_block) = numeric_compare(
+            let (kind, value, halt_block) = numeric_compare(
                 builder,
                 helper_refs.lt_numeric,
                 &helper_refs,
@@ -10274,10 +10341,10 @@ fn try_lower_known_core_call(
                 cranelift_codegen::ir::condcodes::IntCC::SignedLessThan,
             )?;
             exits.halt = halt_block;
-            (RawKind::Bool, value)
+            (kind, value)
         }
         KnownCoreCall::Lte => {
-            let (value, halt_block) = numeric_compare(
+            let (kind, value, halt_block) = numeric_compare(
                 builder,
                 helper_refs.lte_numeric,
                 &helper_refs,
@@ -10290,7 +10357,7 @@ fn try_lower_known_core_call(
                 cranelift_codegen::ir::condcodes::IntCC::SignedLessThanOrEqual,
             )?;
             exits.halt = halt_block;
-            (RawKind::Bool, value)
+            (kind, value)
         }
         KnownCoreCall::Div => {
             if args_count != 2 {
@@ -10343,11 +10410,11 @@ fn try_lower_known_core_call(
             }
         }
         KnownCoreCall::Ne => {
-            let (value, halt_block) = numeric_compare(
+            let (kind, value, halt_block) = numeric_compare(
                 builder,
                 helper_refs.ne_numeric,
                 &helper_refs,
-                5, // ne
+                CMP_OP_NE, // ne
                 remap,
                 registers,
                 register_kinds,
@@ -10356,7 +10423,7 @@ fn try_lower_known_core_call(
                 cranelift_codegen::ir::condcodes::IntCC::NotEqual,
             )?;
             exits.halt = halt_block;
-            (RawKind::Bool, value)
+            (kind, value)
         }
         KnownCoreCall::Not => {
             if args_count != 1 {
@@ -11049,6 +11116,7 @@ fn numeric_compare(
     cc: cranelift_codegen::ir::condcodes::IntCC,
 ) -> Result<
     (
+        RawKind,
         cranelift_codegen::ir::Value,
         Option<cranelift_codegen::ir::Block>,
     ),
@@ -11058,6 +11126,7 @@ fn numeric_compare(
     let right_kind = register_kind(remap, register_kinds, right)?;
     if left_kind == RawKind::Int && right_kind == RawKind::Int {
         return Ok((
+            RawKind::Bool,
             int_compare(builder, remap, registers, register_kinds, left, right, cc)?,
             None,
         ));
@@ -11074,13 +11143,19 @@ fn numeric_compare(
         let (right_tag, right_raw) =
             encode_helper_val_operand(builder, remap, registers, register_kinds, right)?;
         let op_val = builder.ins().iconst(types::I64, cmp_op_code);
-        let call = builder.ins().call(
-            helper_refs.cmp_general,
-            &[op_val, left_tag, left_raw, right_tag, right_raw],
-        );
+        // `ne` has an answer for any two values. An order may not, and only
+        // an owned value can hold the Err it gives then.
+        let (general, kind) = if cmp_op_code == CMP_OP_NE {
+            (helper_refs.cmp_general, RawKind::Bool)
+        } else {
+            (helper_refs.order_general, RawKind::OwnedVal)
+        };
+        let call = builder
+            .ins()
+            .call(general, &[op_val, left_tag, left_raw, right_tag, right_raw]);
         let result = builder.inst_results(call)[0];
         let halt_block = emit_halt_check(builder, result);
-        return Ok((result, Some(halt_block)));
+        return Ok((kind, result, Some(halt_block)));
     }
 
     let (left_tag, left_raw) =
@@ -11092,7 +11167,7 @@ fn numeric_compare(
         .call(helper, &[left_tag, left_raw, right_tag, right_raw]);
     let result = builder.inst_results(call)[0];
     let halt_block = emit_halt_check(builder, result);
-    Ok((result, Some(halt_block)))
+    Ok((RawKind::Bool, result, Some(halt_block)))
 }
 
 /// After a bare-bool comparison helper call, branch to a (caller-filled)

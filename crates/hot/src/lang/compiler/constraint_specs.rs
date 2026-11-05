@@ -6,9 +6,11 @@
 //! - `refine`: `base` must pass, then the predicate function `pred` must
 //!   return `true`. Carries `constraint`, `source` and `location` for errors.
 //! - `base`: the value's runtime type must be `type` (strict; only exact
-//!   numeric conversions apply).
+//!   numeric conversions apply). With `tagged`, a value tagged with a type
+//!   over that kind passes as it is, as it does at a parameter.
 //! - `literal`: the value must equal one of `values`.
-//! - `vec` / `map`: every element, or every map value, must pass `elem`.
+//! - `vec` / `map`: every element, or every map value, must pass `elem`. With
+//!   `tagged`, as for `base`.
 //! - `optional`: `null`, or `inner`.
 //! - `union`: at least one of `members`.
 //! - `struct`: each constrained field passes its spec, then `invariant`.
@@ -19,8 +21,9 @@
 //!
 //! Only types that contain a refinement or a closed literal type are
 //! constrained. A parameter with a primitive annotation gets a `base` check
-//! through `CheckParam` (see `plain_param_spec`); every other annotation
-//! produces no check at all.
+//! through `CheckParam` (see `plain_param_spec`), and a record field or enum
+//! payload one at construction (see `plain_field_spec`); every other
+//! annotation produces no check at all.
 
 use ahash::AHashSet;
 
@@ -153,6 +156,66 @@ fn plain_param_spec(type_expr: &TypeExpr) -> Option<Val> {
         }
         _ => None,
     }
+}
+
+/// The check of a record field or enum payload's built-in annotation, for its
+/// constructor; `None` when it names anything else, such as a user type,
+/// `Any` or `Fn`, which construction handles or leaves alone. Unlike a
+/// parameter's check it reads into `Vec<T>` and `Map<K, V>`: a record is built
+/// far less often than a function is called, and what it holds is trusted
+/// from then on.
+pub(super) fn plain_field_spec(type_expr: &TypeExpr) -> Option<Val> {
+    let base = |name: &str| {
+        node(
+            "base",
+            vec![("type", Val::from(name)), ("tagged", Val::Bool(true))],
+        )
+    };
+    let primitive = |name: &str| is_base_type_name(name) && name != "Fn";
+    let contents = |kind: &str, name: &str, elem: &TypeExpr| match plain_field_spec(elem) {
+        Some(elem) => node(kind, vec![("elem", elem), ("tagged", Val::Bool(true))]),
+        None => base(name),
+    };
+    match type_expr {
+        TypeExpr::Builtin(builtin) => Some(base(builtin_name(builtin))),
+        TypeExpr::Simple(name) | TypeExpr::Named(name) => primitive(name).then(|| base(name)),
+        TypeExpr::Generic(name, params) => match (name.as_str(), params.as_slice()) {
+            ("Vec", [elem]) => Some(contents("vec", "Vec", elem)),
+            ("Map", [_, value]) => Some(contents("map", "Map", value)),
+            ("Vec" | "Map", _) => Some(base(name)),
+            _ => None,
+        },
+        TypeExpr::Optional(inner) => {
+            let inner = plain_field_spec(inner)?;
+            Some(node("optional", vec![("inner", inner)]))
+        }
+        TypeExpr::Union(members) => {
+            let members = members
+                .iter()
+                .map(plain_field_spec)
+                .collect::<Option<Vec<Val>>>()?;
+            Some(node("union", vec![("members", Val::vec(members))]))
+        }
+        _ => None,
+    }
+}
+
+/// A field's entry in a record's `$checks`: `[kinds, item kinds, spec]`. A
+/// value of `kinds`, whose items are of `item kinds` when that isn't 0, passes
+/// as it is; any other value takes the checked path with `spec`.
+pub(super) fn field_check(spec: Val) -> Val {
+    use crate::lang::bytecode::param_mask as kinds;
+    let items = spec_entry(&spec, "elem").map_or(0, spec_mask);
+    let accepted = match get_str(&spec, "kind") {
+        Some("vec") if items != 0 => kinds::VEC,
+        Some("map") if items != 0 => kinds::MAP,
+        _ => spec_mask(&spec),
+    };
+    Val::vec(vec![
+        Val::Int(i64::from(accepted)),
+        Val::Int(i64::from(items)),
+        spec,
+    ])
 }
 
 /// Functions a fast predicate form stands for; a namespace that defines one
@@ -1126,6 +1189,14 @@ impl Compiler {
         }
         self.named_spec_id(qualified)?;
         Some(node("named", vec![("type", Val::from(qualified))]))
+    }
+
+    /// Whether `qualified` is a record with fields or an enum: no plain value
+    /// is one, so a field of that type can't just wrap what it was given.
+    pub(super) fn is_structured_type(&self, qualified: &str) -> bool {
+        self.constraint_type_defs.get(qualified).is_some_and(|def| {
+            def.variants.is_some() || def.fields.as_ref().is_some_and(|f| !f.is_empty())
+        })
     }
 
     /// Whether a type name resolves to a constrained alias, or an alias

@@ -208,6 +208,26 @@ A record type's constructor takes its fields by name, or one Map:
 - On a type with custom constructors, named arguments go to the default constructor, as the Map form does. The custom constructors don't run, and `where` constraints are still checked.
 - A type with a one-parameter constructor that takes a Map doesn't take named arguments: that constructor decides which keys it reads. Pass it the Map.
 
+### Field Checks
+
+A record's constructor checks each field against its declared type, the way a function [checks a parameter](#parameter-checks). Named arguments and the Map form are checked alike. This catches values `hot check` can't see, such as a field of parsed JSON, which is `Any`:
+
+```hot
+Server type { host: Str, port: Int }
+
+body from-json("{\"host\": \"a.example\", \"port\": \"443\"}")
+Server(body)  // Err: constructor of `Server` at `port` expected Int, got Str
+```
+
+- Built-in types follow a parameter's rules. Numbers convert only when nothing is lost, null fails unless the type allows it, and a value of a declared type over a built-in one, such as `Port(80)` from `Port type Int`, keeps its tag.
+- Unlike a parameter, `Vec<T>` and `Map<K, V>` check their contents: `Numbers type { values: Vec<Int> }` refuses `{values: [1, "x"]}`, and the error names `values[1]`.
+- A field typed as a record or enum takes a value of that type, a Map to build it from, or whatever a constructor it declares takes. Any other value fails, null included unless the field allows it.
+- A failure inside a nested record or a `Vec` of records is reported from the outermost record, with the whole path: `constructor of `Order` at `items[2].price` expected Dec, got Str`.
+- An `Err` given for a field stops the construction and comes back as itself, unless the field is `Any`.
+- Fields of type `Any` or `Fn` aren't checked, and neither are fields of a plain declared type such as `Port type Int`.
+
+A failed check returns `Err(ConstraintError.Violation)`, with the field in its `path`. A required field that's missing is its own `Err`, naming the field. `assoc` and the other updates only check `where` constraints, so call the constructor again if the fields may have changed: `Server(assoc(server, "port", value))`.
+
 ### Types with Custom Constructors
 
 Add a constructor function for validation or convenience by combining the struct definition with a function:
@@ -259,7 +279,7 @@ Variants can carry data by referencing other types:
 
 {{snippet:types#enum-with-data}}
 
-A payload can be any type expression, such as a list of records or an optional record. The variant checks its data the way a record field of that type is checked:
+A payload can be any type expression, such as a built-in type, a list of records or an optional record. The variant checks its data the way a record field of that type is [checked](#field-checks):
 
 ```hot
 Ask type { key: Str }
@@ -560,6 +580,31 @@ port-label(body.port)  // Err: parameter `port` of `::app/port-label` expected I
 A failed check returns `Err(ConstraintError.Violation)` from the call, before the
 body runs. Using that value halts as any `Err` does, but `if`, `and`, `or` and `not`
 treat an `Err` as false, so use `is-err` where a bad value needs its own branch.
+
+### Comparing Values of Declared Types
+
+`gt`, `gte`, `lt`, `lte`, `between` and `sort` read a value of a declared type over
+a number or a string as what it holds:
+
+```hot
+Money type Dec
+
+gt(Money(80.0), 100)              // false
+gt(Money(200.0), Money(80.0))     // true
+sort([Money(200), Money(80.5)])   // [Money(80.5), Money(200)]
+```
+
+They go by the number alone, so `gt(Money(200.0), Weight(80.0))` is true: comparing
+two different types is yours to rule out. An enum variant isn't read this way, as
+`Temp.Celsius(30.0)` is a case of its enum rather than a number.
+
+Other operations keep the type. `add(Money(80.0), 1)` gives an `Err`, so convert
+with `Dec(x)` first, and `eq(Money(80.0), 80.0)` is false, because the type is part
+of the value.
+
+Values with no order give an `Err`, such as `gt(1, null)` or two vectors. As with
+any `Err`, `if` reads that as false, so use `is-err` where a missing value needs its
+own branch.
 
 ## Result Types
 

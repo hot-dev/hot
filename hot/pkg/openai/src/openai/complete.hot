@@ -35,7 +35,7 @@ CompleteUploadResponse type {
     bytes: Int,
     purpose: Str,
     status: UploadStatus,
-    expires_at: Int,
+    expires_at: Int?,
     object: "upload",
     file: Any?
 }
