@@ -169,7 +169,10 @@ history is meaningful.
 3. **Merge, wait for CI, then tag.** Push a `vX.Y.Z` tag at the merged commit
    only after the `hot` workflow passed on it. The tag must match
    `resources/version.txt`, and `.github/workflows/release.yml` refuses a tag
-   whose commit has no successful `hot` run.
+   whose commit has no successful `hot` run. The release workflow runs macOS
+   and Windows tests on that exact commit and blocks publication until both
+   pass. These platform checks also run weekly and can be started manually;
+   they do not run on every pull request or push to `main`.
 4. **After the release:** sync the `hot-skills` mirror if it lags and tag it
    `vX.Y.Z` too; publish the SDKs if this release changed the API they use
    (the release's SDK check warns when `resources/docs/api/sdks.md` pins an

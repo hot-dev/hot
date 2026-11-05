@@ -31,6 +31,12 @@ inputs:
       release builds leave it off.
     required: false
     default: "false"
+  cargo-build-jobs:
+    description: >-
+      Optional Cargo build parallelism override. Applied after cache restore
+      so changing runner size does not invalidate compiled-artifact caches.
+    required: false
+    default: ""
 runs:
   using: "composite"
   steps:
@@ -183,7 +189,14 @@ runs:
 
     - name: Setup Cargo optimizations
       shell: bash
+      env:
+        BUILD_JOBS: ${{ inputs.cargo-build-jobs }}
       run: |
+        # rust-cache hashes CARGO_* variables. Parallelism does not change
+        # artifacts, so set it only after restoring the existing cache.
+        if [[ -n "$BUILD_JOBS" ]]; then
+          echo "CARGO_BUILD_JOBS=$BUILD_JOBS" >> "$GITHUB_ENV"
+        fi
         mkdir -p ~/.cargo
         cat > ~/.cargo/config.toml << 'EOF'
         [build]

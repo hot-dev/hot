@@ -1,0 +1,4 @@
+# Organization-defined label for the GitHub-hosted larger runner pool.
+self-hosted-runner:
+  labels:
+    - ubuntu-24.04-8core

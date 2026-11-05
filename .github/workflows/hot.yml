@@ -53,7 +53,9 @@ jobs:
 
   clippy-and-checks:
     name: Clippy and Static Checks
-    runs-on: ubuntu-24.04
+    runs-on:
+      group: hot-ci
+      labels: ubuntu-24.04-8core
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -68,6 +70,7 @@ jobs:
           tailwind-version: ${{ env.TAILWIND_VERSION }}
           save-cache: ${{ github.ref == 'refs/heads/main' }}
           ci-tuning: "true"
+          cargo-build-jobs: '8'
 
       - name: Cargo fmt
         run: cargo fmt --all --check
@@ -97,7 +100,7 @@ jobs:
       # aligned with the workspace test feature set avoids forcing cargo to
       # rebuild the full dependency graph between the two jobs once caches warm.
       - name: Cargo clippy
-        run: cargo clippy --workspace --all-targets --locked -j 4 -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Browser scope contract
         run: node --test scripts/test-app-scope.mjs
@@ -150,7 +153,9 @@ jobs:
 
   rust-tests:
     name: Rust Tests
-    runs-on: ubuntu-24.04
+    runs-on:
+      group: hot-ci
+      labels: ubuntu-24.04-8core
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     services:
       postgres:
@@ -190,6 +195,7 @@ jobs:
           tailwind-version: ${{ env.TAILWIND_VERSION }}
           save-cache: ${{ github.ref == 'refs/heads/main' }}
           ci-tuning: "true"
+          cargo-build-jobs: '8'
 
       - name: Install psql for upgrade provisioning tests
         run: |
@@ -219,14 +225,16 @@ jobs:
           REDIS_URL: redis://localhost:6379
           HOT_TEST_POSTGRES_URI: postgres://hot:hot@localhost:5432/hot
           HOT_TEST_POSTGRES_RESET_SCHEMA: '1'
-        run: cargo test --workspace --all-targets --locked -j 4
+        run: cargo test --workspace --all-targets --locked
 
       - name: sccache stats
         run: sccache --show-stats || true
 
   hot-tests:
     name: Hot Tests
-    runs-on: ubuntu-24.04
+    runs-on:
+      group: hot-ci
+      labels: ubuntu-24.04-8core
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     services:
       postgres:
@@ -266,6 +274,7 @@ jobs:
           tailwind-version: ${{ env.TAILWIND_VERSION }}
           save-cache: ${{ github.ref == 'refs/heads/main' }}
           ci-tuning: "true"
+          cargo-build-jobs: '8'
 
       - name: Run Hot init
         run: cargo run --locked --bin hot -- init -c hot.test.hot --ctx hot/ci.ctx.hot
@@ -345,7 +354,9 @@ jobs:
 
   kata-check:
     name: Kata Backend Compile Check
-    runs-on: ubuntu-24.04
+    runs-on:
+      group: hot-ci
+      labels: ubuntu-24.04-8core
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -360,6 +371,7 @@ jobs:
           tailwind-version: ${{ env.TAILWIND_VERSION }}
           save-cache: ${{ github.ref == 'refs/heads/main' }}
           ci-tuning: "true"
+          cargo-build-jobs: '8'
 
       - name: Install protobuf compiler (for containerd-client)
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler

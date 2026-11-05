@@ -11,19 +11,13 @@
 # Redis/Valkey Windows build). Docker-backed suites (`hot test box`) and the
 # kata feature are structurally Linux-only and never run here.
 #
-# This workflow is intentionally NOT in branch protection's required checks
-# yet — promote it once it has a green track record.
+# Releases call this workflow for their exact commit before publishing.
+# Weekly and manual runs catch platform drift between releases.
 
 name: cross-platform
 
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
-    # The default types leave out ready_for_review, so a pull request leaving
-    # draft would keep the skipped jobs of its last draft push.
-    types: [ opened, synchronize, reopened, ready_for_review ]
+  workflow_call:
   schedule:
     # Weekly rot check: dependency updates and runner-image changes break
     # cross-platform builds even when nothing is pushed.
@@ -76,7 +70,6 @@ jobs:
             cargo_jobs: 4
     runs-on: ${{ matrix.os }}
     timeout-minutes: 150
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     defaults:
       run:
         shell: bash
@@ -100,7 +93,7 @@ jobs:
         with:
           rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
           tailwind-version: ${{ env.TAILWIND_VERSION }}
-          # Restore-only on PR runs. Main/weekly saves use bounded sccache
+          # Release refs restore only. Main/weekly saves use bounded sccache
           # entries and registry-only rust-cache entries; persisting both full
           # target/ and compiler caches for each OS would exceed the repo's
           # 10 GB Actions cache budget. The dependency set needs more than
