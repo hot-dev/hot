@@ -522,7 +522,7 @@ read-file-stream fn (path: Str): Iter                    // Bytes chunks, withou
 write-file fn (path: Str, content: Str): Bool
 delete-file fn (path: Str): Bool
 file-exists fn (path: Str): Bool
-list-files fn (path: Str): Vec<Str>
+list-files fn (prefix: Str): Vec<FileMeta>               // Each with path, size, content-type
 
 // Events
 send fn (event-name: Str, data: Any): Map

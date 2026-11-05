@@ -152,6 +152,19 @@ meta ["test"] fn () {
     delete-file("test/list-test/sub/nested.txt")
 }
 
+// Test that each listed file comes as its FileMeta
+test-list-files-gives-file-meta
+meta ["test"] fn () {
+    write-file("test/list-meta/file1.txt", "content 1")
+
+    file ::hot::coll/first(list-files("test/list-meta/"))
+    assert-eq("test/list-meta/file1.txt", file.path, "the path is the one written")
+    assert-eq(9, file.size, "the size is the file's")
+    assert-eq("content 1", read-file(file.path), "the path opens")
+
+    delete-file("test/list-meta/file1.txt")
+}
+
 // Test nested directory paths
 test-nested-paths
 meta ["test"] fn () {

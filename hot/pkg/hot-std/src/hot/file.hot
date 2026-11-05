@@ -190,16 +190,17 @@ list-files
 meta {
     core: true,
     doc: """
-    List all files matching a prefix path.
+    List all files matching a prefix path. Each file comes as a `FileMeta`.
 
     **Example**
 
     ```hot
     files list-files("uploads/")
+    map(files, %.path)
     // ["uploads/image1.png", "uploads/image2.jpg", ...]
     ```
     """
 }
-fn (prefix: Str): Vec {
+fn (prefix: Str): Vec<FileMeta> {
     call-lib(::hot::file/list-files, [prefix])
 }
