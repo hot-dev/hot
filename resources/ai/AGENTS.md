@@ -263,7 +263,9 @@ Shape enum { Circle(Circle), Point }
 shape Shape.Circle(radius: 5.0)
 radius shape.radius  // 5.0
 
-// Match flow for enums (access matched value through original variable).
+// Match flow for enums. The matched name is the variant: a record payload's
+// fields read through it, and any other payload needs a binding in the arm
+// (`Reply.Declined (why) =>`), or `hot check` warns with `variant-as-payload`.
 // Match on a closed enum must be exhaustive — every variant covered or
 // a `_` default arm. Compiler reports `non-exhaustive-match` otherwise.
 describe fn match (dir: Direction): Str {

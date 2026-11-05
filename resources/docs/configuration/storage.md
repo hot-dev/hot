@@ -450,6 +450,11 @@ for temporary credentials.
 | `hot.file.storage.path` | `HOT_FILE_STORAGE_PATH` | `./.hot/file`, or `$HOT_HOME/file` when `HOT_HOME` is set |
 | `hot.build.storage.path` | `HOT_BUILD_STORAGE_PATH` | `.hot/build` |
 
+`hot build` and `hot deploy --local` write a bundle under `.hot/build` in the
+current directory, whatever the build storage. `hot deploy --local` then copies it
+to build storage, local or not, where workers read it. To deploy a build you made
+earlier, run it from the directory that built it.
+
 One file directory can serve several services. A process running as root, as the
 self-hosted bundle's task worker does, gives what it writes under the directory to
 the directory's owner, so services running as other users can still use it. A

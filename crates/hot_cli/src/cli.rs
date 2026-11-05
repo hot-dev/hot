@@ -444,6 +444,8 @@ pub(crate) enum Command {
         #[command(flatten)]
         network: NetworkOptions,
         #[command(flatten)]
+        queue: QueueOptions,
+        #[command(flatten)]
         show_conf: ShowConfOptions,
     },
     /// Run the background worker
@@ -1306,6 +1308,22 @@ mod help_tests {
             find_help_command(&cmd, &names(&["nope"])).unwrap_err(),
             "nope"
         );
+    }
+
+    /// A service on the `memory` queue is told to pass these flags.
+    #[test]
+    fn every_service_that_needs_a_queue_takes_the_queue_flags() {
+        for service in ["app", "api", "worker", "task-worker", "scheduler"] {
+            let parsed = Cli::try_parse_from([
+                "hot",
+                service,
+                "--queue.type",
+                "redis",
+                "--redis.uri",
+                "redis://127.0.0.1:6379",
+            ]);
+            assert!(parsed.is_ok(), "hot {service}: {:?}", parsed.err());
+        }
     }
 
     #[test]

@@ -167,6 +167,13 @@ The `hot:schedule:new` event payload uses:
 | `args` | `Vec` | No | Arguments the function is called with. Defaults to `[]` when omitted/null. |
 | `schedule` | `Str` or `DateTime` | Yes | When to run (one-time or recurring expression) |
 
+A schedule is one call: a function, a time and its arguments. Two schedules of
+one function at one time both fire, as long as their `args` differ. Sending the
+same call again doesn't add a schedule: it returns the ID of the one it repeats,
+so a redelivered event or a retried run can't arm it twice. A cancelled schedule
+is armed again this way. A one-time schedule that has already fired isn't, so a
+late repeat can't run it a second time.
+
 ### Schedule Formats
 
 The `schedule` field supports multiple formats:

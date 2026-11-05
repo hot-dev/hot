@@ -62,6 +62,7 @@ Run just the web application (dashboard):
 ```bash
 hot app
 hot app --app.port 3000
+hot app --queue.type redis --redis.uri redis://localhost:6379
 ```
 
 ### hot worker

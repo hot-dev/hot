@@ -88,9 +88,21 @@ struct ArmedSchedule {
     at: i128,
     /// Recurring schedules re-arm at their next occurrence after firing.
     cron: Option<croner::Cron>,
+    /// The recurring expression as written, which names the schedule as its
+    /// due time does for a one-time one.
+    expression: Option<String>,
 }
 
 impl ArmedSchedule {
+    /// Whether `other` is this schedule armed again: the same function, time
+    /// and args, as the database keeps them one schedule.
+    fn is_same_call(&self, other: &ArmedSchedule) -> bool {
+        self.function == other.function
+            && self.expression == other.expression
+            && (self.expression.is_some() || self.at == other.at)
+            && self.args == other.args
+    }
+
     fn to_val(&self) -> Val {
         crate::val!({
             "id": self.id.clone(),
@@ -443,17 +455,18 @@ fn armed_schedule(data: &Val, now: i128) -> Result<ArmedSchedule, String> {
         return Err("expected a schedule string".into());
     };
     let from = chrono::DateTime::from_timestamp_nanos(now as i64);
-    let (at, cron) = match crate::db::parse_schedule_expression_at(expr, from)? {
+    let (at, cron, expression) = match crate::db::parse_schedule_expression_at(expr, from)? {
         crate::db::ScheduleType::At(at) => (
             at.timestamp_nanos_opt()
                 .map(i128::from)
                 .ok_or("schedule time is out of range")?,
             None,
+            None,
         ),
         crate::db::ScheduleType::Cron(expr) => {
             let cron = crate::db::parse_cron(&expr)
                 .map_err(|e| format!("could not parse '{expr}' as cron: {e}"))?;
-            (next_occurrence(&cron, now)?, Some(cron))
+            (next_occurrence(&cron, now)?, Some(cron), Some(expr))
         }
     };
     Ok(ArmedSchedule {
@@ -462,6 +475,7 @@ fn armed_schedule(data: &Val, now: i128) -> Result<ArmedSchedule, String> {
         args,
         at,
         cron,
+        expression,
     })
 }
 
@@ -482,8 +496,12 @@ pub fn arm_schedule(args: &[Val]) -> HotResult<Val> {
     let armed = from.and_then(|from| armed_schedule(&args[0], from));
     match armed {
         Ok(armed) => {
+            let mut schedules = harness.schedules.lock();
+            if let Some(existing) = schedules.iter().find(|s| s.is_same_call(&armed)) {
+                return HotResult::Ok(Val::from(existing.id.clone()));
+            }
             let id = Val::from(armed.id.clone());
-            harness.schedules.lock().push(armed);
+            schedules.push(armed);
             HotResult::Ok(id)
         }
         Err(e) => HotResult::Err(Val::from(format!("{prefix}: {e}"))),

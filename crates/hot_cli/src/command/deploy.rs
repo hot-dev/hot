@@ -18,6 +18,9 @@ use crate::conf::get_merged_src_paths;
 use crate::profile::{extract_profile_identifiers, resolve_profile_to_uuids};
 use crate::remote::ApiClient;
 
+/// Where `hot deploy` writes a bundle, before it reaches build storage.
+const LOCAL_BUILD_DIR: &str = ".hot/build";
+
 fn resolve_local_build_storage_path(
     build_dir: &str,
     storage_path: &str,
@@ -418,14 +421,10 @@ pub(crate) async fn run_deploy(
         .with_resources(resource_paths, respect_gitignore, resource_excludes)
         .with_secret_scan_opts(secret_scan_opts);
 
-        let build_result = hot::build::build_create(
-            &db,
-            Some(".hot/build"), // Use default build directory
-            build_context,
-            Some(conf),
-        )
-        .await
-        .map_err(|e| format!("Failed to create bundle build: {}", e))?;
+        let build_result =
+            hot::build::build_create(&db, Some(LOCAL_BUILD_DIR), build_context, Some(conf))
+                .await
+                .map_err(|e| format!("Failed to create bundle build: {}", e))?;
 
         println!("✓ Created bundle build {}", build_result.build.build_id);
         println!("  Size: {} bytes", build_result.build.size);
@@ -822,14 +821,10 @@ async fn upload_via_api(
             Vec::new(), // No test paths in bundles
         );
 
-        let build_result = hot::build::build_create(
-            &db,
-            Some(".hot/build"), // Use default build directory
-            build_context,
-            Some(conf),
-        )
-        .await
-        .map_err(|e| format!("Failed to create bundle build: {}", e))?;
+        let build_result =
+            hot::build::build_create(&db, Some(LOCAL_BUILD_DIR), build_context, Some(conf))
+                .await
+                .map_err(|e| format!("Failed to create bundle build: {}", e))?;
 
         println!("✓ Created bundle build {}", build_result.build.build_id);
         println!("  Size: {} bytes", build_result.build.size);
@@ -850,7 +845,7 @@ async fn upload_via_api(
                 .get("build")
                 .and_then(|b| b.get("dir"))
                 .map(|d| d.to_string())
-                .unwrap_or_else(|| ".hot/build".to_string());
+                .unwrap_or_else(|| LOCAL_BUILD_DIR.to_string());
 
             let full_path = resolve_local_build_storage_path(&build_dir, storage_path)?;
             std::fs::read(&full_path)
@@ -1082,6 +1077,16 @@ async fn deploy_via_database(build_uuid: Uuid, conf: &Val, strict: bool) -> Resu
 
     // Validate requirements for bundle builds before deploying
     if build.is_bundle() {
+        hot::build::ensure_bundle_in_storage(
+            &db,
+            &build,
+            storage.as_ref(),
+            Path::new(LOCAL_BUILD_DIR),
+            &org_id,
+            &env_id,
+        )
+        .await?;
+
         hot::build::validate_ctx_requirements_for_deploy(
             &db,
             &build_uuid,

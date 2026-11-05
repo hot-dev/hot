@@ -196,6 +196,12 @@ keep-declined fn match (r: Reply): Reply {
 }
 ```
 
+Don't use the matched name as the payload: `length(r)` counts the variant's own
+keys and `${r}` shows the variant, not its text. `hot check` warns with
+`variant-as-payload` when the name reaches a place that takes the payload's type
+but not the variant, such as an argument or a declared return type. Bind the
+payload in the arm instead.
+
 ### Exhaustiveness
 
 A `match` on a closed `enum` must cover every variant or include a `_` /

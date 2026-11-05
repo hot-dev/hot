@@ -9,7 +9,9 @@ use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use chrono::{DateTime, Datelike, TimeZone, Utc};
 use hot::db::org::{CreateChild, Org, OrgLifecycle, OrgUser};
-use hot::db::org_api_key::{CreateOrgApiKey, KeyStatus, OrgApiKey};
+use hot::db::org_api_key::{
+    CreateOrgApiKey, KeyStatus, MAX_ROTATION_OVERLAP_SECONDS, OrgApiKey, OrgApiKeyError,
+};
 use hot::db::{BootstrapOperation, DatabasePool, DatabaseScope};
 use hot::val::Val;
 use serde::Deserialize;
@@ -120,6 +122,8 @@ struct SubOrgsPage {
 struct OrgApiKeyRow {
     key: OrgApiKey,
     expires_at: Option<String>,
+    /// When the previous secret stops working, during a rotation's overlap.
+    previous_secret_expires_at: Option<String>,
     /// Whether the key still authenticates, following its issuer chain: a
     /// key whose issuing key was revoked is dead though its own row is not.
     revocable: bool,
@@ -347,6 +351,10 @@ async fn render_page_inner(
         let status = key.status(db).await.map_err(load_failed)?;
         org_api_keys.push(OrgApiKeyRow {
             expires_at: key.expires_at.map(|at| display_time(session, &at)),
+            previous_secret_expires_at: key
+                .previous_secret_expires_at()
+                .filter(|_| status.is_active())
+                .map(|at| display_time(session, &at)),
             revocable: status.is_active(),
             status_label: status_label(status),
             key,
@@ -598,6 +606,52 @@ pub async fn create_org_api_key(
             let form = submitted(
                 "Unable to create the org API key. Permissions must use org: URNs such as org:* or org:{org}/env:*/project:*.",
             );
+            render_page(&db, &session, root, None, form).await
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct RotateOrgApiKeyForm {
+    overlap_seconds: i64,
+}
+
+/// Issue a new secret for an org key. The page shows it once, as it does for a
+/// new key.
+pub async fn rotate_org_api_key(
+    Path((slug, key_id)): Path<(String, Uuid)>,
+    State(db): State<Arc<DatabasePool>>,
+    axum::Extension(session): axum::Extension<Session>,
+    Form(form): Form<RotateOrgApiKeyForm>,
+) -> Result<Response, Response> {
+    let root = root_for_admin(&db, &session, &slug).await?;
+    if !(0..=MAX_ROTATION_OVERLAP_SECONDS).contains(&form.overlap_seconds) {
+        let form = FormState::error("Overlap must be between 0 seconds and 7 days.");
+        return render_page(&db, &session, root, None, form).await;
+    }
+    let overlap = chrono::Duration::seconds(form.overlap_seconds);
+    let user_id = session.current_user_id();
+    match OrgApiKey::rotate_for_user(&db, root.org_id, user_id, key_id, overlap).await {
+        Ok(rotated) => {
+            render_page(
+                &db,
+                &session,
+                root,
+                Some(rotated.token),
+                FormState::default(),
+            )
+            .await
+        }
+        Err(OrgApiKeyError::OverlapRunning(until)) => {
+            let until = display_time(&session, &until);
+            let form = FormState::error(format!(
+                "This key's previous secret works until {until}. Rotate after that, or choose no overlap, which stops it now."
+            ));
+            render_page(&db, &session, root, None, form).await
+        }
+        Err(error) => {
+            tracing::info!(root_org_id = %root.org_id, %error, "Org API key rotation rejected");
+            let form = FormState::error("Unable to rotate the org API key.");
             render_page(&db, &session, root, None, form).await
         }
     }

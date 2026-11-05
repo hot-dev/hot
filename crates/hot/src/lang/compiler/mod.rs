@@ -29,6 +29,7 @@ mod namespace_order;
 pub mod placeholder_lowering;
 pub mod refinements;
 pub mod resolver;
+mod type_aliases;
 pub mod type_checker;
 mod variant_payloads;
 
@@ -1397,6 +1398,11 @@ impl Compiler {
             }
         }
 
+        // Pass 1.5: Bind the aliases of those types, so no namespace's block
+        // has to run before a function can use one.
+        tracing::debug!("Compiler: Pass 1.5 - Binding type aliases");
+        self.bind_type_aliases(program)?;
+
         // Pass 2: Compile everything else (with sub-passes for proper ordering)
         tracing::debug!("Compiler: Pass 2 - Compiling all other declarations");
         tracing::trace!("Total namespaces to compile: {}", program.namespaces.len());
@@ -2271,19 +2277,7 @@ impl Compiler {
                         });
 
                         // Store as a variable with special metadata to indicate it's a function alias
-                        let mut alias_map = indexmap::IndexMap::new();
-                        alias_map
-                            .insert(Val::from("$type"), Val::from("::hot::type/FunctionAlias"));
-                        alias_map.insert(Val::from("$target"), Val::from(target_qualified.clone()));
-
-                        let alias_value_reg = self.allocate_register();
-                        let alias_constant = self
-                            .program
-                            .add_constant(Constant::Val(Val::map(alias_map)));
-                        self.emit_instruction(Instruction::LoadConst {
-                            dest: alias_value_reg,
-                            constant: alias_constant,
-                        });
+                        let alias_value_reg = self.load_function_alias(&target_qualified);
 
                         // Also add to namespace registry for type resolution in match expressions
                         // This allows patterns like `MyOk` to resolve to `::hot::type/Result.Ok`
@@ -7506,16 +7500,25 @@ impl Compiler {
         );
     }
 
-    /// Store a variable in a specific namespace (for type definitions in Pass 1)
-    /// This uses StoreGlobal to avoid relying on VM's current_namespace state
-    fn store_variable_global(&mut self, namespace: &str, name: &str, register: RegisterId) {
-        tracing::trace!(
-            "Storing global variable '{}' in namespace '{}' from register {}",
-            name,
-            namespace,
-            register
-        );
+    /// Load the value a function alias binds: `$target` names the function.
+    fn load_function_alias(&mut self, target: &str) -> RegisterId {
+        let mut alias_map = indexmap::IndexMap::new();
+        alias_map.insert(Val::from("$type"), Val::from("::hot::type/FunctionAlias"));
+        alias_map.insert(Val::from("$target"), Val::from(target));
 
+        let alias_value_reg = self.allocate_register();
+        let alias_constant = self
+            .program
+            .add_constant(Constant::Val(Val::map(alias_map)));
+        self.emit_instruction(Instruction::LoadConst {
+            dest: alias_value_reg,
+            constant: alias_constant,
+        });
+        alias_value_reg
+    }
+
+    /// Emit a StoreGlobal, which doesn't rely on the VM's current_namespace.
+    fn emit_store_global(&mut self, namespace: &str, name: &str, register: RegisterId) {
         // Store the namespace as a constant
         let namespace_constant = self
             .program
@@ -7532,6 +7535,19 @@ impl Compiler {
             var_name: var_name_constant,
             value: register,
         });
+    }
+
+    /// Store a variable in a specific namespace (for type definitions in Pass 1)
+    /// This uses StoreGlobal to avoid relying on VM's current_namespace state
+    fn store_variable_global(&mut self, namespace: &str, name: &str, register: RegisterId) {
+        tracing::trace!(
+            "Storing global variable '{}' in namespace '{}' from register {}",
+            name,
+            namespace,
+            register
+        );
+
+        self.emit_store_global(namespace, name, register);
 
         // Also register in the namespace registry so it can be looked up at compile-time
         // This is important for resolving type names in match expressions

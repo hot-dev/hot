@@ -3255,6 +3255,403 @@ mod integration_tests {
             .collect()
     }
 
+    const VARIANT_TYPES: &str = r#"
+        ::test ns
+
+        Ask type { key: Str }
+        Status enum { OpenAll(Vec<Ask>), NotOwed(Str), Count(Int), Rec(Ask), Either(Ask | Bid), Done }
+        Bid type { key: Str, price: Int }
+        Ticket type { reason: Str }
+
+        key fn (a: Ask): Str { a.key }
+        takes-status fn (s: Status): Status { s }
+        takes-ask fn (a: Ask): Str { a.key }
+        takes-text fn (t: Str): Str { t }
+        takes-either fn (s: Status | Str): Any { s }
+    "#;
+
+    fn variant_warnings(body: &str) -> Vec<String> {
+        let warnings = compile_and_get_warnings(&format!("{VARIANT_TYPES}\n{body}"));
+        constraint_messages(&warnings, "variant-as-payload")
+    }
+
+    /// Inside an `Enum.Variant` arm the matched name is the variant. Code that
+    /// treats it as the payload checks clean and then fails or gets a wrong
+    /// value at run time.
+    #[test]
+    fn test_variant_used_as_its_payload_warns() {
+        let cases = [
+            (
+                "a collection function",
+                r#"f fn match (s: Status): Any {
+                    Status.OpenAll => { map(s, key) }
+                    _ => { [] }
+                }"#,
+            ),
+            (
+                "a function that returns a wrong value, not an error",
+                r#"f fn match (s: Status): Any {
+                    Status.OpenAll => { length(s) }
+                    _ => { 0 }
+                }"#,
+            ),
+            (
+                "a string function",
+                r#"f fn match (s: Status): Str {
+                    Status.NotOwed => { uppercase(s) }
+                    _ => { "" }
+                }"#,
+            ),
+            (
+                "a number function",
+                r#"f fn match (s: Status): Any {
+                    Status.Count => { add(s, 1) }
+                    _ => { 0 }
+                }"#,
+            ),
+            (
+                "a user function",
+                r#"f fn match (s: Status): Str {
+                    Status.NotOwed => { takes-text(s) }
+                    _ => { "" }
+                }"#,
+            ),
+            (
+                "a standalone match",
+                r#"f fn (s: Status): Any {
+                    match s {
+                        Status.OpenAll => { map(s, key) }
+                        _ => { [] }
+                    }
+                }"#,
+            ),
+            (
+                "a piped value",
+                r#"f fn match (s: Status): Any {
+                    Status.OpenAll => { s |> map(key) }
+                    _ => { [] }
+                }"#,
+            ),
+            (
+                "a declared return type",
+                r#"f fn match (s: Status): Str {
+                    Status.NotOwed => { s }
+                    _ => { "none" }
+                }"#,
+            ),
+            (
+                "a declared return type through a standalone match",
+                r#"f fn (s: Status): Str {
+                    match s {
+                        Status.NotOwed => { s }
+                        _ => { "none" }
+                    }
+                }"#,
+            ),
+            (
+                "a declared return type through `if`",
+                r#"f fn match (s: Status, loud: Bool): Str {
+                    Status.NotOwed => { if(loud, s, "quiet") }
+                    _ => { "none" }
+                }"#,
+            ),
+            (
+                "an annotated binding",
+                r#"f fn match (s: Status): Any {
+                    Status.NotOwed => {
+                        note "paid"
+                        why: Str s
+                        why
+                    }
+                    _ => { "none" }
+                }"#,
+            ),
+            (
+                "a value bound first",
+                r#"f fn match (s: Status): Str {
+                    Status.NotOwed => {
+                        why s
+                        uppercase(why)
+                    }
+                    _ => { "none" }
+                }"#,
+            ),
+            (
+                "a record field",
+                r#"f fn match (s: Status): Any {
+                    Status.NotOwed => { Ticket(reason: s) }
+                    _ => { null }
+                }"#,
+            ),
+            (
+                "a template",
+                r#"f fn match (s: Status): Str {
+                    Status.NotOwed => { `why: ${s}` }
+                    _ => { "none" }
+                }"#,
+            ),
+            (
+                "a comparison",
+                r#"f fn match (s: Status): Bool {
+                    Status.NotOwed => { eq(s, "paid") }
+                    _ => { false }
+                }"#,
+            ),
+            (
+                "an arm with a binding of another name",
+                r#"f fn match (s: Status): Str {
+                    Status.NotOwed (why) => { `${why}: ${uppercase(s)}` }
+                    _ => { "none" }
+                }"#,
+            ),
+        ];
+        for (name, body) in cases {
+            let found = variant_warnings(body);
+            assert_eq!(found.len(), 1, "{name}: {found:?}");
+            assert!(
+                found[0].contains("Status."),
+                "{name} names the variant: {found:?}"
+            );
+        }
+    }
+
+    /// The enum and its payload type can live in another namespace.
+    #[test]
+    fn test_variant_used_as_its_payload_warns_across_namespaces() {
+        let (errors, warnings) = compile_files(&[
+            (
+                "types.hot",
+                r#"
+                ::shop::types ns
+                Line type { sku: Str }
+                Order enum { Lines(Vec<Line>), Held(Str) }
+                "#,
+            ),
+            (
+                "use.hot",
+                r#"
+                ::shop::use ns
+                ::types ::shop::types
+                Order ::shop::types/Order
+                count fn match (o: Order): Int {
+                    Order.Lines => { length(o) }
+                    _ => { 0 }
+                }
+                why fn match (o: ::types/Order): Str {
+                    ::types/Order.Held => { o }
+                    _ => { "" }
+                }
+                "#,
+            ),
+        ]);
+        assert!(errors.is_empty(), "Expected no errors. Got: {:?}", errors);
+        let found = constraint_messages(&warnings, "variant-as-payload");
+        assert_eq!(found.len(), 2, "Got: {:?}", found);
+    }
+
+    /// The finding says what is wrong, where, and how to fix it.
+    #[test]
+    fn test_variant_as_payload_points_at_the_use() {
+        let warnings = compile_and_get_warnings(&format!(
+            "{VARIANT_TYPES}\n{}",
+            r#"f fn match (s: Status): Str {
+                Status.NotOwed => { s }
+                _ => { "none" }
+            }"#
+        ));
+        let finding = warnings
+            .iter()
+            .find(|w| constraint_code(w) == Some("variant-as-payload"))
+            .expect("a variant-as-payload warning");
+        let CompilerError::Constraint {
+            message,
+            help,
+            location,
+            warning,
+            ..
+        } = finding
+        else {
+            panic!("Expected a Constraint warning. Got: {finding:?}");
+        };
+        assert!(warning);
+        assert!(message.contains("`Status.NotOwed`"), "{message}");
+        assert!(message.contains("`Str`"), "{message}");
+        assert!(
+            help.as_deref()
+                .is_some_and(|help| help.contains("Status.NotOwed (")),
+            "{help:?}"
+        );
+        // The arm is the second line after the shared types.
+        let line = VARIANT_TYPES.lines().count() + 2;
+        assert_eq!(location.as_ref().map(|l| l.line), Some(line));
+    }
+
+    /// Correct code stays clean: the payload bound by the arm, a record
+    /// payload read through the name, the variant passed on as the enum or to
+    /// a parameter that takes anything, and a name that no longer holds the
+    /// variant.
+    #[test]
+    fn test_variant_used_as_itself_does_not_warn() {
+        let cases = [
+            (
+                "the bound payload",
+                r#"f fn match (s: Status): Any {
+                    Status.OpenAll (asks) => { map(asks, key) }
+                    Status.NotOwed (why) => { uppercase(why) }
+                    Status.Count (n) => { add(n, 1) }
+                    _ => { null }
+                }"#,
+            ),
+            (
+                "a binding named like the subject",
+                r#"f fn match (s: Status): Str {
+                    Status.NotOwed (s) => { uppercase(s) }
+                    _ => { "" }
+                }"#,
+            ),
+            (
+                "a record payload read through the name",
+                r#"f fn match (s: Status): Str {
+                    Status.Rec => { s.key }
+                    _ => { "" }
+                }"#,
+            ),
+            (
+                "a record payload passed on",
+                r#"f fn match (s: Status): Str {
+                    Status.Rec => { takes-ask(s) }
+                    _ => { "" }
+                }"#,
+            ),
+            (
+                "a union of records",
+                r#"f fn match (s: Status): Str {
+                    Status.Either => { s.key }
+                    _ => { "" }
+                }"#,
+            ),
+            (
+                "the variant returned as the enum",
+                r#"f fn match (s: Status): Status {
+                    Status.NotOwed => { s }
+                    _ => { Status.Done }
+                }"#,
+            ),
+            (
+                "the variant passed as the enum",
+                r#"f fn match (s: Status): Status {
+                    Status.NotOwed => { takes-status(s) }
+                    _ => { Status.Done }
+                }"#,
+            ),
+            (
+                "a union that names the enum",
+                r#"f fn match (s: Status): Any {
+                    Status.NotOwed => { takes-either(s) }
+                    _ => { null }
+                }"#,
+            ),
+            (
+                "parameters that take anything",
+                r#"f fn match (s: Status): Any {
+                    Status.NotOwed => { [to-json(s), is-type(s, Status), is-ok(s)] }
+                    _ => { null }
+                }"#,
+            ),
+            (
+                "an untyped result",
+                r#"f fn match (s: Status): Any {
+                    Status.NotOwed => { s }
+                    _ => { null }
+                }"#,
+            ),
+            (
+                "a name rebound in the arm",
+                r#"f fn match (s: Status): Str {
+                    Status.NotOwed => {
+                        s "text"
+                        uppercase(s)
+                    }
+                    _ => { "" }
+                }"#,
+            ),
+            (
+                "a lambda parameter of the same name",
+                r#"f fn match (s: Status, xs: Vec<Str>): Any {
+                    Status.NotOwed => { map(xs, (s) { uppercase(s) }) }
+                    _ => { null }
+                }"#,
+            ),
+            (
+                "a union arm",
+                r#"f fn match (s: Status): Any {
+                    Status.OpenAll | Status.NotOwed => { s }
+                    _ => { null }
+                }"#,
+            ),
+            (
+                "a type-level arm",
+                r#"f fn (s: Any): Any {
+                    match s {
+                        Status => { to-json(s) }
+                        _ => { null }
+                    }
+                }"#,
+            ),
+            (
+                "a unit variant",
+                r#"f fn match (s: Status): Status {
+                    Status.Done => { s }
+                    _ => { Status.Done }
+                }"#,
+            ),
+            (
+                "a Result arm, whose name is the payload",
+                r#"f fn (r: Result): Str {
+                    match r {
+                        Result.Ok => { uppercase(r) }
+                        Result.Err => { "failed" }
+                    }
+                }"#,
+            ),
+        ];
+        for (name, body) in cases {
+            let source = format!("{VARIANT_TYPES}\n{body}");
+            let errors = compile_and_get_type_errors(&source);
+            assert!(errors.is_empty(), "{name}: {errors:?}");
+            let found = variant_warnings(body);
+            assert!(found.is_empty(), "{name}: {found:?}");
+        }
+    }
+
+    /// A variant keeps its enum's coercions, so narrowing the matched name
+    /// must not lose them.
+    #[test]
+    fn test_variant_keeps_its_enums_coercions() {
+        let source = format!(
+            "{VARIANT_TYPES}\n{}",
+            r#"
+            Label type { text: Str }
+            Status -> Label fn (s: Status): Label { Label(text: "status") }
+            Status -> Str fn (s: Status): Str { "status" }
+            takes-label fn (l: Label): Str { l.text }
+            f fn match (s: Status): Str {
+                Status.NotOwed => { takes-label(s) }
+                _ => { "" }
+            }
+            g fn match (s: Status): Str {
+                Status.NotOwed => { Str(s) }
+                _ => { "" }
+            }
+            "#
+        );
+        let errors = compile_and_get_type_errors(&source);
+        assert!(errors.is_empty(), "Got: {errors:?}");
+        let warnings = compile_and_get_warnings(&source);
+        let found = constraint_messages(&warnings, "variant-as-payload");
+        assert!(found.is_empty(), "Got: {found:?}");
+    }
+
     /// A type name nothing declares in a record field, a variant payload or
     /// a return annotation warns (`unresolved-type`). Code like this ran on
     /// 3.0.0, so it stays a warning.

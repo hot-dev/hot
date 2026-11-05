@@ -934,6 +934,20 @@ pub async fn pending_sqlite_migrations(uri: &str) -> Result<Vec<i64>, DatabaseEr
 /// `db.migration-uri` changes the schema the runtime login reads, so it must
 /// be PostgreSQL and name the runtime's database. Hosts may differ, for
 /// example a pooler for the runtime and a direct connection for migrations.
+/// Refuse a PostgreSQL server too old for Hot's migrations, which call
+/// `uuidv7()`, before the first of them fails on it. `version_num` is the
+/// server's `server_version_num`, such as `170011`.
+fn check_postgres_version(version_num: &str, version: &str) -> Result<(), DatabaseError> {
+    if version_num.parse::<u32>().unwrap_or(0) >= MIN_POSTGRES_VERSION_NUM {
+        return Ok(());
+    }
+    let version = version.split_whitespace().next().unwrap_or(version);
+    Err(DatabaseError::Migration(format!(
+        "Hot needs PostgreSQL {MIN_POSTGRES_MAJOR} or newer, and this server is {version}. \
+         No migrations were applied. See https://hot.dev/docs/configuration/postgres"
+    )))
+}
+
 fn check_migration_target(runtime_uri: &str, migration_uri: &str) -> Result<(), DatabaseError> {
     if !matches!(
         DatabaseType::from_uri(migration_uri)?,
@@ -988,6 +1002,9 @@ async fn backup_sqlite_before_migrating(
 /// transaction would otherwise stall every reader of that table until it is
 /// granted.
 const MIGRATION_LOCK_TIMEOUT_MS: i64 = 5_000;
+/// The oldest PostgreSQL major version Hot's migrations run on.
+const MIN_POSTGRES_MAJOR: u32 = 18;
+const MIN_POSTGRES_VERSION_NUM: u32 = MIN_POSTGRES_MAJOR * 10_000;
 const MIGRATION_LOCK_RETRIES: u32 = 5;
 /// Indexes that `-- no-transaction` migrations build concurrently.
 const CONCURRENT_INDEXES: &[&str] = &["call_env_start_time_size_idx"];
@@ -1276,6 +1293,14 @@ pub async fn run_migrations(conf: &Val) -> Result<(), DatabaseError> {
                     tracing::error!("Failed to connect to Postgres for migrations: {:?}", e);
                     DatabaseError::Connection(e)
                 })?;
+
+            let (version_num, version): (String, String) = sqlx::query_as(
+                "SELECT current_setting('server_version_num'), current_setting('server_version')",
+            )
+            .fetch_one(&db)
+            .await
+            .map_err(|e| DatabaseError::Migration(e.to_string()))?;
+            check_postgres_version(&version_num, &version)?;
 
             tracing::debug!("Creating migrator for Postgres");
             let migrator = sqlx::migrate::Migrator::new(migration_path)
@@ -1707,6 +1732,21 @@ pub async fn test_db() -> DatabasePool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migrations_need_postgres_18() {
+        for (num, version) in [("180000", "18.0"), ("180006", "18.6"), ("190001", "19.1")] {
+            assert!(check_postgres_version(num, version).is_ok(), "{version}");
+        }
+        let error = check_postgres_version("170011", "17.11 (Debian 17.11-1.pgdg13+1)")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("PostgreSQL 18 or newer, and this server is 17.11."),
+            "{error}"
+        );
+        assert!(check_postgres_version("not a number", "unknown").is_err());
+    }
 
     #[test]
     fn migration_uri_must_name_the_runtime_database() {
