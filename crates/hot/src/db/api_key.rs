@@ -817,6 +817,9 @@ impl ApiKey {
         let (token, hash) = Self::generate_api_key(api_key_id)?;
         let key_data: serde_json::Value =
             serde_json::from_str(&hash).map_err(|_| ApiKeyError::SerializationError)?;
+        // Read before the update: once it succeeds, only the new secret works
+        // for long, so nothing after it may fail.
+        let key_expires_at = Self::get_credential_state(db, api_key_id).await?.expires_at;
         let now = Utc::now();
         let until = now + overlap;
         let ends_overlap = overlap.is_zero();
@@ -848,8 +851,8 @@ impl ApiKey {
                     .rows_affected()
             }
         };
-        let state = Self::get_credential_state(db, api_key_id).await?;
         if result == 0 {
+            let state = Self::get_credential_state(db, api_key_id).await?;
             let active = Self::get_api_key(db, api_key_id).await?.active;
             return Err(state
                 .previous_secret_expires_at()
@@ -858,7 +861,7 @@ impl ApiKey {
         }
         Ok(RotatedSecret {
             token,
-            previous_secret_expires_at: state.expires_at.map_or(until, |at| at.min(until)),
+            previous_secret_expires_at: key_expires_at.map_or(until, |at| at.min(until)),
         })
     }
 }
