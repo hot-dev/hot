@@ -780,6 +780,59 @@ async fn redis_success_path_rejects_an_ack_lost_before_commit() {
     cleanup_redis_queue(&client, &queue_name).await;
 }
 
+/// A publish that names its event, and what a resend of it finds.
+#[tokio::test]
+async fn postgres_named_event_enqueue_lease_settles() {
+    use chrono::{Duration, Utc};
+    use hot::db::event::{EnqueueClaim, Event};
+
+    let _schema_guard = POSTGRES_SCHEMA_TEST_LOCK.lock().await;
+    let Some((db, schema)) = postgres_db().await else {
+        return;
+    };
+    let data = db::insert_test_data(&db)
+        .await
+        .expect("test data should insert");
+    let event_id = Uuid::new_v4();
+    let now = Utc::now();
+    let lease = now + Duration::minutes(2);
+    let insert = async || {
+        Event::insert_event_if_absent(
+            &db,
+            &event_id,
+            &data.env_id,
+            &data.stream_id,
+            "demo:event",
+            &serde_json::json!({"n": 1e2, "b": 1, "a": 2}),
+            now,
+            &data.user_id,
+            None,
+            lease,
+        )
+        .await
+        .unwrap()
+    };
+    let claim = async |at| {
+        Event::claim_enqueue(&db, &event_id, at, lease)
+            .await
+            .unwrap()
+    };
+
+    assert!(insert().await);
+    assert!(!insert().await, "the id is taken");
+    assert_eq!(claim(now).await, EnqueueClaim::Held);
+    assert_eq!(
+        claim(lease + Duration::seconds(1)).await,
+        EnqueueClaim::Claimed
+    );
+    Event::release_enqueue(&db, &event_id, now).await.unwrap();
+    assert_eq!(claim(now).await, EnqueueClaim::Claimed);
+    Event::finish_enqueue(&db, &event_id).await.unwrap();
+    assert_eq!(claim(now).await, EnqueueClaim::Settled);
+
+    drop_schema(&db, &schema).await;
+}
+
 /// The rows the worker writes for handler runs whose setup failed, or that it
 /// writes before a recovered event runs, and the settlement of earlier
 /// deliveries' runs.
