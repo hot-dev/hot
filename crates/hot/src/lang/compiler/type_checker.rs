@@ -657,6 +657,12 @@ pub struct TypeChecker {
     /// types — they're variables holding `Value::TypeDef`, looked up by
     /// fully-qualified name.
     qualified_types: AHashMap<String, TypeExpr>,
+    /// The namespaces the program holds. A qualified type name counts as
+    /// missing only in one of these, so a check of part of a program, with
+    /// no dependencies loaded, stays permissive.
+    held_namespaces: AHashSet<String>,
+    /// Every top-level name in those namespaces, as `::ns/name`.
+    declared_names: AHashSet<String>,
     /// Qualified names of the types that declare a constructor of their own.
     custom_constructors: AHashSet<String>,
     /// Var imports of a type (`::c/Port` for `Port ::a/Port` in `::c`) →
@@ -791,6 +797,8 @@ impl TypeChecker {
             in_pipe_flow: false,
             known_types: AHashSet::new(),
             qualified_types: AHashMap::new(),
+            held_namespaces: AHashSet::new(),
+            declared_names: AHashSet::new(),
             custom_constructors: AHashSet::new(),
             type_imports: AHashMap::new(),
             import_targets: AHashMap::new(),
@@ -1165,6 +1173,15 @@ impl TypeChecker {
     fn collect_known_types(&mut self, program: &Program) {
         self.refinement_displays =
             crate::lang::ast::inline_refinement_displays(program.namespaces.values());
+        // First, as registering a type can already parse an annotation.
+        for (ns_path, namespace) in &program.namespaces {
+            let ns_str = ns_path.to_string();
+            for var in namespace.scope.vars.keys() {
+                self.declared_names
+                    .insert(format!("{}/{}", ns_str, var.sym.name()));
+            }
+            self.held_namespaces.insert(ns_str);
+        }
         for (ns_path, namespace) in &program.namespaces {
             let ns_str = ns_path.to_string();
             self.namespace_aliases.insert(
@@ -5988,7 +6005,8 @@ impl TypeChecker {
         }
 
         // 4. Try fully qualified namespaced types
-        if let Some(namespaced_type) = self.try_resolve_namespaced_type(type_name) {
+        let missing = self.is_missing_qualified_type(type_name);
+        if !missing && let Some(namespaced_type) = self.try_resolve_namespaced_type(type_name) {
             return namespaced_type;
         }
 
@@ -5997,13 +6015,13 @@ impl TypeChecker {
         //    handles the structural cases above and only the leaf names land
         //    here. Anything that looks structural but slipped through is
         //    treated as `Any` rather than reported.
-        if self.is_complex_type_expression(type_name) {
+        if !missing && self.is_complex_type_expression(type_name) {
             tracing::debug!("Allowing complex type expression: {}", type_name);
             return TypeExpr::Any;
         }
 
-        // Simple, unresolved name — emit an UnresolvedType error so type
-        // annotations like `: NoSuchType` are caught at compile time. Suppress
+        // Unresolved name — emit an UnresolvedType error so type annotations
+        // like `: NoSuchType` and `: ::ns/NoSuchType` are caught at compile time. Suppress
         // inside function bodies (see `in_fn_body` docs) until the body-walk
         // inference paths are fully reliable.
         if self.in_fn_body == 0 {
@@ -6123,10 +6141,34 @@ impl TypeChecker {
             return Some(builtin);
         }
 
-        // Unknown qualified types: stay permissive (current behaviour) rather
-        // than emitting an error — type resolution across all packages isn't
-        // fully wired up yet, and false positives are worse than missed errors.
+        // Unknown qualified types stay permissive here: the namespace may be one
+        // this program doesn't hold. `is_missing_qualified_type` finds the rest.
         Some(TypeExpr::Named(canonical))
+    }
+
+    /// Whether `type_name` is a qualified name in a namespace the program
+    /// holds, which declares nothing of that name. `::ns/Enum.Variant` counts
+    /// by its `Enum`. Any top-level name counts, as an import of a type is a
+    /// plain var, and so does a type declared in a function body.
+    fn is_missing_qualified_type(&self, type_name: &str) -> bool {
+        let Some((prefix, short)) = type_name.rsplit_once('/') else {
+            return false;
+        };
+        let is_leaf = short
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'));
+        if !prefix.starts_with("::") || !is_leaf {
+            return false;
+        }
+        let namespace = self
+            .context
+            .resolve_alias(prefix)
+            .map_or(prefix, String::as_str);
+        let member = short.split('.').next().unwrap_or(short);
+        let name = format!("{namespace}/{member}");
+        self.held_namespaces.contains(namespace)
+            && !self.declared_names.contains(&name)
+            && !self.qualified_types.contains_key(&name)
     }
 
     /// Check if a type name represents a complex type expression that should be allowed
