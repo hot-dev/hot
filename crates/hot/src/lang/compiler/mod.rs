@@ -6244,12 +6244,20 @@ impl Compiler {
                     Val::map_empty()
                 }
             }
-            TypeExpr::Generic(name, _) if name == "Map" => {
-                if include_builtin {
+            TypeExpr::Generic(name, params) if name == "Map" => {
+                let value_type_info = match params.as_slice() {
+                    [_, value] => self.build_field_type_info_from_expr(value, false),
+                    _ => Val::map_empty(),
+                };
+                let builds_values = !Self::is_empty_map(&value_type_info);
+                if builds_values || include_builtin {
                     let mut map_info = Self::simple_type_info("Map");
                     if let Val::Map(entries) = &mut map_info {
-                        std::sync::Arc::make_mut(entries)
-                            .insert(Val::from("$after_records"), Val::Bool(true));
+                        let entries = std::sync::Arc::make_mut(entries);
+                        entries.insert(Val::from("$after_records"), Val::Bool(true));
+                        if builds_values {
+                            entries.insert(Val::from("$value_type"), value_type_info);
+                        }
                     }
                     map_info
                 } else {

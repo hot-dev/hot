@@ -4466,10 +4466,18 @@ impl VirtualMachine {
         };
 
         // Check if it's a builtin type (no construction needed)
-        // BUT: Vec with $item_type needs special handling for nested custom types
+        // BUT: Vec with $item_type and Map with $value_type need special
+        // handling for nested custom types
         let has_item_type = type_info_map.contains_key(&Val::from("$item_type"));
-        if Self::is_builtin_type(&type_name) && !has_item_type {
+        let value_type = type_info_map.get(&Val::from("$value_type"));
+        if Self::is_builtin_type(&type_name) && !has_item_type && value_type.is_none() {
             return Ok(data.clone());
+        }
+
+        if type_name == "Map"
+            && let Some(value_type) = value_type
+        {
+            return self.construct_map_values(data, value_type);
         }
 
         // Handle Vec with custom item type: process each item through its constructor
@@ -4940,6 +4948,38 @@ impl VirtualMachine {
         result_map.insert(Val::from("$val"), processed_val);
 
         Ok(Val::map(result_map))
+    }
+
+    /// Build each value of a `Map<K, V>` whose `V` is constructed. A tagged
+    /// value is already built, and passed its check as a whole.
+    fn construct_map_values(&mut self, data: &Val, value_type: &Val) -> VmResult<Val> {
+        let Val::Map(entries) = data else {
+            return Ok(data.clone());
+        };
+        if crate::val::tagged_type_name(entries).is_some() {
+            return Ok(data.clone());
+        }
+
+        let holds_results = Self::type_info_preserves_result_values(value_type);
+        let mut built = indexmap::IndexMap::with_capacity(entries.len());
+        for (key, value) in entries.iter() {
+            // An Err is no value of `V`: it stops the construction, and isn't
+            // read as the data it carries.
+            if value.is_err() && !holds_results {
+                return Ok(value.clone());
+            }
+            let result = self.construct_typed_recursive(value, value_type)?;
+            if result.is_err() && !holds_results {
+                if let Some(error) = Self::constraint_error_within(&result, key.clone(), None) {
+                    return Ok(error);
+                }
+                let inner_error = result.get("$val").unwrap_or(Val::Null);
+                let error_msg = format!("In Map value {}: {}", key, inner_error);
+                return Ok(Val::err(Val::from(error_msg)));
+            }
+            built.insert(key.clone(), result);
+        }
+        Ok(Val::map(built))
     }
 
     /// A variant of the enum `type_name` from what `untype` makes of one: a

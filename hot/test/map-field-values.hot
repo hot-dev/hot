@@ -1,0 +1,343 @@
+// A `Map<K, V>` field holds values of `V`. Where `V` is a record, an enum or a
+// type over a built-in one, each value is built as a `Vec<V>` item is, and one
+// that can't be is an `Err(ConstraintError.Violation)` naming its key.
+::hot::test::map-field-values ns
+meta ["test"]
+
+// Values reach the constructor at run time, where a literal would be
+// rejected by `hot check` already.
+dynamic fn (value: Any): Any {
+    value
+}
+
+// What a refused construction reports, or "ok".
+refusal fn (lazy result: Any): Str {
+    forced do result
+    cond {
+        is-ok(forced) => { "ok" }
+        => {
+            match err-value(forced) {
+                ConstraintError.Violation => { err-value(forced).message }
+                _ => { `not a violation: ${err-value(forced)}` }
+            }
+        }
+    }
+}
+
+Circle type {
+    radius: Dec,
+}
+
+Square type {
+    side: Dec,
+}
+
+Shape enum {
+    Circle(Circle),
+    Square(Square),
+    Nothing,
+}
+
+Animal enum open {
+    Dog(Circle),
+}
+
+Meters type Int
+
+Other type {
+    name: Str,
+}
+
+Album type {
+    photos: Map<Str, Circle>,
+}
+
+Atlas type {
+    shapes: Map<Str, Shape>,
+}
+
+Zoo type {
+    animals: Map<Str, Animal>,
+}
+
+Distances type {
+    legs: Map<Str, Meters>,
+}
+
+Numbered type {
+    photos: Map<Int, Circle>,
+}
+
+Gaps type {
+    photos: Map<Str, Circle?>,
+}
+
+Mixed type {
+    items: Map<Str, Circle | Str>,
+}
+
+Grid type {
+    rows: Map<Str, Vec<Circle>>,
+}
+
+Nested type {
+    groups: Map<Str, Map<Str, Circle>>,
+}
+
+Pages type {
+    pages: Vec<Map<Str, Circle>>,
+}
+
+Maybe type {
+    photos: Map<Str, Circle>?,
+}
+
+Either type {
+    value: Map<Str, Circle> | Other,
+}
+
+Frame type {
+    album: Album,
+}
+
+Outcomes type {
+    results: Map<Str, Result>,
+}
+
+Shelf enum {
+    Holding(Map<Str, Circle>),
+    Empty,
+}
+
+Plain type {
+    scores: Map<Str, Int>,
+    anything: Map<Str, Any>,
+}
+
+// ============================================================================
+// Records
+// ============================================================================
+
+test-a-record-value-is-built
+meta ["test"] fn () {
+    album Album(photos: dynamic({a: {radius: 1.0}, b: {radius: 2.0}}))
+    assert(is-type(album.photos.a, Circle))
+    assert(is-type(album.photos.b, Circle))
+    assert-eq(2.0, album.photos.b.radius)
+}
+
+test-a-record-value-is-refused-in-either-form
+meta ["test"] fn () {
+    expected "constructor of `Album` at `photos.b.radius` expected Dec, got Str"
+    bad dynamic({a: {radius: 1.0}, b: {radius: "x"}})
+    assert-eq(expected, refusal(Album(photos: bad)))
+    assert-eq(expected, refusal(Album({photos: bad})))
+}
+
+test-a-value-that-is-no-map-is-refused
+meta ["test"] fn () {
+    assert-eq(
+        "constructor of `Album` at `photos.a` expected Circle, got Str",
+        refusal(Album(photos: dynamic({a: "x"}))),
+    )
+}
+
+test-a-value-of-another-record-is-refused
+meta ["test"] fn () {
+    result Album(photos: {a: Other(name: "a")})
+    assert(is-err(result))
+    assert(contains(Str(err-value(result)), "is missing required field(s): radius"))
+}
+
+test-a-value-of-the-type-passes-as-it-is
+meta ["test"] fn () {
+    circle Circle(radius: 1.0)
+    assert-eq(circle, Album(photos: {a: circle}).photos.a)
+}
+
+test-an-empty-map-stays-empty
+meta ["test"] fn () {
+    assert-eq({}, Album(photos: dynamic({})).photos)
+}
+
+test-the-keys-keep-their-order
+meta ["test"] fn () {
+    album Album(photos: dynamic({z: {radius: 1.0}, a: {radius: 2.0}, m: {radius: 3.0}}))
+    assert-eq(["z", "a", "m"], keys(album.photos))
+}
+
+test-a-number-key-reaches-the-value
+meta ["test"] fn () {
+    numbered Numbered(photos: dynamic({"1": {radius: 1.0}}))
+    assert(is-type(get(numbered.photos, 1), Circle))
+    assert(contains(
+        refusal(Numbered(photos: dynamic({"1": {radius: "x"}}))),
+        "expected Dec, got Str",
+    ))
+}
+
+test-a-nested-record-reports-the-whole-path
+meta ["test"] fn () {
+    assert-eq(
+        "constructor of `Frame` at `album.photos.a.radius` expected Dec, got Str",
+        refusal(Frame({album: dynamic({photos: {a: {radius: "x"}}})})),
+    )
+}
+
+test-an-err-value-stops-the-construction
+meta ["test"] fn () {
+    result Album(photos: {a: err("broken")})
+    assert(is-err(result))
+    assert(contains(Str(err-value(result)), "broken"))
+}
+
+// ============================================================================
+// Enums and types over a built-in one
+// ============================================================================
+
+test-a-closed-enum-value-builds-its-variant
+meta ["test"] fn () {
+    assert(is-type(Atlas(shapes: dynamic({a: {radius: 1.0}})).shapes.a, Shape.Circle))
+    assert(is-type(Atlas(shapes: {a: Shape.Nothing}).shapes.a, Shape.Nothing))
+}
+
+test-a-closed-enum-value-it-cannot-place-is-refused
+meta ["test"] fn () {
+    assert-eq(
+        "constructor of `Atlas` at `shapes.a` expected Shape, got Map",
+        refusal(Atlas(shapes: dynamic({a: {sides: 3}}))),
+    )
+}
+
+test-an-open-enum-keeps-a-value-it-does-not-know
+meta ["test"] fn () {
+    assert(is-type(Zoo(animals: dynamic({a: {radius: 1.0}})).animals.a, Animal.Dog))
+    assert-eq({wingspan: 2.1}, Zoo(animals: dynamic({a: {wingspan: 2.1}})).animals.a)
+}
+
+test-a-declared-type-value-is-built-and-checked
+meta ["test"] fn () {
+    assert(is-type(Distances(legs: dynamic({a: 5})).legs.a, Meters))
+    assert-eq(
+        "constructor of `Distances` at `legs.a` expected Int, got Str",
+        refusal(Distances(legs: dynamic({a: "x"}))),
+    )
+}
+
+// ============================================================================
+// Inside other annotations
+// ============================================================================
+
+test-a-value-that-allows-null-keeps-it
+meta ["test"] fn () {
+    gaps Gaps(photos: dynamic({a: null, b: {radius: 1.0}}))
+    assert(is-null(gaps.photos.a))
+    assert(is-type(gaps.photos.b, Circle))
+}
+
+test-a-value-that-does-not-allow-null-refuses-it
+meta ["test"] fn () {
+    assert-eq(
+        "constructor of `Album` at `photos.a` expected Circle, got Null",
+        refusal(Album(photos: dynamic({a: null}))),
+    )
+}
+
+test-a-union-value-picks-its-member
+meta ["test"] fn () {
+    mixed Mixed(items: dynamic({a: {radius: 1.0}, b: "text"}))
+    assert(is-type(mixed.items.a, Circle))
+    assert-eq("text", mixed.items.b)
+    assert(is-err(Mixed(items: dynamic({a: {sides: 3}}))))
+}
+
+test-a-vec-inside-a-map-is-built
+meta ["test"] fn () {
+    assert(is-type(Grid(rows: dynamic({a: [{radius: 1.0}]})).rows.a[0], Circle))
+    assert-eq(
+        "constructor of `Grid` at `rows.a[0].radius` expected Dec, got Str",
+        refusal(Grid(rows: dynamic({a: [{radius: "x"}]}))),
+    )
+}
+
+test-a-map-inside-a-map-is-built
+meta ["test"] fn () {
+    assert(is-type(Nested(groups: dynamic({a: {b: {radius: 1.0}}})).groups.a.b, Circle))
+    assert-eq(
+        "constructor of `Nested` at `groups.a.b.radius` expected Dec, got Str",
+        refusal(Nested(groups: dynamic({a: {b: {radius: "x"}}}))),
+    )
+}
+
+test-a-map-inside-a-vec-is-built
+meta ["test"] fn () {
+    assert(is-type(Pages(pages: dynamic([{a: {radius: 1.0}}])).pages[0].a, Circle))
+    assert-eq(
+        "constructor of `Pages` at `pages[0].a.radius` expected Dec, got Str",
+        refusal(Pages(pages: dynamic([{a: {radius: "x"}}]))),
+    )
+}
+
+test-a-field-that-allows-null-builds-a-map
+meta ["test"] fn () {
+    assert(is-null(Maybe(photos: dynamic(null)).photos))
+    assert(is-type(Maybe(photos: dynamic({a: {radius: 1.0}})).photos.a, Circle))
+    assert(contains(refusal(Maybe(photos: dynamic({a: {radius: "x"}}))), "expected Dec, got Str"))
+}
+
+test-a-union-field-builds-a-map-member
+meta ["test"] fn () {
+    assert(is-type(Either(value: dynamic({a: {radius: 1.0}})).value.a, Circle))
+    assert(is-type(Either(value: dynamic({name: "a"})).value, Other))
+    assert(is-err(Either(value: dynamic({a: {radius: "x"}}))))
+}
+
+test-a-variant-payload-is-built
+meta ["test"] fn () {
+    assert(is-type(Shelf.Holding(dynamic({a: {radius: 1.0}})).a, Circle))
+    assert(contains(refusal(Shelf.Holding(dynamic({a: {radius: "x"}}))), "expected Dec, got Str"))
+}
+
+// ============================================================================
+// What stays as it was
+// ============================================================================
+
+test-result-values-stay-results
+meta ["test"] fn () {
+    results dynamic({a: ok(1), b: err("no")})
+    outcomes Outcomes(results: results)
+    assert(is-ok(get(outcomes.results, "a")))
+    assert(is-err(get(outcomes.results, "b")))
+}
+
+test-built-in-values-are-left-to-their-check
+meta ["test"] fn () {
+    assert-eq("ok", refusal(Plain(scores: dynamic({a: 1}), anything: dynamic({a: {b: 1}}))))
+    assert-eq(
+        "constructor of `Plain` at `scores.a` expected Int, got Str",
+        refusal(Plain(scores: dynamic({a: "x"}), anything: {})),
+    )
+}
+
+test-untype-reaches-the-values
+meta ["test"] fn () {
+    assert-eq(
+        {photos: {a: {radius: 1.0}}},
+        untype(Album(photos: dynamic({a: {radius: 1.0}}))),
+    )
+}
+
+test-what-untype-makes-of-a-map-reads-back
+meta ["test"] fn () {
+    album Album(photos: {a: Circle(radius: 1.0)})
+    atlas Atlas(shapes: {a: Shape.Circle({radius: 1.0}), b: Shape.Nothing})
+    assert-eq(album, Album(untype(album)))
+    assert-eq(atlas, Atlas(untype(atlas)))
+}
+
+test-to-json-writes-the-values-tagged
+meta ["test"] fn () {
+    album Album(photos: dynamic({a: {radius: 1.0}}))
+    assert(contains(to-json(album), "Circle"))
+    assert(not(contains(to-json(untype(album)), "Circle")))
+}
