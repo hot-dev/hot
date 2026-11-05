@@ -3,7 +3,9 @@
 This public repository has these workflow groups:
 
 - `hot.yml`: check/test CI for pushes and pull requests.
-- `cross-platform.yml` and `gcs-integration.yml`: macOS/Windows and GCS test lanes.
+- `cross-platform.yml`: macOS/Windows tests called by Hot releases, plus weekly
+  and manual runs. Pull requests and pushes to `main` run Linux CI only.
+- `gcs-integration.yml`: the GCS integration test lane.
 - `nightly.yml`: scheduled checks too slow or networked for every pull request
   (vendored-library advisories, published SDK pins, Go doc snippets, a Linux
   aarch64 release-build lane, the self-host bundle against real images,
@@ -36,6 +38,13 @@ and the cap in
 [enterprise budgets](https://github.com/enterprises/hot-dev/billing/budgets).
 
 ## Required For Public Releases
+
+The release workflow tests its exact commit on macOS and Windows before
+publishing installers, the package CDN, a GitHub release, or the self-host
+runtime image. The tests run alongside binary builds; either platform failing
+blocks publication. This gate covers stable and beta Hot releases.
+Package-only releases keep their existing pin checks without running the
+native-platform matrix.
 
 These are needed only when `release.yml` publishes artifacts to S3/CDN or updates external repositories. Put them in repository settings or organization settings. The public `hot` release workflow intentionally does not bind jobs to GitHub Environments; staging and production environments belong to `hot-cloud`.
 

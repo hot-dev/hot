@@ -19,6 +19,7 @@ RELEASE = (WORKFLOWS / "selfhost-release.yml").read_text()
 COMMAND = (WORKFLOWS / "selfhost-command.yml").read_text()
 CHECKS = (WORKFLOWS / "selfhost.yml").read_text()
 HOT_RELEASE = (WORKFLOWS / "release.yml").read_text()
+CROSS_PLATFORM = (WORKFLOWS / "cross-platform.yml").read_text()
 DURABLE = re.search(r"DURABLE: '([^']+)'", PLAN).group(1)
 
 
@@ -56,6 +57,15 @@ def step(text, name):
     rest = text.split(f"- name: {name}\n", 1)[1]
     found = re.search(r"^( +)run: \|\n((?:\1  .*\n|\n)+)", rest, re.M)
     return rest[:found.start()], textwrap.dedent(found.group(2))
+
+
+def workflow_job(text, name):
+    return re.search(rf"(?ms)^  {re.escape(name)}:\n(.*?)(?=^  [\w-]+:\n|\Z)", text).group(1)
+
+
+def job_needs(text):
+    found = re.search(r"(?m)^    needs: (.+)$", text)
+    return {name.strip() for name in found.group(1).strip("[]").split(",")} if found else set()
 
 
 def check_inputs(text, **env):
@@ -355,6 +365,63 @@ class ReleaseAndCommandInputs(unittest.TestCase):
 
 
 class ReleaseWorkflow(unittest.TestCase):
+    def test_platform_checks_run_for_releases_weekly_or_on_request(self):
+        triggers = CROSS_PLATFORM.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
+        self.assertEqual(set(re.findall(r"(?m)^  ([\w_]+):", triggers)),
+                         {"workflow_call", "schedule", "workflow_dispatch"})
+        for os_name in ("macos-latest", "windows-latest"):
+            self.assertIn(f"- os: {os_name}\n", CROSS_PLATFORM)
+
+    def test_release_uses_the_platform_workflow_at_its_own_commit(self):
+        caller = workflow_job(HOT_RELEASE, "cross-platform-tests")
+        self.assertIn("uses: ./.github/workflows/cross-platform.yml\n", caller)
+        self.assertEqual(job_needs(caller), {"validate-release"})
+        self.assertIn("needs.validate-release.outputs.is_package_only != 'true'", caller)
+        gate = workflow_job(HOT_RELEASE, "release-ready")
+        self.assertEqual(job_needs(gate), {"validate-release", "cross-platform-tests"})
+        self.assertIn("!cancelled()", gate)
+        self.assertIn("needs.validate-release.result == 'success'", gate)
+
+    def test_every_release_publisher_waits_for_platform_tests(self):
+        def prerequisites(name):
+            needed = job_needs(workflow_job(HOT_RELEASE, name))
+            return needed | {ancestor for parent in needed for ancestor in prerequisites(parent)}
+
+        for publisher in ("package-cdn", "create-release", "selfhost-image", "selfhost-release-assets"):
+            with self.subTest(publisher=publisher):
+                self.assertIn("release-ready", prerequisites(publisher))
+
+        # A skipped native matrix must not skip a successful package-only
+        # gate, or the package CDN job downstream of it.
+        cdn = workflow_job(HOT_RELEASE, "package-cdn").split("    runs-on:", 1)[0]
+        self.assertIn("!cancelled()", cdn)
+        for prerequisite in job_needs(cdn):
+            self.assertIn(f"needs.{prerequisite}.result == 'success'", cdn)
+
+    def test_successful_platform_tests_allow_publication(self):
+        _, script = step(HOT_RELEASE, "Check release test results")
+        for package_only in ("true", "false"):
+            with self.subTest(package_only=package_only):
+                self.assertIn("tests passed", bash(script, IS_PACKAGE_ONLY=package_only, PLATFORM_RESULT="success"))
+
+    def test_only_package_only_releases_can_skip_platform_tests(self):
+        _, script = step(HOT_RELEASE, "Check release test results")
+        self.assertIn("Package-only release", bash(script, IS_PACKAGE_ONLY="true", PLATFORM_RESULT="skipped"))
+        result = subprocess.run(["bash", "-e", "-c", script], capture_output=True, text=True,
+                                env={"PATH": os.environ["PATH"], "IS_PACKAGE_ONLY": "false", "PLATFORM_RESULT": "skipped"})
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_failed_cancelled_or_missing_platform_results_block_publication(self):
+        _, script = step(HOT_RELEASE, "Check release test results")
+        for package_only in ("true", "false"):
+            for result in ("failure", "cancelled", "", "unexpected"):
+                with self.subTest(package_only=package_only, platform_result=result):
+                    checked = subprocess.run(["bash", "-e", "-c", script], capture_output=True, text=True,
+                                             env={"PATH": os.environ["PATH"], "IS_PACKAGE_ONLY": package_only,
+                                                  "PLATFORM_RESULT": result})
+                    self.assertNotEqual(checked.returncode, 0)
+                    self.assertIn("::error::macOS and Windows tests must pass", checked.stdout)
+
     def test_the_manifest_url(self):
         script = "\n".join(lines(RELEASE, 'default="https://', 'base="')) + '\nprintf %s "$base"\n'
         self.assertEqual(bash(script, BASE="", RELEASE="3.0.1"),
