@@ -150,7 +150,7 @@ all fn (): Vec {
      eq(keys(Int-keys({m: numbered}).m), [7]),
      eq(keys(Int-keys({m: {"7": "x"}}).m), [7]),
      eq(keys(Dec-keys({m: numbered}).m), [7.0]),
-     eq(Custom({m: {x: {a: 1}}}).m, {x: {a: 1}}),
+     is-type(get(Custom({m: {x: {a: 1}}}).m, "x"), Foo),
      eq(Whatever({m: numbered}).m, numbered),
      is-err(Whatever({m: "x"}))]
 }
