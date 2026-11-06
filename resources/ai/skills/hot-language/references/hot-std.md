@@ -333,7 +333,7 @@ write-file-bytes fn (path: Str, content: Bytes): Bool    // Write bytes to file
 delete-file fn (path: Str): Bool                         // Delete a file
 file-exists fn (path: Str): Bool                         // Check if file exists
 file-info fn (path: Str): Map                            // Get file metadata
-list-files fn (path: Str): Vec<Str>                      // List files in directory
+list-files fn (prefix: Str): Vec<FileMeta>               // List files under a prefix, each with its metadata
 ```
 
 ### Events (core)

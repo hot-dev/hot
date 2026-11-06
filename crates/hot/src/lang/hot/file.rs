@@ -364,8 +364,10 @@ fn list_files_direct(prefix: &str) -> HotResult<Val> {
                     continue;
                 }
 
+                // The whole path, so that read-file opens it: `relative` only
+                // serves the filter above.
                 if let Ok(meta) = std::fs::metadata(&path) {
-                    files.push(create_direct_file_meta(&relative, &meta));
+                    files.push(create_direct_file_meta(&path.to_string_lossy(), &meta));
                 }
             } else if path.is_dir() {
                 collect_files(&path, base, prefix_filter, files)?;
@@ -1245,6 +1247,35 @@ mod tests {
             }
             HotResult::Ok(other) => panic!("Expected Vec, got {:?}", other),
             HotResult::Err(e) => panic!("Expected success, got error: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_list_files_direct_gives_paths_that_open() {
+        let temp_dir = TempDir::new().unwrap();
+        fs::write(temp_dir.path().join("a.txt"), "a").unwrap();
+        fs::create_dir(temp_dir.path().join("subdir")).unwrap();
+        fs::write(temp_dir.path().join("subdir/c.txt"), "c").unwrap();
+
+        let folder = temp_dir.path().to_str().unwrap().to_string();
+        let name_prefix = temp_dir.path().join("a").to_str().unwrap().to_string();
+        for (prefix, expected) in [(folder, 2), (name_prefix, 1)] {
+            let HotResult::Ok(Val::Vec(files)) = list_files_direct(&prefix) else {
+                panic!("Expected a Vec for {prefix}");
+            };
+            assert_eq!(files.len(), expected, "files under {prefix}");
+            for file in files.iter() {
+                let Val::Map(map) = crate::val::as_fields(file) else {
+                    panic!("Expected a FileMeta, got {file:?}");
+                };
+                let Some(Val::Str(path)) = map.get(&Val::from("path")) else {
+                    panic!("Expected a path in {file:?}");
+                };
+                assert!(
+                    matches!(read_file_direct(path), HotResult::Ok(_)),
+                    "{path} should open"
+                );
+            }
         }
     }
 

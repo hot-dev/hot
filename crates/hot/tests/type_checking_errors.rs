@@ -3850,4 +3850,41 @@ mod integration_tests {
         }
         assert_eq!(found.len(), 7, "Got: {:?}", found);
     }
+
+    // `list-files` gives each file's metadata, not its path. An untyped binding
+    // takes the type the callee declares.
+    #[test]
+    fn test_list_files_is_declared_as_a_vec_of_file_meta() {
+        let as_meta = r#"
+            ::test ns
+
+            keep fn (files: Vec<::hot::file/FileMeta>): Any { files }
+
+            files ::hot::file/list-files("uploads/")
+            kept keep(files)
+        "#;
+        let errors = compile_and_get_type_errors(as_meta);
+        assert!(
+            errors.is_empty(),
+            "A Vec<FileMeta> parameter takes `list-files`'s result. Got: {:?}",
+            errors
+        );
+
+        let as_paths = r#"
+            ::test ns
+
+            keep fn (paths: Vec<Str>): Any { paths }
+
+            files ::hot::file/list-files("uploads/")
+            kept keep(files)
+        "#;
+        let errors = compile_and_get_type_errors(as_paths);
+        assert!(
+            errors
+                .iter()
+                .any(|error| matches!(error, CompilerError::TypeMismatch { .. })),
+            "A Vec<Str> parameter doesn't take `list-files`'s result. Got: {:?}",
+            errors
+        );
+    }
 }
