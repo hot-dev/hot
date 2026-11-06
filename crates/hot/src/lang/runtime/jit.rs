@@ -541,6 +541,8 @@ enum KnownCoreCall {
     Mul,
     Div,
     Mod,
+    Min,
+    Max,
     Eq,
     Ne,
     Gt,
@@ -554,6 +556,8 @@ enum KnownCoreCall {
     And,
     Or,
     Length,
+    Call,
+    Apply,
 }
 
 #[derive(Debug, Clone)]
@@ -6687,6 +6691,24 @@ impl<'a> EmitCtx<'a> {
             self.finish_numeric_exits(builder, exits);
             return Ok(true);
         }
+        // Other operands reach the native function through the VM by name,
+        // not the overload that declares it. (`lt(x)` and the like are
+        // ordinary calls.)
+        if known_core_call(&fn_name).is_some_and(|core| core.runs_natively_at(args_count)) {
+            let halt_block = self.emit_vm_callback_by_name(
+                builder,
+                dest,
+                &fn_name,
+                args_start,
+                args_count,
+                instructions,
+            )?;
+            self.jump_to_next(builder, ip)?;
+            if let Some(halt_block) = halt_block {
+                self.emit_halt_return(builder, halt_block);
+            }
+            return Ok(true);
+        }
         // The function the interpreter's lookup reaches, when it is known
         // here: a qualified name, or the core function an unqualified name
         // the caller's namespace doesn't rebind calls. Any other call goes
@@ -10025,7 +10047,12 @@ fn intrinsic_call_kind(
     use KnownCoreCall::*;
     let first = reg_kinds.get(&args_start).copied();
     let second = reg_kinds.get(&(args_start + 1)).copied();
+    let all_ints =
+        (0..u32::from(args_count)).all(|i| reg_kinds.get(&(args_start + i)) == Some(&RawKind::Int));
     match (known_core_call(name?)?, args_count) {
+        // The counts `lower_int_call` runs inline.
+        (Add | Sub | Mul, 3..) | (Min | Max, 2..) if all_ints => Some(RawKind::Int),
+        (Eq | Ne | Gt | Gte | Lt | Lte, 3..) if all_ints => Some(RawKind::Bool),
         (Eq | Ne, 2) | (Not | IsNull | IsSome, 1) => Some(RawKind::Bool),
         (Gt | Gte | Lt | Lte, 2) => Some(order_result_kind(first, second)),
         (IsZero, 1) if first == Some(RawKind::Int) => Some(RawKind::Bool),
@@ -10204,12 +10231,32 @@ fn try_lower_known_core_call(
     let Some(core_call) = known_core_call(callee_name) else {
         return Ok(None);
     };
+    // Ints run inline at any count. What isn't lowered here is an ordinary
+    // call: declining keeps the function around it compiled.
+    if core_call.takes_any_count()
+        && (args_count != 2 || matches!(core_call, KnownCoreCall::Min | KnownCoreCall::Max))
+    {
+        return lower_int_call(
+            builder,
+            &helper_refs,
+            remap,
+            registers,
+            register_kinds,
+            core_call,
+            args_start,
+            args_count,
+            err_use,
+        );
+    }
     // Exits the caller must finish: a comparison's strict-argument halt on a
     // Result operand, or an arithmetic op's Err.
     let mut exits = NumericExits::default();
 
     let arg = |idx: usize| args_start + idx as u32;
     let lowered = match core_call {
+        KnownCoreCall::Min | KnownCoreCall::Max | KnownCoreCall::Call | KnownCoreCall::Apply => {
+            return Ok(None);
+        }
         KnownCoreCall::Add => {
             if args_count != 2 {
                 return Err(format!("JIT intrinsic '{}' expects 2 args", callee_name));
@@ -10631,6 +10678,32 @@ fn try_lower_known_core_call(
     Ok(Some((lowered.0, lowered.1, exits)))
 }
 
+impl KnownCoreCall {
+    /// Whether hot-std declares this function for more than two arguments.
+    fn takes_any_count(self) -> bool {
+        use KnownCoreCall::*;
+        matches!(
+            self,
+            Add | Sub | Mul | Div | Min | Max | Eq | Ne | Lt | Lte | Gt | Gte
+        )
+    }
+}
+
+impl KnownCoreCall {
+    /// Whether the VM has a faster way than the overload that declares this
+    /// function, for a call by name: `native_numeric_call` for numbers (two
+    /// arguments lower inline, except for `min` and `max`, which only lower
+    /// for Ints), and `direct_call` for `call` and `apply`.
+    fn runs_natively_at(self, args_count: u8) -> bool {
+        use KnownCoreCall::*;
+        match self {
+            Call | Apply => args_count == 2,
+            Min | Max => args_count >= 2,
+            _ => self.takes_any_count() && args_count >= 3,
+        }
+    }
+}
+
 fn known_core_call(name: &str) -> Option<KnownCoreCall> {
     // Bare names (e.g., "add") appear in Call instructions when the compiler
     // couldn't resolve the function locally — meaning it IS the core function.
@@ -10638,6 +10711,8 @@ fn known_core_call(name: &str) -> Option<KnownCoreCall> {
     // CallUserFunction with its specific ID, so bare names here are safe.
     match name {
         "::hot::math/add" | "add" => Some(KnownCoreCall::Add),
+        "::hot::math/min" | "min" => Some(KnownCoreCall::Min),
+        "::hot::math/max" | "max" => Some(KnownCoreCall::Max),
         "::hot::math/sub" | "sub" => Some(KnownCoreCall::Sub),
         "::hot::math/mul" | "mul" => Some(KnownCoreCall::Mul),
         "::hot::math/div" | "div" => Some(KnownCoreCall::Div),
@@ -10655,6 +10730,8 @@ fn known_core_call(name: &str) -> Option<KnownCoreCall> {
         "::hot::bool/and" | "and" => Some(KnownCoreCall::And),
         "::hot::bool/or" | "or" => Some(KnownCoreCall::Or),
         "::hot::coll/length" | "length" => Some(KnownCoreCall::Length),
+        "::hot::lang/call" | "call" => Some(KnownCoreCall::Call),
+        "::hot::lang/apply" | "apply" => Some(KnownCoreCall::Apply),
         _ => None,
     }
 }
@@ -10708,6 +10785,8 @@ fn emit_consume_err(
 fn core_call_name(core: KnownCoreCall) -> &'static str {
     match core {
         KnownCoreCall::Add => "add",
+        KnownCoreCall::Min => "min",
+        KnownCoreCall::Max => "max",
         KnownCoreCall::Sub => "sub",
         KnownCoreCall::Mul => "mul",
         KnownCoreCall::Div => "div",
@@ -10725,6 +10804,8 @@ fn core_call_name(core: KnownCoreCall) -> &'static str {
         KnownCoreCall::And => "and",
         KnownCoreCall::Or => "or",
         KnownCoreCall::Length => "length",
+        KnownCoreCall::Call => "call",
+        KnownCoreCall::Apply => "apply",
     }
 }
 
@@ -10784,8 +10865,8 @@ fn owned_numeric_binop(
     ))
 }
 
-/// The Err of an Int op that failed (an overflow or a zero divisor): the
-/// interpreter's op makes it.
+/// The interpreter's Int op, as an owned value: the Err of one that failed
+/// (an overflow or a zero divisor), or its result.
 fn int_op_err(
     builder: &mut FunctionBuilder<'_>,
     helper_refs: &JitHelperRefs,
@@ -10852,6 +10933,163 @@ fn dec_numeric_binop(
     builder.switch_to_block(ok_block);
     builder.seal_block(ok_block);
     Ok((RawKind::Dec, out_ptr, exits))
+}
+
+/// A core function of Ints that `numeric_binop` and its kin don't lower: more
+/// than two of them, or `min` and `max` of any number. `None` for other
+/// operands, or for a function with no inline form for these (`div`).
+#[allow(clippy::too_many_arguments)]
+fn lower_int_call(
+    builder: &mut FunctionBuilder<'_>,
+    helper_refs: &JitHelperRefs,
+    remap: &AHashMap<u32, usize>,
+    registers: &[Variable],
+    register_kinds: &[Option<RawKind>],
+    core_call: KnownCoreCall,
+    args_start: u32,
+    args_count: u8,
+    err_use: NumericErrUse,
+) -> Result<Option<(RawKind, cranelift_codegen::ir::Value, NumericExits)>, String> {
+    use KnownCoreCall::*;
+    use cranelift_codegen::ir::condcodes::IntCC;
+    let args: Vec<u32> = (args_start..args_start + u32::from(args_count)).collect();
+    if args.len() < 2 {
+        return Ok(None);
+    }
+    for arg in &args {
+        if register_kind(remap, register_kinds, *arg)? != RawKind::Int {
+            return Ok(None);
+        }
+    }
+    let binop_op_code = match core_call {
+        Add => Some(BINOP_ADD),
+        Sub => Some(BINOP_SUB),
+        Mul => Some(BINOP_MUL),
+        _ => None,
+    };
+    if let Some(binop_op_code) = binop_op_code {
+        let mut values = Vec::with_capacity(args.len());
+        for arg in &args {
+            values.push(builder.use_var(registers[remap_reg(remap, *arg)?]));
+        }
+        return int_arithmetic_chain(builder, helper_refs, binop_op_code, &values, err_use)
+            .map(Some);
+    }
+    if matches!(core_call, Min | Max) {
+        let keeps_left = match core_call {
+            Min => IntCC::SignedLessThan,
+            _ => IntCC::SignedGreaterThan,
+        };
+        let mut result = builder.use_var(registers[remap_reg(remap, args[0])?]);
+        for arg in &args[1..] {
+            let next = builder.use_var(registers[remap_reg(remap, *arg)?]);
+            let keep = builder.ins().icmp(keeps_left, result, next);
+            result = builder.ins().select(keep, result, next);
+        }
+        return Ok(Some((RawKind::Int, result, NumericExits::default())));
+    }
+    let pair_holds = match core_call {
+        Eq => IntCC::Equal,
+        Ne => IntCC::NotEqual,
+        Lt => IntCC::SignedLessThan,
+        Lte => IntCC::SignedLessThanOrEqual,
+        Gt => IntCC::SignedGreaterThan,
+        Gte => IntCC::SignedGreaterThanOrEqual,
+        _ => return Ok(None),
+    };
+    // Int comparisons can't fail, so no pair needs a branch: each is read.
+    let mut result = None;
+    for pair in args.windows(2) {
+        let holds = int_compare(
+            builder,
+            remap,
+            registers,
+            register_kinds,
+            pair[0],
+            pair[1],
+            pair_holds,
+        )?;
+        result = Some(match result {
+            None => holds,
+            // Values aren't all equal when any pair differs.
+            Some(so_far) if core_call == Ne => builder.ins().bor(so_far, holds),
+            Some(so_far) => builder.ins().band(so_far, holds),
+        });
+    }
+    let result = result.ok_or("JIT comparison chain has no pairs")?;
+    Ok(Some((RawKind::Bool, result, NumericExits::default())))
+}
+
+/// `add`, `sub` or `mul` of `values` from the left. As `numeric_binop` does
+/// for two Ints: an Int unless the result is kept (`err_use`), where an
+/// overflow's Err has to be a value, so the result is owned. An overflow at
+/// any step is the Err of the whole call, which the later values don't reach.
+fn int_arithmetic_chain(
+    builder: &mut FunctionBuilder<'_>,
+    helper_refs: &JitHelperRefs,
+    binop_op_code: i64,
+    values: &[cranelift_codegen::ir::Value],
+    err_use: NumericErrUse,
+) -> Result<(RawKind, cranelift_codegen::ir::Value, NumericExits), String> {
+    let Some((first, rest)) = values.split_first() else {
+        return Err("JIT Int arithmetic has no operands".to_string());
+    };
+    if err_use == NumericErrUse::Unread {
+        // Nothing reads the result, so an overflow can't be seen.
+        let mut result = *first;
+        for next in rest {
+            result = match binop_op_code {
+                BINOP_ADD => builder.ins().iadd(result, *next),
+                BINOP_SUB => builder.ins().isub(result, *next),
+                BINOP_MUL => builder.ins().imul(result, *next),
+                _ => return Err(format!("JIT Int arithmetic has no op {binop_op_code}")),
+            };
+        }
+        return Ok((RawKind::Int, result, NumericExits::default()));
+    }
+    let kept = err_use == NumericErrUse::Kept;
+    let checked_rest = if kept { &rest[..rest.len() - 1] } else { rest };
+    // A kept result leaves every step at the same place, with its value.
+    let merge = kept.then(|| (builder.create_block(), builder.declare_var(types::I64)));
+    let mut exits = NumericExits::default();
+    let mut result = *first;
+    for next in checked_rest {
+        let (value, overflow) = match binop_op_code {
+            BINOP_ADD => builder.ins().sadd_overflow(result, *next),
+            BINOP_SUB => builder.ins().ssub_overflow(result, *next),
+            BINOP_MUL => builder.ins().smul_overflow(result, *next),
+            _ => return Err(format!("JIT Int arithmetic has no op {binop_op_code}")),
+        };
+        let overflow_block = builder.create_block();
+        let cont_block = builder.create_block();
+        builder
+            .ins()
+            .brif(overflow, overflow_block, &[], cont_block, &[]);
+        builder.switch_to_block(overflow_block);
+        builder.seal_block(overflow_block);
+        let err = int_op_err(builder, helper_refs, binop_op_code, result, *next);
+        match merge {
+            Some((block, var)) => {
+                builder.def_var(var, err);
+                builder.ins().jump(block, &[]);
+            }
+            None => route_numeric_err(builder, helper_refs, err, err_use, &mut exits),
+        }
+        builder.switch_to_block(cont_block);
+        builder.seal_block(cont_block);
+        result = value;
+    }
+    let Some((block, var)) = merge else {
+        return Ok((RawKind::Int, result, exits));
+    };
+    // The interpreter's op makes the last step's owned value, or its Err.
+    let last = *rest.last().ok_or("JIT Int arithmetic has one operand")?;
+    let owned = int_op_err(builder, helper_refs, binop_op_code, result, last);
+    builder.def_var(var, owned);
+    builder.ins().jump(block, &[]);
+    builder.switch_to_block(block);
+    builder.seal_block(block);
+    Ok((RawKind::OwnedVal, builder.use_var(var), exits))
 }
 
 /// `add`, `sub` or `mul`. Two Ints give an Int unless the result is kept

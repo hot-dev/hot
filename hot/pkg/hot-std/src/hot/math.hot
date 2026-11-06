@@ -61,20 +61,30 @@ add
 meta {
     core: true,
     doc: """
-    Add `x` and `y`. An Int sum that doesn't fit in an Int is
-    `Err("Integer overflow")`.
+    Add the numbers, left to right. `add()` is `0` and `add(x)` is `x`, so
+    `add(...xs)` sums a Vec of any length. An Int sum that doesn't fit in an
+    Int is `Err("Integer overflow")`.
 
     **Example**
 
     ```hot
-    add(2, 3)      // 5
-    add(1.5, 2.5)  // 4.0
-    add(-1, 1)     // 0
+    add(2, 3)        // 5
+    add(1.5, 2.5)    // 4.0
+    add(-1, 1)       // 0
+    add(1, 2, 3, 4)  // 10
+    add(...[1, 2])   // 3
+    add()            // 0
     ```
     """
 }
-fn (x: Int | Dec, y: Int | Dec): Int | Dec {
+fn
+(): Int { 0 },
+(x: Int | Dec): Int | Dec { x },
+(x: Int | Dec, y: Int | Dec): Int | Dec {
     call-lib(::hot::math/add, [x, y])
+},
+(x: Int | Dec, y: Int | Dec, z: Int | Dec, ...rest: Int | Dec): Int | Dec {
+    call-lib(::hot::math/add, [x, y, z, ...rest])
 }
 
 
@@ -82,7 +92,8 @@ sub
 meta {
     core: true,
     doc: """
-    Subtract `y` from `x`. An Int difference that doesn't fit in an Int is
+    Subtract each later number from `x`, left to right. With one number,
+    negate it. An Int difference that doesn't fit in an Int is
     `Err("Integer overflow")`.
 
     **Example**
@@ -91,11 +102,18 @@ meta {
     sub(5, 3)      // 2
     sub(1, 5)      // -4
     sub(3.5, 1.5)  // 2.0
+    sub(10, 1, 2)  // 7
+    sub(5)         // -5
     ```
     """
 }
-fn (x: Int | Dec, y: Int | Dec): Int | Dec {
+fn
+(x: Int | Dec): Int | Dec { call-lib(::hot::math/sub, [0, x]) },
+(x: Int | Dec, y: Int | Dec): Int | Dec {
     call-lib(::hot::math/sub, [x, y])
+},
+(x: Int | Dec, y: Int | Dec, z: Int | Dec, ...rest: Int | Dec): Int | Dec {
+    call-lib(::hot::math/sub, [x, y, z, ...rest])
 }
 
 
@@ -103,20 +121,30 @@ mul
 meta {
     core: true,
     doc: """
-    Multiply `x` by `y`. An Int product that doesn't fit in an Int is
-    `Err("Integer overflow")`.
+    Multiply the numbers, left to right. `mul()` is `1` and `mul(x)` is `x`, so
+    `mul(...xs)` takes the product of a Vec of any length. An Int product that
+    doesn't fit in an Int is `Err("Integer overflow")`.
 
     **Example**
 
     ```hot
-    mul(3, 4)      // 12
-    mul(2.5, 4)    // 10.0
-    mul(-2, 3)     // -6
+    mul(3, 4)       // 12
+    mul(2.5, 4)     // 10.0
+    mul(-2, 3)      // -6
+    mul(2, 3, 4)    // 24
+    mul(...[2, 5])  // 10
+    mul()           // 1
     ```
     """
 }
-fn (x: Int | Dec, y: Int | Dec): Int | Dec {
+fn
+(): Int { 1 },
+(x: Int | Dec): Int | Dec { x },
+(x: Int | Dec, y: Int | Dec): Int | Dec {
     call-lib(::hot::math/mul, [x, y])
+},
+(x: Int | Dec, y: Int | Dec, z: Int | Dec, ...rest: Int | Dec): Int | Dec {
+    call-lib(::hot::math/mul, [x, y, z, ...rest])
 }
 
 
@@ -124,7 +152,8 @@ div
 meta {
     core: true,
     doc: """
-    Divide `x` by `y`. Dividing by zero is `Err("Division by zero")`.
+    Divide `x` by each later number, left to right. Dividing by zero is
+    `Err("Division by zero")`.
 
     **Example**
 
@@ -132,11 +161,16 @@ meta {
     div(10, 2)     // 5
     div(7, 2)      // 3.5
     div(1, 4)      // 0.25
+    div(100, 2, 5) // 10
     ```
     """
 }
-fn (x: Int | Dec, y: Int | Dec): Int | Dec {
+fn
+(x: Int | Dec, y: Int | Dec): Int | Dec {
     call-lib(::hot::math/div, [x, y])
+},
+(x: Int | Dec, y: Int | Dec, z: Int | Dec, ...rest: Int | Dec): Int | Dec {
+    call-lib(::hot::math/div, [x, y, z, ...rest])
 }
 
 
@@ -214,7 +248,8 @@ max
 meta {
     core: true,
     doc: """
-    Return the larger of `x` and `y`.
+    Return the largest of the numbers, so `max(...xs)` needs no starting value.
+    An empty Vec has no largest number, so `max(...[])` is an error.
 
     **Example**
 
@@ -222,11 +257,18 @@ meta {
     max(3, 7)       // 7
     max(-1, -5)     // -1
     max(1.5, 1.4)   // 1.5
+    max(3, 9, 2)    // 9
+    max(...[-3, -9]) // -3
     ```
     """
 }
-fn (x: Int | Dec, y: Int | Dec): Int | Dec {
+fn
+(x: Int | Dec): Int | Dec { x },
+(x: Int | Dec, y: Int | Dec): Int | Dec {
     call-lib(::hot::math/max, [x, y])
+},
+(x: Int | Dec, y: Int | Dec, z: Int | Dec, ...rest: Int | Dec): Int | Dec {
+    call-lib(::hot::math/max, [x, y, z, ...rest])
 }
 
 
@@ -234,7 +276,8 @@ min
 meta {
     core: true,
     doc: """
-    Return the smaller of `x` and `y`.
+    Return the smallest of the numbers, so `min(...xs)` needs no starting value.
+    An empty Vec has no smallest number, so `min(...[])` is an error.
 
     **Example**
 
@@ -242,11 +285,18 @@ meta {
     min(3, 7)       // 3
     min(-1, -5)     // -5
     min(1.5, 1.4)   // 1.4
+    min(3, 9, 2)    // 2
+    min(...[-3, -9]) // -9
     ```
     """
 }
-fn (x: Int | Dec, y: Int | Dec): Int | Dec {
+fn
+(x: Int | Dec): Int | Dec { x },
+(x: Int | Dec, y: Int | Dec): Int | Dec {
     call-lib(::hot::math/min, [x, y])
+},
+(x: Int | Dec, y: Int | Dec, z: Int | Dec, ...rest: Int | Dec): Int | Dec {
+    call-lib(::hot::math/min, [x, y, z, ...rest])
 }
 
 

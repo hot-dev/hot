@@ -4,34 +4,44 @@ meta {doc: """Bitwise operations for integers and bytes."""}
 and
 meta {
     doc: """
-    Bitwise AND of `a` and `b`.
+    Bitwise AND of the values, left to right.
 
     **Example**
 
     ```hot
     ::hot::bit/and(12, 10)  // 8 (0b1100 & 0b1010 = 0b1000)
+    ::hot::bit/and(12, 10, 9)  // 8
     ```
     """
 }
-fn (a: Int | Byte, b: Int | Byte): Int | Byte {
+fn
+(a: Int | Byte, b: Int | Byte): Int | Byte {
     call-lib(::hot::bit/and, [a, b])
+},
+(a: Int | Byte, b: Int | Byte, c: Int | Byte, ...rest: Int | Byte): Int | Byte {
+    call-lib(::hot::bit/and, [a, b, c, ...rest])
 }
 
 
 or
 meta {
     doc: """
-    Bitwise OR of `a` and `b`.
+    Bitwise OR of the values, left to right.
 
     **Example**
 
     ```hot
     ::hot::bit/or(12, 10)  // 14 (0b1100 | 0b1010 = 0b1110)
+    ::hot::bit/or(12, 10, 1)  // 15
     ```
     """
 }
-fn (a: Int | Byte, b: Int | Byte): Int | Byte {
+fn
+(a: Int | Byte, b: Int | Byte): Int | Byte {
     call-lib(::hot::bit/or, [a, b])
+},
+(a: Int | Byte, b: Int | Byte, c: Int | Byte, ...rest: Int | Byte): Int | Byte {
+    call-lib(::hot::bit/or, [a, b, c, ...rest])
 }
 
 
@@ -44,11 +54,16 @@ meta {
 
     ```hot
     ::hot::bit/xor(12, 10)  // 6 (0b1100 ^ 0b1010 = 0b0110)
+    ::hot::bit/xor(12, 10, 1)  // 7
     ```
     """
 }
-fn (a: Int | Byte, b: Int | Byte): Int | Byte {
+fn
+(a: Int | Byte, b: Int | Byte): Int | Byte {
     call-lib(::hot::bit/xor, [a, b])
+},
+(a: Int | Byte, b: Int | Byte, c: Int | Byte, ...rest: Int | Byte): Int | Byte {
+    call-lib(::hot::bit/xor, [a, b, c, ...rest])
 }
 
 

@@ -1,6 +1,7 @@
 //! Interpreter/JIT parity for the natives compiled code runs: `length`, map
 //! spreads and appends, bare calls to core names a project rebinds, lambdas
-//! reading locals bound after them, and calls no overload takes.
+//! reading locals bound after them, calls no overload takes, and core
+//! functions called with other than two arguments.
 //!
 //! Each call runs on a fresh VM, first interpreted, then compiled from its
 //! first call, so a call that halts doesn't leave its failure to the next.
@@ -10,6 +11,7 @@ use crate::lang::compiler::core_registry::CoreVariableRegistry;
 use crate::lang::runtime::vm::VirtualMachine;
 use crate::val;
 use crate::val::Val;
+use fastnum::D256;
 use std::sync::Arc;
 
 fn source_vm(source: &str, jit: Val) -> VirtualMachine {
@@ -337,4 +339,339 @@ templated fn (x: Int): Any { `one-arg=${::l/two(x)}` }
             "{function}: {results:?}"
         );
     }
+}
+
+// `add` and its kin run natively for two arguments. Another count is an
+// ordinary call: it must not stop the function around it from compiling, as
+// the intrinsic's fixed arity once did.
+#[test]
+fn jit_compiles_functions_that_call_core_functions_with_more_arguments() {
+    let source = &chain_source(
+        r#"
+::app::main ns
+
+sum fn (a: Int, b: Int, c: Int): Int { add(a, b, c) }
+
+negative-sum fn (a: Int, b: Int, c: Int): Int { sub(mul(a, b, c), add(a, b, c, 1)) }
+
+quotient fn (a: Int, b: Int, c: Int): Any { div(a, b, c) }
+
+rising fn (a: Int, b: Int, c: Int): Bool { lt(a, b, c) }
+
+falling fn (a: Int, b: Int, c: Int): Bool { gt(a, b, c) }
+
+not-rising fn (a: Int, b: Int, c: Int): Bool { gte(a, b, c) }
+
+not-falling fn (a: Int, b: Int, c: Int): Bool { lte(a, b, c) }
+
+level fn (a: Int, b: Int, c: Int): Bool { eq(a, b, c) }
+
+mixed fn (a: Int, b: Int, c: Int): Bool { ne(a, b, c) }
+
+spread fn (a: Int, b: Int, c: Int): Int { add(...[a, b, c]) }
+"#,
+    );
+    let calls = vec![
+        vec![val!(1), val!(2), val!(3)],
+        vec![val!(3), val!(2), val!(1)],
+        vec![val!(2), val!(2), val!(2)],
+    ];
+    for (function, expected) in [
+        ("sum", vec![val!(6), val!(6), val!(6)]),
+        ("negative-sum", vec![val!(-1), val!(-1), val!(1)]),
+        ("rising", vec![val!(true), val!(false), val!(false)]),
+        ("falling", vec![val!(false), val!(true), val!(false)]),
+        ("not-rising", vec![val!(false), val!(true), val!(true)]),
+        ("not-falling", vec![val!(true), val!(false), val!(true)]),
+        ("level", vec![val!(false), val!(false), val!(true)]),
+        ("mixed", vec![val!(true), val!(true), val!(false)]),
+        ("spread", vec![val!(6), val!(6), val!(6)]),
+    ] {
+        let name = format!("::app::main/{function}");
+        let (results, was_compiled) = same_outcomes(source, &name, &calls);
+        let expected: Vec<Result<Val, String>> = expected.into_iter().map(Ok).collect();
+        assert_eq!(results, expected, "{name}");
+        assert!(was_compiled, "{name} stays compiled");
+    }
+    let (results, was_compiled) = same_outcomes(
+        source,
+        "::app::main/quotient",
+        &[
+            vec![val!(100), val!(2), val!(5)],
+            vec![val!(1), val!(0), val!(5)],
+        ],
+    );
+    assert_eq!(results[0], Ok(val!(10)));
+    assert!(is_err_value(&results[1]), "a zero divisor is an Err");
+    assert!(was_compiled, "quotient stays compiled");
+}
+
+/// The overloads hot-std declares for `names`, without the rest of hot-std.
+fn hot_std_overloads(namespace: &str, names: &[&str]) -> String {
+    let functions: Vec<String> = names
+        .iter()
+        .map(|name| {
+            format!(
+                "{name} meta {{core: true}} fn\n\
+                 (x: Any, y: Any) {{ call-lib({namespace}/{name}, [x, y]) }},\n\
+                 (x: Any, y: Any, z: Any, ...rest: Any) {{\n\
+                 call-lib({namespace}/{name}, [x, y, z, ...rest])\n\
+                 }}"
+            )
+        })
+        .collect();
+    format!("{namespace} ns\n\n{}\n", functions.join("\n\n"))
+}
+
+fn chain_source(app: &str) -> String {
+    format!(
+        "{}\n{}\n{app}",
+        hot_std_overloads("::hot::math", &["add", "sub", "mul", "div", "min", "max"]),
+        hot_std_overloads("::hot::cmp", &["eq", "ne", "lt", "lte", "gt", "gte"]),
+    )
+}
+
+// An overflow at any step of a chain is the Err of the whole call, however
+// its result is used: returned, kept in a local, read by another op, or unread.
+#[test]
+fn jit_int_chains_overflow_as_interpreted_wherever_the_result_goes() {
+    let source = chain_source(
+        r#"
+::app::main ns
+
+returned fn (a: Int, b: Int, c: Int): Any { add(a, b, c) }
+
+returned-mul fn (a: Int, b: Int, c: Int): Any { mul(a, b, c) }
+
+returned-sub fn (a: Int, b: Int, c: Int): Any { sub(a, b, c) }
+
+kept fn (a: Int, b: Int, c: Int): Any {
+  total add(a, b, c, 1)
+  [total]
+}
+
+read-by-op fn (a: Int, b: Int, c: Int): Any { add(add(a, b, c), 1) }
+
+unread fn (a: Int, b: Int, c: Int): Int {
+  ignored add(a, b, c)
+  7
+}
+"#,
+    );
+    let max = val!(i64::MAX);
+    let min = val!(i64::MIN);
+    let calls = vec![
+        vec![val!(1), val!(2), val!(3)],
+        // The first step overflows; the last would bring it back.
+        vec![max.clone(), val!(1), val!(-5)],
+        // The last step overflows.
+        vec![max.clone(), val!(-1), val!(2)],
+        vec![max.clone(), max.clone(), max.clone()],
+        vec![min.clone(), val!(-1), val!(1)],
+        vec![min.clone(), min.clone(), val!(0)],
+    ];
+    for function in [
+        "returned",
+        "returned-mul",
+        "returned-sub",
+        "kept",
+        "read-by-op",
+        "unread",
+    ] {
+        let name = format!("::app::main/{function}");
+        let (results, was_compiled) = same_outcomes(&source, &name, &calls);
+        assert!(was_compiled, "{name} stays compiled");
+        let overflow = "Integer overflow";
+        match function {
+            "unread" => assert!(results.iter().all(|r| *r == Ok(val!(7))), "{results:?}"),
+            "read-by-op" => {
+                assert_eq!(results[0], Ok(val!(7)));
+                // An Err read by another op halts there, in either tier.
+                assert!(
+                    matches!(&results[1], Err(e) if e.contains(overflow)),
+                    "{results:?}"
+                );
+            }
+            "kept" => {
+                assert_eq!(results[0], Ok(val!([7])));
+                let Ok(Val::Vec(kept)) = &results[1] else {
+                    panic!("{results:?}");
+                };
+                assert!(kept[0].is_err(), "the local keeps the Err as a value");
+            }
+            _ => assert!(is_err_value(&results[1]), "{name}: {results:?}"),
+        }
+    }
+    let (results, _) = same_outcomes(
+        &source,
+        "::app::main/returned",
+        &[
+            vec![max.clone(), val!(1), val!(-5)],
+            vec![val!(1), val!(2), val!(3)],
+        ],
+    );
+    assert!(is_err_value(&results[0]), "the overflow is the result");
+    assert_eq!(results[1], Ok(val!(6)));
+}
+
+// Dec, mixed and untyped operands take the native function, not the inline
+// Int path, and what isn't a number takes the full call.
+#[test]
+fn jit_chains_of_other_operands_match_the_interpreter() {
+    let source = chain_source(
+        r#"
+::app::main ns
+
+sum fn (a, b, c) { add(a, b, c) }
+
+product fn (a, b, c) { mul(a, b, c) }
+
+quotient fn (a, b, c) { div(a, b, c) }
+
+least fn (a, b, c) { min(a, b, c) }
+
+most fn (a, b, c) { max(a, b, c) }
+
+least-of-two fn (a, b) { min(a, b) }
+
+most-of-two fn (a, b) { max(a, b) }
+
+rising fn (a, b, c) { lt(a, b, c) }
+
+not-falling fn (a, b, c) { lte(a, b, c) }
+
+all-equal fn (a, b, c) { eq(a, b, c) }
+
+not-all-equal fn (a, b, c) { ne(a, b, c) }
+"#,
+    );
+    let calls = vec![
+        vec![val!(1), val!(2), val!(3)],
+        vec![val!(3), val!(2), val!(1)],
+        vec![Val::from(D256::from(1)), val!(2), Val::from(D256::from(3))],
+        vec![Val::from(D256::from(2)), Val::from(D256::from(2)), val!(2)],
+        vec![val!(1), val!(0), val!(2)],
+        vec![val!(i64::MAX), val!(1), Val::from(D256::from(1))],
+    ];
+    for function in [
+        "sum",
+        "product",
+        "quotient",
+        "least",
+        "most",
+        "rising",
+        "not-falling",
+        "all-equal",
+        "not-all-equal",
+    ] {
+        let name = format!("::app::main/{function}");
+        same_outcomes(&source, &name, &calls);
+        // Not a number: the native functions never see these.
+        same_outcomes(&source, &name, &[vec![val!(1), val!(2), val!("a")]]);
+        same_outcomes(&source, &name, &[vec![val!("a"), val!(2), val!(3)]]);
+    }
+    let dec = |n: i64| Val::from(D256::from(n));
+    let check = |function: &str, args: Vec<Val>, expected: Val| {
+        let name = format!("::app::main/{function}");
+        let (results, _) = same_outcomes(&source, &name, &[args]);
+        assert_eq!(results, vec![Ok(expected)], "{name}");
+    };
+    check("sum", vec![val!(1), dec(2), val!(3)], dec(6));
+    check("product", vec![dec(2), val!(3), val!(4)], dec(24));
+    check("quotient", vec![val!(100), val!(2), val!(5)], val!(10));
+    check("least", vec![dec(3), val!(1), val!(2)], dec(1));
+    check("most", vec![val!(3), dec(9), val!(2)], dec(9));
+    check("rising", vec![val!(1), dec(2), val!(3)], val!(true));
+    check("rising", vec![val!(1), dec(3), val!(2)], val!(false));
+    check("not-falling", vec![dec(2), dec(2), dec(3)], val!(true));
+    check("all-equal", vec![dec(2), dec(2), dec(2)], val!(true));
+    check("not-all-equal", vec![dec(2), dec(2), dec(2)], val!(false));
+    check("not-all-equal", vec![dec(2), dec(3), dec(2)], val!(true));
+    let pairs = vec![
+        vec![val!(1), val!(2)],
+        vec![val!(2), val!(1)],
+        vec![Val::from(D256::from(2)), val!(3)],
+        vec![val!("a"), val!(3)],
+    ];
+    same_outcomes(&source, "::app::main/least-of-two", &pairs);
+    same_outcomes(&source, "::app::main/most-of-two", &pairs);
+}
+
+// Comparison chains read every pair, and `ne` isn't "all different".
+#[test]
+fn jit_int_comparison_chains_read_every_pair() {
+    let source = chain_source(
+        r#"
+::app::main ns
+
+rising fn (a: Int, b: Int, c: Int, d: Int): Bool { lt(a, b, c, d) }
+
+not-falling fn (a: Int, b: Int, c: Int, d: Int): Bool { lte(a, b, c, d) }
+
+falling fn (a: Int, b: Int, c: Int, d: Int): Bool { gt(a, b, c, d) }
+
+not-rising fn (a: Int, b: Int, c: Int, d: Int): Bool { gte(a, b, c, d) }
+
+all-equal fn (a: Int, b: Int, c: Int, d: Int): Bool { eq(a, b, c, d) }
+
+not-all-equal fn (a: Int, b: Int, c: Int, d: Int): Bool { ne(a, b, c, d) }
+
+least fn (a: Int, b: Int, c: Int, d: Int): Int { min(a, b, c, d) }
+
+most fn (a: Int, b: Int, c: Int, d: Int): Int { max(a, b, c, d) }
+"#,
+    );
+    let four = |a: i64, b: i64, c: i64, d: i64| vec![val!(a), val!(b), val!(c), val!(d)];
+    let calls = vec![
+        four(1, 2, 3, 4),
+        four(4, 3, 2, 1),
+        four(1, 2, 2, 3),
+        four(3, 2, 2, 1),
+        four(1, 1, 1, 1),
+        // Only the last pair is out of order, then only the first.
+        four(1, 2, 3, 1),
+        four(5, 2, 3, 4),
+        // `ne` of values that match at either end.
+        four(1, 2, 2, 1),
+        four(i64::MAX, i64::MIN, 0, -1),
+    ];
+    for (function, expected) in [
+        (
+            "rising",
+            [true, false, false, false, false, false, false, false, false],
+        ),
+        (
+            "not-falling",
+            [true, false, true, false, true, false, false, false, false],
+        ),
+        (
+            "falling",
+            [false, true, false, false, false, false, false, false, false],
+        ),
+        (
+            "not-rising",
+            [false, true, false, true, true, false, false, false, false],
+        ),
+        (
+            "all-equal",
+            [false, false, false, false, true, false, false, false, false],
+        ),
+        (
+            "not-all-equal",
+            [true, true, true, true, false, true, true, true, true],
+        ),
+    ] {
+        let name = format!("::app::main/{function}");
+        let (results, was_compiled) = same_outcomes(&source, &name, &calls);
+        let expected: Vec<Result<Val, String>> =
+            expected.into_iter().map(|b| Ok(val!(b))).collect();
+        assert_eq!(results, expected, "{name}");
+        assert!(was_compiled, "{name} stays compiled");
+    }
+    let (results, was_compiled) = same_outcomes(&source, "::app::main/least", &calls);
+    assert_eq!(results[8], Ok(val!(i64::MIN)));
+    assert!(was_compiled, "least stays compiled");
+    let (results, was_compiled) = same_outcomes(&source, "::app::main/most", &calls);
+    assert_eq!(results[8], Ok(val!(i64::MAX)));
+    assert!(was_compiled, "most stays compiled");
 }

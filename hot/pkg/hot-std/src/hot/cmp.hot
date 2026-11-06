@@ -5,7 +5,7 @@ eq
 meta {
     core: true,
     doc: """
-    Return true if `a` is equal to `b`.
+    Return true if all the values are equal. One value is equal to itself.
 
     **Example**
 
@@ -14,18 +14,26 @@ meta {
     eq(1, 2)           // false
     eq("hi", "hi") // true
     eq([1, 2], [1, 2]) // true
+    eq(1, 1, 1)        // true
+    eq(1, 1, 2)        // false
     ```
     """
 }
-fn (a: Any, b: Any) {
+fn
+(a: Any) { true },
+(a: Any, b: Any) {
     call-lib(::hot::cmp/eq, [a, b])
+},
+(a: Any, b: Any, c: Any, ...rest: Any) {
+    call-lib(::hot::cmp/eq, [a, b, c, ...rest])
 }
 
 ne
 meta {
     core: true,
     doc: """
-    Return true if `a` is not equal to `b`.
+    Return true if the values aren't all equal, the opposite of `eq`. That
+    isn't "all different": `ne(1, 2, 1)` is true though two of them match.
 
     **Example**
 
@@ -33,18 +41,26 @@ meta {
     ne(1, 2)           // true
     ne(1, 1)           // false
     ne("a", "b")   // true
+    ne(1, 1, 2)        // true
+    ne(1, 1, 1)        // false
     ```
     """
 }
-fn (a: Any, b: Any) {
+fn
+(a: Any) { false },
+(a: Any, b: Any) {
     not(eq(a, b))
+},
+(a: Any, b: Any, c: Any, ...rest: Any) {
+    call-lib(::hot::cmp/ne, [a, b, c, ...rest])
 }
 
 gt
 meta {
     core: true,
     doc: """
-    Return true if `a` is greater than `b`.
+    Return true if each number is greater than the next, so `gt(...xs)` checks
+    a whole Vec. One number has nothing to compare with, so it is true.
 
     **Example**
 
@@ -53,11 +69,18 @@ meta {
     gt(3, 5)     // false
     gt(3, 3)     // false
     gt(2.5, 2)   // true
+    gt(3, 2, 1)   // true
+    gt(3, 3, 1)   // false
     ```
     """
 }
-fn (a: Int | Dec, b: Int | Dec) {
+fn
+(a: Int | Dec) { true },
+(a: Int | Dec, b: Int | Dec) {
     call-lib(::hot::cmp/gt, [a, b])
+},
+(a: Int | Dec, b: Int | Dec, c: Int | Dec, ...rest: Int | Dec) {
+    call-lib(::hot::cmp/gt, [a, b, c, ...rest])
 }
 
 
@@ -65,7 +88,8 @@ gte
 meta {
     core: true,
     doc: """
-    Return true if `a` is greater than or equal to `b`.
+    Return true if each number is greater than or equal to the next, so `gte(...xs)` checks
+    a whole Vec. One number has nothing to compare with, so it is true.
 
     **Example**
 
@@ -73,11 +97,18 @@ meta {
     gte(5, 3)   // true
     gte(3, 3)   // true
     gte(2, 5)   // false
+    gte(3, 3, 1)   // true
+    gte(3, 1, 2)   // false
     ```
     """
 }
-fn (a: Int | Dec, b: Int | Dec) {
+fn
+(a: Int | Dec) { true },
+(a: Int | Dec, b: Int | Dec) {
     call-lib(::hot::cmp/gte, [a, b])
+},
+(a: Int | Dec, b: Int | Dec, c: Int | Dec, ...rest: Int | Dec) {
+    call-lib(::hot::cmp/gte, [a, b, c, ...rest])
 }
 
 
@@ -85,7 +116,8 @@ lt
 meta {
     core: true,
     doc: """
-    Return true if `a` is less than `b`.
+    Return true if each number is less than the next, so `lt(...xs)` checks
+    a whole Vec. One number has nothing to compare with, so it is true.
 
     **Example**
 
@@ -93,11 +125,18 @@ meta {
     lt(3, 5)   // true
     lt(5, 3)   // false
     lt(3, 3)   // false
+    lt(1, 2, 3)   // true
+    lt(1, 3, 2)   // false
     ```
     """
 }
-fn (a: Int | Dec, b: Int | Dec) {
+fn
+(a: Int | Dec) { true },
+(a: Int | Dec, b: Int | Dec) {
     call-lib(::hot::cmp/lt, [a, b])
+},
+(a: Int | Dec, b: Int | Dec, c: Int | Dec, ...rest: Int | Dec) {
+    call-lib(::hot::cmp/lt, [a, b, c, ...rest])
 }
 
 
@@ -105,7 +144,8 @@ lte
 meta {
     core: true,
     doc: """
-    Return true if `a` is less than or equal to `b`.
+    Return true if each number is less than or equal to the next, so `lte(...xs)` checks
+    a whole Vec. One number has nothing to compare with, so it is true.
 
     **Example**
 
@@ -113,11 +153,18 @@ meta {
     lte(3, 5)   // true
     lte(3, 3)   // true
     lte(5, 3)   // false
+    lte(1, 1, 2)   // true
+    lte(2, 1, 3)   // false
     ```
     """
 }
-fn (a: Int | Dec, b: Int | Dec) {
+fn
+(a: Int | Dec) { true },
+(a: Int | Dec, b: Int | Dec) {
     call-lib(::hot::cmp/lte, [a, b])
+},
+(a: Int | Dec, b: Int | Dec, c: Int | Dec, ...rest: Int | Dec) {
+    call-lib(::hot::cmp/lte, [a, b, c, ...rest])
 }
 
 

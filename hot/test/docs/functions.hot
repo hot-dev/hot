@@ -118,6 +118,13 @@ concat-all fn (first-vec: Vec, ...rest: Vec): Vec {
 }
 // @end: variadic-functions
 
+// @doc: spread-arguments
+numbers [1, 2, 3]
+total add(...numbers)
+total-from-ten add(10, ...numbers)
+spread-all concat-all(...[[1], [2], [3]])
+// @end: spread-arguments
+
 // @doc: lambdas
 doubled map([1, 2, 3], (x) { mul(x, 2) })
 sum-lambda reduce([1, 2, 3], (acc, x) { add(acc, x) }, 0)
@@ -134,13 +141,13 @@ safe-access fn (data, lazy fallback) {
 // @end: lazy-arguments
 
 // @doc: function-reference
-apply fn (func, value) {
+call-with fn (func, value) {
   func(value)
 }
 // @end: function-reference
 
 // Helper for test - pass function directly
-apply-double apply(double, 5)
+apply-double call-with(double, 5)
 
 // @doc: tco-factorial
 factorial fn cond (n: Int, acc: Int): Int {
@@ -246,6 +253,13 @@ meta ["test"] fn () {
 test-lambda-as-value
 meta ["test"] fn () {
   assert-eq(10, double(5), "double")
+}
+
+test-spread-arguments
+meta ["test"] fn () {
+  assert-eq(6, total, "spread")
+  assert-eq(16, total-from-ten, "written argument and spread")
+  assert-eq([1, 2, 3], spread-all, "spread into a variadic function")
 }
 
 test-function-reference

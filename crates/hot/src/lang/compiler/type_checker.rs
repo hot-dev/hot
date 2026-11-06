@@ -367,34 +367,31 @@ impl TypeContext {
         // Arithmetic functions - register with both qualified and unqualified names
         // for core function auto-import compatibility.
         //
-        // We register two arities so that pure-Int calls preserve the Int
+        // We register two forms so that pure-Int calls preserve the Int
         // return type (without it, `slice(items, sub(len, n))` falsely
         // rejects because `sub`'s return type would be `Int | Dec`):
-        //   1. `(Int, Int) -> Int` — narrow form for Int-only calls
-        //   2. `(Int | Dec, Int | Dec) -> Int | Dec` — full form for mixed calls
+        //   1. `(...Int) -> Int` — narrow form for Int-only calls
+        //   2. `(...Int | Dec) -> Int | Dec` — full form for mixed calls
         // `find_matching_signature` walks signatures in order, so the
-        // narrower one takes priority when applicable.
-        let math_sigs = vec![
-            FunctionSignature {
-                return_type: TypeExpr::Int,
-                parameter_types: vec![TypeExpr::Int, TypeExpr::Int],
-                variadic: false,
-            },
-            FunctionSignature {
-                return_type: TypeExpr::Union(vec![TypeExpr::Int, TypeExpr::Dec]),
-                parameter_types: vec![
-                    TypeExpr::Union(vec![TypeExpr::Int, TypeExpr::Dec]),
-                    TypeExpr::Union(vec![TypeExpr::Int, TypeExpr::Dec]),
-                ],
-                variadic: false,
-            },
-        ];
-        self.functions.insert("add".to_string(), math_sigs.clone());
+        // narrower one takes priority when applicable. A rest parameter is
+        // what lets two forms stand for every count: each call clones these,
+        // and few functions are called as often. `add` takes no arguments,
+        // and `sub` takes at least one.
+        let number = TypeExpr::Union(vec![TypeExpr::Int, TypeExpr::Dec]);
+        let math_sigs = |required: usize| {
+            let form = |return_type: &TypeExpr, param: &TypeExpr| FunctionSignature {
+                return_type: return_type.clone(),
+                parameter_types: vec![param.clone(); required + 1],
+                variadic: true,
+            };
+            vec![form(&TypeExpr::Int, &TypeExpr::Int), form(&number, &number)]
+        };
+        self.functions.insert("add".to_string(), math_sigs(0));
         self.functions
-            .insert("::hot::math/add".to_string(), math_sigs.clone());
-        self.functions.insert("sub".to_string(), math_sigs.clone());
+            .insert("::hot::math/add".to_string(), math_sigs(0));
+        self.functions.insert("sub".to_string(), math_sigs(1));
         self.functions
-            .insert("::hot::math/sub".to_string(), math_sigs);
+            .insert("::hot::math/sub".to_string(), math_sigs(1));
 
         // String/Vec/Bytes concat is variadic (min 2 args). The actual stdlib signature
         // accepts Vec | Str | Bytes uniformly across all positions; we use Any here so
@@ -4860,6 +4857,10 @@ impl TypeChecker {
         let ([a, b], [a_type, b_type]) = (fn_call.args.as_slice(), arg_types) else {
             return;
         };
+        // A spread's type is its Vec's, not an operand's.
+        if a.spread || b.spread {
+            return;
+        }
         let (literal, literal_arg, other_type) = match (
             Self::literal_type_of_value(&a.value),
             Self::literal_type_of_value(&b.value),
@@ -5134,6 +5135,11 @@ impl TypeChecker {
         if short == "if" && fn_call.args.len() == 2 {
             types.push(TypeExpr::Null);
         }
+        Some(Self::union_of(types))
+    }
+
+    /// One type for a value that may have any of `types`.
+    fn union_of(types: impl IntoIterator<Item = TypeExpr>) -> TypeExpr {
         let mut members: Vec<TypeExpr> = Vec::new();
         for t in types {
             let parts = match t {
@@ -5147,18 +5153,18 @@ impl TypeChecker {
                 if matches!(&part, TypeExpr::Any)
                     || matches!(&part, TypeExpr::Optional(inner) if **inner == TypeExpr::Any)
                 {
-                    return Some(TypeExpr::Any);
+                    return TypeExpr::Any;
                 }
                 if !members.contains(&part) {
                     members.push(part);
                 }
             }
         }
-        Some(match members.len() {
+        match members.len() {
             0 => TypeExpr::Any,
             1 => members.remove(0),
             _ => TypeExpr::Union(members),
-        })
+        }
     }
 
     fn infer_function_call_type(&mut self, fn_call: &FnCall) -> TypeExpr {
@@ -5378,7 +5384,11 @@ impl TypeChecker {
                 let matching_sig = self.find_matching_signature(fn_call, &arg_types, &signatures);
 
                 if let Some(sig) = matching_sig {
-                    let declared = sig.return_type.clone();
+                    let declared = if Self::positioned_args(fn_call) < fn_call.args.len() {
+                        self.spread_call_type(fn_call, &arg_types, &signatures)
+                    } else {
+                        sig.return_type.clone()
+                    };
                     self.check_literal_comparison(lookup_name, fn_call, &arg_types);
                     self.check_null_check(lookup_name, fn_call);
                     if let Some(precise) = self.logic_result_type(lookup_name, fn_call, &arg_types)
@@ -6196,6 +6206,74 @@ impl TypeChecker {
         self.known_types.contains(type_name)
     }
 
+    /// The parameter at `position` of `sig`, a rest parameter standing for
+    /// every position from its own on.
+    fn parameter_at(sig: &FunctionSignature, position: usize) -> Option<&TypeExpr> {
+        sig.parameter_types
+            .get(position)
+            .or_else(|| sig.parameter_types.last().filter(|_| sig.variadic))
+    }
+
+    /// How many arguments of a call have a known position: those before its
+    /// first spread, whose length is only known at runtime.
+    fn positioned_args(fn_call: &FnCall) -> usize {
+        fn_call
+            .args
+            .iter()
+            .position(|arg| arg.spread)
+            .unwrap_or(fn_call.args.len())
+    }
+
+    /// Whether `sig` can take a call. A spread may stand for any number of
+    /// arguments, so `written` is then only the least the call passes.
+    fn arity_fits(sig: &FunctionSignature, written: usize, has_spread: bool) -> bool {
+        let params = sig.parameter_types.len();
+        match (sig.variadic, has_spread) {
+            (true, true) => true,
+            // A rest parameter can be empty.
+            (true, false) => written + 1 >= params,
+            (false, true) => written <= params,
+            (false, false) => written == params,
+        }
+    }
+
+    /// The arguments a call writes out, spreads aside, and the piped value.
+    fn written_args(&self, fn_call: &FnCall) -> usize {
+        let written = fn_call.args.iter().filter(|arg| !arg.spread).count();
+        written + usize::from(self.in_pipe_flow)
+    }
+
+    /// Whether `sig` takes a call: its arity fits, and so does each argument
+    /// with a known position. `arg_types` are the call's written arguments.
+    fn signature_accepts(
+        &self,
+        sig: &FunctionSignature,
+        fn_call: &FnCall,
+        arg_types: &[TypeExpr],
+    ) -> bool {
+        let positioned = Self::positioned_args(fn_call);
+        let has_spread = positioned < fn_call.args.len();
+        if !Self::arity_fits(sig, self.written_args(fn_call), has_spread) {
+            return false;
+        }
+        // When in pipe flow, we skip the first parameter (the piped value)
+        // and check the explicit arguments against remaining parameters.
+        //
+        // Note the canonical argument order is
+        // `types_are_compatible(expected, actual)`.
+        let param_offset = usize::from(self.in_pipe_flow);
+        arg_types
+            .iter()
+            .take(positioned)
+            .enumerate()
+            .all(|(i, actual_type)| {
+                Self::parameter_at(sig, i + param_offset).is_none_or(|expected_type| {
+                    self.types_are_compatible(expected_type, actual_type)
+                        || self.coercion_available(actual_type, expected_type)
+                })
+            })
+    }
+
     /// Find matching signature for a function call from available arities.
     /// `arg_types` are the call's written arguments, inferred once by the
     /// caller.
@@ -6205,52 +6283,25 @@ impl TypeChecker {
         arg_types: &[TypeExpr],
         signatures: &'a [FunctionSignature],
     ) -> Option<&'a FunctionSignature> {
-        // The pipe context only applies to THIS call, whose first arg is the
-        // piped value.
-        let in_pipe_flow = self.in_pipe_flow;
-        let explicit_args = fn_call.args.len();
-        let call_arity = if in_pipe_flow {
-            explicit_args + 1 // Add 1 for the piped value
-        } else {
-            explicit_args
-        };
+        signatures
+            .iter()
+            .find(|sig| self.signature_accepts(sig, fn_call, arg_types))
+    }
 
-        // Try to find a signature that matches the arity
-        for sig in signatures {
-            let sig_arity = sig.parameter_types.len();
-
-            // Check if arity matches
-            // For variadic functions, the minimum arity is (params - 1) since the variadic param can be empty
-            let arity_matches = if sig.variadic {
-                let min_arity = if sig_arity > 0 { sig_arity - 1 } else { 0 };
-                call_arity >= min_arity
-            } else {
-                call_arity == sig_arity
-            };
-
-            if arity_matches {
-                // Check if argument types are compatible.
-                // When in pipe flow, we skip the first parameter (the piped value)
-                // and check the explicit arguments against remaining parameters.
-                //
-                // Note the canonical argument order is
-                // `types_are_compatible(expected, actual)`.
-                let param_offset = if in_pipe_flow { 1 } else { 0 };
-                let all_args_compatible = arg_types.iter().enumerate().all(|(i, actual_type)| {
-                    sig.parameter_types
-                        .get(i + param_offset)
-                        .is_none_or(|expected_type| {
-                            self.types_are_compatible(expected_type, actual_type)
-                                || self.coercion_available(actual_type, expected_type)
-                        })
-                });
-
-                if all_args_compatible {
-                    return Some(sig);
-                }
-            }
-        }
-        None
+    /// What a call with a spread returns: any overload may take it once its
+    /// length is known, so every one that could contributes.
+    fn spread_call_type(
+        &self,
+        fn_call: &FnCall,
+        arg_types: &[TypeExpr],
+        signatures: &[FunctionSignature],
+    ) -> TypeExpr {
+        Self::union_of(
+            signatures
+                .iter()
+                .filter(|sig| self.signature_accepts(sig, fn_call, arg_types))
+                .map(|sig| sig.return_type.clone()),
+        )
     }
 
     /// Validate function call arguments against parameter types (for multiple arities).
@@ -6266,29 +6317,14 @@ impl TypeChecker {
         // The pipe context only applies to THIS call, whose first arg is the
         // piped value.
         let in_pipe_flow = self.in_pipe_flow;
-        let explicit_args = fn_call.args.len();
-        let call_arity = if in_pipe_flow {
-            explicit_args + 1 // Add 1 for the piped value
-        } else {
-            explicit_args
-        };
+        let call_arity = self.written_args(fn_call);
+        let positioned = Self::positioned_args(fn_call);
+        let has_spread = positioned < fn_call.args.len();
 
         // Check if any signature matches the arity
-        // For variadic functions, minimum arity is (params - 1) since the variadic param can be empty
         let matching_arity_sigs: Vec<&FunctionSignature> = signatures
             .iter()
-            .filter(|sig| {
-                if sig.variadic {
-                    let min_arity = if !sig.parameter_types.is_empty() {
-                        sig.parameter_types.len() - 1
-                    } else {
-                        0
-                    };
-                    call_arity >= min_arity
-                } else {
-                    call_arity == sig.parameter_types.len()
-                }
-            })
+            .filter(|sig| Self::arity_fits(sig, call_arity, has_spread))
             .collect();
 
         if matching_arity_sigs.is_empty() {
@@ -6374,8 +6410,14 @@ impl TypeChecker {
         for sig in matching_arity_sigs {
             let mut type_errors = Vec::new();
 
-            for (i, (arg, actual_type)) in fn_call.args.iter().zip(arg_types).enumerate() {
-                if let Some(expected_type) = sig.parameter_types.get(i + param_offset) {
+            for (i, (arg, actual_type)) in fn_call
+                .args
+                .iter()
+                .zip(arg_types)
+                .take(positioned)
+                .enumerate()
+            {
+                if let Some(expected_type) = Self::parameter_at(sig, i + param_offset) {
                     // Check if actual type is compatible with expected (e.g., Int is compatible with Int | Str | Bool)
                     let mut compatible = self.types_are_compatible(expected_type, actual_type);
 

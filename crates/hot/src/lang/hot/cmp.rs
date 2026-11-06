@@ -1,6 +1,6 @@
 use crate::lang::hot::r#type::HotResult;
 use crate::val::{Val, as_scalar};
-use crate::validate_args;
+use crate::validate_args_at_least;
 use fastnum::D256;
 use std::cmp::Ordering;
 
@@ -38,60 +38,67 @@ pub fn fast_ne_int(a: i64, b: i64) -> Val {
     Val::Bool(a != b)
 }
 
-/// Check if two values are equal
+/// Check if all the values are equal
 pub fn eq(args: &[Val]) -> HotResult<Val> {
-    validate_args!("::hot::cmp", args, 2);
-    {
-        let a = &args[0];
-        let b = &args[1];
-        // Use the built-in PartialEq implementation which handles cross-type comparisons
-        let result = a == b;
-        HotResult::Ok(Val::Bool(result))
+    // Use the built-in PartialEq implementation which handles cross-type comparisons
+    if let [a, b] = args {
+        return HotResult::Ok(Val::Bool(a == b));
     }
+    validate_args_at_least!("::hot::cmp", args, 2);
+    HotResult::Ok(Val::Bool(args.windows(2).all(|pair| pair[0] == pair[1])))
 }
 
-/// Check if two values are not equal
+/// Check if the values aren't all equal
 pub fn ne(args: &[Val]) -> HotResult<Val> {
-    validate_args!("::hot::cmp", args, 2);
-    {
-        let a = &args[0];
-        let b = &args[1];
-        let result = a != b;
-        HotResult::Ok(Val::Bool(result))
+    if let [a, b] = args {
+        return HotResult::Ok(Val::Bool(a != b));
     }
+    validate_args_at_least!("::hot::cmp", args, 2);
+    HotResult::Ok(Val::Bool(args.windows(2).any(|pair| pair[0] != pair[1])))
 }
 
-/// Check if first value is greater than second
+/// Check if each value is greater than the next
 pub fn gt(args: &[Val]) -> HotResult<Val> {
-    validate_args!("::hot::cmp", args, 2);
+    validate_args_at_least!("::hot::cmp", args, 2);
     answer("gt", args, Ordering::is_gt)
 }
 
-/// Check if first value is less than second
+/// Check if each value is less than the next
 pub fn lt(args: &[Val]) -> HotResult<Val> {
-    validate_args!("::hot::cmp", args, 2);
+    validate_args_at_least!("::hot::cmp", args, 2);
     answer("lt", args, Ordering::is_lt)
 }
 
-/// Check if first value is greater than or equal to second
+/// Check if each value is greater than or equal to the next
 pub fn gte(args: &[Val]) -> HotResult<Val> {
-    validate_args!("::hot::cmp", args, 2);
+    validate_args_at_least!("::hot::cmp", args, 2);
     answer("gte", args, Ordering::is_ge)
 }
 
-/// Check if first value is less than or equal to second
+/// Check if each value is less than or equal to the next
 pub fn lte(args: &[Val]) -> HotResult<Val> {
-    validate_args!("::hot::cmp", args, 2);
+    validate_args_at_least!("::hot::cmp", args, 2);
     answer("lte", args, Ordering::is_le)
 }
 
-/// What `name` says of how its two arguments order, or its Err when they have
-/// no order, as `add` gives for a value that isn't a number.
+/// What `name` says of how each argument orders with the next, stopping at
+/// the first pair it doesn't hold for, or its Err when a pair has no order,
+/// as `add` gives for a value that isn't a number.
 fn answer(name: &str, args: &[Val], test: fn(Ordering) -> bool) -> HotResult<Val> {
-    match compare_vals(&args[0], &args[1]) {
-        Some(ordering) => HotResult::Ok(Val::Bool(test(ordering))),
-        None => HotResult::Err(Val::from(format!("{name} requires numbers"))),
+    if let [a, b] = args {
+        return match compare_vals(a, b) {
+            Some(ordering) => HotResult::Ok(Val::Bool(test(ordering))),
+            None => HotResult::Err(Val::from(format!("{name} requires numbers"))),
+        };
     }
+    for pair in args.windows(2) {
+        match compare_vals(&pair[0], &pair[1]) {
+            Some(ordering) if test(ordering) => {}
+            Some(_) => return HotResult::Ok(Val::Bool(false)),
+            None => return HotResult::Err(Val::from(format!("{name} requires numbers"))),
+        }
+    }
+    HotResult::Ok(Val::Bool(true))
 }
 
 /// How two values order, reading a declared type over a scalar as that scalar.

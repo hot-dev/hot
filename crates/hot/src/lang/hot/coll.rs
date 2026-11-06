@@ -135,7 +135,7 @@ fn build_int_range(start: i64, end: i64, step: i64) -> Option<Vec<Val>> {
     Some(result)
 }
 
-enum PreparedFunction<'a> {
+pub(crate) enum PreparedFunction<'a> {
     Named(&'a str),
     CallableVal(&'a Val),
     Invalid,
@@ -173,19 +173,31 @@ pub(crate) fn parse_onerr_disposition(
 }
 
 fn is_onerr_variant(val: &Val, variant: &str) -> bool {
-    let expected_full = format!("::hot::type/OnErr.{}", variant);
-    let expected_short = format!("OnErr.{}", variant);
-
+    let names_variant = |name: &str| {
+        name.strip_prefix("::hot::type/")
+            .unwrap_or(name)
+            .strip_prefix("OnErr.")
+            == Some(variant)
+    };
     match val {
         Val::Map(map) => {
-            if let Some(Val::Str(type_str)) = map.get(&Val::from("$type")) {
-                **type_str == expected_full || **type_str == expected_short
-            } else {
-                false
-            }
+            matches!(map.get(&Val::from("$type")), Some(Val::Str(type_str)) if names_variant(type_str))
         }
-        Val::Str(s) => **s == expected_full || **s == expected_short || &**s == variant,
+        Val::Str(s) => names_variant(s) || &**s == variant,
         _ => false,
+    }
+}
+
+/// The `OnErr` that `val` is, if it is one. For a call to learn whether its
+/// last argument is one, where `parse_onerr_disposition` would describe
+/// whatever else it is in an error nobody reads.
+pub(crate) fn onerr_disposition_of(val: &Val) -> Option<OnErrDisposition> {
+    if is_onerr_variant(val, "Force") {
+        Some(OnErrDisposition::Force)
+    } else if is_onerr_variant(val, "Preserve") {
+        Some(OnErrDisposition::Preserve)
+    } else {
+        None
     }
 }
 
@@ -221,7 +233,7 @@ pub(crate) fn apply_onerr_disposition(
     }
 }
 
-fn prepare_function(function_val: &Val) -> PreparedFunction<'_> {
+pub(crate) fn prepare_function(function_val: &Val) -> PreparedFunction<'_> {
     let mut cur = function_val;
     loop {
         if let Val::Map(m) = cur
@@ -305,6 +317,11 @@ fn call_prepared_with_vm_multi_args(
     };
     match function {
         PreparedFunction::Named(name) => {
+            if let Some(HotResult::Ok(value)) =
+                crate::lang::runtime::vm::native_numeric_callback(name, args)
+            {
+                return Ok(value);
+            }
             if let Some(function_id) = vm.find_best_user_function_overload(name, args) {
                 let args = prepare_callback_args(vm, CallTarget::Function(function_id), args)
                     .map_err(|vm_error| halted(vm, "Compiled function call failed", vm_error))?;

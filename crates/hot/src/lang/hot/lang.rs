@@ -2,7 +2,10 @@ use crate::lang::hot::r#type::HotResult;
 use crate::val::Val;
 use crate::{validate_args, validate_no_args};
 
-use super::coll::{OnErrDisposition, apply_onerr_disposition, parse_onerr_disposition};
+use super::coll::{
+    OnErrDisposition, PreparedFunction, apply_onerr_disposition, onerr_disposition_of,
+    parse_onerr_disposition, prepare_function,
+};
 
 // Function invocation utilities (moved from function.rs)
 
@@ -30,10 +33,8 @@ fn resolve_function_with_scoping(
 fn parse_call_onerr_disposition(args: &[Val]) -> Result<OnErrDisposition, Val> {
     match args.len() {
         1 => Ok(OnErrDisposition::Force),
-        2 => match parse_onerr_disposition("::hot::lang/call", args, 1) {
-            Ok(disposition) => Ok(disposition),
-            Err(_) => Ok(OnErrDisposition::Force),
-        },
+        // The second argument is the arguments, unless it's an `OnErr`.
+        2 => Ok(onerr_disposition_of(&args[1]).unwrap_or(OnErrDisposition::Force)),
         3 => match parse_onerr_disposition("::hot::lang/call", args, 2) {
             Ok(disposition) => Ok(disposition),
             Err(err) => {
@@ -54,9 +55,9 @@ fn parse_call_onerr_disposition(args: &[Val]) -> Result<OnErrDisposition, Val> {
 fn call_args_value(args: &[Val]) -> Option<&Val> {
     match args.len() {
         1 => None,
-        2 => match parse_onerr_disposition("::hot::lang/call", args, 1) {
-            Ok(_) => None,
-            Err(_) => Some(&args[1]),
+        2 => match onerr_disposition_of(&args[1]) {
+            Some(_) => None,
+            None => Some(&args[1]),
         },
         3 => Some(&args[1]),
         _ => None,
@@ -295,6 +296,21 @@ pub fn call(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
         Ok(disposition) => disposition,
         Err(err) => return HotResult::Err(err),
     };
+
+    // Numbers for a core function that folds them need no dispatch, nor a copy
+    // of the arguments. Its result is `call`'s as any callee's is.
+    if let (PreparedFunction::Named(name), Some(Val::Vec(items))) =
+        (prepare_function(&args[0]), call_args_value(args))
+        && let Some(HotResult::Ok(value)) =
+            crate::lang::runtime::vm::native_numeric_callback(name, items)
+    {
+        return match apply_onerr_disposition(vm, value, disposition) {
+            Ok(value) => HotResult::Ok(wrap_preserved_call_result(value, disposition)),
+            Err(err) => HotResult::Err(Val::from(format!(
+                "Error executing function '{name}': {err}"
+            ))),
+        };
+    }
 
     // Check for call function recursion to prevent infinite loops
     if let Err(err) = vm.increment_call_depth() {

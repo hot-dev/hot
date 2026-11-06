@@ -269,7 +269,8 @@ fn op_result_type(op: PureOp) -> ExprType {
         | PureOp::Lte
         | PureOp::Gt
         | PureOp::Gte
-        | PureOp::Not => ExprType::Bool,
+        | PureOp::Not
+        | PureOp::And => ExprType::Bool,
         _ => ExprType::Other,
     }
 }
@@ -279,6 +280,60 @@ fn op_arity(op: PureOp) -> usize {
     match op {
         PureOp::IsZero | PureOp::Not | PureOp::Abs | PureOp::Neg => 1,
         _ => 2,
+    }
+}
+
+/// Whether hot-std declares `op` for more than two operands.
+fn op_takes_any_count(op: PureOp) -> bool {
+    matches!(
+        op,
+        PureOp::Add
+            | PureOp::Sub
+            | PureOp::Mul
+            | PureOp::Div
+            | PureOp::Min
+            | PureOp::Max
+            | PureOp::Eq
+            | PureOp::Ne
+            | PureOp::Lt
+            | PureOp::Lte
+            | PureOp::Gt
+            | PureOp::Gte
+    )
+}
+
+/// `op` of two operands.
+fn op_of_two(op: PureOp, left: PureExpr, right: PureExpr) -> PureExpr {
+    PureExpr::Op {
+        op,
+        full_name: op_full_name(op),
+        args: vec![left, right],
+    }
+}
+
+/// `op` of more than two operands, in the two-operand ops it means. Every
+/// operand is pure, so a comparison can read them all: where the interpreter
+/// would stop at a pair, an operand that fails here de-opts to it.
+fn op_of_many(op: PureOp, operands: Vec<PureExpr>) -> Option<PureExpr> {
+    let all_pairs = |pair_op: PureOp, operands: &[PureExpr]| {
+        operands
+            .windows(2)
+            .map(|pair| op_of_two(pair_op, pair[0].clone(), pair[1].clone()))
+            .reduce(|left, right| op_of_two(PureOp::And, left, right))
+    };
+    match op {
+        PureOp::Eq | PureOp::Lt | PureOp::Lte | PureOp::Gt | PureOp::Gte => {
+            all_pairs(op, &operands)
+        }
+        // The values aren't all equal.
+        PureOp::Ne => all_pairs(PureOp::Eq, &operands).map(|all_equal| PureExpr::Op {
+            op: PureOp::Not,
+            full_name: op_full_name(PureOp::Not),
+            args: vec![all_equal],
+        }),
+        _ => operands
+            .into_iter()
+            .reduce(|left, right| op_of_two(op, left, right)),
     }
 }
 
@@ -303,6 +358,7 @@ fn op_full_name(op: PureOp) -> &'static str {
         PureOp::Gt => "::hot::cmp/gt",
         PureOp::Gte => "::hot::cmp/gte",
         PureOp::Not => "::hot::bool/not",
+        PureOp::And => "::hot::bool/and",
         PureOp::Neg => "::hot::math/neg",
         PureOp::Concat => "::hot::coll/concat",
     }
@@ -512,7 +568,8 @@ fn lower_callable_body(
                 let desc = libmap::pure_op(&name)
                     .ok_or_else(|| Bailout::UnsupportedHotlib(name.clone()))?;
                 let op = desc.op;
-                if *args_count as usize != op_arity(op) {
+                let many = *args_count as usize > 2 && op_takes_any_count(op);
+                if !many && *args_count as usize != op_arity(op) {
                     return Err(Bailout::BadArity(op));
                 }
                 let mut operands = Vec::with_capacity(*args_count as usize);
@@ -520,17 +577,16 @@ fn lower_callable_body(
                     let (e, _ty) = reg_as_expr(&regs, args_start + i)?;
                     operands.push(e);
                 }
-                regs.insert(
-                    *dest,
-                    RegContent::Expr(
-                        PureExpr::Op {
-                            op,
-                            full_name: desc.full_name,
-                            args: operands,
-                        },
-                        op_result_type(op),
-                    ),
-                );
+                let expr = if many {
+                    op_of_many(op, operands).ok_or(Bailout::BadArity(op))?
+                } else {
+                    PureExpr::Op {
+                        op,
+                        full_name: desc.full_name,
+                        args: operands,
+                    }
+                };
+                regs.insert(*dest, RegContent::Expr(expr, op_result_type(op)));
             }
             Instruction::Return { value } => {
                 let (e, ty) = reg_as_expr(&regs, *value)?;
@@ -772,11 +828,12 @@ fn fast_op(op: PureOp, vals: &[PureValue]) -> Option<Scalar> {
         PureOp::Gt => Some(Scalar::Bool(vals[0].as_int()? > vals[1].as_int()?)),
         PureOp::Gte => Some(Scalar::Bool(vals[0].as_int()? >= vals[1].as_int()?)),
         PureOp::Not => Some(Scalar::Bool(!vals[0].as_bool()?)),
-        // `Concat` builds a `Str`, and `Div` can yield a `Dec`; `Abs`/`Min`/
-        // `Max`/`Neg` are handled by the hotlib fallback for full parity.
-        PureOp::Concat | PureOp::Div | PureOp::Abs | PureOp::Min | PureOp::Max | PureOp::Neg => {
-            None
-        }
+        PureOp::And => Some(Scalar::Bool(vals[0].as_bool()? && vals[1].as_bool()?)),
+        PureOp::Min => Some(Scalar::Int(vals[0].as_int()?.min(vals[1].as_int()?))),
+        PureOp::Max => Some(Scalar::Int(vals[0].as_int()?.max(vals[1].as_int()?))),
+        // `Concat` builds a `Str`, and `Div` can yield a `Dec`; `Abs`/`Neg` are
+        // handled by the hotlib fallback for full parity.
+        PureOp::Concat | PureOp::Div | PureOp::Abs | PureOp::Neg => None,
     }
 }
 
@@ -1044,6 +1101,9 @@ struct StageCall {
 enum StageCallable {
     LambdaConst(u32),
     FunctionId(u32),
+    /// A hot-std function passed by name, such as `reduce(xs, add, 0)`, which
+    /// the stage runs as the op a lambda calling it would lower to.
+    CoreOp(PureOp, &'static str),
     None,
 }
 
@@ -1807,6 +1867,13 @@ fn trace_stage_callable(
             } if *dest == cur => {
                 let name = const_str(program, *function_name)?;
                 let arity = stage_callable_arity(stage)?;
+                // Only a full name: a bare one may be a local or a binding.
+                if name.starts_with("::hot::")
+                    && let Some(desc) = libmap::pure_op(&name)
+                    && op_arity(desc.op) == arity as usize
+                {
+                    return Some(StageCallable::CoreOp(desc.op, desc.full_name));
+                }
                 return find_unambiguous_function(program, &name, arity)
                     .map(|id| StageCallable::FunctionId(id as u32));
             }
@@ -1871,6 +1938,15 @@ fn lower_stage_callable(
                 return Err(Bailout::PipelineShape);
             }
             lower_callable_body(program, &func.param_names, &func.instructions)
+        }
+        StageCallable::CoreOp(op, full_name) => {
+            let arity = stage_callable_arity(stage).ok_or(Bailout::PipelineShape)? as usize;
+            let expr = PureExpr::Op {
+                op,
+                full_name,
+                args: (0..arity).map(PureExpr::Param).collect(),
+            };
+            Ok(LoweredLambda::new(arity, expr, op_result_type(op)))
         }
         StageCallable::None => Err(Bailout::PipelineShape),
     }
