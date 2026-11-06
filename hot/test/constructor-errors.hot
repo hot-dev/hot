@@ -1,0 +1,203 @@
+// A constructor refuses in one shape: an `Err(ConstraintError.Violation)`, so
+// `.message` reads the same whatever went wrong. A hand-written constructor's
+// own Err is its author's, until a record holding it has to say where it was.
+::hot::test::constructor-errors ns
+meta ["test"]
+
+// Values reach the constructor at run time, where a literal would be
+// rejected by `hot check` already.
+dynamic fn (value: Any): Any {
+    value
+}
+
+Inner type {
+    name: Str,
+    n: Int
+}
+
+Outer type {
+    inner: Inner
+}
+
+Listed type {
+    items: Vec<Inner>
+}
+
+Keyed type {
+    entries: Map<Str, Inner>
+}
+
+Deep type {
+    outer: Outer
+}
+
+Cat type {
+    lives: Int
+}
+
+Dog type {
+    bark: Str
+}
+
+Twin type {
+    bark: Str
+}
+
+Pet type {
+    animal: Cat | Dog
+}
+
+Lookalike type {
+    animal: Dog | Twin
+}
+
+Email type {
+    address: Str
+}
+fn (address: Str): Email {
+    cond {
+        contains(address, "@") => { Email({address: address}) }
+        => { err("no @ in the address") }
+    }
+}
+
+Coded type {
+    code: Int
+}
+fn (code: Str): Coded {
+    err({message: "unknown code", code: code})
+}
+
+Contact type {
+    email: Email
+}
+
+Mailing type {
+    contacts: Vec<Email>
+}
+
+Book type {
+    entries: Map<Str, Email>
+}
+
+Report type {
+    coded: Coded
+}
+
+Emails type Vec<Email>
+
+// The ConstraintError a refused construction holds, or what it held instead.
+refusal fn (lazy result: Any): Any {
+    forced do result
+    match err-value(forced) {
+        ConstraintError.Violation => { err-value(forced) }
+        _ => { {message: `not a violation: ${err-value(forced)}`} }
+    }
+}
+
+test-a-missing-field-is-a-violation
+meta ["test"] fn () {
+    violation refusal(Inner(dynamic({})))
+    assert-eq("constructor of `Inner` is missing required field(s): name, n", violation.message)
+    assert-eq("constructor", violation.boundary)
+    assert-eq([], violation.path)
+    assert-eq("::hot::test::constructor-errors/Inner", violation.declared-type)
+    assert-eq("Map", violation.value-type)
+}
+
+test-a-missing-field-reads-like-a-where-refusal
+meta ["test"] fn () {
+    missing err-value(Inner(dynamic({n: 1})))
+    wrong err-value(Inner(dynamic({name: "a", n: "b"})))
+    assert-eq("constructor of `Inner` is missing required field(s): name", missing.message)
+    assert-eq("constructor of `Inner` at `n` expected Int, got Str", wrong.message)
+    assert-eq(err-message(Inner(dynamic({n: 1}))), missing.message)
+}
+
+test-a-field-missing-from-a-nested-record-gives-its-path
+meta ["test"] fn () {
+    violation refusal(Outer(dynamic({inner: {name: "a"}})))
+    assert-eq("constructor of `Outer` at `inner` is missing required field(s): n", violation.message)
+    assert-eq(["inner"], violation.path)
+    assert-eq("::hot::test::constructor-errors/Outer", violation.declared-type)
+}
+
+test-a-field-missing-two-records-down-gives-the-whole-path
+meta ["test"] fn () {
+    assert-eq(
+        "constructor of `Deep` at `outer.inner` is missing required field(s): name, n",
+        refusal(Deep(dynamic({outer: {inner: {}}}))).message,
+    )
+}
+
+test-a-field-missing-from-a-vec-item-gives-its-index
+meta ["test"] fn () {
+    violation refusal(Listed(dynamic({items: [{name: "a", n: 1}, {name: "b"}]})))
+    assert-eq("constructor of `Listed` at `items[1]` is missing required field(s): n", violation.message)
+    assert-eq(["items", 1], violation.path)
+}
+
+test-a-field-missing-from-a-map-value-gives-its-key
+meta ["test"] fn () {
+    violation refusal(Keyed(dynamic({entries: {first: {name: "a"}}})))
+    assert-eq("constructor of `Keyed` at `entries.first` is missing required field(s): n", violation.message)
+    assert-eq(["entries", "first"], violation.path)
+}
+
+test-a-field-no-union-member-takes-is-a-violation
+meta ["test"] fn () {
+    violation refusal(Pet(dynamic({animal: {wings: 2}})))
+    assert(contains(violation.message, "constructor of `Pet` at `animal`"), violation.message)
+    assert(contains(violation.message, "Cat | Dog"), violation.message)
+    assert-eq(["animal"], violation.path)
+}
+
+test-a-field-two-union-members-take-is-a-violation
+meta ["test"] fn () {
+    violation refusal(Lookalike(dynamic({animal: {bark: "woof"}})))
+    assert(contains(violation.message, "constructor of `Lookalike` at `animal`"), violation.message)
+    assert(contains(violation.message, "Dog | Twin"), violation.message)
+    assert-eq(["animal"], violation.path)
+}
+
+test-a-handwritten-constructor-keeps-its-own-err
+meta ["test"] fn () {
+    assert-eq("no @ in the address", err-value(Email(dynamic("nobody"))))
+    assert-eq("unknown code", err-value(Coded(dynamic("x"))).message)
+}
+
+test-a-record-reports-a-handwritten-refusal-as-a-violation
+meta ["test"] fn () {
+    violation refusal(Contact(dynamic({email: "nobody"})))
+    assert-eq("constructor of `Contact` at `email`: no @ in the address", violation.message)
+    assert-eq(["email"], violation.path)
+    assert-eq("no @ in the address", violation.cause)
+}
+
+test-a-handwritten-refusal-keeps-its-structured-cause
+meta ["test"] fn () {
+    violation refusal(Report(dynamic({coded: "x"})))
+    assert-eq("constructor of `Report` at `coded`: unknown code", violation.message)
+    assert-eq("x", violation.cause.code)
+}
+
+test-a-handwritten-refusal-in-a-vec-gives-its-index
+meta ["test"] fn () {
+    violation refusal(Mailing(dynamic({contacts: ["a@b", "nobody"]})))
+    assert-eq("constructor of `Mailing` at `contacts[1]`: no @ in the address", violation.message)
+    assert-eq(["contacts", 1], violation.path)
+}
+
+test-a-handwritten-refusal-in-a-map-gives-its-key
+meta ["test"] fn () {
+    violation refusal(Book(dynamic({entries: {home: "nobody"}})))
+    assert-eq("constructor of `Book` at `entries.home`: no @ in the address", violation.message)
+    assert-eq(["entries", "home"], violation.path)
+}
+
+test-a-handwritten-refusal-in-a-type-over-a-vec-gives-its-index
+meta ["test"] fn () {
+    violation refusal(Emails(dynamic(["nobody"])))
+    assert-eq("constructor of `Emails` at `[0]`: no @ in the address", violation.message)
+    assert-eq([0], violation.path)
+}

@@ -140,7 +140,7 @@ A failed check is a `Result.Err` whose value is one of these:
 
 | Variant | When |
 | --- | --- |
-| `ConstraintError.Violation` | The value failed the predicate, or isn't of the base type |
+| `ConstraintError.Violation` | The value failed the predicate, isn't of the base type, or a constructor refused it |
 | `ConstraintError.EvaluationFailed` | The predicate errored, returned a non-`Bool`, or called a function a predicate can't use |
 | `ConstraintError.BudgetExceeded` | The predicate ran out of its budget |
 
@@ -161,8 +161,9 @@ Each holds these fields:
 
 `ConstraintError.EvaluationFailed` adds `cause`: the underlying error, or a
 description of what the predicate returned. `ConstraintError.BudgetExceeded`
-adds `budget` (`"instructions"` or `"depth"`) and `limit`. The rejected value
-itself is never included.
+adds `budget` (`"instructions"` or `"depth"`) and `limit`. A `Violation` from a
+hand-written constructor inside a record adds `cause`: the `Err` that
+constructor returned, as it wrote it. Hot never adds the rejected value itself.
 
 {{snippet:constraints#handling-errors}}
 

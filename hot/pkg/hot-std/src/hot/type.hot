@@ -898,7 +898,7 @@ meta {
     core: true,
     doc: """
     Payload of `ConstraintError.Violation`: a value failed a `where`
-    constraint.
+    constraint, or a constructor refused what it was given.
 
     **Fields**
 
@@ -914,6 +914,8 @@ meta {
     - `parameter` — The parameter name, for parameter checks
     - `location` — Source location of the `where` clause
     - `value-type` — Type of the rejected value
+    - `cause` — The Err of a hand-written constructor inside a record, as
+      that constructor gave it. Null for every other refusal
     """
 }
 type {
@@ -926,7 +928,8 @@ type {
     function: Str?,
     parameter: Str?,
     location: Map?,
-    value-type: Str
+    value-type: Str,
+    cause: Any?
 }
 
 ConstraintEvaluationFailure
@@ -986,10 +989,11 @@ ConstraintError
 meta {
     core: true,
     doc: """
-    The error a `where` constraint returns, as the payload of a
-    `Result.Err`.
+    The error a `where` constraint or a constructor returns, as the payload
+    of a `Result.Err`.
 
-    - `ConstraintError.Violation` — The value failed the predicate
+    - `ConstraintError.Violation` — The value failed the predicate, or a
+      constructor refused it
     - `ConstraintError.EvaluationFailed` — The predicate could not decide
     - `ConstraintError.BudgetExceeded` — The predicate ran out of budget
 
