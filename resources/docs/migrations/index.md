@@ -36,6 +36,31 @@ $env:HOT_VERSION = "2.3.0"; irm https://get.hot.dev/install.ps1 | iex
 
 Pinned installs are useful when you need to finish database migrations with an older release line before moving to a newer major version.
 
+## Upgrading from Hot 3.0.3 to 3.0.4 {#upgrading-from-3-0-3-to-3-0-4}
+
+**Migrations 030 and 031.** Run `hot db migrate` with the 3.0.4 CLI. Migration 030 replaces the unique index on `schedule`, and on PostgreSQL it blocks writes to that table while the new index builds. Migration 031 adds a nullable `enqueue_leased_until` column to `event`.
+
+**Restart services straight after migrating.** A build deployed through a worker of the previous version after migration 030 fails. Deploy it again once the workers run 3.0.4.
+
+**Most of what to check is in values that used to build and are now an Err.** Records, types over built-in ones, closed enum fields and collections now check what they're given:
+
+- A record given a field of the wrong type is an Err, and so is null at a required field. Declare the field `T?` or fix the value. Numbers convert as at a parameter, so a `Dec` field given `5` holds a `Dec`, and `eq(record.amount, 5)` is false: compare with `5.0` or declare the field `Int`.
+- With `Meters type Int`, `Meters("x")` is an Err, and so is null unless the type allows it. Declare a field `Name?`, or the type `Name type Str?`, where null is expected.
+- A closed enum field given a Map that fits no variant, or more than one, is an Err. Declare the enum `open`, or the field `Map`, where a Map of another shape is expected.
+- `Map<K, V>` fields, and types over a `Vec` or `Map`, now build what they hold, so `to-json` writes those values tagged and `untype` removes the tag. A value that can't be built is an Err. Declare `Map<K, Any>` or `Vec<Any>` where values of any shape are expected.
+- A `Map<Int, V>` field reads the JSON key `"1"` as the number `1`, so read it with `1`, not `"1"`.
+
+**Packages:** a package's records are checked by the Hot that runs them, so an older `hot.dev/openai` refuses responses with null in fields OpenAI leaves null. Move to openai 1.3.1, qwen 1.0.4 or openai-compatible 0.1.1. In any generated API package, a response whose real data breaks a field's declared type is now an Err.
+
+**Behaviour changes:**
+
+- `gt`, `lt`, `gte` and `lte` compare a value of a declared type as the number it holds, and give an `Err` for values with no order, such as `gt(null, 1)`. Like any `Err` it halts when used, and `if` reads it as false, so code that compared a missing field with a number takes the other branch or stops where it went on before.
+- `sort` and `sort-by` put numbers in order by value, inside other values too.
+- `untype` keeps a variant's name: `untype(Due.Days(3))` is `{Days: 3}`, not `3`, and `to-json(untype(value))` changes the same way. Read a payload with `match` or field access. Plain data saved by an earlier `untype` holds no variant name, so a record field of an enum type refuses a bare payload.
+- A second key rotation during an overlap answers `409` `rotation_overlap_running`. To end an overlap early, rotate with `"overlap_seconds": 0`.
+- In direct mode, `::hot::file/list-files` gives whole paths, so a script that added the folder to `path` itself now gets it twice. `hot check` refuses the result at a `Vec<Str>` parameter.
+- `install.sh` with no mode chosen prefers an existing `~/.local` install over a package. A Linux machine with only the `.deb` now updates the package.
+
 ## Upgrading from Hot 3.0.2 to 3.0.3 {#upgrading-from-3-0-2-to-3-0-3}
 
 **Migration 029** adds a nullable `event_handler_fn` column to `run`. Run `hot db migrate` with the 3.0.3 CLI.
