@@ -151,6 +151,24 @@ A variadic parameter declared with `...` accepts any number of arguments:
 
 {{snippet:functions#variadic-functions}}
 
+### Spread Arguments
+
+`...` in a call passes a Vec's items as separate arguments. It can fill any parameters, and it can sit among written arguments:
+
+{{snippet:functions#spread-arguments}}
+
+A spread's length is only known at runtime. A Vec that doesn't fit any overload fails when the call runs, not at compile time.
+
+Math and comparison functions take any number of arguments, so `add(...xs)` sums a Vec and `lt(...xs)` checks that it's ascending. `add(...[])` is `0` and `mul(...[])` is `1`. `max(...xs)` needs no starting value, where `reduce(xs, max, 0)` would return `0` for a Vec of negative numbers.
+
+`apply` does the same for a function held as a value, or at the end of a pipe. It takes the data first, as `map` and `reduce` do, and `call` takes the function first:
+
+```hot
+apply([1, 2, 3], add)    // 6
+[1, 2, 3] |> apply(add)  // 6
+call(add, [1, 2, 3])     // 6
+```
+
 ## Lambdas (Anonymous Functions)
 
 Create inline functions with `(params) { body }`:

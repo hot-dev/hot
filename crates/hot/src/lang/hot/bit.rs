@@ -1,14 +1,22 @@
 // Bitwise operations for Hot language
 
+use crate::lang::hot::lib_util::fold_args;
 use crate::lang::hot::r#type::HotResult;
 use crate::val::Val;
-use crate::validate_args;
+use crate::{validate_args, validate_args_at_least};
 
-/// Bitwise AND
+/// Bitwise AND of the values, left to right
 pub fn and(args: &[Val]) -> HotResult<Val> {
-    validate_args!("::hot::bit/and", args, 2);
+    if let [x, y] = args {
+        return and_pair(x, y);
+    }
+    validate_args_at_least!("::hot::bit/and", args, 2);
+    fold_args(args, and_pair)
+}
 
-    match (&args[0], &args[1]) {
+#[inline(always)]
+fn and_pair(x: &Val, y: &Val) -> HotResult<Val> {
+    match (x, y) {
         (Val::Int(a), Val::Int(b)) => HotResult::Ok(Val::Int(a & b)),
         (Val::Byte(a), Val::Byte(b)) => HotResult::Ok(Val::Byte(a & b)),
         (Val::Byte(a), Val::Int(b)) => {
@@ -28,11 +36,18 @@ pub fn and(args: &[Val]) -> HotResult<Val> {
     }
 }
 
-/// Bitwise OR
+/// Bitwise OR of the values, left to right
 pub fn or(args: &[Val]) -> HotResult<Val> {
-    validate_args!("::hot::bit/or", args, 2);
+    if let [x, y] = args {
+        return or_pair(x, y);
+    }
+    validate_args_at_least!("::hot::bit/or", args, 2);
+    fold_args(args, or_pair)
+}
 
-    match (&args[0], &args[1]) {
+#[inline(always)]
+fn or_pair(x: &Val, y: &Val) -> HotResult<Val> {
+    match (x, y) {
         (Val::Int(a), Val::Int(b)) => HotResult::Ok(Val::Int(a | b)),
         (Val::Byte(a), Val::Byte(b)) => HotResult::Ok(Val::Byte(a | b)),
         (Val::Byte(a), Val::Int(b)) => {
@@ -52,11 +67,18 @@ pub fn or(args: &[Val]) -> HotResult<Val> {
     }
 }
 
-/// Bitwise XOR
+/// Bitwise XOR of the values, left to right
 pub fn xor(args: &[Val]) -> HotResult<Val> {
-    validate_args!("::hot::bit/xor", args, 2);
+    if let [x, y] = args {
+        return xor_pair(x, y);
+    }
+    validate_args_at_least!("::hot::bit/xor", args, 2);
+    fold_args(args, xor_pair)
+}
 
-    match (&args[0], &args[1]) {
+#[inline(always)]
+fn xor_pair(x: &Val, y: &Val) -> HotResult<Val> {
+    match (x, y) {
         (Val::Int(a), Val::Int(b)) => HotResult::Ok(Val::Int(a ^ b)),
         (Val::Byte(a), Val::Byte(b)) => HotResult::Ok(Val::Byte(a ^ b)),
         (Val::Byte(a), Val::Int(b)) => {

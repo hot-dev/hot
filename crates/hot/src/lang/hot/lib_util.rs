@@ -43,6 +43,20 @@ pub fn validate_no_args(fn_name: &str, args: &[Val]) -> HotResult<Val> {
     HotResult::Ok(Val::Bool(true))
 }
 
+/// Apply `pair` across at least two `args` from the left: the result of each
+/// step and the next argument make the next step. Stops at the first Err, as
+/// an overflow or a division by zero answers the whole call.
+pub fn fold_args(args: &[Val], pair: fn(&Val, &Val) -> HotResult<Val>) -> HotResult<Val> {
+    let mut result = pair(&args[0], &args[1]);
+    for arg in &args[2..] {
+        result = match &result {
+            HotResult::Ok(acc) if !acc.is_err() => pair(acc, arg),
+            _ => return result,
+        };
+    }
+    result
+}
+
 /// Validate that function has between min and max arguments (inclusive)
 pub fn validate_args_range(
     fn_name: &str,

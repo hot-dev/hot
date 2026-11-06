@@ -44,6 +44,7 @@ meta {
     core: true,
     doc: """
     Call function `f` with `args` (default empty vec). Supports both single-argument and no-argument forms.
+    `apply` is the same call with the data first, for pipes.
 
     By default, a normal domain `Err` returned by the callee is forced. Pass
     `OnErr.Preserve` to return the `Err` as the call result instead. `fail()`,
@@ -77,6 +78,39 @@ fn
 (f: Fn): Any {
     // Single-argument form - call with empty args
     call(f, [])
+}
+
+
+apply
+meta {
+    core: true,
+    doc: """
+    Call `f` with the items of `args` as its arguments. This is `call` with
+    the data first, as `map` and `reduce` take it, so it fits a pipe. Clojure's
+    `apply` takes the function first. To call a function you can name, spread
+    is shorter and keeps its return type: `add(...xs)`.
+
+    A normal domain `Err` returned by the callee is forced. Pass
+    `OnErr.Preserve` to return the `Err` as the result instead, as with `call`.
+
+    **Example**
+
+    ```hot
+    apply([1, 2, 3], add)              // 6
+    [1, 2, 3] |> apply(add)            // 6
+    map([[1, 2], [3, 4]], apply(%, add))  // [3, 7]
+
+    // Preserve a recoverable domain Err as a value
+    result apply([id], maybe-fetch, OnErr.Preserve)
+    ```
+    """
+}
+fn
+(args: Vec<Any>, f: Fn): Any {
+    call-lib(::hot::lang/call-internal, [f, args])
+},
+(args: Vec<Any>, f: Fn, on-err: OnErr): Any {
+    call-lib(::hot::lang/call-internal, [f, args, on-err])
 }
 
 

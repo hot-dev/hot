@@ -3887,4 +3887,137 @@ mod integration_tests {
             errors
         );
     }
+
+    /// A spread's length is only known at runtime, so it can fill any
+    /// parameters, typed ones and rest parameters alike.
+    #[test]
+    fn test_spread_fills_typed_parameters() {
+        let source = r#"
+            ::test ns
+            two fn (a: Int, b: Int): Int { add(a, b) }
+            rest fn (a: Int, ...more: Int): Int { a }
+            xs [1, 2, 3]
+            a add(...xs)
+            b add(1, 2, ...xs)
+            c add(...xs, 1, ...xs)
+            d two(...xs)
+            e two(1, ...xs)
+            f rest(...xs)
+            g rest(1, 2, ...xs)
+            h eq(1, ...xs)
+            i lt(...xs)
+            j max(...xs)
+        "#;
+        let errors = compile_and_get_type_errors(source);
+        assert!(errors.is_empty(), "Got: {:?}", errors);
+    }
+
+    /// The arguments before a spread keep their positions, and a call that
+    /// writes too many fails whatever the spread holds.
+    #[test]
+    fn test_spread_keeps_what_is_known() {
+        let wrong_type = compile_and_get_type_errors(
+            r#"
+            ::test ns
+            xs [1, 2]
+            bad add("a", ...xs)
+        "#,
+        );
+        assert!(
+            wrong_type
+                .iter()
+                .any(|e| matches!(e, CompilerError::TypeMismatch { .. })),
+            "Got: {:?}",
+            wrong_type
+        );
+        let too_many = compile_and_get_type_errors(
+            r#"
+            ::test ns
+            two fn (a: Int, b: Int): Int { add(a, b) }
+            xs [1, 2]
+            bad two(1, 2, 3, ...xs)
+        "#,
+        );
+        assert!(
+            too_many
+                .iter()
+                .any(|e| matches!(e, CompilerError::ArityMismatch { .. })),
+            "Got: {:?}",
+            too_many
+        );
+    }
+
+    /// A spread can reach any overload, so its call has the type of them all:
+    /// `add(...xs)` may be a Dec, though `add()` is an Int.
+    #[test]
+    fn test_spread_call_has_the_type_of_every_overload() {
+        let source = r#"
+            ::test ns
+            takes-str fn (v: Str): Str { v }
+            takes-int fn (v: Int): Int { v }
+            xs [1.5, 2.5]
+            as-str takes-str(add(...xs))
+            as-int takes-int(add(...xs))
+        "#;
+        let errors = compile_and_get_type_errors(source);
+        let mismatches = errors
+            .iter()
+            .filter(|e| matches!(e, CompilerError::TypeMismatch { .. }))
+            .count();
+        assert_eq!(mismatches, 2, "Got: {:?}", errors);
+    }
+
+    /// A rest parameter checks every argument it takes, not only its first.
+    #[test]
+    fn test_rest_parameter_checks_every_argument() {
+        for call in [
+            r#"add(1, 2, 3, "a")"#,
+            r#"add(1, 2, 3, 4, 5, "a")"#,
+            r#"lt(1, 2, 3, "a")"#,
+        ] {
+            let source = format!("::test ns\nbad {call}\n");
+            let errors = compile_and_get_type_errors(&source);
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| matches!(e, CompilerError::TypeMismatch { .. })),
+                "{call} got: {errors:?}"
+            );
+        }
+    }
+
+    /// Int arguments keep an Int result at every count, as `slice` needs.
+    #[test]
+    fn test_variadic_math_keeps_int_results() {
+        let source = r#"
+            ::test ns
+            takes-int fn (v: Int): Int { v }
+            a takes-int(add())
+            b takes-int(add(1))
+            c takes-int(add(1, 2))
+            d takes-int(add(1, 2, 3))
+            e takes-int(add(1, 2, 3, 4, 5))
+            f takes-int(sub(1))
+            g takes-int(sub(5, 2, 1))
+        "#;
+        let errors = compile_and_get_type_errors(source);
+        assert!(errors.is_empty(), "Got: {:?}", errors);
+    }
+
+    /// The counts variadic math doesn't take are still compile errors.
+    #[test]
+    fn test_variadic_math_keeps_its_minimum_arity() {
+        for call in [
+            "sub()", "div()", "div(5)", "max()", "min()", "lt()", "eq()", "ne()",
+        ] {
+            let source = format!("::test ns\nbad {call}\n");
+            let errors = compile_and_get_type_errors(&source);
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| matches!(e, CompilerError::ArityMismatch { .. })),
+                "{call} got: {errors:?}"
+            );
+        }
+    }
 }

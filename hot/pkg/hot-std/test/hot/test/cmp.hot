@@ -167,3 +167,33 @@ meta ["test"] fn () {
 
     assert-eq([[1.5], [2]], sort([[2], [1.5]]), "numbers inside other values")
 }
+
+test-comparisons-chain
+meta ["test"] fn () {
+    assert(lt(1, 2, 3), "lt ascending")
+    assert-eq(false, lt(1, 3, 2), "lt stops at a pair out of order")
+    assert-eq(false, lt(1, 1, 2), "lt is strict")
+    assert(lte(1, 1, 2), "lte allows a tie")
+    assert-eq(false, lte(2, 1, 3), "lte out of order")
+    assert(gt(3, 2, 1), "gt descending")
+    assert-eq(false, gt(3, 3, 1), "gt is strict")
+    assert(gte(3, 3, 1), "gte allows a tie")
+    assert-eq(false, gte(3, 1, 2), "gte out of order")
+    assert(lt(1, 1.5, 2, 2.5), "chains across Int and Dec")
+    assert(lt(1), "one number is in order")
+    assert(gte(1), "one number is in order")
+    assert(lt(...[1, 2, 3]), "lt checks a whole Vec")
+    assert(is-err(lt(...[])), "lt takes at least one number")
+}
+
+test-eq-ne-take-any-count
+meta ["test"] fn () {
+    assert(eq(1, 1, 1), "all equal")
+    assert-eq(false, eq(1, 1, 2), "one differs")
+    assert(eq("a"), "one value is equal to itself")
+    assert(eq(...[2, 2, 2]), "eq checks a whole Vec")
+    assert(ne(1, 1, 2), "not all equal")
+    assert-eq(false, ne(1, 1, 1), "all equal")
+    assert(ne(1, 2, 1), "ne isn't all different")
+    assert-eq(false, ne("a"), "one value is equal to itself")
+}

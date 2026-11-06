@@ -1,8 +1,9 @@
 // Math functions for bytecode engine
 
+use crate::lang::hot::lib_util::fold_args;
 use crate::lang::hot::r#type::HotResult;
 use crate::val::Val;
-use crate::validate_args;
+use crate::{validate_args, validate_args_at_least};
 use fastnum::D256;
 
 /// Check if a D256 decimal represents an integer (no fractional part)
@@ -144,11 +145,18 @@ pub fn fast_pow_int(a: i64, b: i64) -> Option<Val> {
     Some(int_pow(a, b))
 }
 
-/// Add two numbers
+/// Add numbers, left to right
 pub fn add(args: &[Val]) -> HotResult<Val> {
-    validate_args!("::hot::math/add", args, 2);
+    if let [x, y] = args {
+        return add_pair(x, y);
+    }
+    validate_args_at_least!("::hot::math/add", args, 2);
+    fold_args(args, add_pair)
+}
 
-    match (&args[0], &args[1]) {
+#[inline(always)]
+fn add_pair(x: &Val, y: &Val) -> HotResult<Val> {
+    match (x, y) {
         (Val::Int(a), Val::Int(b)) => HotResult::Ok(int_or_overflow(a.checked_add(*b))),
         (Val::Dec(a), Val::Dec(b)) => HotResult::Ok(Val::Dec(*a + *b)),
         (Val::Int(a), Val::Dec(b)) => {
@@ -165,11 +173,18 @@ pub fn add(args: &[Val]) -> HotResult<Val> {
     }
 }
 
-/// Subtract two numbers
+/// Subtract each later number from the first, left to right
 pub fn sub(args: &[Val]) -> HotResult<Val> {
-    validate_args!("::hot::math/sub", args, 2);
+    if let [x, y] = args {
+        return sub_pair(x, y);
+    }
+    validate_args_at_least!("::hot::math/sub", args, 2);
+    fold_args(args, sub_pair)
+}
 
-    match (&args[0], &args[1]) {
+#[inline(always)]
+fn sub_pair(x: &Val, y: &Val) -> HotResult<Val> {
+    match (x, y) {
         (Val::Int(a), Val::Int(b)) => HotResult::Ok(int_or_overflow(a.checked_sub(*b))),
         (Val::Dec(a), Val::Dec(b)) => HotResult::Ok(Val::Dec(*a - *b)),
         (Val::Int(a), Val::Dec(b)) => {
@@ -186,11 +201,18 @@ pub fn sub(args: &[Val]) -> HotResult<Val> {
     }
 }
 
-/// Multiply two numbers
+/// Multiply numbers, left to right
 pub fn mul(args: &[Val]) -> HotResult<Val> {
-    validate_args!("::hot::math/mul", args, 2);
+    if let [x, y] = args {
+        return mul_pair(x, y);
+    }
+    validate_args_at_least!("::hot::math/mul", args, 2);
+    fold_args(args, mul_pair)
+}
 
-    match (&args[0], &args[1]) {
+#[inline(always)]
+fn mul_pair(x: &Val, y: &Val) -> HotResult<Val> {
+    match (x, y) {
         (Val::Int(a), Val::Int(b)) => HotResult::Ok(int_or_overflow(a.checked_mul(*b))),
         (Val::Dec(a), Val::Dec(b)) => HotResult::Ok(Val::Dec(*a * *b)),
         (Val::Int(a), Val::Dec(b)) => {
@@ -207,11 +229,18 @@ pub fn mul(args: &[Val]) -> HotResult<Val> {
     }
 }
 
-/// Divide two numbers
+/// Divide the first number by each later one, left to right
 pub fn div(args: &[Val]) -> HotResult<Val> {
-    validate_args!("::hot::math/div", args, 2);
+    if let [x, y] = args {
+        return div_pair(x, y);
+    }
+    validate_args_at_least!("::hot::math/div", args, 2);
+    fold_args(args, div_pair)
+}
 
-    match (&args[0], &args[1]) {
+#[inline(always)]
+fn div_pair(x: &Val, y: &Val) -> HotResult<Val> {
+    match (x, y) {
         (Val::Int(a), Val::Int(b)) => {
             if *b == 0 {
                 return HotResult::Ok(Val::err(Val::from("Division by zero")));
@@ -347,11 +376,18 @@ pub fn abs(args: &[Val]) -> HotResult<Val> {
     }
 }
 
-/// Maximum of two numbers
+/// Maximum of the numbers
 pub fn max(args: &[Val]) -> HotResult<Val> {
-    validate_args!("::hot::math/max", args, 2);
+    if let [x, y] = args {
+        return max_pair(x, y);
+    }
+    validate_args_at_least!("::hot::math/max", args, 2);
+    fold_args(args, max_pair)
+}
 
-    match (&args[0], &args[1]) {
+#[inline(always)]
+fn max_pair(x: &Val, y: &Val) -> HotResult<Val> {
+    match (x, y) {
         (Val::Int(a), Val::Int(b)) => HotResult::Ok(Val::Int(*a.max(b))),
         (Val::Dec(a), Val::Dec(b)) => HotResult::Ok(Val::Dec(if a >= b { *a } else { *b })),
         (Val::Int(a), Val::Dec(b)) => {
@@ -368,11 +404,18 @@ pub fn max(args: &[Val]) -> HotResult<Val> {
     }
 }
 
-/// Minimum of two numbers
+/// Minimum of the numbers
 pub fn min(args: &[Val]) -> HotResult<Val> {
-    validate_args!("::hot::math/min", args, 2);
+    if let [x, y] = args {
+        return min_pair(x, y);
+    }
+    validate_args_at_least!("::hot::math/min", args, 2);
+    fold_args(args, min_pair)
+}
 
-    match (&args[0], &args[1]) {
+#[inline(always)]
+fn min_pair(x: &Val, y: &Val) -> HotResult<Val> {
+    match (x, y) {
         (Val::Int(a), Val::Int(b)) => HotResult::Ok(Val::Int(*a.min(b))),
         (Val::Dec(a), Val::Dec(b)) => HotResult::Ok(Val::Dec(if a <= b { *a } else { *b })),
         (Val::Int(a), Val::Dec(b)) => {

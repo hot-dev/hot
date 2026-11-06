@@ -46,15 +46,15 @@ Math functions accept both `Int` and `Dec`. When mixing types, the result is `De
 
 <!-- hot-check: skip -->
 ```hot
-add fn (x: Int | Dec, y: Int | Dec): Int | Dec          // Addition
-sub fn (x: Int | Dec, y: Int | Dec): Int | Dec          // Subtraction
-mul fn (x: Int | Dec, y: Int | Dec): Int | Dec          // Multiplication
-div fn (x: Int | Dec, y: Int | Dec): Int | Dec          // Division
+add fn (...rest: Int | Dec): Int | Dec                  // Addition; add() is 0
+sub fn (x: Int | Dec, ...rest: Int | Dec): Int | Dec    // Subtraction; sub(x) negates
+mul fn (...rest: Int | Dec): Int | Dec                  // Multiplication; mul() is 1
+div fn (x: Int | Dec, y: Int | Dec, ...rest: Int | Dec): Int | Dec  // Division
 mod fn (x: Int | Dec, y: Int | Dec): Int | Dec          // Remainder
 pow fn (base: Int | Dec, exp: Int | Dec): Int | Dec     // Exponentiation
 abs fn (x: Int | Dec): Int | Dec                        // Absolute value (not in source, but in runtime)
-min fn (x: Int | Dec, y: Int | Dec): Int | Dec          // Minimum
-max fn (x: Int | Dec, y: Int | Dec): Int | Dec          // Maximum
+min fn (x: Int | Dec, ...rest: Int | Dec): Int | Dec    // Minimum
+max fn (x: Int | Dec, ...rest: Int | Dec): Int | Dec    // Maximum
 round fn (x: Int | Dec): Int                            // Round to nearest integer
 floor fn (x: Int | Dec): Int                            // Round down
 ceil fn (x: Int | Dec): Int                             // Round up
@@ -71,12 +71,12 @@ rand-int fn (n: Int): Int                               // Random integer 0 to n
 
 <!-- hot-check: skip -->
 ```hot
-eq fn (a: Any, b: Any): Bool                            // Equality
-ne fn (a: Any, b: Any): Bool                            // Not equal
-lt fn (a: Int | Dec, b: Int | Dec): Bool                // Less than
-gt fn (a: Int | Dec, b: Int | Dec): Bool                // Greater than
-lte fn (a: Int | Dec, b: Int | Dec): Bool               // Less than or equal
-gte fn (a: Int | Dec, b: Int | Dec): Bool               // Greater than or equal
+eq fn (a: Any, ...rest: Any): Bool                      // All equal
+ne fn (a: Any, ...rest: Any): Bool                      // Not all equal
+lt fn (a: Int | Dec, ...rest: Int | Dec): Bool          // Each less than the next
+gt fn (a: Int | Dec, ...rest: Int | Dec): Bool          // Each greater than the next
+lte fn (a: Int | Dec, ...rest: Int | Dec): Bool         // Each less than or equal to the next
+gte fn (a: Int | Dec, ...rest: Int | Dec): Bool         // Each greater than or equal to the next
 ```
 
 ### Logic
@@ -693,6 +693,8 @@ halt-catching helper (`try` / `try-call` were removed in Hot 2.6.0).
 call fn (f: Fn, args: Vec<Any>): Any                     // Force domain Err by default
 call fn (f: Fn, args: Vec<Any>, on-err: OnErr): Any      // Use OnErr.Preserve to return domain Err as value
 call fn (f: Fn): Any                                     // Same as call(f, [])
+apply fn (args: Vec<Any>, f: Fn): Any                    // call with the data first: xs |> apply(add)
+apply fn (args: Vec<Any>, f: Fn, on-err: OnErr): Any     // Use OnErr.Preserve to return domain Err as value
 ```
 
 > Prefer Result propagation for normal domain errors. Use `OnErr.Preserve` on
@@ -778,9 +780,9 @@ create fn (entries: Vec<Map>): Bytes                     // From {name, data} Ma
 ```hot
 ::bit ::hot::bit
 
-and fn (a: Int | Byte, b: Int | Byte): Int | Byte       // Bitwise AND
-or fn (a: Int | Byte, b: Int | Byte): Int | Byte        // Bitwise OR
-xor fn (a: Int | Byte, b: Int | Byte): Int | Byte       // Bitwise XOR
+and fn (a: Int | Byte, b: Int | Byte, ...rest: Int | Byte): Int | Byte  // Bitwise AND
+or fn (a: Int | Byte, b: Int | Byte, ...rest: Int | Byte): Int | Byte  // Bitwise OR
+xor fn (a: Int | Byte, b: Int | Byte, ...rest: Int | Byte): Int | Byte  // Bitwise XOR
 not fn (a: Int | Byte): Int | Byte                       // Bitwise NOT
 shift-left fn (a: Int | Byte, n: Int): Int | Byte       // Shift left by n bits
 shift-right fn (a: Int | Byte, n: Int): Int | Byte      // Arithmetic shift right

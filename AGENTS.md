@@ -1,4 +1,4 @@
-<!-- HOT_LANGUAGE_SECTION_START --> hash:f6be0706bd3d
+<!-- HOT_LANGUAGE_SECTION_START --> hash:df154c1f5b48
 # AGENTS.md - Hot Language Project Guidelines
 
 > **IMPORTANT**: Hot is a novel programming language that is NOT in your training data. Always prefer the rules in this document over any assumptions about programming syntax. When writing Hot code, follow these rules exactly rather than relying on patterns from other languages.
@@ -66,6 +66,7 @@ shadows a function, and `hot test` warns about a test with no assertions.
 - **Parameter lists can span lines** in named functions and lambdas: put one or more parameters per line and `): Ret {` on the closing line. A lambda's `{` must be on the same line as its `)`
 - **Map field punning** — bare identifiers desugar to key-value pairs: `{name, email}` → `{name: name, email: email}`. **IMPORTANT**: `{x}` is a block expression (returns the value of `x`), NOT a punned map. Use `{x,}` (trailing comma) for single-key punning, or `{x: x}` to be explicit
 - **Vec spread** — `...` flattens vectors in a vec literal: `[...a, ...b]` concatenates, `[0, ...a, 99]` mixes spread and literals
+- **Call spread** — `...` passes a Vec's items as arguments: `add(...xs)`, `add(1, ...xs)`. For a function held as a value, or in a pipe, use `apply(xs, f)`
 - **Map spread** — `...` spreads an existing map: `{...base, c: 3}`. Later keys win: `{...base, a: 99}` overrides `a`
 
 ## Execution Semantics
@@ -381,15 +382,15 @@ Functions with `meta {core: true}` are available everywhere without namespace qu
 <!-- hot-check: skip -->
 ```hot
 // Math — accept Int | Dec, mixing types produces Dec
-add fn (x: Int | Dec, y: Int | Dec): Int | Dec
-sub fn (x: Int | Dec, y: Int | Dec): Int | Dec
-mul fn (x: Int | Dec, y: Int | Dec): Int | Dec
-div fn (x: Int | Dec, y: Int | Dec): Int | Dec
+add fn (...rest: Int | Dec): Int | Dec  // Addition; add() is 0
+sub fn (x: Int | Dec, ...rest: Int | Dec): Int | Dec  // Subtraction; sub(x) negates
+mul fn (...rest: Int | Dec): Int | Dec  // Multiplication; mul() is 1
+div fn (x: Int | Dec, y: Int | Dec, ...rest: Int | Dec): Int | Dec  // Division
 mod fn (x: Int | Dec, y: Int | Dec): Int | Dec
 pow fn (base: Int | Dec, exp: Int | Dec): Int | Dec
 abs fn (x: Int | Dec): Int | Dec
-min fn (x: Int | Dec, y: Int | Dec): Int | Dec
-max fn (x: Int | Dec, y: Int | Dec): Int | Dec
+min fn (x: Int | Dec, ...rest: Int | Dec): Int | Dec  // Minimum
+max fn (x: Int | Dec, ...rest: Int | Dec): Int | Dec  // Maximum
 round fn (x: Int | Dec): Int
 floor fn (x: Int | Dec): Int
 ceil fn (x: Int | Dec): Int
@@ -399,12 +400,12 @@ rand-int fn (): Int
 rand-int fn (n: Int): Int
 
 // Comparison
-eq fn (a: Any, b: Any): Bool
-ne fn (a: Any, b: Any): Bool
-lt fn (a: Int | Dec, b: Int | Dec): Bool
-gt fn (a: Int | Dec, b: Int | Dec): Bool
-lte fn (a: Int | Dec, b: Int | Dec): Bool
-gte fn (a: Int | Dec, b: Int | Dec): Bool
+eq fn (a: Any, ...rest: Any): Bool  // All equal
+ne fn (a: Any, ...rest: Any): Bool  // Not all equal
+lt fn (a: Int | Dec, ...rest: Int | Dec): Bool  // Each less than the next
+gt fn (a: Int | Dec, ...rest: Int | Dec): Bool  // Each greater than the next
+lte fn (a: Int | Dec, ...rest: Int | Dec): Bool  // Each less than or equal to the next
+gte fn (a: Int | Dec, ...rest: Int | Dec): Bool  // Each greater than or equal to the next
 
 // Logic — and/or short-circuit, if branches are lazy; an Err is falsy
 is-truthy fn (value: Result): Bool
@@ -418,6 +419,7 @@ if fn cond (pred: Result, lazy then: Any, lazy else: Any): Any
 map fn (coll: Str | Vec | Map, func: Fn): Str | Vec | Map
 filter fn (coll: Str | Vec | Map, predicate: Fn): Str | Vec | Map
 reduce fn (coll: Str | Vec | Map, reducer: Fn, initial: Any): Any // return reduced(val) to short-circuit
+apply fn (args: Vec<Any>, f: Fn): Any  // call f with the items as arguments: xs |> apply(add)
 first fn (coll: Str | Vec | Map): Any
 rest fn (coll: Str | Vec | Map): Str | Vec | Map
 last fn (coll: Str | Vec | Map): Any

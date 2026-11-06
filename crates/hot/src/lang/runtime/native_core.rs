@@ -18,7 +18,8 @@ use indexmap::IndexMap;
 const NATIVE_CORE_NAMES: &[&str] = &[
     "add", "sub", "mul", "div", "mod", "pow", "abs", "min", "max", "is-zero", "eq", "ne", "lt",
     "lte", "gt", "gte", "not", "and", "or", "is-null", "is-some", "is-empty", "length", "first",
-    "rest", "range", "get", "concat", "map", "filter", "reduce", "some", "all", "pmap",
+    "rest", "range", "get", "concat", "map", "filter", "reduce", "some", "all", "pmap", "call",
+    "apply",
 ];
 
 /// `name` as it appears in [`NATIVE_CORE_NAMES`], if it is one.

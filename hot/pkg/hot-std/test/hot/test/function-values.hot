@@ -1,0 +1,149 @@
+::hot::test::function-values ns
+meta ["test"]
+
+// Core functions passed by name run natively, in `call` and as a stage of a
+// pipeline. These check that a name only reaches one when it means that one.
+
+// Rebinds a core name in this namespace.
+max ::hot::math/min
+
+user-sum fn (a: Int, b: Int): Int { add(a, b, 1000) }
+
+test-a-rebound-name-reaches-its-binding
+meta ["test"] fn () {
+    assert-eq(1, reduce(range(1, 4), max, 9), "max here is min")
+    assert-eq(9, reduce(range(1, 4), ::hot::math/max, 9), "the full name is hot-std's")
+    assert-eq(2, call(max, [2, 7]), "call reaches the binding too")
+}
+
+test-a-local-named-like-a-core-function-wins
+meta ["test"] fn () {
+    add (a, b) { 99 }
+    assert-eq(99, reduce(range(0, 3), add, 0), "a local lambda")
+    assert-eq(99, call(add, [1, 2]), "call of a local lambda")
+}
+
+reduce-with fn (add, items) { reduce(items, add, 1) }
+
+test-a-parameter-named-like-a-core-function-wins
+meta ["test"] fn () {
+    assert-eq(6, reduce-with(mul, range(1, 4)), "a parameter")
+}
+
+test-a-user-function-stays-itself
+meta ["test"] fn () {
+    assert-eq(3003, reduce(range(0, 3), user-sum, 0), "a stage")
+    assert-eq(1003, call(user-sum, [1, 2]), "call")
+}
+
+test-core-functions-as-stages
+meta ["test"] fn () {
+    assert-eq(10, reduce(range(0, 5), add, 0), "add")
+    assert-eq(90, reduce(range(0, 5), sub, 100), "sub keeps its order")
+    assert-eq(24, reduce(range(1, 5), mul, 1), "mul")
+    assert-eq(2, reduce(range(1, 4), div, 12), "div")
+    assert-eq(1.5, reduce(range(1, 3), div, 3), "div that leaves a Dec")
+    assert-eq(9, reduce([3, 9, 2], ::hot::math/max, 0), "max")
+    assert-eq(6.5, reduce([1.5, 2, 3], add, 0), "a Dec item")
+    assert-eq(3.5, reduce(range(0, 3), add, 0.5), "a Dec seed")
+    assert-eq([true, false], map(range(0, 2), is-zero), "one parameter")
+    assert-eq([1, 2], map([1, -2], abs), "abs")
+    assert-eq([0], filter(range(0, 2), is-zero), "filter")
+}
+
+test-a-stage-that-fails-fails-as-a-lambda-does
+meta ["test"] fn () {
+    max-int 9223372036854775807
+    attempt ::hot::internal::exec/contain(() { reduce(range(0, 3), add, max-int) })
+    assert(is-err(attempt), "an overflow halts the reduce")
+    failure if-err(attempt, (failure) { failure })
+    assert(contains(Str(failure), "Integer overflow"), Str(failure))
+    not-numbers ::hot::internal::exec/contain(() { reduce([1, "a"], add, 0) })
+    assert(is-err(not-numbers), "what isn't a number stays checked")
+}
+
+test-call-of-a-core-function
+meta ["test"] fn () {
+    assert-eq(3, call(add, [1, 2]), "two numbers")
+    assert-eq(6, call(add, [1, 2, 3]), "three numbers")
+    assert-eq(0, call(add, []), "none")
+    assert-eq(5, call(add, [5]), "one")
+    assert-eq(3.5, call(add, [1.5, 2]), "a Dec")
+    assert(call(lt, [1, 2, 3]), "a comparison")
+    assert(call(eq, ["a", "a"]), "eq of what isn't a number")
+    assert-eq(7, apply([3, 4], add), "apply")
+}
+
+test-call-forces-an-err-from-a-core-function
+meta ["test"] fn () {
+    max-int 9223372036854775807
+    attempt ::hot::internal::exec/contain(() { call(add, [max-int, 1]) })
+    assert(is-err(attempt), "call forces it")
+    failure if-err(attempt, (failure) { failure })
+    assert(contains(Str(failure), "Integer overflow"), Str(failure))
+    assert(is-err(::hot::internal::exec/contain(() { apply([1, 0], div) })), "apply forces it")
+    assert(is-err(::hot::internal::exec/contain(() { call(add, [1, "a"]) })), "not a number")
+}
+
+test-call-preserves-an-err-from-a-core-function
+meta ["test"] fn () {
+    max-int 9223372036854775807
+    assert(is-err(call(add, [max-int, 1], OnErr.Preserve)), "call keeps it")
+    assert(is-err(apply([1, 0], div, OnErr.Preserve)), "apply keeps it")
+    assert-eq(3, call(add, [1, 2], OnErr.Preserve), "a number stays a number")
+}
+
+test-call-with-no-arguments
+meta ["test"] fn () {
+    zero fn (): Int { 0 }
+    assert-eq(0, call(zero), "no arguments")
+    assert-eq(0, call(zero, []), "an empty Vec")
+    assert-eq(0, call(zero, [], OnErr.Preserve), "an empty Vec and an OnErr")
+}
+
+two-args fn (a: Int, b: Int): Int { add(a, b) }
+
+returns-err fn (x: Int) { err("nope") }
+
+halts fn (x: Int) { fail("boom") }
+
+call-it fn (f, items) { call(f, items) }
+
+apply-it fn (f, items) { apply(items, f) }
+
+test-call-and-apply-reach-any-function
+meta ["test"] fn () {
+    assert-eq(3, call(two-args, [1, 2]), "call of a user function")
+    assert-eq(3, apply([1, 2], two-args), "apply of a user function")
+    assert-eq(3, call((a, b) { add(a, b) }, [1, 2]), "call of a lambda")
+    assert-eq(3, apply([1, 2], (a, b) { add(a, b) }), "apply of a lambda")
+    assert-eq(2, call(length, [[1, 2]]), "call of a core function that isn't a fold")
+    assert-eq([1, 2], apply([[1], [2]], concat), "apply of a variadic core function")
+    assert-eq(3, call-it("::hot::math/add", [1, 2]), "a function by its full name")
+    assert-eq(3, apply-it("::hot::math/add", [1, 2]), "apply by its full name")
+}
+
+test-call-and-apply-still-check-what-they-are-given
+meta ["test"] fn () {
+    contain ::hot::internal::exec/contain
+    assert(is-err(contain(() { call-it(1, [1]) })), "a function that isn't one")
+    assert(is-err(contain(() { apply-it(1, [1]) })), "apply of one")
+    assert(is-err(contain(() { call-it(two-args, 5) })), "arguments that aren't a Vec")
+    assert(is-err(contain(() { apply-it(two-args, 5) })), "apply of them")
+    assert(is-err(contain(() { call-it(two-args, null) })), "null arguments")
+    assert(is-err(contain(() { call-it(two-args, {a: 1}) })), "a Map of arguments")
+    assert(is-err(contain(() { call(two-args, [1]) })), "too few arguments")
+    assert(is-err(contain(() { apply([1, 2, 3], two-args) })), "too many arguments")
+    assert(is-err(contain(() { call(two-args, [1, "a"]) })), "an argument of the wrong type")
+}
+
+test-call-and-apply-of-a-function-that-fails
+meta ["test"] fn () {
+    contain ::hot::internal::exec/contain
+    assert(is-err(contain(() { call(returns-err, [1]) })), "call forces an Err")
+    assert(is-err(contain(() { apply([1], returns-err) })), "apply forces an Err")
+    assert(is-err(call(returns-err, [1], OnErr.Preserve)), "call keeps it on request")
+    assert(is-err(apply([1], returns-err, OnErr.Preserve)), "apply keeps it on request")
+    assert(is-err(contain(() { call(halts, [1]) })), "a halt in call")
+    assert(is-err(contain(() { apply([1], halts) })), "a halt in apply")
+}

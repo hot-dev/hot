@@ -109,6 +109,9 @@ pub enum PureOp {
     Gt,
     Gte,
     Not,
+    /// Both of two Bools: the pairs of a comparison chain (`lt(a, b, c)`).
+    /// Nothing lowers to it by name.
+    And,
     /// String/collection concatenation (`::hot::coll/concat`).
     Concat,
 }

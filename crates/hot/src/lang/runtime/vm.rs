@@ -989,6 +989,68 @@ fn is_primitive_param_type(param_type: &str) -> bool {
     )
 }
 
+type NativeFold = fn(&[Val]) -> crate::lang::hot::r#type::HotResult<Val>;
+
+/// The native function of a core function that folds its arguments.
+fn native_fold(short_name: &str) -> Option<NativeFold> {
+    use crate::lang::hot::{cmp, math};
+    Some(match short_name {
+        "add" => math::add,
+        "sub" => math::sub,
+        "mul" => math::mul,
+        "div" => math::div,
+        "min" => math::min,
+        "max" => math::max,
+        "eq" => cmp::eq,
+        "ne" => cmp::ne,
+        "lt" => cmp::lt,
+        "lte" => cmp::lte,
+        "gt" => cmp::gt,
+        "gte" => cmp::gte,
+        _ => return None,
+    })
+}
+
+fn all_numbers(args: &[Val]) -> bool {
+    args.iter()
+        .all(|arg| matches!(arg, Val::Int(_) | Val::Dec(_)))
+}
+
+/// A call to a core function that folds its arguments, on its native function,
+/// skipping the overload that declares it, when every argument is a number.
+/// Those are all the overload's parameters take, so it would pass them on as
+/// they are. Any other argument takes the full call, which checks it.
+///
+/// `min` and `max` take this for two arguments too, as the other functions
+/// here have fast paths of their own for two.
+fn native_numeric_call(
+    function_name: &str,
+    args: &[Val],
+) -> Option<crate::lang::hot::r#type::HotResult<Val>> {
+    let takes_this = args.len() >= 3 || (args.len() == 2 && matches!(function_name, "min" | "max"));
+    if !takes_this {
+        return None;
+    }
+    let native = native_fold(function_name)?;
+    all_numbers(args).then(|| native(args))
+}
+
+/// `native_numeric_call` for a function held as a value, as `call` and a
+/// callback have it. A value names it in full, so nothing can rebind the name.
+pub(crate) fn native_numeric_callback(
+    function_name: &str,
+    args: &[Val],
+) -> Option<crate::lang::hot::r#type::HotResult<Val>> {
+    if args.len() < 2 {
+        return None;
+    }
+    let short_name = function_name
+        .strip_prefix("::hot::math/")
+        .or_else(|| function_name.strip_prefix("::hot::cmp/"))?;
+    let native = native_fold(short_name)?;
+    all_numbers(args).then(|| native(args))
+}
+
 impl VirtualMachine {
     pub fn new(
         program: Arc<BytecodeProgram>,
@@ -6982,6 +7044,12 @@ impl VirtualMachine {
                 };
             }
 
+            if args.len() >= 3
+                && let Some(hr) = native_numeric_call(function_name, args)
+            {
+                fast_return_hr!(hr);
+            }
+
             match args.len() {
                 // ── 1-arg fast paths ──────────────────────────────────────
                 1 => match function_name {
@@ -7047,6 +7115,8 @@ impl VirtualMachine {
                             "mod" => math::fast_mod_int(*a, *b),
                             "div" => math::fast_div_int(*a, *b),
                             "pow" => math::fast_pow_int(*a, *b),
+                            "min" => Some(Val::Int(*a.min(b))),
+                            "max" => Some(Val::Int(*a.max(b))),
                             "lt" => Some(cmp::fast_lt_int(*a, *b)),
                             "gt" => Some(cmp::fast_gt_int(*a, *b)),
                             "lte" => Some(cmp::fast_lte_int(*a, *b)),
@@ -7101,6 +7171,9 @@ impl VirtualMachine {
                         "div" => Some(math::div(args)),
                         "mod" => Some(math::modulo(args)),
                         "pow" => Some(math::pow(args)),
+                        // Their overloads check what isn't a number.
+                        "min" | "max" => native_numeric_call(function_name, args),
+                        "call" | "apply" => self.direct_call(function_name, args),
                         "eq" => Some(cmp::eq(args)),
                         "ne" => Some(cmp::ne(args)),
                         "lt" => Some(cmp::lt(args)),
@@ -7186,8 +7259,46 @@ impl VirtualMachine {
             }
         }
 
+        if args.len() >= 2
+            && !self
+                .native_core_shadows_ref()
+                .shadows(&self.current_namespace, function_name)
+            && let Some(hr) = native_numeric_call(function_name, args)
+                .or_else(|| self.direct_call(function_name, args))
+        {
+            return match hr {
+                crate::lang::hot::r#type::HotResult::Ok(val) => Ok(val),
+                crate::lang::hot::r#type::HotResult::Err(err) => self.dispatch_hotlib_err(err),
+            };
+        }
+
         // Use unified function lookup - no more redundant fallback paths!
         self.unified_function_lookup(function_name, args)
+    }
+
+    /// `call(f, args)` or `apply(args, f)` on the function behind them, skipping
+    /// the overload, which only hands on a function and a Vec. Anything else
+    /// takes the full call, which checks it.
+    fn direct_call(
+        &mut self,
+        function_name: &str,
+        args: &[Val],
+    ) -> Option<crate::lang::hot::r#type::HotResult<Val>> {
+        use crate::lang::hot::coll::{PreparedFunction, prepare_function};
+        let (function, items) = match (function_name, args) {
+            ("call", [function, items]) => (function, items),
+            ("apply", [items, function]) => (function, items),
+            _ => return None,
+        };
+        if !matches!(items, Val::Vec(_))
+            || matches!(prepare_function(function), PreparedFunction::Invalid)
+        {
+            return None;
+        }
+        Some(crate::lang::hot::lang::call(
+            self,
+            &[function.clone(), items.clone()],
+        ))
     }
 
     /// Increment call function recursion depth and check for infinite recursion.
@@ -8427,12 +8538,36 @@ impl VirtualMachine {
             }
         } else {
             Err(VmError::runtime_with_ip(
-                format!(
-                    "Qualified function '{}' not found in compiled functions or hotlib functions",
-                    qualified_name
-                ),
+                self.no_function_message(qualified_name, arity),
                 self.instruction_pointer,
             ))
+        }
+    }
+
+    /// Why a call reached nothing: the function takes another number of
+    /// arguments, as a spread or a function value can pass, or doesn't exist.
+    fn no_function_message(&self, qualified_name: &str, arity: usize) -> String {
+        let mut counts: Vec<String> = self
+            .program
+            .functions
+            .iter()
+            .filter(|function| function.name == qualified_name)
+            .map(|function| match function.is_variadic {
+                true => format!("at least {}", function.arity.saturating_sub(1)),
+                false => function.arity.to_string(),
+            })
+            .collect();
+        counts.sort();
+        counts.dedup();
+        if counts.is_empty() {
+            format!(
+                "Qualified function '{qualified_name}' not found in compiled functions or hotlib functions"
+            )
+        } else {
+            format!(
+                "Function '{qualified_name}' expects {} arguments, got {arity}",
+                counts.join(" or ")
+            )
         }
     }
 

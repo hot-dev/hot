@@ -139,6 +139,13 @@ sum fn (...nums: Int): Int {
 }
 ```
 
+A call spreads a Vec into arguments with `...`, anywhere among written ones:
+
+```hot
+add(...numbers)
+add(1, ...numbers)
+```
+
 ### Lambdas
 
 ```hot

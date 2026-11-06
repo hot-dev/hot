@@ -39,3 +39,59 @@ meta ["test"] fn () {
     result call(maybe-domain-err-for-call, [2], OnErr.Preserve)
     assert(is-err(result))
 }
+
+two-args-for-spread fn (a: Int, b: Int): Int { add(a, b) }
+
+typed-rest-for-spread fn (first-n: Int, ...more: Int): Int { reduce(more, add, first-n) }
+
+test-call-and-apply-reach-every-arity
+meta ["test"] fn () {
+    assert-eq(6, call(add, [1, 2, 3]), "call passes every item")
+    assert-eq(0, call(add, []), "call with nothing")
+    assert-eq(4, apply([1, 1, 1, 1], add), "apply passes every item")
+    assert-eq(0, apply([], add), "apply with nothing")
+    assert-eq(5, apply([2, 3], two-args-for-spread), "apply calls a user function")
+}
+
+test-apply-takes-the-data-first
+meta ["test"] fn () {
+    piped [1, 2, 3] |> apply(add)
+    assert-eq(6, piped, "the pipe fills the data")
+    assert-eq([3, 7], map([[1, 2], [3, 4]], apply(%, add)), "a placeholder in map")
+    assert-eq(10, apply([1, 2, 3, 4], (a, b, c, d) { add(a, b, c, d) }), "apply calls a lambda")
+}
+
+test-apply-forces-domain-err-by-default
+meta ["test"] fn () {
+    attempt ::hot::internal::exec/contain(() { apply([2], maybe-domain-err-for-call) })
+    assert(is-err(attempt))
+}
+
+test-apply-preserves-domain-err-with-onerr-preserve
+meta ["test"] fn () {
+    assert(is-err(apply([2], maybe-domain-err-for-call, OnErr.Preserve)))
+}
+
+test-spread-into-typed-parameters
+meta ["test"] fn () {
+    xs [1, 2, 3]
+    assert-eq(6, typed-rest-for-spread(...xs), "a spread fills a typed rest parameter")
+    assert-eq(7, typed-rest-for-spread(1, ...xs), "after a written argument")
+    assert-eq(3, two-args-for-spread(...[1, 2]), "a spread fills fixed parameters")
+}
+
+test-spread-of-the-wrong-length-says-so
+meta ["test"] fn () {
+    attempt ::hot::internal::exec/contain(() { two-args-for-spread(...[1, 2, 3]) })
+    assert(is-err(attempt))
+    failure if-err(attempt, (failure) { failure })
+    assert(contains(Str(failure), "expects 2 arguments, got 3"), Str(failure))
+}
+
+test-functions-as-values-take-any-count
+meta ["test"] fn () {
+    plus add
+    assert-eq(6, plus(1, 2, 3), "through a variable")
+    assert-eq(6, reduce([1, 2, 3], add, 0), "as a reducer")
+    assert-eq(9, reduce([3, 9, 2], max, 0), "max as a reducer")
+}
