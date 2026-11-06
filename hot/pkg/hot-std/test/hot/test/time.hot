@@ -939,3 +939,90 @@ fn () {
     assert(not(::hot::time/within-seconds-of-now(add(now, 3600), 300)), "an hour ahead is outside")
     assert(not(::hot::time/within-seconds-of-now("garbage", 300)), "non-numeric fails closed")
 }
+
+// ============================================================================
+// Instant from an RFC 3339 string
+// ============================================================================
+
+Seen type {
+    at: Instant,
+    label: Str
+}
+
+// Text reaches the constructor at run time, as a parsed body's does.
+dynamic fn (value: Any): Any {
+    value
+}
+
+test-instant-from-rfc-3339
+meta ["test"]
+fn () {
+    instant Instant("2026-11-01T10:00:00Z")
+
+    assert(is-type(instant, Instant), "the constructor gives an Instant")
+    assert-eq(1793527200000, ::hot::time/epoch-millis(instant))
+    assert-eq("2026-11-01T10:00:00Z", Str(instant))
+}
+
+test-instant-from-rfc-3339-reads-the-offset
+meta ["test"]
+fn () {
+    assert-eq(Instant("2026-11-01T10:00:00Z"), Instant("2026-11-01T05:00:00-05:00"))
+    assert-eq(Instant("2026-11-01T10:00:00Z"), Instant("2026-11-01T15:30:00+05:30"))
+}
+
+test-instant-from-rfc-3339-keeps-fractions-of-a-second
+meta ["test"]
+fn () {
+    assert-eq(1793527200250, ::hot::time/epoch-millis(Instant("2026-11-01T10:00:00.250Z")))
+    assert-eq(
+        1793527200123456789,
+        ::hot::time/epoch-nanos(Instant("2026-11-01T10:00:00.123456789Z")),
+    )
+}
+
+test-instant-from-text-needs-an-offset
+meta ["test"]
+fn () {
+    // No offset or zone: this names no moment, so no instant
+    assert(is-err(Instant("2026-11-01T10:00:00")), "a local date-time")
+    assert(is-err(Instant("2026-11-01")), "a date")
+    assert(is-err(Instant("10:00:00Z")), "a time")
+    assert(is-err(Instant("not a time")), "text")
+    assert(is-err(Instant("")), "nothing")
+}
+
+test-instant-refusal-says-what-it-takes-and-not-what-it-was-given
+meta ["test"]
+fn () {
+    message err-message(Instant("sensitive-value"))
+    assert(contains(message, "RFC 3339"), message)
+    assert(not(contains(message, "sensitive-value")), message)
+}
+
+test-instant-field-reads-rfc-3339
+meta ["test"]
+fn () {
+    seen Seen(dynamic(from-json("{\"at\": \"2026-11-01T10:00:00Z\", \"label\": \"opened\"}")))
+
+    assert(is-type(seen.at, Instant), "the field holds an Instant")
+    assert-eq(1793527200000, ::hot::time/epoch-millis(seen.at))
+}
+
+test-instant-field-refuses-text-that-names-no-moment
+meta ["test"]
+fn () {
+    result Seen(dynamic({at: "2026-11-01T10:00:00", label: "opened"}))
+
+    assert(is-err(result), "a date-time with no offset names no moment")
+    assert-eq(["at"], err-value(result).path)
+    assert(contains(err-value(result).message, "constructor of `Seen` at `at`"), err-value(result).message)
+}
+
+test-instant-field-still-takes-an-instant
+meta ["test"]
+fn () {
+    at Instant(Millisecond(1793527200000))
+
+    assert-eq(at, Seen({at: at, label: "opened"}).at)
+}

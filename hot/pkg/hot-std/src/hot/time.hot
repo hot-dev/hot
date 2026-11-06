@@ -64,13 +64,22 @@ meta {
     now ::hot::time/now()           // Current instant
     Str(now)                        // "2024-12-04T15:30:00Z"
     ::hot::time/epoch-millis(now)   // 1733324400000
+
+    // From an RFC 3339 string, which must state its offset
+    Instant("2026-11-01T10:00:00Z")
+    Instant("2026-11-01T05:00:00-05:00")   // The same instant
     ```
+
+    `Str` shows whole seconds, so `Instant(Str(now))` drops any fraction.
     """
 }
 type {
     epochNanoseconds: Int
 }
 fn
+(rfc3339: Str): Instant {
+    call-lib(::hot::time/instant-from-string, [rfc3339])
+},
 (epoch-millis: Millisecond): Instant {
     call-lib(::hot::time/instant-from-millis, [epoch-millis])
 },
