@@ -13,18 +13,17 @@
 //! T+0..30s: wait up to CODE_DRAIN_SECS for in-flight tasks to finish naturally
 //!           (most user code-tasks are sub-second; container tasks rarely)
 //!
-//! T+30s  : signal cancel_token on every still-active task (cooperative
-//!          interrupt for the Hot VM and the box executor)
-//!
-//! T+33s  : grace window for cancellation to land
-//!
-//! T+33s..: for each task still registered:
+//! T+30s..: for each task still registered:
 //!            1. in one DB transaction, create the queued infra-retry child
 //!               and mark the original failed (or persist an honest exhausted
 //!               result when MAX_INFRA_RETRY_GENERATIONS has been consumed)
-//!            2. publish task:complete from that durable outcome
-//!            3. enqueue the already-durable child onto {hot:task}; a crash or
+//!            2. signal cancel_token, so cooperative completion cannot win
+//!               the terminal write and consume the infrastructure retry
+//!            3. publish task:complete from that durable outcome
+//!            4. enqueue the already-durable child onto {hot:task}; a crash or
 //!               timeout here is repaired by queued-task reconciliation
+//!
+//!          Allow a brief grace window for cancellation to land afterwards.
 //!
 //! T+~50s : If Redis reports that our consumer has no pending messages,
 //!          XGROUP DELCONSUMER our consumer name on {hot:task}. If pending
@@ -73,8 +72,8 @@ use uuid::Uuid;
 /// ~30s we're better off cancelling and retrying than continuing to wait.
 pub const DEFAULT_CODE_DRAIN_SECS: u64 = 30;
 
-/// Brief grace period after signalling cancel_token before we start
-/// failing tasks. Lets the cooperative-cancel path actually reach the VM.
+/// Brief grace period after finalization and cancellation so the
+/// cooperative-cancel path can reach the VM before the process exits.
 const CANCEL_GRACE_SECS: u64 = 3;
 
 /// Per-task DB / stream timeout during shutdown. Bounded so a single slow
@@ -256,7 +255,9 @@ impl TaskShutdownCoordinator {
         // Phase 1: drain — wait for natural completion.
         self.drain_phase().await;
 
-        // Phase 2: cancel anything still running.
+        // Phase 2: persist the infrastructure outcome before signalling cancel.
+        // Otherwise a cooperative VM can record an ordinary failure and
+        // unregister itself before we have made its retry durable.
         let remaining = self.snapshot_active_tasks();
         if remaining.is_empty() {
             tracing::info!("All in-flight tasks completed during drain window");
@@ -265,28 +266,14 @@ impl TaskShutdownCoordinator {
         }
 
         tracing::warn!(
-            "Drain timeout reached, cancelling {} remaining task(s)",
+            "Drain timeout reached, finalizing {} interrupted task(s)",
             remaining.len(),
         );
-        for task in &remaining {
-            if let Some(cancel) = &task.cancel_token {
-                cancel.store(true, Ordering::Relaxed);
-            }
+        for task in remaining {
+            Self::finalize_interrupted_task(db, stream_publisher, task_queue, &task).await;
+            self.unregister_task(&task.task_id);
         }
         tokio::time::sleep(Duration::from_secs(CANCEL_GRACE_SECS)).await;
-
-        // Phase 3: re-enqueue + fail anything still registered.
-        let to_finalize = self.snapshot_active_tasks();
-        if !to_finalize.is_empty() {
-            tracing::warn!(
-                "Re-enqueueing and failing {} task(s) interrupted by shutdown",
-                to_finalize.len(),
-            );
-            for task in to_finalize {
-                Self::finalize_interrupted_task(db, stream_publisher, task_queue, &task).await;
-                self.unregister_task(&task.task_id);
-            }
-        }
 
         // Phase 4: clean Redis state only if the consumer has no pending
         // entries left. If Redis still sees PEL entries, leave the consumer
@@ -381,6 +368,14 @@ impl TaskShutdownCoordinator {
                 return;
             }
         };
+
+        // The terminal fence and retry are now durable. Signal before any
+        // stream/queue waits, which can be slow or unavailable. On a failed
+        // transaction above, leave the VM alone: process exit and the reaper
+        // must recover it rather than persisting an ordinary cancellation.
+        if let Some(cancel) = &task.cancel_token {
+            cancel.store(true, Ordering::Release);
+        }
 
         let (error, duration_ms, retry) = match outcome {
             InfraRetryFinalizeOutcome::AlreadyTerminal => {

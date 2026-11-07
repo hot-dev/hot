@@ -479,6 +479,11 @@ impl ErrPath {
         args_start: u32,
         args_count: u8,
     ) -> Step {
+        // These run a function, which can be observed: the op's Err must
+        // wait for wherever the interpreter would meet it.
+        if matches!(core, KnownCoreCall::Call | KnownCoreCall::Apply) {
+            return Step::Done(NumericErrUse::Kept);
+        }
         let args: Vec<u32> = (args_start..args_start + u32::from(args_count)).collect();
         // These take Results.
         if matches!(

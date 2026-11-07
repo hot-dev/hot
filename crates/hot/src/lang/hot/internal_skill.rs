@@ -155,7 +155,7 @@ pub fn meta_from_fn(args: &[Val]) -> HotResult<Val> {
             // round-trip a Skill back to its source fn even when no
             // `name:` was provided in the annotation.
             let mut merged: IndexMap<Val, Val> = match &entry.skill_meta {
-                Val::Map(m) => (**m).clone(),
+                Val::Map(m) => (**m).clone().into_inner(),
                 _ => IndexMap::new(),
             };
             merged
@@ -188,7 +188,7 @@ pub fn all_skill_metas(args: &[Val]) -> HotResult<Val> {
             .values()
             .map(|e| {
                 let mut merged: IndexMap<Val, Val> = match &e.skill_meta {
-                    Val::Map(m) => (**m).clone(),
+                    Val::Map(m) => (**m).clone().into_inner(),
                     _ => IndexMap::new(),
                 };
                 merged

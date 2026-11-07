@@ -1345,7 +1345,7 @@ mod tests {
             }) else {
                 panic!("a map");
             };
-            Arc::unwrap_or_clone(fields)
+            Arc::unwrap_or_clone(fields).into_inner()
         };
         let masked = mask_plain(Val::constructed("::hot::http/HttpResponse", fields()));
         assert!(masked.is_type("::hot::http/HttpResponse"));

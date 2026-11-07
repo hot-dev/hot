@@ -111,7 +111,7 @@ fn set_path(current: Val, keys: &[String], value: Val) -> Result<Val, String> {
         return Ok(value);
     };
     let mut map = match current {
-        Val::Map(map) => std::sync::Arc::unwrap_or_clone(map),
+        Val::Map(map) => std::sync::Arc::unwrap_or_clone(map).into_inner(),
         Val::Null => IndexMap::new(),
         other => return Err(format!("'{}' is set on a {}, not a map", key, other)),
     };

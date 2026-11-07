@@ -1716,7 +1716,9 @@ async fn insert_root_call(db: &DatabasePool, env_id: &Uuid, run_id: &Uuid, funct
     .unwrap();
 }
 
-/// A run of `handler` on `build_id`, in a stream of its own.
+/// A run of `handler` on `build_id`, in a stream of its own. hot-std's call
+/// and schedule handlers run `hot:call` and `hot:schedule` events, whose data
+/// names the function; any other handler runs a published `demo:event`.
 async fn create_event_run(
     db: &DatabasePool,
     env_id: &Uuid,
@@ -1728,6 +1730,11 @@ async fn create_event_run(
     let run_id = Uuid::now_v7();
     let stream_id = Uuid::now_v7();
     let event_id = Uuid::now_v7();
+    let event_type = match handler {
+        "::hot::lang/call-event-handler" => "hot:call",
+        "::hot::lang/schedule-event-handler" => "hot:schedule",
+        _ => "demo:event",
+    };
     Stream::create_or_get_stream(db, stream_id, *env_id)
         .await
         .unwrap();
@@ -1736,7 +1743,7 @@ async fn create_event_run(
         &event_id,
         env_id,
         &stream_id,
-        "demo:event",
+        event_type,
         &data,
         chrono::Utc::now(),
         user_id,
@@ -1795,7 +1802,17 @@ async fn test_list_runs_narrows_by_project_stream_and_function() {
         &env.env_id,
         &build_a,
         &user_id,
-        "::hot::schedule/fire",
+        "::hot::lang/schedule-event-handler",
+        serde_json::json!({"fn": "::demo/nightly"}),
+    )
+    .await;
+    // Any other event's data is its publisher's: a `fn` in it names nothing.
+    let (published, _) = create_event_run(
+        &db.0,
+        &env.env_id,
+        &build_a,
+        &user_id,
+        "::demo/on-published",
         serde_json::json!({"fn": "::demo/nightly"}),
     )
     .await;
@@ -1831,7 +1848,7 @@ async fn test_list_runs_narrows_by_project_stream_and_function() {
 
     assert_eq!(
         listed(&format!("project_id={project_a}")).await,
-        sorted(vec![handled, called]),
+        sorted(vec![handled, called, published]),
     );
     assert_eq!(
         listed(&format!("project_id={project_b}")).await,
@@ -1847,6 +1864,27 @@ async fn test_list_runs_narrows_by_project_stream_and_function() {
         vec![called],
         "the event's data names the function, and the name may be encoded",
     );
+    assert_eq!(
+        listed("function=::demo/on-published").await,
+        vec![published],
+        "a published event's `fn` does not hide its handler",
+    );
+    assert_eq!(
+        listed("function=::hot::lang/schedule-event-handler").await,
+        Vec::<Uuid>::new(),
+        "a scheduled run is its function's, not hot-std's handler's",
+    );
+    // A run's detail names the same function its listing filters by.
+    for (run_id, function) in [
+        (handled, "::demo/on-a"),
+        (called, "::demo/nightly"),
+        (published, "::demo/on-published"),
+    ] {
+        let run = Run::get_run(&db.0, &run_id).await.unwrap();
+        assert_eq!(run.event_fn.as_deref(), Some(function));
+        let run = Run::get_run_with_status(&db.0, &run_id).await.unwrap();
+        assert_eq!(run.event_fn.as_deref(), Some(function));
+    }
     assert_eq!(listed("function=::demo/direct").await, vec![direct]);
     assert_eq!(listed("function=::demo/none").await, Vec::<Uuid>::new());
     assert_eq!(

@@ -102,6 +102,35 @@ K({m: assoc({}, 7, 8)})"#,
         }
     }
 
+    /// `call` and `apply` run a function, so an overflow kept from before
+    /// them halts only where it is consumed, after the function has run, as
+    /// the interpreter does. Here the function halts first.
+    #[test]
+    fn a_kept_overflow_waits_for_the_function_call_runs() {
+        for via in ["call(::t/notify)", "apply([], ::t/notify)"] {
+            let source = format!(
+                r#"::t ns
+notify fn (): Int {{ if(is-some(::hot::ctx/get("armed")), fail("notified"), 0) }}
+f fn (a: Int, b: Int): Int {{
+    s add(a, b)
+    ignored {via}
+    mul(s, 2)
+}}
+warm f(1, 2)
+armed ::hot::ctx/set("armed", true)
+f(9223372036854775807, 1)"#
+            );
+            for conf in [
+                Some(crate::val!({"jit": {"mode": "off"}})),
+                Some(crate::val!({"jit": {"threshold": 1}})),
+            ] {
+                let error = compile_and_run_with_std_conf(&source, conf.clone())
+                    .expect_err("notify halts");
+                assert!(error.contains("notified"), "{via} {conf:?}: {error}");
+            }
+        }
+    }
+
     #[test]
     fn number_keyed_maps_take_the_keys_json_gives_them() {
         let source = r#"::t ns

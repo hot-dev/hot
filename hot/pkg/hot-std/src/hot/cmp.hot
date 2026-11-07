@@ -60,7 +60,8 @@ meta {
     core: true,
     doc: """
     Return true if each number is greater than the next, so `gt(...xs)` checks
-    a whole Vec. One number has nothing to compare with, so it is true.
+    a whole Vec that has at least one number: with none, the call fails. One
+    number has nothing to compare with, so it is true.
 
     **Example**
 
@@ -89,7 +90,8 @@ meta {
     core: true,
     doc: """
     Return true if each number is greater than or equal to the next, so `gte(...xs)` checks
-    a whole Vec. One number has nothing to compare with, so it is true.
+    a whole Vec that has at least one number: with none, the call fails. One
+    number has nothing to compare with, so it is true.
 
     **Example**
 
@@ -117,7 +119,8 @@ meta {
     core: true,
     doc: """
     Return true if each number is less than the next, so `lt(...xs)` checks
-    a whole Vec. One number has nothing to compare with, so it is true.
+    a whole Vec that has at least one number: with none, the call fails. One
+    number has nothing to compare with, so it is true.
 
     **Example**
 
@@ -145,7 +148,8 @@ meta {
     core: true,
     doc: """
     Return true if each number is less than or equal to the next, so `lte(...xs)` checks
-    a whole Vec. One number has nothing to compare with, so it is true.
+    a whole Vec that has at least one number: with none, the call fails. One
+    number has nothing to compare with, so it is true.
 
     **Example**
 

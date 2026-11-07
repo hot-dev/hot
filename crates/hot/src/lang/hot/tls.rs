@@ -264,7 +264,7 @@ pub fn upgrade(args: &[Val]) -> HotResult<Val> {
     };
 
     let inner = Arc::clone(&handle.inner);
-    let result = tokio::runtime::Handle::current().block_on(async {
+    let result = super::native_io::block_on_result("::hot::tls", async {
         let mut guard = inner.stream.lock().await;
 
         let plain = match std::mem::replace(&mut *guard, TcpStreamState::Closed) {

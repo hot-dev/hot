@@ -180,6 +180,76 @@ fn sum_down(vm: &mut VirtualMachine, n: i64) -> Result<Val, String> {
         .map_err(|err| err.to_string())
 }
 
+#[test]
+fn cancellation_exits_interpreted_and_jitted_tail_loops() {
+    for enabled in [false, true] {
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let token = cancel.clone();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let thread = std::thread::Builder::new()
+            .stack_size(VM_THREAD_STACK_SIZE)
+            .spawn(move || {
+                let mode = if enabled { "enabled" } else { "disabled" };
+                let mut vm = source_vm(TAIL_SOURCE, val!({"mode": mode, "threshold": 1}));
+                let id = function_id(&vm, "::t/flags");
+                call(&mut vm, "::t/flags", &[Val::Int(1), Val::Bool(false)]).unwrap();
+                if enabled {
+                    assert!(vm.jit_has_compiled_function(id));
+                }
+                vm.set_external_cancel(token);
+                ready_tx.send(()).unwrap();
+                done_tx
+                    .send(call(
+                        &mut vm,
+                        "::t/flags",
+                        &[Val::Int(i64::MAX), Val::Bool(false)],
+                    ))
+                    .unwrap();
+            })
+            .unwrap();
+        ready_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        let error = done_rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .expect("VM must stop inside the worker grace period")
+            .unwrap_err();
+        assert!(error.contains("Execution cancelled"), "{error}");
+        thread.join().unwrap();
+    }
+}
+
+#[test]
+fn cancellation_exits_jitted_non_tail_recursion() {
+    let token = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancel = token.clone();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let thread = std::thread::Builder::new().stack_size(VM_THREAD_STACK_SIZE).spawn(move || {
+        let source = "::t ns\nfib fn cond (n: Int): Int { lt(n, 2) => { n } => { add(fib(sub(n, 1)), fib(sub(n, 2))) } }";
+        let mut vm = source_vm(source, val!({"mode": "enabled", "threshold": 1}));
+        assert_eq!(call(&mut vm, "::t/fib", &[Val::Int(4)]).unwrap(), Val::Int(3));
+        assert!(vm.jit_has_compiled_function(function_id(&vm, "::t/fib")));
+        vm.set_external_cancel(token);
+        ready_tx.send(()).unwrap();
+        done_tx.send(call(&mut vm, "::t/fib", &[Val::Int(45)])).unwrap();
+    }).unwrap();
+    ready_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    let error = done_rx
+        .recv_timeout(std::time::Duration::from_secs(3))
+        .expect("recursive compiled calls must observe cancellation")
+        .unwrap_err();
+    assert!(error.contains("Execution cancelled"), "{error}");
+    thread.join().unwrap();
+}
+
 const DEPTH_SOURCE: &str = r#"
 ::t ns
 

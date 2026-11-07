@@ -804,8 +804,11 @@ async fn webhook_handler_inner(
         tokio::select! {
             event = async { subscriber.next().await } => {
                 match event {
-                    StreamNext::Event(StreamEvent::RunStop { result, .. }) => {
-                        outcome = Some(Outcome::Stopped { result });
+                    StreamNext::Event(StreamEvent::RunStop { run_id: completed_run, result, .. }) => {
+                        outcome = Some(match super::resolve_stream_result(db, conf, ctx.env.env_id, completed_run, result).await {
+                            Ok(result) => Outcome::Stopped { result },
+                            Err(error) => Outcome::Failed { error: Some(error) },
+                        });
                         break;
                     }
                     StreamNext::Event(StreamEvent::RunFail { error, .. }) => {

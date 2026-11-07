@@ -6,6 +6,32 @@ use tracing::debug;
 use url::Url;
 use uuid::Uuid;
 
+/// Decode fleet reads one row at a time. A malformed legacy JSON column must
+/// not stop reconciliation or scheduling for every other tenant.
+pub(crate) async fn collect_decodable_page<T>(
+    mut rows: impl futures::Stream<Item = Result<T, sqlx::Error>> + Unpin,
+) -> Result<(Vec<T>, usize), sqlx::Error> {
+    use futures::StreamExt;
+    let mut decoded = Vec::new();
+    let mut count = 0;
+    while let Some(row) = rows.next().await {
+        count += 1;
+        match row {
+            Ok(row) => decoded.push(row),
+            Err(error @ (sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_))) => {
+                tracing::error!(row_index = count, %error, "Skipping undecodable row in fleet read");
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok((decoded, count))
+}
+pub(crate) async fn collect_decodable<T>(
+    rows: impl futures::Stream<Item = Result<T, sqlx::Error>> + Unpin,
+) -> Result<Vec<T>, sqlx::Error> {
+    Ok(collect_decodable_page(rows).await?.0)
+}
+
 /// Macro to log database errors consistently
 #[macro_export]
 macro_rules! log_db_error {
@@ -189,7 +215,7 @@ pub use scope::{
     BootstrapOperation, DatabaseScope, MaintenanceOperation, current_database_scope,
     with_database_scope,
 };
-pub use scoped_postgres::ScopedPgPool;
+pub use scoped_postgres::{ScopedPgPool, ScopedPgTransaction};
 pub use service_key::{ServiceKey, ServiceKeyError};
 pub use session::{Session, SessionError};
 pub use stream::{Stream, StreamError, StreamSummary};
@@ -640,6 +666,15 @@ pub async fn create_db_pool(conf: &Val) -> Result<DatabasePool, DatabaseError> {
 
             let db = PgPoolOptions::new()
                 .max_connections(max_connections)
+                .test_before_acquire(false)
+                .before_acquire(|connection, metadata| {
+                    Box::pin(async move {
+                        if metadata.idle_for >= std::time::Duration::from_secs(30) {
+                            sqlx::Connection::ping(connection).await?;
+                        }
+                        Ok(true)
+                    })
+                })
                 .acquire_timeout(std::time::Duration::from_secs(5)) // Fail fast instead of hanging
                 .idle_timeout(std::time::Duration::from_secs(60))
                 .max_lifetime(std::time::Duration::from_secs(1800)) // 30 minutes
@@ -1007,7 +1042,7 @@ const MIN_POSTGRES_MAJOR: u32 = 18;
 const MIN_POSTGRES_VERSION_NUM: u32 = MIN_POSTGRES_MAJOR * 10_000;
 const MIGRATION_LOCK_RETRIES: u32 = 5;
 /// Indexes that `-- no-transaction` migrations build concurrently.
-const CONCURRENT_INDEXES: &[&str] = &["call_env_start_time_size_idx"];
+const CONCURRENT_INDEXES: &[&str] = &["call_env_start_time_size_idx", "event_outbox_due_idx"];
 /// Taken around every migrator's work, and only ever polled for.
 const MIGRATOR_LOCK: i64 = 0x484f_545f_4d49_4752;
 const MIGRATOR_LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(250);

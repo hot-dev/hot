@@ -799,7 +799,7 @@ fn apply_refinement(schema: Val, refinement: &RefinementSchema) -> Val {
         };
         map.insert(Val::from("description"), Val::from(description));
     }
-    Val::map(map)
+    Val::map(map.into_inner())
 }
 
 /// The JSON Schema form of a `where` predicate. `param` is the predicate's

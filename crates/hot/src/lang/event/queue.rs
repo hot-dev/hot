@@ -789,7 +789,113 @@ impl QueueEventPublisher {
     }
 }
 
+pub(crate) fn durable_event_message(
+    queue_name: &str,
+    ctx: &ExecutionContext,
+    event: Event,
+) -> Message {
+    let mut head = AHashMap::new();
+    head.insert("queue".to_string(), queue_name.to_string());
+    head.insert("event_type".to_string(), event.event_type.clone());
+    head.insert(MAY_REPEAT_HEAD.to_string(), "true".to_string());
+    for (key, value) in [
+        ("env_id", ctx.env_id),
+        ("org_id", ctx.org_id),
+        ("user_id", ctx.user_id),
+    ] {
+        if let Some(value) = value {
+            head.insert(key.to_string(), value.to_string());
+        }
+    }
+    head.insert("run_id".to_string(), ctx.run_id.to_string());
+    EventMessage {
+        id: event.event_id,
+        head,
+        body: EventMessageBody {
+            event,
+            execution_context: ctx.clone(),
+        },
+    }
+    .into()
+}
+
+/// Recover a publisher that died after the durable event write. Atomic lease
+/// claims let multiple schedulers sweep safely; retries carry MAY_REPEAT so
+/// an enqueue whose acknowledgment was lost cannot rerun finished handlers.
+pub async fn recover_event_outbox(
+    db: &DatabasePool,
+    queue: &dyn Queue<Message>,
+    env_id: Option<Uuid>,
+) -> Result<usize, String> {
+    use crate::db::event::{EnqueueClaim, Event as EventRow};
+    let now = chrono::Utc::now();
+    let mut recovered = 0;
+    for (event_id, _) in EventRow::due_enqueues(db, now, 100, env_id)
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        if EventRow::claim_enqueue(db, &event_id, now, now + chrono::Duration::minutes(2))
+            .await
+            .map_err(|error| error.to_string())?
+            != EnqueueClaim::Claimed
+        {
+            continue;
+        }
+        let Some(payload) = EventRow::enqueue_payload(db, &event_id)
+            .await
+            .map_err(|error| error.to_string())?
+        else {
+            continue;
+        };
+        let packet: Message = match serde_json::from_value(payload) {
+            Ok(packet) => packet,
+            Err(error) => {
+                // A packet that can't decode never will: settle it so it isn't
+                // re-claimed every lease forever.
+                tracing::error!(%event_id, %error, "Dropping invalid durable event packet");
+                EventRow::finish_enqueue(db, &event_id)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                continue;
+            }
+        };
+        if let Err(error) =
+            crate::queue::enqueue_with_retries(queue, packet, &crate::queue::PUBLISH_RETRY_DELAYS)
+                .await
+        {
+            let _ = EventRow::release_enqueue(db, &event_id, chrono::Utc::now()).await;
+            return Err(format!("Recovering event {event_id}: {error}"));
+        }
+        EventRow::finish_enqueue(db, &event_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        recovered += 1;
+    }
+    Ok(recovered)
+}
+
+impl QueueEventPublisher {
+    async fn enqueue_message(&self, message: Message) -> Result<(), String> {
+        crate::queue::enqueue_with_retries(
+            &*self.queue,
+            message,
+            &crate::queue::PUBLISH_RETRY_DELAYS,
+        )
+        .await
+        .map_err(|error| error.to_string())
+    }
+}
+
 impl EventPublisher for QueueEventPublisher {
+    fn publish_checked(&self, ctx: &ExecutionContext, event: Event) -> Result<(), String> {
+        crate::lang::hot::native_io::block_on_result("send enqueue", async {
+            self.enqueue_message(durable_event_message(&self.queue_name, ctx, event))
+                .await
+                .map_err(Val::from)
+        })
+        .map_err(|error| error.to_string())
+    }
+
     fn publish(&self, ctx: &ExecutionContext, event: Event) {
         // Create head with context information
         let mut head = AHashMap::new();
@@ -873,6 +979,7 @@ impl QueueAndDatabaseEventPublisher {
         queue_publisher: QueueEventPublisher,
         database_publisher: super::database::DatabaseEventPublisher,
     ) -> Self {
+        database_publisher.enable_outbox(&queue_publisher.queue_name);
         Self {
             queue_publisher,
             database_publisher,
@@ -938,8 +1045,24 @@ impl EventPublisher for QueueAndDatabaseEventPublisher {
 
         // Step 2: Now that database write is complete, enqueue to queue
         // Worker can now safely process this event knowing the event record exists
-        self.queue_publisher.publish(ctx, event);
-        Ok(())
+        crate::lang::hot::native_io::block_on_result("send enqueue", async {
+            let packet = self.database_publisher.pending_message(ctx, event.event_id).await.map_err(Val::from)?;
+            // The event row and its packet are committed: the outbox now owes
+            // the delivery, so a failed enqueue is recovered, not reported. An
+            // error here would tell `send` the event was lost while recovery
+            // still delivers it, and a retried send would deliver it twice.
+            if let Err(error) = self.queue_publisher.enqueue_message(packet).await {
+                tracing::warn!(event_id = %event.event_id, %error, "Event enqueue failed; outbox recovery will enqueue it");
+                if let Err(error) = self.database_publisher.release_enqueue(ctx, event.event_id).await {
+                    tracing::warn!(event_id = %event.event_id, %error, "Event outbox lease not released; recovery waits for it to expire");
+                }
+                return Ok(());
+            }
+            if let Err(error) = self.database_publisher.finish_enqueue(ctx, event.event_id).await {
+                tracing::warn!(event_id = %event.event_id, %error, "Event enqueued; outbox settlement will be recovered");
+            }
+            Ok(())
+        }).map_err(|error| error.to_string())
     }
 
     fn shutdown(
@@ -1188,6 +1311,82 @@ mod tests {
             Serialization::Json,
         )
         .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn durable_send_waits_for_queue_and_crash_outbox_recovers_once() {
+        use crate::db::event::Event as EventRow;
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let publisher = test_queue_publisher();
+        let queue = publisher.queue.clone();
+        let combined = QueueAndDatabaseEventPublisher::new(
+            publisher,
+            DatabaseEventPublisher::new_with_pool(db.clone()),
+        );
+        let ctx = ExecutionContext::new(
+            data.run_id,
+            data.stream_id,
+            4,
+            Some(data.env_id),
+            Some(data.org_id),
+            Some(data.user_id),
+            Some(data.build_id),
+        );
+        let event = Event::new(
+            data.env_id,
+            data.stream_id,
+            "outbox-test".into(),
+            Val::from("hello"),
+        );
+        let event_id = event.event_id;
+        let producer = combined.clone();
+        let context = ctx.clone();
+        tokio::task::spawn_blocking(move || producer.publish_checked(&context, event))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(queue.dequeue().await.unwrap().unwrap().id, event_id);
+        assert!(
+            EventRow::enqueue_payload(&db, &event_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // Simulate a process dying after the row commit, before queue enqueue.
+        let event = Event::new(
+            data.env_id,
+            data.stream_id,
+            "outbox-recovery".into(),
+            Val::from("saved"),
+        );
+        let id = event.event_id;
+        let packet = durable_event_message("hot:event", &ctx, event);
+        EventRow::insert_event_with_outbox(
+            &db,
+            &id,
+            &data.env_id,
+            &data.stream_id,
+            "outbox-recovery",
+            &serde_json::json!("saved"),
+            chrono::Utc::now(),
+            &data.user_id,
+            None,
+            &serde_json::to_value(&packet).unwrap(),
+        )
+        .await
+        .unwrap();
+        EventRow::release_enqueue(&db, &id, chrono::Utc::now())
+            .await
+            .unwrap();
+        let (one, two) = tokio::join!(
+            recover_event_outbox(&db, &*queue, None),
+            recover_event_outbox(&db, &*queue, None)
+        );
+        assert_eq!(one.unwrap() + two.unwrap(), 1);
+        assert_eq!(queue.dequeue().await.unwrap().unwrap().id, id);
+        assert!(queue.dequeue().await.unwrap().is_none());
+        combined.shutdown().await.unwrap();
     }
 
     #[test]

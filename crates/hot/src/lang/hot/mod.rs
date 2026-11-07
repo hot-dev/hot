@@ -44,6 +44,7 @@ pub mod math;
 pub mod md;
 pub mod meta;
 pub mod mime;
+pub mod native_io;
 pub mod random;
 pub mod regex;
 pub mod resource;

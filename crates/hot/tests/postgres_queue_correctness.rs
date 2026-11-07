@@ -915,7 +915,7 @@ async fn postgres_run_listing_narrows_by_project_stream_and_function() {
         .await
         .expect("test data should insert");
 
-    let open = async |handler: &str, event_data: serde_json::Value| {
+    let open = async |event_type: &str, handler: &str, event_data: serde_json::Value| {
         let (run_id, stream_id, event_id) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
         hot::db::stream::Stream::create_or_get_stream(&db, stream_id, data.env_id)
             .await
@@ -925,7 +925,7 @@ async fn postgres_run_listing_narrows_by_project_stream_and_function() {
             &event_id,
             &data.env_id,
             &stream_id,
-            "demo:event",
+            event_type,
             &event_data,
             chrono::Utc::now(),
             &data.user_id,
@@ -953,8 +953,20 @@ async fn postgres_run_listing_narrows_by_project_stream_and_function() {
         (run_id, stream_id)
     };
 
-    let (handled, handled_stream) = open("::demo/on-a", serde_json::json!({})).await;
-    let (called, _) = open("::demo/fire", serde_json::json!({"fn": "::demo/nightly"})).await;
+    let (handled, handled_stream) = open("demo:event", "::demo/on-a", serde_json::json!({})).await;
+    let (called, _) = open(
+        "hot:schedule",
+        "::hot::lang/schedule-event-handler",
+        serde_json::json!({"fn": "::demo/nightly"}),
+    )
+    .await;
+    // Any other event's data is its publisher's: a `fn` in it names nothing.
+    let (published, _) = open(
+        "demo:event",
+        "::demo/on-b",
+        serde_json::json!({"fn": "::demo/nightly"}),
+    )
+    .await;
     let direct = Uuid::now_v7();
     Run::insert_run(
         &db,
@@ -1026,6 +1038,11 @@ async fn postgres_run_listing_narrows_by_project_stream_and_function() {
     );
     assert_eq!(listed(function("::demo/on-a")).await, vec![handled]);
     assert_eq!(listed(function("::demo/nightly")).await, vec![called]);
+    assert_eq!(listed(function("::demo/on-b")).await, vec![published]);
+    assert_eq!(
+        listed(function("::hot::lang/schedule-event-handler")).await,
+        Vec::<Uuid>::new()
+    );
     assert_eq!(listed(function("::demo/direct")).await, vec![direct]);
     assert_eq!(listed(function("::demo/none")).await, Vec::<Uuid>::new());
     assert_eq!(

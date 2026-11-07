@@ -39,7 +39,7 @@ const ROLLOVER_LOCK: i64 = 0x5553_4147_4552_4f4c;
 struct PeriodRollover {
     /// Repeatable read, so the totals are as of the snapshot the mark was
     /// checked against. Holds the recount's advisory lock until it ends.
-    snapshot: sqlx::Transaction<'static, sqlx::Postgres>,
+    snapshot: crate::db::ScopedPgTransaction,
     env_id: Uuid,
     period: DateTime<Utc>,
 }

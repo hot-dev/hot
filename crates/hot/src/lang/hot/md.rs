@@ -91,6 +91,98 @@ pub fn parse_frontmatter_str(input: &str) -> Result<(Val, String), String> {
         None => return Err("unterminated YAML frontmatter (missing closing '---')".to_string()),
     };
     let yaml_text = &after_first[..close];
+    if yaml_text.len() > crate::lang::runtime::limits::max_parse_input_bytes() {
+        return Err("YAML frontmatter exceeds byte budget".to_string());
+    }
+    // Inspect events before YamlLoader, which eagerly clones aliases and can
+    // otherwise expand a tiny input exponentially before conversion starts.
+    // Anchors and aliases are fine; what an alias stands for is counted as
+    // if it were written out, in nodes and in depth.
+    use yaml_rust2::parser::{Event, Parser};
+    /// A collection still open: its anchor, the expanded node count before
+    /// it, and the deepest level reached inside it.
+    struct Open {
+        anchor: usize,
+        start: usize,
+        deepest: usize,
+    }
+    let mut parser = Parser::new(yaml_text.chars());
+    let mut depth = 0usize;
+    let mut events = 0usize;
+    let mut expanded = 0usize;
+    let mut aliased = 0usize;
+    let mut open: Vec<Open> = Vec::new();
+    // Per anchor: (expanded nodes, collection levels).
+    let mut anchors: std::collections::HashMap<usize, (usize, usize)> =
+        std::collections::HashMap::new();
+    let max_nodes = crate::lang::runtime::limits::operational_limit(
+        "HOT_YAML_MAX_NODES",
+        crate::lang::runtime::limits::max_expanded_value_nodes(),
+    );
+    let max_depth = crate::lang::runtime::limits::operational_limit("HOT_YAML_MAX_DEPTH", 256);
+    let node_budget = || "YAML frontmatter exceeds node budget".to_string();
+    let depth_budget = || "YAML frontmatter exceeds maximum nesting depth".to_string();
+    loop {
+        let (event, _) = parser
+            .next_token()
+            .map_err(|e| format!("invalid YAML frontmatter: {e}"))?;
+        events += 1;
+        if events > max_nodes {
+            return Err(node_budget());
+        }
+        match event {
+            Event::Alias(id) => {
+                let (nodes, levels) = anchors.get(&id).copied().unwrap_or((1, 0));
+                aliased = aliased.saturating_add(nodes);
+                expanded = expanded.saturating_add(nodes);
+                if aliased > MAX_YAML_ALIAS_NODES || expanded > max_nodes {
+                    return Err(node_budget());
+                }
+                let reached = depth.saturating_add(levels);
+                if reached > max_depth {
+                    return Err(depth_budget());
+                }
+                if let Some(parent) = open.last_mut() {
+                    parent.deepest = parent.deepest.max(reached);
+                }
+            }
+            Event::SequenceStart(anchor, _) | Event::MappingStart(anchor, _) => {
+                open.push(Open {
+                    anchor,
+                    start: expanded,
+                    deepest: depth + 1,
+                });
+                expanded += 1;
+                depth += 1;
+                if depth > max_depth {
+                    return Err(depth_budget());
+                }
+            }
+            Event::Scalar(_, _, anchor, _) => {
+                expanded += 1;
+                if anchor != 0 {
+                    anchors.insert(anchor, (1, 0));
+                }
+            }
+            Event::SequenceEnd | Event::MappingEnd => {
+                if let Some(closed) = open.pop() {
+                    if closed.anchor != 0 {
+                        let levels = closed.deepest.saturating_sub(depth) + 1;
+                        anchors.insert(closed.anchor, (expanded - closed.start, levels));
+                    }
+                    if let Some(parent) = open.last_mut() {
+                        parent.deepest = parent.deepest.max(closed.deepest);
+                    }
+                }
+                depth = depth.saturating_sub(1);
+            }
+            Event::StreamEnd => break,
+            _ => {}
+        }
+        if expanded > max_nodes {
+            return Err(node_budget());
+        }
+    }
 
     // Skip the closing fence and any trailing newline characters.
     let mut after_close = close + 3;
@@ -113,8 +205,13 @@ pub fn parse_frontmatter_str(input: &str) -> Result<(Val, String), String> {
     } else {
         yaml_to_val(&docs[0])
     };
+    fm.check_shape("parse-frontmatter")?;
     Ok((fm, body))
 }
+
+/// Most nodes aliases may add to frontmatter, beyond those written out. Real
+/// frontmatter reuses a block or two; an alias bomb needs millions.
+const MAX_YAML_ALIAS_NODES: usize = 1024 * 1024;
 
 /// `::hot::md/parse-frontmatter(s: Str): {frontmatter: Map, body: Str}`
 pub fn parse_frontmatter(args: &[Val]) -> HotResult<Val> {
@@ -139,6 +236,55 @@ pub fn parse_frontmatter(args: &[Val]) -> HotResult<Val> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frontmatter_accepts_anchors_and_aliases() {
+        let (fm, _) =
+            parse_frontmatter_str("---\nbase: &base {x: 1}\na: *base\nn: &n 5\nm: *n\n---\n")
+                .unwrap();
+        let Val::Map(m) = &fm else {
+            panic!("expected map")
+        };
+        assert_eq!(m.get(&Val::from("a")), m.get(&Val::from("base")));
+        assert_eq!(m.get(&Val::from("m")), Some(&Val::Int(5)));
+    }
+
+    #[test]
+    fn frontmatter_bounds_alias_expansion() {
+        // Each level doubles the one before: 2^40 nodes from a few lines.
+        let mut bomb = String::from("---\nl0: &l0 [1, 1]\n");
+        for level in 1..40 {
+            bomb.push_str(&format!(
+                "l{level}: &l{level} [*l{}, *l{}]\n",
+                level - 1,
+                level - 1
+            ));
+        }
+        bomb.push_str("---\n");
+        assert!(
+            parse_frontmatter_str(&bomb)
+                .unwrap_err()
+                .contains("node budget")
+        );
+        // An alias counts at the depth of what it stands for.
+        let deep = format!(
+            "---\na: &a {}0{}\nb: {}*a{}\n---\n",
+            "[".repeat(200),
+            "]".repeat(200),
+            "[".repeat(100),
+            "]".repeat(100)
+        );
+        assert!(parse_frontmatter_str(&deep).unwrap_err().contains("depth"));
+    }
+
+    #[test]
+    fn frontmatter_rejects_deep_yaml() {
+        let input = format!("---\nx: {}0{}\n---\n", "[".repeat(1000), "]".repeat(1000));
+        assert!(parse_frontmatter_str(&input).is_err());
+        assert!(parse_frontmatter_str("---\nx: '*literal'\n---\nbody").is_ok());
+        let ordinary = format!("---\nx: {}0{}\n---\n", "[".repeat(100), "]".repeat(100));
+        assert!(parse_frontmatter_str(&ordinary).is_ok());
+    }
 
     #[test]
     fn test_no_frontmatter() {

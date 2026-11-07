@@ -8,7 +8,7 @@ use uuid::Uuid;
 /// or their build is undeployed, so reactivation cannot bypass the account cap.
 pub(crate) enum Admission {
     Postgres {
-        tx: sqlx::Transaction<'static, sqlx::Postgres>,
+        tx: crate::db::ScopedPgTransaction,
         root: Uuid,
         limit: i64,
     },

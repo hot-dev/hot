@@ -1559,7 +1559,12 @@ where
     // Value stack reused across every element/stage (no per-element allocation).
     let mut stack: Vec<PureValue> = Vec::with_capacity(8);
 
-    for item in items {
+    for (index, item) in items.into_iter().enumerate() {
+        if index & 0x3ff == 0 && super::jit::active_execution_cancelled() {
+            // Deopt at a safe boundary; the interpreter raises cancellation
+            // before replaying any operation. Fused stages are pure.
+            return FusedRun::Deopt;
+        }
         match item {
             Val::Int(i) => regs[CUR] = PureValue::Int(i),
             other => regs[CUR] = PureValue::from_val(other),

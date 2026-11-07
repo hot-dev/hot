@@ -37,6 +37,7 @@ pub mod redeploy;
 pub mod redis;
 pub mod request_id;
 pub mod resources;
+pub mod run_slots;
 pub mod runtime_budget;
 pub mod secret_scan;
 pub mod signal;
@@ -50,3 +51,5 @@ pub mod time_range;
 pub mod val;
 pub mod version;
 pub mod webhook_url;
+
+pub mod execution_watchdog;

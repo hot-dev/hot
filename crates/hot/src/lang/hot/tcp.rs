@@ -174,8 +174,8 @@ where
         {
             return Err(err_val(format!("{fn_name}: operation cancelled")));
         }
-        let sleep_until =
-            deadline.unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_millis(50));
+        let poll = tokio::time::Instant::now() + Duration::from_millis(25);
+        let sleep_until = deadline.map_or(poll, |deadline| deadline.min(poll));
         tokio::select! {
             result = &mut fut => return result,
             _ = tokio::time::sleep_until(sleep_until) => {
@@ -305,7 +305,7 @@ fn connect_with_policy(
             "{FN}: raw TCP is unavailable when outbound traffic must use the egress proxy"
         )));
     }
-    let result = tokio::runtime::Handle::current().block_on(async {
+    let result = super::native_io::block_on_result("::hot::tcp", async {
         let addrs = policy
             .resolve_host(&host, port as u16)
             .await
@@ -430,7 +430,7 @@ fn read_impl(
     };
 
     let inner = Arc::clone(&handle.inner);
-    let result = tokio::runtime::Handle::current().block_on(async {
+    let result = super::native_io::block_on_result("::hot::tcp", async {
         with_timeout(fn_name, timeout, cancellation, async {
             let mut guard = inner.stream.lock().await;
             let mut buf = vec![0u8; size];
@@ -511,7 +511,7 @@ pub fn write(args: &[Val]) -> HotResult<Val> {
 
     let inner = Arc::clone(&handle.inner);
     let len = data.len();
-    let result = tokio::runtime::Handle::current().block_on(async {
+    let result = super::native_io::block_on_result("::hot::tcp", async {
         let mut guard = inner.stream.lock().await;
         let write_result = match &mut *guard {
             TcpStreamState::Plain(s) => s.write_all(&data).await.and(s.flush().await),
@@ -544,21 +544,24 @@ pub fn close(args: &[Val]) -> HotResult<Val> {
 
     handle.inner.closed.store(true, Ordering::Relaxed);
 
+    // Release the stream even when the run was cancelled or is past its
+    // deadline. The shutdown is bounded; if it doesn't finish, the stream is
+    // still marked closed and is dropped with the last handle.
     let inner = Arc::clone(&handle.inner);
-    tokio::runtime::Handle::current().block_on(async {
-        let mut guard = inner.stream.lock().await;
-        match &mut *guard {
-            TcpStreamState::Plain(s) => {
+    let _ = super::native_io::block_on_release(super::native_io::RELEASE_BOUND, async {
+        // Take the stream out first so a shutdown cut off by the bound still
+        // drops (and closes) it.
+        let stream = std::mem::replace(&mut *inner.stream.lock().await, TcpStreamState::Closed);
+        match stream {
+            TcpStreamState::Plain(mut s) => {
                 let _ = s.shutdown().await;
             }
-            TcpStreamState::Tls(s) => {
+            TcpStreamState::Tls(mut s) => {
                 let _ = s.shutdown().await;
             }
             TcpStreamState::Closed => {}
         }
-        *guard = TcpStreamState::Closed;
     });
-
     HotResult::Ok(Val::from(true))
 }
 

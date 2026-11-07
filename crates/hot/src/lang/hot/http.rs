@@ -105,7 +105,7 @@ fn request_with_policy(
 
         headers = match map.get(&Val::from("headers")) {
             Some(Val::Map(m)) => m.clone(),
-            Some(Val::Null) | None => std::sync::Arc::new(IndexMap::new()),
+            Some(Val::Null) | None => std::sync::Arc::new(IndexMap::new().into()),
             _ => {
                 return HotResult::Err(err_val(
                     "::hot::http/request: headers must be a map".to_string(),
@@ -155,7 +155,7 @@ fn request_with_policy(
 
     // Bridge sync→async. Since VM execution runs in spawn_blocking context,
     // we use Handle::block_on directly (block_in_place panics from spawn_blocking).
-    tokio::runtime::Handle::current().block_on(async {
+    super::native_io::block_on_hot("::hot::http/request", async {
         make_http_request(&method, &url, &headers, &body, policy, max_response_bytes).await
     })
 }
@@ -252,6 +252,8 @@ async fn send_with_redirect_validation(
         ));
     }
 
+    body.check_shape("::hot::http/request body")
+        .map_err(Val::from)?;
     let (mut body_bytes, body_is_json) = match body {
         Val::Str(s) if !s.is_empty() => (Some(s.as_bytes().to_vec()), false),
         Val::Bytes(bytes) if !bytes.is_empty() => (Some(bytes.to_vec()), false),
@@ -591,16 +593,22 @@ impl HotIterator for HttpStreamIterator {
                 return Ok((Val::Null, true));
             }
 
-            // Block to receive next chunk from the streaming response.
-            // We use blocking_recv() which is designed for calling from non-async contexts
-            // (including from within spawn_blocking tasks). This avoids the need for
-            // block_in_place which panics when called from spawn_blocking.
+            // Block until the next chunk arrives, waking as soon as it does
+            // and observing cancellation and the deadline meanwhile. Park
+            // before taking the receiver lock: resuming can wait for a run
+            // slot, which must not happen while holding the lock.
             let chunk: Result<Option<Bytes>, String> = {
+                let _parked = super::native_io::park_current().map_err(|e| e.to_string())?;
                 let mut guard = self
                     .receiver
                     .lock()
                     .map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
-                guard.blocking_recv().transpose()
+                match super::native_io::recv_blocking(&mut guard, None)? {
+                    super::native_io::Received::Item(value) => value.map(Some),
+                    super::native_io::Received::Closed | super::native_io::Received::TimedOut => {
+                        Ok(None)
+                    }
+                }
             };
 
             match chunk? {
@@ -883,7 +891,7 @@ fn request_stream_with_policy(
 
         headers = match map.get(&Val::from("headers")) {
             Some(Val::Map(m)) => m.clone(),
-            Some(Val::Null) | None => std::sync::Arc::new(IndexMap::new()),
+            Some(Val::Null) | None => std::sync::Arc::new(IndexMap::new().into()),
             _ => {
                 return HotResult::Err(err_val(
                     "::hot::http/request-stream: headers must be a map".to_string(),
@@ -951,7 +959,7 @@ fn request_stream_with_policy(
 
     // Bridge sync→async. Since VM execution runs in spawn_blocking context,
     // we use Handle::block_on directly (block_in_place panics from spawn_blocking).
-    tokio::runtime::Handle::current().block_on(async {
+    super::native_io::block_on_hot("::hot::http/request", async {
         make_streaming_request(
             &method,
             &url,

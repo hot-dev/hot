@@ -2506,6 +2506,9 @@ async fn handle_tools_call_streaming(
     };
     let stream_auth = ctx.auth.as_ref().map(|(auth, _)| auth.clone());
     let stream_db = Arc::new(db.clone());
+    let result_db = stream_db.clone();
+    let result_conf = conf.clone();
+    let result_env = ctx.env.env_id;
     let sse_stream = async_stream::stream! {
         use hot::stream::{StreamEvent, StreamNext};
 
@@ -2572,8 +2575,11 @@ async fn handle_tools_call_streaming(
                                 }
                             }
                         }
-                        StreamNext::Event(StreamEvent::RunStop { result, .. }) => {
-                            outcome = Some(Outcome::Stopped { result });
+                        StreamNext::Event(StreamEvent::RunStop { run_id: completed_run, result, .. }) => {
+                            outcome = Some(match super::resolve_stream_result(&result_db, &result_conf, result_env, completed_run, result).await {
+                                Ok(result) => Outcome::Stopped { result },
+                                Err(error) => Outcome::Failed { error: Some(error) },
+                            });
                             break;
                         }
                         StreamNext::Event(StreamEvent::RunFail { error, .. }) => {

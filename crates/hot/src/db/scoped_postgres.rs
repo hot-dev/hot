@@ -2,9 +2,56 @@
 //! Never expose Deref<Target = PgPool>: that would silently bypass this boundary.
 
 use futures::{TryStreamExt, future::BoxFuture, stream::BoxStream};
-use sqlx::{Database, Either, Execute, Executor, PgPool, Postgres, SqlStr, Transaction};
+use sqlx::{Database, Either, Execute, Executor, PgPool, Postgres, SqlStr};
 
 use super::scope::{BootstrapOperation, DatabaseScope, current_database_scope};
+
+/// An owned scoped transaction. A cancelled or failed BEGIN+scope must close
+/// its connection: SQLx's custom BEGIN tracks depth only after the whole SQL
+/// string succeeds, so its transaction drop cannot roll back a partial BEGIN.
+pub struct ScopedPgTransaction {
+    connection: Option<sqlx::pool::PoolConnection<Postgres>>,
+    open: bool,
+}
+impl std::ops::Deref for ScopedPgTransaction {
+    type Target = sqlx::PgConnection;
+    fn deref(&self) -> &Self::Target {
+        self.connection.as_ref().expect("transaction connection")
+    }
+}
+impl std::ops::DerefMut for ScopedPgTransaction {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.connection.as_mut().expect("transaction connection")
+    }
+}
+impl ScopedPgTransaction {
+    pub async fn commit(mut self) -> Result<(), sqlx::Error> {
+        self.connection.as_mut().unwrap().execute("COMMIT").await?;
+        self.open = false;
+        Ok(())
+    }
+    pub async fn rollback(mut self) -> Result<(), sqlx::Error> {
+        self.connection
+            .as_mut()
+            .unwrap()
+            .execute("ROLLBACK")
+            .await?;
+        self.open = false;
+        Ok(())
+    }
+}
+impl Drop for ScopedPgTransaction {
+    fn drop(&mut self) {
+        if self.open {
+            // Closing also rolls back on the server, including when a BEGIN
+            // future was cancelled before receiving ReadyForQuery. Never let
+            // a partially scoped session re-enter the connection pool.
+            if let Some(mut connection) = self.connection.take() {
+                connection.close_on_drop();
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ScopedPgPool {
@@ -36,37 +83,34 @@ impl ScopedPgPool {
         Ok(scope)
     }
 
-    pub async fn begin(&self) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
-        self.begin_with_snapshot(false).await
+    pub async fn begin(&self) -> Result<ScopedPgTransaction, sqlx::Error> {
+        self.begin_at_isolation("BEGIN").await
     }
 
     /// A stable snapshot must be selected before applying the billing scope,
     /// because applying scope itself reads environment ownership.
-    pub async fn begin_repeatable_read(
-        &self,
-    ) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
-        self.begin_with_snapshot(true).await
+    pub async fn begin_repeatable_read(&self) -> Result<ScopedPgTransaction, sqlx::Error> {
+        self.begin_at_isolation("BEGIN ISOLATION LEVEL REPEATABLE READ")
+            .await
     }
 
-    async fn begin_with_snapshot(
-        &self,
-        repeatable_read: bool,
-    ) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
+    async fn begin_at_isolation(&self, begin: &str) -> Result<ScopedPgTransaction, sqlx::Error> {
         let scope = self.scope()?;
-        let mut tx = self.pool.begin().await?;
-        if repeatable_read {
-            sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-                .execute(&mut *tx)
-                .await?;
-        }
-        // A fresh transaction starts with every scope setting empty, which
-        // denies all platform rows. That is all a health check needs, and it
-        // must work before migrations install hot.apply_scope.
-        if scope != DatabaseScope::Bootstrap(BootstrapOperation::Health) {
-            // Reset every field, including empty values, on this transaction
-            // only. Read sets also become read-only here.
-            scope.apply_to_connection(&mut tx).await?;
-        }
+        // Values are trusted enums/UUIDs, escaped as SQL literals. Both
+        // transaction opening and transaction-local authority use one exchange.
+        let statement = if scope == DatabaseScope::Bootstrap(BootstrapOperation::Health) {
+            begin.to_string()
+        } else {
+            let (mode, org, env, orgs, envs, operation, user) = scope.settings();
+            let literals = [mode, org, env, orgs, envs, operation, user]
+                .map(|value| format!("E'{}'", value.replace('\\', "\\\\").replace('\'', "''")));
+            format!("{begin}; SELECT hot.apply_scope({})", literals.join(","))
+        };
+        let mut tx = ScopedPgTransaction {
+            connection: Some(self.pool.acquire().await?),
+            open: true,
+        };
+        (&mut *tx).execute(sqlx::AssertSqlSafe(statement)).await?;
         Ok(tx)
     }
 

@@ -159,7 +159,7 @@ A variadic parameter declared with `...` accepts any number of arguments:
 
 A spread's length is only known at runtime. A Vec that doesn't fit any overload fails when the call runs, not at compile time.
 
-Math and comparison functions take any number of arguments, so `add(...xs)` sums a Vec and `lt(...xs)` checks that it's ascending. `add(...[])` is `0` and `mul(...[])` is `1`. `max(...xs)` needs no starting value, where `reduce(xs, max, 0)` would return `0` for a Vec of negative numbers.
+Math and comparison functions take any number of arguments, so `add(...xs)` sums a Vec and `lt(...xs)` checks that it's ascending. `add(...[])` is `0` and `mul(...[])` is `1`. The others need at least one value, so `lt(...[])` and `max(...[])` fail. `max(...xs)` needs no starting value, where `reduce(xs, max, 0)` would return `0` for a Vec of negative numbers.
 
 `apply` does the same for a function held as a value, or at the end of a pipe. It takes the data first, as `map` and `reduce` do, and `call` takes the function first:
 

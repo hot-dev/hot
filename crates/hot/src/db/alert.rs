@@ -1556,6 +1556,24 @@ impl AlertDelivery {
         })
     }
 
+    /// Atomically lease a due delivery. Both the queue and recovery sweep use
+    /// this gate; a crashed sender becomes eligible again after two minutes.
+    pub async fn claim(
+        db: &crate::db::DatabasePool,
+        id: &Uuid,
+    ) -> Result<Option<Self>, AlertError> {
+        let now = Utc::now();
+        let until = now + chrono::Duration::minutes(2);
+        Ok(match db {
+            crate::db::DatabasePool::Postgres(pool) => sqlx::query_as::<_, Self>(
+                "UPDATE alert_delivery SET next_retry_at = $1 WHERE alert_delivery_id = $2 AND status_id IN (1,4) AND attempts < max_attempts AND (next_retry_at IS NULL OR next_retry_at <= $3) RETURNING *")
+                .bind(until).bind(id).bind(now).fetch_optional(pool).await?,
+            crate::db::DatabasePool::Sqlite(pool) => sqlx::query_as::<_, Self>(
+                "UPDATE alert_delivery SET next_retry_at = ? WHERE alert_delivery_id = ? AND status_id IN (1,4) AND attempts < max_attempts AND (next_retry_at IS NULL OR next_retry_at <= ?) RETURNING *")
+                .bind(until).bind(id).bind(now).fetch_optional(pool).await?,
+        })
+    }
+
     /// Mark delivery as sent
     pub async fn mark_sent(
         db: &crate::db::DatabasePool,
@@ -1566,7 +1584,7 @@ impl AlertDelivery {
         match db {
             crate::db::DatabasePool::Postgres(pool) => {
                 sqlx::query(
-                    "UPDATE alert_delivery SET status_id = $1, sent_at = $2, attempts = attempts + 1 WHERE alert_delivery_id = $3",
+                    "UPDATE alert_delivery SET status_id = $1, sent_at = $2, next_retry_at = NULL, attempts = attempts + 1 WHERE alert_delivery_id = $3",
                 )
                 .bind(DeliveryStatus::Sent.as_i16())
                 .bind(now)
@@ -1576,7 +1594,7 @@ impl AlertDelivery {
             }
             crate::db::DatabasePool::Sqlite(pool) => {
                 sqlx::query(
-                    "UPDATE alert_delivery SET status_id = ?, sent_at = ?, attempts = attempts + 1 WHERE alert_delivery_id = ?",
+                    "UPDATE alert_delivery SET status_id = ?, sent_at = ?, next_retry_at = NULL, attempts = attempts + 1 WHERE alert_delivery_id = ?",
                 )
                 .bind(DeliveryStatus::Sent.as_i16())
                 .bind(now)
@@ -2381,7 +2399,9 @@ pub async fn process_single_alert_delivery(
     alert_delivery_id: &Uuid,
 ) -> Result<bool, AlertError> {
     // Fetch the delivery record
-    let delivery = AlertDelivery::get_by_id(db, alert_delivery_id).await?;
+    let Some(delivery) = AlertDelivery::claim(db, alert_delivery_id).await? else {
+        return Ok(true);
+    };
 
     // Fetch full delivery info (alert + destination)
     let info = DeliveryInfo::fetch(db, delivery).await?;
@@ -2444,62 +2464,20 @@ pub async fn process_pending_deliveries(
     let mut failure_count = 0;
 
     for delivery in pending {
-        let delivery_id = delivery.alert_delivery_id;
-
-        // Fetch full delivery info
-        let info = match DeliveryInfo::fetch(db, delivery).await {
-            Ok(info) => info,
-            Err(e) => {
-                tracing::error!("Failed to fetch delivery info for {}: {}", delivery_id, e);
-                failure_count += 1;
-                continue;
-            }
-        };
-
-        // Process the delivery
-        let result = process_delivery(
-            &info,
+        match process_single_alert_delivery(
+            db,
             http_client,
             destination_policy.clone(),
             email_sender,
             email_config,
-            db,
+            &delivery.alert_delivery_id,
         )
-        .await;
-
-        // Update delivery status
-        match result {
-            DeliveryResult::Success => {
-                if let Err(e) = AlertDelivery::mark_sent(db, &delivery_id).await {
-                    tracing::error!("Failed to mark delivery {} as sent: {}", delivery_id, e);
-                }
-                success_count += 1;
-            }
-            DeliveryResult::Retry(error) => {
-                // Calculate next retry time (exponential backoff)
-                let next_attempt = info.delivery.attempts + 1;
-                let next_retry = if next_attempt < info.delivery.max_attempts {
-                    let delay_secs = 60 * (2_i64.pow(next_attempt as u32)).min(3600); // Cap at 1 hour
-                    Some(Utc::now() + chrono::Duration::seconds(delay_secs))
-                } else {
-                    None // Max attempts reached
-                };
-
-                if let Err(e) =
-                    AlertDelivery::mark_failed(db, &delivery_id, &error, next_retry).await
-                {
-                    tracing::error!("Failed to mark delivery {} as failed: {}", delivery_id, e);
-                }
-                failure_count += 1;
-            }
-            DeliveryResult::PermanentFailure(error) => {
-                if let Err(e) = AlertDelivery::mark_failed(db, &delivery_id, &error, None).await {
-                    tracing::error!(
-                        "Failed to mark delivery {} as permanently failed: {}",
-                        delivery_id,
-                        e
-                    );
-                }
+        .await
+        {
+            Ok(true) => success_count += 1,
+            Ok(false) => failure_count += 1,
+            Err(error) => {
+                tracing::error!(%error, delivery_id = %delivery.alert_delivery_id, "Alert retry failed");
                 failure_count += 1;
             }
         }
@@ -3073,6 +3051,52 @@ mod tests {
             panic!("an over-long pattern was accepted");
         };
         assert!(message.contains("limit"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn queue_and_sweeper_share_one_recoverable_alert_claim() {
+        let db = setup_test_db().await;
+        let alert = Alert::create(
+            &db,
+            &test_org_id(),
+            &Uuid::now_v7(),
+            "run:failed",
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        let (subscription, destination) = delivery_targets(&db, &alert.org_id, None).await;
+        let delivery =
+            AlertDelivery::create(&db, &alert.alert_id, &subscription, &destination, None)
+                .await
+                .unwrap();
+        let id = delivery.alert_delivery_id;
+        let (one, two) = tokio::join!(
+            AlertDelivery::claim(&db, &id),
+            AlertDelivery::claim(&db, &id)
+        );
+        assert_eq!(
+            usize::from(one.unwrap().is_some()) + usize::from(two.unwrap().is_some()),
+            1
+        );
+        assert!(
+            AlertDelivery::get_pending_retries(&db, 50)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let crate::db::DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        sqlx::query("UPDATE alert_delivery SET next_retry_at=? WHERE alert_delivery_id=?")
+            .bind(Utc::now() - chrono::Duration::minutes(3))
+            .bind(id)
+            .execute(pool)
+            .await
+            .unwrap();
+        assert!(AlertDelivery::claim(&db, &id).await.unwrap().is_some());
+        AlertDelivery::mark_sent(&db, &id).await.unwrap();
+        assert!(AlertDelivery::claim(&db, &id).await.unwrap().is_none());
     }
 
     #[tokio::test]

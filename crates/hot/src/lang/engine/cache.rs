@@ -798,7 +798,14 @@ impl Engine {
         );
 
         let function_call_started = std::time::Instant::now();
-        let result = vm.call_function_bypassing_unified_lookup(function_name, args);
+        let result = vm
+            .call_function_bypassing_unified_lookup(function_name, args)
+            .and_then(|value| {
+                value
+                    .to_checked_json("run result")
+                    .map_err(crate::lang::runtime::vm::VmError::runtime)?;
+                Ok(value)
+            });
         tracing::debug!(
             "TIMING [{}]: vm_function_call: {:?}",
             timing_id,
@@ -1095,7 +1102,14 @@ impl Engine {
         }
         vm.sync_secret_keys_to_execution_context();
 
-        let result = vm.call_function_bypassing_unified_lookup(function_name, args);
+        let result = vm
+            .call_function_bypassing_unified_lookup(function_name, args)
+            .and_then(|value| {
+                value
+                    .to_checked_json("run result")
+                    .map_err(crate::lang::runtime::vm::VmError::runtime)?;
+                Ok(value)
+            });
 
         // Secret values can be discovered during the function itself.
         let execution_context_for_run = vm.get_execution_context().clone();

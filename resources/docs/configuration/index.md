@@ -315,3 +315,51 @@ hot.project.my-app.deps {
 - **[Accounts and Sign-Up](/docs/configuration/accounts)** - The first administrator, sign-up policy, and password resets
 - **[Outbound Network Access](/docs/configuration/network)** - Which destinations deployed code can reach
 - **[Self-Hosted PostgreSQL](/docs/configuration/postgres)** - Running Hot on PostgreSQL with row-level security
+
+## Worker resource budgets
+
+Hot values can share collection storage. Serializing a shared value copies each
+occurrence, so a small value in memory can expand into an enormous payload.
+Expansion checks apply when serializing, formatting, hashing collection keys, or
+sending payloads outside the VM. They do not limit `length`, `get`, or ordinary
+collection updates. Cancellation is sampled every 1,024 interpreter steps or JIT
+tail iterations; native I/O also observes the run deadline and cancellation.
+
+In-memory operations (formatting, hashing, map keys, JSON and XML output, run
+results) accept values nested up to 4,096 levels. Values persisted in records,
+events, and task, schedule, alert, checkpoint, stream, and store payloads are
+limited to 120 levels. A run record holds an `Omitted` marker for a deeper result.
+YAML frontmatter accepts anchors and aliases; aliases add at most 1 Mi nodes.
+
+Operators can set these environment variables before starting workers. Positive
+integer overrides raise or lower the budget; invalid or zero values use the
+default. Raise memory budgets together with worker memory and concurrency sizing.
+
+| Environment variable | Default | Resource measured |
+| --- | --- | --- |
+| `HOT_MAX_EXPANDED_VALUE_NODES` | Twice `HOT_MAX_COLLECTION_SIZE`, plus one | Expanded value occurrences at an output boundary |
+| `HOT_MAX_EXPANDED_VALUE_BYTES` | `HOT_MAX_ALLOC_BYTES` (256 MiB) | Str and Bytes payload, plus 8 bytes for every other value occurrence |
+| `HOT_MAX_STRING_BYTES` | 256 MiB | Produced text or checked serialized output |
+| `HOT_SQLITE_MAX_QUERY_ROWS` | `HOT_MAX_COLLECTION_SIZE` (16 Mi) | Rows materialized by one query |
+| `HOT_SQLITE_MAX_QUERY_CELLS` | `HOT_MAX_COLLECTION_SIZE` (16 Mi) | Cells materialized by one query |
+| `HOT_SQLITE_MAX_QUERY_BYTES` | `HOT_MAX_ALLOC_BYTES` (256 MiB) | Query result storage and individual SQLite values |
+| `HOT_XML_MAX_NODES`, `HOT_YAML_MAX_NODES` | Expanded-value node budget | Parsed events, nodes, and attributes; YAML alias expansion counts too |
+| `HOT_XML_MAX_DEPTH`, `HOT_YAML_MAX_DEPTH` | 256 | Parser nesting; raising it needs stack-budget validation, especially for YAML |
+| `HOT_NATIVE_IO_TIMEOUT_SECONDS` | Unset (no limit) | Native I/O (sockets, HTTP, WebSocket, SQLite) outside a run deadline; runs use their remaining deadline, and cancellation always applies |
+| `HOT_BOX_MAX_IMAGE_BYTES` | 4 GiB | Compressed manifest and layer sizes per image |
+| `HOT_BOX_MAX_CACHED_IMAGES` | 128 | Cached image count before eviction; active images are retained |
+
+Persisted values retain the existing record nesting limit so every fleet reader
+can safely consume them. Trace records also retain their inline threshold and
+blob offload policy. Other outgoing and persisted payloads use the configurable
+expansion budgets above; the trace inline threshold is not a blanket payload
+ceiling. An operator override does not change the record nesting format. Parser
+input continues to use `HOT_MAX_PARSE_INPUT_BYTES`.
+
+Run notification streams expire after the configured `worker.max-run-timeout`
+plus one hour, with a two-hour default. Task inboxes retain their eight-day idle
+window to cover seven-day tasks. Every publish renews expiry atomically. For old
+persistent keys, `scripts/expire-notification-streams.sh` previews a TTL backfill;
+pass `--apply` to perform it. Set `HOT_RUN_STREAM_IDLE_TTL_SECONDS` for that script
+when workers allow runs longer than one hour. This affects notifications;
+durable run and task results remain in the database.

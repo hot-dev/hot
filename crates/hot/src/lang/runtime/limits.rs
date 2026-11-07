@@ -85,6 +85,8 @@ fn cached_env(var: &str, default: usize) -> usize {
     // We use a separate OnceLock per env var. The cache key is the var name,
     // but since the set of vars is small and known at compile time, we just
     // pattern-match into a single shared static here.
+    static MAX_EXPANDED_NODES: OnceLock<usize> = OnceLock::new();
+    static MAX_EXPANDED_BYTES: OnceLock<usize> = OnceLock::new();
     static MAX_COLLECTION: OnceLock<usize> = OnceLock::new();
     static MAX_STRING: OnceLock<usize> = OnceLock::new();
     static MAX_PARSE: OnceLock<usize> = OnceLock::new();
@@ -96,6 +98,8 @@ fn cached_env(var: &str, default: usize) -> usize {
     static MAX_REGEX_INPUT: OnceLock<usize> = OnceLock::new();
 
     let cell = match var {
+        "HOT_MAX_EXPANDED_VALUE_NODES" => &MAX_EXPANDED_NODES,
+        "HOT_MAX_EXPANDED_VALUE_BYTES" => &MAX_EXPANDED_BYTES,
         "HOT_MAX_COLLECTION_SIZE" => &MAX_COLLECTION,
         "HOT_MAX_STRING_BYTES" => &MAX_STRING,
         "HOT_MAX_PARSE_INPUT_BYTES" => &MAX_PARSE,
@@ -114,6 +118,34 @@ fn cached_env(var: &str, default: usize) -> usize {
             .filter(|n| *n > 0)
             .unwrap_or(default)
     })
+}
+
+/// Deepest value an in-memory operation walks: formatting, hashing, map keys,
+/// JSON and XML output, a run's result. Those walks recurse, so this keeps them
+/// well inside a VM thread's 64 MiB stack. A persisted record or payload keeps
+/// the tighter [`crate::blob::MAX_RECORD_DEPTH`], which is what a record can
+/// be read back at.
+pub const MAX_VALUE_DEPTH: usize = 4096;
+
+/// Limits for serialization, hashing and other expansion boundaries. The node
+/// default accommodates every key and value in a maximum-sized flat map.
+pub fn max_expanded_value_nodes() -> usize {
+    cached_env(
+        "HOT_MAX_EXPANDED_VALUE_NODES",
+        max_collection_size().saturating_mul(2).saturating_add(1),
+    )
+}
+pub fn max_expanded_value_bytes() -> usize {
+    cached_env("HOT_MAX_EXPANDED_VALUE_BYTES", max_alloc_bytes())
+}
+
+/// Read an operator budget at an operation boundary, never inside a hot loop.
+pub fn operational_limit(variable: &str, default: usize) -> usize {
+    std::env::var(variable)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
 }
 
 /// Active maximum collection element count.

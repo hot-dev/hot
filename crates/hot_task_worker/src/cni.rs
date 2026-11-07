@@ -41,6 +41,8 @@ fn bridge_config() -> &'static str {
   "bridge": "kata-br0",
   "isGateway": true,
   "ipMasq": false,
+  "macspoofchk": true,
+  "portIsolation": true,
   "ipam": {
     "type": "host-local",
     "subnet": "10.88.0.0/16",
@@ -54,7 +56,7 @@ pub fn netns_path(container_id: &str) -> String {
 }
 
 /// Build a Command that runs via nsenter in the host's mount+network namespace.
-fn host_command(program: &str, args: &[&str]) -> tokio::process::Command {
+pub(crate) fn host_command(program: &str, args: &[&str]) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(NSENTER[0]);
     cmd.args(&NSENTER[1..]);
     cmd.arg(program);
@@ -294,7 +296,80 @@ async fn install_task_policy(container_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn l2_table(container_id: &str) -> String {
+    task_chain(container_id)
+        .replace('-', "_")
+        .to_ascii_lowercase()
+}
+
+/// CNI's MAC check alone still permits forged ARP sender IPs with the guest's
+/// real MAC. Pin the IP and ARP sender as well, before any IP firewall rules.
+fn l2_policy(container_id: &str, result: &serde_json::Value, ip: &str) -> Result<String, String> {
+    let ip: std::net::Ipv4Addr = ip.parse().map_err(|_| "invalid CNI guest IPv4 address")?;
+    let interfaces = result["interfaces"]
+        .as_array()
+        .ok_or("CNI result has no interfaces")?;
+    let host = interfaces
+        .iter()
+        .find(|iface| {
+            iface["sandbox"].as_str().is_none()
+                && iface["name"]
+                    .as_str()
+                    .is_some_and(|name| name != BRIDGE_NAME)
+        })
+        .and_then(|iface| iface["name"].as_str())
+        .ok_or("CNI result has no host veth")?;
+    if host.is_empty()
+        || host.len() > 15
+        || !host
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"_-.".contains(&c))
+    {
+        return Err("invalid CNI host interface".to_string());
+    }
+    let mac = interfaces
+        .iter()
+        .find(|iface| iface["name"].as_str() == Some("eth0") && iface["sandbox"].as_str().is_some())
+        .and_then(|iface| iface["mac"].as_str())
+        .ok_or("CNI result has no guest MAC")?;
+    if mac.len() != 17
+        || !mac
+            .split(':')
+            .all(|part| part.len() == 2 && part.bytes().all(|c| c.is_ascii_hexdigit()))
+    {
+        return Err("invalid CNI guest MAC".to_string());
+    }
+    let table = l2_table(container_id);
+    Ok(format!(
+        "table bridge {table} {{\n chain ingress {{\n type filter hook prerouting priority -300; policy accept;\n iifname \"{host}\" ether type != {{ ip, arp }} drop\n iifname \"{host}\" ether saddr != {mac} drop\n iifname \"{host}\" ether type arp arp saddr ether != {mac} drop\n iifname \"{host}\" ether type arp arp saddr ip != {ip} drop\n iifname \"{host}\" ether type ip ip saddr != {ip} drop\n }}\n}}\n"
+    ))
+}
+
+async fn install_l2_policy(container_id: &str, result: &serde_json::Value) -> Result<(), String> {
+    let policy = l2_policy(container_id, result, &guest_ipv4(container_id).await?)?;
+    let child = host_command("nft", &["-f", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("failed to start bridge anti-spoofing: {error}"))?;
+    let output = write_stdin_and_wait(child, &policy).await?;
+    if !output.status.success() {
+        return Err(format!(
+            "bridge anti-spoofing failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
+}
+
 async fn remove_task_policy(container_id: &str) {
+    let _ = host_command(
+        "nft",
+        &["delete", "table", "bridge", &l2_table(container_id)],
+    )
+    .output()
+    .await;
     let chain = task_chain(container_id);
     remove_policy_chain(&chain).await;
 }
@@ -490,6 +565,17 @@ pub async fn setup(container_id: &str) -> Result<String, String> {
         return Err(format!("failed to install public-only CNI policy: {e}"));
     }
 
+    let l2_result = match serde_json::from_slice(&output.stdout) {
+        Ok(result) => install_l2_policy(container_id, &result).await,
+        Err(error) => Err(format!(
+            "invalid CNI result for bridge anti-spoofing: {error}"
+        )),
+    };
+    if let Err(error) = l2_result {
+        teardown(container_id).await;
+        return Err(error);
+    }
+
     tracing::debug!(
         container_id = container_id,
         netns = %ns_path,
@@ -552,7 +638,50 @@ pub async fn teardown(container_id: &str) {
 /// Remove all stale network namespaces and their CNI state on startup.
 /// Called once when the Kata executor initializes to clean up after a
 /// previous crash or ungraceful shutdown.
+fn stale_l2_tables(value: &serde_json::Value) -> Vec<&str> {
+    value["nftables"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let table = &entry["table"];
+            let name = table["name"].as_str()?;
+            let suffix = name.strip_prefix("hkt_")?;
+            (table["family"] == "bridge"
+                && !suffix.is_empty()
+                && suffix.len() <= 24
+                && suffix
+                    .bytes()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()))
+            .then_some(name)
+        })
+        .collect()
+}
+
 pub async fn cleanup_stale() {
+    // Startup precedes task admission, so all of our remaining tables are stale.
+    if let Ok(output) = host_command("nft", &["-j", "list", "tables"])
+        .output()
+        .await
+        && output.status.success()
+        && let Ok(tables) = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+    {
+        for table in stale_l2_tables(&tables) {
+            match host_command("nft", &["delete", "table", "bridge", table])
+                .output()
+                .await
+            {
+                Ok(output) if output.status.success() => {}
+                Ok(output) => {
+                    tracing::warn!(table, error = %String::from_utf8_lossy(&output.stderr), "cni.cleanup: failed to remove stale bridge table")
+                }
+                Err(error) => {
+                    tracing::warn!(table, %error, "cni.cleanup: failed to remove stale bridge table")
+                }
+            }
+        }
+    }
+
     let rules = host_command(IPTABLES_BIN, &["-S"])
         .output()
         .await
@@ -609,7 +738,7 @@ pub async fn cleanup_stale() {
     }
 }
 
-async fn write_stdin_and_wait(
+pub(crate) async fn write_stdin_and_wait(
     mut child: tokio::process::Child,
     input: &str,
 ) -> Result<std::process::Output, String> {
@@ -632,6 +761,55 @@ async fn write_stdin_and_wait(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cni_result() -> serde_json::Value {
+        serde_json::json!({"interfaces": [
+            {"name": BRIDGE_NAME}, {"name": "veth123"},
+            {"name": "eth0", "sandbox": "/run/netns/task", "mac": "02:00:00:00:00:11"}
+        ]})
+    }
+
+    #[test]
+    fn bridge_policy_pins_guest_identity_and_rejects_other_ethertypes() {
+        let policy = l2_policy("0123456789abcdef01234567", &cni_result(), "10.88.0.2").unwrap();
+        assert!(policy.contains("iifname \"veth123\" ether type != { ip, arp } drop"));
+        assert!(policy.contains("ether saddr != 02:00:00:00:00:11 drop"));
+        assert!(policy.contains("arp saddr ether != 02:00:00:00:00:11 drop"));
+        assert!(policy.contains("arp saddr ip != 10.88.0.2 drop"));
+        assert!(policy.contains("ip saddr != 10.88.0.2 drop"));
+        assert_eq!(policy.matches("iifname \"veth123\"").count(), 5);
+        assert!(l2_policy("id", &cni_result(), "::1").is_err());
+        for host in ["", "0123456789abcdef", "veth\";accept"] {
+            let mut result = cni_result();
+            result["interfaces"][1]["name"] = host.into();
+            assert!(l2_policy("id", &result, "10.88.0.2").is_err());
+        }
+        for mac in [
+            "02:00:00:00:00",
+            "02:00:00:00:00:gg",
+            "02:00:00:00:00:11;accept",
+        ] {
+            let mut result = cni_result();
+            result["interfaces"][2]["mac"] = mac.into();
+            assert!(l2_policy("id", &result, "10.88.0.2").is_err());
+        }
+    }
+
+    #[test]
+    fn stale_bridge_cleanup_selects_only_owned_table_names() {
+        let tables = serde_json::json!({"nftables": [
+            {"metainfo": {}},
+            {"table": {"family": "bridge", "name": "hkt_0123456789abcdef01234567"}},
+            {"table": {"family": "ip", "name": "hkt_0123456789abcdef01234567"}},
+            {"table": {"family": "bridge", "name": "someone_else"}},
+            {"table": {"family": "bridge", "name": "hkt_"}},
+            {"table": {"family": "bridge", "name": "hkt_bad;name"}}
+        ]});
+        assert_eq!(
+            stale_l2_tables(&tables),
+            vec!["hkt_0123456789abcdef01234567"]
+        );
+    }
 
     #[test]
     fn task_chains_are_stable_and_isolated() {
