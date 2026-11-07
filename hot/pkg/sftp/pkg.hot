@@ -3,7 +3,7 @@
 hot.pkg.sftp {
   name: "hot.dev/sftp",
   version: "0.1.0",
-  hot-min-version: "3.0.4",
+  hot-min-version: "3.0.5",
   description: "SFTP file transfer and directory operations backed by russh/russh-sftp.",
   author: "Hot Dev",
   email: "support@hot.dev",
