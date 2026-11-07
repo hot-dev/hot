@@ -593,27 +593,20 @@ impl HotIterator for HttpStreamIterator {
                 return Ok((Val::Null, true));
             }
 
-            // Block to receive next chunk from the streaming response.
-            // We use blocking_recv() which is designed for calling from non-async contexts
-            // (including from within spawn_blocking tasks). This avoids the need for
-            // block_in_place which panics when called from spawn_blocking.
+            // Block until the next chunk arrives, waking as soon as it does
+            // and observing cancellation and the deadline meanwhile. Park
+            // before taking the receiver lock: resuming can wait for a run
+            // slot, which must not happen while holding the lock.
             let chunk: Result<Option<Bytes>, String> = {
+                let _parked = super::native_io::park_current().map_err(|e| e.to_string())?;
                 let mut guard = self
                     .receiver
                     .lock()
                     .map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
-                let _parked = super::native_io::park_current().map_err(|e| e.to_string())?;
-                let context = super::native_io::current();
-                loop {
-                    context.check()?;
-                    match guard.try_recv() {
-                        Ok(value) => break value.map(Some),
-                        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                            break Ok(None);
-                        }
-                        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
-                            std::thread::sleep(std::time::Duration::from_millis(10))
-                        }
+                match super::native_io::recv_blocking(&mut guard, None)? {
+                    super::native_io::Received::Item(value) => value.map(Some),
+                    super::native_io::Received::Closed | super::native_io::Received::TimedOut => {
+                        Ok(None)
                     }
                 }
             };
