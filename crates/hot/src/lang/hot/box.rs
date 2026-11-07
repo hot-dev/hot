@@ -1531,7 +1531,7 @@ mod tests {
         let input = crate::val!({
             "$type": "::hot::box/BoxConf",
             "$val": {
-                "image": "ghcr.io/withleela/reglang:1",
+                "image": "ghcr.io/acme/tool:1",
                 "registry-auth": {
                     "$type": "::hot::box/BoxRegistryAuth",
                     "$val": {"secret": "ghcr-pull"}
@@ -1539,14 +1539,14 @@ mod tests {
             }
         });
         let parsed = validate_and_parse(&[input]).unwrap();
-        assert_eq!(parsed.image, "ghcr.io/withleela/reglang:1");
+        assert_eq!(parsed.image, "ghcr.io/acme/tool:1");
         assert_eq!(parsed.registry_auth.as_deref(), Some("ghcr-pull"));
     }
 
     #[test]
     fn test_start_refuses_a_token_in_registry_auth() {
         let input = crate::val!({
-            "image": "ghcr.io/withleela/reglang:1",
+            "image": "ghcr.io/acme/tool:1",
             "registry-auth": {"secret": "ghcr-pull", "token": "ghp_literal"}
         });
         match validate_and_parse(&[input]) {

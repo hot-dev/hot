@@ -17,8 +17,8 @@ Related documents:
   plan") is the design that shipped in 3.0.0.
 - [Sub-organization management](../../resources/docs/api/management.md) is
   the public 3.0.0 contract this note replaces.
-- Leela's starting proposal is `INTEGRATION.md` §2.1 in
-  `leela-dev/plans/reglang/`. This note works it out and corrects it in
+- The starting proposal came from an integrator's plan, cited here as §2.1.
+  This note works it out and corrects it in
   several places (see [Changes to INTEGRATION §2.1](#changes-to-integration-21)).
 
 ## Implementation
@@ -127,7 +127,7 @@ Three things in this note are not in §2.1 and matter most:
   idempotency as projects.
 - Keys that rotate quietly. In 3.0.0 every runtime key issued by an `hm_`
   credential dies with it, within 90 days, and when its creator leaves the
-  root admin role. A tenant platform like Leela would have to reissue every
+  root admin role. A tenant platform would have to reissue every
   child's key at least quarterly, and on every staff change.
 - The SDK management client has not shipped (SDK 1.3.0 is on branches), so
   the API shape is cheap to change now and expensive after.
@@ -167,7 +167,7 @@ credentials are expressed, not what the isolation contract is.
 | `/v1/orgs/usage` | `/v1/orgs/{org}/usage` | Avoids a collision with `/v1/orgs/{org}`, and names which root's aggregate |
 | `/v1/keys/{id}` | `/v1/api-keys/{id}` | Matches the URN type and `/v1/service-keys` |
 | `usage:*` → `read` | `org:{org}/usage:*` → `read` | Org keys have no unprefixed grants |
-| Leela's org key lists only control grants | It also needs delegable runtime grants (`org:*/env:*/event:*` → `create`, `…/run:*` → `read`) | A minted key's grants must be a subset of the issuer's |
+| The integrator's org key lists only control grants | It also needs delegable runtime grants (`org:*/env:*/event:*` → `create`, `…/run:*` → `read`) | A minted key's grants must be a subset of the issuer's |
 | Only revocation or narrowing cascades | Expiry, and root or child suspension, also cascade | They are the same current-chain check |
 | `/v1/management/*` stays "for one release" | Depends on [Q7](#open-questions-for-curt) | 3.0.0 published it; removing it in 3.x is a breaking change unless we call it experimental |
 
@@ -576,7 +576,7 @@ ancestor as one more link during §7).
 
 - **Rotation as theft.** Rotation hands the caller a working secret. That is
   why it needs descent, not just a grant: a sibling provisioning key with
-  `org:*/env:*/api-key:*` → `update` must not be able to rotate Leela's
+  `org:*/env:*/api-key:*` → `update` must not be able to rotate the integrator's
   server key and receive its secret.
 - **Lineage laundering.** No route changes `issuer_api_key_id`. Rotation and
   narrowing keep it. Deleting a key with descendants is blocked by the
@@ -586,9 +586,9 @@ ancestor as one more link during §7).
   generation authenticated it; revalidation fails after
   `previous_expires_at`.
 - **Revocation as an outage.** Revoking a key kills everything it minted.
-  If Leela's single server key leaks, revoking it revokes every child's
+  If the integrator's single server key leaks, revoking it revokes every child's
   environment key. That is correct security behavior and an availability
-  event; Leela needs a runbook (mint a new org key, re-mint every child
+  event; the integrator needs a runbook (mint a new org key, re-mint every child
   key). [Q8](#open-questions-for-curt) asks whether a root admin may adopt
   descendants under a new issuer.
 - **Reversible deactivation.** Today `active` toggles both ways in the App.
@@ -804,7 +804,7 @@ None for users: no SDK with the management client has shipped.
 
 ## Blast radius of a leaked org key
 
-Leela's proposed server key (corrected from §2.1):
+The integrator's proposed server key (corrected from §2.1):
 
 ```json
 {
@@ -819,7 +819,7 @@ Leela's proposed server key (corrected from §2.1):
 }
 ```
 
-If it leaks, the holder can, in every Leela child: create, suspend and
+If it leaks, the holder can, in every child: create, suspend and
 archive children; create environments; overwrite context (for example the
 callback URL and secret), though not read existing context values; upload
 and deploy a build, which runs their code with that child's context and
@@ -828,7 +828,7 @@ compromise of every tenant. They cannot reach another Hot root, the root's
 own environments (no `org:{root}/…` grant), billing, members, or org-key
 minting.
 
-The 3.0.0 design has the same reach for the same job: Leela would need an
+The 3.0.0 design has the same reach for the same job: the integrator would need an
 `hm_` credential with `runtime-keys:create` and a ceiling covering builds,
 context and events. What differs is lifetime (90 days and the creator's
 role vs optional expiry) and recovery (both cascade on revocation).
@@ -836,7 +836,7 @@ role vs optional expiry) and recovery (both cascade on revocation).
 Ways to shrink it, in order of value:
 
 1. Split keys by job. A provisioning key (`org:*`, `env:*`, `api-key:*`)
-   in Leela's server; a deploy key (`project`, `context`, `build`) in the
+   in the integrator's server; a deploy key (`project`, `context`, `build`) in the
    build worker. Neither alone has everything. Environment keys minted by
    the provisioning key survive revocation of the deploy key.
 2. Expiry plus scheduled rotation by a human or an ancestor key.
@@ -881,7 +881,7 @@ open.
    one in a child, for self-service child admins? (Recommend defer.)
 7. **When `/v1/management/*` goes.** 3.0.0 published it as stable. Options:
    remove in 4.0; or document it as experimental now and remove it once
-   every `hm_` has expired. (Your call: Leela is the only known caller.)
+   every `hm_` has expired. (Your call: there's only one known caller.)
 8. **Adopting descendants.** After revoking a key, may a root admin move its
    descendants under a new issuer (audited, subset-checked), or convert
    `hm_`-issued runtime keys? It saves a mass re-mint and is a laundering

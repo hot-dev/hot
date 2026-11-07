@@ -157,7 +157,7 @@ fn provisioner() -> Value {
 async fn org_keys_provision_children_and_mint_environment_keys() {
     let app = App::new().await;
     let (_, token) = app.org_key(provisioner()).await;
-    let request = json!({"name": "Globex", "slug": "globex", "external_id": "leela-org-1", "idempotency_key": "leela-org-1"});
+    let request = json!({"name": "Globex", "slug": "globex", "external_id": "acme-org-1", "idempotency_key": "acme-org-1"});
     let child = app
         .expect(
             "POST",
@@ -168,7 +168,7 @@ async fn org_keys_provision_children_and_mint_environment_keys() {
         )
         .await;
     assert_eq!(child["data"]["created"], true);
-    assert_eq!(child["data"]["org"]["external_id"], "leela-org-1");
+    assert_eq!(child["data"]["org"]["external_id"], "acme-org-1");
     let repeated = app
         .expect("POST", "/v1/orgs", &token, Some(request), StatusCode::OK)
         .await;
@@ -841,7 +841,7 @@ async fn org_keys_administer_child_projects_through_environment_handlers() {
         "POST",
         &format!("{base}/projects/program/context"),
         &token,
-        Some(json!({"key": "leela.callback.url", "value": "https://leela.example.test/hot"})),
+        Some(json!({"key": "app.callback.url", "value": "https://app.example.test/hot"})),
         StatusCode::CREATED,
     )
     .await;
@@ -854,7 +854,7 @@ async fn org_keys_administer_child_projects_through_environment_handlers() {
             StatusCode::OK,
         )
         .await;
-    assert_eq!(context["data"][0]["key"], "leela.callback.url");
+    assert_eq!(context["data"][0]["key"], "app.callback.url");
     assert!(
         context["data"][0].get("value").is_none(),
         "context values are never returned"

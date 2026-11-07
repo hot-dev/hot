@@ -325,7 +325,7 @@ mod tests {
     }
 
     fn ghcr_secret() -> Val {
-        crate::val!({"registry": "ghcr.io", "username": "leela-bot", "token": TOKEN})
+        crate::val!({"registry": "ghcr.io", "username": "acme-bot", "token": TOKEN})
     }
 
     #[test]
@@ -348,27 +348,24 @@ mod tests {
         assert_eq!(image_registry("alpine"), "docker.io");
         assert_eq!(image_registry("alpine:3.21"), "docker.io");
         assert_eq!(image_registry("library/alpine"), "docker.io");
-        assert_eq!(image_registry("withleela/reglang:1"), "docker.io");
-        assert_eq!(image_registry("ghcr.io/withleela/reglang:1"), "ghcr.io");
-        assert_eq!(image_registry("GHCR.io/withleela/reglang"), "ghcr.io");
-        assert_eq!(image_registry("localhost:5000/reglang:1"), "localhost:5000");
-        assert_eq!(image_registry("localhost/reglang"), "localhost");
+        assert_eq!(image_registry("acme/tool:1"), "docker.io");
+        assert_eq!(image_registry("ghcr.io/acme/tool:1"), "ghcr.io");
+        assert_eq!(image_registry("GHCR.io/acme/tool"), "ghcr.io");
+        assert_eq!(image_registry("localhost:5000/tool:1"), "localhost:5000");
+        assert_eq!(image_registry("localhost/tool"), "localhost");
         // Docker takes a first component with an uppercase letter as a host.
         assert_eq!(image_registry("LOCALHOST/x:y"), "localhost");
         assert_eq!(image_registry("Localhost/x:y"), "localhost");
         assert_eq!(image_registry("FOO/x:y"), "foo");
         assert_eq!(image_registry("MyOrg/tool"), "myorg");
         // Only the first component decides, and a bare name has none.
-        assert_eq!(image_registry("withleela/TOOL:1"), "docker.io");
+        assert_eq!(image_registry("acme/TOOL:1"), "docker.io");
         assert_eq!(image_registry("ALPINE"), "docker.io");
         assert_eq!(
             image_registry("index.docker.io/library/alpine"),
             "docker.io"
         );
-        assert_eq!(
-            image_registry("ghcr.io/withleela/reglang@sha256:abcd"),
-            "ghcr.io"
-        );
+        assert_eq!(image_registry("ghcr.io/acme/tool@sha256:abcd"), "ghcr.io");
     }
 
     #[test]
@@ -386,7 +383,7 @@ mod tests {
     fn sealed_credential_round_trips_and_hides_the_token() {
         let env_id = Uuid::now_v7();
         let org_id = Uuid::now_v7();
-        let image = "ghcr.io/withleela/reglang:1";
+        let image = "ghcr.io/acme/tool:1";
         let auth = resolve_and_seal(
             &context_with(ghcr_secret()),
             "ghcr-pull",
@@ -399,7 +396,7 @@ mod tests {
         let rendered = auth.to_string();
         assert!(!rendered.contains(TOKEN), "the task args hold the token");
         assert!(
-            !rendered.contains("leela-bot"),
+            !rendered.contains("acme-bot"),
             "the task args hold the username"
         );
         assert_eq!(auth["secret"], "ghcr-pull");
@@ -410,7 +407,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(credential.registry, "ghcr.io");
-        assert_eq!(credential.username, "leela-bot");
+        assert_eq!(credential.username, "acme-bot");
         assert_eq!(credential.token, TOKEN);
         assert!(!format!("{credential:?}").contains(TOKEN));
         assert_eq!(
@@ -423,7 +420,7 @@ mod tests {
     fn open_refuses_another_environment_or_org() {
         let env_id = Uuid::now_v7();
         let org_id = Uuid::now_v7();
-        let image = "ghcr.io/withleela/reglang:1";
+        let image = "ghcr.io/acme/tool:1";
         let auth = resolve_and_seal(
             &context_with(ghcr_secret()),
             "ghcr-pull",
@@ -446,7 +443,7 @@ mod tests {
     #[test]
     fn open_refuses_a_swapped_image() {
         let env_id = Uuid::now_v7();
-        let image = "ghcr.io/withleela/reglang:1";
+        let image = "ghcr.io/acme/tool:1";
         let auth = resolve_and_seal(
             &context_with(ghcr_secret()),
             "ghcr-pull",
@@ -489,7 +486,7 @@ mod tests {
     #[test]
     fn resolve_reports_missing_and_malformed_secrets_without_values() {
         let env_id = Uuid::now_v7();
-        let image = "ghcr.io/withleela/reglang:1";
+        let image = "ghcr.io/acme/tool:1";
         let missing =
             resolve_and_seal(&AHashMap::new(), "ghcr-pull", image, &env_id, None, key).unwrap_err();
         assert!(missing.contains("is not set"));
@@ -536,7 +533,7 @@ mod tests {
     #[test]
     fn a_docker_hub_secret_does_not_serve_an_uppercase_host() {
         let hub_secret =
-            crate::val!({"registry": "docker.io", "username": "leela-bot", "token": TOKEN});
+            crate::val!({"registry": "docker.io", "username": "acme-bot", "token": TOKEN});
         let err = resolve_and_seal(
             &context_with(hub_secret),
             "ghcr-pull",
