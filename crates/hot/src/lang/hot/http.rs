@@ -4,10 +4,32 @@ use crate::val::Val;
 use crate::{validate_args, validate_args_range};
 use indexmap::IndexMap;
 use serde_json::Value as JsonValue;
+use std::time::Duration;
 use url::Url;
 
 const DEFAULT_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_REDIRECTS: usize = 10;
+/// How long a plain request may take, body included.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long a stream may go without a byte. A model can think this long before
+/// it answers, and some providers hold their headers until then.
+const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// How long a request may go on.
+#[derive(Clone, Copy)]
+enum TimeLimit {
+    /// The whole exchange, up to the body's last byte.
+    Total(Duration),
+    /// Each wait for data, the headers included. Data starts the wait over.
+    Idle(Duration),
+}
+
+/// What bounds a streaming response.
+#[derive(Clone, Copy)]
+struct StreamLimits {
+    max_response_bytes: usize,
+    idle_timeout: Duration,
+}
 
 fn err_val(msg: String) -> Val {
     Val::err(Val::from(msg))
@@ -204,7 +226,7 @@ async fn send_with_redirect_validation(
     headers: &IndexMap<Val, Val>,
     body: &Val,
     policy: DestinationPolicy,
-    timeout_secs: u64,
+    time_limit: TimeLimit,
 ) -> Result<reqwest::Response, Val> {
     let mut method = reqwest::Method::from_bytes(method.to_uppercase().as_bytes())
         .map_err(|_| err_val(format!("::hot::http/request: unsupported method: {method}")))?;
@@ -244,9 +266,12 @@ async fn send_with_redirect_validation(
     for redirect_count in 0..=MAX_REDIRECTS {
         let builder = crate::outbound::client_builder()
             .user_agent(build_user_agent(headers))
-            .connect_timeout(std::time::Duration::from_secs(30))
-            .timeout(std::time::Duration::from_secs(timeout_secs))
+            .connect_timeout(Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::none());
+        let builder = match time_limit {
+            TimeLimit::Total(limit) => builder.timeout(limit),
+            TimeLimit::Idle(limit) => builder.read_timeout(limit),
+        };
         let client = policy
             .route(&current_url, builder)
             .await
@@ -329,8 +354,9 @@ async fn make_http_request(
     policy: DestinationPolicy,
     max_response_bytes: usize,
 ) -> HotResult<Val> {
+    let time_limit = TimeLimit::Total(REQUEST_TIMEOUT);
     let response =
-        match send_with_redirect_validation(method, url, headers, body, policy, 120).await {
+        match send_with_redirect_validation(method, url, headers, body, policy, time_limit).await {
             Ok(response) => response,
             Err(error) => return HotResult::Err(error),
         };
@@ -551,54 +577,56 @@ pub struct HttpStreamIterator {
 }
 
 impl HotIterator for HttpStreamIterator {
+    /// The next value, or the end. A chunk can hold no whole event or line,
+    /// which is nothing to yield, so this reads on until there is something.
     fn next(&mut self) -> Result<(Val, bool), String> {
-        if let Some(event) = self.pending_sse_events.pop_front() {
-            return Ok((event, false));
-        }
+        loop {
+            if let Some(event) = self.pending_sse_events.pop_front() {
+                return Ok((event, false));
+            }
 
-        if self.done {
-            return Ok((Val::Null, true));
-        }
+            if self.done {
+                return Ok((Val::Null, true));
+            }
 
-        // Block to receive next chunk from the streaming response.
-        // We use blocking_recv() which is designed for calling from non-async contexts
-        // (including from within spawn_blocking tasks). This avoids the need for
-        // block_in_place which panics when called from spawn_blocking.
-        let chunk: Result<Option<Bytes>, String> = {
-            let mut guard = self
-                .receiver
-                .lock()
-                .map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
-            guard.blocking_recv().transpose()
-        };
-        let chunk = chunk?;
+            // Block to receive next chunk from the streaming response.
+            // We use blocking_recv() which is designed for calling from non-async contexts
+            // (including from within spawn_blocking tasks). This avoids the need for
+            // block_in_place which panics when called from spawn_blocking.
+            let chunk: Result<Option<Bytes>, String> = {
+                let mut guard = self
+                    .receiver
+                    .lock()
+                    .map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
+                guard.blocking_recv().transpose()
+            };
 
-        match chunk {
-            Some(bytes) => {
-                // Process based on format
-                let value = match self.format.as_str() {
+            match chunk? {
+                Some(bytes) => match self.format.as_str() {
                     "sse" => self.parse_sse_chunk(&bytes),
-                    "ndjson" => self.parse_ndjson_chunk(&bytes),
-                    _ => {
-                        // Raw bytes as string
-                        match String::from_utf8(bytes.to_vec()) {
-                            Ok(s) => Val::from(s),
-                            Err(_) => Val::bytes(bytes.to_vec()),
+                    "ndjson" => {
+                        if let Some(value) = self.parse_ndjson_chunk(&bytes) {
+                            return Ok((value, false));
                         }
                     }
-                };
-                Ok((value, false))
-            }
-            None => {
-                self.done = true;
-                // Flush any remaining SSE buffer
-                if !self.sse_buffer.is_empty() && self.format == "sse" {
-                    let remaining = std::mem::take(&mut self.sse_buffer);
-                    if let Some(event) = self.parse_sse_event(&remaining) {
-                        return Ok((event, false));
+                    _ => {
+                        // Raw bytes as string
+                        let value = match String::from_utf8(bytes.to_vec()) {
+                            Ok(s) => Val::from(s),
+                            Err(_) => Val::bytes(bytes.to_vec()),
+                        };
+                        return Ok((value, false));
+                    }
+                },
+                None => {
+                    self.done = true;
+                    // Flush any remaining SSE buffer
+                    if !self.sse_buffer.is_empty() && self.format == "sse" {
+                        let remaining = std::mem::take(&mut self.sse_buffer);
+                        self.pending_sse_events
+                            .extend(Self::parse_sse_event(&remaining));
                     }
                 }
-                Ok((Val::Null, true))
             }
         }
     }
@@ -616,43 +644,62 @@ impl HotIterator for HttpStreamIterator {
     }
 }
 
+/// Split off the first SSE event, as `(event, rest)`, once its blank line has
+/// arrived. A line ends in LF, CR or CRLF.
+///
+/// A CR at the end of `buffer` may be half of a CRLF. Taking it as a whole line
+/// ending is safe: when it ends a blank line, the LF that follows reads as one
+/// more blank line, an empty event. When it ends any other line, the event isn't
+/// over, so the buffer waits for the LF.
+fn split_sse_event(buffer: &str) -> Option<(&str, &str)> {
+    let bytes = buffer.as_bytes();
+    let mut line_start = 0;
+    let mut at = 0;
+    while at < bytes.len() {
+        let line_ending = match bytes[at] {
+            b'\r' if bytes.get(at + 1) == Some(&b'\n') => 2,
+            b'\r' | b'\n' => 1,
+            _ => {
+                at += 1;
+                continue;
+            }
+        };
+        if at == line_start {
+            return Some((&buffer[..at], &buffer[at + line_ending..]));
+        }
+        at += line_ending;
+        line_start = at;
+    }
+    None
+}
+
 impl HttpStreamIterator {
-    /// Parse SSE (Server-Sent Events) chunk - buffers data and returns complete events
-    fn parse_sse_chunk(&mut self, bytes: &Bytes) -> Val {
+    /// Parse SSE (Server-Sent Events) chunk - buffers data and queues complete events
+    ///
+    /// HTTP chunks often coalesce several SSE frames, and Anthropic's first
+    /// chunk does. `next` takes one event per call from this queue, so every
+    /// event, the first included, reaches a consumer the same way.
+    fn parse_sse_chunk(&mut self, bytes: &Bytes) {
         let chunk_str = String::from_utf8_lossy(bytes);
         self.sse_buffer.push_str(&chunk_str);
 
-        // Look for complete events (double newline)
-        let mut events = VecDeque::new();
-        while let Some(pos) = self.sse_buffer.find("\n\n") {
-            let event_str = self.sse_buffer[..pos].to_string();
-            self.sse_buffer = self.sse_buffer[pos + 2..].to_string();
-
-            if let Some(event) = self.parse_sse_event(&event_str) {
-                events.push_back(event);
-            }
+        let buffer = std::mem::take(&mut self.sse_buffer);
+        let mut rest = buffer.as_str();
+        while let Some((event_str, after)) = split_sse_event(rest) {
+            self.pending_sse_events
+                .extend(Self::parse_sse_event(event_str));
+            rest = after;
         }
-
-        // Return one event per iterator item. HTTP chunks often coalesce
-        // several SSE frames; yielding a Vec here makes consumers that expect
-        // one event per next() accidentally skip all of them.
-        // The null filter in iter.rs will prevent Null from being published/stored
-        if events.is_empty() {
-            Val::Null
-        } else {
-            let first = events.pop_front().unwrap();
-            self.pending_sse_events.extend(events);
-            first
-        }
+        self.sse_buffer = rest.to_string();
     }
 
     /// Parse a single SSE event string into a Val
-    fn parse_sse_event(&self, event_str: &str) -> Option<Val> {
+    fn parse_sse_event(event_str: &str) -> Option<Val> {
         let mut event_type = String::new();
         let mut data_lines = Vec::new();
         let mut id = None;
 
-        for line in event_str.lines() {
+        for line in event_str.split(['\r', '\n']) {
             if let Some(stripped) = line.strip_prefix("event:") {
                 event_type = stripped.trim().to_string();
             } else if let Some(stripped) = line.strip_prefix("data:") {
@@ -686,8 +733,8 @@ impl HttpStreamIterator {
         Some(Val::map(event_map))
     }
 
-    /// Parse NDJSON (newline-delimited JSON) chunk
-    fn parse_ndjson_chunk(&mut self, bytes: &Bytes) -> Val {
+    /// Parse NDJSON (newline-delimited JSON) chunk, or None if it completes no line
+    fn parse_ndjson_chunk(&mut self, bytes: &Bytes) -> Option<Val> {
         let chunk_str = String::from_utf8_lossy(bytes);
         self.sse_buffer.push_str(&chunk_str);
 
@@ -711,12 +758,10 @@ impl HttpStreamIterator {
             }
         }
 
-        if objects.is_empty() {
-            Val::Null
-        } else if objects.len() == 1 {
-            objects.pop().unwrap()
-        } else {
-            Val::vec(objects)
+        match objects.len() {
+            0 => None,
+            1 => objects.pop(),
+            _ => Some(Val::vec(objects)),
         }
     }
 }
@@ -888,7 +933,10 @@ fn request_stream_with_policy(
             &body,
             &format,
             policy,
-            max_response_bytes,
+            StreamLimits {
+                max_response_bytes,
+                idle_timeout: STREAM_IDLE_TIMEOUT,
+            },
         )
         .await
     })
@@ -901,10 +949,16 @@ async fn make_streaming_request(
     body: &Val,
     format: &str,
     policy: DestinationPolicy,
-    max_response_bytes: usize,
+    limits: StreamLimits,
 ) -> HotResult<Val> {
+    let StreamLimits {
+        max_response_bytes,
+        idle_timeout,
+    } = limits;
+    // A stream gets no total: a model's reply can outrun any, with bytes still coming.
+    let time_limit = TimeLimit::Idle(idle_timeout);
     let response =
-        match send_with_redirect_validation(method, url, headers, body, policy, 300).await {
+        match send_with_redirect_validation(method, url, headers, body, policy, time_limit).await {
             Ok(response) => response,
             Err(error) => return HotResult::Err(error),
         };
@@ -919,6 +973,8 @@ async fn make_streaming_request(
     }
 
     let status = response.status().as_u16() as i64;
+    // A refused call's body holds the reason, and it's no stream of this format.
+    let format = if status >= 400 { "raw" } else { format };
 
     // Get headers
     let mut response_headers: IndexMap<Val, Val> = IndexMap::new();
@@ -953,7 +1009,15 @@ async fn make_streaming_request(
                         };
                         tx.send(Ok(bytes)).await
                     }
-                    Err(e) => tx.send(Err(e.to_string())).await,
+                    Err(e) => {
+                        let message = if e.is_timeout() {
+                            format!("no data for {idle_timeout:?}")
+                        } else {
+                            e.to_string()
+                        };
+                        let _ = tx.send(Err(message)).await;
+                        break;
+                    }
                 };
             if send_result.is_err() {
                 // Receiver dropped, stop streaming
@@ -1015,6 +1079,87 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(10)).await;
 
         url
+    }
+
+    /// An iterator over these chunks, as one response delivers them.
+    fn iterator_over(format: &str, chunks: &[&[u8]]) -> HttpStreamIterator {
+        let (tx, rx) = mpsc::channel(chunks.len().max(1));
+        for chunk in chunks {
+            tx.blocking_send(Ok(Bytes::copy_from_slice(chunk))).unwrap();
+        }
+        drop(tx);
+        HttpStreamIterator {
+            receiver: Arc::new(Mutex::new(rx)),
+            status: 200,
+            headers: IndexMap::new(),
+            format: format.to_string(),
+            sse_buffer: String::new(),
+            pending_sse_events: VecDeque::new(),
+            done: false,
+        }
+    }
+
+    /// All that the iterator yields, in order, up to its end.
+    fn drain(mut iterator: impl HotIterator) -> Vec<Val> {
+        let mut values = Vec::new();
+        loop {
+            let (value, done) = iterator.next().unwrap();
+            if done {
+                return values;
+            }
+            values.push(value);
+        }
+    }
+
+    /// The `event` field of each SSE event, or an empty string where it has none.
+    fn event_names(events: &[Val]) -> Vec<String> {
+        events
+            .iter()
+            .map(|event| match event.get("event") {
+                Some(Val::Str(name)) => name.to_string(),
+                _ => String::new(),
+            })
+            .collect()
+    }
+
+    /// The body of a streaming response, read in full on a blocking thread, as
+    /// a run reads it. An iterator's error ends the list.
+    async fn read_stream(response: HotResult<Val>) -> (Vec<Val>, Option<String>) {
+        let response = unwrap_result(response);
+        tokio::task::spawn_blocking(move || {
+            let body = response.get("body").unwrap();
+            let Val::Box(boxed) = body else {
+                panic!("Expected body to be a Box (iterator)");
+            };
+            let iter_box = boxed.as_any().downcast_ref::<IteratorBox>().unwrap();
+            let mut guard = iter_box.inner.lock().unwrap();
+            let mut values = Vec::new();
+            loop {
+                match guard.next() {
+                    Ok((_, true)) => return (values, None),
+                    Ok((value, false)) => values.push(value),
+                    Err(error) => return (values, Some(error)),
+                }
+            }
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn stream_from(url: String, format: &str, idle_timeout: Duration) -> HotResult<Val> {
+        make_streaming_request(
+            "GET",
+            &url,
+            &IndexMap::new(),
+            &Val::from(""),
+            format,
+            DestinationPolicy::AllowPrivate,
+            StreamLimits {
+                max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
+                idle_timeout,
+            },
+        )
+        .await
     }
 
     /// Helper to unwrap HotResult, down to a response's fields
@@ -1430,10 +1575,7 @@ mod tests {
                         if done {
                             break;
                         }
-                        // Skip null values (partial chunks)
-                        if !matches!(value, Val::Null) {
-                            events.push(value);
-                        }
+                        events.push(value);
                     }
                     events
                 } else {
@@ -1511,6 +1653,262 @@ mod tests {
         } else {
             panic!("Expected second SSE item to be a map");
         }
+    }
+
+    /// The frames that open an Anthropic stream. They often share one HTTP
+    /// chunk, and only the first says how many input tokens the call used.
+    const OPENING_FRAMES: [&str; 4] = [
+        "message_start",
+        "content_block_start",
+        "ping",
+        "content_block_delta",
+    ];
+
+    fn opening_stream(eol: &str) -> String {
+        OPENING_FRAMES
+            .iter()
+            .enumerate()
+            .map(|(index, name)| format!("event: {name}{eol}data: {{\"index\":{index}}}{eol}{eol}"))
+            .collect()
+    }
+
+    fn assert_opening_frames(events: &[Val], label: &str) {
+        assert_eq!(event_names(events), OPENING_FRAMES, "{label}");
+        for (index, event) in events.iter().enumerate() {
+            assert_eq!(
+                event.get("data").and_then(|data| data.get("index")),
+                Some(Val::Int(index as i64)),
+                "{label}"
+            );
+        }
+    }
+
+    /// #17: frames that share a chunk come out one by one, the first included.
+    #[test]
+    fn frames_that_share_a_chunk_all_arrive_in_order() {
+        for (label, eol) in [("LF", "\n"), ("CRLF", "\r\n"), ("CR", "\r")] {
+            let stream = opening_stream(eol);
+            assert_opening_frames(&drain(iterator_over("sse", &[stream.as_bytes()])), label);
+        }
+    }
+
+    /// The same, wherever the stream's chunks happen to break: a chunk can end
+    /// inside the first frame, between frames, or inside a line ending.
+    #[test]
+    fn frames_survive_any_split_into_chunks() {
+        for (label, eol) in [("LF", "\n"), ("CRLF", "\r\n"), ("CR", "\r")] {
+            let stream = opening_stream(eol);
+            let bytes = stream.as_bytes();
+            for at in 1..bytes.len() {
+                let (head, tail) = bytes.split_at(at);
+                assert_opening_frames(
+                    &drain(iterator_over("sse", &[head, tail])),
+                    &format!("{label}, split at {at}"),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn frames_survive_arriving_a_byte_at_a_time() {
+        let stream = opening_stream("\r\n");
+        let chunks: Vec<&[u8]> = stream.as_bytes().chunks(1).collect();
+        assert_opening_frames(&drain(iterator_over("sse", &chunks)), "CRLF");
+    }
+
+    /// The SSE spec ends a line with LF, CR or CRLF, and a blank line ends an
+    /// event, so these all end one.
+    #[test]
+    fn every_blank_line_the_spec_allows_ends_an_event() {
+        for blank in [
+            "\n\n", "\r\r", "\r\n\r\n", "\n\r\n", "\r\n\n", "\n\r", "\r\r\n", "\r\n\r",
+        ] {
+            let stream = format!("event: one{blank}event: two{blank}");
+            let events = drain(iterator_over("sse", &[stream.as_bytes()]));
+            assert_eq!(event_names(&events), ["one", "two"], "{blank:?}");
+        }
+    }
+
+    /// As Gemini sends them: no `event:` field, and each frame ends in CRLF.
+    #[test]
+    fn crlf_frames_arrive_as_separate_events() {
+        let events = drain(iterator_over(
+            "sse",
+            &[b"data: {\"n\":1}\r\n\r\ndata: {\"n\":2}\r\n\r\n"],
+        ));
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert_eq!(
+            events[0].get("data").and_then(|data| data.get("n")),
+            Some(Val::Int(1))
+        );
+        assert_eq!(
+            events[1].get("data").and_then(|data| data.get("n")),
+            Some(Val::Int(2))
+        );
+    }
+
+    #[test]
+    fn data_lines_in_one_event_join_whatever_ends_them() {
+        for eol in ["\n", "\r\n", "\r"] {
+            let stream = format!("data: one{eol}data: two{eol}{eol}");
+            let events = drain(iterator_over("sse", &[stream.as_bytes()]));
+            assert_eq!(events.len(), 1, "{eol:?}");
+            assert_eq!(
+                events[0].get("data"),
+                Some(Val::from("one\ntwo")),
+                "{eol:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_last_event_with_no_blank_line_still_arrives() {
+        for eol in ["\n", "\r\n", "\r"] {
+            let stream = format!("event: first{eol}{eol}event: last{eol}");
+            let events = drain(iterator_over("sse", &[stream.as_bytes()]));
+            assert_eq!(event_names(&events), ["first", "last"], "{eol:?}");
+        }
+    }
+
+    /// A chunk that holds no whole event is not a value: `next` reads on.
+    #[test]
+    fn next_reads_past_a_chunk_with_no_whole_event() {
+        let mut iterator = iterator_over(
+            "sse",
+            &[
+                b"event: mess",
+                b"age\ndata: {\"text\":",
+                b"\"hello\"}\n",
+                b"\n",
+            ],
+        );
+        let (event, done) = iterator.next().unwrap();
+        assert!(!done);
+        assert_eq!(event.get("event"), Some(Val::from("message")));
+        assert_eq!(
+            event.get("data").and_then(|data| data.get("text")),
+            Some(Val::from("hello"))
+        );
+        assert!(iterator.next().unwrap().1);
+    }
+
+    /// A keep-alive comment ends a frame but holds no event.
+    #[test]
+    fn next_reads_past_a_comment() {
+        let events = drain(iterator_over(
+            "sse",
+            &[
+                b": keep-alive\n\n",
+                b": keep-alive\n\n",
+                b"event: message\ndata: 1\n\n",
+            ],
+        ));
+        assert_eq!(event_names(&events), ["message"]);
+    }
+
+    #[test]
+    fn a_stream_of_comments_ends_with_nothing() {
+        let mut iterator = iterator_over("sse", &[b": keep-alive\n\n"]);
+        assert_eq!(iterator.next().unwrap(), (Val::Null, true));
+    }
+
+    #[test]
+    fn next_reads_past_part_of_an_ndjson_line() {
+        let values = drain(iterator_over("ndjson", &[b"{\"id\"", b":1}", b"\n"]));
+        assert_eq!(values.len(), 1, "{values:?}");
+        assert_eq!(values[0].get("id"), Some(Val::Int(1)));
+    }
+
+    /// A `null` line is the stream's own value, not an empty read.
+    #[test]
+    fn an_ndjson_null_line_is_a_value() {
+        assert_eq!(drain(iterator_over("ndjson", &[b"null\n"])), [Val::Null]);
+    }
+
+    /// A chunk every `gap`, closing after `count` of them.
+    fn paced_chunks(count: usize, gap: Duration) -> axum::body::Body {
+        axum::body::Body::from_stream(stream::unfold(0, move |sent| async move {
+            if sent == count {
+                return None;
+            }
+            tokio::time::sleep(gap).await;
+            Some((
+                Ok::<_, Infallible>(Bytes::from(format!("data: {sent}\n\n"))),
+                sent + 1,
+            ))
+        }))
+    }
+
+    /// A stream that keeps moving can outlast the limit many times over.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_moving_stream_outlasts_its_idle_limit() {
+        let app = Router::new().route(
+            "/slow",
+            axum::routing::get(|| async { paced_chunks(8, Duration::from_millis(200)) }),
+        );
+        let url = format!("{}/slow", start_mock_server(app).await);
+
+        let response = stream_from(url, "sse", Duration::from_secs(1)).await;
+        let (events, error) = read_stream(response).await;
+
+        assert_eq!(error, None);
+        assert_eq!(events.len(), 8, "{events:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stalled_stream_ends_at_its_idle_limit() {
+        let app = Router::new().route(
+            "/stalls",
+            axum::routing::get(|| async {
+                let first = stream::once(async {
+                    Ok::<_, Infallible>(Bytes::from_static(b"data: first\n\n"))
+                });
+                axum::body::Body::from_stream(first.chain(stream::pending()))
+            }),
+        );
+        let url = format!("{}/stalls", start_mock_server(app).await);
+
+        let response = stream_from(url, "sse", Duration::from_millis(300)).await;
+        let (events, error) = read_stream(response).await;
+
+        assert_eq!(events.len(), 1, "{events:?}");
+        let error = error.expect("a stalled stream ends in an error");
+        assert!(error.contains("no data for"), "{error}");
+    }
+
+    /// The wait for the headers is a wait for data too.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn silence_before_the_headers_ends_at_the_idle_limit() {
+        let app = Router::new().route(
+            "/silent",
+            axum::routing::get(|| async {
+                futures::future::pending::<()>().await;
+                ""
+            }),
+        );
+        let url = format!("{}/silent", start_mock_server(app).await);
+
+        let response = stream_from(url, "sse", Duration::from_millis(300)).await;
+
+        assert!(matches!(response, HotResult::Err(_)));
+    }
+
+    /// A refused call's body is no event stream. It has to reach the caller,
+    /// since that's where the reason is.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refused_stream_keeps_its_body() {
+        const REASON: &str = r#"{"type":"error","error":{"message":"balance too low"}}"#;
+        let app = Router::new().route(
+            "/refused",
+            axum::routing::get(|| async { (StatusCode::BAD_REQUEST, REASON) }),
+        );
+        let url = format!("{}/refused", start_mock_server(app).await);
+
+        let response = stream_from(url, "sse", Duration::from_secs(5)).await;
+        let (chunks, error) = read_stream(response).await;
+
+        assert_eq!(error, None);
+        assert_eq!(chunks, [Val::from(REASON)]);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

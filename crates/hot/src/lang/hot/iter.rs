@@ -170,10 +170,9 @@ pub fn next(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         }
     };
 
-    // Optionally emit stream:data (skip null values - they're just "no data yet" signals)
+    // Optionally emit stream:data
     if iter_box.emit_stream_data
         && !done
-        && !matches!(value, Val::Null)
         && let Some(publisher) = vm.get_stream_publisher()
         && let Some(ctx) = vm.get_execution_context()
     {

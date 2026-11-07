@@ -150,3 +150,40 @@ meta ["test"]
 fn () {
     assert(is-null(::ct/response-usage(null)), "null usage stays null")
 }
+
+// ============================================================================
+// Streaming
+// ============================================================================
+
+OVERLOADED {type: "error", error: {type: "overloaded_error", message: "Overloaded"}}
+
+test-drain-stream-counts-every-frame
+meta ["test"]
+fn () {
+    frames Iter([
+        {event: "message_start", data: {message: {usage: {input_tokens: 11}}}},
+        {event: "content_block_start", data: {index: 0, content_block: {type: "text"}}},
+        {event: "ping", data: {type: "ping"}},
+        {event: "content_block_delta", data: {index: 0, delta: {type: "text_delta", text: "Hello"}}},
+        {event: "message_delta", data: {delta: {stop_reason: "max_tokens"}, usage: {output_tokens: 7}}},
+    ])
+    reply ::ct/finalize-state(::ct/drain-stream(frames, ::ai-chat/noop-on-delta, ::ct/EMPTY_STATE))
+    assert-eq("Hello", reply.text)
+    assert-eq("max_tokens", reply.stop-reason)
+    assert-eq(11, reply.usage.input-tokens, "message_start, the first frame, carries the input tokens")
+    assert-eq(7, reply.usage.output-tokens)
+}
+
+test-drain-stream-stops-at-an-error-event
+meta ["test"]
+fn () {
+    frames Iter([
+        {event: "message_start", data: {message: {usage: {input_tokens: 11}}}},
+        {event: "error", data: OVERLOADED},
+        {event: "ping", data: {type: "ping"}},
+    ])
+    result ::ct/drain-stream(frames, ::ai-chat/noop-on-delta, ::ct/EMPTY_STATE)
+    assert(is-err(result), "an error event is an Err, not an empty reply")
+    assert-eq("Overloaded", err-value(result).body.error.message)
+    assert-eq("ping", next(frames).value.event, "nothing after the error is read")
+}
