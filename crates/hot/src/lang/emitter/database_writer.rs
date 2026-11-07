@@ -844,19 +844,22 @@ impl DatabaseWriter {
             let remask_pool = scoped_pool.clone();
             let scoped_db = Arc::new(RwLock::new(scoped_pool));
             let run_ids: Vec<_> = batch.iter().map(DatabaseWrite::run_id).collect();
-            if !Self::process_scoped_batch(
-                &scoped_db,
-                &mut batch,
-                shard_idx,
-                trigger,
-                pressure_stats,
-            )
-            .await
-            {
-                failed_runs
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .extend(run_ids.into_iter().map(|id| (id, Instant::now())));
+            for chunk in batch.chunks_mut(WRITE_BATCH_SIZE) {
+                let mut chunk = chunk.to_vec();
+                if !Self::process_scoped_batch(
+                    &scoped_db,
+                    &mut chunk,
+                    shard_idx,
+                    trigger,
+                    pressure_stats,
+                )
+                .await
+                {
+                    failed_runs
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .extend(run_ids.iter().copied().map(|id| (id, Instant::now())));
+                }
             }
             for write in remasks {
                 let DatabaseWrite::RemaskCalls { execution_context } = write else {
@@ -1283,175 +1286,13 @@ impl DatabaseWriter {
                 }
             }
             DatabasePool::Postgres(_) => {
-                match crate::store::quota::begin_postgres(
-                    pool,
-                    org_id,
-                    env_id,
-                    crate::store::quota::QuotaKind::Call,
-                )
-                .await
-                {
-                    Ok((mut tx, budget)) => {
-                        let mut failed = false;
-
-                        // Execute writes IN ORDER within the transaction
-                        for write in &other_writes {
-                            // Log what we're about to write
-                            if let DatabaseWrite::Call { call_id, .. } = write {
-                                tracing::debug!("DatabaseWriter: TX inserting call_id={}", call_id);
-                            }
-
-                            let result = match write {
-                                DatabaseWrite::Call {
-                                    execution_context,
-                                    call_id,
-                                    parent_call_id,
-                                    function_name,
-                                    static_scope,
-                                    runtime_path,
-                                    call_depth,
-                                    args,
-                                    return_value,
-                                    error,
-                                    flow,
-                                    file,
-                                    line,
-                                    column,
-                                    position,
-                                    start_time,
-                                    stop_time,
-                                    duration_us,
-                                } => {
-                                    // Defense in depth: scrub Postgres-rejected
-                                    // chars from `jsonb` columns (`args`,
-                                    // `return_value`, `flow`) and the `text`
-                                    // column (`error`). Upstream serialization
-                                    // already does this, but a single
-                                    // unsanitized payload from a future caller
-                                    // would 22P05 and roll back the whole
-                                    // batch without this net. The `Cow`s
-                                    // returned are bound here so they outlive
-                                    // the `.bind(... .as_deref())` calls.
-                                    // Common (clean) path is one
-                                    // `str::contains` early-return, no alloc.
-                                    let args_safe = args.as_deref().map(sanitize_json_for_jsonb);
-                                    let return_value_safe =
-                                        return_value.as_deref().map(sanitize_json_for_jsonb);
-                                    let error_safe =
-                                        error.as_deref().map(sanitize_text_for_postgres);
-                                    let flow_safe = flow.as_deref().map(sanitize_json_for_jsonb);
-                                    sqlx::query(
-                                        "
-INSERT INTO hot.call (call_id, run_id, parent_call_id, function_name, static_scope, runtime_path, call_depth, args, return_value, error, flow, file, line, \"column\", position, start_time, stop_time, duration_us, size, env_id)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11::jsonb, $12, $13, $14, $15, $16, $17, $18,
-    COALESCE(octet_length(($8::jsonb)::text), 0) + COALESCE(octet_length(($9::jsonb)::text), 0) +
-    COALESCE(octet_length($10::text), 0) + COALESCE(octet_length(($11::jsonb)::text), 0) + 50, $19)
-ON CONFLICT (call_id) DO UPDATE SET
-    stop_time = COALESCE(EXCLUDED.stop_time, hot.call.stop_time),
-    return_value = COALESCE(EXCLUDED.return_value, hot.call.return_value),
-    error = COALESCE(EXCLUDED.error, hot.call.error),
-    flow = COALESCE(EXCLUDED.flow, hot.call.flow),
-    duration_us = COALESCE(EXCLUDED.duration_us, hot.call.duration_us),
-    start_time = COALESCE(EXCLUDED.start_time, hot.call.start_time),
-    parent_call_id = COALESCE(EXCLUDED.parent_call_id, hot.call.parent_call_id),
-    -- Use NULLIF to treat 'unknown' as NULL, preferring real function names
-    function_name = COALESCE(NULLIF(EXCLUDED.function_name, 'unknown'), NULLIF(hot.call.function_name, 'unknown'), 'unknown'),
-    static_scope = COALESCE(NULLIF(EXCLUDED.static_scope, 'unknown'), NULLIF(hot.call.static_scope, 'unknown'), 'unknown'),
-    runtime_path = COALESCE(NULLIF(EXCLUDED.runtime_path, 'unknown'), NULLIF(hot.call.runtime_path, 'unknown'), 'unknown'),
-    call_depth = CASE WHEN EXCLUDED.call_depth = 0 AND hot.call.call_depth != 0 THEN hot.call.call_depth ELSE COALESCE(EXCLUDED.call_depth, hot.call.call_depth) END,
-    args = COALESCE(EXCLUDED.args, hot.call.args),
-    file = COALESCE(EXCLUDED.file, hot.call.file),
-    line = COALESCE(EXCLUDED.line, hot.call.line),
-    \"column\" = COALESCE(EXCLUDED.\"column\", hot.call.\"column\"),
-    position = COALESCE(EXCLUDED.position, hot.call.position),
-    size = COALESCE(octet_length(COALESCE(EXCLUDED.args, hot.call.args)::text), 0) +
-           COALESCE(octet_length(COALESCE(EXCLUDED.return_value, hot.call.return_value)::text), 0) +
-           COALESCE(octet_length(COALESCE(EXCLUDED.flow, hot.call.flow)::text), 0) +
-           COALESCE(octet_length(COALESCE(EXCLUDED.error, hot.call.error)), 0) + 50
-WHERE hot.call.run_id = EXCLUDED.run_id
-"
-                                    )
-                                    .bind(call_id)
-                                    .bind(execution_context.run_id)
-                                    .bind(parent_call_id)
-                                    .bind(function_name)
-                                    .bind(static_scope)
-                                    .bind(runtime_path)
-                                    .bind(*call_depth as i32)
-                                    .bind(args_safe.as_deref())
-                                    .bind(return_value_safe.as_deref())
-                                    .bind(error_safe.as_deref())
-                                    .bind(flow_safe.as_deref())
-                                    .bind(file.as_deref())
-                                    .bind(line)
-                                    .bind(column)
-                                    .bind(position)
-                                    .bind(start_time)
-                                    .bind(stop_time)
-                                    .bind(duration_us)
-                                    .bind(execution_context.env_id)
-                                    .execute(&mut *tx)
-                                    .await
-                                    .and_then(|result| {
-                                        if result.rows_affected() == 1 { Ok(result) }
-                                        else { Err(sqlx::Error::Protocol("Trace call ownership changed".into())) }
-                                    })
-                                }
-                                _ => {
-                                    // Run events shouldn't be in other_writes, but handle gracefully
-                                    tracing::warn!(
-                                        "DatabaseWriter: Unexpected write type in transaction batch: {:?}",
-                                        write
-                                    );
-                                    continue;
-                                }
-                            };
-
-                            if let Err(e) = result {
-                                batch_failed = true;
-                                tracing::error!(
-                                    "DatabaseWriter: Write failed in transaction: {}",
-                                    e
-                                );
-                                other_write_errors += 1;
-                                failed = true;
-                                break; // Stop on first error
-                            }
-                        }
-
-                        if !failed && let Err(error) = budget.check_postgres(&mut tx).await {
-                            tracing::error!(
-                                "DatabaseWriter: Trace storage quota rejected PostgreSQL batch: {error}"
-                            );
-                            batch_failed = true;
-                            other_write_errors += 1;
-                            failed = true;
-                        }
-                        if failed {
-                            // Rollback on failure
-                            if let Err(e) = tx.rollback().await {
-                                batch_failed = true;
-                                tracing::error!("DatabaseWriter: Rollback failed: {}", e);
-                                outcome = "rollback_failed";
-                            } else {
-                                outcome = "rolled_back";
-                            }
-                        } else {
-                            // Commit on success
-                            if let Err(e) = tx.commit().await {
-                                batch_failed = true;
-                                tracing::error!("DatabaseWriter: Commit failed: {}", e);
-                                outcome = "commit_failed";
-                            } else {
-                                outcome = "committed";
-                            }
-                        }
-                    }
-                    Err(e) => {
+                match Self::write_postgres_calls(pool, org_id, env_id, &other_writes).await {
+                    Ok(()) => outcome = "committed",
+                    Err(error) => {
+                        tracing::error!(%error, "DatabaseWriter: PostgreSQL trace batch rejected");
                         batch_failed = true;
-                        tracing::error!("DatabaseWriter: Failed to begin transaction: {}", e);
                         other_write_errors += other_write_count;
-                        outcome = "quota_transaction_failed";
+                        outcome = "rolled_back";
                     }
                 }
             }
@@ -1484,6 +1325,130 @@ WHERE hot.call.run_id = EXCLUDED.run_id
             stats.maybe_log();
         }
         !batch_failed
+    }
+
+    /// One bounded multi-row UPSERT per trace chunk. Duplicate call identities
+    /// (start/stop in the same chunk) are merged before PostgreSQL sees them.
+    async fn write_postgres_calls(
+        pool: &DatabasePool,
+        org: Uuid,
+        env: Uuid,
+        writes: &[DatabaseWrite],
+    ) -> Result<(), String> {
+        let mut rows = indexmap::IndexMap::<Uuid, serde_json::Value>::new();
+        for write in writes {
+            let DatabaseWrite::Call {
+                execution_context,
+                call_id,
+                parent_call_id,
+                function_name,
+                static_scope,
+                runtime_path,
+                call_depth,
+                args,
+                return_value,
+                error,
+                flow,
+                file,
+                line,
+                column,
+                position,
+                start_time,
+                stop_time,
+                duration_us,
+            } = write
+            else {
+                return Err("Unexpected trace write".into());
+            };
+            let row = serde_json::json!({
+                "call_id": call_id, "run_id": execution_context.run_id,
+                "parent_call_id": parent_call_id, "function_name": function_name,
+                "static_scope": static_scope, "runtime_path": runtime_path, "call_depth": *call_depth as i32,
+                "args": args.as_deref().map(sanitize_json_for_jsonb),
+                "return_value": return_value.as_deref().map(sanitize_json_for_jsonb),
+                "error": error.as_deref().map(sanitize_text_for_postgres),
+                "flow": flow.as_deref().map(sanitize_json_for_jsonb),
+                "file": file, "line": line, "column": column, "position": position,
+                "start_time": start_time, "stop_time": stop_time, "duration_us": duration_us,
+                "env_id": execution_context.env_id,
+            });
+            if let Some(old) = rows.get_mut(call_id) {
+                if old["run_id"] != row["run_id"] {
+                    return Err("Trace call ownership changed".into());
+                }
+                for (key, value) in row.as_object().unwrap() {
+                    if value.is_null() {
+                        continue;
+                    }
+                    if matches!(
+                        key.as_str(),
+                        "function_name" | "static_scope" | "runtime_path"
+                    ) && value == "unknown"
+                    {
+                        continue;
+                    }
+                    if key == "call_depth"
+                        && value == 0
+                        && old[key].as_i64().is_some_and(|n| n != 0)
+                    {
+                        continue;
+                    }
+                    old[key] = value.clone();
+                }
+            } else {
+                rows.insert(*call_id, row);
+            }
+        }
+        let count = rows.len() as u64;
+        let payload = serde_json::Value::Array(rows.into_values().collect());
+        for attempt in 0..8 {
+            let result = async {
+                let (mut tx, budget) = crate::store::quota::begin_postgres(pool, org, env, crate::store::quota::QuotaKind::Call).await?;
+                let affected = sqlx::query(r#"
+INSERT INTO hot.call (call_id, run_id, parent_call_id, function_name, static_scope, runtime_path, call_depth, args, return_value, error, flow, file, line, "column", position, start_time, stop_time, duration_us, size, env_id)
+SELECT call_id, run_id, parent_call_id, function_name, static_scope, runtime_path, call_depth, args::jsonb, return_value::jsonb, error, flow::jsonb, file, line, "column", position, start_time, stop_time, duration_us,
+    COALESCE(octet_length(args::jsonb::text),0) + COALESCE(octet_length(return_value::jsonb::text),0) + COALESCE(octet_length(error),0) + COALESCE(octet_length(flow::jsonb::text),0) + 50, env_id
+FROM jsonb_to_recordset($1::jsonb) AS c(call_id uuid, run_id uuid, parent_call_id uuid, function_name text, static_scope text, runtime_path text, call_depth integer, args text, return_value text, error text, flow text, file text, line bigint, "column" bigint, position bigint, start_time timestamptz, stop_time timestamptz, duration_us bigint, env_id uuid)
+ON CONFLICT (call_id) DO UPDATE SET
+    stop_time = COALESCE(EXCLUDED.stop_time, hot.call.stop_time),
+    return_value = COALESCE(EXCLUDED.return_value, hot.call.return_value),
+    error = COALESCE(EXCLUDED.error, hot.call.error),
+    flow = COALESCE(EXCLUDED.flow, hot.call.flow),
+    duration_us = COALESCE(EXCLUDED.duration_us, hot.call.duration_us),
+    start_time = COALESCE(EXCLUDED.start_time, hot.call.start_time),
+    parent_call_id = COALESCE(EXCLUDED.parent_call_id, hot.call.parent_call_id),
+    -- Use NULLIF to treat 'unknown' as NULL, preferring real function names
+    function_name = COALESCE(NULLIF(EXCLUDED.function_name, 'unknown'), NULLIF(hot.call.function_name, 'unknown'), 'unknown'),
+    static_scope = COALESCE(NULLIF(EXCLUDED.static_scope, 'unknown'), NULLIF(hot.call.static_scope, 'unknown'), 'unknown'),
+    runtime_path = COALESCE(NULLIF(EXCLUDED.runtime_path, 'unknown'), NULLIF(hot.call.runtime_path, 'unknown'), 'unknown'),
+    call_depth = CASE WHEN EXCLUDED.call_depth = 0 AND hot.call.call_depth != 0 THEN hot.call.call_depth ELSE COALESCE(EXCLUDED.call_depth, hot.call.call_depth) END,
+    args = COALESCE(EXCLUDED.args, hot.call.args),
+    file = COALESCE(EXCLUDED.file, hot.call.file),
+    line = COALESCE(EXCLUDED.line, hot.call.line),
+    "column" = COALESCE(EXCLUDED."column", hot.call."column"),
+    position = COALESCE(EXCLUDED.position, hot.call.position),
+    size = COALESCE(octet_length(COALESCE(EXCLUDED.args, hot.call.args)::text), 0) +
+           COALESCE(octet_length(COALESCE(EXCLUDED.return_value, hot.call.return_value)::text), 0) +
+           COALESCE(octet_length(COALESCE(EXCLUDED.flow, hot.call.flow)::text), 0) +
+           COALESCE(octet_length(COALESCE(EXCLUDED.error, hot.call.error)), 0) + 50
+WHERE hot.call.run_id = EXCLUDED.run_id
+"#).bind(sqlx::types::Json(&payload)).execute(&mut *tx).await.map_err(|e| e.to_string())?.rows_affected();
+                if affected != count { return Err("Trace call ownership changed".into()); }
+                budget.check_postgres(&mut tx).await?;
+                tx.commit().await.map_err(|e| e.to_string())
+            }.await;
+            match result {
+                Err(error)
+                    if attempt < 7
+                        && (error.contains("could not serialize")
+                            || error.contains("deadlock detected")) =>
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(5 * (attempt + 1))).await;
+                }
+                result => return result,
+            }
+        }
+        unreachable!()
     }
 
     /// Verify trace authority using the original scope before acquiring the
@@ -2837,6 +2802,100 @@ mod tests {
             stop_time: None,
             duration_us: None,
         }
+    }
+
+    #[tokio::test]
+    async fn postgres_trace_batch_merges_calls_and_serializes_quota_without_account_lock() {
+        use sqlx::Executor;
+        let Ok(uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
+            return;
+        };
+        let admin = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&uri)
+            .await
+            .unwrap();
+        let name = format!("review_trace_{}", Uuid::new_v4().simple());
+        admin
+            .execute(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
+            .await
+            .unwrap();
+        let mut url = url::Url::parse(&uri).unwrap();
+        url.set_path(&name);
+        let conf = crate::val!({"uri":url.to_string(),"schema":"hot","rls":{"enforce":false}});
+        crate::db::run_migrations(&conf).await.unwrap();
+        let db = crate::db::create_db_pool(&conf).await.unwrap();
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let db = db.with_scope(DatabaseScope::Environment {
+            org_id: data.org_id,
+            env_id: data.env_id,
+        });
+        let ctx = ExecutionContext::new(
+            data.run_id,
+            data.stream_id,
+            4,
+            Some(data.env_id),
+            Some(data.org_id),
+            Some(data.user_id),
+            Some(data.build_id),
+        );
+        let id = Uuid::now_v7();
+        let first = trace_write(&ctx, id, Some("[1]"), "before");
+        let mut last = trace_write(&ctx, id, None, "after");
+        if let DatabaseWrite::Call {
+            return_value,
+            stop_time,
+            ..
+        } = &mut last
+        {
+            *return_value = Some("42".into());
+            *stop_time = Some(chrono::Utc::now());
+        }
+        DatabaseWriter::write_postgres_calls(&db, data.org_id, data.env_id, &[first, last])
+            .await
+            .unwrap();
+        let DatabasePool::Postgres(pool) = &db else {
+            unreachable!()
+        };
+        let row: (String, String, String) =
+            sqlx::query_as("SELECT args::text,return_value::text,error FROM call WHERE call_id=$1")
+                .bind(id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!(row, ("[1]".into(), "42".into(), "after".into()));
+        let used: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(call_bytes),0)::bigint FROM usage_storage WHERE env_id=$1",
+        )
+        .bind(data.env_id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let features = serde_json::json!({"call_storage_bytes":used+80});
+        sqlx::query("UPDATE org SET features=$1 WHERE org_id=$2")
+            .bind(sqlx::types::Json(features))
+            .bind(data.org_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        let one = vec![trace_write(&ctx, Uuid::now_v7(), None, &"x".repeat(20))];
+        let two = vec![trace_write(&ctx, Uuid::now_v7(), None, &"x".repeat(20))];
+        let (one, two) = tokio::join!(
+            DatabaseWriter::write_postgres_calls(&db, data.org_id, data.env_id, &one),
+            DatabaseWriter::write_postgres_calls(&db, data.org_id, data.env_id, &two)
+        );
+        assert_eq!(
+            usize::from(one.is_ok()) + usize::from(two.is_ok()),
+            1,
+            "{one:?} {two:?}"
+        );
+        pool.close().await;
+        admin
+            .execute(sqlx::AssertSqlSafe(format!(
+                "DROP DATABASE {name} WITH (FORCE)"
+            )))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

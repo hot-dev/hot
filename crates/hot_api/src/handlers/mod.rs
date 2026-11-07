@@ -302,6 +302,48 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn completion_without_inline_result_reads_the_authorized_stored_value() {
+        let db = db::test_db().await;
+        let data = db::insert_test_data(&db).await.unwrap();
+        let db::DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        let result = serde_json::json!({"body":"x".repeat(70_000)});
+        sqlx::query(
+            "UPDATE run SET result=?,status_id=2,stop_time=CURRENT_TIMESTAMP WHERE run_id=?",
+        )
+        .bind(result.to_string())
+        .bind(data.run_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        let conf = hot::val!({"blob":{"mode":"off"}});
+        assert_eq!(
+            resolve_stream_result(&db, &conf, data.env_id, data.run_id, None)
+                .await
+                .unwrap(),
+            Some(result)
+        );
+        assert!(
+            resolve_stream_result(&db, &conf, Uuid::now_v7(), data.run_id, None)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            resolve_stream_result(
+                &db,
+                &conf,
+                data.env_id,
+                Uuid::now_v7(),
+                Some(serde_json::json!(42))
+            )
+            .await
+            .unwrap(),
+            Some(serde_json::json!(42))
+        );
+    }
+
     #[test]
     fn scoped_api_key_permissions_are_enforced() {
         let mut api_key = test_api_key(Uuid::now_v7(), Uuid::now_v7());
@@ -373,4 +415,26 @@ mod tests {
                 .active
         );
     }
+}
+
+/// Small results arrive inline. A completion without a payload refers to the
+/// committed run row; the worker flushes that row before publishing the notice.
+pub(crate) async fn resolve_stream_result(
+    db: &DatabasePool,
+    conf: &hot::val::Val,
+    env_id: Uuid,
+    run_id: Uuid,
+    inline: Option<serde_json::Value>,
+) -> Result<Option<serde_json::Value>, String> {
+    if inline.is_some() {
+        return Ok(inline);
+    }
+    let run = hot::db::Run::get_run(db, &run_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    if run.env_id != env_id {
+        return Err("Run is outside the authorized environment".into());
+    }
+    let blob_store = hot::blob::blob_store_from_conf(std::sync::Arc::new(db.clone()), conf).await;
+    Ok(rehydrate_payload_json(db, blob_store.as_ref(), env_id, run.result).await)
 }

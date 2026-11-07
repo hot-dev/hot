@@ -722,7 +722,14 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
         config.container_backend.to_string(),
     );
     let container_max = container_budget.resolved;
-    let queue_claim_max = code_max.max(container_max);
+    // A running task occupies its processor for its entire lifetime. Give
+    // both execution pools enough processors to use their own slots.
+    let queue_claim_max = blocking_execution_capacity(
+        code_max,
+        config
+            .worker_conf
+            .get_int_or_default("worker.max-blocking-executions", -1),
+    ) + container_max;
     let shutdown_container_timeout_secs = config
         .worker_conf
         .get_int_or_default("task.shutdown-container-timeout-seconds", 30)
@@ -1037,7 +1044,6 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
     let bytecode_cache = Arc::new(BytecodeCache::default_location());
 
     // Split concurrency: task-count caps plus memory/disk admission for containers.
-    let code_semaphore = Arc::new(Semaphore::new(code_max));
     // Total live VM executions, including detached spawn_blocking threads
     // from timed-out tasks. Each execution's owned permit rides inside its
     // blocking closure, so a wedged thread keeps consuming capacity until it
@@ -1047,7 +1053,12 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
         .worker_conf
         .get_int_or_default("worker.max-blocking-executions", -1);
     let max_blocking_executions = blocking_execution_capacity(code_max, configured_max_blocking);
+    let code_semaphore = Arc::new(hot::run_slots::RunSlots::new_with_wait_limit(
+        code_max,
+        max_blocking_executions.saturating_sub(1),
+    ));
     let blocking_execution_slots = Arc::new(Semaphore::new(max_blocking_executions));
+    hot::execution_watchdog::tasks().configure(max_blocking_executions);
     tracing::info!(
         max_blocking_executions,
         configured_max = configured_max_blocking,
@@ -1347,15 +1358,13 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
     // (`ZOMBIE_HEARTBEAT_STALE_SECS`) is sized as a small multiple of this.
     let hb_db = Arc::clone(&db);
     let hb_worker_id = worker_id.clone();
-    let hb_coordinator = Arc::clone(&coordinator);
     let heartbeat_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
         interval.tick().await; // first tick is immediate, skip it
         loop {
             interval.tick().await;
-            if hb_coordinator.is_shutting_down() {
-                break;
-            }
+            // Draining tasks still belong to this worker. Keep their leases
+            // alive until shutdown has finalized them and aborts this handle.
             match Task::heartbeat(&hb_db, &hb_worker_id).await {
                 Ok(count) if count > 0 => {
                     tracing::debug!("Heartbeat updated for {} task(s)", count);
@@ -1655,11 +1664,17 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
         });
     }
 
-    tokio::select! {
+    let restarting = tokio::select! {
         biased;
-        _ = &mut shutdown => {
-            tracing::info!("Shutting down task worker");
-        }
+        _ = &mut shutdown => false,
+        _ = hot::execution_watchdog::tasks().restart_requested() => true,
+    };
+    if restarting {
+        tracing::error!("Blocking code task ceiling exhausted; draining before supervisor restart");
+        tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+            std::process::exit(75);
+        });
     }
 
     let _ = task_loop_shutdown_tx.send(true);
@@ -1693,6 +1708,9 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
 
     heartbeat_handle.abort();
     tracing::info!("Task worker stopped");
+    if restarting {
+        std::process::exit(75);
+    }
     Ok(())
 }
 
@@ -2318,7 +2336,7 @@ async fn process_task(
     task_queue: Arc<ProcessingQueue<TaskRequest>>,
     stream_publisher: Arc<StreamPubSub>,
     bytecode_cache: Arc<BytecodeCache>,
-    code_semaphore: Arc<Semaphore>,
+    code_semaphore: Arc<hot::run_slots::RunSlots>,
     blocking_execution_slots: Arc<Semaphore>,
     container_semaphore: Arc<Semaphore>,
     container_budget: Arc<resource_budget::ResourceBudget>,
@@ -2521,7 +2539,7 @@ async fn process_task_inner(
     task_queue: Arc<ProcessingQueue<TaskRequest>>,
     stream_publisher: Arc<StreamPubSub>,
     bytecode_cache: Arc<BytecodeCache>,
-    code_semaphore: Arc<Semaphore>,
+    code_semaphore: Arc<hot::run_slots::RunSlots>,
     blocking_execution_slots: Arc<Semaphore>,
     container_semaphore: Arc<Semaphore>,
     container_budget: Arc<resource_budget::ResourceBudget>,
@@ -2854,7 +2872,7 @@ async fn process_task_inner(
             )
             .await
             {
-                Ok(permit) => permit?,
+                Ok(permit) => permit,
                 Err(_) => {
                     tracing::warn!(
                         task_id = %task_id,
@@ -2958,6 +2976,7 @@ async fn process_task_inner(
                 worker_id.clone(),
                 blocking_execution_permit,
                 task_deadline,
+                _permit.handle(),
             )
             .await
         }
@@ -5545,6 +5564,7 @@ async fn process_code_task(
     worker_id: String,
     blocking_execution_permit: tokio::sync::OwnedSemaphorePermit,
     task_deadline: tokio::time::Instant,
+    run_slot_handle: hot::run_slots::RunSlotHandle,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let function_name = request.function_name.clone();
     let task_type = request.task_type.clone();
@@ -5720,48 +5740,45 @@ async fn process_code_task(
 
     // Subscribe to inbound task messages via pub/sub and forward to the inbox channel
     let inbox_tx_clone = inbox_tx.clone();
-    let stream_pub_clone = Arc::clone(&stream_publisher);
     let task_id_for_sub = task_id;
     let task_env_id = env_id;
     let cancel_notify_fwd = Arc::clone(&cancel_notify);
+    let mut sub =
+        await_claimed_task_deadline(task_deadline, stream_publisher.subscribe_task(task_id))
+            .await??;
     let inbox_forwarder = tokio::spawn(async move {
-        match stream_pub_clone.subscribe(task_id_for_sub).await {
-            Ok(mut sub) => loop {
-                match sub.next().await {
-                    // `::hot::task/send` and `cancel` check the task's env
-                    // before publishing; drop anything that doesn't name it.
-                    StreamNext::Event(StreamEvent::TaskMessage {
-                        env_id: sender_env, ..
-                    }) if sender_env != Some(task_env_id) => {
-                        tracing::warn!(
-                            task_id = %task_id_for_sub,
-                            sender_env = ?sender_env,
-                            "Dropping task message from another environment"
-                        );
-                    }
-                    StreamNext::Event(StreamEvent::TaskMessage { payload, .. }) => {
-                        let is_cancel = payload
-                            .as_object()
-                            .and_then(|m| m.get("$cancel"))
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false);
-
-                        let val: Val = serde_json::from_value(payload).unwrap_or(Val::Null);
-                        if inbox_tx_clone.send(val).await.is_err() {
-                            break;
-                        }
-
-                        if is_cancel {
-                            cancel_notify_fwd.notify_one();
-                            break;
-                        }
-                    }
-                    StreamNext::Event(_) | StreamNext::Idle => {}
-                    StreamNext::Closed => break,
+        loop {
+            match sub.next().await {
+                // `::hot::task/send` and `cancel` check the task's env
+                // before publishing; drop anything that doesn't name it.
+                StreamNext::Event(StreamEvent::TaskMessage {
+                    env_id: sender_env, ..
+                }) if sender_env != Some(task_env_id) => {
+                    tracing::warn!(
+                        task_id = %task_id_for_sub,
+                        sender_env = ?sender_env,
+                        "Dropping task message from another environment"
+                    );
                 }
-            },
-            Err(e) => {
-                tracing::warn!(task_id = %task_id_for_sub, "Failed to subscribe for task messages: {}", e);
+                StreamNext::Event(StreamEvent::TaskMessage { payload, .. }) => {
+                    let is_cancel = payload
+                        .as_object()
+                        .and_then(|m| m.get("$cancel"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+
+                    let val: Val = serde_json::from_value(payload).unwrap_or(Val::Null);
+                    if is_cancel {
+                        cancel_notify_fwd.notify_one();
+                        let _ = inbox_tx_clone.try_send(val);
+                        break;
+                    }
+                    if inbox_tx_clone.send(val).await.is_err() {
+                        break;
+                    }
+                }
+                StreamNext::Event(_) | StreamNext::Idle => {}
+                StreamNext::Closed => break,
             }
         }
     });
@@ -5839,7 +5856,11 @@ async fn process_code_task(
         .unwrap_or_else(|| Arc::new(hot::lang::hot::resource::ResourceRegistry::default()));
     let workload_started_at = chrono::Utc::now();
     let bundle_lease = BUNDLE_EXTRACTIONS.lease(build_id);
+    let (execution_complete, _execution_watch) =
+        hot::execution_watchdog::tasks().execution(org_id, task_id);
     let task_handle = tokio::task::spawn_blocking(move || {
+        let _execution_complete = execution_complete;
+        let _run_slot_scope = hot::run_slots::enter_run_slot(Some(run_slot_handle));
         // Hold the blocking-execution slot for the lifetime of the THREAD,
         // not the JoinHandle: when the timeout arm drops the handle, this
         // detached thread keeps consuming a permit until the closure returns,
@@ -5860,7 +5881,7 @@ async fn process_code_task(
         // as a typed task failure (with location, thread, optional backtrace)
         // instead of a generic "Task panicked" string. spawn_blocking still
         // catches panics outside this boundary as defense-in-depth.
-        match hot::lang::user_code::run_user_code(&panic_label, || {
+        let result = match hot::lang::user_code::run_user_code(&panic_label, || {
             hot::lang::engine::Engine::call_function_with_cached_bytecode_and_task(
                 &fn_name_exec,
                 std::slice::from_ref(&args_val),
@@ -5896,7 +5917,16 @@ async fn process_code_task(
                 // normalize_val_to_task_failure.
                 Ok(panic.to_failure_val())
             }
-        }
+        };
+        result.and_then(|value| {
+            value.check_shape("task result")?;
+            match classify_task_terminal_result(&value) {
+                Some((status, json, alert)) => Ok((Some((status, alert)), json)),
+                None => value
+                    .to_checked_json("task result")
+                    .map(|json| (None, json)),
+            }
+        })
     });
     // Timing is diagnostic; do not delay arming the claim-anchored execution
     // timeout behind its DB write. The write has its own short ceiling.
@@ -5966,10 +5996,8 @@ async fn process_code_task(
     }
 
     match execution_result {
-        Ok(Ok(Ok(result_val))) => {
-            if let Some((status, result_json, alert_name)) =
-                classify_task_terminal_result(&result_val)
-            {
+        Ok(Ok(Ok((terminal, result_json)))) => {
+            if let Some((status, alert_name)) = terminal {
                 if complete_task_with_event(
                     &db,
                     &stream_publisher,
@@ -5997,8 +6025,6 @@ async fn process_code_task(
                     "Task finished with terminal result"
                 );
             } else {
-                let result_json = serde_json::to_value(result_val.to_hot_data_repr())
-                    .unwrap_or(serde_json::Value::Null);
                 match store_task_result(
                     &db,
                     blob_store.as_ref(),
@@ -6174,6 +6200,52 @@ fn task_failure_json(msg: &str, err: Option<serde_json::Value>) -> serde_json::V
     })
 }
 
+/// Container output belongs in the task row, not every dashboard/alert frame.
+/// Borrow ordinary failures so this never clones a large box result first.
+fn task_notification_error(data: &serde_json::Value) -> std::borrow::Cow<'_, serde_json::Value> {
+    const STDERR_TAIL_BYTES: usize = 4096;
+    let Some(details) = data.pointer("/$val/err") else {
+        return std::borrow::Cow::Borrowed(data);
+    };
+    if details
+        .get("backend")
+        .and_then(serde_json::Value::as_str)
+        .is_none()
+        || (details.get("stdout").is_none() && details.get("stderr").is_none())
+    {
+        return std::borrow::Cow::Borrowed(data);
+    }
+    let stderr = details
+        .get("stderr")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let mut start = stderr.len().saturating_sub(STDERR_TAIL_BYTES);
+    while !stderr.is_char_boundary(start) {
+        start += 1;
+    }
+    let mut summary = serde_json::json!({
+        "stderr": &stderr[start..],
+        "output-truncated": true,
+    });
+    for field in [
+        "exit-code",
+        "backend",
+        "duration-ms",
+        "oom-killed",
+        "signal",
+    ] {
+        if let Some(value) = details.get(field) {
+            summary[field] = value.clone();
+        }
+    }
+    std::borrow::Cow::Owned(task_failure_json(
+        data.pointer("/$val/msg")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Container task failed"),
+        Some(summary),
+    ))
+}
+
 /// The organization a task's blobs belong to. A request rebuilt from its row
 /// doesn't carry it.
 async fn task_org_id(
@@ -6300,7 +6372,10 @@ fn task_cancellation_json(msg: &str, data: Option<serde_json::Value>) -> serde_j
 /// If the VM result is already a typed Failure/Cancellation, keep it as-is.
 /// Otherwise wrap it in `::hot::task/Failure`.
 fn normalize_val_to_task_failure(val: &Val) -> serde_json::Value {
-    let json = serde_json::to_value(val.to_hot_data_repr()).unwrap_or(serde_json::Value::Null);
+    let json = match val.to_checked_json("task failure") {
+        Ok(json) => json,
+        Err(error) => return task_failure_json(&error, None),
+    };
 
     // Already a typed value (::hot::run/Failure, ::hot::task/Failure, etc.) — pass through
     if json.get("$type").and_then(|t| t.as_str()).is_some() {
@@ -6333,8 +6408,9 @@ fn classify_task_terminal_result(
     let payload = result_val.unwrap_err().unwrap_or(result_val);
 
     if payload.is_cancelled() {
-        let json =
-            serde_json::to_value(payload.to_hot_data_repr()).unwrap_or(serde_json::Value::Null);
+        let json = payload
+            .to_checked_json("task cancellation")
+            .unwrap_or_else(|error| task_cancellation_json(&error, None));
         return Some((TaskStatus::Cancelled, json, "task:cancelled"));
     }
 
@@ -6693,7 +6769,9 @@ async fn complete_task_with_event(
 
     // Build error payload for the SSE event (only for non-success statuses)
     let error = match status {
-        TaskStatus::Failed | TaskStatus::TimedOut | TaskStatus::Cancelled => result.cloned(),
+        TaskStatus::Failed | TaskStatus::TimedOut | TaskStatus::Cancelled => {
+            result.map(|value| task_notification_error(value).into_owned())
+        }
         _ => None,
     };
 
@@ -6828,10 +6906,11 @@ async fn publish_task_alert(
         return;
     };
 
+    let error = task_notification_error(data);
     let alert_data = serde_json::json!({
         "task_id": task_id.to_string(),
         "env_id": env_id.to_string(),
-        "error": data,
+        "error": error.as_ref(),
         "timestamp": chrono::Utc::now().to_rfc3339(),
     });
 
@@ -10179,6 +10258,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn container_failure_notifications_keep_full_output_in_task_row() {
+        let db = hot::db::test_db().await;
+        let publisher =
+            StreamPubSub::new(hot::stream::StreamPubSubType::Memory, None, false).unwrap();
+        let (_request, task, _, _, _) = make_task_request_and_row();
+        insert_test_task(&db, &task).await;
+        let mut events = publisher.subscribe_env(task.env_id).await.unwrap();
+        let stderr = format!("{}final diagnostic", "🙂".repeat(300_000));
+        let failure = task_failure_json(
+            "Container exited with code 1",
+            Some(serde_json::json!({
+                "exit-code": 1,
+                "backend": "kata",
+                "stdout": "x".repeat(1_000_000),
+                "stderr": stderr,
+                "duration-ms": 100,
+            })),
+        );
+        assert!(
+            complete_task_with_event(
+                &db,
+                &publisher,
+                &task.task_id,
+                task.env_id,
+                task.stream_id,
+                &task.function_name,
+                "container",
+                TaskStatus::Failed,
+                Some(&failure),
+                None,
+                None,
+            )
+            .await
+        );
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.next())
+            .await
+            .unwrap()
+            .unwrap();
+        let EnvEvent::TaskComplete {
+            error: Some(error), ..
+        } = event
+        else {
+            panic!("expected task failure event");
+        };
+        assert!(error.to_string().len() < 8192);
+        assert!(error["$val"]["err"].get("stdout").is_none());
+        assert!(
+            error["$val"]["err"]["stderr"]
+                .as_str()
+                .unwrap()
+                .ends_with("final diagnostic")
+        );
+        assert_eq!(
+            error,
+            task_notification_error(&failure).into_owned(),
+            "alerts use the same summary"
+        );
+        assert_eq!(
+            Task::get(&db, &task.task_id).await.unwrap().result,
+            Some(failure)
+        );
+        let ordinary = task_failure_json("ordinary failure", None);
+        assert!(matches!(
+            task_notification_error(&ordinary),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn container_notifications_also_trim_output_without_an_exit_code() {
+        let failure = task_failure_json(
+            "Box timed out",
+            Some(
+                serde_json::json!({"backend":"kata","exit-code":null,"stdout":"x".repeat(100_000),"stderr":"e".repeat(10_000)}),
+            ),
+        );
+        let notice = task_notification_error(&failure);
+        assert!(notice.pointer("/$val/err/stdout").is_none());
+        assert_eq!(
+            notice
+                .pointer("/$val/err/stderr")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .len(),
+            4096
+        );
+    }
+
+    #[tokio::test]
     async fn unpersisted_completion_returns_false_so_alerts_and_retries_are_suppressed() {
         let db = hot::db::test_db().await;
         let publisher =
@@ -10595,7 +10764,7 @@ flaky fn (args: Any): Map {
                     queue,
                     publisher,
                     cache,
-                    Arc::new(Semaphore::new(1)),
+                    Arc::new(hot::run_slots::RunSlots::new(1)),
                     Arc::new(Semaphore::new(1)),
                     Arc::new(Semaphore::new(1)),
                     resource_budget::ResourceBudget::new(1024, 1024),
@@ -12178,7 +12347,7 @@ flaky fn (args: Any): Map {
                         Arc::clone(&queue),
                         Arc::clone(&publisher),
                         Arc::clone(&cache),
-                        Arc::new(Semaphore::new(1)),
+                        Arc::new(hot::run_slots::RunSlots::new(1)),
                         Arc::new(Semaphore::new(1)),
                         Arc::new(Semaphore::new(1)),
                         resource_budget::ResourceBudget::new(1_024, 10_240),

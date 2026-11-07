@@ -207,7 +207,7 @@ fn merge_alias_meta(target_meta: Option<&Val>, alias_meta: &Val) -> Val {
             for (k, v) in alias_map.iter() {
                 merged.insert(k.clone(), v.clone());
             }
-            Val::map(merged)
+            Val::map(merged.into_inner())
         }
         // Target has no map meta (e.g. None or non-Map): just use the
         // alias meta as-is.
@@ -897,7 +897,7 @@ impl Compiler {
                             var.sym.to_string(),
                             mcp_config
                         );
-                        Some(mcp_config.as_ref().clone())
+                        Some(mcp_config.as_ref().clone().into_inner())
                     }
                     _ => None,
                 }
@@ -912,7 +912,7 @@ impl Compiler {
                     if let Ok(val) = serde_json::from_value::<Val>(mcp_value.clone())
                         && let Val::Map(mcp_map) = val
                     {
-                        return Some(mcp_map.as_ref().clone());
+                        return Some(mcp_map.as_ref().clone().into_inner());
                     }
                 }
                 None
@@ -1089,7 +1089,9 @@ impl Compiler {
         // Handle both Map and JSON string formats
         match &meta.val {
             Val::Map(meta_map) => match meta_map.get(&Val::from("webhook")) {
-                Some(Val::Map(webhook_config)) => Some(webhook_config.as_ref().clone()),
+                Some(Val::Map(webhook_config)) => {
+                    Some(webhook_config.as_ref().clone().into_inner())
+                }
                 _ => None,
             },
             Val::Str(json_str) => {
@@ -1099,7 +1101,7 @@ impl Compiler {
                     && let Ok(val) = serde_json::from_value::<Val>(webhook_value.clone())
                     && let Val::Map(webhook_map) = val
                 {
-                    return Some(webhook_map.as_ref().clone());
+                    return Some(webhook_map.as_ref().clone().into_inner());
                 }
                 None
             }
@@ -1191,7 +1193,7 @@ impl Compiler {
     fn extract_agent_config_from_meta_val(meta_val: &Val) -> Option<indexmap::IndexMap<Val, Val>> {
         match meta_val {
             Val::Map(meta_map) => match meta_map.get(&Val::from("agent")) {
-                Some(Val::Map(agent_config)) => Some(agent_config.as_ref().clone()),
+                Some(Val::Map(agent_config)) => Some(agent_config.as_ref().clone().into_inner()),
                 _ => None,
             },
             Val::Str(json_str) => {
@@ -1201,7 +1203,7 @@ impl Compiler {
                     && let Ok(val) = serde_json::from_value::<Val>(agent_value.clone())
                     && let Val::Map(agent_map) = val
                 {
-                    return Some(agent_map.as_ref().clone());
+                    return Some(agent_map.as_ref().clone().into_inner());
                 }
                 None
             }
@@ -1287,7 +1289,9 @@ impl Compiler {
     ) -> Option<indexmap::IndexMap<Val, Val>> {
         match meta_val {
             Val::Map(meta_map) => match meta_map.get(&Val::from("workflow")) {
-                Some(Val::Map(workflow_config)) => Some(workflow_config.as_ref().clone()),
+                Some(Val::Map(workflow_config)) => {
+                    Some(workflow_config.as_ref().clone().into_inner())
+                }
                 _ => None,
             },
             Val::Str(json_str) => {
@@ -1297,7 +1301,7 @@ impl Compiler {
                     && let Ok(val) = serde_json::from_value::<Val>(workflow_value.clone())
                     && let Val::Map(workflow_map) = val
                 {
-                    return Some(workflow_map.as_ref().clone());
+                    return Some(workflow_map.as_ref().clone().into_inner());
                 }
                 None
             }

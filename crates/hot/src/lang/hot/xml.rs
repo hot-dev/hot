@@ -199,7 +199,7 @@ fn get_attrs(val: &Val) -> Result<IndexMap<Val, Val>, String> {
         Val::Map(m) => {
             let key = Val::from("attrs");
             match m.get(&key) {
-                Some(Val::Map(attrs)) => Ok((**attrs).clone()),
+                Some(Val::Map(attrs)) => Ok((**attrs).clone().into_inner()),
                 Some(_) => Err("attrs field must be a Map".to_string()),
                 None => Ok(IndexMap::new()),
             }
@@ -222,6 +222,9 @@ fn get_tag(val: &Val) -> Option<String> {
 }
 
 fn parse_xml(xml_str: &str) -> Result<Val, String> {
+    const MAX_XML_DEPTH: usize = crate::blob::MAX_RECORD_DEPTH / 2;
+    const MAX_XML_NODES: usize = 100_000;
+    let mut nodes = 0usize;
     let mut reader = Reader::from_str(xml_str);
     // quick-xml reports each `&...;` reference as its own `GeneralRef`
     // event, splitting the surrounding text. Trimming per event would eat
@@ -252,17 +255,29 @@ fn parse_xml(xml_str: &str) -> Result<Val, String> {
     }
 
     loop {
+        nodes += 1;
+        if nodes > MAX_XML_NODES {
+            return Err("XML exceeds node/attribute budget".to_string());
+        }
         match reader.read_event() {
             Ok(Event::Start(e)) => {
+                if stack.len() >= MAX_XML_DEPTH {
+                    return Err("XML exceeds maximum nesting depth".to_string());
+                }
                 flush_text(&mut pending, &mut stack);
                 let tag_name = e.name().as_ref().to_string();
                 let attrs = parse_attributes(&e)?;
+                nodes += attrs.len();
                 stack.push((tag_name, attrs, Vec::new()));
             }
             Ok(Event::Empty(e)) => {
+                if stack.len() >= MAX_XML_DEPTH {
+                    return Err("XML exceeds maximum nesting depth".to_string());
+                }
                 flush_text(&mut pending, &mut stack);
                 let tag_name = e.name().as_ref().to_string();
                 let attrs = parse_attributes(&e)?;
+                nodes += attrs.len();
                 let element = build_xml_val(&tag_name, attrs, Vec::new());
 
                 if let Some((_, _, content)) = stack.last_mut() {
@@ -447,6 +462,12 @@ fn serialize_element<W: std::io::Write>(writer: &mut Writer<W>, val: &Val) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deeply_nested_xml_is_rejected_before_building_the_value() {
+        let xml = format!("{}text{}", "<a>".repeat(10_000), "</a>".repeat(10_000));
+        assert!(parse_xml(&xml).unwrap_err().contains("depth"));
+    }
 
     #[test]
     fn xml_attribute_parsing_remains_compatible() {

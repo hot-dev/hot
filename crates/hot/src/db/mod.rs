@@ -6,6 +6,32 @@ use tracing::debug;
 use url::Url;
 use uuid::Uuid;
 
+/// Decode fleet reads one row at a time. A malformed legacy JSON column must
+/// not stop reconciliation or scheduling for every other tenant.
+pub(crate) async fn collect_decodable_page<T>(
+    mut rows: impl futures::Stream<Item = Result<T, sqlx::Error>> + Unpin,
+) -> Result<(Vec<T>, usize), sqlx::Error> {
+    use futures::StreamExt;
+    let mut decoded = Vec::new();
+    let mut count = 0;
+    while let Some(row) = rows.next().await {
+        count += 1;
+        match row {
+            Ok(row) => decoded.push(row),
+            Err(error @ (sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_))) => {
+                tracing::error!(row_index = count, %error, "Skipping undecodable row in fleet read");
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok((decoded, count))
+}
+pub(crate) async fn collect_decodable<T>(
+    rows: impl futures::Stream<Item = Result<T, sqlx::Error>> + Unpin,
+) -> Result<Vec<T>, sqlx::Error> {
+    Ok(collect_decodable_page(rows).await?.0)
+}
+
 /// Macro to log database errors consistently
 #[macro_export]
 macro_rules! log_db_error {
@@ -189,7 +215,7 @@ pub use scope::{
     BootstrapOperation, DatabaseScope, MaintenanceOperation, current_database_scope,
     with_database_scope,
 };
-pub use scoped_postgres::ScopedPgPool;
+pub use scoped_postgres::{ScopedPgPool, ScopedPgTransaction};
 pub use service_key::{ServiceKey, ServiceKeyError};
 pub use session::{Session, SessionError};
 pub use stream::{Stream, StreamError, StreamSummary};
@@ -640,6 +666,15 @@ pub async fn create_db_pool(conf: &Val) -> Result<DatabasePool, DatabaseError> {
 
             let db = PgPoolOptions::new()
                 .max_connections(max_connections)
+                .test_before_acquire(false)
+                .before_acquire(|connection, metadata| {
+                    Box::pin(async move {
+                        if metadata.idle_for >= std::time::Duration::from_secs(30) {
+                            sqlx::Connection::ping(connection).await?;
+                        }
+                        Ok(true)
+                    })
+                })
                 .acquire_timeout(std::time::Duration::from_secs(5)) // Fail fast instead of hanging
                 .idle_timeout(std::time::Duration::from_secs(60))
                 .max_lifetime(std::time::Duration::from_secs(1800)) // 30 minutes

@@ -248,7 +248,7 @@ pub fn invoke_with_input(
 
     let input_map = match input {
         Val::Map(m) => m.clone(),
-        Val::Null => Arc::new(IndexMap::new()),
+        Val::Null => Arc::new(IndexMap::new().into()),
         other => {
             return HotResult::Err(Val::from(format!(
                 "::hot::internal::mcp/invoke-with-input: input must be a Map (got {:?})",

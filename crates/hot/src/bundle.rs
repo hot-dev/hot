@@ -774,7 +774,7 @@ fn normalize_manifest_artifact_source_path(
 ) -> Val {
     let mut val = val.clone();
     if let Val::Map(map) = &mut val {
-        normalize_manifest_source_field(std::sync::Arc::make_mut(map), "file", normalizer);
+        normalize_manifest_source_field(&mut **std::sync::Arc::make_mut(map), "file", normalizer);
     }
     val
 }
@@ -2323,7 +2323,7 @@ limits {port: 8080}
         let Some(Val::Map(bundle_info)) = manifest.get(&Val::from("hot.bundle.names")) else {
             panic!("manifest should hold the bundle");
         };
-        bundle_info.as_ref().clone()
+        bundle_info.as_ref().clone().into_inner()
     }
 
     fn manifest_meta(artifact: &Val) -> Val {

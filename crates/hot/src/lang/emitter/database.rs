@@ -5,7 +5,7 @@ use crate::blob::{BlobScope, BlobStore, MAX_INLINE_HARD_LIMIT_BYTES, SpillSource
 use crate::db::DatabasePool;
 use crate::lang::event::ExecutionContext;
 use crate::lang::masking::RecordMask;
-use crate::val::Val;
+use crate::val::{ShapeIdentity, Val};
 use ahash::{AHashMap, AHashSet};
 use indexmap::IndexMap;
 use std::future::Future;
@@ -984,8 +984,13 @@ impl DatabaseEngineEventEmitterProcessor {
     /// Without this, a single bad byte in a container/webhook payload would
     /// 22P05 the whole transaction batch and we'd silently drop a window of
     /// trace data. See [`super::postgres_safety`] for the full rationale.
+    #[cfg(test)]
     fn call_payload(v: &Val) -> CallPayload {
-        let storage_val = v.to_record_repr();
+        Self::prepared_call_payload(&v.to_record_repr())
+    }
+
+    fn prepared_call_payload(v: &Val) -> CallPayload {
+        let storage_val = v.clone();
         if crate::blob::count_large_leaves(&storage_val, LARGE_PAYLOAD_LEAF_BYTES) > 0 {
             return CallPayload::Large(storage_val);
         }
@@ -1012,7 +1017,7 @@ impl DatabaseEngineEventEmitterProcessor {
     /// Mask a value recorded on a run. Masks its storage form, so that values
     /// inside a closure's captures, say, aren't missed.
     fn mask_run_val(val: &Val, ctx: &ExecutionContext) -> Val {
-        RecordMask::new(&ctx.secret_values, &ctx.secret_value_hashes).mask_val(val.to_record_repr())
+        RecordMask::new(&ctx.secret_values, &ctx.secret_value_hashes).mask_val(val.clone())
     }
 
     fn handle_call_start_batch(&mut self, event: &EngineEvent) {
@@ -1077,7 +1082,7 @@ impl DatabaseEngineEventEmitterProcessor {
                     if matches!(v, Val::Null) {
                         None
                     } else {
-                        Some(Self::call_payload(v))
+                        Some(Self::prepared_call_payload(v))
                     }
                 });
 
@@ -1104,7 +1109,7 @@ impl DatabaseEngineEventEmitterProcessor {
                     if matches!(v, Val::Null) {
                         None
                     } else {
-                        Some(Self::call_payload(v))
+                        Some(Self::prepared_call_payload(v))
                     }
                 });
 
@@ -1166,7 +1171,7 @@ impl DatabaseEngineEventEmitterProcessor {
                     if matches!(v, Val::Null) {
                         None
                     } else {
-                        Some(Self::call_payload(v))
+                        Some(Self::prepared_call_payload(v))
                     }
                 });
 
@@ -1282,6 +1287,53 @@ impl DatabaseEngineEventEmitter {
     }
 }
 
+// Each VM thread keeps a small cache for its current run. Weak identities
+// prevent pointer reuse without retaining discarded inputs; COW invalidates them.
+// Shape decisions and data conversion happen before entering the shared queue.
+thread_local! {
+    static RECORD_CACHE: std::cell::RefCell<(Uuid, Vec<(ShapeIdentity, Val)>, usize)> =
+        std::cell::RefCell::new((Uuid::nil(), Vec::new(), 0));
+}
+fn prepare_record_value(run: Uuid, value: &Val) -> Val {
+    let Some(identity) = ShapeIdentity::of(value) else {
+        return value.to_record_repr();
+    };
+    RECORD_CACHE.with(|slot| {
+        let mut cache = slot.borrow_mut();
+        if cache.0 != run {
+            *cache = (run, Vec::new(), 0);
+        }
+        if let Some((_, prepared)) = cache.1.iter().find(|(identity, _)| identity.matches(value)) {
+            return prepared.clone();
+        }
+        let prepared = value.to_record_repr();
+        let bytes = crate::blob::estimate_val_size(&prepared);
+        if cache.1.len() < 64 && bytes <= (4 * 1024 * 1024usize).saturating_sub(cache.2) {
+            cache.2 += bytes;
+            cache.1.push((identity, prepared.clone()));
+        }
+        prepared
+    })
+}
+fn prepare_record_event(mut event: EngineEvent) -> EngineEvent {
+    let fields: &[&str] = match event.event_type.as_str() {
+        "call:start" => &["args", "flow"],
+        "call:stop" => &["return_value", "flow"],
+        "run:stop" => &["result"],
+        "run:fail" => &["failure", "err", "origin"],
+        "run:cancel" => &["cancellation", "data", "origin"],
+        _ => &[],
+    };
+    if let Val::Map(data) = &mut event.event_data {
+        for field in fields {
+            if let Some(value) = Arc::make_mut(data).get_mut(&Val::from(*field)) {
+                *value = prepare_record_value(event.execution_context.run_id, value);
+            }
+        }
+    }
+    event
+}
+
 impl EngineEventEmitter for DatabaseEngineEventEmitter {
     fn emit(&self, event: EngineEvent) {
         let event_type = event.event_type.clone();
@@ -1309,7 +1361,8 @@ impl EngineEventEmitter for DatabaseEngineEventEmitter {
             event
         };
 
-        // Send all events through the processor for batching, secret masking, etc.
+        let event = prepare_record_event(event);
+        // Send bounded data through the processor for batching and masking.
         if self.event_sender.send(event).is_err() {
             // Only log error if shutdown hasn't been initiated (expected during shutdown)
             if !self.shutdown_initiated.load(Ordering::SeqCst) {
@@ -1386,6 +1439,18 @@ mod tests {
 
         emitter.emit(start_event);
         emitter.emit(stop_event);
+    }
+
+    #[test]
+    fn record_shape_cache_does_not_keep_discarded_inputs_alive() {
+        let value = Val::vec(vec![Val::Int(1)]);
+        let Val::Vec(items) = &value else {
+            unreachable!()
+        };
+        let weak = Arc::downgrade(items);
+        assert_eq!(prepare_record_value(Uuid::now_v7(), &value), value);
+        drop(value);
+        assert!(weak.upgrade().is_none());
     }
 
     #[test]

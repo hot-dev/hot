@@ -655,7 +655,7 @@ impl VirtualMachine {
         payload.insert(Val::from("declared-type"), Val::from(record));
         Some(Val::err(Val::map_from_iter([
             (Val::from("$type"), Val::from(type_name)),
-            (Val::from("$val"), Val::map(payload)),
+            (Val::from("$val"), Val::map(payload.into_inner())),
         ])))
     }
 
@@ -1481,7 +1481,7 @@ fn with_article(type_name: &str) -> String {
 /// `value` with one field replaced, keeping a typed value's tag.
 fn with_field(value: &Val, field: Val, field_value: Val) -> Val {
     let mut fields = match crate::val::as_fields(value) {
-        Val::Map(fields) => fields.as_ref().clone(),
+        Val::Map(fields) => fields.as_ref().clone().into_inner(),
         _ => indexmap::IndexMap::new(),
     };
     fields.insert(field, field_value);

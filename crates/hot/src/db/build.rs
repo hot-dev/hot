@@ -1190,6 +1190,11 @@ impl Build {
                 .execute(&mut *tx)
                 .await?;
 
+                // Dynamic schedules carry arguments bound to the old program. Cancel
+                // them atomically with activation rather than leaving invisible work.
+                sqlx::query("UPDATE schedule SET active = false, deactivated_at = NOW(), meta = COALESCE(meta, '{}'::jsonb) || '{\"deactivation-reason\":\"build replaced by deployment\"}'::jsonb WHERE active = true AND value IS NOT NULL AND build_id <> $1 AND build_id IN (SELECT build_id FROM build WHERE project_id = $2)")
+                    .bind(build_id).bind(build.project_id).execute(&mut *tx).await?;
+
                 super::schedule::quota::validate_postgres(&mut tx, root, limit)
                     .await
                     .map_err(schedule_admission_error)?;
@@ -1245,6 +1250,9 @@ impl Build {
                 .bind(env_id)
                 .execute(&mut *tx)
                 .await?;
+
+                sqlx::query("UPDATE schedule SET active = 0, deactivated_at = CURRENT_TIMESTAMP, meta = json_set(COALESCE(meta, '{}'), '$.deactivation-reason', 'build replaced by deployment') WHERE active = 1 AND value IS NOT NULL AND build_id <> ? AND build_id IN (SELECT build_id FROM build WHERE project_id = ?)")
+                    .bind(build_id).bind(build.project_id).execute(&mut *tx).await?;
 
                 super::schedule::quota::validate_sqlite(&mut tx, root, limit)
                     .await
@@ -1320,6 +1328,11 @@ impl Build {
                 .await?;
 
                 // Commit the transaction
+                // Dynamic schedules carry arguments bound to the old program. Cancel
+                // them atomically with activation rather than leaving invisible work.
+                sqlx::query("UPDATE schedule SET active = false, deactivated_at = NOW(), meta = COALESCE(meta, '{}'::jsonb) || '{\"deactivation-reason\":\"build replaced by deployment\"}'::jsonb WHERE active = true AND value IS NOT NULL AND build_id <> $1 AND build_id IN (SELECT build_id FROM build WHERE project_id = $2)")
+                    .bind(build_id).bind(build.project_id).execute(&mut *tx).await?;
+
                 super::schedule::quota::validate_postgres(&mut tx, root, limit)
                     .await
                     .map_err(schedule_admission_error)?;
@@ -1375,6 +1388,9 @@ impl Build {
                 .await?;
 
                 // Commit the transaction
+                sqlx::query("UPDATE schedule SET active = 0, deactivated_at = CURRENT_TIMESTAMP, meta = json_set(COALESCE(meta, '{}'), '$.deactivation-reason', 'build replaced by deployment') WHERE active = 1 AND value IS NOT NULL AND build_id <> ? AND build_id IN (SELECT build_id FROM build WHERE project_id = ?)")
+                    .bind(build_id).bind(build.project_id).execute(&mut *tx).await?;
+
                 super::schedule::quota::validate_sqlite(&mut tx, root, limit)
                     .await
                     .map_err(schedule_admission_error)?;
@@ -1837,6 +1853,60 @@ mod tests {
                 "Build is incompatible with this Hot runtime: Bundle engine version {incompatible_version} is incompatible with runtime {runtime_version}; major versions must match"
             ))
         );
+    }
+
+    #[tokio::test]
+    async fn both_activation_paths_cancel_old_dynamic_schedules_with_a_reason() {
+        for prepared in [false, true] {
+            let db = test_db().await;
+            let user = Uuid::now_v7();
+            let (_, project) = insert_test_project(&db, &user).await;
+            let old = insert_test_build(&db, &project, &user).await;
+            let new = insert_test_build(&db, &project, &user).await;
+            Build::activate_build_directly(&db, &old, &user)
+                .await
+                .unwrap();
+            let schedule = Uuid::now_v7();
+            super::super::Schedule::insert_schedule(
+                &db,
+                &schedule,
+                &old,
+                "0 * * * * *",
+                "::app",
+                "work",
+                None,
+                Some(&serde_json::json!([1])),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            if prepared {
+                Build::request_bundle_deployment(&db, &new, &user)
+                    .await
+                    .unwrap();
+                assert!(
+                    Build::activate_prepared_build(&db, &new, &user)
+                        .await
+                        .unwrap()
+                );
+            } else {
+                Build::activate_build_directly(&db, &new, &user)
+                    .await
+                    .unwrap();
+            }
+            let old_schedule = super::super::Schedule::get_schedule(&db, &schedule)
+                .await
+                .unwrap();
+            assert!(!old_schedule.active);
+            assert!(old_schedule.deactivated_at.is_some());
+            assert_eq!(
+                old_schedule.meta.unwrap()["deactivation-reason"],
+                "build replaced by deployment"
+            );
+        }
     }
 
     #[tokio::test]

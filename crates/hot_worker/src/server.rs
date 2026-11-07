@@ -2145,8 +2145,15 @@ impl std::fmt::Display for ParkedEvent {
 impl std::error::Error for ParkedEvent {}
 
 async fn park_event(db: &DatabasePool, message: &EventMessage) -> Result<(), WorkerError> {
+    park_event_with_epoch(db, message, None).await
+}
+async fn park_event_with_epoch(
+    db: &DatabasePool,
+    message: &EventMessage,
+    epoch: Option<&str>,
+) -> Result<(), WorkerError> {
     let payload = serde_json::to_string(message)?;
-    let sql = "INSERT INTO parked_event(message_id,env_id,build_id,payload) VALUES($1,$2,$3,$4) ON CONFLICT(message_id) DO NOTHING";
+    let sql = "INSERT INTO parked_event(message_id,env_id,build_id,payload,quota_epoch) VALUES($1,$2,$3,$4,$5) ON CONFLICT(message_id) DO NOTHING";
     match db {
         DatabasePool::Postgres(pool) => {
             sqlx::query(sql)
@@ -2154,6 +2161,7 @@ async fn park_event(db: &DatabasePool, message: &EventMessage) -> Result<(), Wor
                 .bind(message.body.event.env_id)
                 .bind(message.body.execution_context.build_id)
                 .bind(payload)
+                .bind(epoch)
                 .execute(pool)
                 .await?;
         }
@@ -2163,6 +2171,7 @@ async fn park_event(db: &DatabasePool, message: &EventMessage) -> Result<(), Wor
                 .bind(message.body.event.env_id)
                 .bind(message.body.execution_context.build_id)
                 .bind(payload)
+                .bind(epoch)
                 .execute(pool)
                 .await?;
         }
@@ -2216,10 +2225,12 @@ async fn replay_parked_events(
             WHERE b.build_id=parked_event.build_id AND p.active=true
         ) THEN $2 ELSE $3 END
         WHERE message_id IN (
-            SELECT message_id FROM parked_event WHERE env_id=$4 AND leased_until <= $1
+            SELECT message_id FROM parked_event WHERE env_id=$4 AND leased_until <= $1 AND (quota_epoch IS NULL OR quota_epoch <> $5)
             ORDER BY leased_until LIMIT 100
         ) AND leased_until <= $1 RETURNING message_id,payload,leased_until=$2";
     for env_id in envs {
+        let env = hot::db::Env::get_env_uncached(db, &env_id).await?;
+        let epoch = hot::db::Run::admission_epoch(db, env.org_id).await?;
         let rows: Vec<(Uuid, String, bool)> = match db {
             DatabasePool::Postgres(pool) => {
                 sqlx::query_as(sql)
@@ -2227,6 +2238,7 @@ async fn replay_parked_events(
                     .bind(lease)
                     .bind(backoff)
                     .bind(env_id)
+                    .bind(&epoch)
                     .fetch_all(pool)
                     .await?
             }
@@ -2236,6 +2248,7 @@ async fn replay_parked_events(
                     .bind(lease)
                     .bind(backoff)
                     .bind(env_id)
+                    .bind(&epoch)
                     .fetch_all(pool)
                     .await?
             }
@@ -5650,6 +5663,8 @@ async fn execute_single_event_handler_inner(
         None
     };
 
+    let (execution_complete, _execution_watch) =
+        hot::execution_watchdog::events().execution(Some(org_id), run_id);
     let handle = {
         // Clone/move all data needed for the blocking task
         let function_name = function_name.clone();
@@ -5676,6 +5691,7 @@ async fn execute_single_event_handler_inner(
         let panic_label = format!("worker:{}", function_name);
         let spawn_scheduled = std::time::Instant::now();
         tokio::task::spawn_blocking(move || {
+            let _execution_complete = execution_complete;
             let _blocking_execution_permit = blocking_execution_permit;
             // A timed-out VM keeps running detached and can still read resources.
             let _bundle_lease = bundle_lease;
@@ -5968,7 +5984,7 @@ async fn execute_single_event_handler_inner(
                         }
                         Err(e) => Err(e),
                     }
-                }
+                }.and_then(hot::val::CheckedOutput::new)
             }) // end run_user_code
         }) // end spawn_blocking
     };
@@ -6099,7 +6115,7 @@ async fn execute_single_event_handler_inner(
     };
 
     // Handle result (rest of function continues as before)
-    let result = match result {
+    let mut result = match result {
         Ok(val) => val,
         Err(e) => {
             error!(
@@ -6138,12 +6154,15 @@ async fn execute_single_event_handler_inner(
         );
     }
 
+    let mut result_durable = false;
     // Flush emitter to ensure run is written to database BEFORE publishing stream event
     // This guarantees the SSE handler can query the run from the database
     if let Some(ref em) = emitter {
         let flush_started = std::time::Instant::now();
         match bounded_run_result_write(RUN_RESULT_FLUSH_TIMEOUT, em.flush_run(run_id)).await {
-            Ok(Ok(())) => {}
+            Ok(Ok(())) => {
+                result_durable = true;
+            }
             Ok(Err(e)) => {
                 tracing::warn!("Failed to flush emitter before stream publish: {}", e);
             }
@@ -6170,7 +6189,13 @@ async fn execute_single_event_handler_inner(
         let env_id = event_message.body.event.env_id;
 
         // Convert result to JSON for the stream event
-        let result_json = serde_json::to_value(result.to_hot_data_repr()).ok();
+        // None is a completion notice whose result is read from the durable
+        // run row. Keep inline delivery if persistence failed or is disabled.
+        let result_json = if result.stream_inline || !result_durable {
+            Some(std::mem::take(&mut result.json))
+        } else {
+            None
+        };
         // A failure is recorded, and logged by what waits on it. A run's result
         // is left whole: this event delivers it to the webhook or MCP caller
         // waiting for it, and it may be what they asked for.
@@ -6178,7 +6203,14 @@ async fn execute_single_event_handler_inner(
             &_execution_context.secret_values,
             &_execution_context.secret_value_hashes,
         );
-        let mask_failure = |text: String| failure_mask.mask_text(&text).into_owned();
+        let mask_failure = |text: String| {
+            let masked = failure_mask.mask_text(&text);
+            let mut end = masked.len().min(4096);
+            while !masked.is_char_boundary(end) {
+                end -= 1;
+            }
+            masked[..end].to_string()
+        };
 
         // Get run type as string for env event
         let run_type = if event_message.body.event.event_type == "hot:call" {
@@ -6199,20 +6231,13 @@ async fn execute_single_event_handler_inner(
                 env_id,
                 stream_id,
                 event_id,
-                error: result_json.map(|v| mask_failure(v.to_string())),
+                error: result_json
+                    .map(|v| mask_failure(v.to_string()))
+                    .or_else(|| result.failure_text.clone().map(mask_failure)),
             }
         } else if is_cancelled_result {
             // Extract cancellation reason from the Cancellation type if available
-            let reason = result.unwrap_cancelled().and_then(|v| {
-                if let Val::Map(m) = v {
-                    m.get(&Val::from("msg")).and_then(|msg| match msg {
-                        Val::Str(s) => Some(mask_failure((**s).to_owned())),
-                        _ => None,
-                    })
-                } else {
-                    None
-                }
-            });
+            let reason = result.cancellation_reason.clone().map(mask_failure);
             StreamEvent::RunCancel {
                 run_id,
                 env_id,
@@ -6241,19 +6266,10 @@ async fn execute_single_event_handler_inner(
                 fn_name: Some(function_name.clone()),
                 run_type: run_type.clone(),
                 duration_ms: None, // Duration is tracked by the run record
-                error: result.unwrap_err().map(|v| mask_failure(v.to_string())),
+                error: result.failure_text.clone().map(mask_failure),
             }
         } else if is_cancelled_result {
-            let reason = result.unwrap_cancelled().and_then(|v| {
-                if let Val::Map(m) = v {
-                    m.get(&Val::from("msg")).and_then(|msg| match msg {
-                        Val::Str(s) => Some(mask_failure((**s).to_owned())),
-                        _ => None,
-                    })
-                } else {
-                    None
-                }
-            });
+            let reason = result.cancellation_reason.clone().map(mask_failure);
             EnvEvent::RunCancel {
                 run_id,
                 env_id,
@@ -7738,6 +7754,7 @@ pub async fn run_with_components_shared_context_and_db(
     let max_blocking_executions =
         blocking_execution_capacity(worker_count, configured_max_blocking_executions);
     let blocking_execution_slots = Arc::new(Semaphore::new(max_blocking_executions));
+    hot::execution_watchdog::events().configure(max_blocking_executions);
     let crash_quarantine = CrashQuarantine::default();
 
     info!(
@@ -8854,29 +8871,20 @@ pub async fn run_with_components_shared_context_and_db(
                                                         }
                                                         let run_ids: Vec<Uuid> = admitted_handlers.iter().map(|(_, _, id)| *id).collect();
                                                         let org_id = event_message.body.execution_context.org_id.ok_or_else(|| worker_error("Hydrated event has no organization"))?;
-                                                        hot::db::run::Run::admit_executions(db, &org_id, &env_id, &run_ids).await
-                                                            .map_err(|e| match e {
-                                                                // Database errors leave accepted work pending.
-                                                                hot::db::run::RunError::Database(_) => {
-                                                                    worker_infrastructure_retry_error(e.to_string(), infra_retry_backoff_ms.max(5_000))
-                                                                }
-                                                                // A suspended account or environment, or a reached account
-                                                                // limit, also leaves the event pending: it runs once the
-                                                                // account resumes, the period rolls over or the limit is raised.
+                                                        if let Err(error) = hot::db::run::Run::admit_executions(db, &org_id, &env_id, &run_ids).await {
+                                                            match error {
                                                                 hot::db::run::RunError::Suspended(_) | hot::db::run::RunError::QuotaExceeded(_) => {
-                                                                    if wait_log_due(org_id) {
-                                                                        warn!(
-                                                                            event_id = %event_message.body.event.event_id,
-                                                                            %org_id,
-                                                                            "hot.dev: WORKER {} events wait for run admission: {}",
-                                                                            worker_id,
-                                                                            e
-                                                                        );
-                                                                    }
-                                                                    worker_infrastructure_retry_error(e.to_string(), infra_retry_backoff_ms.max(60_000))
+                                                                    if wait_log_due(org_id) { warn!(%org_id, %error, "Events parked until account admission changes"); }
+                                                                    let epoch = if matches!(error, hot::db::run::RunError::QuotaExceeded(_)) {
+                                                                        Some(hot::db::Run::admission_epoch(db, org_id).await?)
+                                                                    } else { None };
+                                                                    park_event_with_epoch(db, &event_message, epoch.as_deref()).await?;
+                                                                    return Ok(());
                                                                 }
-                                                                _ => worker_error(e.to_string()),
-                                                            })?;
+                                                                hot::db::run::RunError::Database(_) => return Err(worker_infrastructure_retry_error(error.to_string(), infra_retry_backoff_ms.max(5_000))),
+                                                                _ => return Err(worker_error(error.to_string())),
+                                                            }
+                                                        }
                                                         // No handler has started yet, so a failure here can still
                                                         // leave the whole event for redelivery.
                                                         hot::db::run::Run::reopen_held_runs(db, &held_runs).await
@@ -10030,7 +10038,26 @@ pub async fn run_with_components_shared_context_and_db(
     }
 
     // Wait for SIGINT or SIGTERM
-    hot::signal::shutdown_signal().await;
+    if let Some(db) = &db {
+        crate::alert_worker::spawn_alert_worker(
+            db.clone(),
+            worker_conf.clone(),
+            crate::alert_worker::AlertWorkerConfig::default(),
+            shutdown_rx.clone(),
+        );
+    }
+
+    let restarting = tokio::select! {
+        _ = hot::signal::shutdown_signal() => false,
+        _ = hot::execution_watchdog::events().restart_requested() => true,
+    };
+    if restarting {
+        error!("Blocking execution ceiling exhausted; draining before supervisor restart");
+        tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+            std::process::exit(75);
+        });
+    }
     info!("hot.dev: WORKER received shutdown signal");
 
     // Phase 1: Stop claimers first so the graceful drain only waits on work
@@ -10140,6 +10167,9 @@ pub async fn run_with_components_shared_context_and_db(
     }
 
     info!("hot.dev: WORKER shutdown complete");
+    if restarting {
+        std::process::exit(75);
+    }
 
     Ok(())
 }
@@ -10148,6 +10178,64 @@ pub async fn run_with_components_shared_context_and_db(
 mod tests {
     use super::*;
     use hot::val;
+
+    #[tokio::test]
+    async fn quota_parked_events_wait_for_limit_change_without_queue_churn() {
+        let db = hot::db::test_db().await;
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let ctx = hot::lang::event::ExecutionContext::new(
+            data.run_id,
+            data.stream_id,
+            4,
+            Some(data.env_id),
+            Some(data.org_id),
+            Some(data.user_id),
+            Some(data.build_id),
+        );
+        let event = hot::lang::event::Event::new(
+            data.env_id,
+            data.stream_id,
+            "quota-test".into(),
+            Val::Null,
+        );
+        let message = EventMessage {
+            id: event.event_id,
+            head: AHashMap::new(),
+            body: hot::lang::event::EventMessageBody {
+                event,
+                execution_context: ctx,
+            },
+        };
+        let epoch = hot::db::Run::admission_epoch(&db, data.org_id)
+            .await
+            .unwrap();
+        park_event_with_epoch(&db, &message, Some(&epoch))
+            .await
+            .unwrap();
+        let queue = ProcessingQueue::<Message>::new(
+            QueueType::Memory,
+            format!("quota-park-{}", Uuid::now_v7()),
+            None,
+            Serialization::Json,
+        )
+        .unwrap();
+        for _ in 0..3 {
+            replay_parked_events(&db, &queue).await.unwrap();
+            assert!(queue.is_empty().await.unwrap());
+        }
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        sqlx::query("UPDATE org SET features=? WHERE org_id=?")
+            .bind("{\"runs_per_month\":1000}")
+            .bind(data.org_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        replay_parked_events(&db, &queue).await.unwrap();
+        assert_eq!(queue.dequeue().await.unwrap().unwrap().id, message.id);
+        assert!(queue.is_empty().await.unwrap());
+    }
 
     #[test]
     fn dev_context_secrets_are_masked_in_runs() {

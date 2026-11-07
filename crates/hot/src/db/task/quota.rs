@@ -72,8 +72,8 @@ impl Task {
     /// before settling. An old heartbeat alone never releases cancelled capacity.
     pub async fn unsettled_cancelled_containers(db: &DatabasePool) -> Result<Vec<Task>, TaskError> {
         match db {
-            DatabasePool::Postgres(pool) => Ok(sqlx::query_as("SELECT t.*,ts.name AS status FROM task t JOIN task_status ts ON ts.task_status_id=t.task_status_id WHERE t.task_status_id=5 AND t.task_type='container' AND t.reserved_duration_ms>0").fetch_all(pool).await?),
-            DatabasePool::Sqlite(pool) => Ok(sqlx::query_as("SELECT t.*,ts.name AS status FROM task t JOIN task_status ts ON ts.task_status_id=t.task_status_id WHERE t.task_status_id=5 AND t.task_type='container' AND t.reserved_duration_ms>0").fetch_all(pool).await?),
+            DatabasePool::Postgres(pool) => Ok(crate::db::collect_decodable(sqlx::query_as("SELECT t.*,ts.name AS status FROM task t JOIN task_status ts ON ts.task_status_id=t.task_status_id WHERE t.task_status_id=5 AND t.task_type='container' AND t.reserved_duration_ms>0").fetch(pool)).await?),
+            DatabasePool::Sqlite(pool) => Ok(crate::db::collect_decodable(sqlx::query_as("SELECT t.*,ts.name AS status FROM task t JOIN task_status ts ON ts.task_status_id=t.task_status_id WHERE t.task_status_id=5 AND t.task_type='container' AND t.reserved_duration_ms>0").fetch(pool)).await?),
         }
     }
 

@@ -568,6 +568,7 @@ struct AbiLayout {
 
 #[derive(Debug, Clone, Copy)]
 struct JitHelperRefs {
+    poll_cancel: FuncRef,
     get_stack_limit: FuncRef,
     copy_dec: FuncRef,
     add_numeric: FuncRef,
@@ -1966,6 +1967,7 @@ fn compile_with_return_kind(
         "hot_jit_drop_owned_val",
         hot_jit_drop_owned_val as *const u8,
     );
+    builder.symbol("hot_jit_poll_cancel", hot_jit_poll_cancel as *const u8);
     builder.symbol("hot_jit_call_vm", hot_jit_call_vm as *const u8);
     builder.symbol("hot_jit_call_vm_local", hot_jit_call_vm as *const u8);
     builder.symbol("hot_jit_binop_general", hot_jit_binop_general as *const u8);
@@ -3552,11 +3554,14 @@ unsafe extern "C" fn hot_jit_set_element(
     let collection_val = unsafe { &*(collection_ptr as *const Val) };
     let index_val = unsafe { &*(index_ptr as *const Val) };
     let value_val = unsafe { &*(value_ptr as *const Val) };
+    if let Err(error) = index_val.check_shape("map key") {
+        return new_owned_val(Val::err(Val::from(error)));
+    }
     match collection_val {
         Val::Map(map) => {
             let mut new_map = (**map).clone();
             new_map.insert(index_val.clone(), value_val.clone());
-            new_owned_val(Val::map(new_map))
+            new_owned_val(Val::map(new_map.into_inner()))
         }
         Val::Vec(vec) => {
             if let Val::Int(idx) = index_val {
@@ -4473,6 +4478,14 @@ fn declare_jit_helpers(
             &[types::I64],
             &[types::I64],
         )?,
+        poll_cancel: declare_helper_func(
+            module,
+            func,
+            ptr_ty,
+            "hot_jit_poll_cancel",
+            &[],
+            &[types::I64],
+        )?,
         failure_err: declare_helper_func(
             module,
             func,
@@ -5070,6 +5083,23 @@ fn vm_error_to_halt(err: VmError) -> i64 {
         return new_owned_val(Val::err(Val::Str(err.to_string().into())));
     }
     vm_runtime_error_to_halt(unsafe { &*vm_ptr }, err)
+}
+
+unsafe extern "C" fn hot_jit_poll_cancel() -> i64 {
+    let vm_ptr = get_jit_vm_ptr();
+    if vm_ptr.is_null() {
+        return 0;
+    }
+    let vm = unsafe { &*vm_ptr };
+    match vm.check_execution_cancelled() {
+        Ok(()) => 0,
+        Err(error) => vm_runtime_error_to_halt(vm, error),
+    }
+}
+
+pub(crate) fn active_execution_cancelled() -> bool {
+    let vm_ptr = get_jit_vm_ptr();
+    !vm_ptr.is_null() && unsafe { &*vm_ptr }.is_cancellation_requested()
 }
 
 /// Property helpers represent interpreter `VmError` unwinding with the JIT's
@@ -8938,6 +8968,16 @@ fn build_supported_body(
             ctx.finish_fused_run(builder, run)?;
         }
         builder.switch_to_block(ctx.blocks[ip]);
+        // Self-tail calls jump back to block zero; ordinary self-calls enter
+        // here too. Poll even when the entire loop has been lowered to raw IR.
+        if ip == 0 {
+            let call = builder.ins().call(ctx.helper_refs.poll_cancel, &[]);
+            let result = builder.inst_results(call)[0];
+            let halt = emit_halt_check(builder, result);
+            let resume = builder.current_block().unwrap();
+            ctx.emit_halt_return(builder, halt);
+            builder.switch_to_block(resume);
+        }
         if let Some(plan) = fused_plans.iter().find(|plan| plan.first_stage_ip == ip) {
             open_fused_run = ctx.begin_fused_run(builder, plan)?;
         }
@@ -11761,6 +11801,16 @@ fn compile_thunk_inline(
 
     for (ip, instruction) in instructions.iter().enumerate() {
         builder.switch_to_block(ctx.blocks[ip]);
+        // Self-tail calls jump back to block zero; ordinary self-calls enter
+        // here too. Poll even when the entire loop has been lowered to raw IR.
+        if ip == 0 {
+            let call = builder.ins().call(ctx.helper_refs.poll_cancel, &[]);
+            let result = builder.inst_results(call)[0];
+            let halt = emit_halt_check(builder, result);
+            let resume = builder.current_block().unwrap();
+            ctx.emit_halt_return(builder, halt);
+            builder.switch_to_block(resume);
+        }
 
         match ctx.emit_instruction(builder, ip, instruction, instructions)? {
             EmitResult::Handled => continue,
@@ -17409,6 +17459,23 @@ mod tests {
             vm.execute_compiled_user_function(1, &[val!(0)]).unwrap(),
             val!(true)
         );
+    }
+
+    #[test]
+    fn jit_map_keys_refuse_values_past_the_shape_budget() {
+        let map = Val::map(indexmap::IndexMap::new());
+        let key = (0..130).fold(Val::Null, |value, _| Val::vec(vec![value]));
+        let value = Val::Int(1);
+        let output = unsafe {
+            super::hot_jit_set_element(
+                (&map as *const Val) as i64,
+                (&key as *const Val) as i64,
+                (&value as *const Val) as i64,
+            )
+        };
+        let output = unsafe { super::take_owned_val(output) };
+        assert!(output.is_err());
+        assert!(output.to_string().contains("nesting depth"));
     }
 
     // --- DotAccess, MakeVec, MergeMaps, SetElement, VecAppend tests ---

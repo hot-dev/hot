@@ -12,6 +12,8 @@ use super::search::{IdSearch, pg_placeholders, sqlite_placeholders};
 
 #[derive(Error, Debug)]
 pub enum TaskError {
+    #[error("Invalid task value: {0}")]
+    InvalidValue(String),
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
     #[error("Task quota exceeded: {0}")]
@@ -223,6 +225,9 @@ impl Task {
         timeout_ms: i64,
         by_user_id: Option<&Uuid>,
     ) -> Result<(), TaskError> {
+        for value in args.into_iter().chain(options) {
+            crate::val::check_json_shape(value, "task write").map_err(TaskError::InvalidValue)?;
+        }
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 sqlx::query(
@@ -1096,13 +1101,15 @@ impl Task {
                        AND (t.next_retry_at IS NULL OR t.next_retry_at <= $3) \
                      ORDER BY t.created_at ASC LIMIT $4"
                 );
-                let tasks = sqlx::query_as::<_, Task>(sqlx::AssertSqlSafe(q.as_str()))
-                    .bind(queued_id)
-                    .bind(cutoff)
-                    .bind(now)
-                    .bind(limit)
-                    .fetch_all(pg_pool)
-                    .await?;
+                let tasks = crate::db::collect_decodable(
+                    sqlx::query_as::<_, Task>(sqlx::AssertSqlSafe(q.as_str()))
+                        .bind(queued_id)
+                        .bind(cutoff)
+                        .bind(now)
+                        .bind(limit)
+                        .fetch(pg_pool),
+                )
+                .await?;
                 Ok(tasks)
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
@@ -1118,13 +1125,15 @@ impl Task {
                        AND (t.next_retry_at IS NULL OR t.next_retry_at <= ?) \
                      ORDER BY t.created_at ASC LIMIT ?"
                 );
-                let tasks = sqlx::query_as::<_, Task>(sqlx::AssertSqlSafe(q.as_str()))
-                    .bind(queued_id)
-                    .bind(cutoff)
-                    .bind(now)
-                    .bind(limit)
-                    .fetch_all(sqlite_pool)
-                    .await?;
+                let tasks = crate::db::collect_decodable(
+                    sqlx::query_as::<_, Task>(sqlx::AssertSqlSafe(q.as_str()))
+                        .bind(queued_id)
+                        .bind(cutoff)
+                        .bind(now)
+                        .bind(limit)
+                        .fetch(sqlite_pool),
+                )
+                .await?;
                 Ok(tasks)
             }
         }
@@ -2095,32 +2104,36 @@ impl Task {
         let running_id = TaskStatus::Running.as_id();
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
-                let tasks = sqlx::query_as::<_, Task>(
-                    r#"SELECT t.*, ts.name as status
+                let tasks = crate::db::collect_decodable(
+                    sqlx::query_as::<_, Task>(
+                        r#"SELECT t.*, ts.name as status
                        FROM task t
                        JOIN task_status ts ON t.task_status_id = ts.task_status_id
                        WHERE t.task_status_id = $1
                          AND t.last_heartbeat_at IS NOT NULL
                          AND t.last_heartbeat_at < NOW() - ($2 || ' seconds')::interval"#,
+                    )
+                    .bind(running_id)
+                    .bind(stale_threshold_secs.to_string())
+                    .fetch(pg_pool),
                 )
-                .bind(running_id)
-                .bind(stale_threshold_secs.to_string())
-                .fetch_all(pg_pool)
                 .await?;
                 Ok(tasks)
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
-                let tasks = sqlx::query_as::<_, Task>(
-                    r#"SELECT t.*, ts.name as status
+                let tasks = crate::db::collect_decodable(
+                    sqlx::query_as::<_, Task>(
+                        r#"SELECT t.*, ts.name as status
                        FROM task t
                        JOIN task_status ts ON t.task_status_id = ts.task_status_id
                        WHERE t.task_status_id = ?
                          AND t.last_heartbeat_at IS NOT NULL
                          AND t.last_heartbeat_at < datetime('now', '-' || ? || ' seconds')"#,
+                    )
+                    .bind(running_id)
+                    .bind(stale_threshold_secs.to_string())
+                    .fetch(sqlite_pool),
                 )
-                .bind(running_id)
-                .bind(stale_threshold_secs.to_string())
-                .fetch_all(sqlite_pool)
                 .await?;
                 Ok(tasks)
             }
@@ -2262,30 +2275,34 @@ impl Task {
         let running_id = TaskStatus::Running.as_id();
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
-                let tasks = sqlx::query_as::<_, Task>(
-                    r#"SELECT t.*, ts.name as status
+                let tasks = crate::db::collect_decodable(
+                    sqlx::query_as::<_, Task>(
+                        r#"SELECT t.*, ts.name as status
                        FROM task t
                        JOIN task_status ts ON t.task_status_id = ts.task_status_id
                        WHERE t.task_status_id = $1
                          AND t.last_heartbeat_at IS NULL
                          AND t.start_time < NOW() - interval '5 minutes'"#,
+                    )
+                    .bind(running_id)
+                    .fetch(pg_pool),
                 )
-                .bind(running_id)
-                .fetch_all(pg_pool)
                 .await?;
                 Ok(tasks)
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
-                let tasks = sqlx::query_as::<_, Task>(
-                    r#"SELECT t.*, ts.name as status
+                let tasks = crate::db::collect_decodable(
+                    sqlx::query_as::<_, Task>(
+                        r#"SELECT t.*, ts.name as status
                        FROM task t
                        JOIN task_status ts ON t.task_status_id = ts.task_status_id
                        WHERE t.task_status_id = ?
                          AND t.last_heartbeat_at IS NULL
                          AND t.start_time < datetime('now', '-5 minutes')"#,
+                    )
+                    .bind(running_id)
+                    .fetch(sqlite_pool),
                 )
-                .bind(running_id)
-                .fetch_all(sqlite_pool)
                 .await?;
                 Ok(tasks)
             }
@@ -2348,6 +2365,71 @@ mod tests {
     // -----------------------------------------------------------------------
     // CRUD tests
     // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn reconciler_skips_corrupt_task_args_and_rejects_deep_writes() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let bad = Uuid::now_v7();
+        let good = Uuid::now_v7();
+        for id in [bad, good] {
+            Task::insert(
+                &db,
+                &id,
+                &data.env_id,
+                &data.stream_id,
+                &data.build_id,
+                None,
+                "::app/work",
+                Some(&serde_json::json!([])),
+                None,
+                "code",
+                60000,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        let crate::db::DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        sqlx::query("UPDATE task SET args=? WHERE task_id=?")
+            .bind(format!("{}0{}", "[".repeat(200), "]".repeat(200)))
+            .bind(bad)
+            .execute(pool)
+            .await
+            .unwrap();
+        let now = Utc::now();
+        let tasks = Task::get_stale_queued(&db, now + chrono::Duration::minutes(1), now, 100)
+            .await
+            .unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].task_id, good);
+        sqlx::query("UPDATE task SET task_status_id=2,start_time=datetime('now','-10 minutes'),last_heartbeat_at=NULL WHERE task_id IN (?,?)")
+            .bind(bad).bind(good).execute(pool).await.unwrap();
+        let legacy = Task::find_running_without_heartbeat(&db).await.unwrap();
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(legacy[0].task_id, good);
+        let deep = (0..130).fold(serde_json::json!(0), |value, _| serde_json::json!([value]));
+        assert!(
+            Task::insert(
+                &db,
+                &Uuid::now_v7(),
+                &data.env_id,
+                &data.stream_id,
+                &data.build_id,
+                None,
+                "::app/work",
+                Some(&deep),
+                None,
+                "code",
+                60000,
+                None
+            )
+            .await
+            .is_err()
+        );
+    }
 
     #[tokio::test]
     async fn test_insert_and_get() {

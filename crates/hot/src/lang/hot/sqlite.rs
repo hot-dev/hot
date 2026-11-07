@@ -550,6 +550,8 @@ enum RunMode {
 }
 
 fn run(args: &[Val], fn_name: &str, mode: RunMode) -> Result<Val, String> {
+    const MAX_QUERY_ROWS: usize = 10_000;
+    const MAX_QUERY_CELLS: usize = 100_000;
     let handle = get_handle(args, fn_name)?;
     let sql = match &args[1] {
         Val::Str(s) => s.to_string(),
@@ -567,6 +569,40 @@ fn run(args: &[Val], fn_name: &str, mode: RunMode) -> Result<Val, String> {
         .lock()
         .map_err(|_| "connection poisoned")?;
     let db = state.db.as_ref().ok_or("connection is closed")?.0;
+
+    struct Progress {
+        context: super::native_io::IoContext,
+    }
+    unsafe extern "C" fn progress(data: *mut std::ffi::c_void) -> i32 {
+        let progress = unsafe { &*(data as *const Progress) };
+        i32::from(progress.context.check().is_err())
+    }
+    struct ProgressGuard(*mut ffi::sqlite3);
+    impl Drop for ProgressGuard {
+        fn drop(&mut self) {
+            unsafe {
+                ffi::sqlite3_progress_handler(self.0, 0, None, std::ptr::null_mut());
+            }
+        }
+    }
+    let progress_context = Progress {
+        context: super::native_io::current(),
+    };
+    progress_context.context.check()?;
+    unsafe {
+        ffi::sqlite3_limit(
+            db,
+            ffi::SQLITE_LIMIT_LENGTH,
+            crate::blob::MAX_INLINE_HARD_LIMIT_BYTES as i32,
+        );
+        ffi::sqlite3_progress_handler(
+            db,
+            1000,
+            Some(progress),
+            (&progress_context as *const Progress).cast_mut().cast(),
+        );
+    }
+    let _progress_guard = ProgressGuard(db);
 
     let stmt = prepare(db, &sql)?;
     bind_all(&stmt, &params)?;
@@ -602,11 +638,25 @@ fn run(args: &[Val], fn_name: &str, mode: RunMode) -> Result<Val, String> {
             }
 
             let mut rows: Vec<Val> = Vec::new();
+            let mut result_bytes = 0usize;
             loop {
                 match unsafe { ffi::sqlite3_step(stmt.ptr) } {
                     ffi::SQLITE_ROW => {
+                        if rows.len() >= MAX_QUERY_ROWS
+                            || (rows.len() + 1).saturating_mul(col_count as usize) > MAX_QUERY_CELLS
+                        {
+                            return Err("query result exceeds row/cell limit".to_string());
+                        }
                         let mut row = indexmap::IndexMap::new();
                         for c in 0..col_count {
+                            let bytes =
+                                unsafe { ffi::sqlite3_column_bytes(stmt.ptr, c) }.max(0) as usize;
+                            result_bytes = result_bytes
+                                .saturating_add(bytes)
+                                .saturating_add(std::mem::size_of::<Val>() * 2);
+                            if result_bytes > crate::blob::MAX_INLINE_HARD_LIMIT_BYTES {
+                                return Err("query result exceeds byte limit".to_string());
+                            }
                             row.insert(names[c as usize].clone(), column_value(stmt.ptr, c));
                         }
                         rows.push(Val::map(row));
@@ -883,5 +933,81 @@ mod tests {
 
         exec(&db, &format!("ATTACH '{}' AS other", other.display())).unwrap();
         exec(&db, "SELECT * FROM other.secret").unwrap();
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    fn connection() -> Val {
+        Val::Box(Box::new(SqliteConnectionHandle {
+            inner: Arc::new(SqliteConnInner {
+                id: "budget-test".into(),
+                display_path: ":memory:".into(),
+                state: Mutex::new(SqliteConnState {
+                    db: Some(open_db(std::path::Path::new(":memory:"), false, true).unwrap()),
+                    local_path: PathBuf::from(":memory:"),
+                    service: None,
+                }),
+            }),
+        }))
+    }
+    #[test]
+    fn query_stops_before_materializing_unbounded_rows_or_bytes() {
+        let conn = connection();
+        for (sql, expected) in [
+            (
+                "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10001) SELECT x FROM n",
+                "row/cell",
+            ),
+            (
+                "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<40) SELECT zeroblob(1000000) FROM n",
+                "byte limit",
+            ),
+        ] {
+            let error = run(
+                &[conn.clone(), Val::from(sql), Val::Null],
+                "query",
+                RunMode::Query,
+            )
+            .unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        }
+        assert!(
+            run(
+                &[conn, Val::from("SELECT 42 AS answer"), Val::Null],
+                "query",
+                RunMode::Query
+            )
+            .is_ok()
+        );
+    }
+    #[test]
+    fn sqlite_progress_handler_interrupts_and_clears_after_cancel() {
+        let conn = connection();
+        let token = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let for_cancel = token.clone();
+        let cancel = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            for_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+        let _scope = super::super::native_io::test_scope(
+            Some(token.clone()),
+            std::time::Duration::from_secs(3),
+        );
+        let started = std::time::Instant::now();
+        let error = run(&[conn.clone(), Val::from("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n) SELECT sum(x) FROM n"), Val::Null], "query", RunMode::Query).unwrap_err();
+        assert!(error.contains("interrupt"), "{error}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        cancel.join().unwrap();
+        token.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            run(
+                &[conn, Val::from("SELECT 1"), Val::Null],
+                "query",
+                RunMode::Query
+            )
+            .is_ok()
+        );
     }
 }

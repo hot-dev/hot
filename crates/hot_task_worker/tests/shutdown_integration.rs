@@ -223,7 +223,7 @@ async fn drain_phase_exits_early_when_tasks_finish_naturally() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn drain_timeout_signals_cancel_then_finalizes() {
+async fn drain_timeout_finalizes_then_signals_cancel() {
     let (db, td, queue, pubsub) = make_test_env().await;
     // 1s drain so the test runs in ~5s instead of ~33s.
     let coord = TaskShutdownCoordinator::with_drain_secs(1);
@@ -279,6 +279,62 @@ async fn drain_timeout_signals_cancel_then_finalizes() {
     assert_eq!(
         retry_row.retry_attempt, row.retry_attempt,
         "infra-retry should NOT bump the user's retry_attempt counter",
+    );
+}
+
+#[tokio::test]
+async fn cooperative_cancellation_cannot_consume_infrastructure_retry() {
+    let (db, td, queue, pubsub) = make_test_env().await;
+    let coord = Arc::new(TaskShutdownCoordinator::with_drain_secs(0));
+    let (task_id, req) = insert_active_task(&db, &td, None).await;
+    let cancel = register(&coord, task_id, req);
+
+    // Model a VM that immediately records a failure and unregisters when its
+    // cancellation token fires. The old shutdown ordering let it win.
+    let vm_db = db.clone();
+    let vm_coord = Arc::clone(&coord);
+    let vm = tokio::spawn(async move {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !cancel.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("shutdown must signal the VM");
+        let row = Task::get(&vm_db, &task_id).await.unwrap();
+        assert_eq!(row.task_status_id, TaskStatus::Failed.as_id());
+        assert_eq!(
+            row.result.as_ref().unwrap()["$val"]["infra_interrupted"],
+            true
+        );
+        let cancellation = serde_json::json!({"msg": "Execution cancelled"});
+        assert!(
+            !Task::complete(
+                &vm_db,
+                &task_id,
+                &TaskStatus::Failed,
+                Some(&cancellation),
+                None,
+                None
+            )
+            .await
+            .unwrap(),
+            "cooperative completion must lose the terminal fence"
+        );
+        vm_coord.unregister_task(&task_id);
+    });
+
+    coord.initiate_shutdown(&db, &pubsub, &queue).await;
+    vm.await.unwrap();
+    let retry = queue
+        .dequeue()
+        .await
+        .unwrap()
+        .expect("infrastructure retry");
+    let retry_id = Uuid::parse_str(&retry.task_id).unwrap();
+    assert_eq!(
+        Task::get(&db, &retry_id).await.unwrap().task_status_id,
+        TaskStatus::Queued.as_id()
     );
 }
 

@@ -50,6 +50,33 @@ impl Run {
         }
     }
 
+    /// Stable wake-up key for quota-parked work. Merely polling this key
+    /// never reserves a run or cycles its queue message through admission.
+    pub async fn admission_epoch(db: &DatabasePool, org_id: Uuid) -> Result<String, RunError> {
+        let root = crate::db::Org::billing_owner_id_for(db, &org_id)
+            .await
+            .map_err(org_lookup_error)?;
+        let billing = db.with_scope(DatabaseScope::Maintenance {
+            operation: MaintenanceOperation::Billing,
+            org_id: Some(root),
+        });
+        type Epoch = (
+            Option<String>,
+            Option<String>,
+            Option<DateTime<Utc>>,
+            Option<DateTime<Utc>>,
+        );
+        let query = "SELECT CAST(o.features AS TEXT), CAST(p.features AS TEXT), op.current_period_start, op.current_period_end FROM org o LEFT JOIN org_plan op ON op.org_id=o.org_id LEFT JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE o.org_id=$1";
+        let (overrides, plan, start, end): Epoch = match &billing {
+            DatabasePool::Postgres(pool) => {
+                sqlx::query_as(query).bind(root).fetch_one(pool).await?
+            }
+            DatabasePool::Sqlite(pool) => sqlx::query_as(query).bind(root).fetch_one(pool).await?,
+        };
+        let period = crate::db::subscription::monthly_usage_start(Utc::now(), start, end);
+        Ok(serde_json::json!([overrides, plan, period]).to_string())
+    }
+
     /// Reserve one execution before running any user bytecode. Reusing the same
     /// immutable run identity does not consume another slot. A new VM still
     /// checks lifecycle, even when a previous delivery reserved that identity.

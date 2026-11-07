@@ -91,6 +91,44 @@ pub fn parse_frontmatter_str(input: &str) -> Result<(Val, String), String> {
         None => return Err("unterminated YAML frontmatter (missing closing '---')".to_string()),
     };
     let yaml_text = &after_first[..close];
+    if yaml_text.len() > crate::blob::MAX_INLINE_HARD_LIMIT_BYTES {
+        return Err("YAML frontmatter exceeds byte budget".to_string());
+    }
+    // Inspect events before YamlLoader, which eagerly clones aliases and can
+    // otherwise expand a tiny input exponentially before conversion starts.
+    use yaml_rust2::parser::{Event, Parser};
+    let mut parser = Parser::new(yaml_text.chars());
+    let mut depth = 0usize;
+    let mut nodes = 0usize;
+    loop {
+        let (event, _) = parser
+            .next_token()
+            .map_err(|e| format!("invalid YAML frontmatter: {e}"))?;
+        nodes += 1;
+        if nodes > 100_000 {
+            return Err("YAML frontmatter exceeds node budget".to_string());
+        }
+        match event {
+            Event::Alias(_) => {
+                return Err("YAML aliases are not supported in frontmatter".to_string());
+            }
+            Event::SequenceStart(anchor, _) | Event::MappingStart(anchor, _) => {
+                if anchor != 0 {
+                    return Err("YAML anchors are not supported in frontmatter".to_string());
+                }
+                depth += 1;
+                if depth > crate::blob::MAX_RECORD_DEPTH / 2 {
+                    return Err("YAML frontmatter exceeds maximum nesting depth".to_string());
+                }
+            }
+            Event::Scalar(_, _, anchor, _) if anchor != 0 => {
+                return Err("YAML anchors are not supported in frontmatter".to_string());
+            }
+            Event::SequenceEnd | Event::MappingEnd => depth = depth.saturating_sub(1),
+            Event::StreamEnd => break,
+            _ => {}
+        }
+    }
 
     // Skip the closing fence and any trailing newline characters.
     let mut after_close = close + 3;
@@ -113,6 +151,7 @@ pub fn parse_frontmatter_str(input: &str) -> Result<(Val, String), String> {
     } else {
         yaml_to_val(&docs[0])
     };
+    fm.check_shape("parse-frontmatter")?;
     Ok((fm, body))
 }
 
@@ -139,6 +178,14 @@ pub fn parse_frontmatter(args: &[Val]) -> HotResult<Val> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frontmatter_rejects_alias_expansion_and_deep_yaml() {
+        assert!(parse_frontmatter_str("---\na: &a [1, 2]\nb: [*a, *a]\n---\n").is_err());
+        let input = format!("---\nx: {}0{}\n---\n", "[".repeat(1000), "]".repeat(1000));
+        assert!(parse_frontmatter_str(&input).is_err());
+        assert!(parse_frontmatter_str("---\nx: '*literal'\n---\nbody").is_ok());
+    }
 
     #[test]
     fn test_no_frontmatter() {

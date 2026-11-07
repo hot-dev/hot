@@ -606,6 +606,10 @@ pub fn send(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
 /// # Returns
 /// The next message value, or `null` on shutdown/close.
 pub fn receive(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
+    let _parked = match super::native_io::park_current() {
+        Ok(parked) => parked,
+        Err(error) => return HotResult::Err(error),
+    };
     if !args.is_empty() {
         return HotResult::Err(err_val("::hot::task/receive: expected 0 args".to_string()));
     }
@@ -769,6 +773,10 @@ pub fn cancel(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
 /// # Returns
 /// `TaskResult` with id, status, timing breakdown, CUS, and result.
 pub fn await_task(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
+    let _parked = match super::native_io::park_current() {
+        Ok(parked) => parked,
+        Err(error) => return HotResult::Err(error),
+    };
     if args.len() != 1 {
         return HotResult::Err(err_val(
             "::hot::task/await: expected 1 arg (task-id)".to_string(),

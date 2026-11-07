@@ -395,6 +395,13 @@ pub trait StreamSubscriber: Send {
 /// Factory for creating stream subscribers
 #[async_trait]
 pub trait StreamSubscriberFactory: Send + Sync {
+    /// Replay a task inbox, including messages sent while it was queued.
+    async fn subscribe_task(
+        &self,
+        task_id: Uuid,
+    ) -> Result<Box<dyn StreamSubscriber>, StreamPubSubError> {
+        self.subscribe(task_id).await
+    }
     /// Subscribe to events for a specific stream
     async fn subscribe(
         &self,
@@ -588,6 +595,15 @@ impl StreamPublisher for StreamPubSub {
 
 #[async_trait]
 impl StreamSubscriberFactory for StreamPubSub {
+    async fn subscribe_task(
+        &self,
+        task_id: Uuid,
+    ) -> Result<Box<dyn StreamSubscriber>, StreamPubSubError> {
+        match self {
+            StreamPubSub::Memory(m) => m.subscribe_task(task_id).await,
+            StreamPubSub::Redis(r) => r.subscribe_task(task_id).await,
+        }
+    }
     async fn subscribe(
         &self,
         stream_id: Uuid,

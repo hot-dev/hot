@@ -304,6 +304,9 @@ pub fn call_pure_lib(
     full_name: &str,
     args: &[Val],
 ) -> Option<crate::lang::hot::r#type::HotResult<Val>> {
+    if let Err(error) = super::lib_util::check_shapes(full_name, args) {
+        return Some(HotResult::Err(error));
+    }
     match get_hotlib_map().get(full_name)? {
         HotLibFn::LibFn(f) => Some(f(args)),
         _ => None,

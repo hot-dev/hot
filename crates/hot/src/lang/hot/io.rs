@@ -403,14 +403,25 @@ fn format_val_for_raw_output(val: &Val) -> String {
     }
 }
 
+fn format_output_args(args: &[Val]) -> Result<String, Val> {
+    let mut output = String::new();
+    for arg in args {
+        arg.check_text_shape("print").map_err(Val::from)?;
+        let piece = format_val_for_raw_output(arg);
+        if piece.len() > crate::blob::MAX_INLINE_HARD_LIMIT_BYTES.saturating_sub(output.len()) {
+            return Err(Val::from("print: formatted output exceeds byte limit"));
+        }
+        output.push_str(&piece);
+    }
+    Ok(output)
+}
+
 /// Print values without newline
 pub fn print(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
-    // Build formatted output for all args
-    let mut pieces: Vec<String> = Vec::with_capacity(args.len());
-    for arg in args {
-        pieces.push(format_val_for_raw_output(arg));
-    }
-    let final_output = pieces.join("");
+    let final_output = match format_output_args(args) {
+        Ok(output) => output,
+        Err(error) => return HotResult::Err(error),
+    };
     if let Err(e) = write_run_output(vm, false, &final_output) {
         return HotResult::Err(Val::from(format!("Failed to write to stdout: {}", e)));
     }
@@ -419,12 +430,10 @@ pub fn print(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
 
 /// Print values with newline
 pub fn println(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
-    // Build formatted output for all args
-    let mut pieces: Vec<String> = Vec::with_capacity(args.len());
-    for arg in args {
-        pieces.push(format_val_for_raw_output(arg));
-    }
-    let final_line = pieces.join("");
+    let final_line = match format_output_args(args) {
+        Ok(output) => output,
+        Err(error) => return HotResult::Err(error),
+    };
     // Ensure stdout receives the same 2-decimal formatting as returned value
     if let Err(e) = write_run_output(vm, false, &(final_line.clone() + "\n")) {
         return HotResult::Err(Val::from(format!("Failed to write to stdout: {}", e)));
@@ -434,12 +443,10 @@ pub fn println(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
 
 /// Print to stderr without newline
 pub fn eprint(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
-    // Build formatted output for all args
-    let mut pieces: Vec<String> = Vec::with_capacity(args.len());
-    for arg in args {
-        pieces.push(format_val_for_raw_output(arg));
-    }
-    let final_output = pieces.join("");
+    let final_output = match format_output_args(args) {
+        Ok(output) => output,
+        Err(error) => return HotResult::Err(error),
+    };
     if let Err(e) = write_run_output(vm, true, &final_output) {
         return HotResult::Err(Val::from(format!("Failed to write to stderr: {}", e)));
     }
@@ -449,7 +456,10 @@ pub fn eprint(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
 /// Print to stderr with newline
 pub fn eprintln(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     // One write, so a logged line is one record.
-    let mut line: String = args.iter().map(format_val_for_raw_output).collect();
+    let mut line = match format_output_args(args) {
+        Ok(output) => output,
+        Err(error) => return HotResult::Err(error),
+    };
     line.push('\n');
     if let Err(e) = write_run_output(vm, true, &line) {
         return HotResult::Err(Val::from(format!("Failed to write to stderr: {}", e)));

@@ -72,7 +72,7 @@ apt_get() {
 apt_get update
 apt_get install -y --no-install-recommends \
     ca-certificates curl jq python3 zstd e2fsprogs dmsetup thin-provisioning-tools \
-    iproute2 iptables docker.io docker-compose-v2
+    iproute2 iptables nftables docker.io docker-compose-v2
 apt_get upgrade -y
 
 # ------------------------------------------------------------------

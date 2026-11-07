@@ -32,6 +32,11 @@ impl<T> HotResult<T> {
 
 /// Core Str type constructor
 pub(crate) fn str_internal(args: &[Val]) -> HotResult<Val> {
+    for arg in args {
+        if let Err(error) = arg.check_text_shape("Str") {
+            return HotResult::Err(Val::from(error));
+        }
+    }
     if args.is_empty() {
         return HotResult::Ok(Val::from(""));
     }
@@ -95,6 +100,11 @@ pub fn str_constructor(
     vm: &mut crate::lang::runtime::vm::VirtualMachine,
     args: &[Val],
 ) -> HotResult<Val> {
+    for arg in args {
+        if let Err(error) = arg.check_text_shape("Str") {
+            return HotResult::Err(Val::from(error));
+        }
+    }
     if args.is_empty() {
         return HotResult::Ok(Val::from(""));
     }

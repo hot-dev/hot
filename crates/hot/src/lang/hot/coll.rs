@@ -1065,7 +1065,10 @@ pub fn assoc(args: &[Val]) -> HotResult<Val> {
         Val::Map(m) => {
             let mut new_map = (**m).clone(); // Clone the inner IndexMap
             new_map.insert(key.clone(), value.clone());
-            HotResult::Ok(crate::val::with_type_of(&args[0], Val::map(new_map)))
+            HotResult::Ok(crate::val::with_type_of(
+                &args[0],
+                Val::map(new_map.into_inner()),
+            ))
         }
         _ => HotResult::Err(Val::from(
             "::hot::coll/assoc expects a Map as the first argument".to_string(),
@@ -1202,7 +1205,7 @@ fn merge_fields(a: &Val, b: &Val) -> Val {
                 };
                 merged.insert(key.clone(), value);
             }
-            crate::val::with_type_of(a, Val::map(merged))
+            crate::val::with_type_of(a, Val::map(merged.into_inner()))
         }
         _ => b.clone(),
     }
@@ -2349,7 +2352,7 @@ pub fn delete(args: &[Val]) -> HotResult<Val> {
         (Val::Map(map), Val::Str(target_key)) => {
             let mut result_map = (**map).clone(); // Clone the inner IndexMap
             result_map.shift_remove(&Val::from(target_key.clone()));
-            HotResult::Ok(Val::map(result_map))
+            HotResult::Ok(Val::map(result_map.into_inner()))
         }
         (Val::Map(map), _) => HotResult::Ok(Val::Map(map.clone())), // map is Box, clone returns Box
         (Val::Str(s), _) => HotResult::Ok(Val::from(s.clone())),
@@ -2687,6 +2690,7 @@ fn groups_by(
     let mut groups: IndexMap<Val, Vec<Val>> = IndexMap::new();
     for item in vec_items("group-by", coll)? {
         let key = call_forced(vm, &function, item, "Group-by function call")?;
+        key.check_shape("group-by map key").map_err(Val::from)?;
         groups.entry(key).or_default().push(item.clone());
     }
     Ok(groups
@@ -2711,6 +2715,7 @@ fn indexed_by(
     let mut index = IndexMap::new();
     for item in vec_items("index-by", coll)? {
         let key = call_forced(vm, &function, item, "Index-by function call")?;
+        key.check_shape("index-by map key").map_err(Val::from)?;
         index.insert(key, item.clone());
     }
     Ok(index)
@@ -2759,7 +2764,9 @@ fn mapped_entries(
     let mut out = IndexMap::with_capacity(entries.len());
     for (key, value) in entries {
         if keys {
-            out.insert(call_forced(vm, &function, key, &what)?, value.clone());
+            let mapped = call_forced(vm, &function, key, &what)?;
+            mapped.check_shape("map-keys map key").map_err(Val::from)?;
+            out.insert(mapped, value.clone());
         } else {
             out.insert(key.clone(), call_forced(vm, &function, value, &what)?);
         }
@@ -3874,7 +3881,10 @@ pub fn assoc_in(args: &[Val]) -> HotResult<Val> {
                 let new_child = assoc_in_recursive(&child, rest, value)?;
                 new_map.insert(key.clone(), new_child);
                 // Constructed values along the path keep their types.
-                Ok(crate::val::with_type_of(coll, Val::map(new_map)))
+                Ok(crate::val::with_type_of(
+                    coll,
+                    Val::map(new_map.into_inner()),
+                ))
             }
             Val::Vec(v) => {
                 if let Val::Int(i) = key {
