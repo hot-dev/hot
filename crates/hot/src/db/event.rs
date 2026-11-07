@@ -926,7 +926,7 @@ impl Event {
         limit: i64,
         env_id: Option<Uuid>,
     ) -> Result<Vec<(Uuid, Uuid)>, EventError> {
-        let query = "SELECT ev.event_id, ev.env_id FROM event ev JOIN env e ON e.env_id=ev.env_id JOIN org o ON o.org_id=e.org_id JOIN org root ON root.org_id=COALESCE(o.parent_org_id,o.org_id) WHERE ev.enqueue_payload IS NOT NULL AND ev.enqueue_leased_until <= $1 AND e.active AND o.active AND root.active AND o.lifecycle_state='active' AND root.lifecycle_state='active'";
+        let query = "SELECT ev.event_id, ev.env_id FROM event ev JOIN env e ON e.env_id=ev.env_id JOIN org o ON o.org_id=e.org_id JOIN org root ON root.org_id=CASE WHEN o.parent_org_id IS NULL THEN o.org_id ELSE o.parent_org_id END WHERE ev.enqueue_payload IS NOT NULL AND ev.enqueue_leased_until <= $1 AND e.active AND o.active AND root.active AND o.lifecycle_state='active' AND root.lifecycle_state='active'";
         let rows = match db {
             crate::db::DatabasePool::Postgres(pool) => {
                 let sql = format!(
