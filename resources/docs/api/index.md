@@ -1026,6 +1026,13 @@ GET /v1/runs
 | `status` | string | Filter: `running`, `succeeded`, `failed`, `cancelled`, `pending_retry` |
 | `type` | string | Filter: `call`, `event`, `schedule`, `run`, `eval`, `repl` |
 | `time_range` | string | ISO 8601 duration: `P7D`, `P30D`, etc. |
+| `project_id` | UUID | Only runs of this project |
+| `stream_id` | UUID | Only runs in this stream |
+| `function` | string | Only runs of this function, by its whole name: `::myapp::orders/on-placed` |
+
+Filters narrow together, and `pagination.total` counts what they keep. A
+`project_id` or `stream_id` that isn't a UUID is a `400`. `function` compares
+the name of each run in the environment, so add `time_range` on a large one.
 
 **Response:**
 

@@ -902,3 +902,141 @@ async fn postgres_unstarted_and_earlier_delivery_runs_settle() {
 
     drop_schema(&db, &schema).await;
 }
+
+#[tokio::test]
+async fn postgres_run_listing_narrows_by_project_stream_and_function() {
+    use hot::db::run::{Run, RunScope, RunType, UnstartedRun};
+
+    let _schema_guard = POSTGRES_SCHEMA_TEST_LOCK.lock().await;
+    let Some((db, schema)) = postgres_db().await else {
+        return;
+    };
+    let data = db::insert_test_data(&db)
+        .await
+        .expect("test data should insert");
+
+    let open = async |handler: &str, event_data: serde_json::Value| {
+        let (run_id, stream_id, event_id) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        hot::db::stream::Stream::create_or_get_stream(&db, stream_id, data.env_id)
+            .await
+            .unwrap();
+        hot::db::Event::insert_event(
+            &db,
+            &event_id,
+            &data.env_id,
+            &stream_id,
+            "demo:event",
+            &event_data,
+            chrono::Utc::now(),
+            &data.user_id,
+            None,
+        )
+        .await
+        .unwrap();
+        Run::open_event_run(
+            &db,
+            &UnstartedRun {
+                run_id,
+                env_id: data.env_id,
+                stream_id,
+                build_id: data.build_id,
+                run_type_id: RunType::Event.as_id(),
+                origin_run_id: None,
+                event_id,
+                by_user_id: data.user_id,
+                retry_attempt: 0,
+                event_handler_fn: handler.to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        (run_id, stream_id)
+    };
+
+    let (handled, handled_stream) = open("::demo/on-a", serde_json::json!({})).await;
+    let (called, _) = open("::demo/fire", serde_json::json!({"fn": "::demo/nightly"})).await;
+    let direct = Uuid::now_v7();
+    Run::insert_run(
+        &db,
+        &direct,
+        &data.env_id,
+        &data.stream_id,
+        Some(&data.build_id),
+        RunType::Call.as_id(),
+        None,
+        &data.user_id,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let DatabasePool::Postgres(pool) = &db else {
+        panic!("this test runs on Postgres");
+    };
+    sqlx::query(
+        "INSERT INTO hot.call (call_id, env_id, run_id, function_name, static_scope, runtime_path, call_depth, start_time) \
+         VALUES ($1, $2, $3, '::demo/direct', '', '', 0, now())",
+    )
+    .bind(Uuid::now_v7())
+    .bind(data.env_id)
+    .bind(direct)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    let listed = async |scope: RunScope<'_>| {
+        let runs = Run::get_filtered_runs_by_env(
+            &db,
+            &data.env_id,
+            None,
+            None,
+            None,
+            scope,
+            None,
+            Some(50),
+            None,
+        )
+        .await
+        .unwrap();
+        let count =
+            Run::get_filtered_count_by_env(&db, &data.env_id, None, None, None, scope, None)
+                .await
+                .unwrap();
+        assert_eq!(
+            count,
+            runs.len() as i64,
+            "the count keeps what the list keeps"
+        );
+        let mut ids: Vec<Uuid> = runs.into_iter().map(|run| run.run_id).collect();
+        ids.sort();
+        ids
+    };
+    let function = |name| RunScope {
+        function: Some(name),
+        ..RunScope::default()
+    };
+
+    assert_eq!(
+        listed(RunScope {
+            stream_id: Some(&handled_stream),
+            ..RunScope::default()
+        })
+        .await,
+        vec![handled]
+    );
+    assert_eq!(listed(function("::demo/on-a")).await, vec![handled]);
+    assert_eq!(listed(function("::demo/nightly")).await, vec![called]);
+    assert_eq!(listed(function("::demo/direct")).await, vec![direct]);
+    assert_eq!(listed(function("::demo/none")).await, Vec::<Uuid>::new());
+    assert_eq!(
+        listed(RunScope {
+            project_id: Some(&data.project_id),
+            stream_id: Some(&handled_stream),
+            function: Some("::demo/on-a"),
+        })
+        .await,
+        vec![handled]
+    );
+
+    drop_schema(&db, &schema).await;
+}

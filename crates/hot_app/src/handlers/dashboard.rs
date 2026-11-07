@@ -5,6 +5,7 @@ use ahash::AHashMap;
 use askama::Template;
 use axum::extract::{Query, State};
 use axum::response::{Html, IntoResponse};
+use hot::db::run::RunScope;
 use hot::db::{AgentStats, DatabasePool, Event, Run, StreamSummary, Task};
 use hot::time_range::parse_time_range_cutoff;
 use std::sync::Arc;
@@ -248,7 +249,7 @@ pub async fn failed_runs_widget_handler(
         Some(&["failed"]),
         None,
         time_range_cutoff,
-        project_id.as_ref(),
+        RunScope::project(project_id.as_ref()),
         None,
         Some(5),
         None,
@@ -314,7 +315,7 @@ pub async fn cancelled_runs_widget_handler(
         Some(&["cancelled"]),
         None,
         time_range_cutoff,
-        project_id.as_ref(),
+        RunScope::project(project_id.as_ref()),
         None,
         Some(5),
         None,
