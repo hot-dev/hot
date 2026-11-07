@@ -45,6 +45,31 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   })
 }
 
+refused-stream
+meta {
+    doc: """
+    The `HttpError` for a streaming call the API refused, with the reason read
+    from the response. Its `body` is what a plain call's would be: the decoded
+    JSON, or the text when it isn't JSON.
+
+    **Example**
+
+    ```hot
+    response ::anthropic::api/call-stream("POST", "/v1/messages", {}, body, "sse", {})
+    if(gte(response.status, 400), err(::anthropic::api/refused-stream(response)), response)
+    ```
+    """
+}
+fn (response: StreamingHttpResponse): HttpError {
+  text join(map(collect(response.body), Str), "")
+  decoded from-json(text)
+  HttpError({
+    status: response.status,
+    headers: response.headers,
+    body: if(is-err(decoded), text, decoded)
+  })
+}
+
 DEFAULT_API_VERSION "2023-06-01"
 
 non-blank

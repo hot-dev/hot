@@ -269,6 +269,25 @@ meta ["test"] fn () {
     assert-reached-offline-url(() { ::ct/count-tokens(history, "m", OFFLINE) }, "count-tokens")
 }
 
+test-refused-stream-reads-the-reason-from-the-body
+meta ["test"] fn () {
+    response ::hot::http/StreamingHttpResponse({
+        status: 400,
+        headers: {request-id: "req_1"},
+        body: Iter(["{\"type\":\"error\",\"error\":", "{\"message\":\"balance too low\"}}"])
+    })
+    problem ::api/refused-stream(response)
+    assert-eq(400, problem.status)
+    assert-eq("req_1", problem.headers.request-id)
+    assert-eq("balance too low", problem.body.error.message)
+}
+
+test-refused-stream-keeps-a-body-that-is-not-json
+meta ["test"] fn () {
+    response ::hot::http/StreamingHttpResponse({status: 502, headers: {}, body: Iter(["Bad ", "gateway"])})
+    assert-eq("Bad gateway", ::api/refused-stream(response).body)
+}
+
 test-opts-arity-without-a-key-fails-clearly
 meta ["test"] fn () {
     before ::ctx/get("anthropic.api.key")

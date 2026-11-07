@@ -40,6 +40,7 @@ meta {
 ::ai-chat  ::ai::chat
 ::ai-tool  ::ai::tool
 
+HttpError          ::anthropic::api/HttpError
 ReplyDelta         ::ai-chat/ReplyDelta
 TextDelta          ::ai-chat/TextDelta
 ToolUseStart       ::ai-chat/ToolUseStart
@@ -546,13 +547,19 @@ fn cond (state: Map, event: Map, on-delta: Fn): Map {
 
 drain-stream
 meta {
-    doc: """Internal: tail-recursively consume `iter`, accumulating ReplyDelta events into `state`."""
+    doc: """
+    Internal: tail-recursively consume `iter`, accumulating ReplyDelta events
+    into `state`. An `error` event ends it in an Err carrying `HttpError`. The
+    call itself succeeded, so its `status` is 200, and its `body` holds the
+    API's reason, as a refused call's does.
+    """
 }
 fn cond (iter: Any, on-delta: Fn, state: Map): Map {
     => {
         n next(iter)
         cond {
             n.done => { state }
+            eq(n.value.event, "error") => { err(HttpError({status: 200, headers: {}, body: n.value.data})) }
             => { drain-stream(iter, on-delta, handle-event(state, n.value, on-delta)) }
         }
     }
@@ -646,6 +653,10 @@ meta {
     holds any parsed tool calls (with their input maps reconstructed
     from streamed JSON fragments), and `reply.usage` carries the
     provider-reported token totals.
+
+    A refused call, or an `error` event partway through the stream, returns
+    an Err carrying `::anthropic::api/HttpError`, whose `body` holds the API's
+    reason. `on-delta` gets no `Stop` then.
     """
 }
 fn
@@ -693,11 +704,11 @@ fn
     with-effort apply-request-options(with-system, options)
     with-tools if(is-null(anth-tools), with-effort, assoc(with-effort, "tools", anth-tools))
 
-    response ::messages/post-stream(::messages/MessagesPostRequest(with-tools), opts)
-
-    final-state drain-stream(response.body, on-delta, EMPTY_STATE)
-    reply finalize-state(final-state)
-
-    on-delta(ReplyDelta.Stop(StreamStop({reason: reply.stop-reason, usage: reply.usage})))
-    reply
+    ::messages/post-stream(::messages/MessagesPostRequest(with-tools), opts)
+        |> if-ok((response) { drain-stream(response.body, on-delta, EMPTY_STATE) })
+        |> if-ok((final-state) {
+            reply finalize-state(final-state)
+            on-delta(ReplyDelta.Stop(StreamStop({reason: reply.stop-reason, usage: reply.usage})))
+            reply
+        })
 }

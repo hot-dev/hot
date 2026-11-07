@@ -300,6 +300,10 @@ meta {
     - `content_block_stop` - End of a content block
     - `message_delta` - Final message metadata (stop_reason, usage)
     - `message_stop` - End of message
+    - `error` - The API stopped partway (an overload, say). Nothing follows it
+
+    A refused call has no stream, so it returns an Err carrying `HttpError`,
+    as `post` does. Its `body` holds the API's reason.
 
     **Example**
 
@@ -324,5 +328,10 @@ fn (request: MessagesPostRequest): StreamingMessagesResponse {
 (request: MessagesPostRequest, opts: Map): StreamingMessagesResponse {
   // Force stream: true in the request
   streaming-request {...untype(request), stream: true}
-  api-call-stream("POST", "/v1/messages", {}, streaming-request, "sse", opts)
+  response api-call-stream("POST", "/v1/messages", {}, streaming-request, "sse", opts)
+  cond {
+    is-err(response) => { response }
+    gte(response.status, 400) => { err(::anthropic::api/refused-stream(response)) }
+    => { response }
+  }
 }

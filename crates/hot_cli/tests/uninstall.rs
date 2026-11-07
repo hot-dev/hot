@@ -2,8 +2,11 @@
 //! real `add_to_path` in `install.sh`, so the two can't drift apart.
 #![cfg(unix)]
 
+use std::io::{ErrorKind, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::time::Duration;
 
 const CLEAN_PATH: &str = "/usr/bin:/bin";
 
@@ -40,6 +43,22 @@ fn user_install() -> Install {
     }
 }
 
+/// Runs a fresh copy of a binary. Linux won't run a file that's open for
+/// writing, and for a moment this one can be: a test on another thread may fork
+/// while the copy is open, and that child holds the handle until it execs. The
+/// refused run never started, so trying again is safe.
+fn run_copy(command: &mut Command) -> Output {
+    for _ in 0..500 {
+        match command.output() {
+            Err(error) if error.kind() == ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            result => return result.unwrap(),
+        }
+    }
+    panic!("the copy stayed busy: {command:?}");
+}
+
 /// Runs the real `add_to_path` for `install`, as `shell`'s user
 fn add_to_path(install: &Install, shell: &str) {
     let installer =
@@ -60,16 +79,16 @@ fn add_to_path(install: &Install, shell: &str) {
 }
 
 fn hot_uninstall(install: &Install, args: &[&str]) -> Output {
-    Command::new(install.bin.join("hot"))
-        .arg("uninstall")
-        .args(args)
-        .env("HOME", &install.home)
-        .env("PATH", CLEAN_PATH)
-        .env_remove("ZDOTDIR")
-        .env_remove("HOT_HOME")
-        .stdin(Stdio::null())
-        .output()
-        .unwrap()
+    run_copy(
+        Command::new(install.bin.join("hot"))
+            .arg("uninstall")
+            .args(args)
+            .env("HOME", &install.home)
+            .env("PATH", CLEAN_PATH)
+            .env_remove("ZDOTDIR")
+            .env_remove("HOT_HOME")
+            .stdin(Stdio::null()),
+    )
 }
 
 fn assert_removed(install: &Install, output: &Output) {
@@ -98,6 +117,27 @@ fn round_trip(shell: &str, file: &str, before: Option<&str>) {
         // A startup file is never deleted, even one the installer created
         None => assert_eq!(std::fs::read_to_string(&file).unwrap(), ""),
     }
+}
+
+/// On Linux a plain `output()` is refused here, as it was on CI, on a binary
+/// another thread's fork had open.
+#[test]
+fn a_copy_that_is_busy_for_a_moment_still_runs() {
+    std::fs::create_dir_all(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let root = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let program = root.path().join("program");
+    let mut handle = std::fs::File::create(&program).unwrap();
+    handle.write_all(b"#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let closes = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        drop(handle);
+    });
+
+    let output = run_copy(&mut Command::new(&program));
+
+    closes.join().unwrap();
+    assert!(output.status.success(), "{output:?}");
 }
 
 #[test]
@@ -185,14 +225,14 @@ fn without_a_terminal_it_needs_yes() {
 fn hot_home_inside_the_install_stops_it() {
     let install = user_install();
 
-    let output = Command::new(install.bin.join("hot"))
-        .args(["uninstall", "--yes"])
-        .env("HOME", &install.home)
-        .env("PATH", CLEAN_PATH)
-        .env("HOT_HOME", &install.resources)
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
+    let output = run_copy(
+        Command::new(install.bin.join("hot"))
+            .args(["uninstall", "--yes"])
+            .env("HOME", &install.home)
+            .env("PATH", CLEAN_PATH)
+            .env("HOT_HOME", &install.resources)
+            .stdin(Stdio::null()),
+    );
 
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
