@@ -6791,6 +6791,7 @@ impl<'a> EmitCtx<'a> {
             && let Some(ret_kind) = self.expected_return_kind
         {
             self.relies_on_expected_return = true;
+            self.emit_self_call_cancel_poll(builder);
             let (result_kind, raw, error_info) = emit_self_recursive_call(
                 builder,
                 self.ptr_ty,
@@ -6947,6 +6948,32 @@ impl<'a> EmitCtx<'a> {
         Ok(true)
     }
 
+    /// A direct self-call bypasses the VM's call dispatch, which samples
+    /// cancellation. Sample it here by depth instead: a call from every
+    /// eighth level polls, so deep or branching recursion still notices a
+    /// cancellation while most frames make no helper call.
+    fn emit_self_call_cancel_poll(&self, builder: &mut FunctionBuilder<'_>) {
+        let level = builder.ins().band_imm_u(self.call_depth, 7);
+        let due =
+            builder
+                .ins()
+                .icmp_imm_s(cranelift_codegen::ir::condcodes::IntCC::Equal, level, 0);
+        let poll = builder.create_block();
+        let resume = builder.create_block();
+        builder.ins().brif(due, poll, &[], resume, &[]);
+        builder.switch_to_block(poll);
+        builder.seal_block(poll);
+        let call = builder.ins().call(self.helper_refs.poll_cancel, &[]);
+        let result = builder.inst_results(call)[0];
+        let halt = emit_halt_check(builder, result);
+        let checked = builder.current_block().unwrap();
+        self.emit_halt_return(builder, halt);
+        builder.switch_to_block(checked);
+        builder.ins().jump(resume, &[]);
+        builder.switch_to_block(resume);
+        builder.seal_block(resume);
+    }
+
     /// Handle a self-recursive CallUserFunction (used by both body and thunk).
     fn emit_self_call(
         &mut self,
@@ -6961,6 +6988,7 @@ impl<'a> EmitCtx<'a> {
             "JIT cannot determine return kind for self-recursive call".to_string()
         })?;
         self.relies_on_expected_return = true;
+        self.emit_self_call_cancel_poll(builder);
         let (result_kind, raw, error_info) = emit_self_recursive_call(
             builder,
             self.ptr_ty,
@@ -17525,7 +17553,8 @@ mod tests {
     #[test]
     fn jit_map_keys_refuse_values_past_the_shape_budget() {
         let map = Val::map(indexmap::IndexMap::new());
-        let key = (0..130).fold(Val::Null, |value, _| Val::vec(vec![value]));
+        let depth = crate::lang::runtime::limits::MAX_VALUE_DEPTH + 10;
+        let key = (0..depth).fold(Val::Null, |value, _| Val::vec(vec![value]));
         let value = Val::Int(1);
         let output = unsafe {
             super::hot_jit_set_element(
