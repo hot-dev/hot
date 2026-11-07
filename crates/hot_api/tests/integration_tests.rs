@@ -1685,6 +1685,298 @@ async fn test_list_runs_with_pagination() {
     let _ = (run_id_1, run_id_2, run_id_3);
 }
 
+/// An app that serves only `GET /v1/runs`.
+fn run_list_app(db: &hot_api::ApiStateData) -> axum::Router {
+    let api_v1_routes = axum::Router::new()
+        .route("/v1/runs", axum::routing::get(hot_api::handlers::list_runs))
+        .route_layer(axum::middleware::from_fn_with_state(
+            db.clone(),
+            hot_api::auth::api_key_auth_middleware,
+        ));
+    axum::Router::new()
+        .merge(api_v1_routes)
+        .with_state(db.clone())
+}
+
+/// Give `run_id` a root call of `function`.
+async fn insert_root_call(db: &DatabasePool, env_id: &Uuid, run_id: &Uuid, function: &str) {
+    let DatabasePool::Sqlite(pool) = db else {
+        panic!("these tests run on SQLite");
+    };
+    sqlx::query(
+        "INSERT INTO call (call_id, env_id, run_id, function_name, static_scope, runtime_path, call_depth, start_time) \
+         VALUES (?, ?, ?, ?, '', '', 0, CURRENT_TIMESTAMP)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(env_id)
+    .bind(run_id)
+    .bind(function)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// A run of `handler` on `build_id`, in a stream of its own.
+async fn create_event_run(
+    db: &DatabasePool,
+    env_id: &Uuid,
+    build_id: &Uuid,
+    user_id: &Uuid,
+    handler: &str,
+    data: serde_json::Value,
+) -> (Uuid, Uuid) {
+    let run_id = Uuid::now_v7();
+    let stream_id = Uuid::now_v7();
+    let event_id = Uuid::now_v7();
+    Stream::create_or_get_stream(db, stream_id, *env_id)
+        .await
+        .unwrap();
+    hot::db::Event::insert_event(
+        db,
+        &event_id,
+        env_id,
+        &stream_id,
+        "demo:event",
+        &data,
+        chrono::Utc::now(),
+        user_id,
+        None,
+    )
+    .await
+    .unwrap();
+    Run::open_event_run(
+        db,
+        &hot::db::run::UnstartedRun {
+            run_id,
+            env_id: *env_id,
+            stream_id,
+            build_id: *build_id,
+            run_type_id: RunType::Event.as_id(),
+            origin_run_id: None,
+            event_id,
+            by_user_id: *user_id,
+            retry_attempt: 0,
+            event_handler_fn: handler.to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    (run_id, stream_id)
+}
+
+#[tokio::test]
+async fn test_list_runs_narrows_by_project_stream_and_function() {
+    let db = create_test_db().await;
+    let (_api_key_id, api_key) = create_test_api_key(&db.0).await;
+    let (_, user_id) = hot::db::get_default_org_and_user_ids(&db.0).await.unwrap();
+    let env = Env::get_default_env(&db.0).await.unwrap();
+
+    let project_a = create_test_project(&db.0, &env.env_id, &user_id).await;
+    let build_a = create_test_build(&db.0, &project_a, &user_id, false).await;
+    let project_b = Uuid::new_v4();
+    Project::insert_project(&db.0, &project_b, &env.env_id, "second-project", &user_id)
+        .await
+        .unwrap();
+    let build_b = create_test_build(&db.0, &project_b, &user_id, false).await;
+
+    let empty = serde_json::json!({});
+    let (handled, handled_stream) = create_event_run(
+        &db.0,
+        &env.env_id,
+        &build_a,
+        &user_id,
+        "::demo/on-a",
+        empty.clone(),
+    )
+    .await;
+    // A scheduled or called run says its function in the event's data.
+    let (called, _) = create_event_run(
+        &db.0,
+        &env.env_id,
+        &build_a,
+        &user_id,
+        "::hot::schedule/fire",
+        serde_json::json!({"fn": "::demo/nightly"}),
+    )
+    .await;
+    let (other, other_stream) =
+        create_event_run(&db.0, &env.env_id, &build_b, &user_id, "::demo/on-b", empty).await;
+    // A direct run has no event: its function is its root call's.
+    let (direct, _) = create_test_run(&db.0, &env.env_id, &build_b, &user_id).await;
+    insert_root_call(&db.0, &env.env_id, &direct, "::demo/direct").await;
+
+    let sorted = |mut ids: Vec<Uuid>| {
+        ids.sort();
+        ids
+    };
+    let app = run_list_app(&db);
+    let listed = async |query: &str| -> Vec<Uuid> {
+        let uri = format!("/v1/runs?{query}");
+        let (status, json) = make_request(&app, Method::GET, &uri, &api_key, None).await;
+        assert_eq!(status, StatusCode::OK, "{uri}: {json}");
+        let mut ids: Vec<Uuid> = json["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|run| run["run_id"].as_str().unwrap().parse().unwrap())
+            .collect();
+        ids.sort();
+        assert_eq!(
+            json["pagination"]["total"],
+            ids.len(),
+            "{uri}: the total counts what the filter keeps"
+        );
+        ids
+    };
+
+    assert_eq!(
+        listed(&format!("project_id={project_a}")).await,
+        sorted(vec![handled, called]),
+    );
+    assert_eq!(
+        listed(&format!("project_id={project_b}")).await,
+        sorted(vec![other, direct]),
+    );
+    assert_eq!(
+        listed(&format!("stream_id={handled_stream}")).await,
+        vec![handled],
+    );
+    assert_eq!(listed("function=::demo/on-a").await, vec![handled]);
+    assert_eq!(
+        listed("function=%3A%3Ademo%2Fnightly").await,
+        vec![called],
+        "the event's data names the function, and the name may be encoded",
+    );
+    assert_eq!(listed("function=::demo/direct").await, vec![direct]);
+    assert_eq!(listed("function=::demo/none").await, Vec::<Uuid>::new());
+    assert_eq!(
+        listed("function=::demo/on").await,
+        Vec::<Uuid>::new(),
+        "a function is matched whole",
+    );
+
+    // Filters narrow together.
+    assert_eq!(
+        listed(&format!("project_id={project_b}&function=::demo/on-b")).await,
+        vec![other],
+    );
+    assert_eq!(
+        listed(&format!("project_id={project_a}&stream_id={other_stream}")).await,
+        Vec::<Uuid>::new(),
+    );
+    assert_eq!(
+        listed(&format!(
+            "function=::demo/on-b&status=running&stream_id={other_stream}"
+        ))
+        .await,
+        vec![other],
+    );
+}
+
+#[tokio::test]
+async fn test_list_runs_function_outlives_its_call_rows() {
+    let db = create_test_db().await;
+    let (_api_key_id, api_key) = create_test_api_key(&db.0).await;
+    let (_, user_id) = hot::db::get_default_org_and_user_ids(&db.0).await.unwrap();
+    let env = Env::get_default_env(&db.0).await.unwrap();
+    let project = create_test_project(&db.0, &env.env_id, &user_id).await;
+    let build = create_test_build(&db.0, &project, &user_id, false).await;
+
+    // The handler's name is on the run, so a run whose calls were purged
+    // stays findable. It has no call rows at all here.
+    let (run_id, _) = create_event_run(
+        &db.0,
+        &env.env_id,
+        &build,
+        &user_id,
+        "::demo/on-a",
+        serde_json::json!({}),
+    )
+    .await;
+
+    create_event_run(
+        &db.0,
+        &env.env_id,
+        &build,
+        &user_id,
+        "::demo/on-b",
+        serde_json::json!({}),
+    )
+    .await;
+
+    let app = run_list_app(&db);
+    let (status, json) = make_request(
+        &app,
+        Method::GET,
+        "/v1/runs?function=::demo/on-a",
+        &api_key,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["pagination"]["total"], 1);
+    assert_eq!(json["data"][0]["run_id"], run_id.to_string());
+}
+
+#[tokio::test]
+async fn test_list_runs_refuses_a_malformed_id() {
+    let db = create_test_db().await;
+    let (_api_key_id, api_key) = create_test_api_key(&db.0).await;
+    let app = run_list_app(&db);
+
+    for query in ["project_id=nope", "stream_id=nope"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/v1/runs?{query}"))
+                    .header("Authorization", format!("Bearer {api_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+    }
+}
+
+#[tokio::test]
+async fn test_list_runs_filters_stay_inside_the_env() {
+    let db = create_test_db().await;
+    let (_api_key_id, api_key) = create_test_api_key(&db.0).await;
+    let (org_id, user_id) = hot::db::get_default_org_and_user_ids(&db.0).await.unwrap();
+    let other_env = Uuid::now_v7();
+    Env::insert_env(&db.0, &other_env, &org_id, "elsewhere", &user_id)
+        .await
+        .unwrap();
+    let other_project = create_test_project(&db.0, &other_env, &user_id).await;
+    let other_build = create_test_build(&db.0, &other_project, &user_id, false).await;
+
+    let (_, stream_id) = create_event_run(
+        &db.0,
+        &other_env,
+        &other_build,
+        &user_id,
+        "::demo/elsewhere",
+        serde_json::json!({}),
+    )
+    .await;
+
+    // A key of the default env names what another env holds, and gets nothing.
+    let app = run_list_app(&db);
+    for query in [
+        format!("stream_id={stream_id}"),
+        format!("project_id={other_project}"),
+        "function=::demo/elsewhere".to_string(),
+    ] {
+        let uri = format!("/v1/runs?{query}");
+        let (status, json) = make_request(&app, Method::GET, &uri, &api_key, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["pagination"]["total"], 0, "{uri}");
+    }
+}
+
 // NOTE: test_get_run_vars tests are commented out because the `var` table
 // is not included in the SQLite schema migration. These tests should be
 // enabled when the var table is added to the schema.

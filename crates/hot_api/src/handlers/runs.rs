@@ -10,7 +10,10 @@ use axum::{
 };
 use futures::stream::Stream;
 use hot::blob::BlobStore;
-use hot::db::{api_key::ApiKey, run::Run};
+use hot::db::{
+    api_key::ApiKey,
+    run::{Run, RunScope},
+};
 use hot::time_range::parse_time_range_cutoff;
 use serde::{Deserialize, Serialize};
 use std::{convert::Infallible, sync::Arc, time::Duration};
@@ -101,6 +104,9 @@ pub struct RunFilters {
     #[serde(rename = "type")]
     pub run_type: Option<String>, // call|event|schedule|run|eval|repl
     pub time_range: Option<String>, // P7D|P30D (ISO 8601 duration)
+    pub project_id: Option<Uuid>,
+    pub stream_id: Option<Uuid>,
+    pub function: Option<String>, // whole name, e.g. ::myapp::orders/on-placed
 }
 
 pub async fn list_runs(
@@ -118,6 +124,11 @@ pub async fn list_runs(
     let run_types: Option<Vec<&str>> = filters.run_type.as_ref().map(|t| vec![t.as_str()]);
     let time_range_cutoff =
         parse_time_range_cutoff(filters.time_range.as_deref(), chrono::Utc::now());
+    let scope = RunScope {
+        project_id: filters.project_id.as_ref(),
+        stream_id: filters.stream_id.as_ref(),
+        function: filters.function.as_deref(),
+    };
 
     let runs = Run::get_filtered_runs_by_env(
         &db,
@@ -125,7 +136,7 @@ pub async fn list_runs(
         statuses.as_deref(),
         run_types.as_deref(),
         time_range_cutoff,
-        None, // project_id filter not supported in API yet
+        scope,
         None, // search_term - not supported in API yet
         Some(filters.limit),
         Some(filters.offset),
@@ -144,7 +155,7 @@ pub async fn list_runs(
         statuses.as_deref(),
         run_types.as_deref(),
         time_range_cutoff,
-        None, // project_id filter not supported in API yet
+        scope,
         None, // search_term - not supported in API yet
     )
     .await
