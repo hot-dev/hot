@@ -298,7 +298,8 @@ meta {
 
     **Formats**
     - `"sse"` - Server-Sent Events, parses event/data/id fields
-    - `"ndjson"` - Newline-delimited JSON
+    - `"ndjson"` - Newline-delimited JSON, one value per line. A line that
+      isn't JSON comes as text, and a blank line is skipped
     - `"raw"` - Raw chunks as strings or bytes (default)
 
     Each `next` gives one event or chunk: it reads on until it has one, so a
