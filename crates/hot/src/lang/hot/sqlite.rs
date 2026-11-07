@@ -145,7 +145,70 @@ fn last_errmsg(db: *mut ffi::sqlite3) -> String {
     }
 }
 
-fn open_db(path: &std::path::Path, read_only: bool) -> Result<DbPtr, String> {
+/// Pragmas that change SQLite for the whole process, not one connection.
+const PROCESS_WIDE_PRAGMAS: [&str; 4] = [
+    "temp_store_directory",
+    "data_store_directory",
+    "soft_heap_limit",
+    "hard_heap_limit",
+];
+
+/// The authorizer of a confined connection. The SQL a caller passes runs as
+/// written, so without this it can name any path this process can open.
+/// `VACUUM INTO` attaches its target, so it stops here too; plain `VACUUM`
+/// attaches an empty name. A filename that isn't a literal arrives as null.
+unsafe extern "C" fn authorize_confined(
+    _user_data: *mut std::os::raw::c_void,
+    action: std::os::raw::c_int,
+    arg1: *const std::os::raw::c_char,
+    _arg2: *const std::os::raw::c_char,
+    _database: *const std::os::raw::c_char,
+    _trigger: *const std::os::raw::c_char,
+) -> std::os::raw::c_int {
+    let allowed = match action {
+        ffi::SQLITE_ATTACH => !arg1.is_null() && unsafe { *arg1 } == 0,
+        ffi::SQLITE_PRAGMA => {
+            arg1.is_null() || {
+                let pragma = unsafe { CStr::from_ptr(arg1) }.to_string_lossy();
+                !PROCESS_WIDE_PRAGMAS
+                    .iter()
+                    .any(|wide| pragma.eq_ignore_ascii_case(wide))
+            }
+        }
+        _ => true,
+    };
+    if allowed {
+        ffi::SQLITE_OK
+    } else {
+        ffi::SQLITE_DENY
+    }
+}
+
+/// Keep a connection to its own database, for callers with no right to the
+/// host's files.
+fn confine_connection(db: *mut ffi::sqlite3) -> Result<(), String> {
+    let rc =
+        unsafe { ffi::sqlite3_set_authorizer(db, Some(authorize_confined), std::ptr::null_mut()) };
+    if rc != ffi::SQLITE_OK {
+        return Err(last_errmsg(db));
+    }
+    // Refuses the writes that can corrupt a database file on purpose, such as
+    // `writable_schema` and `sqlite_dbpage`.
+    let rc = unsafe {
+        ffi::sqlite3_db_config(
+            db,
+            ffi::SQLITE_DBCONFIG_DEFENSIVE,
+            1 as std::os::raw::c_int,
+            std::ptr::null_mut::<std::os::raw::c_int>(),
+        )
+    };
+    if rc != ffi::SQLITE_OK {
+        return Err(last_errmsg(db));
+    }
+    Ok(())
+}
+
+fn open_db(path: &std::path::Path, read_only: bool, confined: bool) -> Result<DbPtr, String> {
     let c_path = CString::new(path.to_string_lossy().as_bytes())
         .map_err(|_| "path contains a NUL byte".to_string())?;
     let flags = if read_only {
@@ -164,6 +227,10 @@ fn open_db(path: &std::path::Path, read_only: bool) -> Result<DbPtr, String> {
             m
         };
         return Err(msg);
+    }
+    if confined && let Err(message) = confine_connection(db) {
+        unsafe { ffi::sqlite3_close(db) };
+        return Err(message);
     }
     // Sane defaults: foreign keys on, 5s busy timeout for co-located writers.
     unsafe {
@@ -431,7 +498,9 @@ pub fn open(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         )
     };
 
-    let db = match open_db(&local_path, read_only) {
+    // Direct mode is the caller's own machine, where its files are its own.
+    let confined = service.is_some() || vm.is_isolation_enabled();
+    let db = match open_db(&local_path, read_only, confined) {
         Ok(db) => db,
         Err(e) => {
             if service.is_some() {
@@ -688,4 +757,131 @@ pub fn close(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         }
     }
     HotResult::Ok(Val::Bool(true))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Fixture {
+        dir: PathBuf,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!("hot-sqlite-{}", uuid::Uuid::now_v7()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self { dir }
+        }
+
+        /// A database of another tenant's, as this process has it open.
+        fn other_database(&self) -> (PathBuf, DbPtr) {
+            let path = self.dir.join("other.db");
+            let db = open_db(&path, false, true).unwrap();
+            exec(
+                &db,
+                "CREATE TABLE secret(v); INSERT INTO secret VALUES ('private')",
+            )
+            .unwrap();
+            (path, db)
+        }
+
+        fn confined(&self) -> DbPtr {
+            open_db(&self.dir.join("own.db"), false, true).unwrap()
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn exec(db: &DbPtr, sql: &str) -> Result<(), String> {
+        let sql = CString::new(sql).unwrap();
+        let rc = unsafe {
+            ffi::sqlite3_exec(
+                db.0,
+                sql.as_ptr(),
+                None,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if rc == ffi::SQLITE_OK {
+            Ok(())
+        } else {
+            Err(last_errmsg(db.0))
+        }
+    }
+
+    fn assert_refused(db: &DbPtr, sql: &str) {
+        let error = exec(db, sql).expect_err(sql);
+        assert!(error.contains("authoriz"), "{sql}: {error}");
+    }
+
+    #[test]
+    fn a_confined_connection_cannot_attach_another_database() {
+        let fixture = Fixture::new();
+        let (other, _open) = fixture.other_database();
+        let db = fixture.confined();
+        let path = other.display();
+
+        assert_refused(&db, &format!("ATTACH '{path}' AS other"));
+        assert_refused(&db, &format!("ATTACH 'file:{path}' AS other"));
+        assert_refused(&db, &format!("ATTACH '{path}' || '' AS other"));
+        // A bound filename is not a literal, so it reaches the authorizer as
+        // null: this is how a path built at run time would arrive.
+        assert_refused(&db, "ATTACH ? AS other");
+        assert!(exec(&db, "SELECT * FROM other.secret").is_err());
+    }
+
+    #[test]
+    fn a_confined_connection_cannot_write_a_file_with_vacuum_into() {
+        let fixture = Fixture::new();
+        let db = fixture.confined();
+        let target = fixture.dir.join("written.db");
+
+        assert_refused(&db, &format!("VACUUM INTO '{}'", target.display()));
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn a_confined_connection_cannot_change_sqlite_for_the_process() {
+        let fixture = Fixture::new();
+        let db = fixture.confined();
+        for pragma in PROCESS_WIDE_PRAGMAS {
+            assert_refused(&db, &format!("PRAGMA {pragma} = 1"));
+        }
+        assert_refused(&db, "PRAGMA HARD_HEAP_LIMIT = 1");
+    }
+
+    #[test]
+    fn a_confined_connection_keeps_everything_on_its_own_database() {
+        let fixture = Fixture::new();
+        let db = fixture.confined();
+        for sql in [
+            "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT)",
+            "CREATE INDEX t_v ON t(v)",
+            "INSERT INTO t(v) VALUES ('a')",
+            "UPDATE t SET v = 'b'",
+            "PRAGMA journal_mode = WAL",
+            "PRAGMA wal_checkpoint(TRUNCATE)",
+            "PRAGMA foreign_keys = ON",
+            "BEGIN; DELETE FROM t; ROLLBACK",
+            "VACUUM",
+        ] {
+            exec(&db, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+        }
+    }
+
+    #[test]
+    fn a_direct_connection_can_still_attach_the_callers_own_files() {
+        let fixture = Fixture::new();
+        let (other, _open) = fixture.other_database();
+        let db = open_db(&fixture.dir.join("direct.db"), false, false).unwrap();
+
+        exec(&db, &format!("ATTACH '{}' AS other", other.display())).unwrap();
+        exec(&db, "SELECT * FROM other.secret").unwrap();
+    }
 }

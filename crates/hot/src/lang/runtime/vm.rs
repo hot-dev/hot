@@ -233,6 +233,7 @@ pub(crate) struct VmHostContext {
     task_queue: Option<Arc<crate::queue::ProcessingQueue<crate::lang::hot::task::TaskRequest>>>,
     task_receiver: Option<Arc<parking_lot::Mutex<tokio::sync::mpsc::Receiver<Val>>>>,
     external_cancel: Option<Arc<AtomicBool>>,
+    run_capture: Arc<crate::lang::hot::io::RunCapture>,
     task_id: Option<uuid::Uuid>,
     context_storage: AHashMap<String, Val>,
     secret_keys: AHashSet<String>,
@@ -929,6 +930,8 @@ pub struct VirtualMachine {
     /// External cancellation token — checked periodically by the instruction loop.
     /// When set to `true`, the VM returns a cancellation error at the next check point.
     external_cancel: Option<Arc<AtomicBool>>,
+    /// The run's own output capture, shared with its parallel branches.
+    run_capture: Arc<crate::lang::hot::io::RunCapture>,
     /// Task ID when this VM is executing inside a task worker.
     /// Used by `::hot::task/checkpoint` and `::hot::task/restore`.
     task_id: Option<uuid::Uuid>,
@@ -1157,6 +1160,7 @@ impl VirtualMachine {
             task_queue: None,
             task_receiver: None,
             external_cancel: None,
+            run_capture: Arc::default(),
             task_id: None,
         };
 
@@ -1309,6 +1313,7 @@ impl VirtualMachine {
             task_queue: self.task_queue.clone(),
             task_receiver: self.task_receiver.clone(),
             external_cancel: self.external_cancel.clone(),
+            run_capture: Arc::clone(&self.run_capture),
             task_id: self.task_id,
             context_storage: self.context_storage.clone(),
             secret_keys: self.secret_keys.clone(),
@@ -1332,6 +1337,7 @@ impl VirtualMachine {
         self.task_queue = context.task_queue.clone();
         self.task_receiver = context.task_receiver.clone();
         self.external_cancel = context.external_cancel.clone();
+        self.run_capture = Arc::clone(&context.run_capture);
         self.task_id = context.task_id;
         self.context_storage = context.context_storage.clone();
         self.secret_keys = context.secret_keys.clone();
@@ -1717,6 +1723,11 @@ impl VirtualMachine {
     /// an async block without holding a borrow on the VM.
     pub fn external_cancel_token(&self) -> Option<Arc<AtomicBool>> {
         self.external_cancel.clone()
+    }
+
+    /// The run's own output capture (see `crate::lang::hot::io::RunCapture`).
+    pub(crate) fn run_capture(&self) -> &crate::lang::hot::io::RunCapture {
+        &self.run_capture
     }
 
     /// Set the task ID for checkpoint/restore support.
