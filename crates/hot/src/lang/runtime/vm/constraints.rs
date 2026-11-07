@@ -65,11 +65,30 @@ struct Failure {
 
 enum FailureKind {
     Violation,
-    BaseMismatch { expected: String },
-    Ambiguous { expected: String },
+    BaseMismatch {
+        expected: String,
+    },
+    Ambiguous {
+        expected: String,
+        among: &'static str,
+    },
     NotOneOf,
-    Evaluation { cause: Val },
-    Budget { budget: &'static str, limit: i64 },
+    /// A record's data has none of these required fields.
+    Missing {
+        fields: Vec<String>,
+    },
+    /// A constructor inside this one refused with an Err of its own, which
+    /// isn't a `ConstraintError` this one can repeat.
+    Refused {
+        cause: Val,
+    },
+    Evaluation {
+        cause: Val,
+    },
+    Budget {
+        budget: &'static str,
+        limit: i64,
+    },
 }
 
 /// The boundary a check runs at, from its spec.
@@ -207,8 +226,20 @@ fn passes_as_is(value: &Val, kinds: u32, item_kinds: u32, key_kinds: u32) -> boo
     }
 }
 
-fn short_name(name: &str) -> &str {
+pub(super) fn short_name(name: &str) -> &str {
     name.rsplit('/').next().unwrap_or(name)
+}
+
+/// What an Err's payload says: its `message`, as `err-message` reads it, or
+/// the payload itself.
+fn error_text(payload: &Val) -> String {
+    let fields = crate::val::as_fields(payload);
+    let said = get_str(fields, "message").or_else(|| get_str(fields, "msg"));
+    match (said, payload) {
+        (Some(text), _) => text.to_string(),
+        (None, Val::Str(text)) => text.to_string(),
+        (None, other) => other.to_string(),
+    }
 }
 
 /// `items[1].price` for a path of `["items", 1, "price"]`.
@@ -513,13 +544,52 @@ impl VirtualMachine {
     /// The `ConstraintError` of `value`, which fits more than one variant of
     /// `type_name` and so can't become any of them.
     pub(crate) fn constructor_ambiguity(&self, type_name: &str, value: &Val) -> Val {
+        self.ambiguity(type_name, value, "variant")
+    }
+
+    /// The `ConstraintError` of `value`, which fits more than one member of
+    /// `union` and so can't become any of them.
+    pub(crate) fn union_ambiguity(&self, union: &str, value: &Val) -> Val {
+        self.ambiguity(union, value, "member")
+    }
+
+    fn ambiguity(&self, type_name: &str, value: &Val, among: &'static str) -> Val {
         let failure = self.failure(
             FailureKind::Ambiguous {
                 expected: short_name(type_name).to_string(),
+                among,
             },
             value,
             &[],
         );
+        self.constraint_error(&failure, &Boundary::constructor(type_name))
+    }
+
+    /// The `ConstraintError` of `value`, record data that doesn't have the
+    /// required `fields` of `type_name`.
+    pub(crate) fn constructor_missing(
+        &self,
+        type_name: &str,
+        value: &Val,
+        fields: Vec<String>,
+    ) -> Val {
+        let failure = self.failure(FailureKind::Missing { fields }, value, &[]);
+        self.constraint_error(&failure, &Boundary::constructor(type_name))
+    }
+
+    /// The `ConstraintError` of `type_name`, for `value` at `step` inside it,
+    /// which a hand-written constructor refused with `error`. A hand-written
+    /// constructor's Err is its author's to shape, so it stays whole as the
+    /// `cause`, and the path says where in `type_name` it came from.
+    pub(crate) fn constructor_refusal(
+        &self,
+        type_name: &str,
+        error: &Val,
+        value: &Val,
+        step: Val,
+    ) -> Val {
+        let cause = error.unwrap_err().cloned().unwrap_or(Val::Null);
+        let failure = self.failure(FailureKind::Refused { cause }, value, &[step]);
         self.constraint_error(&failure, &Boundary::constructor(type_name))
     }
 
@@ -1248,13 +1318,26 @@ impl VirtualMachine {
                 ),
                 vec![],
             ),
-            FailureKind::Ambiguous { expected } => (
+            FailureKind::Ambiguous { expected, among } => (
                 "Violation",
                 format!(
-                    "{subject}{at} expected {expected}, got a {} that fits more than one variant",
+                    "{subject}{at} expected {expected}, got a {} that fits more than one {among}",
                     failure.value_type
                 ),
                 vec![],
+            ),
+            FailureKind::Missing { fields } => (
+                "Violation",
+                format!(
+                    "{subject}{at} is missing required field(s): {}",
+                    fields.join(", ")
+                ),
+                vec![],
+            ),
+            FailureKind::Refused { cause } => (
+                "Violation",
+                format!("{subject}{at}: {}", error_text(cause)),
+                vec![("cause", cause.clone())],
             ),
             FailureKind::NotOneOf => (
                 "Violation",

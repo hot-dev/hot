@@ -137,6 +137,33 @@ pub struct UnstartedRun {
     pub event_handler_fn: String,
 }
 
+/// What narrows a run listing, beyond its status, type and time range.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RunScope<'a> {
+    pub project_id: Option<&'a Uuid>,
+    pub stream_id: Option<&'a Uuid>,
+    /// The function a run executes, by its whole name.
+    pub function: Option<&'a str>,
+}
+
+impl<'a> RunScope<'a> {
+    pub fn project(project_id: Option<&'a Uuid>) -> Self {
+        Self {
+            project_id,
+            ..Self::default()
+        }
+    }
+}
+
+/// The function a run executes: what its event names, else its handler, which
+/// outlives its call rows, else its root call or task.
+const RUN_FUNCTION_POSTGRES: &str = "COALESCE(e.event_data->>'fn', r.event_handler_fn, \
+     (SELECT function_name FROM call WHERE run_id = r.run_id AND parent_call_id IS NULL LIMIT 1), \
+     (SELECT function_name FROM task WHERE run_id = r.run_id LIMIT 1))";
+const RUN_FUNCTION_SQLITE: &str = "COALESCE(json_extract(e.event_data, '$.fn'), r.event_handler_fn, \
+     (SELECT function_name FROM call WHERE run_id = r.run_id AND parent_call_id IS NULL LIMIT 1), \
+     (SELECT function_name FROM task WHERE run_id = r.run_id LIMIT 1))";
+
 /// The run id of an event's handler (`ns/var`): the same for every delivery of
 /// the event, so a redelivery finds the runs earlier deliveries wrote, and what
 /// queues a retry can name the run it will be. It derives from what a redeploy
@@ -818,7 +845,7 @@ impl Run {
         statuses: Option<&[&str]>,
         run_types: Option<&[&str]>,
         time_range_cutoff: Option<chrono::DateTime<chrono::Utc>>,
-        project_id: Option<&Uuid>, // Optional project filter
+        scope: RunScope<'_>,
         search_term: Option<&str>, // Optional search term for Run ID, Stream ID, Project Name, Run Type
         limit: Option<i64>,
         offset: Option<i64>,
@@ -835,9 +862,17 @@ impl Run {
                 ];
                 let mut param_count = 2; // Start at 2 since $1 is env_id
 
-                // Add project filter if specified
-                if project_id.is_some() {
+                // Add the filters that narrow what the listing covers
+                if scope.project_id.is_some() {
                     where_clauses.push(format!("b.project_id = ${}", param_count));
+                    param_count += 1;
+                }
+                if scope.stream_id.is_some() {
+                    where_clauses.push(format!("r.stream_id = ${}", param_count));
+                    param_count += 1;
+                }
+                if scope.function.is_some() {
+                    where_clauses.push(format!("{RUN_FUNCTION_POSTGRES} = ${}", param_count));
                     param_count += 1;
                 }
 
@@ -926,9 +961,15 @@ impl Run {
                 let mut q =
                     sqlx::query_as::<_, Run>(sqlx::AssertSqlSafe(query.as_str())).bind(env_id);
 
-                // Bind project_id if specified
-                if let Some(proj_id) = project_id {
+                // Bind what narrows the listing, in the order of its clauses
+                if let Some(proj_id) = scope.project_id {
                     q = q.bind(proj_id);
+                }
+                if let Some(stream_id) = scope.stream_id {
+                    q = q.bind(stream_id);
+                }
+                if let Some(function) = scope.function {
+                    q = q.bind(function);
                 }
 
                 // Bind time range parameter
@@ -992,9 +1033,15 @@ impl Run {
                 let mut where_clauses =
                     vec!["r.env_id = ?".to_string(), "r.run_type_id != 7".to_string()];
 
-                // Add project filter if specified
-                if project_id.is_some() {
+                // Add the filters that narrow what the listing covers
+                if scope.project_id.is_some() {
                     where_clauses.push("b.project_id = ?".to_string());
+                }
+                if scope.stream_id.is_some() {
+                    where_clauses.push("r.stream_id = ?".to_string());
+                }
+                if scope.function.is_some() {
+                    where_clauses.push(format!("{RUN_FUNCTION_SQLITE} = ?"));
                 }
 
                 // Add time range filter (cutoff bound below, after env_id/project_id binds)
@@ -1071,9 +1118,15 @@ impl Run {
                 let mut q =
                     sqlx::query_as::<_, Run>(sqlx::AssertSqlSafe(query.as_str())).bind(env_id);
 
-                // Bind project_id if specified
-                if let Some(proj_id) = project_id {
+                // Bind what narrows the listing, in the order of its clauses
+                if let Some(proj_id) = scope.project_id {
                     q = q.bind(proj_id);
+                }
+                if let Some(stream_id) = scope.stream_id {
+                    q = q.bind(stream_id);
+                }
+                if let Some(function) = scope.function {
+                    q = q.bind(function);
                 }
 
                 // Bind time range cutoff (matches `r.start_time >= ?` clause above)
@@ -1144,9 +1197,15 @@ impl Run {
         statuses: Option<&[&str]>,
         run_types: Option<&[&str]>,
         time_range_cutoff: Option<chrono::DateTime<chrono::Utc>>,
-        project_id: Option<&Uuid>, // Optional project filter
+        scope: RunScope<'_>,
         search_term: Option<&str>, // Optional search term
     ) -> Result<i64, RunError> {
+        // Only the function filter reads a run's event.
+        let event_join = if scope.function.is_some() {
+            " LEFT JOIN event e ON r.event_id = e.event_id"
+        } else {
+            ""
+        };
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 // Build dynamic WHERE clauses (exclude task-type runs from counts)
@@ -1156,9 +1215,17 @@ impl Run {
                 ];
                 let mut param_count = 2; // Start at 2 since $1 is env_id
 
-                // Add project filter if specified
-                if project_id.is_some() {
+                // Add the filters that narrow what the listing covers
+                if scope.project_id.is_some() {
                     where_clauses.push(format!("b.project_id = ${}", param_count));
+                    param_count += 1;
+                }
+                if scope.stream_id.is_some() {
+                    where_clauses.push(format!("r.stream_id = ${}", param_count));
+                    param_count += 1;
+                }
+                if scope.function.is_some() {
+                    where_clauses.push(format!("{RUN_FUNCTION_POSTGRES} = ${}", param_count));
                     param_count += 1;
                 }
 
@@ -1236,16 +1303,22 @@ impl Run {
                 let where_clause = where_clauses.join(" AND ");
 
                 let query = format!(
-                    "SELECT COUNT(*) FROM run r JOIN run_status rs ON r.status_id = rs.status_id JOIN run_type rt ON r.run_type_id = rt.run_type_id LEFT JOIN build b ON r.build_id = b.build_id LEFT JOIN project p ON b.project_id = p.project_id WHERE {}",
+                    "SELECT COUNT(*) FROM run r JOIN run_status rs ON r.status_id = rs.status_id JOIN run_type rt ON r.run_type_id = rt.run_type_id LEFT JOIN build b ON r.build_id = b.build_id LEFT JOIN project p ON b.project_id = p.project_id{event_join} WHERE {}",
                     where_clause
                 );
 
                 let mut q =
                     sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(query.as_str())).bind(env_id);
 
-                // Bind project_id if specified
-                if let Some(proj_id) = project_id {
+                // Bind what narrows the listing, in the order of its clauses
+                if let Some(proj_id) = scope.project_id {
                     q = q.bind(proj_id);
+                }
+                if let Some(stream_id) = scope.stream_id {
+                    q = q.bind(stream_id);
+                }
+                if let Some(function) = scope.function {
+                    q = q.bind(function);
                 }
 
                 // Bind time range cutoff
@@ -1298,9 +1371,15 @@ impl Run {
                 let mut where_clauses =
                     vec!["r.env_id = ?".to_string(), "r.run_type_id != 7".to_string()];
 
-                // Add project filter if specified
-                if project_id.is_some() {
+                // Add the filters that narrow what the listing covers
+                if scope.project_id.is_some() {
                     where_clauses.push("b.project_id = ?".to_string());
+                }
+                if scope.stream_id.is_some() {
+                    where_clauses.push("r.stream_id = ?".to_string());
+                }
+                if scope.function.is_some() {
+                    where_clauses.push(format!("{RUN_FUNCTION_SQLITE} = ?"));
                 }
                 let time_cutoff_str =
                     time_range_cutoff.map(|c| c.format("%Y-%m-%d %H:%M:%S").to_string());
@@ -1366,16 +1445,22 @@ impl Run {
                 let where_clause = where_clauses.join(" AND ");
 
                 let query = format!(
-                    "SELECT COUNT(*) FROM run r JOIN run_status rs ON r.status_id = rs.status_id JOIN run_type rt ON r.run_type_id = rt.run_type_id LEFT JOIN build b ON r.build_id = b.build_id LEFT JOIN project p ON b.project_id = p.project_id WHERE {}",
+                    "SELECT COUNT(*) FROM run r JOIN run_status rs ON r.status_id = rs.status_id JOIN run_type rt ON r.run_type_id = rt.run_type_id LEFT JOIN build b ON r.build_id = b.build_id LEFT JOIN project p ON b.project_id = p.project_id{event_join} WHERE {}",
                     where_clause
                 );
 
                 let mut q =
                     sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(query.as_str())).bind(env_id);
 
-                // Bind project_id if specified
-                if let Some(proj_id) = project_id {
+                // Bind what narrows the listing, in the order of its clauses
+                if let Some(proj_id) = scope.project_id {
                     q = q.bind(proj_id);
+                }
+                if let Some(stream_id) = scope.stream_id {
+                    q = q.bind(stream_id);
+                }
+                if let Some(function) = scope.function {
+                    q = q.bind(function);
                 }
 
                 // Bind time range cutoff (matches `r.start_time >= ?` clause above)

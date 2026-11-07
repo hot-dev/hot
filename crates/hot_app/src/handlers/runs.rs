@@ -8,6 +8,7 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect};
+use hot::db::run::RunScope;
 use hot::db::{DatabasePool, Run, Task};
 use hot::queue::Queue;
 use serde_json::json;
@@ -68,7 +69,7 @@ pub async fn runs_list_handler(
             status_filter.as_deref(),
             run_type_filter.as_deref(),
             query_filters.time_range_cutoff,
-            selected_project_uuid.as_ref(),
+            RunScope::project(selected_project_uuid.as_ref()),
             search_filter,
             Some(RUNS_PER_PAGE),
             Some(page.offset),
@@ -85,7 +86,7 @@ pub async fn runs_list_handler(
             status_filter.as_deref(),
             run_type_filter.as_deref(),
             query_filters.time_range_cutoff,
-            selected_project_uuid.as_ref(),
+            RunScope::project(selected_project_uuid.as_ref()),
             search_filter,
         )
         .await

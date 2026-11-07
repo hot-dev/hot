@@ -232,7 +232,7 @@ Server(body)  // Err: constructor of `Server` at `port` expected Int, got Str
 - A type declared over a `Vec` or `Map` of records or enums builds what it holds the same way: `Circles type Vec<Circle>` builds every item into a `Circle`, and `Circles([{radius: "x"}])` fails at `[0].radius`. A `where` refinement of one builds them too, and its value stays a plain `Vec` or `Map`. A parameter of such a type checks what it's given and doesn't build it.
 - Fields of type `Any` or `Fn` aren't checked.
 
-A failed check returns `Err(ConstraintError.Violation)`, with the field in its `path`. A required field that's missing is its own `Err`, naming the field. `assoc` and the other updates only check `where` constraints, so call the constructor again if the fields may have changed: `Server(assoc(server, "port", value))`.
+A failed check returns `Err(ConstraintError.Violation)`, with the field in its `path`. A missing required field, or a value that no member of a union takes or more than one does, fails the same way: `err-value(r).message` reads the same for every refusal, and for a missing field names each one. A hand-written constructor's own `Err` stays as it wrote it, until a record holding it refuses: that's a `Violation` too, with the `Err` whole in its `cause`. `assoc` and the other updates only check `where` constraints, so call the constructor again if the fields may have changed: `Server(assoc(server, "port", value))`.
 
 ### Types over Built-in Types
 

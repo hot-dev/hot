@@ -522,7 +522,10 @@ fn delete_context_variable_doc() {}
         ("offset" = Option<i64>, Query, description = "Pagination offset"),
         ("status" = Option<String>, Query, description = "running|succeeded|failed|cancelled"),
         ("type" = Option<String>, Query, description = "call|event|schedule|run|eval|repl"),
-        ("time_range" = Option<String>, Query, description = "ISO 8601 duration, e.g. P7D")
+        ("time_range" = Option<String>, Query, description = "ISO 8601 duration, e.g. P7D"),
+        ("project_id" = Option<Uuid>, Query, description = "Only runs of this project"),
+        ("stream_id" = Option<Uuid>, Query, description = "Only runs in this stream"),
+        ("function" = Option<String>, Query, description = "Only runs of this function, by its whole name, e.g. ::myapp::orders/on-placed")
     ),
     security(("bearer_auth" = [])),
     responses((status = 200, description = "Runs", body = ApiListResponse<RunResponse>), (status = "default", description = "Error", body = ApiErrorResponse))

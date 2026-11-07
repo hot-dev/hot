@@ -58,25 +58,58 @@ meta {
     Claude Opus 5 has thinking enabled by default and counts thinking plus
     visible text against `max_tokens`, so callers selecting it should use a
     materially larger ceiling than the legacy 1024-token adapter default.
+
+    `cache-control` turns on prompt caching, as Anthropic's own value:
+    `{type: "ephemeral"}`, or `{type: "ephemeral", ttl: "1h"}`. It marks the
+    system prompt, which caches the tools with it, and the conversation, whose
+    mark moves forward each turn. A loop that sends its long skills and pack
+    as the system prompt then reads them from the cache on every call. Keep
+    what changes between calls out of the system prompt, since a change there
+    misses the cache for everything after it.
     """
 }
 type {
     max-tokens: Int,
     effort: Str?,
+    cache-control: Map?,
 }
 
 DEFAULT_REQUEST_OPTIONS ChatRequestOptions({
     max-tokens: DEFAULT_MAX_TOKENS,
     effort: null,
+    cache-control: null,
 })
 
+mark-system-prompt
+meta {
+    doc: """
+    Internal: `request` with its system prompt as a block that holds
+    `cache-control`. An empty prompt stays as it is: there's nothing to cache,
+    and the API refuses an empty block.
+    """
+}
+fn (request: Map, cache-control: Map): Map {
+    system get(request, "system")
+    cond {
+        or(not(is-str(system)), is-empty(system)) => { request }
+        => { assoc(request, "system", [{type: "text", text: system, cache_control: cache-control}]) }
+    }
+}
+
 apply-request-options
-meta { doc: "Apply output and effort controls to an Anthropic request map." }
+meta { doc: "Apply output, effort and cache controls to an Anthropic request map." }
 fn (request: Map, options: ChatRequestOptions): Map {
     with-output assoc(request, "max_tokens", options.max-tokens)
-    match options.effort {
+    with-effort match options.effort {
         Null => { with-output }
         Str => { assoc(with-output, "output_config", {effort: options.effort}) }
+    }
+
+    match options.cache-control {
+        Null => { with-effort }
+        Map => {
+            assoc(mark-system-prompt(with-effort, options.cache-control), "cache_control", options.cache-control)
+        }
     }
 }
 
@@ -182,16 +215,42 @@ fn (blocks: Vec): Vec<::ai-tool/ToolCall> {
     )
 }
 
+prompt-usage
+meta {
+    doc: """
+    Internal: a reply's usage. Anthropic's `input_tokens` is only what the
+    cache didn't cover, so `input-tokens` adds the cached tokens back: it
+    counts the whole prompt, with a cache or without one, as it does for other
+    providers. `cache-read-tokens` and `cache-write-tokens` are the parts of it
+    the cache served and took.
+    """
+}
+fn (uncached: Int, cache-read: Int, cache-write: Int, output: Int): Map {
+    {
+        input-tokens: add(uncached, add(cache-read, cache-write)),
+        output-tokens: output,
+        cache-read-tokens: cache-read,
+        cache-write-tokens: cache-write
+    }
+}
+
 response-usage
 meta {
-    doc: """Normalize Anthropic's usage shape into `{input-tokens, output-tokens}`."""
+    doc: """
+    Normalize Anthropic's usage shape into `{input-tokens, output-tokens,
+    cache-read-tokens, cache-write-tokens}`.
+    """
 }
 fn (u: Any): Map? {
     cond {
         is-null(u) => { null }
         => {
-            input-tokens: or(get(u, "input_tokens"), 0),
-            output-tokens: or(get(u, "output_tokens"), 0)
+            prompt-usage(
+                or(get(u, "input_tokens"), 0),
+                or(get(u, "cache_read_input_tokens"), 0),
+                or(get(u, "cache_creation_input_tokens"), 0),
+                or(get(u, "output_tokens"), 0),
+            )
         }
     }
 }
@@ -354,6 +413,8 @@ EMPTY_STATE {
     block-order: [],
     stop-reason: null,
     usage-input: 0,
+    usage-cache-read: 0,
+    usage-cache-write: 0,
     usage-output: 0
 }
 
@@ -444,7 +505,9 @@ fn (state: Map, data: Map): Map {
     usage or(msg.usage, {})
     {
         ...state,
-        usage-input: add(or(state.usage-input, 0), or(usage.input_tokens, 0))
+        usage-input: add(or(state.usage-input, 0), or(usage.input_tokens, 0)),
+        usage-cache-read: add(or(state.usage-cache-read, 0), or(usage.cache_read_input_tokens, 0)),
+        usage-cache-write: add(or(state.usage-cache-write, 0), or(usage.cache_creation_input_tokens, 0))
     }
 }
 
@@ -532,10 +595,12 @@ fn (state: Map): ::ai-chat/ChatReply {
     })
 
     stop or(state.stop-reason, "end_turn")
-    usage {
-        input-tokens: or(state.usage-input, 0),
-        output-tokens: or(state.usage-output, 0)
-    }
+    usage prompt-usage(
+        or(state.usage-input, 0),
+        or(state.usage-cache-read, 0),
+        or(state.usage-cache-write, 0),
+        or(state.usage-output, 0),
+    )
 
     ::ai-chat/ChatReply({
         text: if(is-empty(text), null, text),

@@ -100,6 +100,12 @@ Server(body)   // Err: constructor of `Server` at `port` expected Int, got Str
   and a value that can't be one fails.
 - A failure in a nested record reports the whole path from the outermost one:
   `constructor of `Order` at `items[2].price` expected Dec, got Str`.
+- A missing required field, or a value that no member of a union takes or more
+  than one does, is the same `Violation`, so `err-value(r).message` always
+  reads: `constructor of `Order` is missing required field(s): total`.
+- A hand-written constructor's own `Err` stays as it wrote it, until a record
+  holding it refuses: that's a `Violation` at the field, with the `Err` whole
+  in `cause`.
 - An `Err` given for a field, or among the items or values of a `Vec` or `Map`
   of records or enums, comes back as itself, unless the field is `Any`.
 - A type over a built-in one checks its value the same way, at its constructor
@@ -358,8 +364,9 @@ limit: Int fetch-limit() where gt(%, 0)   // binding; `where` may start the next
   (or `EvaluationFailed`, `BudgetExceeded`) with `message`, `constraint`,
   `predicate`, `boundary`, `path` (e.g. `["items", 2, "price"]`),
   `declared-type`, `value-type`, `function`, `parameter`, `location`.
-  `EvaluationFailed` adds `cause`; `BudgetExceeded` adds `budget` and
-  `limit`. It never contains the value.
+  `EvaluationFailed` adds `cause`, as does a `Violation` from a hand-written
+  constructor inside a record; `BudgetExceeded` adds `budget` and `limit`. Hot
+  never adds the value itself.
   `match err-value(r) { ConstraintError.Violation => ... }` tells them apart.
 - Checks run at typed bindings, parameters (before the body), the
   precondition (after the parameters), return values (success only),

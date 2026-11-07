@@ -1103,6 +1103,31 @@ pub fn format(args: &[Val]) -> HotResult<Val> {
     to_string(args)
 }
 
+/// Nanoseconds since the Unix epoch of an RFC 3339 time, which states its own
+/// offset. `None` for anything else, or a time an Instant can't hold.
+pub(crate) fn rfc3339_nanos(text: &str) -> Option<i128> {
+    chrono::DateTime::parse_from_rfc3339(text)
+        .ok()
+        .and_then(|at| at.timestamp_nanos_opt())
+        .map(i128::from)
+}
+
+/// Create an instant from an RFC 3339 string. A refusal doesn't repeat the
+/// text: a constructor's message never holds the value it refused.
+pub fn instant_from_string(args: &[Val]) -> HotResult<Val> {
+    validate_args!("::hot::time/instant-from-string", args, 1);
+
+    let Val::Str(text) = &args[0] else {
+        return HotResult::Err(Val::from("instant-from-string expects a string"));
+    };
+    match rfc3339_nanos(text) {
+        Some(nanos) => HotResult::Ok(instant_val(nanos)),
+        None => HotResult::Err(Val::from(
+            "Instant expects an RFC 3339 time with an offset, such as \"2026-11-01T10:00:00Z\"",
+        )),
+    }
+}
+
 /// Create an instant from epoch microseconds
 pub fn instant_from_micros(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::time/instant-from-micros", args, 1);

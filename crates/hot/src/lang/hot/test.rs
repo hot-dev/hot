@@ -191,15 +191,9 @@ fn harness_now(harness: &TestHarness) -> Result<i128, String> {
 /// Nanoseconds since the Unix epoch of an RFC 3339 string, Instant or ZonedDateTime.
 fn epoch_nanos_of(value: &Val) -> Result<i128, String> {
     if let Val::Str(text) = value {
-        return chrono::DateTime::parse_from_rfc3339(text)
-            .ok()
-            .and_then(|at| at.timestamp_nanos_opt())
-            .map(i128::from)
-            .ok_or_else(|| {
-                format!(
-                    "expected an RFC 3339 time such as \"2026-10-14T09:00:00Z\", got \"{text}\""
-                )
-            });
+        return time::rfc3339_nanos(text).ok_or_else(|| {
+            format!("expected an RFC 3339 time such as \"2026-10-14T09:00:00Z\", got \"{text}\"")
+        });
     }
     let untyped = match untype_recursive(value) {
         HotResult::Ok(v) => v,

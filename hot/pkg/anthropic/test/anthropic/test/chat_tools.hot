@@ -23,6 +23,93 @@ fn () {
     assert-eq("high", request.output_config.effort)
 }
 
+test-request-options-leave-the-cache-alone-by-default
+meta ["test"]
+fn () {
+    request ::ct/apply-request-options(
+        {model: "claude-opus-5", system: "be brief"},
+        ::ct/DEFAULT_REQUEST_OPTIONS
+    )
+    assert-eq("be brief", request.system)
+    assert(not(in("cache_control", keys(request))), "no marker unless one is asked for")
+}
+
+test-request-options-mark-the-system-prompt-and-the-conversation
+meta ["test"]
+fn () {
+    marker {type: "ephemeral"}
+    request ::ct/apply-request-options(
+        {model: "claude-opus-5", system: "the skills and the pack"},
+        ::ct/ChatRequestOptions({max-tokens: 1024, cache-control: marker})
+    )
+    assert-eq(marker, request.cache_control, "the conversation's tail moves forward each turn")
+    assert-eq(
+        [{type: "text", text: "the skills and the pack", cache_control: marker}],
+        request.system,
+        "the system prompt is a read point that survives what the tail does",
+    )
+}
+
+test-request-options-mark-both-with-one-ttl
+meta ["test"]
+fn () {
+    // A longer TTL must come first, so the two can't be allowed to differ.
+    marker {type: "ephemeral", ttl: "1h"}
+    request ::ct/apply-request-options(
+        {model: "claude-opus-5", system: "stable"},
+        ::ct/ChatRequestOptions({max-tokens: 1024, cache-control: marker})
+    )
+    assert-eq("1h", request.cache_control.ttl)
+    assert-eq("1h", request.system[0].cache_control.ttl)
+}
+
+test-request-options-mark-a-conversation-with-no-system-prompt
+meta ["test"]
+fn () {
+    request ::ct/apply-request-options(
+        {model: "claude-opus-5"},
+        ::ct/ChatRequestOptions({max-tokens: 1024, cache-control: {type: "ephemeral"}})
+    )
+    assert-eq("ephemeral", request.cache_control.type)
+    assert(not(in("system", keys(request))), "no system prompt appears from nowhere")
+}
+
+test-request-options-leave-an-empty-system-prompt-unmarked
+meta ["test"]
+fn () {
+    // The API refuses an empty text block, and there's nothing there to cache.
+    request ::ct/apply-request-options(
+        {model: "claude-opus-5", system: ""},
+        ::ct/ChatRequestOptions({max-tokens: 1024, cache-control: {type: "ephemeral"}})
+    )
+    assert-eq("", request.system)
+    assert-eq("ephemeral", request.cache_control.type)
+}
+
+test-request-options-keep-effort-beside-the-cache
+meta ["test"]
+fn () {
+    request ::ct/apply-request-options(
+        {model: "claude-opus-5", system: "s"},
+        ::ct/ChatRequestOptions({max-tokens: 1024, effort: "high", cache-control: {type: "ephemeral"}})
+    )
+    assert-eq("high", request.output_config.effort)
+    assert-eq("ephemeral", request.cache_control.type)
+}
+
+test-a-marked-request-reaches-the-wire-whole
+meta ["test"]
+fn () {
+    marker {type: "ephemeral"}
+    request ::ct/apply-request-options(
+        {model: "claude-opus-5", messages: [{role: "user", content: "hi"}], system: "s"},
+        ::ct/ChatRequestOptions({max-tokens: 1024, cache-control: marker})
+    )
+    sent untype(::anthropic::messages/MessagesPostRequest(request))
+    assert-eq(marker, sent.cache_control)
+    assert-eq(marker, sent.system[0].cache_control)
+}
+
 test-to-anthropic-user-message
 meta ["test"]
 fn () {
@@ -135,6 +222,51 @@ fn () {
     assert-eq("weather", calls[0].name)
     assert-eq("NYC", calls[0].input.city)
     assert-eq("tu_2", calls[1].id)
+}
+
+test-usage-counts-the-whole-prompt-with-a-cache
+meta ["test"]
+fn () {
+    usage ::ct/response-usage({
+        input_tokens: 10,
+        cache_read_input_tokens: 900,
+        cache_creation_input_tokens: 90,
+        output_tokens: 5,
+    })
+    assert-eq(1000, usage.input-tokens, "Anthropic's input_tokens is only what the cache didn't cover")
+    assert-eq(900, usage.cache-read-tokens)
+    assert-eq(90, usage.cache-write-tokens)
+    assert-eq(5, usage.output-tokens)
+}
+
+test-usage-with-no-cache-reads-as-before
+meta ["test"]
+fn () {
+    usage ::ct/response-usage({input_tokens: 10, output_tokens: 5})
+    assert-eq(10, usage.input-tokens)
+    assert-eq(5, usage.output-tokens)
+    assert-eq(0, usage.cache-read-tokens)
+    assert-eq(0, usage.cache-write-tokens)
+}
+
+test-a-stream-reports-what-the-cache-held
+meta ["test"]
+fn () {
+    state ::ct/handle-event(
+        ::ct/EMPTY_STATE,
+        {
+            event: "message_start",
+            data: {
+                type: "message_start",
+                message: {usage: {input_tokens: 10, cache_read_input_tokens: 900, cache_creation_input_tokens: 90}},
+            },
+        },
+        (delta) { null },
+    )
+    reply ::ct/finalize-state(state)
+    assert-eq(1000, reply.usage.input-tokens)
+    assert-eq(900, reply.usage.cache-read-tokens)
+    assert-eq(90, reply.usage.cache-write-tokens)
 }
 
 test-response-usage-shape

@@ -93,8 +93,9 @@ shadows a function, and `hot test` warns about a test with no assertions.
   has `?`. An `Int` becomes a `Dec` at `x: Dec`, and a whole `Dec` an `Int` at
   `x: Int`. User types, `Any` and `Fn` aren't checked.
 - A record's constructor checks its fields the same way, named or Map form,
-  and reads into `Vec<T>` and `Map<K, V>`. A field that doesn't fit makes the
-  record an `Err(ConstraintError.Violation)` naming the field. A record or enum
+  and reads into `Vec<T>` and `Map<K, V>`. A field that doesn't fit, or a
+  required one that's missing, makes the record an
+  `Err(ConstraintError.Violation)` naming the field. A record or enum
   field refuses a plain value no constructor of its type takes. An enum
   variant's payload is checked as a field is. A type over a built-in one
   (`Meters type Int`) checks its value this way too. A Map at a closed enum
