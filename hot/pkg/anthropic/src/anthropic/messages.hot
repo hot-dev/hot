@@ -97,7 +97,8 @@ MessagesPostRequest type {
     top_k: Int?,
     top_p: Dec?,
     output_config: Map?,
-    thinking: Map?
+    thinking: Map?,
+    cache_control: Map?
 }
 
 MessagesPostResponse type {

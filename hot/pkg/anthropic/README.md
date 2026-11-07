@@ -7,7 +7,7 @@ anthropic API bindings for Hot.
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/anthropic": "1.3.0"
+"hot.dev/anthropic": "1.4.0"
 ```
 
 ## API Base URL
@@ -52,12 +52,35 @@ answer ::ai::chat/run-loop(opts, "What is 17 + 25?")
 ## Per-request controls
 
 `::anthropic::chat-tools/chat-with-tools-options` and its streaming
-counterpart accept `ChatRequestOptions` with `max-tokens` and `effort`. The
-original four-argument `chat-with-tools` function remains compatible with
-`::ai::chat/run-loop`.
+counterpart accept `ChatRequestOptions` with `max-tokens`, `effort` and
+`cache-control`. The original four-argument `chat-with-tools` function remains
+compatible with `::ai::chat/run-loop`.
 
 Claude Opus 5 enables thinking by default, and thinking plus visible text
 share `max_tokens`; use an output ceiling appropriate to the selected effort.
+
+### Prompt caching
+
+A tool loop sends its whole prompt again on every call. Set `cache-control` to
+read what doesn't change from Anthropic's cache:
+
+```hot
+options ::anthropic::chat-tools/ChatRequestOptions({
+    max-tokens: 16384,
+    cache-control: {type: "ephemeral"},   // or {type: "ephemeral", ttl: "1h"}
+})
+```
+
+It marks the system prompt, which caches the tools with it, and the
+conversation, whose mark moves forward each turn. Keep what changes between
+calls out of the system prompt: a change there misses the cache for everything
+after it. A prefix under the model's minimum isn't cached, and that isn't an
+error.
+
+`reply.usage.input-tokens` counts the whole prompt either way.
+`cache-read-tokens` and `cache-write-tokens` say how much of it the cache
+served and took, so a read count of zero on a later call means the prefix
+changed.
 
 ## License
 
