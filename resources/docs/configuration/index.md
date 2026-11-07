@@ -325,6 +325,12 @@ sending payloads outside the VM. They do not limit `length`, `get`, or ordinary
 collection updates. Cancellation is sampled every 1,024 interpreter steps or JIT
 tail iterations; native I/O also observes the run deadline and cancellation.
 
+In-memory operations (formatting, hashing, map keys, JSON and XML output, run
+results) accept values nested up to 4,096 levels. Values persisted in records,
+events, and task, schedule, alert, checkpoint, stream, and store payloads are
+limited to 120 levels. A run record holds an `Omitted` marker for a deeper result.
+YAML frontmatter accepts anchors and aliases; aliases add at most 1 Mi nodes.
+
 Operators can set these environment variables before starting workers. Positive
 integer overrides raise or lower the budget; invalid or zero values use the
 default. Raise memory budgets together with worker memory and concurrency sizing.
@@ -332,14 +338,14 @@ default. Raise memory budgets together with worker memory and concurrency sizing
 | Environment variable | Default | Resource measured |
 | --- | --- | --- |
 | `HOT_MAX_EXPANDED_VALUE_NODES` | Twice `HOT_MAX_COLLECTION_SIZE`, plus one | Expanded value occurrences at an output boundary |
-| `HOT_MAX_EXPANDED_VALUE_BYTES` | `HOT_MAX_ALLOC_BYTES` (256 MiB) | Estimated expanded value storage |
+| `HOT_MAX_EXPANDED_VALUE_BYTES` | `HOT_MAX_ALLOC_BYTES` (256 MiB) | Str and Bytes payload, plus 8 bytes for every other value occurrence |
 | `HOT_MAX_STRING_BYTES` | 256 MiB | Produced text or checked serialized output |
 | `HOT_SQLITE_MAX_QUERY_ROWS` | `HOT_MAX_COLLECTION_SIZE` (16 Mi) | Rows materialized by one query |
 | `HOT_SQLITE_MAX_QUERY_CELLS` | `HOT_MAX_COLLECTION_SIZE` (16 Mi) | Cells materialized by one query |
 | `HOT_SQLITE_MAX_QUERY_BYTES` | `HOT_MAX_ALLOC_BYTES` (256 MiB) | Query result storage and individual SQLite values |
-| `HOT_XML_MAX_NODES`, `HOT_YAML_MAX_NODES` | Expanded-value node budget | Parsed events, nodes, and attributes |
+| `HOT_XML_MAX_NODES`, `HOT_YAML_MAX_NODES` | Expanded-value node budget | Parsed events, nodes, and attributes; YAML alias expansion counts too |
 | `HOT_XML_MAX_DEPTH`, `HOT_YAML_MAX_DEPTH` | 256 | Parser nesting; raising it needs stack-budget validation, especially for YAML |
-| `HOT_NATIVE_IO_TIMEOUT_SECONDS` | 300 | Native I/O without an enclosing run deadline; runs use their remaining deadline |
+| `HOT_NATIVE_IO_TIMEOUT_SECONDS` | Unset (no limit) | Native I/O (sockets, HTTP, WebSocket, SQLite) outside a run deadline; runs use their remaining deadline, and cancellation always applies |
 | `HOT_BOX_MAX_IMAGE_BYTES` | 4 GiB | Compressed manifest and layer sizes per image |
 | `HOT_BOX_MAX_CACHED_IMAGES` | 128 | Cached image count before eviction; active images are retained |
 
