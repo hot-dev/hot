@@ -94,11 +94,6 @@ impl ScopedPgPool {
             .await
     }
 
-    pub(crate) async fn begin_serializable(&self) -> Result<ScopedPgTransaction, sqlx::Error> {
-        self.begin_at_isolation("BEGIN ISOLATION LEVEL SERIALIZABLE")
-            .await
-    }
-
     async fn begin_at_isolation(&self, begin: &str) -> Result<ScopedPgTransaction, sqlx::Error> {
         let scope = self.scope()?;
         // Values are trusted enums/UUIDs, escaped as SQL literals. Both

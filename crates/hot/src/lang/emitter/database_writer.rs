@@ -2805,7 +2805,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn postgres_trace_batch_merges_calls_and_serializes_quota_without_account_lock() {
+    async fn postgres_trace_batch_merges_calls_and_admits_one_of_two_concurrent_over_quota_writers()
+    {
         use sqlx::Executor;
         let Ok(uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
             return;

@@ -8878,13 +8878,21 @@ pub async fn run_with_components_shared_context_and_db(
                                                         }
                                                         let run_ids: Vec<Uuid> = admitted_handlers.iter().map(|(_, _, id)| *id).collect();
                                                         let org_id = event_message.body.execution_context.org_id.ok_or_else(|| worker_error("Hydrated event has no organization"))?;
-                                                        if let Err(error) = hot::db::run::Run::admit_executions(db, &org_id, &env_id, &run_ids).await {
+                                                        let mut admitted = hot::db::run::Run::admit_executions(db, &org_id, &env_id, &run_ids).await;
+                                                        // The epoch read after a quota refusal may already belong to
+                                                        // a new period or plan. Retry admission once under it: a
+                                                        // refusal then was made no later than the epoch, so a change
+                                                        // after it still wakes the parked event.
+                                                        let mut epoch = None;
+                                                        if matches!(admitted, Err(hot::db::run::RunError::QuotaExceeded(_))) {
+                                                            epoch = Some(hot::db::Run::admission_epoch(db, org_id).await?);
+                                                            admitted = hot::db::run::Run::admit_executions(db, &org_id, &env_id, &run_ids).await;
+                                                        }
+                                                        if let Err(error) = admitted {
                                                             match error {
                                                                 hot::db::run::RunError::Suspended(_) | hot::db::run::RunError::QuotaExceeded(_) => {
                                                                     if wait_log_due(org_id) { warn!(%org_id, %error, "Events parked until account admission changes"); }
-                                                                    let epoch = if matches!(error, hot::db::run::RunError::QuotaExceeded(_)) {
-                                                                        Some(hot::db::Run::admission_epoch(db, org_id).await?)
-                                                                    } else { None };
+                                                                    let epoch = if matches!(error, hot::db::run::RunError::QuotaExceeded(_)) { epoch } else { None };
                                                                     park_event_with_epoch(db, &event_message, epoch.as_deref()).await?;
                                                                     return Ok(());
                                                                 }

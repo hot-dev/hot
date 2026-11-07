@@ -850,7 +850,12 @@ pub async fn recover_event_outbox(
         let packet: Message = match serde_json::from_value(payload) {
             Ok(packet) => packet,
             Err(error) => {
-                tracing::error!(%event_id, %error, "Skipping invalid durable event packet");
+                // A packet that can't decode never will: settle it so it isn't
+                // re-claimed every lease forever.
+                tracing::error!(%event_id, %error, "Dropping invalid durable event packet");
+                EventRow::finish_enqueue(db, &event_id)
+                    .await
+                    .map_err(|error| error.to_string())?;
                 continue;
             }
         };
@@ -1042,7 +1047,17 @@ impl EventPublisher for QueueAndDatabaseEventPublisher {
         // Worker can now safely process this event knowing the event record exists
         crate::lang::hot::native_io::block_on_result("send enqueue", async {
             let packet = self.database_publisher.pending_message(ctx, event.event_id).await.map_err(Val::from)?;
-            self.queue_publisher.enqueue_message(packet).await.map_err(Val::from)?;
+            // The event row and its packet are committed: the outbox now owes
+            // the delivery, so a failed enqueue is recovered, not reported. An
+            // error here would tell `send` the event was lost while recovery
+            // still delivers it, and a retried send would deliver it twice.
+            if let Err(error) = self.queue_publisher.enqueue_message(packet).await {
+                tracing::warn!(event_id = %event.event_id, %error, "Event enqueue failed; outbox recovery will enqueue it");
+                if let Err(error) = self.database_publisher.release_enqueue(ctx, event.event_id).await {
+                    tracing::warn!(event_id = %event.event_id, %error, "Event outbox lease not released; recovery waits for it to expire");
+                }
+                return Ok(());
+            }
             if let Err(error) = self.database_publisher.finish_enqueue(ctx, event.event_id).await {
                 tracing::warn!(event_id = %event.event_id, %error, "Event enqueued; outbox settlement will be recovered");
             }

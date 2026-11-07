@@ -173,11 +173,12 @@ macro_rules! begin {
             // Unlimited accounts need neither the sibling-serializing account
             // lock nor a recount of every stored byte in the account.
             let used:i64=if limit<0 { 0 } else {
-                // Trace transactions use SSI to protect the aggregate without
-                // holding an account row lock while writing all their calls.
-                if !matches!(kind, QuotaKind::Call) {
-                    sqlx::query($lock).bind(root).execute(&mut *tx).await.map_err(|e|e.to_string())?;
-                }
+                // Every limited write, traces included, takes the account lock.
+                // Under SERIALIZABLE instead, any two overlapping trace batches
+                // in one account read the shared usage sum and write a slot of
+                // it, so one aborts with 40001 and a busy account exhausts its
+                // retries and re-runs handlers.
+                sqlx::query($lock).bind(root).execute(&mut *tx).await.map_err(|e|e.to_string())?;
                 sqlx::query_scalar(sqlx::AssertSqlSafe(kind.usage_sql()))
                     .bind(root).fetch_one(&mut *tx).await.map_err(|e|e.to_string())?
             };
@@ -202,13 +203,9 @@ async fn narrow_sqlite(_: &mut sqlx::SqliteConnection, _: Uuid, _: Uuid) -> Resu
 }
 async fn begin_postgres_tx(
     pool: &crate::db::ScopedPgPool,
-    kind: QuotaKind,
+    _kind: QuotaKind,
 ) -> Result<crate::db::ScopedPgTransaction, sqlx::Error> {
-    if matches!(kind, QuotaKind::Call) {
-        pool.begin_serializable().await
-    } else {
-        pool.begin().await
-    }
+    pool.begin().await
 }
 /// Admission reads before it writes. A deferred SQLite transaction that has
 /// read cannot wait for the writer lock: its first write fails at once with

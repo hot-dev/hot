@@ -61,6 +61,20 @@ impl DatabaseEventPublisher {
             .map_err(|error| error.to_string())
     }
 
+    pub(crate) async fn release_enqueue(
+        &self,
+        ctx: &ExecutionContext,
+        event_id: uuid::Uuid,
+    ) -> Result<(), String> {
+        crate::db::event::Event::release_enqueue(
+            &self.outbox_db(ctx).await?,
+            &event_id,
+            chrono::Utc::now(),
+        )
+        .await
+        .map_err(|error| error.to_string())
+    }
+
     /// Create a new DatabaseEventPublisher with an existing database pool (preferred)
     /// This ensures the database connection is ready before events are published
     pub fn new_with_pool(db_pool: DatabasePool) -> Self {
@@ -97,10 +111,7 @@ impl DatabaseEventPublisher {
                     event = event_receiver.recv() => {
                         match event {
                             Some((ctx, evt, ack_sender)) => {
-                                let result = processor.process_event(ctx, evt).await;
-                                if let Some(sender) = ack_sender {
-                                    let _ = sender.send(result);
-                                }
+                                processor.write_acked(ctx, evt, ack_sender).await;
                             }
                             None => break, // Channel closed
                         }
@@ -109,10 +120,7 @@ impl DatabaseEventPublisher {
                         if let Some(sender) = shutdown {
                             // Process any remaining events
                             while let Ok((ctx, evt, ack_sender)) = event_receiver.try_recv() {
-                                let result = processor.process_event(ctx, evt).await;
-                                if let Some(ack) = ack_sender {
-                                    let _ = ack.send(result);
-                                }
+                                processor.write_acked(ctx, evt, ack_sender).await;
                             }
                             // Signal completion
                             let _ = sender.send(());
@@ -183,10 +191,7 @@ impl DatabaseEventPublisher {
                     event = event_receiver.recv() => {
                         match event {
                             Some((ctx, evt, ack_sender)) => {
-                                let result = processor.process_event(ctx, evt).await;
-                                if let Some(sender) = ack_sender {
-                                    let _ = sender.send(result);
-                                }
+                                processor.write_acked(ctx, evt, ack_sender).await;
                             }
                             None => break, // Channel closed
                         }
@@ -195,10 +200,7 @@ impl DatabaseEventPublisher {
                         if let Some(sender) = shutdown {
                             // Process any remaining events
                             while let Ok((ctx, evt, ack_sender)) = event_receiver.try_recv() {
-                                let result = processor.process_event(ctx, evt).await;
-                                if let Some(ack) = ack_sender {
-                                    let _ = ack.send(result);
-                                }
+                                processor.write_acked(ctx, evt, ack_sender).await;
                             }
                             // Signal completion
                             let _ = sender.send(());
@@ -253,6 +255,56 @@ struct DatabaseEventProcessor {
 }
 
 impl DatabaseEventProcessor {
+    /// Write an event and report the result to its publisher. A publisher that
+    /// stopped waiting has already told `send` the event was not sent, so its
+    /// event must not be delivered: skip a write it no longer waits for, and
+    /// settle the outbox packet of one that committed after it gave up.
+    async fn write_acked(
+        &mut self,
+        ctx: ExecutionContext,
+        event: Event,
+        ack: Option<EventWriteAck>,
+    ) {
+        if ack.as_ref().is_some_and(|ack| ack.is_closed()) {
+            tracing::warn!(event_id = %event.event_id, "Skipping an event write its publisher stopped waiting for");
+            return;
+        }
+        let event_id = event.event_id;
+        let result = self.process_event(ctx.clone(), event).await;
+        let Some(ack) = ack else { return };
+        let committed = result.is_ok();
+        if ack.send(result).is_err() && committed {
+            if let Err(error) = self.settle_unsent(&ctx, event_id).await {
+                tracing::error!(%event_id, %error, "Event committed after its publisher timed out, and its outbox packet could not be settled");
+            } else {
+                tracing::warn!(%event_id, "Event committed after its publisher timed out; it will not be enqueued");
+            }
+        }
+    }
+
+    async fn settle_unsent(
+        &self,
+        ctx: &ExecutionContext,
+        event_id: uuid::Uuid,
+    ) -> Result<(), String> {
+        let db = self
+            .db
+            .read()
+            .await
+            .clone()
+            .ok_or("Database not initialized")?;
+        let db = match (&db, ctx.org_id, ctx.env_id) {
+            (DatabasePool::Postgres(_), Some(org_id), Some(env_id)) => {
+                db.with_scope(crate::db::DatabaseScope::Environment { org_id, env_id })
+            }
+            (DatabasePool::Postgres(_), _, _) => return Err("Missing org_id or env_id".into()),
+            (DatabasePool::Sqlite(_), _, _) => db,
+        };
+        crate::db::event::Event::finish_enqueue(&db, &event_id)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
     /// Process an event with its execution context
     async fn process_event(&mut self, ctx: ExecutionContext, event: Event) -> Result<(), String> {
         if let Err(e) = self.insert_event(&ctx, &event).await {
