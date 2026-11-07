@@ -703,35 +703,41 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         );
 
         // IO functions
-        map.insert("::hot::io/print".to_string(), HotLibFn::LibFn(io::print));
+        map.insert(
+            "::hot::io/print".to_string(),
+            HotLibFn::VmAwareFn(io::print),
+        );
         map.insert(
             "::hot::io/println".to_string(),
-            HotLibFn::LibFn(io::println),
+            HotLibFn::VmAwareFn(io::println),
         );
         map.insert(
             "::hot::io/print-line".to_string(),
-            HotLibFn::LibFn(io::println),
+            HotLibFn::VmAwareFn(io::println),
         );
-        map.insert("::hot::io/eprint".to_string(), HotLibFn::LibFn(io::eprint));
+        map.insert(
+            "::hot::io/eprint".to_string(),
+            HotLibFn::VmAwareFn(io::eprint),
+        );
         map.insert(
             "::hot::io/eprintln".to_string(),
-            HotLibFn::LibFn(io::eprintln),
+            HotLibFn::VmAwareFn(io::eprintln),
         );
         map.insert(
             "::hot::io/capture-stdout".to_string(),
-            HotLibFn::LibFn(io::capture_stdout),
+            HotLibFn::VmAwareFn(io::capture_stdout),
         );
         map.insert(
             "::hot::io/capture-stderr".to_string(),
-            HotLibFn::LibFn(io::capture_stderr),
+            HotLibFn::VmAwareFn(io::capture_stderr),
         );
         map.insert(
             "::hot::io/release".to_string(),
-            HotLibFn::LibFn(io::release),
+            HotLibFn::VmAwareFn(io::release),
         );
         map.insert(
             "::hot::io/discard".to_string(),
-            HotLibFn::LibFn(io::discard),
+            HotLibFn::VmAwareFn(io::discard),
         );
         map.insert(
             "::hot::io/get-captured-content".to_string(),
@@ -743,7 +749,7 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         );
         map.insert("::hot::io/tap".to_string(), HotLibFn::VmAwareFn(io::tap));
         // Add direct println alias for compatibility with hot-std
-        map.insert("println".to_string(), HotLibFn::LibFn(io::println));
+        map.insert("println".to_string(), HotLibFn::VmAwareFn(io::println));
 
         // Language introspection functions (VM-aware)
         map.insert(

@@ -1,6 +1,7 @@
 // IO functions for  bytecode engine
 
 use crate::lang::hot::r#type::HotResult;
+use crate::lang::runtime::vm::VirtualMachine;
 use crate::val::Val;
 use crate::{validate_args, validate_no_args};
 use std::io::{self, BufWriter, Write};
@@ -225,6 +226,51 @@ pub fn write_stdout(text: &str) -> io::Result<()> {
     }
 }
 
+/// What one run is capturing. `::hot::io/capture-stdout` captures here, not on
+/// the process's streams: a worker holds many tenants' runs, and a run's
+/// capture must never hold another run's output. A run's `parallel` branches
+/// share it, and it ends with the run.
+#[derive(Debug, Default)]
+pub struct RunCapture {
+    stdout: Mutex<Option<CaptureBuffer>>,
+    stderr: Mutex<Option<CaptureBuffer>>,
+}
+
+impl RunCapture {
+    fn stream(&self, is_stderr: bool) -> &Mutex<Option<CaptureBuffer>> {
+        if is_stderr {
+            &self.stderr
+        } else {
+            &self.stdout
+        }
+    }
+
+    fn start(&self, is_stderr: bool) -> Option<CaptureHandle> {
+        let buffer = CaptureBuffer::new();
+        *self.stream(is_stderr).lock().ok()? = Some(buffer.clone());
+        Some(CaptureHandle::new(buffer, is_stderr))
+    }
+
+    fn release(&self, is_stderr: bool) {
+        if let Ok(mut stream) = self.stream(is_stderr).lock() {
+            *stream = None;
+        }
+    }
+
+    fn buffer(&self, is_stderr: bool) -> Option<CaptureBuffer> {
+        self.stream(is_stderr).lock().ok()?.clone()
+    }
+}
+
+/// Write a run's output: to its capture if it has one, else to the process.
+fn write_run_output(vm: &VirtualMachine, is_stderr: bool, text: &str) -> io::Result<()> {
+    match vm.run_capture().buffer(is_stderr) {
+        Some(mut buffer) => buffer.write_all(text.as_bytes()),
+        None if is_stderr => write_stderr(text),
+        None => write_stdout(text),
+    }
+}
+
 /// Handle for managing stream captures
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]
 pub struct CaptureHandle {
@@ -329,10 +375,9 @@ impl HotCaptureHandle {
         }
     }
 
-    /// Release the capture and return captured content
-    pub fn release(&self) -> Option<String> {
-        // Clone the handle to move it into release
-        self.inner.clone().release()
+    /// Check if this is a stderr capture
+    pub fn is_stderr(&self) -> bool {
+        self.inner.is_stderr()
     }
 
     /// Get captured content without releasing
@@ -359,21 +404,21 @@ fn format_val_for_raw_output(val: &Val) -> String {
 }
 
 /// Print values without newline
-pub fn print(args: &[Val]) -> HotResult<Val> {
+pub fn print(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     // Build formatted output for all args
     let mut pieces: Vec<String> = Vec::with_capacity(args.len());
     for arg in args {
         pieces.push(format_val_for_raw_output(arg));
     }
     let final_output = pieces.join("");
-    if let Err(e) = write_stdout(&final_output) {
+    if let Err(e) = write_run_output(vm, false, &final_output) {
         return HotResult::Err(Val::from(format!("Failed to write to stdout: {}", e)));
     }
     HotResult::Ok(Val::from(final_output))
 }
 
 /// Print values with newline
-pub fn println(args: &[Val]) -> HotResult<Val> {
+pub fn println(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     // Build formatted output for all args
     let mut pieces: Vec<String> = Vec::with_capacity(args.len());
     for arg in args {
@@ -381,32 +426,32 @@ pub fn println(args: &[Val]) -> HotResult<Val> {
     }
     let final_line = pieces.join("");
     // Ensure stdout receives the same 2-decimal formatting as returned value
-    if let Err(e) = write_stdout(&(final_line.clone() + "\n")) {
+    if let Err(e) = write_run_output(vm, false, &(final_line.clone() + "\n")) {
         return HotResult::Err(Val::from(format!("Failed to write to stdout: {}", e)));
     }
     HotResult::Ok(Val::from(final_line + "\n"))
 }
 
 /// Print to stderr without newline
-pub fn eprint(args: &[Val]) -> HotResult<Val> {
+pub fn eprint(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     // Build formatted output for all args
     let mut pieces: Vec<String> = Vec::with_capacity(args.len());
     for arg in args {
         pieces.push(format_val_for_raw_output(arg));
     }
     let final_output = pieces.join("");
-    if let Err(e) = write_stderr(&final_output) {
+    if let Err(e) = write_run_output(vm, true, &final_output) {
         return HotResult::Err(Val::from(format!("Failed to write to stderr: {}", e)));
     }
     HotResult::Ok(Val::from(final_output))
 }
 
 /// Print to stderr with newline
-pub fn eprintln(args: &[Val]) -> HotResult<Val> {
+pub fn eprintln(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     // One write, so a logged line is one record.
     let mut line: String = args.iter().map(format_val_for_raw_output).collect();
     line.push('\n');
-    if let Err(e) = write_stderr(&line) {
+    if let Err(e) = write_run_output(vm, true, &line) {
         return HotResult::Err(Val::from(format!("Failed to write to stderr: {}", e)));
     }
 
@@ -474,10 +519,10 @@ fn write_stderr(s: &str) -> Result<(), std::io::Error> {
 }
 
 /// Capture stdout
-pub fn capture_stdout(args: &[Val]) -> HotResult<Val> {
+pub fn capture_stdout(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     validate_no_args!("::hot::io/capture-stdout", args);
 
-    match start_capture_stdout() {
+    match vm.run_capture().start(false) {
         Some(handle) => {
             let hot_handle = HotCaptureHandle::new(handle, "stdout".to_string());
             HotResult::Ok(Val::boxed(hot_handle))
@@ -487,10 +532,10 @@ pub fn capture_stdout(args: &[Val]) -> HotResult<Val> {
 }
 
 /// Capture stderr
-pub fn capture_stderr(args: &[Val]) -> HotResult<Val> {
+pub fn capture_stderr(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     validate_no_args!("::hot::io/capture-stderr", args);
 
-    match start_capture_stderr() {
+    match vm.run_capture().start(true) {
         Some(handle) => {
             let hot_handle = HotCaptureHandle::new(handle, "stderr".to_string());
             HotResult::Ok(Val::boxed(hot_handle))
@@ -500,14 +545,14 @@ pub fn capture_stderr(args: &[Val]) -> HotResult<Val> {
 }
 
 /// Release a captured stdout or stderr handle
-pub fn release(args: &[Val]) -> HotResult<Val> {
+pub fn release(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::io/release", args, 1);
 
     let handle = &args[0];
     match handle {
         Val::Box(boxed_val) => {
             if let Some(capture_handle) = boxed_val.as_any().downcast_ref::<HotCaptureHandle>() {
-                capture_handle.release();
+                vm.run_capture().release(capture_handle.is_stderr());
                 HotResult::Ok(Val::Bool(true))
             } else {
                 HotResult::Err(Val::from("Expected a HotCaptureHandle"))
@@ -520,14 +565,14 @@ pub fn release(args: &[Val]) -> HotResult<Val> {
 }
 
 /// Discard a captured handle without getting its contents
-pub fn discard(args: &[Val]) -> HotResult<Val> {
+pub fn discard(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::io/discard", args, 1);
 
     let handle = &args[0];
     match handle {
         Val::Box(boxed_val) => {
             if let Some(capture_handle) = boxed_val.as_any().downcast_ref::<HotCaptureHandle>() {
-                capture_handle.release();
+                vm.run_capture().release(capture_handle.is_stderr());
                 HotResult::Ok(Val::Bool(true))
             } else {
                 HotResult::Err(Val::from("Expected a HotCaptureHandle"))
@@ -576,5 +621,95 @@ pub fn clear_captured_content(args: &[Val]) -> HotResult<Val> {
         _ => HotResult::Err(Val::from(
             "Expected a capture handle (boxed value)".to_string(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lang::bytecode::BytecodeProgram;
+    use crate::lang::compiler::core_registry::CoreVariableRegistry;
+    use std::sync::Arc;
+
+    fn run() -> VirtualMachine {
+        VirtualMachine::new(
+            Arc::new(BytecodeProgram::new()),
+            None,
+            Arc::new(indexmap::IndexMap::new()),
+            Arc::new(indexmap::IndexMap::new()),
+            Arc::new(indexmap::IndexMap::new()),
+            Arc::new(CoreVariableRegistry::new()),
+            None,
+        )
+    }
+
+    fn captured(handle: &Val) -> String {
+        match get_captured_content(std::slice::from_ref(handle)) {
+            HotResult::Ok(content) => content.to_string(),
+            HotResult::Err(error) => panic!("{error}"),
+        }
+    }
+
+    fn capture(vm: &mut VirtualMachine) -> Val {
+        match capture_stdout(vm, &[]) {
+            HotResult::Ok(handle) => handle,
+            HotResult::Err(error) => panic!("{error}"),
+        }
+    }
+
+    #[test]
+    fn a_run_captures_its_own_output_and_no_other_runs() {
+        let mut capturing = run();
+        let mut other = run();
+        let handle = capture(&mut capturing);
+
+        let _ = println(&mut other, &[Val::from("another tenant's token")]);
+        let _ = println(&mut capturing, &[Val::from("my own line")]);
+
+        let content = captured(&handle);
+        assert!(content.contains("my own line"), "{content}");
+        assert!(!content.contains("token"), "{content}");
+    }
+
+    #[test]
+    fn a_runs_stderr_capture_is_its_own_too() {
+        let mut capturing = run();
+        let mut other = run();
+        let HotResult::Ok(handle) = capture_stderr(&mut capturing, &[]) else {
+            panic!("capture must start");
+        };
+
+        let _ = eprint(&mut other, &[Val::from("another tenant's error")]);
+        let _ = eprint(&mut capturing, &[Val::from("my own error")]);
+
+        let content = captured(&handle);
+        assert!(content.contains("my own error"), "{content}");
+        assert!(!content.contains("tenant"), "{content}");
+    }
+
+    #[test]
+    fn a_runs_parallel_branches_share_its_capture() {
+        let mut parent = run();
+        let handle = capture(&mut parent);
+
+        let mut branch = run();
+        branch.inherit_host_context(&parent.host_context_snapshot());
+        let _ = println(&mut branch, &[Val::from("from a branch")]);
+
+        assert!(captured(&handle).contains("from a branch"));
+    }
+
+    #[test]
+    fn output_after_a_release_is_not_captured() {
+        let mut vm = run();
+        let handle = capture(&mut vm);
+        let _ = print(&mut vm, &[Val::from("kept")]);
+
+        let _ = release(&mut vm, std::slice::from_ref(&handle));
+        let _ = print(&mut vm, &[Val::from("after")]);
+
+        let content = captured(&handle);
+        assert!(content.contains("kept"), "{content}");
+        assert!(!content.contains("after"), "{content}");
     }
 }
