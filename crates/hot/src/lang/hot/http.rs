@@ -606,11 +606,7 @@ impl HotIterator for HttpStreamIterator {
             match chunk? {
                 Some(bytes) => match self.format.as_str() {
                     "sse" => self.parse_sse_chunk(&bytes),
-                    "ndjson" => {
-                        if let Some(value) = self.parse_ndjson_chunk(&bytes) {
-                            return Ok((value, false));
-                        }
-                    }
+                    "ndjson" => self.parse_ndjson_chunk(&bytes),
                     _ => {
                         if let Some(value) = self.parse_raw_chunk(&bytes) {
                             return Ok((value, false));
@@ -619,14 +615,17 @@ impl HotIterator for HttpStreamIterator {
                 },
                 None => {
                     self.done = true;
-                    // Flush what's left: a last event with no blank line, or
-                    // the bytes of a character the stream cut off
+                    // Flush what's left: a last event with no blank line, a
+                    // last NDJSON line with no newline, or the bytes of a
+                    // character the stream cut off
                     let remaining = std::mem::take(&mut self.sse_buffer);
                     match self.format.as_str() {
                         "sse" => self
                             .pending_sse_events
                             .extend(Self::parse_sse_event(&String::from_utf8_lossy(&remaining))),
-                        "ndjson" => {}
+                        "ndjson" => self
+                            .pending_sse_events
+                            .extend(Self::parse_ndjson_line(&remaining)),
                         _ if remaining.is_empty() => {}
                         _ => self.pending_sse_events.push_back(Val::bytes(remaining)),
                     }
@@ -744,35 +743,35 @@ impl HttpStreamIterator {
         Some(Val::map(event_map))
     }
 
-    /// Parse NDJSON (newline-delimited JSON) chunk, or None if it completes no line
-    fn parse_ndjson_chunk(&mut self, bytes: &Bytes) -> Option<Val> {
+    /// Parse NDJSON (newline-delimited JSON) chunk - buffers data and queues
+    /// complete lines
+    ///
+    /// `next` takes one value per call from the queue, as it does for SSE, so
+    /// a stream reads the same however the network split it.
+    fn parse_ndjson_chunk(&mut self, bytes: &Bytes) {
         self.sse_buffer.extend_from_slice(bytes);
 
-        // Look for complete lines
-        let mut objects = Vec::new();
         while let Some(pos) = self.sse_buffer.iter().position(|byte| *byte == b'\n') {
-            let line_bytes: Vec<u8> = self.sse_buffer.drain(..=pos).collect();
-            let line = String::from_utf8_lossy(&line_bytes).trim().to_string();
-
-            if !line.is_empty() {
-                match serde_json::from_str::<JsonValue>(&line) {
-                    Ok(json) => {
-                        let val: Val =
-                            serde_json::from_value(json).unwrap_or(Val::from(line.clone()));
-                        objects.push(val);
-                    }
-                    Err(_) => {
-                        objects.push(Val::from(line));
-                    }
-                }
-            }
+            let line: Vec<u8> = self.sse_buffer.drain(..=pos).collect();
+            self.pending_sse_events
+                .extend(Self::parse_ndjson_line(&line));
         }
+    }
 
-        match objects.len() {
-            0 => None,
-            1 => objects.pop(),
-            _ => Some(Val::vec(objects)),
+    /// A line of NDJSON as its value, or as its text when it isn't JSON. None
+    /// for a blank line.
+    fn parse_ndjson_line(bytes: &[u8]) -> Option<Val> {
+        let text = String::from_utf8_lossy(bytes);
+        let line = text.trim();
+        if line.is_empty() {
+            return None;
         }
+        Some(
+            serde_json::from_str::<JsonValue>(line)
+                .ok()
+                .and_then(|json| serde_json::from_value(json).ok())
+                .unwrap_or_else(|| Val::from(line)),
+        )
     }
 
     /// A raw chunk as Str, or as Bytes when it isn't text. The start of a
@@ -1850,6 +1849,68 @@ mod tests {
     #[test]
     fn an_ndjson_null_line_is_a_value() {
         assert_eq!(drain(iterator_over("ndjson", &[b"null\n"])), [Val::Null]);
+        assert_eq!(
+            drain(iterator_over("ndjson", &[b"null\n1\n"])),
+            [Val::Null, Val::Int(1)]
+        );
+    }
+
+    /// Each line is its own value, however the network split the stream.
+    #[test]
+    fn an_ndjson_stream_reads_the_same_however_it_was_chunked() {
+        let together = drain(iterator_over("ndjson", &[b"{\"id\":1}\n{\"id\":2}\n"]));
+        let apart = drain(iterator_over("ndjson", &[b"{\"id\":1}\n", b"{\"id\":2}\n"]));
+        let split = drain(iterator_over("ndjson", &[b"{\"id\":1}\n{\"i", b"d\":2}\n"]));
+
+        assert_eq!(together.len(), 2, "{together:?}");
+        assert_eq!(together[1].get("id"), Some(Val::Int(2)));
+        assert_eq!(together, apart);
+        assert_eq!(together, split);
+    }
+
+    /// Two lines and one line holding an array are different streams.
+    #[test]
+    fn an_ndjson_array_line_is_not_two_lines() {
+        assert_eq!(
+            drain(iterator_over("ndjson", &[b"1\n2\n"])),
+            [Val::Int(1), Val::Int(2)]
+        );
+        assert_eq!(
+            drain(iterator_over("ndjson", &[b"[1,2]\n"])),
+            [Val::vec(vec![Val::Int(1), Val::Int(2)])]
+        );
+    }
+
+    /// A stream needn't end its last line with a newline.
+    #[test]
+    fn an_ndjson_last_line_needs_no_newline() {
+        let values = drain(iterator_over("ndjson", &[b"{\"id\":1}\n{\"id\":2}"]));
+        assert_eq!(values.len(), 2, "{values:?}");
+        assert_eq!(values[1].get("id"), Some(Val::Int(2)));
+
+        assert_eq!(
+            drain(iterator_over("ndjson", &[b"1\n", b"2"])),
+            [Val::Int(1), Val::Int(2)]
+        );
+    }
+
+    /// Blank lines are no values, at the end of a stream too, and any line
+    /// ending will do.
+    #[test]
+    fn an_ndjson_blank_line_is_no_value() {
+        assert_eq!(
+            drain(iterator_over("ndjson", &[b"1\n\n\r\n2\r\n  "])),
+            [Val::Int(1), Val::Int(2)]
+        );
+    }
+
+    /// A line that isn't JSON comes as its text, and doesn't end the stream.
+    #[test]
+    fn an_ndjson_line_that_is_not_json_is_text() {
+        assert_eq!(
+            drain(iterator_over("ndjson", &[b"oops\n1\nlast"])),
+            [Val::from("oops"), Val::Int(1), Val::from("last")]
+        );
     }
 
     /// Characters of two, three and four bytes.
@@ -2078,14 +2139,7 @@ mod tests {
                         if done {
                             break;
                         }
-                        // Handle both single values and vectors (multiple lines in one chunk)
-                        match value {
-                            Val::Null => continue,
-                            Val::Vec(items) => {
-                                objects.extend(std::sync::Arc::unwrap_or_clone(items))
-                            }
-                            other => objects.push(other),
-                        }
+                        objects.push(value);
                     }
                     objects
                 } else {
