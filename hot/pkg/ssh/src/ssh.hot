@@ -9,7 +9,7 @@ meta {
 
 ConnectOptions
 meta {
-    doc: "SSH connection settings. Supply a trusted host-key and exactly one of password or private-key; timeout is milliseconds (default 30000), port defaults to 22."
+    doc: "SSH connection settings. Supply a trusted host-key (a full OpenSSH public key also selects which server key type is used) and exactly one of password or private-key; timeout is milliseconds (default 30000), port defaults to 22."
 }
 type {
     host: Str, user: Str, host-key: Str, port: Int?,

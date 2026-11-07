@@ -41,6 +41,13 @@ an encrypted key. Credentials are registered for masking in run records.
 a trusted channel. Unknown keys and changed keys are rejected. Host certificates
 and automatic trust-on-first-use are not supported.
 
+Prefer the full public key (for example a line from `ssh-keyscan`, without the
+host name). Hot then asks the server for that key type, so the pin works even
+when the server also has other host keys. A fingerprint cannot say which type
+to ask for: Hot asks for Ed25519, then ECDSA, then RSA, and the fingerprint must
+match the first type the server has. A mismatch error names the key the server
+presented.
+
 `port` defaults to 22. `timeout` is a positive millisecond deadline for each
 operation, default 30000; connecting includes DNS, negotiation and authentication.
 An inactive connection is disconnected after five minutes.

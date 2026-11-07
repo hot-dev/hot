@@ -318,8 +318,19 @@ async fn server() -> (
     let key =
         russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519).unwrap();
     let pin = key.public_key().fingerprint(HashAlg::Sha256).to_string();
+    let (port, fs, task) = server_with_keys(vec![key]).await;
+    (port, pin, fs, task)
+}
+
+async fn server_with_keys(
+    keys: Vec<russh::keys::PrivateKey>,
+) -> (
+    u16,
+    Arc<parking_lot::Mutex<Fs>>,
+    tokio::task::JoinHandle<()>,
+) {
     let config = Arc::new(server::Config {
-        keys: vec![key],
+        keys,
         auth_rejection_time: Duration::ZERO,
         auth_rejection_time_initial: Some(Duration::ZERO),
         ..Default::default()
@@ -342,7 +353,15 @@ async fn server() -> (
             });
         }
     });
-    (port, pin, fs, task)
+    (port, fs, task)
+}
+
+fn with_pin(opts: &Val, pin: &str) -> Val {
+    let mut opts = opts.clone();
+    if let Val::Map(m) = &mut opts {
+        Arc::make_mut(m).insert(Val::from("host-key"), Val::from(pin));
+    }
+    opts
 }
 
 fn options(port: u16, pin: &str) -> Val {
@@ -602,6 +621,52 @@ async fn inflight_reads_are_cancelled_and_close_still_works() {
         );
         ok(close(&mut vm, &[channel]));
         ok(close(&mut vm, &[connection]));
+    })
+    .await
+    .unwrap();
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn public_key_pin_selects_its_host_key_type() {
+    use russh::keys::{Algorithm, EcdsaCurve, PrivateKey};
+    // russh prefers Ed25519, so a server holding both presents Ed25519 unless the pin says otherwise.
+    let ed25519 = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+    let ecdsa = PrivateKey::random(
+        &mut rand::rng(),
+        Algorithm::Ecdsa {
+            curve: EcdsaCurve::NistP256,
+        },
+    )
+    .unwrap();
+    let ed25519_pin = ed25519
+        .public_key()
+        .fingerprint(HashAlg::Sha256)
+        .to_string();
+    let ecdsa_pin = ecdsa.public_key().fingerprint(HashAlg::Sha256).to_string();
+    let ecdsa_public = ecdsa.public_key().to_openssh().unwrap();
+    let (port, _, server) = server_with_keys(vec![ed25519, ecdsa]).await;
+    tokio::task::spawn_blocking(move || {
+        let mut vm = new_vm(Val::map_empty());
+        let opts = options(port, &ed25519_pin);
+
+        let conn = ok(connect(&mut vm, std::slice::from_ref(&opts)));
+        ok(close(&mut vm, &[conn]));
+
+        let conn = ok(connect(&mut vm, &[with_pin(&opts, &ecdsa_public)]));
+        assert_eq!(
+            field(&conn, "host-key"),
+            Some(&Val::from(ecdsa_pin.as_str()))
+        );
+        ok(close(&mut vm, &[conn]));
+
+        // A fingerprint cannot select a type; the error names the key the server presented.
+        let message = error(connect(&mut vm, &[with_pin(&opts, &ecdsa_pin)]));
+        assert!(
+            message.contains("server presented ssh-ed25519"),
+            "{message}"
+        );
+        assert!(message.contains(&ed25519_pin), "{message}");
     })
     .await
     .unwrap();

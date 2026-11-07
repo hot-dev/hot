@@ -30,7 +30,9 @@ data ::sftp/read-file(session, "/incoming/report.csv")
 ::sftp/close(session)
 ```
 
-Use a trusted OpenSSH public key or SHA256 fingerprint for `host-key`.
+Use a trusted OpenSSH public key or SHA256 fingerprint for `host-key`. A full
+public key also selects which of the server's host keys is used; see the
+`hot.dev/ssh` README.
 Connection options are shared with `hot.dev/ssh`: `port` defaults to 22;
 `timeout` defaults to 30000 milliseconds. Supply either `private-key` contents
 (with optional `passphrase`) or `password`. Hot's outbound network policy applies.

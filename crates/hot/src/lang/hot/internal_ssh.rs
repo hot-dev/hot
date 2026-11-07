@@ -7,10 +7,11 @@ use crate::outbound::DestinationPolicy;
 use crate::val::{Val, as_fields};
 use indexmap::IndexMap;
 use russh::client;
-use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate};
+use russh::keys::{Algorithm, HashAlg, PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate};
 use russh_sftp::client::{SftpSession, fs::File};
 use russh_sftp::protocol::{FileAttributes, OpenFlags};
 use std::any::Any;
+use std::borrow::Cow;
 use std::future::Future;
 use std::hash::Hasher;
 use std::sync::Arc;
@@ -47,6 +48,8 @@ impl Control {
 
 struct Client {
     fingerprint: String,
+    // The key the server offered, recorded so a pin mismatch can name it.
+    presented: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl client::Handler for Client {
@@ -57,8 +60,16 @@ impl client::Handler for Client {
         key: &PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
         // CA certificates need their own validation policy; a raw-key pin is not a CA pin.
-        Ok(key.certificate().is_none()
-            && key.public_key().fingerprint(HashAlg::Sha256).to_string() == self.fingerprint)
+        if key.certificate().is_some() {
+            return Ok(false);
+        }
+        let key = key.public_key();
+        let fingerprint = key.fingerprint(HashAlg::Sha256).to_string();
+        let matched = fingerprint == self.fingerprint;
+        if !matched && let Ok(mut presented) = self.presented.lock() {
+            *presented = Some(format!("{} {fingerprint}", key.algorithm()));
+        }
+        Ok(matched)
     }
 }
 
@@ -307,17 +318,40 @@ fn cleanup<T>(
     })
 }
 
-fn fingerprint(pin: &str) -> Result<String, String> {
+struct HostKeyPin {
+    fingerprint: String,
+    /// Host-key algorithms to offer. A full public key restricts negotiation to its own type,
+    /// so a server that also holds other key types presents the pinned one.
+    algorithms: Option<Vec<Algorithm>>,
+}
+
+fn host_key_pin(pin: &str) -> Result<HostKeyPin, String> {
     if pin.starts_with("SHA256:") {
         let parsed: russh::keys::ssh_key::Fingerprint = pin
             .parse()
             .map_err(|_| "invalid SHA256 host-key fingerprint")?;
-        Ok(parsed.to_string())
-    } else {
-        PublicKey::from_openssh(pin)
-            .map(|k| k.fingerprint(HashAlg::Sha256).to_string())
-            .map_err(|_| "host-key must be an OpenSSH public key or SHA256 fingerprint".into())
+        return Ok(HostKeyPin {
+            fingerprint: parsed.to_string(),
+            algorithms: None,
+        });
     }
+    let key = PublicKey::from_openssh(pin)
+        .map_err(|_| "host-key must be an OpenSSH public key or SHA256 fingerprint")?;
+    let algorithms: Vec<Algorithm> = match key.algorithm() {
+        // An RSA key signs with any of the RSA hash variants; keep russh's order.
+        Algorithm::Rsa { .. } => russh::Preferred::DEFAULT
+            .key
+            .iter()
+            .filter(|a| matches!(a, Algorithm::Rsa { .. }))
+            .cloned()
+            .collect(),
+        alg if russh::Preferred::DEFAULT.key.contains(&alg) => vec![alg],
+        alg => return Err(format!("host-key type {alg} is not supported")),
+    };
+    Ok(HostKeyPin {
+        fingerprint: key.fingerprint(HashAlg::Sha256).to_string(),
+        algorithms: Some(algorithms),
+    })
 }
 
 fn connect_inner(vm: &mut VirtualMachine, options: &Val) -> Result<(Arc<Connection>, Val), String> {
@@ -331,7 +365,10 @@ fn connect_inner(vm: &mut VirtualMachine, options: &Val) -> Result<(Arc<Connecti
     }
     let host = required(options, "host")?;
     let user = required(options, "user")?;
-    let pin = fingerprint(required(options, "host-key")?)?;
+    let HostKeyPin {
+        fingerprint: pin,
+        algorithms,
+    } = host_key_pin(required(options, "host-key")?)?;
     let port = integer(options, "port", 22, 1, 65535)?;
     let timeout =
         Duration::from_millis(
@@ -367,19 +404,29 @@ fn connect_inner(vm: &mut VirtualMachine, options: &Val) -> Result<(Arc<Connecti
             .await
             .map_err(|e| e.to_string())?;
         socket.set_nodelay(true).map_err(|e| e.to_string())?;
-        let config = client::Config {
+        let mut config = client::Config {
             inactivity_timeout: Some(Duration::from_secs(300)),
             ..Default::default()
         };
+        if let Some(algorithms) = algorithms {
+            config.preferred.key = Cow::Owned(algorithms);
+        }
+        let presented = Arc::new(std::sync::Mutex::new(None));
         let mut session = client::connect_stream(
             Arc::new(config),
             socket,
             Client {
                 fingerprint: pin.clone(),
+                presented: presented.clone(),
             },
         )
         .await
-        .map_err(|e| format!("SSH negotiation or host-key verification failed: {e}"))?;
+        .map_err(|e| match presented.lock().ok().and_then(|p| p.clone()) {
+            Some(key) => {
+                format!("host-key verification failed: server presented {key}, expected {pin}")
+            }
+            None => format!("SSH negotiation or host-key verification failed: {e}"),
+        })?;
         let authenticated = match key {
             Some(key) => {
                 let hash = session
