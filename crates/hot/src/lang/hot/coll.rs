@@ -1060,12 +1060,16 @@ pub fn assoc(args: &[Val]) -> HotResult<Val> {
     let map = crate::val::as_fields(&args[0]);
     let key = &args[1];
     let value = &args[2];
+    crate::validate_expansion!("assoc map key", std::slice::from_ref(key));
 
     match map {
         Val::Map(m) => {
             let mut new_map = (**m).clone(); // Clone the inner IndexMap
             new_map.insert(key.clone(), value.clone());
-            HotResult::Ok(crate::val::with_type_of(&args[0], Val::map(new_map)))
+            HotResult::Ok(crate::val::with_type_of(
+                &args[0],
+                Val::Map(std::sync::Arc::new(new_map)),
+            ))
         }
         _ => HotResult::Err(Val::from(
             "::hot::coll/assoc expects a Map as the first argument".to_string(),
@@ -1177,6 +1181,7 @@ pub fn concat(args: &[Val]) -> HotResult<Val> {
 /// Merge two maps
 pub fn merge(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::coll/merge", args, 2);
+    crate::validate_expansion!("deep merge", args);
 
     match (
         crate::val::as_fields(&args[0]),
@@ -1202,7 +1207,7 @@ fn merge_fields(a: &Val, b: &Val) -> Val {
                 };
                 merged.insert(key.clone(), value);
             }
-            crate::val::with_type_of(a, Val::map(merged))
+            crate::val::with_type_of(a, Val::map(merged.into_inner()))
         }
         _ => b.clone(),
     }
@@ -2349,7 +2354,7 @@ pub fn delete(args: &[Val]) -> HotResult<Val> {
         (Val::Map(map), Val::Str(target_key)) => {
             let mut result_map = (**map).clone(); // Clone the inner IndexMap
             result_map.shift_remove(&Val::from(target_key.clone()));
-            HotResult::Ok(Val::map(result_map))
+            HotResult::Ok(Val::map(result_map.into_inner()))
         }
         (Val::Map(map), _) => HotResult::Ok(Val::Map(map.clone())), // map is Box, clone returns Box
         (Val::Str(s), _) => HotResult::Ok(Val::from(s.clone())),
@@ -2687,6 +2692,7 @@ fn groups_by(
     let mut groups: IndexMap<Val, Vec<Val>> = IndexMap::new();
     for item in vec_items("group-by", coll)? {
         let key = call_forced(vm, &function, item, "Group-by function call")?;
+        key.check_shape("group-by map key").map_err(Val::from)?;
         groups.entry(key).or_default().push(item.clone());
     }
     Ok(groups
@@ -2711,6 +2717,7 @@ fn indexed_by(
     let mut index = IndexMap::new();
     for item in vec_items("index-by", coll)? {
         let key = call_forced(vm, &function, item, "Index-by function call")?;
+        key.check_shape("index-by map key").map_err(Val::from)?;
         index.insert(key, item.clone());
     }
     Ok(index)
@@ -2719,15 +2726,16 @@ fn indexed_by(
 /// How many times each element occurs in a vector, in first-seen order.
 pub fn frequencies(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::coll/frequencies", args, 1);
-    into_hot_result(vec_items("frequencies", &args[0]).map(|items| {
+    into_hot_result(vec_items("frequencies", &args[0]).and_then(|items| {
         let mut counts: IndexMap<Val, i64> = IndexMap::new();
         for item in items {
+            item.check_shape("frequencies map key").map_err(Val::from)?;
             *counts.entry(item.clone()).or_default() += 1;
         }
-        counts
+        Ok(counts
             .into_iter()
             .map(|(item, count)| (item, Val::Int(count)))
-            .collect()
+            .collect())
     }))
 }
 
@@ -2759,7 +2767,9 @@ fn mapped_entries(
     let mut out = IndexMap::with_capacity(entries.len());
     for (key, value) in entries {
         if keys {
-            out.insert(call_forced(vm, &function, key, &what)?, value.clone());
+            let mapped = call_forced(vm, &function, key, &what)?;
+            mapped.check_shape("map-keys map key").map_err(Val::from)?;
+            out.insert(mapped, value.clone());
         } else {
             out.insert(key.clone(), call_forced(vm, &function, value, &what)?);
         }
@@ -2838,6 +2848,7 @@ pub fn distinct(args: &[Val]) -> HotResult<Val> {
             let mut result = Vec::new();
 
             for item in items.iter() {
+                crate::validate_expansion!("distinct formatted key", std::slice::from_ref(item));
                 // Create a simple hash key for the item
                 let key = format!("{:?}", item);
                 if seen.insert(key) {
@@ -3091,6 +3102,7 @@ pub fn flatten(args: &[Val]) -> HotResult<Val> {
         )));
     }
 
+    crate::validate_expansion!("flatten", args);
     match &args[0] {
         Val::Vec(items) => {
             fn flatten_recursive(val: &Val, out: &mut Vec<Val>) {
@@ -3143,6 +3155,7 @@ pub fn zipmap(args: &[Val]) -> HotResult<Val> {
 
     // Zip keys and values together
     for (key, value) in keys.into_iter().zip(values) {
+        crate::validate_expansion!("zipmap map key", std::slice::from_ref(&key));
         result_map.insert(key, value);
     }
 
@@ -3609,6 +3622,7 @@ pub fn prewalk(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) 
         )));
     }
 
+    crate::validate_expansion!("prewalk", &args[1..2]);
     let function_val = &args[0];
     let data = &args[1];
 
@@ -3668,6 +3682,7 @@ pub fn postwalk(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val])
         )));
     }
 
+    crate::validate_expansion!("postwalk", &args[1..2]);
     let function_val = &args[0];
     let data = &args[1];
 
@@ -3730,6 +3745,7 @@ pub fn postwalk_replace(
         )));
     }
 
+    crate::validate_expansion!("postwalk-replace", &args[1..2]);
     let replacement_map = match &args[0] {
         Val::Map(m) => m,
         _ => {
@@ -3874,7 +3890,10 @@ pub fn assoc_in(args: &[Val]) -> HotResult<Val> {
                 let new_child = assoc_in_recursive(&child, rest, value)?;
                 new_map.insert(key.clone(), new_child);
                 // Constructed values along the path keep their types.
-                Ok(crate::val::with_type_of(coll, Val::map(new_map)))
+                Ok(crate::val::with_type_of(
+                    coll,
+                    Val::map(new_map.into_inner()),
+                ))
             }
             Val::Vec(v) => {
                 if let Val::Int(i) = key {

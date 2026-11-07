@@ -21,6 +21,20 @@ pub struct ScheduleLog {
 }
 
 impl ScheduleLog {
+    pub async fn has_execution_in_second(
+        db: &crate::db::DatabasePool,
+        schedule_id: &Uuid,
+        at: DateTime<Utc>,
+    ) -> Result<bool, ScheduleLogError> {
+        let end = at + chrono::Duration::seconds(1);
+        let found: bool = match db {
+            crate::db::DatabasePool::Postgres(pool) => sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM schedule_log WHERE schedule_id=$1 AND scheduled_time >= $2 AND scheduled_time < $3)")
+                .bind(schedule_id).bind(at).bind(end).fetch_one(pool).await?,
+            crate::db::DatabasePool::Sqlite(pool) => sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM schedule_log WHERE schedule_id=? AND julianday(scheduled_time) >= julianday(?) AND julianday(scheduled_time) < julianday(?))")
+                .bind(schedule_id).bind(at).bind(end).fetch_one(pool).await?,
+        };
+        Ok(found)
+    }
     /// Insert a new schedule execution log entry
     pub async fn insert(
         db: &crate::db::DatabasePool,

@@ -735,6 +735,7 @@ impl Event {
             created_by_user_id,
             access_id,
             None,
+            None,
         )
         .await?;
         if inserted {
@@ -772,6 +773,38 @@ impl Event {
             created_by_user_id,
             access_id,
             Some(enqueue_leased_until),
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_event_with_outbox(
+        db: &crate::db::DatabasePool,
+        event_id: &Uuid,
+        env_id: &Uuid,
+        stream_id: &Uuid,
+        event_type: &str,
+        event_data: &JsonValue,
+        event_time: DateTime<Utc>,
+        created_by_user_id: &Uuid,
+        access_id: Option<&Uuid>,
+        payload: &JsonValue,
+    ) -> Result<bool, EventError> {
+        crate::val::check_json_shape(payload, "event outbox")
+            .map_err(|error| EventError::Database(sqlx::Error::Protocol(error)))?;
+        Self::insert_row(
+            db,
+            event_id,
+            env_id,
+            stream_id,
+            event_type,
+            event_data,
+            event_time,
+            created_by_user_id,
+            access_id,
+            Some(Utc::now() + chrono::Duration::minutes(2)),
+            Some(payload),
         )
         .await
     }
@@ -788,6 +821,7 @@ impl Event {
         created_by_user_id: &Uuid,
         access_id: Option<&Uuid>,
         enqueue_leased_until: Option<DateTime<Utc>>,
+        enqueue_payload: Option<&JsonValue>,
     ) -> Result<bool, EventError> {
         // Ensure the stream exists (create if it doesn't)
         crate::db::stream::Stream::create_or_get_stream(db, *stream_id, *env_id)
@@ -803,7 +837,7 @@ impl Event {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 // Keep PostgreSQL's database-clock DEFAULT now() as the
                 // authoritative durable-creation timestamp.
-                sqlx::query("INSERT INTO event (event_id, env_id, stream_id, event_type, event_data, event_time, created_by_user_id, access_id, enqueue_leased_until) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (event_id) DO NOTHING")
+                sqlx::query("INSERT INTO event (event_id, env_id, stream_id, event_type, event_data, event_time, created_by_user_id, access_id, enqueue_leased_until, enqueue_payload) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (event_id) DO NOTHING")
                     .bind(event_id)
                     .bind(env_id)
                     .bind(stream_id)
@@ -813,6 +847,7 @@ impl Event {
                     .bind(created_by_user_id)
                     .bind(access_id)
                     .bind(enqueue_leased_until)
+                    .bind(enqueue_payload)
                     .execute(pg_pool)
                     .await?
                     .rows_affected()
@@ -829,7 +864,7 @@ impl Event {
                 })?;
 
                 sqlx::query(
-                    "INSERT INTO event (event_id, env_id, stream_id, event_type, event_data, event_time, created_at, created_by_user_id, access_id, enqueue_leased_until) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (event_id) DO NOTHING",
+                    "INSERT INTO event (event_id, env_id, stream_id, event_type, event_data, event_time, created_at, created_by_user_id, access_id, enqueue_leased_until, enqueue_payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (event_id) DO NOTHING",
                 )
                     .bind(event_id)
                     .bind(env_id)
@@ -841,6 +876,7 @@ impl Event {
                     .bind(created_by_user_id)
                     .bind(access_id)
                     .bind(enqueue_leased_until)
+                    .bind(enqueue_payload.map(serde_json::to_string).transpose().map_err(|error| EventError::Database(sqlx::Error::Protocol(error.to_string())))?)
                     .execute(sqlite_pool)
                     .await?
                     .rows_affected()
@@ -861,6 +897,61 @@ impl Event {
             })?;
 
         Ok(true)
+    }
+
+    pub async fn enqueue_payload(
+        db: &crate::db::DatabasePool,
+        event_id: &Uuid,
+    ) -> Result<Option<JsonValue>, EventError> {
+        let payload: Option<sqlx::types::Json<JsonValue>> = match db {
+            crate::db::DatabasePool::Postgres(pool) => {
+                sqlx::query_scalar("SELECT enqueue_payload FROM event WHERE event_id=$1")
+                    .bind(event_id)
+                    .fetch_one(pool)
+                    .await?
+            }
+            crate::db::DatabasePool::Sqlite(pool) => {
+                sqlx::query_scalar("SELECT enqueue_payload FROM event WHERE event_id=?")
+                    .bind(event_id)
+                    .fetch_one(pool)
+                    .await?
+            }
+        };
+        Ok(payload.map(|payload| payload.0))
+    }
+
+    pub async fn due_enqueues(
+        db: &crate::db::DatabasePool,
+        now: DateTime<Utc>,
+        limit: i64,
+        env_id: Option<Uuid>,
+    ) -> Result<Vec<(Uuid, Uuid)>, EventError> {
+        let query = "SELECT ev.event_id, ev.env_id FROM event ev JOIN env e ON e.env_id=ev.env_id JOIN org o ON o.org_id=e.org_id JOIN org root ON root.org_id=COALESCE(o.parent_org_id,o.org_id) WHERE ev.enqueue_payload IS NOT NULL AND ev.enqueue_leased_until <= $1 AND e.active AND o.active AND root.active AND o.lifecycle_state='active' AND root.lifecycle_state='active'";
+        let rows = match db {
+            crate::db::DatabasePool::Postgres(pool) => {
+                let sql = format!(
+                    "{query} AND ($3::uuid IS NULL OR ev.env_id=$3) ORDER BY ev.enqueue_leased_until, ev.event_id LIMIT $2"
+                );
+                sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
+                    .bind(now)
+                    .bind(limit)
+                    .bind(env_id)
+                    .fetch_all(pool)
+                    .await?
+            }
+            crate::db::DatabasePool::Sqlite(pool) => {
+                let sql = format!(
+                    "{query} AND ($3 IS NULL OR ev.env_id=$3) ORDER BY ev.enqueue_leased_until, ev.event_id LIMIT $2"
+                );
+                sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
+                    .bind(now)
+                    .bind(limit)
+                    .bind(env_id)
+                    .fetch_all(pool)
+                    .await?
+            }
+        };
+        Ok(rows)
     }
 
     /// Take over an event's enqueue if its lease has ended, until
@@ -915,7 +1006,7 @@ impl Event {
         db: &crate::db::DatabasePool,
         event_id: &Uuid,
     ) -> Result<(), EventError> {
-        let sql = "UPDATE event SET enqueue_leased_until = NULL WHERE event_id = $1";
+        let sql = "UPDATE event SET enqueue_leased_until = NULL, enqueue_payload = NULL WHERE event_id = $1";
         match db {
             crate::db::DatabasePool::Postgres(pool) => {
                 sqlx::query(sql).bind(event_id).execute(pool).await?;

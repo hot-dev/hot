@@ -32,6 +32,11 @@ impl<T> HotResult<T> {
 
 /// Core Str type constructor
 pub(crate) fn str_internal(args: &[Val]) -> HotResult<Val> {
+    for arg in args {
+        if let Err(error) = arg.check_text_shape("Str") {
+            return HotResult::Err(Val::from(error));
+        }
+    }
     if args.is_empty() {
         return HotResult::Ok(Val::from(""));
     }
@@ -95,6 +100,11 @@ pub fn str_constructor(
     vm: &mut crate::lang::runtime::vm::VirtualMachine,
     args: &[Val],
 ) -> HotResult<Val> {
+    for arg in args {
+        if let Err(error) = arg.check_text_shape("Str") {
+            return HotResult::Err(Val::from(error));
+        }
+    }
     if args.is_empty() {
         return HotResult::Ok(Val::from(""));
     }
@@ -1091,6 +1101,7 @@ pub fn typed_map(args: &[Val]) -> HotResult<Val> {
 /// Untype function - removes type information from typed objects recursively
 pub fn untype(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::type/untype", args, 1);
+    crate::validate_expansion!("untype", args);
 
     let form = &args[0];
     untype_recursive(form)

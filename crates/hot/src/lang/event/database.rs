@@ -10,6 +10,7 @@ type EventWriteAck = oneshot::Sender<Result<(), String>>;
 type EventWrite = (ExecutionContext, Event, Option<EventWriteAck>);
 
 pub struct DatabaseEventPublisher {
+    outbox_queue: Arc<std::sync::RwLock<Option<String>>>,
     db: Arc<RwLock<Option<DatabasePool>>>,
     blob_store: Option<Arc<BlobStore>>,
     event_sender: mpsc::UnboundedSender<EventWrite>,
@@ -19,6 +20,47 @@ pub struct DatabaseEventPublisher {
 }
 
 impl DatabaseEventPublisher {
+    pub(crate) fn enable_outbox(&self, queue_name: &str) {
+        *self.outbox_queue.write().unwrap() = Some(queue_name.to_string());
+    }
+    async fn outbox_db(&self, ctx: &ExecutionContext) -> Result<DatabasePool, String> {
+        let db = self
+            .db
+            .read()
+            .await
+            .clone()
+            .ok_or("Database not initialized")?;
+        match &db {
+            DatabasePool::Postgres(_) => Ok(db.with_scope(crate::db::DatabaseScope::Environment {
+                org_id: ctx.org_id.ok_or("Missing org_id for event enqueue")?,
+                env_id: ctx.env_id.ok_or("Missing env_id for event enqueue")?,
+            })),
+            _ => Ok(db),
+        }
+    }
+    pub(crate) async fn pending_message(
+        &self,
+        ctx: &ExecutionContext,
+        event_id: uuid::Uuid,
+    ) -> Result<crate::data::msg::Message, String> {
+        let db = self.outbox_db(ctx).await?;
+        let payload = crate::db::event::Event::enqueue_payload(&db, &event_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or("Event enqueue packet was not stored")?;
+        serde_json::from_value(payload)
+            .map_err(|error| format!("Cannot decode event enqueue packet: {error}"))
+    }
+    pub(crate) async fn finish_enqueue(
+        &self,
+        ctx: &ExecutionContext,
+        event_id: uuid::Uuid,
+    ) -> Result<(), String> {
+        crate::db::event::Event::finish_enqueue(&self.outbox_db(ctx).await?, &event_id)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
     /// Create a new DatabaseEventPublisher with an existing database pool (preferred)
     /// This ensures the database connection is ready before events are published
     pub fn new_with_pool(db_pool: DatabasePool) -> Self {
@@ -37,12 +79,15 @@ impl DatabaseEventPublisher {
             mpsc::unbounded_channel::<oneshot::Sender<()>>();
 
         let db = Arc::new(RwLock::new(Some(db_pool)));
+        let outbox_queue = Arc::new(std::sync::RwLock::new(None));
+        let outbox_for_processor = Arc::clone(&outbox_queue);
         let db_for_processor = Arc::clone(&db);
         let blob_store_for_processor = blob_store.clone();
 
         // Start event processing task
         tokio::spawn(async move {
             let mut processor = DatabaseEventProcessor {
+                outbox_queue: outbox_for_processor,
                 db: db_for_processor,
                 blob_store: blob_store_for_processor,
             };
@@ -80,6 +125,7 @@ impl DatabaseEventPublisher {
 
         // Return the publisher
         Self {
+            outbox_queue,
             db,
             blob_store,
             event_sender,
@@ -96,6 +142,8 @@ impl DatabaseEventPublisher {
             mpsc::unbounded_channel::<oneshot::Sender<()>>();
 
         let db = Arc::new(RwLock::new(None));
+        let outbox_queue = Arc::new(std::sync::RwLock::new(None));
+        let outbox_for_processor = Arc::clone(&outbox_queue);
         let db_for_processor = Arc::clone(&db);
 
         // Initialize database connection in the background
@@ -125,6 +173,7 @@ impl DatabaseEventPublisher {
         // Start event processing task
         tokio::spawn(async move {
             let mut processor = DatabaseEventProcessor {
+                outbox_queue: outbox_for_processor,
                 db: db_for_processor,
                 blob_store: None,
             };
@@ -162,6 +211,7 @@ impl DatabaseEventPublisher {
 
         // Return the publisher
         Self {
+            outbox_queue,
             db,
             blob_store: None,
             event_sender,
@@ -195,6 +245,7 @@ impl DatabaseEventPublisher {
 }
 
 struct DatabaseEventProcessor {
+    outbox_queue: Arc<std::sync::RwLock<Option<String>>>,
     db: Arc<RwLock<Option<DatabasePool>>>,
     /// When present, large event payload leaves are spilled to blob storage
     /// before the event row insert.
@@ -251,18 +302,49 @@ impl DatabaseEventProcessor {
             let event_data = serde_json::to_value(&event_data_val)
                 .map_err(|e| format!("Failed to serialize event data: {}", e))?;
 
-            let inserted = crate::db::event::Event::insert_event(
-                db,
-                &event.event_id,
-                &env_id,
-                &event.stream_id,
-                &event.event_type,
-                &event_data,
-                event.event_time,
-                &user_id,
-                None,
-            )
-            .await;
+            let outbox_queue = self.outbox_queue.read().unwrap().clone();
+            let inserted = if let Some(queue) = outbox_queue {
+                let stored_event = Event {
+                    event_data: event_data_val,
+                    ..event.clone()
+                };
+                let message = super::queue::durable_event_message(&queue, ctx, stored_event);
+                let payload = serde_json::to_value(&message)
+                    .map_err(|error| format!("Cannot serialize event outbox: {error}"))?;
+                crate::db::event::Event::insert_event_with_outbox(
+                    db,
+                    &event.event_id,
+                    &env_id,
+                    &event.stream_id,
+                    &event.event_type,
+                    &event_data,
+                    event.event_time,
+                    &user_id,
+                    None,
+                    &payload,
+                )
+                .await
+                .and_then(|inserted| {
+                    if inserted {
+                        Ok(())
+                    } else {
+                        Err(crate::db::event::EventError::AlreadyExists(event.event_id))
+                    }
+                })
+            } else {
+                crate::db::event::Event::insert_event(
+                    db,
+                    &event.event_id,
+                    &env_id,
+                    &event.stream_id,
+                    &event.event_type,
+                    &event_data,
+                    event.event_time,
+                    &user_id,
+                    None,
+                )
+                .await
+            };
             if let Err(e) = inserted {
                 self.release_unstored_event(db, ctx, event).await;
                 return Err(format!("Database error: {}", e));
@@ -318,6 +400,7 @@ async fn event_data_to_store(
     event: &Event,
 ) -> Result<Val, String> {
     let data = &event.event_data;
+    data.check_shape("send event")?;
     let (Some(store), Some(org_id)) = (blob_store.filter(|s| s.config().enabled()), ctx.org_id)
     else {
         return Ok(data.clone());
@@ -388,11 +471,12 @@ impl DatabaseEventPublisher {
 
         // Store large parts here, not in the processor: that can take longer
         // than the timeout below, and would hold up every event behind this one.
-        let event_data = tokio::runtime::Handle::current().block_on(event_data_to_store(
-            self.blob_store.as_deref(),
-            ctx,
-            &event,
-        ))?;
+        let event_data = crate::lang::hot::native_io::block_on_result("send data", async {
+            event_data_to_store(self.blob_store.as_deref(), ctx, &event)
+                .await
+                .map_err(Val::from)
+        })
+        .map_err(|error| error.to_string())?;
         // What's still inline takes the writer longer the larger it is.
         let timeout =
             crate::blob::timeout_for_size(timeout, crate::blob::estimate_val_size(&event_data));
@@ -414,7 +498,7 @@ impl DatabaseEventPublisher {
         // VM code runs in a blocking context, where `Handle::block_on` is the
         // correct sync-to-async bridge. Do not use `block_in_place` here:
         // this path is called from Hot VM execution, not from async worker code.
-        tokio::runtime::Handle::current().block_on(async {
+        crate::lang::hot::native_io::block_on_result("send commit", async {
             match tokio::time::timeout(timeout, ack_receiver).await {
                 Ok(Ok(result)) => result,
                 Ok(Err(_)) => Err("Database write acknowledgment was dropped".to_string()),
@@ -424,7 +508,9 @@ impl DatabaseEventPublisher {
                     timeout
                 )),
             }
+            .map_err(Val::from)
         })
+        .map_err(|error| error.to_string())
     }
 }
 
@@ -471,6 +557,7 @@ impl EventPublisher for DatabaseEventPublisher {
 impl Clone for DatabaseEventPublisher {
     fn clone(&self) -> Self {
         Self {
+            outbox_queue: Arc::clone(&self.outbox_queue),
             db: Arc::clone(&self.db),
             blob_store: self.blob_store.clone(),
             event_sender: self.event_sender.clone(),
@@ -534,6 +621,7 @@ mod tests {
         configure(&mut config);
         let blob_store = Arc::new(BlobStore::new(db.clone(), storage, config));
         let processor = DatabaseEventProcessor {
+            outbox_queue: Arc::new(std::sync::RwLock::new(None)),
             db: Arc::new(RwLock::new(Some((*db).clone()))),
             blob_store: Some(blob_store.clone()),
         };
@@ -681,6 +769,7 @@ mod tests {
         ));
 
         let processor = DatabaseEventProcessor {
+            outbox_queue: Arc::new(std::sync::RwLock::new(None)),
             db: Arc::new(RwLock::new(Some((*db).clone()))),
             blob_store: Some(blob_store.clone()),
         };
@@ -742,6 +831,7 @@ mod tests {
 
         // No processor task drains the channel: simulates a stuck insert.
         let publisher = DatabaseEventPublisher {
+            outbox_queue: Arc::new(std::sync::RwLock::new(None)),
             db: Arc::new(RwLock::new(None)),
             blob_store: None,
             event_sender,

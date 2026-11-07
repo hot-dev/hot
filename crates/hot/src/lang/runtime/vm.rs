@@ -930,6 +930,7 @@ pub struct VirtualMachine {
     /// External cancellation token — checked periodically by the instruction loop.
     /// When set to `true`, the VM returns a cancellation error at the next check point.
     external_cancel: Option<Arc<AtomicBool>>,
+    cancel_poll_budget: std::cell::Cell<u32>,
     /// The run's own output capture, shared with its parallel branches.
     run_capture: Arc<crate::lang::hot::io::RunCapture>,
     /// Task ID when this VM is executing inside a task worker.
@@ -1160,6 +1161,7 @@ impl VirtualMachine {
             task_queue: None,
             task_receiver: None,
             external_cancel: None,
+            cancel_poll_budget: std::cell::Cell::new(0),
             run_capture: Arc::default(),
             task_id: None,
         };
@@ -1730,6 +1732,54 @@ impl VirtualMachine {
         &self.run_capture
     }
 
+    pub(crate) fn check_execution_cancelled(&self) -> VmResult<()> {
+        if self.is_cancellation_requested() {
+            return Err(VmError::runtime("Execution cancelled".to_string()));
+        }
+        Ok(())
+    }
+
+    #[inline]
+    fn poll_execution_cancelled(&self) -> VmResult<()> {
+        let budget = self.cancel_poll_budget.get();
+        if budget == 0 {
+            self.cancel_poll_budget.set(1023);
+            self.check_execution_cancelled()
+        } else {
+            self.cancel_poll_budget.set(budget - 1);
+            Ok(())
+        }
+    }
+
+    fn guard_native(
+        &self,
+        name: &str,
+        args: &[Val],
+    ) -> VmResult<Option<crate::lang::hot::native_io::Scope>> {
+        self.poll_execution_cancelled()?;
+        // Scalar/collection operations do not need an I/O context. Iterators
+        // can perform I/O when consumed by an otherwise pure collection native.
+        let pure = [
+            "::hot::coll/",
+            "::hot::math/",
+            "::hot::num/",
+            "::hot::str/",
+            "::hot::type/",
+            "::hot::bool/",
+        ]
+        .iter()
+        .any(|prefix| name.starts_with(prefix));
+        let iterator = args.iter().any(|arg| matches!(arg, Val::Box(_)));
+        if !pure || iterator {
+            // Check immediately before an operation that can perform I/O or
+            // durable work, even between the periodic CPU polls.
+            self.check_execution_cancelled()?;
+            Ok(Some(crate::lang::hot::native_io::Scope::enter(self)))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Set the task ID for checkpoint/restore support.
     pub fn set_task_id(&mut self, task_id: uuid::Uuid) {
         self.task_id = Some(task_id);
@@ -2246,6 +2296,7 @@ impl VirtualMachine {
     }
 
     fn execute_instruction(&mut self, instruction: &Instruction) -> VmResult<()> {
+        // The containing main/function/lambda loop owns periodic polling.
         tracing::trace!(
             "VM: Executing instruction at {}: {:?}",
             self.instruction_pointer,
@@ -3942,6 +3993,7 @@ impl VirtualMachine {
                 let index = *index;
                 let value = *value;
                 let index_val = self.get_register(index)?.clone();
+                index_val.check_shape("map key").map_err(VmError::runtime)?;
                 let value_val = self.get_register(value)?.clone();
                 let collection_val = self.take_register(collection)?;
 
@@ -5850,6 +5902,9 @@ impl VirtualMachine {
         let mut result = String::new();
         let max_template_bytes = crate::lang::runtime::limits::max_string_bytes();
         for part_val in parts {
+            part_val
+                .check_text_shape("template")
+                .map_err(VmError::runtime)?;
             // Automatically unwrap Results in template literals
             let unwrapped_val = self.unwrap_result_if_ok(part_val)?;
 
@@ -7375,6 +7430,7 @@ impl VirtualMachine {
 
         // 2. Try hotlib functions, but SKIP the call function to avoid recursion
         if function_name != "::hot::lang/call" {
+            let _native_scope = self.guard_native(function_name, args)?;
             let hotlib_map = crate::lang::hot::get_hotlib_map();
             if let Some(lib_fn) = hotlib_map.get(function_name) {
                 tracing::trace!("Found hotlib function: '{}'", function_name);
@@ -8446,6 +8502,7 @@ impl VirtualMachine {
         }
 
         // Try as hotlib function via call-lib
+        let _native_scope = self.guard_native(qualified_name, args)?;
         let hotlib_map = crate::lang::hot::get_hotlib_map();
 
         // Generic hotlib overload resolution: try type+arity and arity-specific keys first
@@ -8689,7 +8746,7 @@ impl VirtualMachine {
                         };
 
                     match evaluated_vec {
-                        Val::Vec(vec) => Arc::unwrap_or_clone(vec),
+                        Val::Vec(vec) => Arc::unwrap_or_clone(vec).into_inner(),
                         _ => {
                             return Err(VmError::runtime(format!(
                                 "call-lib: second argument must evaluate to an array, got {:?}",
@@ -8924,6 +8981,7 @@ impl VirtualMachine {
         function_name: &str,
         args: &[Val],
     ) -> VmResult<Val> {
+        let _native_scope = self.guard_native(function_name, args)?;
         tracing::trace!(
             "VM: Calling hotlib function '{}' with {} args",
             function_name,
@@ -8982,6 +9040,7 @@ impl VirtualMachine {
 
     /// Execute a lambda
     pub fn execute_lambda(&mut self, lambda_val: &Val, args: &[Val]) -> VmResult<Val> {
+        self.poll_execution_cancelled()?;
         // Lambda self-recursion (CallLambda -> execute_lambda -> ...) never
         // passes through execute_user_function's depth guard, so the stack
         // backstop must be checked here as well.
@@ -9238,6 +9297,7 @@ impl VirtualMachine {
         // caller's registers, scope and namespace below.
         let body = (|| -> VmResult<()> {
             while lambda_ip < lambda_info.instructions.len() {
+                self.poll_execution_cancelled()?;
                 let instruction = &lambda_info.instructions[lambda_ip];
                 // A `where` predicate draws each instruction from its budget.
                 self.charge_constraint_fuel()?;
@@ -9518,6 +9578,8 @@ impl VirtualMachine {
     /// it, for the interpreter to run the call. A traced call is traced as an
     /// interpreted one is.
     fn try_jit_call(&mut self, function_id: u32, args: &[Val]) -> Result<Option<Val>, String> {
+        self.poll_execution_cancelled()
+            .map_err(|error| error.to_string())?;
         let Some(compiled) = self.jit.compiled_function(function_id, args) else {
             return Ok(None);
         };
@@ -9592,6 +9654,7 @@ impl VirtualMachine {
     }
 
     pub fn try_jit_lambda_call(&mut self, lambda_val: &Val, args: &[Val]) -> VmResult<Option<Val>> {
+        self.poll_execution_cancelled()?;
         // A `where` predicate stays on the interpreter, where every
         // instruction and native call is checked.
         if self.in_constraint_predicate() {
@@ -11074,6 +11137,8 @@ impl VirtualMachine {
                 let error_clone = error_mutex.clone();
                 let failure_state_worker = shared_failure_state.clone();
                 let tokio_handle_clone = tokio_handle.clone();
+                let run_slot = crate::run_slots::current_run_slot();
+                let blocking_pool = crate::lang::hot::native_io::blocking_pool();
                 let log_run_id = log_run_id.clone();
                 let log_env_id = log_env_id.clone();
 
@@ -11089,6 +11154,8 @@ impl VirtualMachine {
                         // Enter Tokio runtime context so async functions (e.g.
                         // ::hot::box/run) work on spawned threads.
                         let _tokio_guard = tokio_handle_clone.as_ref().map(|h| h.enter());
+                        let _run_slot_scope = crate::run_slots::enter_run_slot(run_slot);
+                        let _blocking_pool_scope = blocking_pool.map(crate::lang::hot::native_io::BlockingPoolScope::enter);
                         let _resource_guard =
                             crate::lang::hot::resource::ThreadRegistryGuard::install(
                                 resource_registry_worker,
@@ -11744,7 +11811,10 @@ impl VirtualMachine {
             Val::Vec(vec) => {
                 // Vector assignment: try to parse property as index
                 match property.parse::<usize>() {
-                    Ok(index) => Self::set_vector_index(Arc::make_mut(vec), index, new_value),
+                    Ok(index) => {
+                        let vec = Arc::make_mut(vec);
+                        Self::set_vector_index(vec, index, new_value)
+                    }
                     Err(_) => Err(VmError::runtime(format!(
                         "Cannot set property '{}' on vector - property must be a valid index",
                         property
@@ -11801,6 +11871,7 @@ impl VirtualMachine {
         property: &Val,
         new_value: Val,
     ) -> VmResult<()> {
+        property.check_shape("map key").map_err(VmError::runtime)?;
         // A dynamic key cannot tell the compiler which collection to create,
         // so its parent must already exist (documented in vars-and-values).
         // Enforce that uniformly for every runtime key type — string keys
@@ -11846,7 +11917,10 @@ impl VirtualMachine {
                     let index = usize::try_from(*index).map_err(|_| {
                         VmError::runtime(format!("Vector index {} is too large to address", index))
                     })?;
-                    Self::set_vector_index(Arc::make_mut(vec), index, new_value)
+                    {
+                        let vec = Arc::make_mut(vec);
+                        Self::set_vector_index(vec, index, new_value)
+                    }
                 }
                 other => Err(VmError::runtime(format!(
                     "Vector index must be an integer, got {:?}",
@@ -12106,6 +12180,7 @@ impl VirtualMachine {
 
     /// Execute a call-lib instruction using the new enum-based hotlib system
     pub fn execute_call_lib(&mut self, function_name: &str, args: &[Val]) -> VmResult<Val> {
+        let _native_scope = self.guard_native(function_name, args)?;
         tracing::trace!(
             "VM: execute_call_lib calling '{}' with {} args: {:?}",
             function_name,
@@ -12261,6 +12336,7 @@ impl VirtualMachine {
         let mut func_ip: usize = 0;
 
         while func_ip < instructions.len() {
+            self.poll_execution_cancelled()?;
             let instruction = &instructions[func_ip];
             // Set instruction pointer for debugging
             self.instruction_pointer = func_ip;

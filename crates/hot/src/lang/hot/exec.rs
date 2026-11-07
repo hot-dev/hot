@@ -48,6 +48,9 @@ pub(crate) fn evaluate_lazy(
         && m.contains_key(&Val::from("instructions"))
         && m.contains_key(&Val::from("register_count"))
     {
+        if let Err(error) = val.check_shape("lazy function representation") {
+            return Err(HotResult::Err(Val::from(error)));
+        }
         let lambda = serde_json::to_value(m).ok().and_then(|json| {
             serde_json::from_value::<crate::lang::bytecode::LambdaInfo>(json).ok()
         });

@@ -1107,15 +1107,18 @@ async fn sync_with_database(
     }
 
     // Get all schedules for deployed builds
-    let schedules = Schedule::get_schedules_for_environment(db, None, None, env_id)
-        .await
-        .map_err(|e| {
-            error!(
-                "Failed to get schedules for deployed builds from database: {}",
-                e
-            );
-            e
-        })?;
+    let mut schedules = Vec::new();
+    let mut offset = 0;
+    loop {
+        let (mut page, raw_rows) =
+            Schedule::get_schedules_page_for_environment(db, Some(1000), Some(offset), env_id)
+                .await?;
+        schedules.append(&mut page);
+        if raw_rows < 1000 {
+            break;
+        }
+        offset += raw_rows as i64;
+    }
     // A deployment this runtime can't run, made with another major version
     // of Hot, keeps its schedules paused until the project is redeployed.
     let schedules = without_builds_awaiting_redeploy(db, schedules).await;
@@ -1399,13 +1402,13 @@ async fn create_scheduled_job(
     ));
     let db_clone = Arc::clone(db);
     let schedule_clone = schedule.clone();
-    let job = Job::new_async(&scheduler_cron, move |_uuid, _lock| {
+    let job = Job::new_async_at(&scheduler_cron, move |_uuid, scheduled_at, _lock| {
         let queue = Arc::clone(&queue_clone);
         let db = Arc::clone(&db_clone);
         let schedule = schedule_clone.clone();
         Box::pin(async move {
             if let Err(error) =
-                queue_schedule_execution(&db, &queue, &schedule, Utc::now(), false).await
+                queue_schedule_execution(&db, &queue, &schedule, scheduled_at, false).await
             {
                 warn!(schedule_id = %schedule.schedule_id, %error, "Scheduled execution deferred");
             }
@@ -1621,45 +1624,18 @@ async fn calculate_missed_executions(
     let cron = hot::db::schedule::parse_cron(&scheduler_cron)?;
 
     let mut missed = Vec::new();
-    let mut check_time = start_time;
-
-    // Safety limit to prevent infinite loops on misconfigured crons
+    let mut check_time = chrono::DateTime::from_timestamp(start_time.timestamp(), 0)
+        .ok_or("invalid backfill start")?;
     const MAX_MISSED_EXECUTIONS: usize = 100;
-
-    // Find all times the cron should have fired in the window
-    while check_time < end_time && missed.len() < MAX_MISSED_EXECUTIONS {
-        // Find the next occurrence after check_time
-        let mut current = check_time;
-        loop {
-            if cron.is_time_matching(&current).unwrap_or(false) {
-                // This time matches - add it if it's in range
-                if current < end_time {
-                    missed.push(current);
-                }
-                // Move to next second
-                check_time = current + chrono::Duration::seconds(1);
-                break;
-            }
-
-            // Move forward one second and keep looking
-            current += chrono::Duration::seconds(1);
-
-            // Give up if we've moved past the end
-            if current >= end_time {
-                check_time = end_time;
-                break;
-            }
-
-            // Safety: don't loop forever
-            if current - check_time > chrono::Duration::hours(24) {
-                warn!(
-                    "Stopped searching for cron matches after 24 hours from {}",
-                    check_time
-                );
-                check_time = end_time;
-                break;
-            }
+    while missed.len() < MAX_MISSED_EXECUTIONS {
+        let Ok(next) = cron.find_next_occurrence(&check_time, false) else {
+            break;
+        };
+        if next >= end_time {
+            break;
         }
+        missed.push(next);
+        check_time = next;
     }
 
     if missed.len() >= MAX_MISSED_EXECUTIONS {
@@ -1680,8 +1656,14 @@ async fn queue_schedule_execution(
     scheduled_time: chrono::DateTime<Utc>,
     is_backfill: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let event_id = Uuid::now_v7();
-    let run_id = Uuid::now_v7();
+    let scheduled_time = chrono::DateTime::from_timestamp(scheduled_time.timestamp(), 0)
+        .ok_or("invalid scheduled time")?;
+    if ScheduleLog::has_execution_in_second(db, &schedule.schedule_id, scheduled_time).await? {
+        return Ok(());
+    }
+    let occurrence = format!("{}:{}", schedule.schedule_id, scheduled_time.timestamp());
+    let event_id = Uuid::new_v5(&Uuid::NAMESPACE_OID, occurrence.as_bytes());
+    let run_id = Uuid::new_v5(&event_id, b"run");
 
     // Look up the environment ID for this build
     let env_id = match hot::db::Build::get_env_id_for_build(db, &schedule.build_id).await {
@@ -1714,7 +1696,7 @@ async fn queue_schedule_execution(
         })?;
 
     // Create a new stream ID for this scheduled event
-    let stream_id = Uuid::now_v7();
+    let stream_id = Uuid::new_v5(&event_id, b"stream");
 
     // Create the execution context
     let execution_context = ExecutionContext {
@@ -1795,30 +1777,16 @@ async fn queue_schedule_execution(
         target_project_name: None, // Will be resolved by worker if needed
     };
 
-    // Insert the event into the database
-    hot::db::event::Event::insert_event(
-        db,
-        &event_id,
-        &env_id,
-        &stream_id,
-        "hot:schedule",
-        &serde_json::Value::from(&event.event_data),
-        event.event_time,
-        &build.created_by_user_id,
-        None,
-    )
-    .await
-    .map_err(|e| {
-        error!(
-            "Failed to insert schedule event for {}/{} into database: {}",
-            schedule.ns, schedule.var, e
-        );
-        e
-    })?;
+    let stored_event_data = serde_json::Value::from(&event.event_data);
+    let event_time = event.event_time;
 
     // Create event message head
     let mut head = AHashMap::new();
     head.insert("source".to_string(), "scheduler".to_string());
+    head.insert(
+        hot::lang::event::queue::MAY_REPEAT_HEAD.to_string(),
+        "true".to_string(),
+    );
     head.insert("event_type".to_string(), "hot:schedule".to_string());
     head.insert("schedule_id".to_string(), schedule.schedule_id.to_string());
     head.insert(
@@ -1841,16 +1809,58 @@ async fn queue_schedule_execution(
     };
 
     // Convert to unified Message format
-    let message: Message = event_message.into();
-
-    // Send to event queue
-    event_queue.enqueue(message).await.map_err(|e| {
-        error!(
-            "Failed to enqueue schedule event for {}/{}: {}",
-            schedule.ns, schedule.var, e
-        );
-        e
-    })?;
+    let candidate: Message = event_message.into();
+    let payload = serde_json::to_value(&candidate)?;
+    let inserted = hot::db::event::Event::insert_event_with_outbox(
+        db,
+        &event_id,
+        &env_id,
+        &stream_id,
+        "hot:schedule",
+        &stored_event_data,
+        event_time,
+        &build.created_by_user_id,
+        None,
+        &payload,
+    )
+    .await?;
+    let message = if inserted {
+        candidate
+    } else {
+        use hot::db::event::EnqueueClaim;
+        match hot::db::event::Event::claim_enqueue(
+            db,
+            &event_id,
+            Utc::now(),
+            Utc::now() + chrono::Duration::minutes(2),
+        )
+        .await?
+        {
+            EnqueueClaim::Settled => {
+                ScheduleLog::insert(
+                    db,
+                    &schedule.schedule_id,
+                    Some(&event_id),
+                    scheduled_time,
+                    is_backfill,
+                )
+                .await?;
+                return Ok(());
+            }
+            EnqueueClaim::Held => return Ok(()),
+            EnqueueClaim::Claimed => {
+                let payload = hot::db::event::Event::enqueue_payload(db, &event_id)
+                    .await?
+                    .ok_or("Missing schedule enqueue packet")?;
+                serde_json::from_value(payload)?
+            }
+        }
+    };
+    if let Err(error) = event_queue.enqueue(message).await {
+        let _ = hot::db::event::Event::release_enqueue(db, &event_id, Utc::now()).await;
+        return Err(error);
+    }
+    hot::db::event::Event::finish_enqueue(db, &event_id).await?;
 
     // Log the execution
     ScheduleLog::insert(
@@ -1903,6 +1913,16 @@ async fn process_pending_retries(
     event_queue: &Arc<dyn Queue<Message>>,
     env_id: Option<Uuid>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    match tokio::time::timeout(
+        Duration::from_secs(30),
+        hot::lang::event::queue::recover_event_outbox(db, event_queue.as_ref(), env_id),
+    )
+    .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => warn!(%error, "Event outbox sweep failed; continuing run retries"),
+        Err(error) => warn!(%error, "Event outbox sweep timed out; continuing run retries"),
+    }
     // Get runs pending retry (batch of 50)
     let pending_runs = hot::db::run::Run::get_pending_retries_for_environment(db, 50, env_id)
         .await
@@ -2215,6 +2235,19 @@ mod tests {
     use chrono::Timelike;
 
     #[tokio::test]
+    async fn backfill_starts_strictly_after_the_last_fired_second() {
+        let start = chrono::DateTime::from_timestamp(1_800_000_000, 123_000_000).unwrap();
+        let end = start + chrono::Duration::seconds(4);
+        let times = calculate_missed_executions("* * * * * *", start, end)
+            .await
+            .unwrap();
+        assert_eq!(
+            times.iter().map(|at| at.timestamp()).collect::<Vec<_>>(),
+            (start.timestamp() + 1..=start.timestamp() + 4).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
     async fn the_heartbeat_job_writes_the_time_whole() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("heartbeat");
@@ -2229,7 +2262,7 @@ mod tests {
                 .is_time_matching(&Utc::now().with_second(31).unwrap())
                 .unwrap()
         );
-        (job.task)(job.id, Arc::new(tokio::sync::Mutex::new(()))).await;
+        (job.task)(job.id, Utc::now(), Arc::new(tokio::sync::Mutex::new(()))).await;
         let written: u64 = std::fs::read_to_string(&path).unwrap().parse().unwrap();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -2288,7 +2321,7 @@ mod tests {
             }),
             health: Arc::clone(&health),
         };
-        let beat = || (job.task)(job.id, Arc::new(tokio::sync::Mutex::new(())));
+        let beat = || (job.task)(job.id, Utc::now(), Arc::new(tokio::sync::Mutex::new(())));
         let message = || -> Message { hot::lang::event::MaintenanceMessage::all_tasks().into() };
 
         assert!(queue.enqueue(message()).await.is_err());
@@ -3096,6 +3129,60 @@ mod tests {
             MemQueue::new(format!("test:retry-unretryable:{}", Uuid::now_v7()))
                 .expect("memory queue"),
         );
+
+        process_pending_retries(&db, &queue, None).await.unwrap();
+        process_pending_retries(&db, &queue, None).await.unwrap();
+
+        assert!(queue.is_empty().await.unwrap(), "nothing to retry");
+        let (status, attempt, _) = run_state(&db, data.run_id).await;
+        assert_eq!(status, hot::db::run::RunStatus::Failed.as_id());
+        assert_eq!(attempt, 1, "back at the attempt it ran as, once");
+    }
+
+    #[tokio::test]
+    async fn failed_outbox_recovery_does_not_skip_run_retry_processing() {
+        let db = Arc::new(hot::db::test_db().await);
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let hot::db::DatabasePool::Sqlite(pool) = db.as_ref() else {
+            panic!("test_db should be SQLite");
+        };
+        // The worker raised retry_attempt from 1 to 2 when it scheduled the
+        // retry; the attempt has no event to retry from.
+        sqlx::query(
+            "UPDATE run SET status_id = ?, retry_attempt = 2, next_retry_at = ?, event_id = NULL WHERE run_id = ?",
+        )
+        .bind(hot::db::run::RunStatus::PendingRetry.as_id())
+        .bind(Utc::now() - chrono::Duration::seconds(60))
+        .bind(data.run_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        let event_id = Uuid::now_v7();
+        let packet = Message {
+            id: event_id,
+            head: Val::Null,
+            body: Val::Null,
+        };
+        hot::db::event::Event::insert_event_with_outbox(
+            &db,
+            &event_id,
+            &data.env_id,
+            &data.stream_id,
+            "test:outbox",
+            &serde_json::Value::Null,
+            Utc::now(),
+            &data.user_id,
+            None,
+            &serde_json::to_value(packet).unwrap(),
+        )
+        .await
+        .unwrap();
+        hot::db::event::Event::release_enqueue(&db, &event_id, Utc::now())
+            .await
+            .unwrap();
+        let queue: Arc<dyn Queue<Message>> = Arc::new(SwitchableQueue {
+            refusing: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        });
 
         process_pending_retries(&db, &queue, None).await.unwrap();
         process_pending_retries(&db, &queue, None).await.unwrap();

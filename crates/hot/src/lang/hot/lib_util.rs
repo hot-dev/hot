@@ -126,3 +126,15 @@ macro_rules! validate_args_range {
         }
     };
 }
+
+/// Check only arguments about to be copied into an external representation.
+#[macro_export]
+macro_rules! validate_expansion {
+    ($operation:expr, $values:expr) => {
+        for value in $values {
+            if let Err(error) = value.check_shape($operation) {
+                return $crate::lang::hot::r#type::HotResult::Err($crate::val::Val::from(error));
+            }
+        }
+    };
+}

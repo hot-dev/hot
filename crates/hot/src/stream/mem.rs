@@ -10,6 +10,7 @@ use super::{
 };
 use ahash::AHashMap;
 use async_trait::async_trait;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{RwLock, broadcast};
@@ -19,6 +20,8 @@ use uuid::Uuid;
 /// This determines how many events can be buffered before subscribers lag
 const CHANNEL_CAPACITY: usize = 256;
 
+type TaskHistory = AHashMap<String, (VecDeque<StreamEvent>, std::time::Instant)>;
+
 /// In-memory stream pub/sub using tokio broadcast channels
 ///
 /// Uses a RwLock<HashMap> to store broadcast senders per stream_id.
@@ -26,6 +29,7 @@ const CHANNEL_CAPACITY: usize = 256;
 /// When a publisher publishes, they send to the corresponding sender.
 #[derive(Clone)]
 pub struct MemStreamPubSub {
+    task_history: Arc<RwLock<TaskHistory>>,
     /// Map of channel key -> broadcast sender
     /// The sender is created lazily when first needed
     channels: Arc<RwLock<AHashMap<String, broadcast::Sender<StreamEvent>>>>,
@@ -39,6 +43,7 @@ impl MemStreamPubSub {
     /// Create a new in-memory stream pub/sub
     pub fn new() -> Self {
         Self {
+            task_history: Arc::new(RwLock::new(AHashMap::new())),
             channels: Arc::new(RwLock::new(AHashMap::new())),
             env_channels: Arc::new(RwLock::new(AHashMap::new())),
             mcp_sse_transport_sessions: Arc::new(RwLock::new(AHashMap::new())),
@@ -94,6 +99,10 @@ impl MemStreamPubSub {
     /// Clean up channels with no active receivers
     /// This prevents memory leaks from accumulated channels
     pub async fn cleanup_empty_channels(&self) {
+        self.task_history
+            .write()
+            .await
+            .retain(|_, (_, updated)| updated.elapsed() < Duration::from_secs(8 * 24 * 60 * 60));
         let mut channels = self.channels.write().await;
         channels.retain(|_, sender| {
             // Keep channels that have at least one receiver
@@ -118,6 +127,23 @@ impl Default for MemStreamPubSub {
 impl StreamPublisher for MemStreamPubSub {
     async fn publish(&self, event: StreamEvent) -> Result<(), StreamPubSubError> {
         let channel_key = event.channel_name();
+        // Serialize replay snapshot/subscription with publishing. Holding this
+        // through send prevents both a gap and duplicate replay at handoff.
+        let mut history = if matches!(event, StreamEvent::TaskMessage { .. }) {
+            Some(self.task_history.write().await)
+        } else {
+            None
+        };
+        if let Some(history) = history.as_mut() {
+            let (entries, updated) = history
+                .entry(channel_key.clone())
+                .or_insert_with(|| (VecDeque::new(), std::time::Instant::now()));
+            *updated = std::time::Instant::now();
+            entries.push_back(event.clone());
+            while entries.len() > CHANNEL_CAPACITY {
+                entries.pop_front();
+            }
+        }
         let sender = self.get_or_create_sender(channel_key.clone()).await;
 
         // Send to all subscribers - ignore if no receivers (fire-and-forget)
@@ -144,6 +170,24 @@ impl StreamPublisher for MemStreamPubSub {
 
 #[async_trait]
 impl StreamSubscriberFactory for MemStreamPubSub {
+    async fn subscribe_task(
+        &self,
+        task_id: Uuid,
+    ) -> Result<Box<dyn StreamSubscriber>, StreamPubSubError> {
+        let history = self.task_history.write().await;
+        let channel_key = legacy_channel_name(&task_id);
+        let sender = self.get_or_create_sender(channel_key.clone()).await;
+        let receiver = sender.subscribe();
+        let replay = history
+            .get(&channel_key)
+            .map(|(entries, _)| entries.clone())
+            .unwrap_or_default();
+        Ok(Box::new(MemStreamSubscriber {
+            receiver,
+            channel_key,
+            replay,
+        }))
+    }
     async fn subscribe(
         &self,
         stream_id: Uuid,
@@ -159,6 +203,7 @@ impl StreamSubscriberFactory for MemStreamPubSub {
         );
 
         Ok(Box::new(MemStreamSubscriber {
+            replay: VecDeque::new(),
             receiver,
             channel_key,
         }))
@@ -181,6 +226,7 @@ impl StreamSubscriberFactory for MemStreamPubSub {
         );
 
         Ok(Box::new(MemStreamSubscriber {
+            replay: VecDeque::new(),
             receiver,
             channel_key,
         }))
@@ -189,6 +235,7 @@ impl StreamSubscriberFactory for MemStreamPubSub {
 
 /// In-memory stream subscriber
 pub struct MemStreamSubscriber {
+    replay: VecDeque<StreamEvent>,
     receiver: broadcast::Receiver<StreamEvent>,
     channel_key: String,
 }
@@ -196,6 +243,9 @@ pub struct MemStreamSubscriber {
 #[async_trait]
 impl StreamSubscriber for MemStreamSubscriber {
     async fn next(&mut self) -> StreamNext {
+        if let Some(event) = self.replay.pop_front() {
+            return StreamNext::Event(event);
+        }
         loop {
             match self.receiver.recv().await {
                 Ok(event) => {
@@ -360,6 +410,36 @@ mod tests {
             StreamNext::Event(event) => event,
             other => panic!("expected stream event, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn task_inbox_replays_early_messages_then_live_without_duplicates() {
+        let pubsub = MemStreamPubSub::new();
+        let task = Uuid::new_v4();
+        let env = Uuid::new_v4();
+        let packet = |n| StreamEvent::TaskMessage {
+            task_id: task.to_string(),
+            env_id: Some(env),
+            payload: serde_json::json!(n),
+        };
+        pubsub.publish(packet(1)).await.unwrap();
+        let mut inbox = pubsub.subscribe_task(task).await.unwrap();
+        pubsub.publish(packet(2)).await.unwrap();
+        for expected in [1, 2] {
+            let StreamNext::Event(StreamEvent::TaskMessage { payload, .. }) =
+                tokio::time::timeout(std::time::Duration::from_secs(1), inbox.next())
+                    .await
+                    .unwrap()
+            else {
+                panic!("missing inbox message");
+            };
+            assert_eq!(payload, serde_json::json!(expected));
+        }
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), inbox.next())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

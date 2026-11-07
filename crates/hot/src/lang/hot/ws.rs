@@ -170,8 +170,19 @@ impl HotIterator for WsMessageIterator {
         }
 
         let chunk: Result<Option<Val>, String> = {
+            let _parked = super::native_io::park_current().map_err(|e| e.to_string())?;
             let mut guard = self.receiver.lock().map_err(|e| e.to_string())?;
-            guard.blocking_recv().transpose()
+            let context = super::native_io::current();
+            loop {
+                context.check()?;
+                match guard.try_recv() {
+                    Ok(value) => break value.map(Some),
+                    Err(mpsc::error::TryRecvError::Disconnected) => break Ok(None),
+                    Err(mpsc::error::TryRecvError::Empty) => {
+                        std::thread::sleep(std::time::Duration::from_millis(10))
+                    }
+                }
+            }
         };
         let chunk = chunk?;
 
@@ -237,7 +248,7 @@ fn connect_with_policy(args: &[Val], policy: DestinationPolicy) -> HotResult<Val
     let headers: IndexMap<Val, Val> = if args.len() > 1 {
         match &args[1] {
             Val::Map(m) => match m.get(&Val::from("headers")) {
-                Some(Val::Map(h)) => (**h).clone(),
+                Some(Val::Map(h)) => (**h).clone().into_inner(),
                 _ => IndexMap::new(),
             },
             Val::Null => IndexMap::new(),
@@ -251,8 +262,9 @@ fn connect_with_policy(args: &[Val], policy: DestinationPolicy) -> HotResult<Val
         IndexMap::new()
     };
 
-    tokio::runtime::Handle::current()
-        .block_on(async { ws_connect_async(&url, &headers, &policy).await })
+    super::native_io::block_on_hot("::hot::ws/connect", async {
+        ws_connect_async(&url, &headers, &policy).await
+    })
 }
 
 /// Open the TCP connection for `request`, to addresses `policy` allows,
@@ -441,9 +453,16 @@ pub fn send(args: &[Val]) -> HotResult<Val> {
         return HotResult::Err(err_val("::hot::ws/send: connection is closed".to_string()));
     }
 
+    crate::validate_expansion!("::hot::ws/send", &args[1..2]);
     let message = val_to_message(&args[1]);
 
-    match handle.write_tx.blocking_send(WsCommand::Send(message)) {
+    match super::native_io::block_on_result("::hot::ws/send", async {
+        handle
+            .write_tx
+            .send(WsCommand::Send(message))
+            .await
+            .map_err(|e| Val::from(e.to_string()))
+    }) {
         Ok(()) => HotResult::Ok(Val::from(true)),
         Err(e) => HotResult::Err(err_val(format!("::hot::ws/send: send failed: {}", e))),
     }
@@ -521,8 +540,11 @@ fn receive_with_timeout_inner(
     receiver: &WsReceiver,
     deadline: std::time::Instant,
 ) -> Result<Option<Val>, String> {
+    let _parked = super::native_io::park_current().map_err(|e| e.to_string())?;
     let mut rx = receiver.lock().map_err(|e| e.to_string())?;
+    let context = super::native_io::current();
     loop {
+        context.check()?;
         match rx.try_recv() {
             Ok(Ok(val)) => return Ok(Some(val)),
             Ok(Err(e)) => return Err(e),
@@ -551,7 +573,13 @@ pub fn close(args: &[Val]) -> HotResult<Val> {
     };
     handle.closed.store(true, Ordering::Relaxed);
 
-    match handle.write_tx.blocking_send(WsCommand::Close) {
+    match super::native_io::block_on_result("::hot::ws/close", async {
+        handle
+            .write_tx
+            .send(WsCommand::Close)
+            .await
+            .map_err(|e| Val::from(e.to_string()))
+    }) {
         Ok(()) => HotResult::Ok(Val::from(true)),
         Err(_) => HotResult::Ok(Val::from(true)), // already closed
     }

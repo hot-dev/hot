@@ -22,6 +22,31 @@ const FINALIZE_TIMEOUT_SECS: u64 = 5;
 const MAX_LOG_BYTES: usize = 10 * 1024 * 1024; // 10 MB
 const TRUNCATION_NOTICE: &str = "\n[hot-task-worker] output truncated at 10 MB\n";
 
+/// Store text that is safe for Postgres JSONB, within the output budget.
+/// Both Docker and FIFO output can contain arbitrary bytes.
+fn append_log(buf: &mut String, bytes: &[u8]) {
+    if buf.len() >= MAX_LOG_BYTES {
+        return;
+    }
+    let text = String::from_utf8_lossy(bytes);
+    let text = if text.contains('\0') {
+        std::borrow::Cow::Owned(text.replace('\0', "\u{fffd}"))
+    } else {
+        text
+    };
+    let remaining = MAX_LOG_BYTES - buf.len();
+    if text.len() <= remaining {
+        buf.push_str(&text);
+    } else {
+        let mut end = remaining;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        buf.push_str(&text[..end]);
+        buf.push_str(TRUNCATION_NOTICE);
+    }
+}
+
 /// Accumulates stdout/stderr from a container in real time.
 ///
 /// Captures output as it's produced so partial output is available
@@ -54,29 +79,11 @@ impl LogAccumulator {
                     match log {
                         LogOutput::StdOut { message } => {
                             let mut buf = stdout_clone.lock().await;
-                            if buf.len() < MAX_LOG_BYTES {
-                                let chunk = String::from_utf8_lossy(&message);
-                                let remaining = MAX_LOG_BYTES - buf.len();
-                                if chunk.len() <= remaining {
-                                    buf.push_str(&chunk);
-                                } else {
-                                    buf.push_str(&chunk[..remaining]);
-                                    buf.push_str(TRUNCATION_NOTICE);
-                                }
-                            }
+                            append_log(&mut buf, &message);
                         }
                         LogOutput::StdErr { message } => {
                             let mut buf = stderr_clone.lock().await;
-                            if buf.len() < MAX_LOG_BYTES {
-                                let chunk = String::from_utf8_lossy(&message);
-                                let remaining = MAX_LOG_BYTES - buf.len();
-                                if chunk.len() <= remaining {
-                                    buf.push_str(&chunk);
-                                } else {
-                                    buf.push_str(&chunk[..remaining]);
-                                    buf.push_str(TRUNCATION_NOTICE);
-                                }
-                            }
+                            append_log(&mut buf, &message);
                         }
                         _ => {}
                     }
@@ -162,15 +169,7 @@ fn read_fifo_stream(path: &str, buf: Arc<Mutex<String>>, stream_name: &str) {
                 if locked.len() >= MAX_LOG_BYTES {
                     break;
                 }
-                let text = String::from_utf8_lossy(&chunk[..n]);
-                let remaining = MAX_LOG_BYTES - locked.len();
-                if text.len() <= remaining {
-                    locked.push_str(&text);
-                } else {
-                    locked.push_str(&text[..remaining]);
-                    locked.push_str(TRUNCATION_NOTICE);
-                    break;
-                }
+                append_log(&mut locked, &chunk[..n]);
             }
             Err(e) => {
                 buf.blocking_lock().push_str(&format!(
@@ -179,6 +178,32 @@ fn read_fifo_stream(path: &str, buf: Arc<Mutex<String>>, stream_name: &str) {
                 ));
                 break;
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn binary_output_is_safe_text() {
+        let mut buf = String::new();
+        append_log(&mut buf, b"before\0after\xff");
+        assert_eq!(buf, "before\u{fffd}after\u{fffd}");
+        assert!(!buf.contains('\0'));
+    }
+
+    #[test]
+    fn truncation_respects_utf8_and_replacement_expansion() {
+        for bytes in ["🙂".as_bytes(), b"\0"] {
+            let mut buf = "a".repeat(MAX_LOG_BYTES - 1);
+            append_log(&mut buf, bytes);
+            assert!(buf.ends_with(TRUNCATION_NOTICE));
+            assert!(!buf.contains('\0'));
+            let truncated_len = buf.len();
+            append_log(&mut buf, b"ignored");
+            assert_eq!(buf.len(), truncated_len);
         }
     }
 }

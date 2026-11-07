@@ -31,7 +31,7 @@ pub struct FileRecord {
 /// lock nor the total. On SQLite every write holds the database's writer lock
 /// from the start. Staged object bytes are never counted as committed storage.
 enum StorageWriteTransaction {
-    Postgres(sqlx::Transaction<'static, sqlx::Postgres>),
+    Postgres(crate::db::ScopedPgTransaction),
     Sqlite(sqlx::Transaction<'static, sqlx::Sqlite>),
 }
 

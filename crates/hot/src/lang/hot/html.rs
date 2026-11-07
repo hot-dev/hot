@@ -402,7 +402,7 @@ impl NodeKeys {
             return Err("expected an Html node with a Str tag".to_string());
         };
         let attrs = match map.get(&self.attrs) {
-            Some(Val::Map(attrs)) => Some(attrs.as_ref()),
+            Some(Val::Map(attrs)) => Some(&***attrs),
             Some(_) => return Err("attrs field must be a Map".to_string()),
             None => None,
         };

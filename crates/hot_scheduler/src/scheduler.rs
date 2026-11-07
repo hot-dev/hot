@@ -1,5 +1,5 @@
 use ahash::AHashMap;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use croner::Cron;
 use std::future::Future;
 use std::pin::Pin;
@@ -11,8 +11,25 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 /// Type alias for the complex async task function
-type AsyncTask =
-    Arc<dyn Fn(Uuid, Arc<Mutex<()>>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+type AsyncTask = Arc<
+    dyn Fn(Uuid, DateTime<Utc>, Arc<Mutex<()>>) -> Pin<Box<dyn Future<Output = ()> + Send>>
+        + Send
+        + Sync,
+>;
+
+fn catch_up_seconds(last_checked: i64, now: i64) -> Option<std::ops::RangeInclusive<i64>> {
+    if now <= last_checked {
+        return None;
+    }
+    let first = (last_checked + 1).max(now - 299);
+    if first > last_checked + 1 {
+        warn!(
+            skipped_seconds = first - last_checked - 1,
+            "Scheduler catch-up window exceeded"
+        );
+    }
+    Some(first..=now)
+}
 
 /// Represents a scheduled job that can be executed
 pub struct Job {
@@ -84,33 +101,28 @@ impl JobScheduler {
         let handle = tokio::spawn(async move {
             debug!("Starting custom croner-based scheduler");
 
+            let mut last_checked = Utc::now().timestamp() - 1;
             while *running_flag.read().await {
-                let now = Utc::now();
-                let jobs_read = jobs.read().await;
-
-                for (job_id, job) in jobs_read.iter() {
-                    // Check if this job should run now
-                    if job.cron.is_time_matching(&now).unwrap_or(false) {
-                        // Clone data needed for the spawned task
-                        let lock = Arc::new(Mutex::new(()));
-                        let task = Arc::clone(&job.task);
-                        let job_id_clone = *job_id;
-
-                        debug!("Executing job {} at {}", job_id, now);
-
-                        // Execute the task
-                        tokio::spawn(async move {
-                            task(job_id_clone, lock).await;
-                        });
+                let now = Utc::now().timestamp();
+                if let Some(seconds) = catch_up_seconds(last_checked, now) {
+                    let jobs_read = jobs.read().await;
+                    for second in seconds {
+                        let scheduled_at = DateTime::from_timestamp(second, 0).unwrap();
+                        for (job_id, job) in jobs_read.iter() {
+                            if job.cron.is_time_matching(&scheduled_at).unwrap_or(false) {
+                                let lock = Arc::new(Mutex::new(()));
+                                let task = Arc::clone(&job.task);
+                                let job_id = *job_id;
+                                tokio::spawn(async move {
+                                    task(job_id, scheduled_at, lock).await;
+                                });
+                            }
+                        }
                     }
+                    last_checked = now;
                 }
-
-                drop(jobs_read);
-
-                // Sleep for a short interval before checking again
-                // Note: For production, you might want to calculate the exact time
-                // until the next potential execution to be more efficient
-                sleep(Duration::from_secs(1)).await;
+                let millis = 1000 - Utc::now().timestamp_subsec_millis();
+                sleep(Duration::from_millis(millis as u64)).await;
             }
 
             debug!("Custom scheduler stopped");
@@ -150,14 +162,25 @@ impl Job {
         F: Fn(Uuid, Arc<Mutex<()>>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
+        Self::new_async_at(cron_expression, move |id, _at, lock| task(id, lock))
+    }
+
+    pub fn new_async_at<F, Fut>(
+        cron_expression: &str,
+        task: F,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>>
+    where
+        F: Fn(Uuid, DateTime<Utc>, Arc<Mutex<()>>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
         // Parse with full croner capabilities - no restrictions!
         let cron = hot::db::schedule::parse_cron(cron_expression)
             .map_err(|e| format!("Invalid cron expression '{}': {}", cron_expression, e))?;
 
         let job_id = Uuid::now_v7();
 
-        let task_boxed = move |job_id: Uuid, lock: Arc<Mutex<()>>| {
-            let fut = task(job_id, lock);
+        let task_boxed = move |job_id: Uuid, at: DateTime<Utc>, lock: Arc<Mutex<()>>| {
+            let fut = task(job_id, at, lock);
             Box::pin(fut) as Pin<Box<dyn Future<Output = ()> + Send>>
         };
 
@@ -189,6 +212,17 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
     use tokio::time::{Duration, sleep};
+
+    #[test]
+    fn delayed_ticks_check_each_second_once_and_bound_long_pauses() {
+        assert_eq!(
+            catch_up_seconds(100, 104).unwrap().collect::<Vec<_>>(),
+            vec![101, 102, 103, 104]
+        );
+        assert!(catch_up_seconds(104, 104).is_none());
+        assert!(catch_up_seconds(104, 102).is_none());
+        assert_eq!(catch_up_seconds(0, 1000).unwrap().count(), 300);
+    }
 
     #[tokio::test]
     async fn test_scheduler_basic() {

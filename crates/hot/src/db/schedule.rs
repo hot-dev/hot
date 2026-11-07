@@ -991,6 +991,10 @@ impl Schedule {
         column: Option<i32>,
         position: Option<i32>,
     ) -> Result<(), ScheduleError> {
+        for value in meta.into_iter().chain(value) {
+            crate::val::check_json_shape(value, "schedule write")
+                .map_err(ScheduleError::PolicyError)?;
+        }
         let admission = quota::Admission::begin(db, build_id, -1).await?;
         match admission {
             quota::Admission::Postgres {
@@ -1059,6 +1063,10 @@ impl Schedule {
         column: Option<i32>,
         position: Option<i32>,
     ) -> Result<(), ScheduleError> {
+        for value in meta.into_iter().chain(value) {
+            crate::val::check_json_shape(value, "schedule write")
+                .map_err(ScheduleError::PolicyError)?;
+        }
         let meta_json = meta
             .map(serde_json::to_string)
             .transpose()
@@ -1102,6 +1110,10 @@ impl Schedule {
         column: Option<i32>,
         position: Option<i32>,
     ) -> Result<(), ScheduleError> {
+        for value in meta.into_iter().chain(value) {
+            crate::val::check_json_shape(value, "schedule write")
+                .map_err(ScheduleError::PolicyError)?;
+        }
         sqlx::query(
             "INSERT INTO schedule (schedule_id, build_id, cron, ns, var, meta, value, file, line, \"column\", position) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"
         )
@@ -1248,6 +1260,10 @@ impl Schedule {
         column: Option<i32>,
         position: Option<i32>,
     ) -> Result<(), ScheduleError> {
+        for value in meta.into_iter().chain(value) {
+            crate::val::check_json_shape(value, "schedule write")
+                .map_err(ScheduleError::PolicyError)?;
+        }
         let admission = quota::Admission::begin(db, build_id, -1).await?;
         match admission {
             quota::Admission::Postgres {
@@ -1897,12 +1913,25 @@ impl Schedule {
         offset: Option<i64>,
         env_id: Option<Uuid>,
     ) -> Result<Vec<Schedule>, ScheduleError> {
+        Ok(
+            Self::get_schedules_page_for_environment(db, limit, offset, env_id)
+                .await?
+                .0,
+        )
+    }
+
+    pub async fn get_schedules_page_for_environment(
+        db: &crate::db::DatabasePool,
+        limit: Option<i64>,
+        offset: Option<i64>,
+        env_id: Option<Uuid>,
+    ) -> Result<(Vec<Schedule>, usize), ScheduleError> {
         let limit = limit.unwrap_or(1000); // Default to a large number since this is for scheduler sync
         let offset = offset.unwrap_or(0);
 
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
-                let schedules = sqlx::query_as::<_, Schedule>(
+                let schedules = crate::db::collect_decodable_page(sqlx::query_as::<_, Schedule>(
                     "SELECT s.schedule_id, s.build_id, s.cron, s.ns, s.var, s.meta, s.value, s.file, s.line, s.\"column\", s.position, s.active, s.created_at, s.deactivated_at
                      FROM schedule s
                      JOIN build b ON s.build_id = b.build_id
@@ -1910,18 +1939,17 @@ impl Schedule {
                      JOIN env qe ON qe.env_id=p.env_id JOIN org qo ON qo.org_id=qe.org_id JOIN org qr ON qr.org_id=CASE WHEN qo.parent_org_id IS NULL THEN qo.org_id ELSE qo.parent_org_id END
                      WHERE qe.active=true AND qo.active=true AND qr.active=true AND qo.lifecycle_state='active' AND qr.lifecycle_state='active' AND s.active = true AND b.deployed = true AND b.runtime_status = 'ready' AND b.active = true AND p.active = true
                      AND ($3::uuid IS NULL OR qe.env_id=$3)
-                     ORDER BY s.cron, s.ns, s.var
+                     ORDER BY s.cron, s.ns, s.var, s.schedule_id
                      LIMIT $1 OFFSET $2"
                 )
                 .bind(limit)
                 .bind(offset)
                 .bind(env_id)
-                .fetch_all(pg_pool)
-                .await?;
+                .fetch(pg_pool)).await?;
                 Ok(schedules)
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
-                let schedules = sqlx::query_as::<_, Schedule>(
+                let schedules = crate::db::collect_decodable_page(sqlx::query_as::<_, Schedule>(
                     "SELECT s.schedule_id, s.build_id, s.cron, s.ns, s.var, s.meta, s.value, s.file, s.line, s.\"column\", s.position, s.active, s.created_at, s.deactivated_at
                      FROM schedule s
                      JOIN build b ON s.build_id = b.build_id
@@ -1929,15 +1957,14 @@ impl Schedule {
                      JOIN env qe ON qe.env_id=p.env_id JOIN org qo ON qo.org_id=qe.org_id JOIN org qr ON qr.org_id=CASE WHEN qo.parent_org_id IS NULL THEN qo.org_id ELSE qo.parent_org_id END
                      WHERE qe.active=true AND qo.active=true AND qr.active=true AND qo.lifecycle_state='active' AND qr.lifecycle_state='active' AND s.active = 1 AND b.deployed = 1 AND b.runtime_status = 'ready' AND b.active = 1 AND p.active = 1
                      AND (? IS NULL OR qe.env_id=?)
-                     ORDER BY s.cron, s.ns, s.var
+                     ORDER BY s.cron, s.ns, s.var, s.schedule_id
                      LIMIT ? OFFSET ?"
                 )
                 .bind(env_id)
                 .bind(env_id)
                 .bind(limit)
                 .bind(offset)
-                .fetch_all(sqlite_pool)
-                .await?;
+                .fetch(sqlite_pool)).await?;
                 Ok(schedules)
             }
         }
@@ -1964,7 +1991,7 @@ impl Schedule {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 // For Postgres: extract the datetime from @at: prefix and compare
                 // cron format: @at:2024-01-15T10:30:00Z
-                let schedules = sqlx::query_as::<_, ScheduleWithProject>(
+                let schedules = crate::db::collect_decodable(sqlx::query_as::<_, ScheduleWithProject>(
                     "SELECT s.schedule_id, s.build_id, s.cron, s.ns, s.var, s.meta, s.value, s.file, s.line, s.\"column\", s.position, s.active, s.created_at, s.deactivated_at, p.project_id, p.name as project_name
                      FROM schedule s
                      JOIN build b ON s.build_id = b.build_id
@@ -1983,14 +2010,13 @@ impl Schedule {
                 .bind(&at_prefix)
                 .bind(now)
                 .bind(env_id)
-                .fetch_all(pg_pool)
-                .await?;
+                .fetch(pg_pool)).await?;
                 Ok(schedules)
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 // For SQLite: use SUBSTR to extract datetime and compare as text
                 // This works because ISO 8601 format is lexicographically sortable
-                let schedules = sqlx::query_as::<_, ScheduleWithProject>(
+                let schedules = crate::db::collect_decodable(sqlx::query_as::<_, ScheduleWithProject>(
                     "SELECT s.schedule_id, s.build_id, s.cron, s.ns, s.var, s.meta, s.value, s.file, s.line, s.\"column\", s.position, s.active, s.created_at, s.deactivated_at, p.project_id, p.name as project_name
                      FROM schedule s
                      JOIN build b ON s.build_id = b.build_id
@@ -2010,8 +2036,7 @@ impl Schedule {
                 .bind(&now_str)
                 .bind(env_id)
                 .bind(env_id)
-                .fetch_all(sqlite_pool)
-                .await?;
+                .fetch(sqlite_pool)).await?;
                 Ok(schedules)
             }
         }
@@ -2212,6 +2237,10 @@ impl Schedule {
         meta: Option<&JsonValue>,
         args: Option<&JsonValue>,
     ) -> Result<Uuid, ScheduleError> {
+        for value in meta.into_iter().chain(args) {
+            crate::val::check_json_shape(value, "dynamic schedule write")
+                .map_err(ScheduleError::PolicyError)?;
+        }
         if let ScheduleType::Cron(cron) = schedule_type {
             validate_recurring_schedule_interval(cron, policy.min_interval_secs)
                 .map_err(|e| ScheduleError::PolicyError(e.message()))?;
@@ -3033,6 +3062,76 @@ mod tests {
             .collect();
         schedules.insert(cron.to_string(), entries);
         schedules
+    }
+
+    #[tokio::test]
+    async fn scheduler_pages_past_corrupt_rows_and_rejects_deep_writes() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let crate::db::DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        sqlx::query("UPDATE build SET deployed=1,runtime_status='ready' WHERE build_id=?")
+            .bind(data.build_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        let bad = Uuid::now_v7();
+        let good = Uuid::now_v7();
+        for (id, name) in [(bad, "a"), (good, "b")] {
+            Schedule::insert_schedule(
+                &db,
+                &id,
+                &data.build_id,
+                "0 * * * * *",
+                "::page",
+                name,
+                None,
+                Some(&serde_json::json!([])),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        let deep = format!("{}0{}", "[".repeat(200), "]".repeat(200));
+        sqlx::query("UPDATE schedule SET value=? WHERE schedule_id=?")
+            .bind(deep)
+            .bind(bad)
+            .execute(pool)
+            .await
+            .unwrap();
+        let (rows, raw) = Schedule::get_schedules_page_for_environment(&db, Some(1), Some(0), None)
+            .await
+            .unwrap();
+        assert!(rows.is_empty());
+        assert_eq!(raw, 1);
+        let (rows, raw) = Schedule::get_schedules_page_for_environment(&db, Some(1), Some(1), None)
+            .await
+            .unwrap();
+        assert_eq!(raw, 1);
+        assert_eq!(rows[0].schedule_id, good);
+        let deep = (0..130).fold(serde_json::json!(0), |value, _| serde_json::json!([value]));
+        assert!(
+            Schedule::insert_schedule(
+                &db,
+                &Uuid::now_v7(),
+                &data.build_id,
+                "0 * * * * *",
+                "::page",
+                "deep",
+                None,
+                Some(&deep),
+                None,
+                None,
+                None,
+                None
+            )
+            .await
+            .is_err()
+        );
     }
 
     #[tokio::test]

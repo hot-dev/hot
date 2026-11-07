@@ -476,18 +476,27 @@ pub fn json_contains_blob_ref(value: &serde_json::Value) -> bool {
 /// Rough in-memory payload size of a Val tree; used for spill decisions and
 /// metrics, not exact accounting.
 pub fn estimate_val_size(val: &Val) -> usize {
-    match val {
-        Val::Bytes(b) => b.len(),
-        Val::Str(s) => s.len(),
-        Val::Vec(v) => 8 + v.iter().map(estimate_val_size).sum::<usize>(),
-        Val::Map(m) => {
-            8 + m
-                .iter()
-                .map(|(k, v)| estimate_val_size(k) + estimate_val_size(v))
-                .sum::<usize>()
-        }
-        _ => 8,
+    if val.check_shape("size estimate").is_err() {
+        return usize::MAX;
     }
+    let mut pending = vec![val];
+    let mut size = 0usize;
+    while let Some(value) = pending.pop() {
+        size = size.saturating_add(match value {
+            Val::Bytes(bytes) => bytes.len(),
+            Val::Str(text) => text.len(),
+            Val::Vec(items) => {
+                pending.extend(items.iter());
+                8
+            }
+            Val::Map(items) => {
+                pending.extend(items.iter().flat_map(|(k, v)| [k, v]));
+                8
+            }
+            _ => 8,
+        });
+    }
+    size
 }
 
 /// Rehydration budget limits, enforced per top-level rehydrate call.

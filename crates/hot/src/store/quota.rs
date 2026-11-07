@@ -158,13 +158,13 @@ fn limit(plan: Option<String>, overrides: Option<String>, kind: QuotaKind) -> Re
 }
 
 macro_rules! begin {
-    ($name:ident,$database:ty,$variant:ident,$begin:expr,$lock:literal,$narrow:expr) => {
+    ($name:ident,$transaction:ty,$variant:ident,$begin:expr,$lock:literal,$narrow:expr) => {
         pub(crate) async fn $name(db:&DatabasePool,org:Uuid,env:Uuid,kind:QuotaKind)
-            -> Result<(sqlx::Transaction<'static,$database>,Budget),String> {
+            -> Result<($transaction,Budget),String> {
             let root=root_for(db,org,env).await?;
             let billing=db.with_scope(DatabaseScope::Maintenance { operation:MaintenanceOperation::Billing,org_id:Some(root) });
             let DatabasePool::$variant(pool)=&billing else { return Err("Incorrect store database backend".into()); };
-            let mut tx=$begin(pool).await.map_err(|e| e.to_string())?;
+            let mut tx=$begin(pool,kind).await.map_err(|e| e.to_string())?;
             let overrides:Option<String>=sqlx::query_scalar("SELECT CAST(features AS TEXT) FROM org WHERE org_id=$1")
                 .bind(root).fetch_one(&mut *tx).await.map_err(|e|e.to_string())?;
             let plan:Option<String>=sqlx::query_scalar("SELECT CAST(COALESCE(p.features,'{}') AS TEXT) FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1")
@@ -173,7 +173,11 @@ macro_rules! begin {
             // Unlimited accounts need neither the sibling-serializing account
             // lock nor a recount of every stored byte in the account.
             let used:i64=if limit<0 { 0 } else {
-                sqlx::query($lock).bind(root).execute(&mut *tx).await.map_err(|e|e.to_string())?;
+                // Trace transactions use SSI to protect the aggregate without
+                // holding an account row lock while writing all their calls.
+                if !matches!(kind, QuotaKind::Call) {
+                    sqlx::query($lock).bind(root).execute(&mut *tx).await.map_err(|e|e.to_string())?;
+                }
                 sqlx::query_scalar(sqlx::AssertSqlSafe(kind.usage_sql()))
                     .bind(root).fetch_one(&mut *tx).await.map_err(|e|e.to_string())?
             };
@@ -198,20 +202,26 @@ async fn narrow_sqlite(_: &mut sqlx::SqliteConnection, _: Uuid, _: Uuid) -> Resu
 }
 async fn begin_postgres_tx(
     pool: &crate::db::ScopedPgPool,
-) -> Result<sqlx::Transaction<'static, sqlx::Postgres>, sqlx::Error> {
-    pool.begin().await
+    kind: QuotaKind,
+) -> Result<crate::db::ScopedPgTransaction, sqlx::Error> {
+    if matches!(kind, QuotaKind::Call) {
+        pool.begin_serializable().await
+    } else {
+        pool.begin().await
+    }
 }
 /// Admission reads before it writes. A deferred SQLite transaction that has
 /// read cannot wait for the writer lock: its first write fails at once with
 /// SQLITE_BUSY instead of honoring busy_timeout. Take the writer lock up front.
 async fn begin_sqlite_tx(
     pool: &sqlx::SqlitePool,
+    _kind: QuotaKind,
 ) -> Result<sqlx::Transaction<'static, sqlx::Sqlite>, sqlx::Error> {
     pool.begin_with("BEGIN IMMEDIATE").await
 }
 begin!(
     begin_postgres,
-    sqlx::Postgres,
+    crate::db::ScopedPgTransaction,
     Postgres,
     begin_postgres_tx,
     "SELECT org_id FROM org WHERE org_id=$1 FOR UPDATE",
@@ -219,7 +229,7 @@ begin!(
 );
 begin!(
     begin_sqlite,
-    sqlx::Sqlite,
+    sqlx::Transaction<'static, sqlx::Sqlite>,
     Sqlite,
     begin_sqlite_tx,
     "UPDATE org SET updated_at=updated_at WHERE org_id=$1",

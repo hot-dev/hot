@@ -33,7 +33,6 @@ const WRITABLE_ROOTFS_CAPS: &[&str] = &[
     "FSETID",
     "SETGID",
     "SETUID",
-    "NET_RAW",
     "SYS_CHROOT",
     "MKNOD",
 ];
@@ -135,6 +134,9 @@ pub(crate) fn describe_pull_failure(
         infra: false,
     };
 
+    if has(&["4 gib", "compressed-size limit", "disk-growth budget"]) {
+        return user("Image exceeds the worker's 4 GiB image size budget".to_string());
+    }
     if has(&["manifest.v1+prettyjws", "schema 1", "schema1"]) {
         return user(format!(
             "Image '{image}' uses the Docker schema 1 image format, which this worker can no \
@@ -335,6 +337,174 @@ impl std::fmt::Display for ExecutorError {
 impl std::error::Error for ExecutorError {}
 
 pub type ExecutorResult<T> = Result<T, ExecutorError>;
+
+#[cfg(any(test, all(target_os = "linux", feature = "kata")))]
+#[derive(Debug, Default)]
+struct ImageDefaults {
+    env: Vec<String>,
+    entrypoint: Vec<String>,
+    cmd: Vec<String>,
+    working_dir: String,
+    user: String,
+}
+#[cfg(any(test, all(target_os = "linux", feature = "kata")))]
+impl ImageDefaults {
+    fn from_config(config: &serde_json::Value) -> ExecutorResult<Self> {
+        let strings = |field: &str| -> ExecutorResult<Vec<String>> {
+            match &config[field] {
+                serde_json::Value::Null => Ok(Vec::new()),
+                serde_json::Value::Array(items) => items
+                    .iter()
+                    .map(|item| {
+                        item.as_str()
+                            .filter(|s| !s.contains('\0'))
+                            .map(str::to_owned)
+                            .ok_or_else(|| ExecutorError::Create(format!("Invalid image {field}")))
+                    })
+                    .collect(),
+                _ => Err(ExecutorError::Create(format!("Invalid image {field}"))),
+            }
+        };
+        let working_dir = config["WorkingDir"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("/")
+            .to_string();
+        if !working_dir.starts_with('/') || working_dir.contains('\0') {
+            return Err(ExecutorError::Create(
+                "Image WorkingDir must be an absolute path".to_string(),
+            ));
+        }
+        Ok(Self {
+            env: strings("Env")?,
+            entrypoint: strings("Entrypoint")?,
+            cmd: strings("Cmd")?,
+            working_dir,
+            user: config["User"].as_str().unwrap_or("").to_string(),
+        })
+    }
+
+    fn args(
+        &self,
+        cmd: Option<&[String]>,
+        entrypoint: Option<&[String]>,
+    ) -> ExecutorResult<Vec<String>> {
+        let entry = entrypoint.unwrap_or(&self.entrypoint);
+        let mut args = if entry == [String::new()] {
+            Vec::new()
+        } else {
+            entry.to_vec()
+        };
+        let cmd = cmd.filter(|cmd| !cmd.is_empty()).unwrap_or_else(|| {
+            if entrypoint.is_some_and(|entry| !entry.is_empty()) {
+                &[]
+            } else {
+                &self.cmd
+            }
+        });
+        args.extend_from_slice(cmd);
+        if args.is_empty() || args[0].is_empty() || args.iter().any(|arg| arg.contains('\0')) {
+            return Err(ExecutorError::Create(
+                "No valid container command: provide cmd or an image ENTRYPOINT/CMD".to_string(),
+            ));
+        }
+        Ok(args)
+    }
+}
+
+#[cfg(any(test, all(target_os = "linux", feature = "kata")))]
+fn image_user_ids(user: &str, passwd: &str, groups: &str) -> ExecutorResult<(u32, u32, Vec<u32>)> {
+    let invalid = || {
+        ExecutorError::Create(format!(
+            "Image USER '{user}' does not name a valid user/group in the image"
+        ))
+    };
+    let (user_name, group_name) = user
+        .split_once(':')
+        .map_or((user, None), |(user, group)| (user, Some(group)));
+    let account = passwd
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<_> = line.split(':').collect();
+            if fields.len() < 4 {
+                return None;
+            }
+            Some((
+                fields[0],
+                fields[2].parse::<u32>().ok()?,
+                fields[3].parse::<u32>().ok()?,
+            ))
+        })
+        .find(|(name, uid, _)| *name == user_name || user_name.parse::<u32>().ok() == Some(*uid));
+    let uid = user_name
+        .parse::<u32>()
+        .ok()
+        .or_else(|| account.map(|(_, uid, _)| uid))
+        .or_else(|| (user_name == "root").then_some(0))
+        .ok_or_else(invalid)?;
+    let group_rows: Vec<_> = groups
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<_> = line.split(':').collect();
+            if fields.len() < 4 {
+                return None;
+            }
+            Some((fields[0], fields[2].parse::<u32>().ok()?, fields[3]))
+        })
+        .collect();
+    let gid = match group_name {
+        Some(group) => group
+            .parse::<u32>()
+            .ok()
+            .or_else(|| {
+                group_rows
+                    .iter()
+                    .find(|(name, _, _)| *name == group)
+                    .map(|(_, gid, _)| *gid)
+            })
+            .ok_or_else(invalid)?,
+        None => account.map_or(0, |(_, _, gid)| gid),
+    };
+    let additional = if group_name.is_none() {
+        account
+            .map(|(name, _, _)| {
+                group_rows
+                    .iter()
+                    .filter(|(_, _, members)| members.split(',').any(|member| member == name))
+                    .map(|(_, gid, _)| *gid)
+                    .filter(|group| *group != gid)
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    Ok((uid, gid, additional))
+}
+
+#[cfg(any(test, all(target_os = "linux", feature = "kata")))]
+fn check_image_manifest_size(manifest: &serde_json::Value) -> ExecutorResult<()> {
+    let mut bytes = manifest["config"]["size"].as_u64().unwrap_or(0);
+    if let Some(layers) = manifest["layers"].as_array() {
+        for layer in layers {
+            bytes = bytes
+                .checked_add(layer["size"].as_u64().ok_or_else(|| {
+                    ExecutorError::ImagePull("Image layer has no valid size".to_string())
+                })?)
+                .ok_or_else(|| ExecutorError::ImagePull("Image size overflow".to_string()))?;
+        }
+    }
+    let max_bytes = hot::lang::runtime::limits::operational_limit(
+        "HOT_BOX_MAX_IMAGE_BYTES",
+        4 * 1024 * 1024 * 1024,
+    ) as u64;
+    if bytes > max_bytes {
+        return Err(ExecutorError::ImagePull(format!(
+            "Image exceeds compressed-size limit ({max_bytes} bytes); raise HOT_BOX_MAX_IMAGE_BYTES"
+        )));
+    }
+    Ok(())
+}
 
 /// Extra bind mounts and env vars to inject into the container.
 #[derive(Debug, Default, Clone)]
@@ -1538,8 +1708,9 @@ mod kata {
         connect,
         services::v1::{
             Container, CreateContainerRequest, CreateTaskRequest, DeleteContainerRequest,
-            DeleteTaskRequest, GetImageRequest, KillRequest, ListContainersRequest,
-            ReadContentRequest, StartRequest, WaitRequest,
+            DeleteImageRequest, DeleteTaskRequest, GetImageRequest, KillRequest,
+            ListContainersRequest, ListImagesRequest, ReadContentRequest, StartRequest,
+            WaitRequest,
             containers_client::ContainersClient,
             content_client::ContentClient,
             images_client::ImagesClient,
@@ -1703,6 +1874,8 @@ mod kata {
             }
         });
 
+        let _abort_responder = AbortResponder(responder.abort_handle());
+
         let platform = Platform {
             os: "linux".to_string(),
             architecture: containerd_arch().to_string(),
@@ -1753,7 +1926,107 @@ mod kata {
         })
     }
 
+    /// Resolve names from an image's account files without executing anything
+    /// from that image on the host. The snapshot is not running and is mounted
+    /// read-only; absolute/escaping symlinks and special files are refused.
+    async fn read_image_accounts(
+        rootfs: &[containerd_client::types::Mount],
+    ) -> ExecutorResult<(String, String)> {
+        const READER: &str = r#"
+import json, os, pathlib, subprocess, sys, tempfile
+mounts = json.load(sys.stdin)
+if len(mounts) != 1 or mounts[0]['type'] not in ('ext4', 'xfs'):
+    raise RuntimeError('unsupported image snapshot mount')
+mount = mounts[0]
+root = pathlib.Path(tempfile.mkdtemp(prefix='hot-image-user-'))
+mounted = False
+try:
+    options = [o for o in mount['options'] if o not in ('rw', 'exec', 'suid', 'dev')]
+    options += ['ro', 'noexec', 'nosuid', 'nodev']
+    if mount['type'] == 'ext4':
+        options += ['noload']
+    subprocess.run(['mount', '-t', mount['type'], '-o', ','.join(options), mount['source'], str(root)], check=True, timeout=10, stdout=subprocess.DEVNULL)
+    mounted = True
+    def read(name):
+        path = (root / 'etc' / name).resolve()
+        if not path.is_relative_to(root):
+            raise RuntimeError('image account file escapes the root filesystem')
+        if not path.exists():
+            return ''
+        if not path.is_file():
+            raise RuntimeError('image account file is not a regular file')
+        with path.open('rb') as file:
+            data = file.read(1048577)
+        if len(data) > 1048576:
+            raise RuntimeError('image account file exceeds 1 MiB')
+        return data.decode('utf-8', errors='replace')
+    print(json.dumps([read('passwd'), read('group')]))
+finally:
+    if mounted:
+        subprocess.run(['umount', '-l', str(root)], check=True, timeout=10, stdout=subprocess.DEVNULL)
+    root.rmdir()
+"#;
+        let mounts: Vec<_> = rootfs.iter().map(|mount| serde_json::json!({"type": mount.r#type, "source": mount.source, "options": mount.options})).collect();
+        let child = crate::cni::host_command("python3", &["-c", READER])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|error| {
+                ExecutorError::Create(format!("Cannot resolve image USER: {error}"))
+            })?;
+        let output =
+            crate::cni::write_stdin_and_wait(child, &serde_json::to_string(&mounts).unwrap())
+                .await
+                .map_err(ExecutorError::Create)?;
+        if !output.status.success() {
+            return Err(ExecutorError::Create(format!(
+                "Cannot resolve image USER: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        serde_json::from_slice(&output.stdout)
+            .map_err(|error| ExecutorError::Create(format!("Invalid image account data: {error}")))
+    }
+
+    struct ActiveImage {
+        active: Arc<parking_lot::Mutex<std::collections::HashMap<String, usize>>>,
+        image: String,
+    }
+    impl ActiveImage {
+        fn new(
+            active: &Arc<parking_lot::Mutex<std::collections::HashMap<String, usize>>>,
+            image: &str,
+        ) -> Self {
+            *active.lock().entry(image.to_string()).or_default() += 1;
+            Self {
+                active: active.clone(),
+                image: image.to_string(),
+            }
+        }
+    }
+    impl Drop for ActiveImage {
+        fn drop(&mut self) {
+            let mut active = self.active.lock();
+            if let Some(count) = active.get_mut(&self.image) {
+                *count -= 1;
+                if *count == 0 {
+                    active.remove(&self.image);
+                }
+            }
+        }
+    }
+    struct AbortResponder(tokio::task::AbortHandle);
+    impl Drop for AbortResponder {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+
     pub struct KataExecutor {
+        image_maintenance: tokio::sync::Mutex<()>,
+        active_images: Arc<parking_lot::Mutex<std::collections::HashMap<String, usize>>>,
+        image_last_used: parking_lot::Mutex<std::collections::HashMap<String, i64>>,
         channel: Channel,
         semaphore: Arc<Semaphore>,
         slot_timeout_secs: u64,
@@ -1822,6 +2095,9 @@ mod kata {
             tracing::debug!(vmm = %vmm, "kata.executor.initialized");
 
             Ok(Self {
+                image_maintenance: tokio::sync::Mutex::new(()),
+                active_images: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+                image_last_used: parking_lot::Mutex::new(std::collections::HashMap::new()),
                 channel,
                 semaphore: Arc::new(Semaphore::new(max_concurrent)),
                 slot_timeout_secs,
@@ -2062,6 +2338,7 @@ mod kata {
             pre_start_hook: Option<PreStartHook>,
         ) -> ExecutorResult<ContainerOutput> {
             let image = &normalize_image_ref(image);
+            let _active_image = ActiveImage::new(&self.active_images, image);
             let container_id = container_id_for_trace(trace_id);
 
             let mut images = ImagesClient::new(self.channel.clone());
@@ -2077,21 +2354,14 @@ mod kata {
                 .map_or(crate::box_limits::BoxLimits::DEFAULT_DISK_SIZE_MB, |l| {
                     l.disk_size_mb
                 });
-            let pull_result = match ensure_devmapper_capacity(
-                crate::resource_budget::disk_admission_mb(requested_disk_mb),
-            )
-            .await
-            {
-                Ok(()) => {
-                    self.ensure_image(
-                        &mut images,
-                        image,
-                        extras.and_then(|e| e.registry_auth.clone()),
-                    )
-                    .await
-                }
-                Err(e) => Err(e),
-            };
+            let pull_result = self
+                .ensure_image(
+                    &mut images,
+                    image,
+                    extras.and_then(|e| e.registry_auth.clone()),
+                    crate::resource_budget::disk_admission_mb(requested_disk_mb),
+                )
+                .await;
             // Stamp the phase end on success and mid-pull failure alike
             // (devmapper admission or the pull itself): the time already
             // spent is platform-owned either way and must be measurable
@@ -2101,7 +2371,7 @@ mod kata {
             pull_result?;
             let runtime_start = Instant::now();
 
-            let (chain_id, image_env) = self
+            let (chain_id, image_defaults) = self
                 .get_image_chain_id(&mut images, &mut content, image)
                 .await?;
             tracing::debug!(
@@ -2195,7 +2465,8 @@ mod kata {
                         limits,
                         extras,
                         netns_path.as_deref(),
-                        &image_env,
+                        &image_defaults,
+                        &attempt_rootfs,
                         trace_id,
                     )
                     .await?;
@@ -2526,45 +2797,156 @@ mod kata {
             })
         }
 
-        async fn ensure_image(
+        async fn reclaim_image_space(
             &self,
-            _client: &mut ImagesClient<Channel>,
-            image: &str,
-            registry_auth: Option<Arc<RegistryCredential>>,
+            client: &mut ImagesClient<Channel>,
+            current: &str,
+            required_mb: u64,
         ) -> ExecutorResult<()> {
-            // Every task pulls, so the registry decides each time whether this
-            // task may use the image: a private image another environment
-            // already pulled into this namespace is not usable without a
-            // credential the registry accepts.
-            if let Some(auth) = registry_auth {
-                return pull_with_registry_auth(self.channel.clone(), image, auth, SNAPSHOTTER)
-                    .await;
-            }
-            // Always run ctr pull; it is idempotent and skips already-present
-            // layers. Checking the image index via gRPC first is unreliable
-            // because the index can exist while layer blobs are missing.
-            let output = tokio::process::Command::new("ctr")
-                .args([
-                    "--address",
-                    DEFAULT_CONTAINERD_SOCKET,
-                    "-n",
-                    NAMESPACE,
-                    "images",
-                    "pull",
-                    "--snapshotter",
-                    SNAPSHOTTER,
-                    image,
-                ])
-                .output()
+            let max_cached_images =
+                hot::lang::runtime::limits::operational_limit("HOT_BOX_MAX_CACHED_IMAGES", 128);
+            let images = client
+                .list(with_namespace!(
+                    ListImagesRequest { filters: vec![] },
+                    NAMESPACE
+                ))
                 .await
-                .map_err(|e| ExecutorError::ImagePull(e.to_string()))?;
-
-            if !output.status.success() {
+                .map_err(|e| ExecutorError::ImagePull(format!("list cached images: {e}")))?
+                .into_inner()
+                .images;
+            let containers = ContainersClient::new(self.channel.clone())
+                .list(with_namespace!(
+                    ListContainersRequest { filters: vec![] },
+                    NAMESPACE
+                ))
+                .await
+                .map_err(|e| ExecutorError::ImagePull(format!("list image users: {e}")))?
+                .into_inner()
+                .containers;
+            let in_use: std::collections::HashSet<_> = containers
+                .into_iter()
+                .map(|container| container.image)
+                .collect();
+            let active: std::collections::HashSet<_> =
+                self.active_images.lock().keys().cloned().collect();
+            let last_used = self.image_last_used.lock().clone();
+            let mut total = images.len();
+            let already_cached = images.iter().any(|image| image.name == current);
+            let mut candidates: Vec<_> = images
+                .into_iter()
+                .filter(|image| {
+                    image.name != current
+                        && !in_use.contains(&image.name)
+                        && !active.contains(&image.name)
+                })
+                .collect();
+            candidates.sort_by_key(|image| {
+                last_used
+                    .get(&image.name)
+                    .copied()
+                    .unwrap_or_else(|| image.updated_at.as_ref().map_or(0, |at| at.seconds))
+            });
+            for image in candidates {
+                if total < max_cached_images
+                    && ensure_devmapper_capacity(required_mb).await.is_ok()
+                    && content_available_mb().await? >= DEVMAPPER_MIN_FREE_RESERVE_MB
+                {
+                    break;
+                }
+                let name = image.name;
+                client
+                    .delete(with_namespace!(
+                        DeleteImageRequest {
+                            name: name.clone(),
+                            sync: true,
+                            target: image.target
+                        },
+                        NAMESPACE
+                    ))
+                    .await
+                    .map_err(|e| {
+                        ExecutorError::ImagePull(format!("evict unused image {name}: {e}"))
+                    })?;
+                total -= 1;
+                self.image_last_used.lock().remove(&name);
+                tracing::info!(image = %name, "Evicted least-recently-used idle box image");
+            }
+            ensure_devmapper_capacity(required_mb).await?;
+            if content_available_mb().await? < DEVMAPPER_MIN_FREE_RESERVE_MB {
                 return Err(ExecutorError::ImagePull(
-                    String::from_utf8_lossy(&output.stderr).to_string(),
+                    "Container content store is below its free-space reserve".to_string(),
                 ));
             }
+            if total >= max_cached_images && !already_cached {
+                return Err(ExecutorError::ImagePull(
+                    "Image cache is full of images still in use".to_string(),
+                ));
+            }
+            Ok(())
+        }
 
+        async fn ensure_image(
+            &self,
+            client: &mut ImagesClient<Channel>,
+            image: &str,
+            registry_auth: Option<Arc<RegistryCredential>>,
+            required_mb: u64,
+        ) -> ExecutorResult<()> {
+            // Serialize eviction decisions and deletes only. Pulls run concurrently;
+            // ActiveImage protects them through container registration.
+            {
+                let _maintenance = self.image_maintenance.lock().await;
+                self.reclaim_image_space(client, image, required_mb).await?;
+            }
+            let pull = async {
+                if let Some(auth) = registry_auth {
+                    return pull_with_registry_auth(self.channel.clone(), image, auth, SNAPSHOTTER)
+                        .await;
+                }
+                let output = tokio::process::Command::new("ctr")
+                    .args([
+                        "--address",
+                        DEFAULT_CONTAINERD_SOCKET,
+                        "-n",
+                        NAMESPACE,
+                        "images",
+                        "pull",
+                        "--snapshotter",
+                        SNAPSHOTTER,
+                        image,
+                    ])
+                    .kill_on_drop(true)
+                    .output()
+                    .await
+                    .map_err(|e| ExecutorError::ImagePull(e.to_string()))?;
+                if !output.status.success() {
+                    return Err(ExecutorError::ImagePull(
+                        String::from_utf8_lossy(&output.stderr).to_string(),
+                    ));
+                }
+                Ok(())
+            };
+            tokio::pin!(pull);
+            let mut poll = tokio::time::interval(std::time::Duration::from_millis(250));
+            loop {
+                tokio::select! {
+                    result = &mut pull => { result?; break; }
+                    _ = poll.tick() => {
+                        ensure_devmapper_capacity(required_mb).await?;
+                        let free = content_available_mb().await?;
+                        if free < DEVMAPPER_MIN_FREE_RESERVE_MB {
+                            return Err(ExecutorError::ImagePull("Content store is below its free-space reserve".to_string()));
+                        }
+                        // This is a shared store: growth includes other concurrent
+                        // pulls, so it cannot enforce an individual image's budget.
+                        // Per-image compressed sizes are checked from its manifest.
+                    }
+                }
+            }
+            ensure_devmapper_capacity(required_mb).await?;
+            self.image_last_used
+                .lock()
+                .insert(image.to_string(), chrono::Utc::now().timestamp());
             Ok(())
         }
 
@@ -2578,7 +2960,7 @@ mod kata {
             images: &mut ImagesClient<Channel>,
             content: &mut ContentClient<Channel>,
             image: &str,
-        ) -> ExecutorResult<(String, Vec<String>)> {
+        ) -> ExecutorResult<(String, ImageDefaults)> {
             let get_req = with_namespace!(
                 GetImageRequest {
                     name: image.to_string(),
@@ -2601,25 +2983,35 @@ mod kata {
             let manifest: serde_json::Value = serde_json::from_slice(&manifest_data)
                 .map_err(|e| ExecutorError::Create(format!("parse manifest: {e}")))?;
 
+            check_image_manifest_size(&manifest)?;
             // Handle manifest list (multi-platform images) vs single manifest
             let config_digest = if manifest.get("manifests").is_some() {
                 let manifests = manifest["manifests"]
                     .as_array()
                     .ok_or_else(|| ExecutorError::Create("invalid manifest list".into()))?;
+                let architecture = match std::env::consts::ARCH {
+                    "x86_64" => "amd64",
+                    "aarch64" => "arm64",
+                    other => other,
+                };
                 let platform_manifest = manifests
                     .iter()
                     .find(|m| {
-                        m["platform"]["architecture"].as_str() == Some("amd64")
+                        m["platform"]["architecture"].as_str() == Some(architecture)
                             && m["platform"]["os"].as_str() == Some("linux")
                     })
-                    .or_else(|| manifests.first())
-                    .ok_or_else(|| ExecutorError::Create("no suitable manifest found".into()))?;
+                    .ok_or_else(|| {
+                        ExecutorError::Create(format!(
+                            "no linux/{architecture} image manifest found"
+                        ))
+                    })?;
                 let inner_digest = platform_manifest["digest"]
                     .as_str()
                     .ok_or_else(|| ExecutorError::Create("manifest has no digest".into()))?;
                 let inner_data = self.read_content(content, inner_digest).await?;
                 let inner: serde_json::Value = serde_json::from_slice(&inner_data)
                     .map_err(|e| ExecutorError::Create(format!("parse platform manifest: {e}")))?;
+                check_image_manifest_size(&inner)?;
                 inner["config"]["digest"]
                     .as_str()
                     .ok_or_else(|| ExecutorError::Create("manifest has no config digest".into()))?
@@ -2646,16 +3038,8 @@ mod kata {
                 return Err(ExecutorError::Create("image has no layers".into()));
             }
 
-            let image_env: Vec<String> = config["config"]["Env"]
-                .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            Ok((compute_chain_id(&diff_ids), image_env))
+            let defaults = ImageDefaults::from_config(&config["config"])?;
+            Ok((compute_chain_id(&diff_ids), defaults))
         }
 
         async fn read_content(
@@ -2681,6 +3065,11 @@ mod kata {
                 .await
                 .map_err(|e| ExecutorError::Create(format!("read content stream: {e}")))?
             {
+                if chunk.data.len() > (4 * 1024 * 1024usize).saturating_sub(data.len()) {
+                    return Err(ExecutorError::Create(
+                        "Image metadata exceeds 4 MiB limit".to_string(),
+                    ));
+                }
                 data.extend_from_slice(&chunk.data);
             }
             Ok(data)
@@ -2730,12 +3119,35 @@ mod kata {
             limits: Option<&crate::box_limits::BoxLimits>,
             extras: Option<&ContainerExtras>,
             netns_path: Option<&str>,
-            image_env: &[String],
+            image_defaults: &ImageDefaults,
+            rootfs: &[containerd_client::types::Mount],
             task_id: Option<&str>,
         ) -> ExecutorResult<()> {
             let hotbox = kata_hotbox_source(IN_HOST_MOUNTS, INSTALLED_HOTBOX, BAKED_HOTBOX).await?;
             tracing::debug!(container_id = id, hotbox, "kata.hotbox.source");
-            let spec = self.build_spec(id, cmd, env, limits, extras, netns_path, image_env, hotbox);
+            let args = image_defaults.args(
+                cmd.as_deref(),
+                extras.and_then(|extra| extra.entrypoint.as_deref()),
+            )?;
+            let mut spec = self.build_spec(
+                id,
+                Some(args),
+                env,
+                limits,
+                extras,
+                netns_path,
+                &image_defaults.env,
+                hotbox,
+            );
+            spec["process"]["cwd"] = serde_json::json!(image_defaults.working_dir);
+            if extras.is_some_and(|extra| extra.writable_rootfs) && !image_defaults.user.is_empty()
+            {
+                let (passwd, groups) = read_image_accounts(rootfs).await?;
+                let (uid, gid, additional) =
+                    image_user_ids(&image_defaults.user, &passwd, &groups)?;
+                spec["process"]["user"] =
+                    serde_json::json!({"uid": uid, "gid": gid, "additionalGids": additional});
+            }
             let spec_json =
                 serde_json::to_vec(&spec).map_err(|e| ExecutorError::Create(e.to_string()))?;
 
@@ -2855,16 +3267,16 @@ mod kata {
                 serde_json::json!({
                     "bounding": ["CAP_CHOWN", "CAP_DAC_OVERRIDE", "CAP_FOWNER",
                                  "CAP_FSETID", "CAP_SETGID", "CAP_SETUID",
-                                 "CAP_NET_BIND_SERVICE", "CAP_NET_RAW",
+                                 "CAP_NET_BIND_SERVICE",
                                  "CAP_SYS_CHROOT", "CAP_MKNOD", "CAP_KILL"],
                     "effective": ["CAP_CHOWN", "CAP_DAC_OVERRIDE", "CAP_FOWNER",
                                   "CAP_FSETID", "CAP_SETGID", "CAP_SETUID",
-                                  "CAP_NET_BIND_SERVICE", "CAP_NET_RAW",
+                                  "CAP_NET_BIND_SERVICE",
                                   "CAP_SYS_CHROOT", "CAP_MKNOD", "CAP_KILL"],
                     "inheritable": [],
                     "permitted": ["CAP_CHOWN", "CAP_DAC_OVERRIDE", "CAP_FOWNER",
                                   "CAP_FSETID", "CAP_SETGID", "CAP_SETUID",
-                                  "CAP_NET_BIND_SERVICE", "CAP_NET_RAW",
+                                  "CAP_NET_BIND_SERVICE",
                                   "CAP_SYS_CHROOT", "CAP_MKNOD", "CAP_KILL"],
                     "ambient": []
                 })
@@ -3165,6 +3577,28 @@ mod kata {
         Some((used_sectors, total_sectors))
     }
 
+    async fn content_available_mb() -> ExecutorResult<u64> {
+        let output = crate::cni::host_command("df", &["-Pm", "/var/lib/kata/containerd"])
+            .output()
+            .await
+            .map_err(|error| {
+                ExecutorError::ImagePull(format!("content-store capacity check: {error}"))
+            })?;
+        if !output.status.success() {
+            return Err(ExecutorError::ImagePull(
+                "Cannot inspect content-store free space".to_string(),
+            ));
+        }
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .last()
+            .and_then(|line| line.split_whitespace().nth(3))
+            .and_then(|value| value.parse().ok())
+            .ok_or_else(|| {
+                ExecutorError::ImagePull("Invalid content-store capacity result".to_string())
+            })
+    }
+
     async fn ensure_devmapper_capacity(required_mb: u64) -> ExecutorResult<()> {
         let output = tokio::process::Command::new("nsenter")
             .args([
@@ -3273,6 +3707,87 @@ mod kata {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_defaults_follow_entrypoint_command_workdir_and_user() {
+        let defaults = ImageDefaults::from_config(&serde_json::json!({"Entrypoint": ["/app/worker"], "Cmd": ["serve"], "Env": ["APP=prod"], "WorkingDir": "/app", "User": "app"})).unwrap();
+        let words = |items: &[&str]| {
+            items
+                .iter()
+                .map(|item| item.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            defaults.args(None, None).unwrap(),
+            words(&["/app/worker", "serve"])
+        );
+        assert_eq!(
+            defaults.args(Some(&words(&["check"])), None).unwrap(),
+            words(&["/app/worker", "check"])
+        );
+        assert_eq!(
+            defaults
+                .args(Some(&words(&["-c", "echo hi"])), Some(&words(&["sh"])))
+                .unwrap(),
+            words(&["sh", "-c", "echo hi"])
+        );
+        assert_eq!(
+            defaults.args(None, Some(&words(&["sh"]))).unwrap(),
+            words(&["sh"])
+        );
+        assert_eq!(
+            defaults
+                .args(Some(&words(&["true"])), Some(&words(&[""])))
+                .unwrap(),
+            words(&["true"])
+        );
+        assert_eq!(defaults.working_dir, "/app");
+        assert_eq!(defaults.env, words(&["APP=prod"]));
+        assert_eq!(defaults.user, "app");
+        assert!(ImageDefaults::default().args(None, None).is_err());
+        assert!(
+            ImageDefaults::from_config(&serde_json::json!({"WorkingDir": "relative"})).is_err()
+        );
+    }
+    #[test]
+    fn image_user_ids_resolve_named_and_numeric_accounts() {
+        let passwd = "root:x:0:0:root:/root:/bin/sh\napp:x:1001:1002::/app:/bin/false\n";
+        let groups = "app:x:1002:\nextra:x:1003:app\n";
+        assert_eq!(
+            image_user_ids("app", passwd, groups).unwrap(),
+            (1001, 1002, vec![1003])
+        );
+        assert_eq!(
+            image_user_ids("1001:1004", passwd, groups).unwrap(),
+            (1001, 1004, vec![])
+        );
+        assert_eq!(
+            image_user_ids("1005", passwd, groups).unwrap(),
+            (1005, 0, vec![])
+        );
+        assert!(image_user_ids("missing", passwd, groups).is_err());
+    }
+    #[test]
+    fn oversized_image_layers_are_refused() {
+        assert!(
+            check_image_manifest_size(
+                &serde_json::json!({"layers": [{"size": 4_u64 * 1024 * 1024 * 1024 + 1}]})
+            )
+            .is_err()
+        );
+        assert!(
+            check_image_manifest_size(
+                &serde_json::json!({"layers": [{"size": u64::MAX}, {"size": 1}]})
+            )
+            .is_err()
+        );
+        assert!(
+            check_image_manifest_size(
+                &serde_json::json!({"config": {"size": 100}, "layers": [{"size": 1000}]})
+            )
+            .is_ok()
+        );
+    }
 
     /// A Docker socket that is there is not enough: the worker counts Docker
     /// as connected only once the daemon behind it answers, and then speaks

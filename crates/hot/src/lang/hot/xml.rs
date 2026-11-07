@@ -7,9 +7,6 @@ use quick_xml::reader::Reader;
 use quick_xml::writer::Writer;
 use std::io::Cursor;
 
-const MAX_XML_ATTRIBUTES_PER_ELEMENT: usize = 1024;
-const MAX_XML_ATTRIBUTE_BYTES_PER_ELEMENT: usize = 1024 * 1024;
-
 /// Parse XML string to Hot Xml structure
 /// Returns: {tag: Str, attrs: Map, content: Vec}
 pub fn from_xml(args: &[Val]) -> HotResult<Val> {
@@ -35,6 +32,7 @@ pub fn from_xml(args: &[Val]) -> HotResult<Val> {
 /// Convert Hot Xml structure to XML string
 pub fn to_xml(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::xml/to-xml", args, 1);
+    crate::validate_expansion!("::hot::xml/to-xml", args);
 
     let val = &args[0];
 
@@ -199,7 +197,7 @@ fn get_attrs(val: &Val) -> Result<IndexMap<Val, Val>, String> {
         Val::Map(m) => {
             let key = Val::from("attrs");
             match m.get(&key) {
-                Some(Val::Map(attrs)) => Ok((**attrs).clone()),
+                Some(Val::Map(attrs)) => Ok((**attrs).clone().into_inner()),
                 Some(_) => Err("attrs field must be a Map".to_string()),
                 None => Ok(IndexMap::new()),
             }
@@ -222,6 +220,11 @@ fn get_tag(val: &Val) -> Option<String> {
 }
 
 fn parse_xml(xml_str: &str) -> Result<Val, String> {
+    use crate::lang::runtime::limits;
+    let max_depth = limits::operational_limit("HOT_XML_MAX_DEPTH", 256);
+    let max_nodes =
+        limits::operational_limit("HOT_XML_MAX_NODES", limits::max_expanded_value_nodes());
+    let mut nodes = 0usize;
     let mut reader = Reader::from_str(xml_str);
     // quick-xml reports each `&...;` reference as its own `GeneralRef`
     // event, splitting the surrounding text. Trimming per event would eat
@@ -252,17 +255,29 @@ fn parse_xml(xml_str: &str) -> Result<Val, String> {
     }
 
     loop {
+        nodes += 1;
+        if nodes > max_nodes {
+            return Err("XML exceeds node/attribute budget".to_string());
+        }
         match reader.read_event() {
             Ok(Event::Start(e)) => {
+                if stack.len() >= max_depth {
+                    return Err("XML exceeds maximum nesting depth".to_string());
+                }
                 flush_text(&mut pending, &mut stack);
                 let tag_name = e.name().as_ref().to_string();
                 let attrs = parse_attributes(&e)?;
+                nodes += attrs.len();
                 stack.push((tag_name, attrs, Vec::new()));
             }
             Ok(Event::Empty(e)) => {
+                if stack.len() >= max_depth {
+                    return Err("XML exceeds maximum nesting depth".to_string());
+                }
                 flush_text(&mut pending, &mut stack);
                 let tag_name = e.name().as_ref().to_string();
                 let attrs = parse_attributes(&e)?;
+                nodes += attrs.len();
                 let element = build_xml_val(&tag_name, attrs, Vec::new());
 
                 if let Some((_, _, content)) = stack.last_mut() {
@@ -319,23 +334,37 @@ fn parse_xml(xml_str: &str) -> Result<Val, String> {
 }
 
 fn parse_attributes(e: &BytesStart) -> Result<IndexMap<Val, Val>, String> {
+    parse_attributes_with_limits(
+        e,
+        crate::lang::runtime::limits::max_collection_size(),
+        crate::lang::runtime::limits::max_alloc_bytes(),
+    )
+}
+
+fn parse_attributes_with_limits(
+    e: &BytesStart<'_>,
+    max_attributes: usize,
+    max_bytes: usize,
+) -> Result<IndexMap<Val, Val>, String> {
     let mut attrs = IndexMap::new();
     let mut total_bytes = 0usize;
 
     for attr_result in e.attributes() {
         let attr = attr_result.map_err(|e| e.to_string())?;
-        if attrs.len() >= MAX_XML_ATTRIBUTES_PER_ELEMENT {
+        if attrs.len() >= max_attributes {
             return Err(format!(
-                "XML element exceeds attribute count limit ({MAX_XML_ATTRIBUTES_PER_ELEMENT})"
+                "XML element exceeds attribute count limit ({})",
+                max_attributes
             ));
         }
         total_bytes = total_bytes
             .checked_add(attr.key.as_ref().len())
             .and_then(|n| n.checked_add(attr.value.as_ref().len()))
             .ok_or_else(|| "XML attribute size overflow".to_string())?;
-        if total_bytes > MAX_XML_ATTRIBUTE_BYTES_PER_ELEMENT {
+        if total_bytes > max_bytes {
             return Err(format!(
-                "XML element exceeds attribute size limit ({MAX_XML_ATTRIBUTE_BYTES_PER_ELEMENT} bytes)"
+                "XML element exceeds attribute size limit ({} bytes)",
+                max_bytes
             ));
         }
         let key = attr.key.as_ref().to_string();
@@ -449,6 +478,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ordinary_nested_xml_is_not_limited_by_record_depth() {
+        let xml = format!("{}text{}", "<a>".repeat(100), "</a>".repeat(100));
+        assert!(parse_xml(&xml).is_ok());
+    }
+
+    #[test]
+    fn deeply_nested_xml_is_rejected_before_building_the_value() {
+        let xml = format!("{}text{}", "<a>".repeat(10_000), "</a>".repeat(10_000));
+        assert!(parse_xml(&xml).unwrap_err().contains("depth"));
+    }
+
+    #[test]
     fn xml_attribute_parsing_remains_compatible() {
         let parsed =
             parse_xml(r#"<root plain="value" escaped="a &amp; b"><child>text</child></root>"#)
@@ -493,17 +534,17 @@ mod tests {
 
     #[test]
     fn xml_rejects_excessive_attribute_count() {
-        let attributes = (0..=MAX_XML_ATTRIBUTES_PER_ELEMENT)
-            .map(|i| format!(" a{i}=\"x\""))
-            .collect::<String>();
-        let error = parse_xml(&format!("<root{attributes}/>")).expect_err("must reject");
+        let input = "root a=\"x\" b=\"y\" c=\"z\"";
+        let element = BytesStart::from_content(input, 4);
+        let error = parse_attributes_with_limits(&element, 2, 1024).unwrap_err();
         assert!(error.contains("attribute count limit"), "{error}");
     }
 
     #[test]
     fn xml_rejects_excessive_attribute_bytes() {
-        let value = "x".repeat(MAX_XML_ATTRIBUTE_BYTES_PER_ELEMENT + 1);
-        let error = parse_xml(&format!("<root a=\"{value}\"/>")).expect_err("must reject");
+        let input = "root a=\"123456789\"";
+        let element = BytesStart::from_content(input, 4);
+        let error = parse_attributes_with_limits(&element, 100, 8).unwrap_err();
         assert!(error.contains("attribute size limit"), "{error}");
     }
 }

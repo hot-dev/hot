@@ -294,3 +294,18 @@ marked as infrastructure failures, so the task page shows no such banner even wh
 the worker is at fault. Timing is not hidden: the task result's `image-pull-ms`
 still says how long the pull took. Docker Hub images keep their specific messages,
 such as an image that was not found or a pull that was rate-limited.
+
+## Box network compatibility
+
+The worker isolation update removes the `NET_RAW` capability from boxes.
+Programs that require raw sockets, including some implementations of `ping`,
+will fail with a permission error. Ordinary HTTP, TCP, and UDP clients remain
+available subject to the configured network policy. Images that use raw-socket
+`ping` for a health check should use a TCP or HTTP check instead. Linux ping
+sockets may still work when the image and kernel permit them.
+
+Kata hosts must install `nftables`; both the bundled host setup and production
+AMI setup install it. Bridge traffic permits only IPv4 and ARP from each guest,
+with its assigned MAC and source IP. VLAN-tagged frames are rejected. The pinned
+[CNI bridge v1.9.1](https://github.com/containernetworking/plugins/blob/v1.9.1/plugins/main/bridge/bridge.go)
+supports the MAC spoof check and bridge port isolation used by the worker.

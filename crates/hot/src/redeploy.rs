@@ -342,11 +342,11 @@ fn bundle_project_conf(conf: &Val, name: &str, dir: &Path) -> Result<Val, String
         "deps": Val::map(deps),
     });
     let mut root = match conf {
-        Val::Map(map) => (**map).clone(),
+        Val::Map(map) => (**map).clone().into_inner(),
         _ => indexmap::IndexMap::new(),
     };
     let mut projects = match root.get(&Val::from("project")) {
-        Some(Val::Map(map)) => (**map).clone(),
+        Some(Val::Map(map)) => (**map).clone().into_inner(),
         _ => indexmap::IndexMap::new(),
     };
     projects.insert(Val::from(name), project);
