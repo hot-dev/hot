@@ -30,10 +30,24 @@ impl<T> HotResult<T> {
     }
 }
 
+/// What `Str` checks before converting `arg`. A Str is returned as it is and
+/// Bytes become text of about their length; only a collection is formatted.
+fn check_str_arg(arg: &Val) -> Result<(), String> {
+    match arg {
+        Val::Str(_) => Ok(()),
+        Val::Bytes(bytes) => crate::lang::runtime::limits::check_string_bytes("Str", bytes.len())
+            .map_err(|e| match e {
+                Val::Str(text) => text.to_string(),
+                other => other.to_string(),
+            }),
+        _ => arg.check_text_shape("Str"),
+    }
+}
+
 /// Core Str type constructor
 pub(crate) fn str_internal(args: &[Val]) -> HotResult<Val> {
     for arg in args {
-        if let Err(error) = arg.check_text_shape("Str") {
+        if let Err(error) = check_str_arg(arg) {
             return HotResult::Err(Val::from(error));
         }
     }
@@ -101,7 +115,7 @@ pub fn str_constructor(
     args: &[Val],
 ) -> HotResult<Val> {
     for arg in args {
-        if let Err(error) = arg.check_text_shape("Str") {
+        if let Err(error) = check_str_arg(arg) {
             return HotResult::Err(Val::from(error));
         }
     }

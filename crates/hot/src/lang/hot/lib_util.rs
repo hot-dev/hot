@@ -138,3 +138,16 @@ macro_rules! validate_expansion {
         }
     };
 }
+
+/// [`validate_expansion!`] for arguments about to be persisted, which are held
+/// to the depth a record can be read back at.
+#[macro_export]
+macro_rules! validate_record_expansion {
+    ($operation:expr, $values:expr) => {
+        for value in $values {
+            if let Err(error) = value.check_record_shape($operation) {
+                return $crate::lang::hot::r#type::HotResult::Err($crate::val::Val::from(error));
+            }
+        }
+    };
+}

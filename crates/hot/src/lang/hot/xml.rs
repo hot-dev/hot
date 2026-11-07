@@ -32,7 +32,15 @@ pub fn from_xml(args: &[Val]) -> HotResult<Val> {
 /// Convert Hot Xml structure to XML string
 pub fn to_xml(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::xml/to-xml", args, 1);
-    crate::validate_expansion!("::hot::xml/to-xml", args);
+    // Write out whatever `from-xml` reads: an element nests as a map in its
+    // parent's content Vec, and may be typed, so up to 3 levels an element.
+    let max_depth = crate::lang::runtime::limits::MAX_VALUE_DEPTH
+        .max(xml_max_depth().saturating_mul(3).saturating_add(2));
+    for arg in args {
+        if let Err(error) = arg.check_shape_within("::hot::xml/to-xml", max_depth) {
+            return HotResult::Err(Val::from(error));
+        }
+    }
 
     let val = &args[0];
 
@@ -219,9 +227,13 @@ fn get_tag(val: &Val) -> Option<String> {
     }
 }
 
+fn xml_max_depth() -> usize {
+    crate::lang::runtime::limits::operational_limit("HOT_XML_MAX_DEPTH", 256)
+}
+
 fn parse_xml(xml_str: &str) -> Result<Val, String> {
     use crate::lang::runtime::limits;
-    let max_depth = limits::operational_limit("HOT_XML_MAX_DEPTH", 256);
+    let max_depth = xml_max_depth();
     let max_nodes =
         limits::operational_limit("HOT_XML_MAX_NODES", limits::max_expanded_value_nodes());
     let mut nodes = 0usize;
@@ -481,6 +493,26 @@ mod tests {
     fn ordinary_nested_xml_is_not_limited_by_record_depth() {
         let xml = format!("{}text{}", "<a>".repeat(100), "</a>".repeat(100));
         assert!(parse_xml(&xml).is_ok());
+    }
+
+    #[test]
+    fn to_xml_writes_out_the_deepest_xml_from_xml_reads() {
+        // On a stack the size of a VM thread's: the writer recurses.
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let depth = xml_max_depth();
+                let xml = format!("{}text{}", "<a>".repeat(depth), "</a>".repeat(depth));
+                let parsed = parse_xml(&xml).expect("parse the deepest accepted XML");
+                let written = match to_xml(&[parsed]) {
+                    HotResult::Ok(Val::Str(text)) => text,
+                    other => panic!("to-xml failed: {other:?}"),
+                };
+                assert_eq!(&*written, xml.as_str());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

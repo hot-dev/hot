@@ -2847,11 +2847,10 @@ pub fn distinct(args: &[Val]) -> HotResult<Val> {
             let mut seen = AHashSet::new();
             let mut result = Vec::new();
 
+            // Key by the value itself: two different values never collide
+            // into one, however large either is.
             for item in items.iter() {
-                crate::validate_expansion!("distinct formatted key", std::slice::from_ref(item));
-                // Create a simple hash key for the item
-                let key = format!("{:?}", item);
-                if seen.insert(key) {
+                if seen.insert(item) {
                     result.push(item.clone());
                 }
             }

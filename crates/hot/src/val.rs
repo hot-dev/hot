@@ -331,18 +331,31 @@ impl CheckedOutput {
 
 /// Shared collection storage drains through a per-thread worklist. Dropping
 /// the last reference to a deeply nested value never recurses through children.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 #[repr(transparent)]
 pub struct ValVec(Vec<Val>);
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Storage is transparent to formatting: `{:?}` reads as the plain Vec.
+impl fmt::Debug for ValVec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.0, f)
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ValMap(
     IndexMap<Val, Val>,
     // Deserialized or mutably borrowed maps conservatively use iterative drop.
     #[serde(skip, default = "may_have_children")] bool,
 );
+/// Storage is transparent to formatting: `{:?}` reads as the plain map.
+impl fmt::Debug for ValMap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.0, f)
+    }
+}
 fn may_have_children() -> bool {
     true
 }
@@ -820,13 +833,44 @@ impl Val {
     }
 }
 
+thread_local! {
+    static SHAPE_CHECKED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+/// Formatters and `Hash` recurse through themselves. The shape check at the
+/// outermost call covers every value inside it, so nested calls skip theirs
+/// rather than walking the same subtree again at every level.
+struct ShapeChecked(bool);
+impl Drop for ShapeChecked {
+    fn drop(&mut self) {
+        if self.0 {
+            SHAPE_CHECKED.with(|checked| checked.set(false));
+        }
+    }
+}
+/// `None` when `check` fails; otherwise a guard to hold while recursing.
+fn shape_checked_once(check: impl FnOnce() -> Result<(), String>) -> Option<ShapeChecked> {
+    if SHAPE_CHECKED.with(|checked| checked.get()) {
+        return Some(ShapeChecked(false));
+    }
+    check().ok()?;
+    SHAPE_CHECKED.with(|checked| checked.set(true));
+    Some(ShapeChecked(true))
+}
+
 // Implement Hash for Val
 impl Hash for Val {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        if matches!(self, Val::Vec(_) | Val::Map(_)) && self.check_shape("hash").is_err() {
-            state.write_u64(0x686f745f6c696d69);
-            return;
-        }
+        let _checked = if matches!(self, Val::Vec(_) | Val::Map(_)) {
+            match shape_checked_once(|| self.check_shape("hash")) {
+                Some(checked) => Some(checked),
+                None => {
+                    state.write_u64(0x686f745f6c696d69);
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         // First hash the discriminant to distinguish variants
         core::mem::discriminant(self).hash(state);
 
@@ -945,9 +989,9 @@ impl<T: ValType> ValType for Option<T> {
 
 impl fmt::Debug for Val {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.check_text_shape("debug").is_err() {
+        let Some(_checked) = shape_checked_once(|| self.check_escaped_text_shape("debug")) else {
             return f.write_str("<value exceeds size or depth limit>");
-        }
+        };
         match self {
             Self::Int(v) => f.debug_tuple("Int").field(v).finish(),
             Self::Dec(v) => f.debug_tuple("Dec").field(v).finish(),
@@ -965,11 +1009,14 @@ impl fmt::Debug for Val {
 
 impl fmt::Display for Val {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if matches!(self, Val::Vec(_) | Val::Map(_) | Val::Box(_))
-            && self.check_text_shape("format").is_err()
-        {
-            return f.write_str("<value exceeds size or depth limit>");
-        }
+        let _checked = if matches!(self, Val::Vec(_) | Val::Map(_) | Val::Box(_)) {
+            match shape_checked_once(|| self.check_text_shape("format")) {
+                Some(checked) => Some(checked),
+                None => return f.write_str("<value exceeds size or depth limit>"),
+            }
+        } else {
+            None
+        };
         match self {
             Val::Int(i) => write!(f, "{}", i),
             Val::Dec(d) => write!(f, "{}", d),
@@ -1117,9 +1164,9 @@ impl Val {
     /// This format can be parsed back by the Hot parser without changing semantics.
     /// Used for code generation (e.g., event handler calls).
     pub fn format_hot(&self, indent: usize) -> String {
-        if self.check_text_shape("format").is_err() {
+        let Some(_checked) = shape_checked_once(|| self.check_escaped_text_shape("format")) else {
             return "<value exceeds size or depth limit>".into();
-        }
+        };
         self.format_hot_internal(indent, false)
     }
 
@@ -1127,9 +1174,9 @@ impl Val {
     /// Shows typed values as ::ns/Type({...}) for better readability.
     /// NOT suitable for parsing back - use format_hot() for roundtrip-safe formatting.
     pub fn format_hot_display(&self, indent: usize) -> String {
-        if self.check_text_shape("format").is_err() {
+        let Some(_checked) = shape_checked_once(|| self.check_escaped_text_shape("format")) else {
             return "<value exceeds size or depth limit>".into();
-        }
+        };
         self.format_hot_display_internal(indent, false)
     }
 
@@ -1390,9 +1437,9 @@ impl Val {
 
     /// Format as JSON syntax with proper indentation
     pub fn format_json(&self, indent: usize) -> String {
-        if self.check_text_shape("format").is_err() {
+        let Some(_checked) = shape_checked_once(|| self.check_escaped_text_shape("format")) else {
             return "<value exceeds size or depth limit>".into();
-        }
+        };
         let indent_str = "  ".repeat(indent);
         let next_indent_str = "  ".repeat(indent + 1);
 
@@ -2660,7 +2707,7 @@ impl Val {
     /// record can be read back. Either way the record holds an `Omitted` instead,
     /// and nothing is copied to find that out.
     pub fn to_record_repr(&self) -> Val {
-        if let Err(error) = self.check_shape("record") {
+        if let Err(error) = self.check_record_shape("record") {
             return if error.contains("depth") {
                 crate::blob::omitted_too_deep_val(0)
             } else {
@@ -2672,7 +2719,24 @@ impl Val {
 
     /// Bound work where shared storage is expanded, never at ordinary native dispatch.
     /// Count occurrences, rather than unique nodes, to reject exponential DAG expansion.
+    /// For an in-memory operation; see [`Val::check_record_shape`] for one
+    /// that persists the value.
     pub fn check_shape(&self, operation: &str) -> Result<(), String> {
+        self.check_shape_within(operation, limits::MAX_VALUE_DEPTH)
+    }
+
+    /// [`Val::check_shape`] for a value about to be persisted (a record, an
+    /// event, a task or schedule payload, a store value), which must nest no
+    /// deeper than a record can be read back.
+    pub fn check_record_shape(&self, operation: &str) -> Result<(), String> {
+        self.check_shape_within(operation, crate::blob::MAX_RECORD_DEPTH)
+    }
+
+    pub(crate) fn check_shape_within(
+        &self,
+        operation: &str,
+        max_depth: usize,
+    ) -> Result<(), String> {
         let max_nodes = limits::max_expanded_value_nodes();
         let max_bytes = limits::max_expanded_value_bytes();
         match self {
@@ -2693,19 +2757,20 @@ impl Val {
         let mut bytes = max_bytes;
         let mut pending = vec![(self, 0usize)];
         while let Some((value, depth)) = pending.pop() {
-            if depth > crate::blob::MAX_RECORD_DEPTH {
+            if depth > max_depth {
                 return Err(format!(
-                    "{operation}: value exceeds maximum nesting depth ({})",
-                    crate::blob::MAX_RECORD_DEPTH
+                    "{operation}: value exceeds maximum nesting depth ({max_depth})"
                 ));
             }
             nodes = nodes.checked_sub(1).ok_or_else(|| {
                 format!("{operation}: value exceeds expanded node limit ({max_nodes}; raise HOT_MAX_EXPANDED_VALUE_NODES)")
             })?;
+            // The payload of a Str or Bytes, else about what a small value
+            // takes written out. The node limit bounds how many there are.
             let leaf_bytes = match value {
                 Val::Str(s) => s.len(),
                 Val::Bytes(b) => b.len(),
-                _ => std::mem::size_of::<Val>(),
+                _ => REPR_NODE_BYTES,
             };
             bytes = bytes
                 .checked_sub(leaf_bytes)
@@ -2744,24 +2809,46 @@ impl Val {
         Ok(())
     }
 
-    /// Reserve a conservative upper bound for escaped/indented text before
-    /// any formatter allocates it. Includes punctuation, indentation and Bytes.
+    /// Reserve an upper bound for the text of a formatter that doesn't escape
+    /// strings (`Str`, templates, `print`, `Display`) before it allocates.
     pub fn check_text_shape(&self, operation: &str) -> Result<(), String> {
+        self.check_text_shape_as(operation, false)
+    }
+
+    /// [`Val::check_text_shape`] for a formatter that escapes strings and
+    /// indents (`Debug`, Hot and JSON formatting).
+    pub fn check_escaped_text_shape(&self, operation: &str) -> Result<(), String> {
+        self.check_text_shape_as(operation, true)
+    }
+
+    fn check_text_shape_as(&self, operation: &str, escaped: bool) -> Result<(), String> {
         self.check_shape(operation)?;
         let mut left = limits::max_string_bytes();
         let mut pending = vec![(self, 0usize)];
         while let Some((value, depth)) = pending.pop() {
-            let extra = match value {
-                Val::Str(s) => s.len().saturating_mul(6),
-                Val::Bytes(b) => b.len().saturating_mul(6),
-                _ => 0,
+            // A separator, indentation where the formatter indents, and the
+            // value's own text. An escape takes at most 6 bytes a byte; a byte
+            // of Bytes reads as up to `255, `.
+            let text = match value {
+                Val::Str(s) => s.len().saturating_mul(if escaped { 6 } else { 1 }) + 2,
+                Val::Bytes(b) => b.len().saturating_mul(6) + 9,
+                Val::Int(i) => {
+                    i.unsigned_abs()
+                        .checked_ilog10()
+                        .map_or(1, |d| d as usize + 1)
+                        + 1
+                }
+                Val::Dec(d) => {
+                    d.digits_count() + d.fractional_digits_count().unsigned_abs() as usize + 3
+                }
+                Val::Vec(_) => 2,
+                Val::Map(items) => items.len().saturating_mul(2) + 2,
+                Val::Box(_) => 64,
+                Val::Bool(_) | Val::Null | Val::Byte(_) => 9,
             };
+            let indent = if escaped { depth.saturating_mul(2) } else { 0 };
             left = left
-                .checked_sub(
-                    32usize
-                        .saturating_add(depth.saturating_mul(4))
-                        .saturating_add(extra),
-                )
+                .checked_sub(2usize.saturating_add(indent).saturating_add(text))
                 .ok_or_else(|| format!("{operation}: formatted value exceeds byte limit"))?;
             match value {
                 Val::Vec(items) => pending.extend(items.iter().map(|value| (value, depth + 1))),
@@ -2779,6 +2866,14 @@ impl Val {
     /// Checked terminal conversion. Call this while still on the VM's blocking
     /// thread, before any async completion or notification path sees the value.
     pub fn to_checked_json(&self, operation: &str) -> Result<serde_json::Value, String> {
+        self.check_shape(operation)?;
+        self.to_checked_json_with_limit(operation, limits::max_string_bytes())
+    }
+
+    /// [`Val::to_checked_json`] for a payload that is persisted (a task,
+    /// schedule, alert or checkpoint payload), held to the record depth.
+    pub fn to_checked_record_json(&self, operation: &str) -> Result<serde_json::Value, String> {
+        self.check_record_shape(operation)?;
         self.to_checked_json_with_limit(operation, limits::max_string_bytes())
     }
 
@@ -2787,24 +2882,26 @@ impl Val {
         operation: &str,
         max_bytes: usize,
     ) -> Result<serde_json::Value, String> {
-        self.check_shape(operation)?;
-        struct LimitedJson(Vec<u8>, usize);
+        /// Counts the serialized bytes, failing past the limit, and keeps none.
+        struct LimitedJson(usize, usize);
         impl std::io::Write for LimitedJson {
             fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                if bytes.len() > self.1.saturating_sub(self.0.len()) {
+                if bytes.len() > self.1.saturating_sub(self.0) {
                     return Err(std::io::Error::other("value exceeds serialized byte limit"));
                 }
-                self.0.extend_from_slice(bytes);
+                self.0 += bytes.len();
                 Ok(bytes.len())
             }
             fn flush(&mut self) -> std::io::Result<()> {
                 Ok(())
             }
         }
-        let mut output = LimitedJson(Vec::new(), max_bytes);
-        serde_json::to_writer(&mut output, &self.to_hot_data_repr())
+        let repr = self.to_hot_data_repr();
+        serde_json::to_writer(&mut LimitedJson(0, max_bytes), &repr)
             .map_err(|e| format!("{operation}: {e}"))?;
-        serde_json::from_slice(&output.0).map_err(|e| format!("{operation}: {e}"))
+        // Built directly, not parsed back: parsing stops at 128 levels, and
+        // a value may nest deeper than that.
+        serde_json::to_value(&repr).map_err(|e| format!("{operation}: {e}"))
     }
 
     fn record_repr_within(&self, floor: usize) -> Val {
@@ -4156,12 +4253,12 @@ mod tests {
             unreachable!()
         };
         Arc::make_mut(items).push(deep);
-        assert!(value.check_shape("changed").is_err());
+        assert!(value.check_record_shape("changed").is_err());
         let Val::Vec(items) = &mut value else {
             unreachable!()
         };
         Arc::make_mut(items).pop();
-        value.check_shape("restored").unwrap();
+        value.check_record_shape("restored").unwrap();
         assert!(
             CheckedOutput::new(Val::from("small"))
                 .unwrap()
@@ -4210,6 +4307,77 @@ mod tests {
         assert!(value == clone);
         let mut hash = std::collections::hash_map::DefaultHasher::new();
         Hash::hash(&value, &mut hash);
+    }
+
+    /// Only what's persisted is held to the record depth. Printing, `Str`,
+    /// JSON and a run's result take a value nested deeper, as 3.0.4 did,
+    /// and the record of it holds an `Omitted`.
+    #[test]
+    fn values_deeper_than_a_record_format_and_return() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let list =
+                    (0..130).fold(Val::Null, |next, n| crate::val!({"value": n, "next": next}));
+                let text = ToString::to_string(&list);
+                assert!(
+                    text.starts_with(r#"{"value": 129, "next": {"value": 128"#),
+                    "{text}"
+                );
+                assert!(!format!("{list:?}").contains("exceeds"));
+                assert!(!list.format_hot_display(0).contains("exceeds"));
+                assert!(!list.format_json(0).contains("exceeds"));
+                list.check_text_shape("Str").unwrap();
+                assert!(list.to_checked_json("run result").is_ok());
+                assert!(CheckedOutput::new(list.clone()).is_ok());
+                assert!(list.check_record_shape("record").is_err());
+                assert!(list.to_checked_record_json("checkpoint").is_err());
+                let record = list.to_record_repr();
+                assert!(ToString::to_string(&record).contains("Omitted"), "{record}");
+
+                let deepest = (0..crate::lang::runtime::limits::MAX_VALUE_DEPTH)
+                    .fold(Val::Null, |v, _| Val::vec(vec![v]));
+                assert!(!ToString::to_string(&deepest).contains("exceeds"));
+                assert!(!format!("{deepest:?}").contains("exceeds"));
+                assert!(deepest.to_checked_json("test").is_ok());
+                let mut hash = std::collections::hash_map::DefaultHasher::new();
+                Hash::hash(&deepest, &mut hash);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// A flat Vec is bounded by the node limit, not by a per-node size.
+    #[test]
+    fn a_vec_of_millions_of_ints_formats_and_converts() {
+        let ints = Val::vec((0..7_500_000).map(Val::Int).collect());
+        ints.check_shape("test").unwrap();
+        ints.check_text_shape("print").unwrap();
+        ints.check_escaped_text_shape("format").unwrap();
+    }
+
+    /// `Str` and templates copy a Str as it is; only escaping formatters
+    /// reserve room for escapes.
+    #[test]
+    fn plain_text_shape_charges_a_string_its_length() {
+        let limit = crate::lang::runtime::limits::max_string_bytes();
+        let text = Val::vec(vec![Val::from("x".repeat(limit / 4))]);
+        text.check_text_shape("Str").unwrap();
+        assert!(text.check_escaped_text_shape("debug").is_err());
+    }
+
+    /// Storage doesn't show in `{:?}`: a Vec or Map reads as it did in 3.0.4.
+    #[test]
+    fn storage_debug_reads_as_the_plain_collection() {
+        let Val::Vec(items) = Val::vec(vec![Val::Int(1), Val::from("a")]) else {
+            unreachable!()
+        };
+        assert_eq!(format!("{items:?}"), r#"[Int(1), Str("a")]"#);
+        let Val::Map(map) = crate::val!({"a": 1}) else {
+            unreachable!()
+        };
+        assert_eq!(format!("{map:?}"), r#"{Str("a"): Int(1)}"#);
     }
 
     #[test]

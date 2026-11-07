@@ -176,7 +176,7 @@ pub fn next(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         && let Some(publisher) = vm.get_stream_publisher()
         && let Some(ctx) = vm.get_execution_context()
     {
-        crate::validate_expansion!("::hot::iter/next", std::slice::from_ref(&value));
+        crate::validate_record_expansion!("::hot::iter/next", std::slice::from_ref(&value));
         let stream_data_id = Uuid::now_v7();
         // A stream's payload is meant for its consumer, but a run's secret isn't.
         let delivered =

@@ -195,7 +195,7 @@ pub fn create_schedule(
     let args_json: Option<serde_json::Value> = if fn_args.is_empty() {
         None
     } else {
-        match Val::vec(fn_args.clone()).to_checked_json("::hot::schedule") {
+        match Val::vec(fn_args.clone()).to_checked_record_json("::hot::schedule") {
             Ok(json) => Some(json),
             Err(error) => return HotResult::Err(Val::from(error)),
         }

@@ -476,7 +476,7 @@ pub fn json_contains_blob_ref(value: &serde_json::Value) -> bool {
 /// Rough in-memory payload size of a Val tree; used for spill decisions and
 /// metrics, not exact accounting.
 pub fn estimate_val_size(val: &Val) -> usize {
-    if val.check_shape("size estimate").is_err() {
+    if val.check_record_shape("size estimate").is_err() {
         return usize::MAX;
     }
     let mut pending = vec![val];

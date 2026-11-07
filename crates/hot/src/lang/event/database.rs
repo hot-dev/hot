@@ -452,7 +452,7 @@ async fn event_data_to_store(
     event: &Event,
 ) -> Result<Val, String> {
     let data = &event.event_data;
-    data.check_shape("send event")?;
+    data.check_record_shape("send event")?;
     let (Some(store), Some(org_id)) = (blob_store.filter(|s| s.config().enabled()), ctx.org_id)
     else {
         return Ok(data.clone());

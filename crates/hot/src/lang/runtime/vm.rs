@@ -5902,9 +5902,12 @@ impl VirtualMachine {
         let mut result = String::new();
         let max_template_bytes = crate::lang::runtime::limits::max_string_bytes();
         for part_val in parts {
-            part_val
-                .check_text_shape("template")
-                .map_err(VmError::runtime)?;
+            // A Str part is copied as it is; the length check below bounds it.
+            if !matches!(part_val, Val::Str(_)) {
+                part_val
+                    .check_text_shape("template")
+                    .map_err(VmError::runtime)?;
+            }
             // Automatically unwrap Results in template literals
             let unwrapped_val = self.unwrap_result_if_ok(part_val)?;
 

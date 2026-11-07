@@ -184,7 +184,7 @@ pub fn start(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         ));
     }
 
-    crate::validate_expansion!("::hot::task/start", &[task_args.clone(), options.clone()]);
+    crate::validate_record_expansion!("::hot::task/start", &[task_args.clone(), options.clone()]);
     // Serialize task args and options to JSON
     let args_json: serde_json::Value = (&task_args).into();
     let options_json: serde_json::Value = (&options).into();
@@ -529,7 +529,7 @@ pub fn send(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     };
 
     let data = &args[1];
-    crate::validate_expansion!("::hot::task/send", std::slice::from_ref(data));
+    crate::validate_record_expansion!("::hot::task/send", std::slice::from_ref(data));
     let payload_json: serde_json::Value = data.into();
 
     let Some(db) = vm.get_database_pool() else {
@@ -1313,7 +1313,7 @@ pub fn checkpoint(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         }
     };
 
-    let data_json = match args[0].to_checked_json("::hot::task/checkpoint") {
+    let data_json = match args[0].to_checked_record_json("::hot::task/checkpoint") {
         Ok(json) => json,
         Err(error) => return HotResult::Err(err_val(error)),
     };

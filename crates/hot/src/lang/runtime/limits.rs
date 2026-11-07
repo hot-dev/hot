@@ -120,6 +120,13 @@ fn cached_env(var: &str, default: usize) -> usize {
     })
 }
 
+/// Deepest value an in-memory operation walks: formatting, hashing, map keys,
+/// JSON and XML output, a run's result. Those walks recurse, so this keeps them
+/// well inside a VM thread's 64 MiB stack. A persisted record or payload keeps
+/// the tighter [`crate::blob::MAX_RECORD_DEPTH`], which is what a record can
+/// be read back at.
+pub const MAX_VALUE_DEPTH: usize = 4096;
+
 /// Limits for serialization, hashing and other expansion boundaries. The node
 /// default accommodates every key and value in a maximum-sized flat map.
 pub fn max_expanded_value_nodes() -> usize {
