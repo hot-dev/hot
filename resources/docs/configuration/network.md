@@ -309,3 +309,23 @@ AMI setup install it. Bridge traffic permits only IPv4 and ARP from each guest,
 with its assigned MAC and source IP. VLAN-tagged frames are rejected. The pinned
 [CNI bridge v1.9.1](https://github.com/containernetworking/plugins/blob/v1.9.1/plugins/main/bridge/bridge.go)
 supports the MAC spoof check and bridge port isolation used by the worker.
+
+## Box command compatibility
+
+Hot 3.0.5 runs Kata boxes the way the Docker backend runs them. Two things
+change for images that set an `ENTRYPOINT` or a `USER`:
+
+- A box's `cmd`, or the shell command its `script` becomes, is passed to the
+  image `ENTRYPOINT` as arguments, as `docker run` does. Before, Kata ran it in
+  place of the entrypoint. An image whose entrypoint is not a shell, such as
+  `["python"]`, now receives `sh -c ...` as arguments to that program.
+- A writable box runs as the image `USER`. Before, Kata ran it as root. A box
+  that installs packages with `apk add` or `apt-get` in an image with a non-root
+  `USER` now fails with a permission error. Read-only boxes are unchanged.
+
+To keep the old command behavior, set `entrypoint: [""]` on the box. It
+clears the image entrypoint, so `cmd` or `script` runs on its own. For a box
+that needs root in an image with a non-root `USER`, build a derived image that
+sets `USER root`, or run the install step in an image without one. An image
+whose `USER` names an account missing from its `/etc/passwd` now fails as an
+image error its owner can fix, not as an infrastructure failure.

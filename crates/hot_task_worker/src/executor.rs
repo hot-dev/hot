@@ -135,7 +135,7 @@ pub(crate) fn describe_pull_failure(
     };
 
     if has(&["4 gib", "compressed-size limit", "disk-growth budget"]) {
-        return user("Image exceeds the worker's 4 GiB image size budget".to_string());
+        return user(image_size_limit_message(max_image_bytes()));
     }
     if has(&["manifest.v1+prettyjws", "schema 1", "schema1"]) {
         return user(format!(
@@ -299,11 +299,38 @@ impl std::str::FromStr for Backend {
     }
 }
 
+/// The largest compressed image (manifest config plus layers) a box may use.
+pub(crate) fn max_image_bytes() -> u64 {
+    hot::lang::runtime::limits::operational_limit("HOT_BOX_MAX_IMAGE_BYTES", 4 * 1024 * 1024 * 1024)
+        as u64
+}
+
+/// What a task is told when its image is over `max_bytes`, in the unit the
+/// limit was set in.
+pub(crate) fn image_size_limit_message(max_bytes: u64) -> String {
+    const UNITS: [(u64, &str); 3] = [(1 << 30, "GiB"), (1 << 20, "MiB"), (1 << 10, "KiB")];
+    let size = UNITS
+        .iter()
+        .find(|(unit, _)| max_bytes >= *unit && max_bytes.is_multiple_of(*unit))
+        .map_or_else(
+            || format!("{max_bytes}-byte"),
+            |(unit, name)| format!("{} {name}", max_bytes / unit),
+        );
+    format!("Image exceeds the worker's {size} compressed image size limit")
+}
+
 #[derive(Debug)]
 pub enum ExecutorError {
     ImageNotAllowed(String),
     Connection(String),
     ImagePull(String),
+    /// The image itself can't run as a box (no command, an invalid config,
+    /// a USER it doesn't define, no variant for this platform, too large):
+    /// the task's owner can fix it, so it is not an infrastructure failure.
+    /// The message is meant for them. Only the Kata backend reads an image's
+    /// config itself; Docker reports these as its own create errors.
+    #[cfg_attr(not(all(target_os = "linux", feature = "kata")), allow(dead_code))]
+    ImageConfig(String),
     Create(String),
     Start(String),
     SlotTimeout(u64),
@@ -321,6 +348,7 @@ impl std::fmt::Display for ExecutorError {
             ),
             Self::Connection(e) => write!(f, "Failed to connect to backend: {}", e),
             Self::ImagePull(e) => write!(f, "Failed to pull image: {}", e),
+            Self::ImageConfig(e) => write!(f, "{}", e),
             Self::Create(e) => write!(f, "Failed to create container/VM: {}", e),
             Self::Start(e) => write!(f, "Failed to start container/VM: {}", e),
             Self::SlotTimeout(secs) => {
@@ -359,10 +387,16 @@ impl ImageDefaults {
                         item.as_str()
                             .filter(|s| !s.contains('\0'))
                             .map(str::to_owned)
-                            .ok_or_else(|| ExecutorError::Create(format!("Invalid image {field}")))
+                            .ok_or_else(|| {
+                                ExecutorError::ImageConfig(format!(
+                                    "Image config has an invalid {field}"
+                                ))
+                            })
                     })
                     .collect(),
-                _ => Err(ExecutorError::Create(format!("Invalid image {field}"))),
+                _ => Err(ExecutorError::ImageConfig(format!(
+                    "Image config has an invalid {field}"
+                ))),
             }
         };
         let working_dir = config["WorkingDir"]
@@ -371,7 +405,7 @@ impl ImageDefaults {
             .unwrap_or("/")
             .to_string();
         if !working_dir.starts_with('/') || working_dir.contains('\0') {
-            return Err(ExecutorError::Create(
+            return Err(ExecutorError::ImageConfig(
                 "Image WorkingDir must be an absolute path".to_string(),
             ));
         }
@@ -404,7 +438,7 @@ impl ImageDefaults {
         });
         args.extend_from_slice(cmd);
         if args.is_empty() || args[0].is_empty() || args.iter().any(|arg| arg.contains('\0')) {
-            return Err(ExecutorError::Create(
+            return Err(ExecutorError::ImageConfig(
                 "No valid container command: provide cmd or an image ENTRYPOINT/CMD".to_string(),
             ));
         }
@@ -415,7 +449,7 @@ impl ImageDefaults {
 #[cfg(any(test, all(target_os = "linux", feature = "kata")))]
 fn image_user_ids(user: &str, passwd: &str, groups: &str) -> ExecutorResult<(u32, u32, Vec<u32>)> {
     let invalid = || {
-        ExecutorError::Create(format!(
+        ExecutorError::ImageConfig(format!(
             "Image USER '{user}' does not name a valid user/group in the image"
         ))
     };
@@ -484,23 +518,22 @@ fn image_user_ids(user: &str, passwd: &str, groups: &str) -> ExecutorResult<(u32
 
 #[cfg(any(test, all(target_os = "linux", feature = "kata")))]
 fn check_image_manifest_size(manifest: &serde_json::Value) -> ExecutorResult<()> {
+    let max_bytes = max_image_bytes();
     let mut bytes = manifest["config"]["size"].as_u64().unwrap_or(0);
     if let Some(layers) = manifest["layers"].as_array() {
         for layer in layers {
             bytes = bytes
                 .checked_add(layer["size"].as_u64().ok_or_else(|| {
-                    ExecutorError::ImagePull("Image layer has no valid size".to_string())
+                    ExecutorError::ImageConfig(
+                        "Image manifest has a layer with no valid size".to_string(),
+                    )
                 })?)
-                .ok_or_else(|| ExecutorError::ImagePull("Image size overflow".to_string()))?;
+                .ok_or_else(|| ExecutorError::ImageConfig(image_size_limit_message(max_bytes)))?;
         }
     }
-    let max_bytes = hot::lang::runtime::limits::operational_limit(
-        "HOT_BOX_MAX_IMAGE_BYTES",
-        4 * 1024 * 1024 * 1024,
-    ) as u64;
     if bytes > max_bytes {
-        return Err(ExecutorError::ImagePull(format!(
-            "Image exceeds compressed-size limit ({max_bytes} bytes); raise HOT_BOX_MAX_IMAGE_BYTES"
+        return Err(ExecutorError::ImageConfig(image_size_limit_message(
+            max_bytes,
         )));
     }
     Ok(())
@@ -1934,6 +1967,8 @@ mod kata {
     ) -> ExecutorResult<(String, String)> {
         const READER: &str = r#"
 import json, os, pathlib, subprocess, sys, tempfile
+class ImageError(Exception):
+    pass
 mounts = json.load(sys.stdin)
 if len(mounts) != 1 or mounts[0]['type'] not in ('ext4', 'xfs'):
     raise RuntimeError('unsupported image snapshot mount')
@@ -1950,17 +1985,21 @@ try:
     def read(name):
         path = (root / 'etc' / name).resolve()
         if not path.is_relative_to(root):
-            raise RuntimeError('image account file escapes the root filesystem')
+            raise ImageError('image account file escapes the root filesystem')
         if not path.exists():
             return ''
         if not path.is_file():
-            raise RuntimeError('image account file is not a regular file')
+            raise ImageError('image account file is not a regular file')
         with path.open('rb') as file:
             data = file.read(1048577)
         if len(data) > 1048576:
-            raise RuntimeError('image account file exceeds 1 MiB')
+            raise ImageError('image account file exceeds 1 MiB')
         return data.decode('utf-8', errors='replace')
-    print(json.dumps([read('passwd'), read('group')]))
+    try:
+        print(json.dumps([read('passwd'), read('group')]))
+    except ImageError as error:
+        print(error, file=sys.stderr)
+        sys.exit(3)
 finally:
     if mounted:
         subprocess.run(['umount', '-l', str(root)], check=True, timeout=10, stdout=subprocess.DEVNULL)
@@ -1980,10 +2019,17 @@ finally:
                 .await
                 .map_err(ExecutorError::Create)?;
         if !output.status.success() {
-            return Err(ExecutorError::Create(format!(
+            // Exit 3: the image's own account files are unusable.
+            let image_error = output.status.code() == Some(3);
+            let detail = format!(
                 "Cannot resolve image USER: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )));
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            return Err(if image_error {
+                ExecutorError::ImageConfig(detail)
+            } else {
+                ExecutorError::Create(detail)
+            });
         }
         serde_json::from_slice(&output.stdout)
             .map_err(|error| ExecutorError::Create(format!("Invalid image account data: {error}")))
@@ -2983,7 +3029,10 @@ finally:
             let manifest: serde_json::Value = serde_json::from_slice(&manifest_data)
                 .map_err(|e| ExecutorError::Create(format!("parse manifest: {e}")))?;
 
-            check_image_manifest_size(&manifest)?;
+            if let Err(refused) = check_image_manifest_size(&manifest) {
+                self.discard_refused_image(images, image, &target).await;
+                return Err(refused);
+            }
             // Handle manifest list (multi-platform images) vs single manifest
             let config_digest = if manifest.get("manifests").is_some() {
                 let manifests = manifest["manifests"]
@@ -3001,8 +3050,9 @@ finally:
                             && m["platform"]["os"].as_str() == Some("linux")
                     })
                     .ok_or_else(|| {
-                        ExecutorError::Create(format!(
-                            "no linux/{architecture} image manifest found"
+                        ExecutorError::ImageConfig(format!(
+                            "Image '{image}' has no variant for this worker's platform \
+                             (linux/{architecture})"
                         ))
                     })?;
                 let inner_digest = platform_manifest["digest"]
@@ -3011,7 +3061,10 @@ finally:
                 let inner_data = self.read_content(content, inner_digest).await?;
                 let inner: serde_json::Value = serde_json::from_slice(&inner_data)
                     .map_err(|e| ExecutorError::Create(format!("parse platform manifest: {e}")))?;
-                check_image_manifest_size(&inner)?;
+                if let Err(refused) = check_image_manifest_size(&inner) {
+                    self.discard_refused_image(images, image, &target).await;
+                    return Err(refused);
+                }
                 inner["config"]["digest"]
                     .as_str()
                     .ok_or_else(|| ExecutorError::Create("manifest has no config digest".into()))?
@@ -3040,6 +3093,61 @@ finally:
 
             let defaults = ImageDefaults::from_config(&config["config"])?;
             Ok((compute_chain_id(&diff_ids), defaults))
+        }
+
+        /// Drop an image its size refuses, so it doesn't hold cache space every
+        /// later task of it would be refused too. Its layers are known only once
+        /// pulled: the pull path doesn't see the manifest first. An image
+        /// another task or container is using stays.
+        async fn discard_refused_image(
+            &self,
+            images: &mut ImagesClient<Channel>,
+            image: &str,
+            target: &containerd_client::types::Descriptor,
+        ) {
+            let _maintenance = self.image_maintenance.lock().await;
+            if self.active_images.lock().get(image).copied().unwrap_or(0) > 1 {
+                return;
+            }
+            let in_use = match ContainersClient::new(self.channel.clone())
+                .list(with_namespace!(
+                    ListContainersRequest { filters: vec![] },
+                    NAMESPACE
+                ))
+                .await
+            {
+                Ok(response) => response
+                    .into_inner()
+                    .containers
+                    .iter()
+                    .any(|container| container.image == image),
+                Err(error) => {
+                    tracing::warn!(image, %error, "Kept a refused box image: can't list its users");
+                    return;
+                }
+            };
+            if in_use {
+                return;
+            }
+            match images
+                .delete(with_namespace!(
+                    DeleteImageRequest {
+                        name: image.to_string(),
+                        sync: true,
+                        target: Some(target.clone()),
+                    },
+                    NAMESPACE
+                ))
+                .await
+            {
+                Ok(_) => {
+                    self.image_last_used.lock().remove(image);
+                    tracing::info!(image, "Removed a box image over the size limit");
+                }
+                Err(error) => {
+                    tracing::warn!(image, %error, "Could not remove a box image over the size limit")
+                }
+            }
         }
 
         async fn read_content(
@@ -3744,10 +3852,19 @@ mod tests {
         assert_eq!(defaults.working_dir, "/app");
         assert_eq!(defaults.env, words(&["APP=prod"]));
         assert_eq!(defaults.user, "app");
-        assert!(ImageDefaults::default().args(None, None).is_err());
-        assert!(
-            ImageDefaults::from_config(&serde_json::json!({"WorkingDir": "relative"})).is_err()
-        );
+        // What the image gets wrong is its owner's to fix, not a platform failure.
+        assert!(matches!(
+            ImageDefaults::default().args(None, None),
+            Err(ExecutorError::ImageConfig(_))
+        ));
+        assert!(matches!(
+            ImageDefaults::from_config(&serde_json::json!({"WorkingDir": "relative"})),
+            Err(ExecutorError::ImageConfig(_))
+        ));
+        assert!(matches!(
+            ImageDefaults::from_config(&serde_json::json!({"Cmd": ["a\0b"]})),
+            Err(ExecutorError::ImageConfig(_))
+        ));
     }
     #[test]
     fn image_user_ids_resolve_named_and_numeric_accounts() {
@@ -3765,16 +3882,23 @@ mod tests {
             image_user_ids("1005", passwd, groups).unwrap(),
             (1005, 0, vec![])
         );
-        assert!(image_user_ids("missing", passwd, groups).is_err());
+        assert!(matches!(
+            image_user_ids("missing", passwd, groups),
+            Err(ExecutorError::ImageConfig(_))
+        ));
     }
     #[test]
     fn oversized_image_layers_are_refused() {
-        assert!(
-            check_image_manifest_size(
-                &serde_json::json!({"layers": [{"size": 4_u64 * 1024 * 1024 * 1024 + 1}]})
-            )
-            .is_err()
-        );
+        match check_image_manifest_size(
+            &serde_json::json!({"layers": [{"size": 4_u64 * 1024 * 1024 * 1024 + 1}]}),
+        ) {
+            Err(ExecutorError::ImageConfig(message)) => assert_eq!(
+                message,
+                image_size_limit_message(max_image_bytes()),
+                "the refusal names the limit the worker applies"
+            ),
+            other => panic!("expected an image refusal, got {other:?}"),
+        }
         assert!(
             check_image_manifest_size(
                 &serde_json::json!({"layers": [{"size": u64::MAX}, {"size": 1}]})
@@ -3787,6 +3911,27 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn image_size_limit_message_names_the_configured_limit() {
+        let gib = 1024 * 1024 * 1024;
+        assert_eq!(
+            image_size_limit_message(4 * gib),
+            "Image exceeds the worker's 4 GiB compressed image size limit"
+        );
+        assert_eq!(
+            image_size_limit_message(gib / 2),
+            "Image exceeds the worker's 512 MiB compressed image size limit"
+        );
+        assert_eq!(
+            image_size_limit_message(1000),
+            "Image exceeds the worker's 1000-byte compressed image size limit"
+        );
+        let failure =
+            describe_pull_failure("Image exceeds compressed-size limit", "alpine:3.20", None);
+        assert_eq!(failure.message, image_size_limit_message(max_image_bytes()));
+        assert!(!failure.infra);
     }
 
     /// A Docker socket that is there is not enough: the worker counts Docker

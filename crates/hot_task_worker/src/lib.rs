@@ -4950,8 +4950,8 @@ async fn process_container_task(
             // completion, so don't charge CUS, and don't surface raw backend
             // errors to the user. Most are container infrastructure (create,
             // start, containerd/wait plumbing); `infra-failure` marks those.
-            // An image the policy refuses, or a pull the registry refuses,
-            // is the user's to fix and says how. (`Start` was previously
+            // An image the policy refuses, a pull the registry refuses, or an
+            // image that can't run as a box, is the user's to fix and says how. (`Start` was previously
             // misclassified as a user failure, charging CUS and leaking
             // containerd internals when Kata setup retries were exhausted.)
             let compute_units = 0;
@@ -4976,6 +4976,8 @@ async fn process_container_task(
                     let failure = executor::describe_pull_failure(detail, &image, auth_entry);
                     (failure.message, failure.infra)
                 }
+                // The image can't run as a box; the message says why.
+                ExecutorError::ImageConfig(message) => (message.clone(), false),
                 ExecutorError::Start(_) => ("Failed to start container".to_string(), true),
                 _ => ("Container infrastructure error".to_string(), true),
             };

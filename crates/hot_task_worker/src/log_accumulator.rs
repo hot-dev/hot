@@ -26,6 +26,10 @@ const TRUNCATION_NOTICE: &str = "\n[hot-task-worker] output truncated at 10 MB\n
 /// Both Docker and FIFO output can contain arbitrary bytes.
 fn append_log(buf: &mut String, bytes: &[u8]) {
     if buf.len() >= MAX_LOG_BYTES {
+        // Output that filled the budget exactly was whole until more came.
+        if !bytes.is_empty() && !buf.ends_with(TRUNCATION_NOTICE) {
+            buf.push_str(TRUNCATION_NOTICE);
+        }
         return;
     }
     let text = String::from_utf8_lossy(bytes);
@@ -45,6 +49,52 @@ fn append_log(buf: &mut String, bytes: &[u8]) {
         buf.push_str(&text[..end]);
         buf.push_str(TRUNCATION_NOTICE);
     }
+}
+
+/// One stream's output as it arrives in pieces. A piece can end partway
+/// through a multibyte character, so its incomplete tail waits for the next
+/// piece instead of decoding to U+FFFD on its own.
+#[derive(Default)]
+struct LogStream {
+    pending: Vec<u8>,
+}
+
+impl LogStream {
+    fn push(&mut self, buf: &mut String, bytes: &[u8]) {
+        if self.pending.is_empty() {
+            let keep = incomplete_utf8_tail(bytes);
+            append_log(buf, &bytes[..bytes.len() - keep]);
+            self.pending.extend_from_slice(&bytes[bytes.len() - keep..]);
+        } else {
+            let mut joined = std::mem::take(&mut self.pending);
+            joined.extend_from_slice(bytes);
+            let keep = incomplete_utf8_tail(&joined);
+            append_log(buf, &joined[..joined.len() - keep]);
+            self.pending = joined.split_off(joined.len() - keep);
+        }
+    }
+
+    /// The stream ended: a tail still incomplete is invalid, and says so.
+    fn finish(&mut self, buf: &mut String) {
+        let pending = std::mem::take(&mut self.pending);
+        append_log(buf, &pending);
+    }
+}
+
+/// How many trailing bytes of `bytes` begin a UTF-8 character they don't
+/// finish (at most 3).
+fn incomplete_utf8_tail(bytes: &[u8]) -> usize {
+    let start = bytes.len().saturating_sub(3);
+    for i in (start..bytes.len()).rev() {
+        // The last byte that isn't a continuation byte starts the last character.
+        if bytes[i] & 0xC0 != 0x80 {
+            return match std::str::from_utf8(&bytes[i..]) {
+                Err(error) if error.error_len().is_none() => bytes.len() - i,
+                _ => 0,
+            };
+        }
+    }
+    0
 }
 
 /// Accumulates stdout/stderr from a container in real time.
@@ -74,21 +124,24 @@ impl LogAccumulator {
         let stderr_clone = stderr.clone();
 
         let handle = tokio::spawn(async move {
+            let (mut out, mut err) = (LogStream::default(), LogStream::default());
             while let Some(log_result) = log_stream.next().await {
                 if let Ok(log) = log_result {
                     match log {
                         LogOutput::StdOut { message } => {
                             let mut buf = stdout_clone.lock().await;
-                            append_log(&mut buf, &message);
+                            out.push(&mut buf, &message);
                         }
                         LogOutput::StdErr { message } => {
                             let mut buf = stderr_clone.lock().await;
-                            append_log(&mut buf, &message);
+                            err.push(&mut buf, &message);
                         }
                         _ => {}
                     }
                 }
             }
+            out.finish(&mut *stdout_clone.lock().await);
+            err.finish(&mut *stderr_clone.lock().await);
         });
 
         Self {
@@ -161,25 +214,31 @@ fn read_fifo_stream(path: &str, buf: Arc<Mutex<String>>, stream_name: &str) {
     };
 
     let mut chunk = [0u8; 4096];
+    let mut stream = LogStream::default();
     loop {
         match file.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => {
                 let mut locked = buf.blocking_lock();
-                if locked.len() >= MAX_LOG_BYTES {
-                    break;
+                stream.push(&mut locked, &chunk[..n]);
+                // Output that only fills the budget may be all there is:
+                // read on, and stop once more arrives and is cut.
+                if locked.ends_with(TRUNCATION_NOTICE) {
+                    return;
                 }
-                append_log(&mut locked, &chunk[..n]);
             }
             Err(e) => {
-                buf.blocking_lock().push_str(&format!(
+                let mut locked = buf.blocking_lock();
+                stream.finish(&mut locked);
+                locked.push_str(&format!(
                     "[hot-task-worker] failed reading {} fifo '{}': {}\n",
                     stream_name, path, e
                 ));
-                break;
+                return;
             }
         }
     }
+    stream.finish(&mut buf.blocking_lock());
 }
 
 #[cfg(test)]
@@ -205,5 +264,52 @@ mod tests {
             append_log(&mut buf, b"ignored");
             assert_eq!(buf.len(), truncated_len);
         }
+    }
+
+    #[test]
+    fn output_that_exactly_fills_the_budget_is_marked_once_more_arrives() {
+        let mut buf = String::new();
+        append_log(&mut buf, "a".repeat(MAX_LOG_BYTES).as_bytes());
+        assert_eq!(buf.len(), MAX_LOG_BYTES, "whole output is not marked cut");
+        append_log(&mut buf, b"");
+        assert!(!buf.ends_with(TRUNCATION_NOTICE));
+        append_log(&mut buf, b"more");
+        assert!(buf.ends_with(TRUNCATION_NOTICE));
+        let truncated_len = buf.len();
+        append_log(&mut buf, b"more");
+        assert_eq!(buf.len(), truncated_len, "the notice is added once");
+    }
+
+    #[test]
+    fn a_character_split_across_chunks_decodes_whole() {
+        let text = "héllo 🙂 wörld ✓";
+        let bytes = text.as_bytes();
+        // Every split point, including inside each multibyte character.
+        for split in 0..=bytes.len() {
+            let (mut buf, mut stream) = (String::new(), LogStream::default());
+            stream.push(&mut buf, &bytes[..split]);
+            stream.push(&mut buf, &bytes[split..]);
+            stream.finish(&mut buf);
+            assert_eq!(buf, text, "split at {split}");
+        }
+        // One byte at a time.
+        let (mut buf, mut stream) = (String::new(), LogStream::default());
+        for byte in bytes {
+            stream.push(&mut buf, std::slice::from_ref(byte));
+        }
+        stream.finish(&mut buf);
+        assert_eq!(buf, text);
+    }
+
+    #[test]
+    fn invalid_bytes_still_decode_as_replacements() {
+        let (mut buf, mut stream) = (String::new(), LogStream::default());
+        // A lone continuation byte and a bad lead are invalid now; a 4-byte
+        // lead the stream never finishes is invalid at its end.
+        stream.push(&mut buf, b"a\x80b\xffc");
+        stream.push(&mut buf, b"d\xf0\x9f");
+        assert_eq!(buf, "a\u{fffd}b\u{fffd}cd");
+        stream.finish(&mut buf);
+        assert_eq!(buf, "a\u{fffd}b\u{fffd}cd\u{fffd}");
     }
 }
