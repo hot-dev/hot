@@ -587,6 +587,7 @@ now-zoned fn (timezone: Str): ZonedDateTime               // Current time in tim
 
 // Parsing
 parse fn (date-string: Str): PlainDateTime | PlainDate | PlainTime // By the string's shape
+Instant("2026-11-01T10:00:00Z")                           // From RFC 3339; the offset is required
 
 // Instant accessors
 epoch-millis fn (instant: Instant): Int                   // Milliseconds since Unix epoch

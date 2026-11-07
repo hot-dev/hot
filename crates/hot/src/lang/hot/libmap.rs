@@ -1345,6 +1345,10 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
             HotLibFn::LibFn(time::instant_from_nanos),
         );
         map.insert(
+            "::hot::time/instant-from-string".to_string(),
+            HotLibFn::LibFn(time::instant_from_string),
+        );
+        map.insert(
             "::hot::time/instant-from-plain-date".to_string(),
             HotLibFn::LibFn(time::instant_from_plain_date),
         );

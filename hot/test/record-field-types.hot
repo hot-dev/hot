@@ -143,7 +143,7 @@ meta ["test"] fn () {
 
 test-a-missing-field-is-still-reported-as-missing
 meta ["test"] fn () {
-    assert(contains(Str(err-value(Count(dynamic({})))), "missing required field(s): n"))
+    assert-eq("constructor of `Count` is missing required field(s): n", refusal(Count(dynamic({}))))
 }
 
 test-numbers-convert-as-at-a-parameter

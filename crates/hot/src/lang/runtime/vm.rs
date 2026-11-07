@@ -4567,12 +4567,10 @@ impl VirtualMachine {
                     // Check if item construction returned an error
                     if result.is_err() {
                         let step = Val::Int(idx as i64);
-                        if let Some(error) = Self::constraint_error_within(&result, step, None) {
-                            return Ok(error);
-                        }
-                        let inner_error = result.get("$val").unwrap_or(Val::Null);
-                        let error_msg = format!("In Vec item {}: {}", idx, inner_error);
-                        return Ok(Val::err(Val::from(error_msg)));
+                        return Ok(Self::constraint_error_within(&result, step.clone(), None)
+                            .unwrap_or_else(|| {
+                                self.constructor_refusal("Vec", &result, item, step)
+                            }));
                     }
                     new_vec.push(result);
                 }
@@ -4918,23 +4916,17 @@ impl VirtualMachine {
                 }
 
                 if !missing_fields.is_empty() {
-                    // Return Result.Err for missing required fields
-                    let error_msg = format!(
-                        "Type {} is missing required field(s): {}",
-                        type_name,
-                        missing_fields.join(", ")
-                    );
-                    return Ok(Val::err(Val::from(error_msg)));
+                    return Ok(self.constructor_missing(&type_name, &raw_data, missing_fields));
                 }
 
                 // For map data, recursively construct typed fields
                 let mut new_map = indexmap::IndexMap::new();
 
                 for (key, value) in data_map.iter() {
-                    let Val::Str(key_str) = key else {
+                    if !matches!(key, Val::Str(_)) {
                         new_map.insert(key.clone(), value.clone());
                         continue;
-                    };
+                    }
 
                     let field_check = field_checks.and_then(|checks| checks.get(key));
                     let field_type = field_types.and_then(|types| types.get(key));
@@ -4975,20 +4967,14 @@ impl VirtualMachine {
                         if result.is_err()
                             && !Self::type_info_preserves_result_values(field_type_info)
                         {
-                            if let Some(error) = Self::constraint_error_within(
+                            return Ok(Self::constraint_error_within(
                                 &result,
                                 key.clone(),
                                 Some(&type_name),
-                            ) {
-                                return Ok(error);
-                            }
-                            // Propagate the error with context
-                            let inner_error = result.get("$val").unwrap_or(Val::Null);
-                            let error_msg = format!(
-                                "In field '{}' of type {}: {}",
-                                key_str, type_name, inner_error
-                            );
-                            return Ok(Val::err(Val::from(error_msg)));
+                            )
+                            .unwrap_or_else(|| {
+                                self.constructor_refusal(&type_name, &result, value, key.clone())
+                            }));
                         }
                         result
                     } else {
@@ -5016,15 +5002,14 @@ impl VirtualMachine {
                         // Check if item construction returned an error
                         if result.is_err() {
                             let step = Val::Int(idx as i64);
-                            if let Some(error) =
-                                Self::constraint_error_within(&result, step, Some(&type_name))
-                            {
-                                return Ok(error);
-                            }
-                            let inner_error = result.get("$val").unwrap_or(Val::Null);
-                            let error_msg =
-                                format!("In item {} of {}: {}", idx, type_name, inner_error);
-                            return Ok(Val::err(Val::from(error_msg)));
+                            return Ok(Self::constraint_error_within(
+                                &result,
+                                step.clone(),
+                                Some(&type_name),
+                            )
+                            .unwrap_or_else(|| {
+                                self.constructor_refusal(&type_name, &result, item, step)
+                            }));
                         }
                         new_vec.push(result);
                     }
@@ -5087,12 +5072,10 @@ impl VirtualMachine {
         for (key, value) in entries.iter() {
             let result = self.construct_typed_recursive(value, value_type)?;
             if result.is_err() && !holds_results {
-                if let Some(error) = Self::constraint_error_within(&result, key.clone(), None) {
-                    return Ok(error);
-                }
-                let inner_error = result.get("$val").unwrap_or(Val::Null);
-                let error_msg = format!("In Map value {}: {}", key, inner_error);
-                return Ok(Val::err(Val::from(error_msg)));
+                return Ok(Self::constraint_error_within(&result, key.clone(), None)
+                    .unwrap_or_else(|| {
+                        self.constructor_refusal("Map", &result, value, key.clone())
+                    }));
             }
             built.insert(key.clone(), result);
         }
@@ -5186,16 +5169,10 @@ impl VirtualMachine {
                     check_failure.get_or_insert(constructed);
                 }
                 Ok(check_failure.unwrap_or_else(|| {
-                    Val::err(Val::from(format!(
-                        "Value does not match any member of union {}",
-                        Self::format_union_members(members)
-                    )))
+                    self.constructor_mismatch(&Self::format_union_members(members), data)
                 }))
             }
-            _ => Ok(Val::err(Val::from(format!(
-                "Value ambiguously matches multiple members of union {}",
-                Self::format_union_members(members)
-            )))),
+            _ => Ok(self.union_ambiguity(&Self::format_union_members(members), data)),
         }
     }
 
@@ -5351,7 +5328,9 @@ impl VirtualMachine {
         members
             .iter()
             .filter_map(|member| {
-                Self::type_info_type_name(member).or_else(|| Self::type_info_literal(member))
+                Self::type_info_type_name(member)
+                    .map(constraints::short_name)
+                    .or_else(|| Self::type_info_literal(member))
             })
             .collect::<Vec<_>>()
             .join(" | ")

@@ -146,7 +146,7 @@ test-a-value-of-another-record-is-refused
 meta ["test"] fn () {
     result Album(photos: {a: Other(name: "a")})
     assert(is-err(result))
-    assert(contains(Str(err-value(result)), "is missing required field(s): radius"))
+    assert-eq("constructor of `Album` at `photos.a` is missing required field(s): radius", err-value(result).message)
 }
 
 test-a-value-of-the-type-passes-as-it-is
