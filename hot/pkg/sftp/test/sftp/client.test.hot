@@ -1,0 +1,12 @@
+::sftp::test ns
+meta ["test"]
+
+test-handles-are-required
+meta ["test"] fn () {
+    saved {id: "saved-session-id"}
+    assert(is-err(::sftp/start(saved)))
+    assert(is-err(::sftp/read-file(saved, "/file")))
+    assert(is-err(::sftp/open(saved, "/file")))
+    assert(is-err(::sftp/stat(saved, "/file")))
+    assert(is-err(::sftp/close(saved)))
+}

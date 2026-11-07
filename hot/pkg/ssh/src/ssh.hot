@@ -1,0 +1,77 @@
+::ssh ns
+meta {
+    doc: """
+    SSH client sessions and subsystem byte streams backed by the host's russh
+    transport. Host-key verification is required. Connections are live runtime
+    handles: close them explicitly, and reconnect after a task is restored.
+    """
+}
+
+ConnectOptions
+meta {
+    doc: "SSH connection settings. Supply a trusted host-key and exactly one of password or private-key; timeout is milliseconds (default 30000), port defaults to 22."
+}
+type {
+    host: Str, user: Str, host-key: Str, port: Int?,
+    password: Str?, private-key: Str?, passphrase: Str?, timeout: Int?
+}
+
+Connection
+meta {doc: "An authenticated SSH session and its verified host-key fingerprint."}
+type {
+    id: Str,
+    host: Str,
+    port: Int,
+    user: Str,
+    host-key: Str
+}
+
+Channel
+meta {doc: "A live SSH subsystem byte stream."}
+type {
+    id: Str
+}
+
+connect
+meta {
+    doc: """
+    Connect and authenticate. Expected failures return Err, including a missing
+    or mismatched host-key. Passwords, private keys and passphrases are marked
+    secret in run records. Hot's outbound network policy applies.
+    """
+}
+fn (options: ConnectOptions): Connection { call-lib(::hot::internal::ssh/connect, [options]) }
+
+open-subsystem
+meta {
+    doc: "Open a named subsystem and wait for server acceptance. Reuse one connection for multiple channels."
+}
+fn (connection: Connection, name: Str): Channel { call-lib(::hot::internal::ssh/open-subsystem, [connection, name]) }
+
+read
+meta {
+    doc: "Read up to max bytes (1..67108864). Returns null at EOF. Each channel has independent read/write locks."
+}
+fn (channel: Channel, max: Int): Bytes? { call-lib(::hot::internal::ssh/read, [channel, max]) }
+
+read-exact
+meta {
+    doc: "Read exactly size bytes. An error closes the channel for further I/O because a partial frame may have been consumed."
+}
+fn (channel: Channel, size: Int): Bytes { call-lib(::hot::internal::ssh/read-exact, [channel, size]) }
+
+write
+meta {
+    doc: "Write Bytes or UTF-8 Str and flush. Returns the byte count. An interrupted write makes the channel unusable."
+}
+fn (channel: Channel, data: Bytes | Str): Int { call-lib(::hot::internal::ssh/write, [channel, data]) }
+
+close
+meta {
+    doc: "Close a connection or channel. Closing a connection invalidates its channels and SFTP sessions. Safe to repeat."
+}
+fn (handle: Connection | Channel): Bool { call-lib(::hot::internal::ssh/close, [handle]) }
+
+is-open
+meta {doc: "Check local handle state; this does not probe the peer."}
+fn (handle: Connection | Channel): Bool { call-lib(::hot::internal::ssh/is-open, [handle]) }

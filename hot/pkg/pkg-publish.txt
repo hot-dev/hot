@@ -112,6 +112,8 @@ whatsapp
 
 # Protocols
 json-rpc
+ssh
+sftp
 
 # Hot Box Containers
 ffmpeg

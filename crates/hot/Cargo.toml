@@ -37,6 +37,8 @@ redis = { workspace = true }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
 tokio-rustls = { workspace = true }
+russh = { workspace = true }
+russh-sftp = { workspace = true }
 webpki-roots = { workspace = true }
 webpki-root-certs = { workspace = true }
 once_cell = { workspace = true }

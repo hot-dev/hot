@@ -1,0 +1,157 @@
+::sftp ns
+meta {
+    doc: """
+    SFTP v3 client backed by russh/russh-sftp. Bulk reads and writes are
+    pipelined natively. Paths are remote POSIX paths. Use open/read/write for
+    large files; read-file has a bounded allocation. Handles cannot be saved
+    in checkpoints: reconnect and reopen after restoring a task.
+    """
+}
+
+ConnectOptions ::ssh/ConnectOptions
+Connection ::ssh/Connection
+
+Session
+meta {doc: "A live SFTP session. Separate files can be used in parallel."}
+type {
+    id: Str
+}
+
+File
+meta {doc: "A live remote file. Operations serialize access to its cursor."}
+type {
+    id: Str
+}
+
+FileKind
+meta {doc: "The kind of remote filesystem object."}
+type "file" | "directory" | "symlink" | "other" | "unknown"
+
+OpenMode
+meta {doc: "File access mode: read, write, append, or read-write."}
+type "read" | "write" | "append" | "read-write"
+
+Attributes
+meta {
+    doc: "Remote attributes; unavailable fields are null and times are Unix seconds."
+}
+type {
+    size: Int?, uid: Int?, gid: Int?, permissions: Int?,
+    accessed: Int?, modified: Int?, kind: FileKind
+}
+
+Entry
+meta {doc: "A remote directory entry and its attributes."}
+type {
+    name: Str,
+    path: Str,
+    attributes: Attributes
+}
+
+connect
+meta {
+    doc: "Connect to SFTP using ::ssh/ConnectOptions. Owns its SSH connection; close shuts both down."
+}
+fn (options: ConnectOptions): Session { call-lib(::hot::internal::sftp/connect, [options]) }
+
+start
+meta {
+    doc: "Start SFTP on an existing authenticated SSH connection. Closing this session leaves the shared connection open."
+}
+fn (connection: Connection): Session { call-lib(::hot::internal::sftp/start, [connection]) }
+
+stat
+meta {
+    doc: "Read file metadata, following symlinks. Times are Unix seconds; unavailable attributes are null."
+}
+fn (session: Session, path: Str): Attributes { call-lib(::hot::internal::sftp/stat, [session, path]) }
+
+lstat
+meta {doc: "Read metadata without following the final symlink."}
+fn (session: Session, path: Str): Attributes { call-lib(::hot::internal::sftp/lstat, [session, path]) }
+
+list
+meta {
+    doc: "List a directory. Entries named '.' and '..' are omitted. Paths use POSIX separators."
+}
+fn (session: Session, path: Str): Vec<Entry> { call-lib(::hot::internal::sftp/list, [session, path]) }
+
+exists
+meta {
+    doc: "Return false only when the server reports a missing path. Permission and transport errors remain Err."
+}
+fn (session: Session, path: Str): Bool { call-lib(::hot::internal::sftp/exists, [session, path]) }
+
+realpath
+meta {doc: "Resolve a remote path to its canonical absolute path."}
+fn (session: Session, path: Str): Str { call-lib(::hot::internal::sftp/realpath, [session, path]) }
+
+readlink
+meta {doc: "Read a symbolic link's target."}
+fn (session: Session, path: Str): Str { call-lib(::hot::internal::sftp/readlink, [session, path]) }
+
+mkdir
+meta {doc: "Create one directory. Parent directories must already exist."}
+fn (session: Session, path: Str): Bool { call-lib(::hot::internal::sftp/mkdir, [session, path]) }
+
+rmdir
+meta {doc: "Remove an empty directory."}
+fn (session: Session, path: Str): Bool { call-lib(::hot::internal::sftp/rmdir, [session, path]) }
+
+remove
+meta {doc: "Remove a file or symbolic link."}
+fn (session: Session, path: Str): Bool { call-lib(::hot::internal::sftp/remove, [session, path]) }
+
+rename
+meta {
+    doc: "Rename a file or directory. Replacement behavior follows the server's SFTP v3 semantics."
+}
+fn (session: Session, old-path: Str, new-path: Str): Bool { call-lib(::hot::internal::sftp/rename, [session, old-path, new-path]) }
+
+symlink
+meta {doc: "Create link-path pointing at target."}
+fn (session: Session, target: Str, link-path: Str): Bool { call-lib(::hot::internal::sftp/symlink, [session, target, link-path]) }
+
+write-file
+meta {
+    doc: "Create or truncate a file, write Bytes or UTF-8 Str, and wait for acknowledged writes and close. Returns bytes written."
+}
+fn (session: Session, path: Str, data: Bytes | Str): Int { call-lib(::hot::internal::sftp/write-file, [session, path, data]) }
+
+read
+meta {
+    doc: "Read up to max bytes (1..67108864) from an open file. Returns null at EOF. A short read does not mean EOF."
+}
+fn (file: File, max: Int): Bytes? { call-lib(::hot::internal::sftp/read, [file, max]) }
+
+write
+meta {doc: "Write a chunk and wait for server acknowledgement. Returns bytes written."}
+fn (file: File, data: Bytes | Str): Int { call-lib(::hot::internal::sftp/write, [file, data]) }
+
+seek
+meta {
+    doc: "Set an open file's absolute byte offset. Flushes pending writes before seeking."
+}
+fn (file: File, offset: Int): Int { call-lib(::hot::internal::sftp/seek, [file, offset]) }
+
+close
+meta {
+    doc: "Close a session or file. Close files before their session. Safe to repeat."
+}
+fn (handle: Session | File): Bool { call-lib(::hot::internal::sftp/close, [handle]) }
+
+read-file
+meta {
+    doc: "Read a whole file as Bytes, up to max bytes (default and maximum 67108864). A larger file returns Err; use open/read for large files."
+}
+fn
+(session: Session, path: Str): Bytes { call-lib(::hot::internal::sftp/read-file, [session, path, 67108864]) },
+(session: Session, path: Str, max: Int): Bytes { call-lib(::hot::internal::sftp/read-file, [session, path, max]) }
+
+open
+meta {
+    doc: "Open a file. Modes: read (default), write (create/truncate), append (create), or read-write (create without truncating)."
+}
+fn
+(session: Session, path: Str): File { call-lib(::hot::internal::sftp/open, [session, path, "read"]) },
+(session: Session, path: Str, mode: OpenMode): File { call-lib(::hot::internal::sftp/open, [session, path, mode]) }
