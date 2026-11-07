@@ -103,7 +103,7 @@ fn read_request(socket: &mut TcpStream) {
 
 /// Answers one request, each part in a TCP write of its own, and returns the
 /// port it listens on.
-fn serve(parts: Vec<String>) -> u16 {
+fn serve(parts: Vec<Vec<u8>>) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
@@ -111,7 +111,7 @@ fn serve(parts: Vec<String>) -> u16 {
         socket.set_nodelay(true).unwrap();
         read_request(&mut socket);
         for part in parts {
-            socket.write_all(part.as_bytes()).unwrap();
+            socket.write_all(&part).unwrap();
             std::thread::sleep(Duration::from_millis(10));
         }
     });
@@ -180,7 +180,9 @@ fn assert_says(output: &str, expected: &str) {
 #[test]
 fn every_frame_of_a_reply_in_one_chunk_counts() {
     for eol in ["\n", "\r\n"] {
-        let port = serve(vec![format!("{STREAM_HEAD}{}", whole_reply(eol))]);
+        let port = serve(vec![
+            format!("{STREAM_HEAD}{}", whole_reply(eol)).into_bytes(),
+        ]);
         assert_says(&ask(port), FULL_REPLY);
     }
 }
@@ -189,15 +191,47 @@ fn every_frame_of_a_reply_in_one_chunk_counts() {
 fn a_reply_split_inside_its_frames_still_reads_whole() {
     for eol in ["\n", "\r\n"] {
         let reply = whole_reply(eol);
-        let mut parts = vec![STREAM_HEAD.to_string()];
-        parts.extend(
-            reply
-                .as_bytes()
-                .chunks(37)
-                .map(|part| String::from_utf8(part.to_vec()).unwrap()),
-        );
+        let mut parts = vec![STREAM_HEAD.as_bytes().to_vec()];
+        parts.extend(reply.as_bytes().chunks(37).map(<[u8]>::to_vec));
         assert_says(&ask(serve(parts)), FULL_REPLY);
     }
+}
+
+/// The two halves of `bytes`, split inside its first two-byte character.
+fn split_inside_a_character(bytes: &[u8]) -> Vec<Vec<u8>> {
+    let at = bytes.iter().position(|byte| *byte == 0xC3).unwrap() + 1;
+    vec![bytes[..at].to_vec(), bytes[at..].to_vec()]
+}
+
+#[test]
+fn a_character_split_across_chunks_stays_whole() {
+    let delta =
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"café"}}"#;
+    let reply = format!(
+        "{}{}{}",
+        frame(FRAMES[1].0, FRAMES[1].1, "\n"),
+        frame("content_block_delta", delta, "\n"),
+        frame(FRAMES[6].0, FRAMES[6].1, "\n")
+    );
+    let mut parts = vec![STREAM_HEAD.as_bytes().to_vec()];
+    parts.extend(split_inside_a_character(reply.as_bytes()));
+    assert_says(&ask(serve(parts)), "replied text=café stop=end_turn");
+}
+
+#[test]
+fn a_refused_call_keeps_a_character_split_in_its_reason() {
+    let reason =
+        r#"{"type":"error","error":{"type":"invalid_request_error","message":"Solde épuisé"}}"#;
+    let head = format!(
+        "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        reason.len()
+    );
+    let mut parts = vec![head.into_bytes()];
+    parts.extend(split_inside_a_character(reason.as_bytes()));
+    assert_says(
+        &ask(serve(parts)),
+        "refused status=400 message=Solde épuisé",
+    );
 }
 
 #[test]
@@ -206,7 +240,7 @@ fn a_refused_call_is_an_err_that_says_why() {
     let port = serve(vec![format!(
         "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reason}",
         reason.len()
-    )]);
+    ).into_bytes()]);
     assert_says(
         &ask(port),
         "refused status=400 message=Your credit balance is too low",
@@ -217,10 +251,13 @@ fn a_refused_call_is_an_err_that_says_why() {
 fn an_error_event_ends_the_reply_in_an_err() {
     let error = r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
     let (name, data) = FRAMES[0];
-    let port = serve(vec![format!(
-        "{STREAM_HEAD}{}{}",
-        frame(name, data, "\n"),
-        frame("error", error, "\n")
-    )]);
+    let port = serve(vec![
+        format!(
+            "{STREAM_HEAD}{}{}",
+            frame(name, data, "\n"),
+            frame("error", error, "\n")
+        )
+        .into_bytes(),
+    ]);
     assert_says(&ask(port), "refused status=200 message=Overloaded");
 }

@@ -568,8 +568,10 @@ pub struct HttpStreamIterator {
     pub headers: IndexMap<Val, Val>,
     /// Stream format hint (e.g., "sse", "ndjson", "raw")
     pub format: String,
-    /// Buffer for partial SSE events
-    sse_buffer: String,
+    /// Bytes not yet decoded: a partial SSE event or NDJSON line, or the start
+    /// of a raw chunk's split character. A chunk can end inside a character, so
+    /// text decodes only once it's whole.
+    sse_buffer: Vec<u8>,
     /// Complete SSE events parsed from the last chunk but not yet yielded
     pending_sse_events: VecDeque<Val>,
     /// Whether the stream is exhausted
@@ -610,21 +612,23 @@ impl HotIterator for HttpStreamIterator {
                         }
                     }
                     _ => {
-                        // Raw bytes as string
-                        let value = match String::from_utf8(bytes.to_vec()) {
-                            Ok(s) => Val::from(s),
-                            Err(_) => Val::bytes(bytes.to_vec()),
-                        };
-                        return Ok((value, false));
+                        if let Some(value) = self.parse_raw_chunk(&bytes) {
+                            return Ok((value, false));
+                        }
                     }
                 },
                 None => {
                     self.done = true;
-                    // Flush any remaining SSE buffer
-                    if !self.sse_buffer.is_empty() && self.format == "sse" {
-                        let remaining = std::mem::take(&mut self.sse_buffer);
-                        self.pending_sse_events
-                            .extend(Self::parse_sse_event(&remaining));
+                    // Flush what's left: a last event with no blank line, or
+                    // the bytes of a character the stream cut off
+                    let remaining = std::mem::take(&mut self.sse_buffer);
+                    match self.format.as_str() {
+                        "sse" => self
+                            .pending_sse_events
+                            .extend(Self::parse_sse_event(&String::from_utf8_lossy(&remaining))),
+                        "ndjson" => {}
+                        _ if remaining.is_empty() => {}
+                        _ => self.pending_sse_events.push_back(Val::bytes(remaining)),
                     }
                 }
             }
@@ -651,13 +655,12 @@ impl HotIterator for HttpStreamIterator {
 /// ending is safe: when it ends a blank line, the LF that follows reads as one
 /// more blank line, an empty event. When it ends any other line, the event isn't
 /// over, so the buffer waits for the LF.
-fn split_sse_event(buffer: &str) -> Option<(&str, &str)> {
-    let bytes = buffer.as_bytes();
+fn split_sse_event(buffer: &[u8]) -> Option<(&[u8], &[u8])> {
     let mut line_start = 0;
     let mut at = 0;
-    while at < bytes.len() {
-        let line_ending = match bytes[at] {
-            b'\r' if bytes.get(at + 1) == Some(&b'\n') => 2,
+    while at < buffer.len() {
+        let line_ending = match buffer[at] {
+            b'\r' if buffer.get(at + 1) == Some(&b'\n') => 2,
             b'\r' | b'\n' => 1,
             _ => {
                 at += 1;
@@ -673,6 +676,15 @@ fn split_sse_event(buffer: &str) -> Option<(&str, &str)> {
     None
 }
 
+/// How many bytes at the end of `bytes` start a character that isn't whole yet.
+/// None do unless all before them is text, so binary data passes through.
+fn split_character_len(bytes: &[u8]) -> usize {
+    match std::str::from_utf8(bytes) {
+        Err(error) if error.error_len().is_none() => bytes.len() - error.valid_up_to(),
+        _ => 0,
+    }
+}
+
 impl HttpStreamIterator {
     /// Parse SSE (Server-Sent Events) chunk - buffers data and queues complete events
     ///
@@ -680,17 +692,16 @@ impl HttpStreamIterator {
     /// chunk does. `next` takes one event per call from this queue, so every
     /// event, the first included, reaches a consumer the same way.
     fn parse_sse_chunk(&mut self, bytes: &Bytes) {
-        let chunk_str = String::from_utf8_lossy(bytes);
-        self.sse_buffer.push_str(&chunk_str);
+        self.sse_buffer.extend_from_slice(bytes);
 
         let buffer = std::mem::take(&mut self.sse_buffer);
-        let mut rest = buffer.as_str();
-        while let Some((event_str, after)) = split_sse_event(rest) {
+        let mut rest = buffer.as_slice();
+        while let Some((event, after)) = split_sse_event(rest) {
             self.pending_sse_events
-                .extend(Self::parse_sse_event(event_str));
+                .extend(Self::parse_sse_event(&String::from_utf8_lossy(event)));
             rest = after;
         }
-        self.sse_buffer = rest.to_string();
+        self.sse_buffer = rest.to_vec();
     }
 
     /// Parse a single SSE event string into a Val
@@ -735,14 +746,13 @@ impl HttpStreamIterator {
 
     /// Parse NDJSON (newline-delimited JSON) chunk, or None if it completes no line
     fn parse_ndjson_chunk(&mut self, bytes: &Bytes) -> Option<Val> {
-        let chunk_str = String::from_utf8_lossy(bytes);
-        self.sse_buffer.push_str(&chunk_str);
+        self.sse_buffer.extend_from_slice(bytes);
 
         // Look for complete lines
         let mut objects = Vec::new();
-        while let Some(pos) = self.sse_buffer.find('\n') {
-            let line = self.sse_buffer[..pos].trim().to_string();
-            self.sse_buffer = self.sse_buffer[pos + 1..].to_string();
+        while let Some(pos) = self.sse_buffer.iter().position(|byte| *byte == b'\n') {
+            let line_bytes: Vec<u8> = self.sse_buffer.drain(..=pos).collect();
+            let line = String::from_utf8_lossy(&line_bytes).trim().to_string();
 
             if !line.is_empty() {
                 match serde_json::from_str::<JsonValue>(&line) {
@@ -763,6 +773,23 @@ impl HttpStreamIterator {
             1 => objects.pop(),
             _ => Some(Val::vec(objects)),
         }
+    }
+
+    /// A raw chunk as Str, or as Bytes when it isn't text. The start of a
+    /// character split across chunks waits for the rest, or None if that's all
+    /// there is. Every byte still arrives, and text stays Str.
+    fn parse_raw_chunk(&mut self, bytes: &Bytes) -> Option<Val> {
+        let mut chunk = std::mem::take(&mut self.sse_buffer);
+        chunk.extend_from_slice(bytes);
+        self.sse_buffer = chunk.split_off(chunk.len() - split_character_len(&chunk));
+
+        if chunk.is_empty() {
+            return None;
+        }
+        Some(match String::from_utf8(chunk) {
+            Ok(text) => Val::from(text),
+            Err(error) => Val::bytes(error.into_bytes()),
+        })
     }
 }
 
@@ -1033,7 +1060,7 @@ async fn make_streaming_request(
         status,
         headers: response_headers.clone(),
         format: format.to_string(),
-        sse_buffer: String::new(),
+        sse_buffer: Vec::new(),
         pending_sse_events: VecDeque::new(),
         done: false,
     };
@@ -1093,7 +1120,7 @@ mod tests {
             status: 200,
             headers: IndexMap::new(),
             format: format.to_string(),
-            sse_buffer: String::new(),
+            sse_buffer: Vec::new(),
             pending_sse_events: VecDeque::new(),
             done: false,
         }
@@ -1618,7 +1645,7 @@ mod tests {
             status: 200,
             headers: IndexMap::new(),
             format: "sse".to_string(),
-            sse_buffer: String::new(),
+            sse_buffer: Vec::new(),
             pending_sse_events: VecDeque::new(),
             done: false,
         };
@@ -1823,6 +1850,101 @@ mod tests {
     #[test]
     fn an_ndjson_null_line_is_a_value() {
         assert_eq!(drain(iterator_over("ndjson", &[b"null\n"])), [Val::Null]);
+    }
+
+    /// Characters of two, three and four bytes.
+    const WIDE_TEXT: &str = "café € 😀";
+
+    /// A chunk can end inside a character. The text decodes once it's whole.
+    #[test]
+    fn an_sse_event_survives_a_split_inside_a_character() {
+        let stream = format!("data: {{\"text\":\"{WIDE_TEXT}\"}}\n\n");
+        let bytes = stream.as_bytes();
+        for at in 1..bytes.len() {
+            let (head, tail) = bytes.split_at(at);
+            let events = drain(iterator_over("sse", &[head, tail]));
+            assert_eq!(events.len(), 1, "split at {at}");
+            assert_eq!(
+                events[0].get("data").and_then(|data| data.get("text")),
+                Some(Val::from(WIDE_TEXT)),
+                "split at {at}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_ndjson_line_survives_a_split_inside_a_character() {
+        let stream = format!("{{\"text\":\"{WIDE_TEXT}\"}}\n");
+        let bytes = stream.as_bytes();
+        for at in 1..bytes.len() {
+            let (head, tail) = bytes.split_at(at);
+            let values = drain(iterator_over("ndjson", &[head, tail]));
+            assert_eq!(values.len(), 1, "split at {at}");
+            assert_eq!(
+                values[0].get("text"),
+                Some(Val::from(WIDE_TEXT)),
+                "split at {at}"
+            );
+        }
+    }
+
+    /// A reader that turns raw chunks into text has to get whole characters,
+    /// and text stays Str, wherever the chunks break.
+    #[test]
+    fn raw_text_arrives_in_whole_characters() {
+        let bytes = WIDE_TEXT.as_bytes();
+        for at in 1..bytes.len() {
+            let (head, tail) = bytes.split_at(at);
+            let chunks = drain(iterator_over("raw", &[head, tail]));
+            let text: String = chunks
+                .iter()
+                .map(|chunk| match chunk {
+                    Val::Str(text) => text.to_string(),
+                    other => panic!("split at {at}: expected Str, got {other:?}"),
+                })
+                .collect();
+            assert_eq!(text, WIDE_TEXT, "split at {at}");
+        }
+    }
+
+    #[test]
+    fn raw_text_survives_arriving_a_byte_at_a_time() {
+        let chunks: Vec<&[u8]> = WIDE_TEXT.as_bytes().chunks(1).collect();
+        assert_eq!(
+            raw_bytes(&drain(iterator_over("raw", &chunks))),
+            WIDE_TEXT.as_bytes()
+        );
+    }
+
+    fn raw_bytes(chunks: &[Val]) -> Vec<u8> {
+        chunks
+            .iter()
+            .flat_map(|chunk| match chunk {
+                Val::Str(text) => text.as_bytes().to_vec(),
+                Val::Bytes(bytes) => bytes.to_vec(),
+                other => panic!("Expected a raw chunk, got {other:?}"),
+            })
+            .collect()
+    }
+
+    /// Audio and the like: every byte arrives, in order, wherever chunks break.
+    #[test]
+    fn a_binary_stream_keeps_every_byte() {
+        let bytes: Vec<u8> = (0..=255).chain((0..=255).rev()).collect();
+        for at in 1..bytes.len() {
+            let (head, tail) = bytes.split_at(at);
+            let chunks = drain(iterator_over("raw", &[head, tail]));
+            assert_eq!(raw_bytes(&chunks), bytes, "split at {at}");
+        }
+    }
+
+    /// A stream cut off inside a character still gives up its last bytes.
+    #[test]
+    fn a_raw_stream_that_ends_inside_a_character_keeps_those_bytes() {
+        assert_eq!(
+            drain(iterator_over("raw", &[b"caf\xC3"])),
+            [Val::from("caf"), Val::bytes(vec![0xC3])]
+        );
     }
 
     /// A chunk every `gap`, closing after `count` of them.

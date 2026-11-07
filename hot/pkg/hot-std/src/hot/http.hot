@@ -302,7 +302,9 @@ meta {
     - `"raw"` - Raw chunks as strings or bytes (default)
 
     Each `next` gives one event or chunk: it reads on until it has one, so a
-    chunk that holds only part of an event gives no value of its own.
+    chunk that holds only part of an event gives no value of its own. Text
+    never breaks inside a character: a raw chunk holds back the start of a
+    split one until the rest arrives.
 
     **Refused calls**
 
