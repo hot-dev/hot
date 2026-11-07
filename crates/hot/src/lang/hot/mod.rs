@@ -30,6 +30,7 @@ pub mod http;
 pub mod info;
 pub mod internal_mcp;
 pub mod internal_skill;
+pub mod internal_ssh;
 pub mod internal_tokenizer;
 pub mod io;
 pub mod iter;

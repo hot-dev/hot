@@ -145,10 +145,12 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/sec-edgar/test",
     "./hot/pkg/sec-iapd/test",
     "./hot/pkg/sentry/test",
+    "./hot/pkg/sftp/test",
     "./hot/pkg/shopify/test",
     "./hot/pkg/slack-admin/test",
     "./hot/pkg/slack/test",
     "./hot/pkg/sox/test",
+    "./hot/pkg/ssh/test",
     "./hot/pkg/sql-mysql/test",
     "./hot/pkg/sql-sqlite/test",
     "./hot/pkg/sql/test",
@@ -262,10 +264,12 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/sec-edgar": { "local": "./hot/pkg/sec-edgar" },
     "hot.dev/sec-iapd": { "local": "./hot/pkg/sec-iapd" },
     "hot.dev/sentry": { "local": "./hot/pkg/sentry" },
+    "hot.dev/sftp": { "local": "./hot/pkg/sftp" },
     "hot.dev/shopify": { "local": "./hot/pkg/shopify" },
     "hot.dev/slack": { "local": "./hot/pkg/slack" },
     "hot.dev/slack-admin": { "local": "./hot/pkg/slack-admin" },
     "hot.dev/sox": { "local": "./hot/pkg/sox" },
+    "hot.dev/ssh": { "local": "./hot/pkg/ssh" },
     "hot.dev/sql": { "local": "./hot/pkg/sql" },
     "hot.dev/sql-mysql": { "local": "./hot/pkg/sql-mysql" },
     "hot.dev/sql-pg": { "local": "./hot/pkg/sql-pg" },
@@ -1254,6 +1258,12 @@ hot.project.pkg-test-sql-mysql.deps {
     "hot.dev/mysql": { "local": "./hot/pkg/mysql" },
     "hot.dev/sql": { "local": "./hot/pkg/sql" }
 }
+
+// SSH/SFTP hermetic package boundary tests; live protocol tests are in Rust.
+hot.project.pkg-test-sftp.src.paths ["./hot/pkg/ssh/src", "./hot/pkg/sftp/src"]
+hot.project.pkg-test-sftp.test.paths ["./hot/pkg/ssh/test", "./hot/pkg/sftp/test"]
+hot.project.pkg-test-sftp.test.capture true
+hot.project.pkg-test-sftp.deps {}
 
 // mysql unit tests (hermetic wire/auth/decode vectors)
 hot.project.pkg-test-mysql.src.paths ["./hot/pkg/mysql/src"]

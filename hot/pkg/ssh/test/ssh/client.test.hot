@@ -1,0 +1,14 @@
+::ssh::test ns
+meta ["test"]
+
+test-host-verification-is-required
+meta ["test"] fn () {
+    assert(is-err(::ssh/connect({host: "invalid.example", user: "test", password: "test"})))
+    assert(is-err(::ssh/connect({host: "invalid.example", user: "test", password: "test", host-key: "SHA256:bad"})))
+}
+
+test-runtime-handles-cannot-be-reconstructed
+meta ["test"] fn () {
+    assert(is-err(::ssh/is-open({id: "saved-connection-id"})))
+    assert(is-err(::ssh/close({id: "saved-connection-id"})))
+}
