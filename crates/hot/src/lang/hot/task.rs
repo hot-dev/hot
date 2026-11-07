@@ -184,6 +184,7 @@ pub fn start(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         ));
     }
 
+    crate::validate_expansion!("::hot::task/start", &[task_args.clone(), options.clone()]);
     // Serialize task args and options to JSON
     let args_json: serde_json::Value = (&task_args).into();
     let options_json: serde_json::Value = (&options).into();
@@ -528,6 +529,7 @@ pub fn send(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     };
 
     let data = &args[1];
+    crate::validate_expansion!("::hot::task/send", std::slice::from_ref(data));
     let payload_json: serde_json::Value = data.into();
 
     let Some(db) = vm.get_database_pool() else {
@@ -606,7 +608,7 @@ pub fn send(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
 /// # Returns
 /// The next message value, or `null` on shutdown/close.
 pub fn receive(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
-    let _parked = match super::native_io::park_current() {
+    let _parked = match super::native_io::park_task_wait() {
         Ok(parked) => parked,
         Err(error) => return HotResult::Err(error),
     };
@@ -773,7 +775,7 @@ pub fn cancel(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
 /// # Returns
 /// `TaskResult` with id, status, timing breakdown, CUS, and result.
 pub fn await_task(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
-    let _parked = match super::native_io::park_current() {
+    let _parked = match super::native_io::park_task_wait() {
         Ok(parked) => parked,
         Err(error) => return HotResult::Err(error),
     };
@@ -1311,8 +1313,10 @@ pub fn checkpoint(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         }
     };
 
-    let data_json: serde_json::Value =
-        serde_json::to_value(args[0].to_hot_data_repr()).unwrap_or(serde_json::Value::Null);
+    let data_json = match args[0].to_checked_json("::hot::task/checkpoint") {
+        Ok(json) => json,
+        Err(error) => return HotResult::Err(err_val(error)),
+    };
 
     let result = tokio::runtime::Handle::current().block_on(async {
         tokio::time::timeout(

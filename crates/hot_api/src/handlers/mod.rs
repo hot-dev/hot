@@ -279,6 +279,28 @@ pub async fn get_org_id_for_env(
     Ok(env.org_id)
 }
 
+/// Small results arrive inline. A completion without a payload refers to the
+/// committed run row; the worker flushes that row before publishing the notice.
+pub(crate) async fn resolve_stream_result(
+    db: &DatabasePool,
+    conf: &hot::val::Val,
+    env_id: Uuid,
+    run_id: Uuid,
+    inline: Option<serde_json::Value>,
+) -> Result<Option<serde_json::Value>, String> {
+    if inline.is_some() {
+        return Ok(inline);
+    }
+    let run = hot::db::Run::get_run(db, &run_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    if run.env_id != env_id {
+        return Err("Run is outside the authorized environment".into());
+    }
+    let blob_store = hot::blob::blob_store_from_conf(std::sync::Arc::new(db.clone()), conf).await;
+    Ok(rehydrate_payload_json(db, blob_store.as_ref(), env_id, run.result).await)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,26 +437,4 @@ mod tests {
                 .active
         );
     }
-}
-
-/// Small results arrive inline. A completion without a payload refers to the
-/// committed run row; the worker flushes that row before publishing the notice.
-pub(crate) async fn resolve_stream_result(
-    db: &DatabasePool,
-    conf: &hot::val::Val,
-    env_id: Uuid,
-    run_id: Uuid,
-    inline: Option<serde_json::Value>,
-) -> Result<Option<serde_json::Value>, String> {
-    if inline.is_some() {
-        return Ok(inline);
-    }
-    let run = hot::db::Run::get_run(db, &run_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    if run.env_id != env_id {
-        return Err("Run is outside the authorized environment".into());
-    }
-    let blob_store = hot::blob::blob_store_from_conf(std::sync::Arc::new(db.clone()), conf).await;
-    Ok(rehydrate_payload_json(db, blob_store.as_ref(), env_id, run.result).await)
 }

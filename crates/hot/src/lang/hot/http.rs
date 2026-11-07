@@ -252,6 +252,8 @@ async fn send_with_redirect_validation(
         ));
     }
 
+    body.check_shape("::hot::http/request body")
+        .map_err(Val::from)?;
     let (mut body_bytes, body_is_json) = match body {
         Val::Str(s) if !s.is_empty() => (Some(s.as_bytes().to_vec()), false),
         Val::Bytes(bytes) if !bytes.is_empty() => (Some(bytes.to_vec()), false),

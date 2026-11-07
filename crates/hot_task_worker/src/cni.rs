@@ -341,7 +341,7 @@ fn l2_policy(container_id: &str, result: &serde_json::Value, ip: &str) -> Result
     }
     let table = l2_table(container_id);
     Ok(format!(
-        "table bridge {table} {{\n chain ingress {{\n type filter hook prerouting priority -300; policy accept;\n iifname \"{host}\" ether saddr != {mac} drop\n iifname \"{host}\" ether type arp arp saddr ether != {mac} drop\n iifname \"{host}\" ether type arp arp saddr ip != {ip} drop\n iifname \"{host}\" ether type ip ip saddr != {ip} drop\n iifname \"{host}\" ether type ip6 drop\n }}\n}}\n"
+        "table bridge {table} {{\n chain ingress {{\n type filter hook prerouting priority -300; policy accept;\n iifname \"{host}\" ether type != {{ ip, arp }} drop\n iifname \"{host}\" ether saddr != {mac} drop\n iifname \"{host}\" ether type arp arp saddr ether != {mac} drop\n iifname \"{host}\" ether type arp arp saddr ip != {ip} drop\n iifname \"{host}\" ether type ip ip saddr != {ip} drop\n }}\n}}\n"
     ))
 }
 
@@ -638,7 +638,50 @@ pub async fn teardown(container_id: &str) {
 /// Remove all stale network namespaces and their CNI state on startup.
 /// Called once when the Kata executor initializes to clean up after a
 /// previous crash or ungraceful shutdown.
+fn stale_l2_tables(value: &serde_json::Value) -> Vec<&str> {
+    value["nftables"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let table = &entry["table"];
+            let name = table["name"].as_str()?;
+            let suffix = name.strip_prefix("hkt_")?;
+            (table["family"] == "bridge"
+                && !suffix.is_empty()
+                && suffix.len() <= 24
+                && suffix
+                    .bytes()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()))
+            .then_some(name)
+        })
+        .collect()
+}
+
 pub async fn cleanup_stale() {
+    // Startup precedes task admission, so all of our remaining tables are stale.
+    if let Ok(output) = host_command("nft", &["-j", "list", "tables"])
+        .output()
+        .await
+        && output.status.success()
+        && let Ok(tables) = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+    {
+        for table in stale_l2_tables(&tables) {
+            match host_command("nft", &["delete", "table", "bridge", table])
+                .output()
+                .await
+            {
+                Ok(output) if output.status.success() => {}
+                Ok(output) => {
+                    tracing::warn!(table, error = %String::from_utf8_lossy(&output.stderr), "cni.cleanup: failed to remove stale bridge table")
+                }
+                Err(error) => {
+                    tracing::warn!(table, %error, "cni.cleanup: failed to remove stale bridge table")
+                }
+            }
+        }
+    }
+
     let rules = host_command(IPTABLES_BIN, &["-S"])
         .output()
         .await
@@ -718,6 +761,55 @@ pub(crate) async fn write_stdin_and_wait(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cni_result() -> serde_json::Value {
+        serde_json::json!({"interfaces": [
+            {"name": BRIDGE_NAME}, {"name": "veth123"},
+            {"name": "eth0", "sandbox": "/run/netns/task", "mac": "02:00:00:00:00:11"}
+        ]})
+    }
+
+    #[test]
+    fn bridge_policy_pins_guest_identity_and_rejects_other_ethertypes() {
+        let policy = l2_policy("0123456789abcdef01234567", &cni_result(), "10.88.0.2").unwrap();
+        assert!(policy.contains("iifname \"veth123\" ether type != { ip, arp } drop"));
+        assert!(policy.contains("ether saddr != 02:00:00:00:00:11 drop"));
+        assert!(policy.contains("arp saddr ether != 02:00:00:00:00:11 drop"));
+        assert!(policy.contains("arp saddr ip != 10.88.0.2 drop"));
+        assert!(policy.contains("ip saddr != 10.88.0.2 drop"));
+        assert_eq!(policy.matches("iifname \"veth123\"").count(), 5);
+        assert!(l2_policy("id", &cni_result(), "::1").is_err());
+        for host in ["", "0123456789abcdef", "veth\";accept"] {
+            let mut result = cni_result();
+            result["interfaces"][1]["name"] = host.into();
+            assert!(l2_policy("id", &result, "10.88.0.2").is_err());
+        }
+        for mac in [
+            "02:00:00:00:00",
+            "02:00:00:00:00:gg",
+            "02:00:00:00:00:11;accept",
+        ] {
+            let mut result = cni_result();
+            result["interfaces"][2]["mac"] = mac.into();
+            assert!(l2_policy("id", &result, "10.88.0.2").is_err());
+        }
+    }
+
+    #[test]
+    fn stale_bridge_cleanup_selects_only_owned_table_names() {
+        let tables = serde_json::json!({"nftables": [
+            {"metainfo": {}},
+            {"table": {"family": "bridge", "name": "hkt_0123456789abcdef01234567"}},
+            {"table": {"family": "ip", "name": "hkt_0123456789abcdef01234567"}},
+            {"table": {"family": "bridge", "name": "someone_else"}},
+            {"table": {"family": "bridge", "name": "hkt_"}},
+            {"table": {"family": "bridge", "name": "hkt_bad;name"}}
+        ]});
+        assert_eq!(
+            stale_l2_tables(&tables),
+            vec!["hkt_0123456789abcdef01234567"]
+        );
+    }
 
     #[test]
     fn task_chains_are_stable_and_isolated() {

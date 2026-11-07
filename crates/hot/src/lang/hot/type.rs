@@ -1101,6 +1101,7 @@ pub fn typed_map(args: &[Val]) -> HotResult<Val> {
 /// Untype function - removes type information from typed objects recursively
 pub fn untype(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::type/untype", args, 1);
+    crate::validate_expansion!("untype", args);
 
     let form = &args[0];
     untype_recursive(form)

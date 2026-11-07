@@ -11,6 +11,13 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+fn default_timeout() -> Duration {
+    Duration::from_secs(crate::lang::runtime::limits::operational_limit(
+        "HOT_NATIVE_IO_TIMEOUT_SECONDS",
+        300,
+    ) as u64)
+}
+
 #[derive(Clone)]
 pub(crate) struct IoContext {
     cancel: Option<Arc<AtomicBool>>,
@@ -20,7 +27,7 @@ impl Default for IoContext {
     fn default() -> Self {
         Self {
             cancel: None,
-            deadline: Instant::now() + Duration::from_secs(300),
+            deadline: Instant::now() + default_timeout(),
         }
     }
 }
@@ -46,16 +53,12 @@ thread_local! { static CONTEXT: RefCell<Option<IoContext>> = const { RefCell::ne
 pub(crate) struct Scope(Option<IoContext>, std::marker::PhantomData<std::rc::Rc<()>>);
 impl Scope {
     pub(crate) fn enter(vm: &VirtualMachine) -> Self {
-        let limit = Duration::from_secs(300);
         let wait = vm
             .get_execution_context()
             .as_ref()
-            .map(|context| {
-                context
-                    .cap_wait_to_deadline(limit, Duration::ZERO)
-                    .unwrap_or(Duration::ZERO)
-            })
-            .unwrap_or(limit);
+            .and_then(|context| context.deadline_at)
+            .map(|deadline| (deadline - chrono::Utc::now()).to_std().unwrap_or_default())
+            .unwrap_or_else(default_timeout);
         let context = IoContext {
             cancel: vm.external_cancel_token(),
             deadline: Instant::now() + wait,
@@ -77,10 +80,45 @@ pub(crate) fn current() -> IoContext {
     CONTEXT.with(|slot| slot.borrow().clone().unwrap_or_default())
 }
 
+thread_local! {
+    static BLOCKING_POOL: RefCell<Option<Arc<tokio::sync::Semaphore>>> = const { RefCell::new(None) };
+}
+/// Task-dependent waits must leave a physical VM thread available for the
+/// queued task they may depend on. This is separate from CPU scheduling.
+pub struct BlockingPoolScope(
+    Option<Arc<tokio::sync::Semaphore>>,
+    std::marker::PhantomData<std::rc::Rc<()>>,
+);
+impl BlockingPoolScope {
+    pub fn enter(pool: Arc<tokio::sync::Semaphore>) -> Self {
+        Self(
+            BLOCKING_POOL.with(|slot| slot.replace(Some(pool))),
+            std::marker::PhantomData,
+        )
+    }
+}
+impl Drop for BlockingPoolScope {
+    fn drop(&mut self) {
+        BLOCKING_POOL.with(|slot| slot.replace(self.0.take()));
+    }
+}
+pub(crate) fn blocking_pool() -> Option<Arc<tokio::sync::Semaphore>> {
+    BLOCKING_POOL.with(|slot| slot.borrow().clone())
+}
+pub(crate) fn park_task_wait() -> Result<Option<crate::run_slots::ParkedRun>, Val> {
+    // The last physical execution cannot park on a task: earlier waiters can
+    // only have observed a free permit before it was admitted. Ordinary remote
+    // I/O has no dependency on another queued VM and does not need this gate.
+    if blocking_pool().is_some_and(|pool| pool.available_permits() == 0) {
+        return Err(Val::from(
+            "Task wait would exhaust worker execution capacity; increase worker.max-blocking-executions",
+        ));
+    }
+    park_current()
+}
+
 pub(crate) fn park_current() -> Result<Option<crate::run_slots::ParkedRun>, Val> {
-    crate::run_slots::current_run_slot()
-        .map(|slot| slot.try_park(current().cancel).map_err(Val::from))
-        .transpose()
+    Ok(crate::run_slots::current_run_slot().map(|slot| slot.park(current().cancel)))
 }
 
 async fn bounded<F: Future>(operation: &str, future: F) -> Result<F::Output, Val> {
@@ -132,6 +170,21 @@ pub(crate) fn test_scope(cancel: Option<Arc<AtomicBool>>, timeout: Duration) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn task_waits_leave_capacity_for_their_dependency() {
+        let pool = Arc::new(tokio::sync::Semaphore::new(2));
+        let _scope = BlockingPoolScope::enter(pool.clone());
+        let first = pool.clone().try_acquire_owned().unwrap();
+        assert!(park_task_wait().is_ok());
+        let last = pool.clone().try_acquire_owned().unwrap();
+        assert!(park_task_wait().is_err());
+        // Remote I/O does not depend on admitting another queued task.
+        assert!(park_current().is_ok());
+        drop(first);
+        assert!(park_task_wait().is_ok());
+        drop(last);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn blocking_io_wait_respects_cancellation_and_deadline() {
         for cancel in [false, true] {

@@ -774,7 +774,8 @@ fn normalize_manifest_artifact_source_path(
 ) -> Val {
     let mut val = val.clone();
     if let Val::Map(map) = &mut val {
-        normalize_manifest_source_field(&mut **std::sync::Arc::make_mut(map), "file", normalizer);
+        let map = std::sync::Arc::make_mut(map);
+        normalize_manifest_source_field(map, "file", normalizer);
     }
     val
 }

@@ -494,10 +494,14 @@ fn check_image_manifest_size(manifest: &serde_json::Value) -> ExecutorResult<()>
                 .ok_or_else(|| ExecutorError::ImagePull("Image size overflow".to_string()))?;
         }
     }
-    if bytes > 4 * 1024 * 1024 * 1024 {
-        return Err(ExecutorError::ImagePull(
-            "Image exceeds the 4 GiB compressed-size limit".to_string(),
-        ));
+    let max_bytes = hot::lang::runtime::limits::operational_limit(
+        "HOT_BOX_MAX_IMAGE_BYTES",
+        4 * 1024 * 1024 * 1024,
+    ) as u64;
+    if bytes > max_bytes {
+        return Err(ExecutorError::ImagePull(format!(
+            "Image exceeds compressed-size limit ({max_bytes} bytes); raise HOT_BOX_MAX_IMAGE_BYTES"
+        )));
     }
     Ok(())
 }
@@ -1939,6 +1943,8 @@ mounted = False
 try:
     options = [o for o in mount['options'] if o not in ('rw', 'exec', 'suid', 'dev')]
     options += ['ro', 'noexec', 'nosuid', 'nodev']
+    if mount['type'] == 'ext4':
+        options += ['noload']
     subprocess.run(['mount', '-t', mount['type'], '-o', ','.join(options), mount['source'], str(root)], check=True, timeout=10, stdout=subprocess.DEVNULL)
     mounted = True
     def read(name):
@@ -2797,7 +2803,8 @@ finally:
             current: &str,
             required_mb: u64,
         ) -> ExecutorResult<()> {
-            const MAX_CACHED_IMAGES: usize = 128;
+            let max_cached_images =
+                hot::lang::runtime::limits::operational_limit("HOT_BOX_MAX_CACHED_IMAGES", 128);
             let images = client
                 .list(with_namespace!(
                     ListImagesRequest { filters: vec![] },
@@ -2840,7 +2847,7 @@ finally:
                     .unwrap_or_else(|| image.updated_at.as_ref().map_or(0, |at| at.seconds))
             });
             for image in candidates {
-                if total < MAX_CACHED_IMAGES
+                if total < max_cached_images
                     && ensure_devmapper_capacity(required_mb).await.is_ok()
                     && content_available_mb().await? >= DEVMAPPER_MIN_FREE_RESERVE_MB
                 {
@@ -2870,7 +2877,7 @@ finally:
                     "Container content store is below its free-space reserve".to_string(),
                 ));
             }
-            if total >= MAX_CACHED_IMAGES && !already_cached {
+            if total >= max_cached_images && !already_cached {
                 return Err(ExecutorError::ImagePull(
                     "Image cache is full of images still in use".to_string(),
                 ));
@@ -2885,11 +2892,12 @@ finally:
             registry_auth: Option<Arc<RegistryCredential>>,
             required_mb: u64,
         ) -> ExecutorResult<()> {
-            // Serialize cache maintenance and pulls. ActiveImage also protects
-            // images between pull completion and container registration.
-            let _maintenance = self.image_maintenance.lock().await;
-            self.reclaim_image_space(client, image, required_mb).await?;
-            let initial_free = content_available_mb().await?;
+            // Serialize eviction decisions and deletes only. Pulls run concurrently;
+            // ActiveImage protects them through container registration.
+            {
+                let _maintenance = self.image_maintenance.lock().await;
+                self.reclaim_image_space(client, image, required_mb).await?;
+            }
             let pull = async {
                 if let Some(auth) = registry_auth {
                     return pull_with_registry_auth(self.channel.clone(), image, auth, SNAPSHOTTER)
@@ -2929,9 +2937,9 @@ finally:
                         if free < DEVMAPPER_MIN_FREE_RESERVE_MB {
                             return Err(ExecutorError::ImagePull("Content store is below its free-space reserve".to_string()));
                         }
-                        if initial_free.saturating_sub(free) > 4096 {
-                            return Err(ExecutorError::ImagePull("Image pull exceeded its 4 GiB disk-growth budget".to_string()));
-                        }
+                        // This is a shared store: growth includes other concurrent
+                        // pulls, so it cannot enforce an individual image's budget.
+                        // Per-image compressed sizes are checked from its manifest.
                     }
                 }
             }

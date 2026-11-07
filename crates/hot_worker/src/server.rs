@@ -7146,8 +7146,13 @@ pub async fn run_with_components_shared_context_and_db(
     }
 
     // Create or use provided stream publisher for real-time SSE updates
-    let stream_publisher: Option<Arc<StreamPubSub>> = if stream_publisher.is_some() {
-        stream_publisher
+    let stream_publisher: Option<Arc<StreamPubSub>> = if let Some(publisher) = stream_publisher {
+        Some(Arc::new(
+            publisher
+                .as_ref()
+                .clone()
+                .with_run_timeout(get_max_run_timeout(&worker_conf)),
+        ))
     } else {
         // SQLite queues use process-local pub/sub for live UI updates; Redis
         // retains distributed pub/sub.
@@ -7162,7 +7167,9 @@ pub async fn run_with_components_shared_context_and_db(
                     "hot.dev: WORKER created stream publisher (type: {:?})",
                     pubsub_type
                 );
-                Some(Arc::new(pubsub))
+                Some(Arc::new(
+                    pubsub.with_run_timeout(get_max_run_timeout(&worker_conf)),
+                ))
             }
             // A Redis queue means API and app replicas subscribe through
             // Redis. Publishing nowhere would silently stall their streams.

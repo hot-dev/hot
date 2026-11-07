@@ -406,10 +406,19 @@ fn format_val_for_raw_output(val: &Val) -> String {
 fn format_output_args(args: &[Val]) -> Result<String, Val> {
     let mut output = String::new();
     for arg in args {
-        arg.check_text_shape("print").map_err(Val::from)?;
+        match arg {
+            Val::Str(text) => {
+                crate::lang::runtime::limits::check_string_bytes("print", text.len())?
+            }
+            _ => arg.check_text_shape("print").map_err(Val::from)?,
+        }
         let piece = format_val_for_raw_output(arg);
-        if piece.len() > crate::blob::MAX_INLINE_HARD_LIMIT_BYTES.saturating_sub(output.len()) {
-            return Err(Val::from("print: formatted output exceeds byte limit"));
+        if piece.len()
+            > crate::lang::runtime::limits::max_string_bytes().saturating_sub(output.len())
+        {
+            return Err(Val::from(
+                "print: formatted output exceeds byte limit; raise HOT_MAX_STRING_BYTES",
+            ));
         }
         output.push_str(&piece);
     }

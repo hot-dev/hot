@@ -3,18 +3,6 @@
 use crate::lang::hot::r#type::HotResult;
 use crate::val::Val;
 
-pub fn check_shapes(fn_name: &str, args: &[Val]) -> Result<(), Val> {
-    // HTML has its own iterative depth/node/output budgets and accepts DOM
-    // trees deeper than the serialization boundary. It never expands blindly.
-    if fn_name.starts_with("::hot::html/") {
-        return Ok(());
-    }
-    for arg in args {
-        arg.check_shape(fn_name).map_err(Val::from)?;
-    }
-    Ok(())
-}
-
 /// Validate that function has exactly the expected number of arguments
 pub fn validate_args(fn_name: &str, args: &[Val], expected_args: usize) -> HotResult<Val> {
     if args.len() != expected_args {
@@ -25,9 +13,6 @@ pub fn validate_args(fn_name: &str, args: &[Val], expected_args: usize) -> HotRe
             if expected_args == 1 { "" } else { "s" },
             args.len()
         )));
-    }
-    if let Err(error) = check_shapes(fn_name, args) {
-        return HotResult::Err(error);
     }
     HotResult::Ok(Val::Bool(true))
 }
@@ -42,9 +27,6 @@ pub fn validate_args_at_least(fn_name: &str, args: &[Val], expected_args: usize)
             if expected_args == 1 { "" } else { "s" },
             args.len()
         )));
-    }
-    if let Err(error) = check_shapes(fn_name, args) {
-        return HotResult::Err(error);
     }
     HotResult::Ok(Val::Bool(true))
 }
@@ -90,9 +72,6 @@ pub fn validate_args_range(
             max_args,
             args.len()
         )));
-    }
-    if let Err(error) = check_shapes(fn_name, args) {
-        return HotResult::Err(error);
     }
     HotResult::Ok(Val::Bool(true))
 }
@@ -144,6 +123,18 @@ macro_rules! validate_args_range {
             $crate::lang::hot::lib_util::validate_args_range($fn_name, $args, $min, $max)
         {
             return HotResult::Err(err);
+        }
+    };
+}
+
+/// Check only arguments about to be copied into an external representation.
+#[macro_export]
+macro_rules! validate_expansion {
+    ($operation:expr, $values:expr) => {
+        for value in $values {
+            if let Err(error) = value.check_shape($operation) {
+                return $crate::lang::hot::r#type::HotResult::Err($crate::val::Val::from(error));
+            }
         }
     };
 }

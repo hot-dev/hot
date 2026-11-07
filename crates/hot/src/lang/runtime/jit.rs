@@ -653,8 +653,9 @@ impl JitHelperRefs {
     /// The helpers that never look up a name in the calling frame or run
     /// Hot code that could. A call to a top-level function runs in its own
     /// frame.
-    fn scope_free(&self) -> [FuncRef; 48] {
+    fn scope_free(&self) -> [FuncRef; 49] {
         [
+            self.poll_cancel,
             self.call_vm,
             self.template_interpolate,
             self.dot_access,
@@ -8952,6 +8953,17 @@ fn build_supported_body(
 
     builder.switch_to_block(body_block);
     builder.seal_block(body_block);
+    let cancel_budget = builder.declare_var(types::I32);
+    // VM entry samples ordinary calls. Only direct self-recursion bypasses
+    // that dispatch; tail loops count their iterations in this local counter.
+    let recursive = instructions.iter().any(|instruction| {
+        matches!(instruction,
+        Instruction::CallUserFunction { function_id: called, .. } if *called == function_id)
+    });
+    let initial_budget = builder
+        .ins()
+        .iconst(types::I32, if recursive { 0 } else { 1023 });
+    builder.def_var(cancel_budget, initial_budget);
     builder.ins().jump(ctx.blocks[0], &[]);
 
     let mut active_flows: Vec<ActiveFlowState> = Vec::new();
@@ -8971,12 +8983,29 @@ fn build_supported_body(
         // Self-tail calls jump back to block zero; ordinary self-calls enter
         // here too. Poll even when the entire loop has been lowered to raw IR.
         if ip == 0 {
+            let budget = builder.use_var(cancel_budget);
+            let poll = builder.create_block();
+            let resume = builder.create_block();
+            let due =
+                builder
+                    .ins()
+                    .icmp_imm_s(cranelift_codegen::ir::condcodes::IntCC::Equal, budget, 0);
+            let next = builder.ins().iadd_imm_s(budget, -1);
+            builder.def_var(cancel_budget, next);
+            builder.ins().brif(due, poll, &[], resume, &[]);
+            builder.switch_to_block(poll);
+            builder.seal_block(poll);
+            let reset = builder.ins().iconst(types::I32, 1023);
+            builder.def_var(cancel_budget, reset);
             let call = builder.ins().call(ctx.helper_refs.poll_cancel, &[]);
             let result = builder.inst_results(call)[0];
             let halt = emit_halt_check(builder, result);
-            let resume = builder.current_block().unwrap();
+            let checked = builder.current_block().unwrap();
             ctx.emit_halt_return(builder, halt);
+            builder.switch_to_block(checked);
+            builder.ins().jump(resume, &[]);
             builder.switch_to_block(resume);
+            builder.seal_block(resume);
         }
         if let Some(plan) = fused_plans.iter().find(|plan| plan.first_stage_ip == ip) {
             open_fused_run = ctx.begin_fused_run(builder, plan)?;
@@ -11797,6 +11826,17 @@ fn compile_thunk_inline(
 
     let mut return_kind: Option<RawKind> = None;
 
+    let cancel_budget = builder.declare_var(types::I32);
+    // VM entry samples ordinary calls. Only direct self-recursion bypasses
+    // that dispatch; tail loops count their iterations in this local counter.
+    let recursive = instructions.iter().any(|instruction| {
+        matches!(instruction,
+        Instruction::CallUserFunction { function_id: called, .. } if *called == function_id)
+    });
+    let initial_budget = builder
+        .ins()
+        .iconst(types::I32, if recursive { 0 } else { 1023 });
+    builder.def_var(cancel_budget, initial_budget);
     builder.ins().jump(ctx.blocks[0], &[]);
 
     for (ip, instruction) in instructions.iter().enumerate() {
@@ -11804,12 +11844,29 @@ fn compile_thunk_inline(
         // Self-tail calls jump back to block zero; ordinary self-calls enter
         // here too. Poll even when the entire loop has been lowered to raw IR.
         if ip == 0 {
+            let budget = builder.use_var(cancel_budget);
+            let poll = builder.create_block();
+            let resume = builder.create_block();
+            let due =
+                builder
+                    .ins()
+                    .icmp_imm_s(cranelift_codegen::ir::condcodes::IntCC::Equal, budget, 0);
+            let next = builder.ins().iadd_imm_s(budget, -1);
+            builder.def_var(cancel_budget, next);
+            builder.ins().brif(due, poll, &[], resume, &[]);
+            builder.switch_to_block(poll);
+            builder.seal_block(poll);
+            let reset = builder.ins().iconst(types::I32, 1023);
+            builder.def_var(cancel_budget, reset);
             let call = builder.ins().call(ctx.helper_refs.poll_cancel, &[]);
             let result = builder.inst_results(call)[0];
             let halt = emit_halt_check(builder, result);
-            let resume = builder.current_block().unwrap();
+            let checked = builder.current_block().unwrap();
             ctx.emit_halt_return(builder, halt);
+            builder.switch_to_block(checked);
+            builder.ins().jump(resume, &[]);
             builder.switch_to_block(resume);
+            builder.seal_block(resume);
         }
 
         match ctx.emit_instruction(builder, ip, instruction, instructions)? {
@@ -12744,6 +12801,10 @@ mod tests {
         let sig = TypeSig::from_args(&[val!(41)]);
         let compiled =
             compile_supported_function(&program, 0, &function, &sig, CallNames::default()).unwrap();
+        assert!(
+            !compiled.needs_vm_scope(),
+            "Cancellation polling must not force a lexical frame for scalar code"
+        );
         let result = compiled.call(&[val!(41)]).unwrap();
         assert_eq!(result, val!(42));
     }

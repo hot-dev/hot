@@ -12,6 +12,7 @@ const JSON_MAX_DEPTH: usize = 256;
 pub fn to_json(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::json/to-json", args, 1);
 
+    crate::validate_expansion!("to-json", args);
     let value = &args[0];
     let json_val = match build_json_value(value, 0) {
         Ok(v) => v,

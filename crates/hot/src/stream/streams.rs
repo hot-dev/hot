@@ -33,10 +33,10 @@ use uuid::Uuid;
 /// Maximum number of entries to keep per stream (approximate)
 /// This bounds entry count; expiry separately bounds idle key lifetime.
 const STREAM_MAXLEN: usize = 1000;
-/// Retain idle streams beyond the longest supported code-task timeout (7 days).
-/// Each publish renews this window. These streams are notifications; durable
-/// results live in the database. Existing idle keys need a one-off TTL backfill.
-const STREAM_IDLE_TTL_SECS: u64 = 8 * 24 * 60 * 60;
+/// Task inboxes survive the longest supported task (7 days) plus delivery grace.
+const TASK_STREAM_IDLE_TTL_SECS: u64 = 8 * 24 * 60 * 60;
+/// Default run ceiling (1 hour) plus one hour for reconnect/final delivery.
+const DEFAULT_RUN_STREAM_IDLE_TTL_SECS: u64 = 2 * 60 * 60;
 /// One server-side operation: a process/connection loss after XADD must not
 /// leave a permanent key. The single explicit key also works in Redis Cluster.
 const PUBLISH_STREAM_SCRIPT: &str = "\
@@ -388,6 +388,7 @@ impl SubscriberConnection {
 #[derive(Clone)]
 pub struct RedisStreamsPubSub {
     connection_pool: Arc<RedisConnectionPool>,
+    run_idle_ttl_secs: u64,
 }
 
 impl RedisStreamsPubSub {
@@ -395,6 +396,7 @@ impl RedisStreamsPubSub {
     pub fn new(client: Client) -> Self {
         Self {
             connection_pool: Arc::new(RedisConnectionPool::new_standalone(client)),
+            run_idle_ttl_secs: DEFAULT_RUN_STREAM_IDLE_TTL_SECS,
         }
     }
 
@@ -402,7 +404,14 @@ impl RedisStreamsPubSub {
     pub fn new_cluster(cluster_client: ClusterClient) -> Self {
         Self {
             connection_pool: Arc::new(RedisConnectionPool::new_cluster(cluster_client)),
+            run_idle_ttl_secs: DEFAULT_RUN_STREAM_IDLE_TTL_SECS,
         }
+    }
+
+    /// Keep run notifications through the configured maximum run plus delivery grace.
+    pub fn with_run_timeout(mut self, timeout: Duration) -> Self {
+        self.run_idle_ttl_secs = timeout.as_secs().saturating_add(60 * 60);
+        self
     }
 
     /// Round-trip a PING on the pooled connection.
@@ -487,6 +496,11 @@ impl McpSseTransportSessionStore for RedisStreamsPubSub {
 impl StreamPublisher for RedisStreamsPubSub {
     async fn publish(&self, event: StreamEvent) -> Result<(), StreamPubSubError> {
         let stream_key = event.channel_name();
+        let idle_ttl = if matches!(event, StreamEvent::TaskMessage { .. }) {
+            TASK_STREAM_IDLE_TTL_SECS
+        } else {
+            self.run_idle_ttl_secs
+        };
 
         // Serialize the event to JSON
         let payload = serde_json::to_string(&event)
@@ -504,7 +518,7 @@ impl StreamPublisher for RedisStreamsPubSub {
                     .arg(&stream_key)
                     .arg(STREAM_MAXLEN)
                     .arg(&payload)
-                    .arg(STREAM_IDLE_TTL_SECS)
+                    .arg(idle_ttl)
                     .clone(),
             )
             .await?;
@@ -1270,6 +1284,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_stream_expiry_covers_configured_long_runs() {
+        let Some(client) = try_client().await else {
+            return;
+        };
+        let pubsub = RedisStreamsPubSub::new(client.clone())
+            .with_run_timeout(Duration::from_secs(24 * 3600));
+        let event = stream_data(Uuid::now_v7(), Uuid::now_v7(), 1);
+        let key = event.channel_name();
+        pubsub.publish(event).await.unwrap();
+        let mut admin = client.get_multiplexed_async_connection().await.unwrap();
+        let ttl: i64 = redis::cmd("TTL")
+            .arg(&key)
+            .query_async(&mut admin)
+            .await
+            .unwrap();
+        assert!((25 * 3600 - 1..=25 * 3600).contains(&ttl));
+        delete_key(&client, &key).await;
+    }
+
+    #[tokio::test]
     async fn publishing_expires_and_renews_scoped_and_task_streams() {
         let Some(client) = try_client().await else {
             eprintln!("skipping: Redis not available");
@@ -1289,6 +1323,11 @@ mod tests {
         ];
         let mut admin = client.get_multiplexed_async_connection().await.unwrap();
         for event in events {
+            let expected_ttl = if matches!(event, StreamEvent::TaskMessage { .. }) {
+                TASK_STREAM_IDLE_TTL_SECS
+            } else {
+                DEFAULT_RUN_STREAM_IDLE_TTL_SECS
+            } as i64;
             let key = event.channel_name();
             for _ in 0..2 {
                 pubsub.publish(event.clone()).await.unwrap();
@@ -1297,9 +1336,7 @@ mod tests {
                     .query_async(&mut admin)
                     .await
                     .unwrap();
-                assert!(
-                    (STREAM_IDLE_TTL_SECS as i64 - 1..=STREAM_IDLE_TTL_SECS as i64).contains(&ttl)
-                );
+                assert!((expected_ttl - 1..=expected_ttl).contains(&ttl));
                 // Model a nearly expired key; the next publish must renew it.
                 let _: i64 = redis::cmd("EXPIRE")
                     .arg(&key)

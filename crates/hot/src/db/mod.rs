@@ -1042,7 +1042,7 @@ const MIN_POSTGRES_MAJOR: u32 = 18;
 const MIN_POSTGRES_VERSION_NUM: u32 = MIN_POSTGRES_MAJOR * 10_000;
 const MIGRATION_LOCK_RETRIES: u32 = 5;
 /// Indexes that `-- no-transaction` migrations build concurrently.
-const CONCURRENT_INDEXES: &[&str] = &["call_env_start_time_size_idx"];
+const CONCURRENT_INDEXES: &[&str] = &["call_env_start_time_size_idx", "event_outbox_due_idx"];
 /// Taken around every migrator's work, and only ever polled for.
 const MIGRATOR_LOCK: i64 = 0x484f_545f_4d49_4752;
 const MIGRATOR_LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(250);

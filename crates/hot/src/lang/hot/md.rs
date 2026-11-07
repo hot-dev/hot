@@ -91,7 +91,7 @@ pub fn parse_frontmatter_str(input: &str) -> Result<(Val, String), String> {
         None => return Err("unterminated YAML frontmatter (missing closing '---')".to_string()),
     };
     let yaml_text = &after_first[..close];
-    if yaml_text.len() > crate::blob::MAX_INLINE_HARD_LIMIT_BYTES {
+    if yaml_text.len() > crate::lang::runtime::limits::max_parse_input_bytes() {
         return Err("YAML frontmatter exceeds byte budget".to_string());
     }
     // Inspect events before YamlLoader, which eagerly clones aliases and can
@@ -100,12 +100,17 @@ pub fn parse_frontmatter_str(input: &str) -> Result<(Val, String), String> {
     let mut parser = Parser::new(yaml_text.chars());
     let mut depth = 0usize;
     let mut nodes = 0usize;
+    let max_nodes = crate::lang::runtime::limits::operational_limit(
+        "HOT_YAML_MAX_NODES",
+        crate::lang::runtime::limits::max_expanded_value_nodes(),
+    );
+    let max_depth = crate::lang::runtime::limits::operational_limit("HOT_YAML_MAX_DEPTH", 256);
     loop {
         let (event, _) = parser
             .next_token()
             .map_err(|e| format!("invalid YAML frontmatter: {e}"))?;
         nodes += 1;
-        if nodes > 100_000 {
+        if nodes > max_nodes {
             return Err("YAML frontmatter exceeds node budget".to_string());
         }
         match event {
@@ -117,7 +122,7 @@ pub fn parse_frontmatter_str(input: &str) -> Result<(Val, String), String> {
                     return Err("YAML anchors are not supported in frontmatter".to_string());
                 }
                 depth += 1;
-                if depth > crate::blob::MAX_RECORD_DEPTH / 2 {
+                if depth > max_depth {
                     return Err("YAML frontmatter exceeds maximum nesting depth".to_string());
                 }
             }
@@ -185,6 +190,8 @@ mod tests {
         let input = format!("---\nx: {}0{}\n---\n", "[".repeat(1000), "]".repeat(1000));
         assert!(parse_frontmatter_str(&input).is_err());
         assert!(parse_frontmatter_str("---\nx: '*literal'\n---\nbody").is_ok());
+        let ordinary = format!("---\nx: {}0{}\n---\n", "[".repeat(100), "]".repeat(100));
+        assert!(parse_frontmatter_str(&ordinary).is_ok());
     }
 
     #[test]

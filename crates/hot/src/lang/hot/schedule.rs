@@ -195,10 +195,10 @@ pub fn create_schedule(
     let args_json: Option<serde_json::Value> = if fn_args.is_empty() {
         None
     } else {
-        Some(
-            serde_json::to_value(Val::vec(fn_args.clone()).to_hot_data_repr())
-                .unwrap_or(serde_json::Value::Null),
-        )
+        match Val::vec(fn_args.clone()).to_checked_json("::hot::schedule") {
+            Ok(json) => Some(json),
+            Err(error) => return HotResult::Err(Val::from(error)),
+        }
     };
 
     // Insert the schedule synchronously (use Handle::block_on since VM runs in spawn_blocking)

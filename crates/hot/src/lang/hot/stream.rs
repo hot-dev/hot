@@ -68,6 +68,7 @@ pub fn data(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     // Generate a new UUIDv7 for this stream data (provides ordering)
     let stream_data_id = Uuid::now_v7();
 
+    crate::validate_expansion!("::hot::stream/data", std::slice::from_ref(payload));
     // Convert payload to JSON, with registered secrets masked: a stream's
     // payload is meant for its consumer, but a run's secret isn't.
     let payload = match vm.get_execution_context() {

@@ -10,8 +10,7 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, OnceLock};
 
-pub const MAX_VALUE_NODES: usize = 4_000_000;
-pub const MAX_VALUE_EXPANDED_BYTES: usize = 128 * 1024 * 1024;
+use crate::lang::runtime::limits;
 
 pub(crate) const HOT_BYTE_TYPE: &str = "::hot::type/Byte";
 pub(crate) const HOT_BYTES_TYPE: &str = "::hot::type/Bytes";
@@ -19,37 +18,43 @@ pub(crate) const HOT_BYTES_TYPE: &str = "::hot::type/Bytes";
 /// Validate external JSON before writing it to a row read by fleet services.
 pub fn check_json_shape(value: &JsonValue, operation: &str) -> Result<(), String> {
     let mut pending = vec![(value, 0usize)];
-    let mut nodes = MAX_VALUE_NODES;
-    let mut bytes = crate::blob::MAX_INLINE_HARD_LIMIT_BYTES;
+    let mut nodes = limits::max_expanded_value_nodes();
+    let mut bytes = limits::max_expanded_value_bytes();
     while let Some((value, depth)) = pending.pop() {
         if depth > crate::blob::MAX_RECORD_DEPTH {
             return Err(format!("{operation}: JSON exceeds maximum depth"));
         }
-        nodes = nodes
-            .checked_sub(1)
-            .ok_or_else(|| format!("{operation}: JSON exceeds node limit"))?;
+        nodes = nodes.checked_sub(1).ok_or_else(|| {
+            format!("{operation}: JSON exceeds node limit; raise HOT_MAX_EXPANDED_VALUE_NODES")
+        })?;
         match value {
             JsonValue::Array(items) => {
                 if items.len() > nodes.saturating_sub(pending.len()) {
-                    return Err(format!("{operation}: JSON exceeds node limit"));
+                    return Err(format!(
+                        "{operation}: JSON exceeds node limit; raise HOT_MAX_EXPANDED_VALUE_NODES"
+                    ));
                 }
                 pending.extend(items.iter().map(|value| (value, depth + 1)));
             }
             JsonValue::Object(items) => {
                 if items.len() > nodes.saturating_sub(pending.len()) {
-                    return Err(format!("{operation}: JSON exceeds node limit"));
+                    return Err(format!(
+                        "{operation}: JSON exceeds node limit; raise HOT_MAX_EXPANDED_VALUE_NODES"
+                    ));
                 }
                 for (key, value) in items {
                     bytes = bytes
                         .checked_sub(key.len())
-                        .ok_or_else(|| format!("{operation}: JSON exceeds byte limit"))?;
+                        .ok_or_else(|| format!("{operation}: JSON exceeds byte limit; raise HOT_MAX_EXPANDED_VALUE_BYTES"))?;
                     pending.push((value, depth + 1));
                 }
             }
             JsonValue::String(text) => {
-                bytes = bytes
-                    .checked_sub(text.len())
-                    .ok_or_else(|| format!("{operation}: JSON exceeds byte limit"))?
+                bytes = bytes.checked_sub(text.len()).ok_or_else(|| {
+                    format!(
+                        "{operation}: JSON exceeds byte limit; raise HOT_MAX_EXPANDED_VALUE_BYTES"
+                    )
+                })?
             }
             _ => {}
         }
@@ -271,9 +276,6 @@ impl ShapeIdentity {
         }
     }
 }
-thread_local! {
-    static SHAPE_CHECKS: std::cell::RefCell<std::collections::VecDeque<(ShapeIdentity, Result<(),String>)>> = const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
-}
 
 /// A terminal value prepared on a blocking VM thread for async delivery.
 pub struct CheckedOutput {
@@ -334,10 +336,61 @@ impl CheckedOutput {
 #[repr(transparent)]
 pub struct ValVec(Vec<Val>);
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(transparent)]
-#[repr(transparent)]
-pub struct ValMap(IndexMap<Val, Val>);
+pub struct ValMap(
+    IndexMap<Val, Val>,
+    // Deserialized or mutably borrowed maps conservatively use iterative drop.
+    #[serde(skip, default = "may_have_children")] bool,
+);
+fn may_have_children() -> bool {
+    true
+}
+fn recursive_value(value: &Val) -> bool {
+    matches!(value, Val::Vec(_) | Val::Map(_) | Val::Box(_))
+}
+impl PartialEq for ValMap {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl Eq for ValMap {}
+impl std::ops::Deref for ValMap {
+    type Target = IndexMap<Val, Val>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for ValMap {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.1 = true;
+        &mut self.0
+    }
+}
+impl From<IndexMap<Val, Val>> for ValMap {
+    fn from(entries: IndexMap<Val, Val>) -> Self {
+        let recursive = entries
+            .iter()
+            .any(|(key, value)| recursive_value(key) || recursive_value(value));
+        Self(entries, recursive)
+    }
+}
+impl ValMap {
+    pub fn into_inner(mut self) -> IndexMap<Val, Val> {
+        std::mem::take(&mut self.0)
+    }
+    pub fn insert(&mut self, key: Val, value: Val) -> Option<Val> {
+        self.1 |= recursive_value(&key) || recursive_value(&value);
+        self.0.insert(key, value)
+    }
+}
+impl IntoIterator for ValMap {
+    type Item = (Val, Val);
+    type IntoIter = indexmap::map::IntoIter<Val, Val>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.into_inner().into_iter()
+    }
+}
 
 macro_rules! val_storage {
     ($name:ident, $inner:ty, $item:ty, $iter:ty) => {
@@ -372,14 +425,18 @@ macro_rules! val_storage {
     };
 }
 val_storage!(ValVec, Vec<Val>, Val, std::vec::IntoIter<Val>);
-val_storage!(ValMap, IndexMap<Val, Val>, (Val, Val), indexmap::map::IntoIter<Val, Val>);
 
 thread_local! {
     static VALUE_DROP_QUEUE: std::cell::RefCell<Option<Vec<Val>>> = const { std::cell::RefCell::new(None) };
 }
 
 fn drop_value_children(children: impl Iterator<Item = Val>) {
-    let mut children = children.peekable();
+    // Leaves cannot recurse. Drop them directly instead of allocating a
+    // worklist and borrowing TLS once per element of an ordinary flat value.
+    // Boxes stay on the worklist because their captures can own collections.
+    let mut children = children
+        .filter(|value| matches!(value, Val::Vec(_) | Val::Map(_) | Val::Box(_)))
+        .peekable();
     if children.peek().is_none() {
         return;
     }
@@ -425,11 +482,26 @@ fn drop_value_children(children: impl Iterator<Item = Val>) {
 
 impl Drop for ValVec {
     fn drop(&mut self) {
+        if !self
+            .0
+            .iter()
+            .any(|value| matches!(value, Val::Vec(_) | Val::Map(_) | Val::Box(_)))
+        {
+            return; // Rust drops flat storage in place, without a worklist.
+        }
         drop_value_children(self.0.drain(..));
     }
 }
 impl Drop for ValMap {
     fn drop(&mut self) {
+        if !self.1
+            || !self.0.iter().any(|(key, value)| {
+                matches!(key, Val::Vec(_) | Val::Map(_) | Val::Box(_))
+                    || matches!(value, Val::Vec(_) | Val::Map(_) | Val::Box(_))
+            })
+        {
+            return;
+        }
         drop_value_children(self.0.drain(..).flat_map(|(k, v)| [k, v]));
     }
 }
@@ -437,6 +509,13 @@ impl Drop for ValMap {
 // Custom PartialEq implementation that allows cross-type comparisons
 impl PartialEq for Val {
     fn eq(&self, other: &Self) -> bool {
+        if !matches!(
+            (self, other),
+            (Val::Vec(_), Val::Vec(_)) | (Val::Map(_), Val::Map(_))
+        ) {
+            return self.leaf_eq(other);
+        }
+
         let mut pending = vec![(self, other)];
         let mut compared = std::collections::HashSet::new();
         while let Some((a, b)) = pending.pop() {
@@ -622,6 +701,13 @@ impl PartialOrd for Val {
 // Manual implementation of Ord
 impl Ord for Val {
     fn cmp(&self, other: &Self) -> Ordering {
+        if !matches!(
+            (self, other),
+            (Val::Vec(_), Val::Vec(_)) | (Val::Map(_), Val::Map(_))
+        ) {
+            return self.leaf_cmp(other);
+        }
+
         enum Compare<'a> {
             Pair(&'a Val, &'a Val),
             Length(Ordering),
@@ -2344,7 +2430,7 @@ impl Val {
 
     /// A Map value holding `entries`.
     pub fn map(entries: IndexMap<Val, Val>) -> Self {
-        Val::Map(Arc::new(ValMap(entries)))
+        Val::Map(Arc::new(ValMap::from(entries)))
     }
 
     /// A Bytes value holding `bytes`.
@@ -2584,56 +2670,27 @@ impl Val {
         self.record_repr_within(crate::blob::RECORD_BUDGET_FLOOR_BYTES)
     }
 
-    /// Bound work before a native, persistence conversion, comparison or
-    /// formatter expands shared storage. Count occurrences, not unique nodes.
+    /// Bound work where shared storage is expanded, never at ordinary native dispatch.
+    /// Count occurrences, rather than unique nodes, to reject exponential DAG expansion.
     pub fn check_shape(&self, operation: &str) -> Result<(), String> {
-        let Some(identity) = ShapeIdentity::of(self) else {
-            return self.check_shape_uncached(operation);
-        };
-        let cached = SHAPE_CHECKS
-            .try_with(|checks| {
-                let mut checks = checks.borrow_mut();
-                let index = checks
-                    .iter()
-                    .position(|(identity, _)| identity.matches(self))?;
-                let entry = checks.remove(index).unwrap();
-                let result = entry.1.clone();
-                checks.push_front(entry);
-                Some(result)
-            })
-            .ok()
-            .flatten();
-        let result = cached.unwrap_or_else(|| {
-            let result = self.check_shape_uncached("value");
-            let _ = SHAPE_CHECKS.try_with(|checks| {
-                let mut checks = checks.borrow_mut();
-                checks.push_front((identity, result.clone()));
-                checks.truncate(256);
-            });
-            result
-        });
-        result.map_err(|error| {
-            format!(
-                "{operation}: {}",
-                error.strip_prefix("value: ").unwrap_or(&error)
-            )
-        })
-    }
-
-    fn check_shape_uncached(&self, operation: &str) -> Result<(), String> {
-        const MAX_NODES: usize = MAX_VALUE_NODES;
+        let max_nodes = limits::max_expanded_value_nodes();
+        let max_bytes = limits::max_expanded_value_bytes();
         match self {
             Val::Vec(_) | Val::Map(_) | Val::Box(_) => {}
-            Val::Str(s) if s.len() > MAX_VALUE_EXPANDED_BYTES => {
-                return Err(format!("{operation}: value exceeds expanded byte limit"));
+            Val::Str(s) if s.len() > max_bytes => {
+                return Err(format!(
+                    "{operation}: value exceeds expanded byte limit; raise HOT_MAX_EXPANDED_VALUE_BYTES"
+                ));
             }
-            Val::Bytes(b) if b.len() > MAX_VALUE_EXPANDED_BYTES => {
-                return Err(format!("{operation}: value exceeds expanded byte limit"));
+            Val::Bytes(b) if b.len() > max_bytes => {
+                return Err(format!(
+                    "{operation}: value exceeds expanded byte limit; raise HOT_MAX_EXPANDED_VALUE_BYTES"
+                ));
             }
             _ => return Ok(()),
         }
-        let mut nodes = MAX_NODES;
-        let mut bytes = MAX_VALUE_EXPANDED_BYTES;
+        let mut nodes = max_nodes;
+        let mut bytes = max_bytes;
         let mut pending = vec![(self, 0usize)];
         while let Some((value, depth)) = pending.pop() {
             if depth > crate::blob::MAX_RECORD_DEPTH {
@@ -2643,7 +2700,7 @@ impl Val {
                 ));
             }
             nodes = nodes.checked_sub(1).ok_or_else(|| {
-                format!("{operation}: value exceeds expanded node limit ({MAX_NODES})")
+                format!("{operation}: value exceeds expanded node limit ({max_nodes}; raise HOT_MAX_EXPANDED_VALUE_NODES)")
             })?;
             let leaf_bytes = match value {
                 Val::Str(s) => s.len(),
@@ -2652,7 +2709,7 @@ impl Val {
             };
             bytes = bytes
                 .checked_sub(leaf_bytes)
-                .ok_or_else(|| format!("{operation}: value exceeds expanded byte limit"))?;
+                .ok_or_else(|| format!("{operation}: value exceeds expanded byte limit; raise HOT_MAX_EXPANDED_VALUE_BYTES"))?;
             match value {
                 Val::Vec(items) => {
                     if items.len() > nodes.saturating_sub(pending.len()) {
@@ -2691,7 +2748,7 @@ impl Val {
     /// any formatter allocates it. Includes punctuation, indentation and Bytes.
     pub fn check_text_shape(&self, operation: &str) -> Result<(), String> {
         self.check_shape(operation)?;
-        let mut left = crate::blob::MAX_INLINE_HARD_LIMIT_BYTES;
+        let mut left = limits::max_string_bytes();
         let mut pending = vec![(self, 0usize)];
         while let Some((value, depth)) = pending.pop() {
             let extra = match value {
@@ -2722,13 +2779,19 @@ impl Val {
     /// Checked terminal conversion. Call this while still on the VM's blocking
     /// thread, before any async completion or notification path sees the value.
     pub fn to_checked_json(&self, operation: &str) -> Result<serde_json::Value, String> {
+        self.to_checked_json_with_limit(operation, limits::max_string_bytes())
+    }
+
+    fn to_checked_json_with_limit(
+        &self,
+        operation: &str,
+        max_bytes: usize,
+    ) -> Result<serde_json::Value, String> {
         self.check_shape(operation)?;
-        struct LimitedJson(Vec<u8>);
+        struct LimitedJson(Vec<u8>, usize);
         impl std::io::Write for LimitedJson {
             fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                if bytes.len()
-                    > crate::blob::MAX_INLINE_HARD_LIMIT_BYTES.saturating_sub(self.0.len())
-                {
+                if bytes.len() > self.1.saturating_sub(self.0.len()) {
                     return Err(std::io::Error::other("value exceeds serialized byte limit"));
                 }
                 self.0.extend_from_slice(bytes);
@@ -2738,7 +2801,7 @@ impl Val {
                 Ok(())
             }
         }
-        let mut output = LimitedJson(Vec::new());
+        let mut output = LimitedJson(Vec::new(), max_bytes);
         serde_json::to_writer(&mut output, &self.to_hot_data_repr())
             .map_err(|e| format!("{operation}: {e}"))?;
         serde_json::from_slice(&output.0).map_err(|e| format!("{operation}: {e}"))
@@ -4059,7 +4122,33 @@ mod tests {
     use fastnum::decimal::Context;
 
     #[test]
-    fn cached_shape_checks_follow_copy_on_write_changes() {
+    fn map_drop_hint_survives_mutation_and_serialization() {
+        std::thread::Builder::new()
+            .stack_size(128 * 1024)
+            .spawn(|| {
+                let mut map = ValMap::from(IndexMap::new());
+                map.insert(Val::from("x"), Val::Int(1));
+                assert!(!map.1);
+                let restored: ValMap =
+                    serde_json::from_str(&serde_json::to_string(&map).unwrap()).unwrap();
+                assert!(restored.1);
+                assert_eq!(map, restored); // The hint is not part of value equality.
+                let deep = || (0..30_000).fold(Val::Null, |value, _| Val::vec(vec![value]));
+                *map.get_mut(&Val::from("x")).unwrap() = deep();
+                assert!(map.1);
+                drop(map);
+                let mut map = ValMap::from(IndexMap::new());
+                map.insert(Val::from("nested"), deep());
+                assert!(map.1);
+                drop(map);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn shape_checks_follow_copy_on_write_changes() {
         let mut value = Val::vec(vec![Val::Int(1)]);
         value.check_shape("first").unwrap();
         let deep = (0..130).fold(Val::Null, |v, _| Val::vec(vec![v]));
@@ -4130,8 +4219,9 @@ mod tests {
             value.to_checked_json("test").unwrap(),
             serde_json::to_value(value.to_hot_data_repr()).unwrap()
         );
-        let escaped = Val::from("\0".repeat(crate::blob::MAX_INLINE_HARD_LIMIT_BYTES / 6 + 1));
-        assert!(escaped.to_checked_json("test").is_err());
+        let escaped = Val::from("\0".repeat(100));
+        assert!(escaped.to_checked_json_with_limit("test", 599).is_err());
+        assert!(escaped.to_checked_json_with_limit("test", 602).is_ok());
     }
 
     /// Numbers order by value whichever variant holds them, and an Int and a

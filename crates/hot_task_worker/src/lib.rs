@@ -1053,10 +1053,7 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
         .worker_conf
         .get_int_or_default("worker.max-blocking-executions", -1);
     let max_blocking_executions = blocking_execution_capacity(code_max, configured_max_blocking);
-    let code_semaphore = Arc::new(hot::run_slots::RunSlots::new_with_wait_limit(
-        code_max,
-        max_blocking_executions.saturating_sub(1),
-    ));
+    let code_semaphore = Arc::new(hot::run_slots::RunSlots::new(code_max));
     let blocking_execution_slots = Arc::new(Semaphore::new(max_blocking_executions));
     hot::execution_watchdog::tasks().configure(max_blocking_executions);
     tracing::info!(
@@ -1397,7 +1394,7 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
                 }
                 let status = slot_status::SlotStatus {
                     code_slots: code_max,
-                    code_busy: code_max.saturating_sub(code.available_permits()),
+                    code_busy: code_max.saturating_sub(code.available()),
                     container_slots: container_max,
                     container_busy: container_max.saturating_sub(containers.available_permits()),
                     memory_mb: memory.total_memory_mb(),
@@ -5865,6 +5862,9 @@ async fn process_code_task(
         // not the JoinHandle: when the timeout arm drops the handle, this
         // detached thread keeps consuming a permit until the closure returns,
         // so admission backpressure reflects wedged VM threads.
+        let _blocking_pool_scope = hot::lang::hot::native_io::BlockingPoolScope::enter(Arc::clone(
+            blocking_execution_permit.semaphore(),
+        ));
         let _blocking_execution_permit = blocking_execution_permit;
         // Likewise the extraction: a wedged VM can still read its resources.
         let _bundle_lease = bundle_lease;

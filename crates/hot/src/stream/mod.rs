@@ -502,6 +502,13 @@ impl Clone for StreamPubSub {
 }
 
 impl StreamPubSub {
+    pub fn with_run_timeout(self, timeout: std::time::Duration) -> Self {
+        match self {
+            Self::Redis(redis) => Self::Redis(redis.with_run_timeout(timeout)),
+            memory => memory,
+        }
+    }
+
     /// Create a new StreamPubSub with the specified backend
     pub fn new(
         pubsub_type: StreamPubSubType,

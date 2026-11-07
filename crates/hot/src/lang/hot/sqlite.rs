@@ -550,8 +550,25 @@ enum RunMode {
 }
 
 fn run(args: &[Val], fn_name: &str, mode: RunMode) -> Result<Val, String> {
-    const MAX_QUERY_ROWS: usize = 10_000;
-    const MAX_QUERY_CELLS: usize = 100_000;
+    use crate::lang::runtime::limits;
+    run_with_limits(
+        args,
+        fn_name,
+        mode,
+        limits::operational_limit("HOT_SQLITE_MAX_QUERY_ROWS", limits::max_collection_size()),
+        limits::operational_limit("HOT_SQLITE_MAX_QUERY_CELLS", limits::max_collection_size()),
+        limits::operational_limit("HOT_SQLITE_MAX_QUERY_BYTES", limits::max_alloc_bytes()),
+    )
+}
+
+fn run_with_limits(
+    args: &[Val],
+    fn_name: &str,
+    mode: RunMode,
+    max_rows: usize,
+    max_cells: usize,
+    max_bytes: usize,
+) -> Result<Val, String> {
     let handle = get_handle(args, fn_name)?;
     let sql = match &args[1] {
         Val::Str(s) => s.to_string(),
@@ -593,7 +610,7 @@ fn run(args: &[Val], fn_name: &str, mode: RunMode) -> Result<Val, String> {
         ffi::sqlite3_limit(
             db,
             ffi::SQLITE_LIMIT_LENGTH,
-            crate::blob::MAX_INLINE_HARD_LIMIT_BYTES as i32,
+            max_bytes.min(i32::MAX as usize) as i32,
         );
         ffi::sqlite3_progress_handler(
             db,
@@ -642,10 +659,10 @@ fn run(args: &[Val], fn_name: &str, mode: RunMode) -> Result<Val, String> {
             loop {
                 match unsafe { ffi::sqlite3_step(stmt.ptr) } {
                     ffi::SQLITE_ROW => {
-                        if rows.len() >= MAX_QUERY_ROWS
-                            || (rows.len() + 1).saturating_mul(col_count as usize) > MAX_QUERY_CELLS
+                        if rows.len() >= max_rows
+                            || (rows.len() + 1).saturating_mul(col_count as usize) > max_cells
                         {
-                            return Err("query result exceeds row/cell limit".to_string());
+                            return Err("query result exceeds row/cell limit; raise HOT_SQLITE_MAX_QUERY_ROWS or HOT_SQLITE_MAX_QUERY_CELLS".to_string());
                         }
                         let mut row = indexmap::IndexMap::new();
                         for c in 0..col_count {
@@ -654,8 +671,8 @@ fn run(args: &[Val], fn_name: &str, mode: RunMode) -> Result<Val, String> {
                             result_bytes = result_bytes
                                 .saturating_add(bytes)
                                 .saturating_add(std::mem::size_of::<Val>() * 2);
-                            if result_bytes > crate::blob::MAX_INLINE_HARD_LIMIT_BYTES {
-                                return Err("query result exceeds byte limit".to_string());
+                            if result_bytes > max_bytes {
+                                return Err("query result exceeds byte limit; raise HOT_SQLITE_MAX_QUERY_BYTES".to_string());
                             }
                             row.insert(names[c as usize].clone(), column_value(stmt.ptr, c));
                         }
@@ -955,6 +972,8 @@ mod budget_tests {
     #[test]
     fn query_stops_before_materializing_unbounded_rows_or_bytes() {
         let conn = connection();
+        // The previous hard-coded 10k ceiling rejected ordinary queries.
+        assert!(run(&[conn.clone(), Val::from("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10001) SELECT x FROM n"), Val::Null], "query", RunMode::Query).is_ok());
         for (sql, expected) in [
             (
                 "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10001) SELECT x FROM n",
@@ -965,10 +984,13 @@ mod budget_tests {
                 "byte limit",
             ),
         ] {
-            let error = run(
+            let error = run_with_limits(
                 &[conn.clone(), Val::from(sql), Val::Null],
                 "query",
                 RunMode::Query,
+                10_000,
+                100_000,
+                32 * 1024 * 1024,
             )
             .unwrap_err();
             assert!(error.contains(expected), "{error}");

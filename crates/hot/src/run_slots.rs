@@ -35,21 +35,15 @@ pub struct RunSlots {
 #[derive(Debug)]
 struct Pool {
     semaphore: Arc<Semaphore>,
-    waiters: Arc<Semaphore>,
     /// How many started runs are waiting to take a slot back.
     resuming: watch::Sender<usize>,
 }
 
 impl RunSlots {
     pub fn new(limit: usize) -> Self {
-        Self::new_with_wait_limit(limit, Semaphore::MAX_PERMITS)
-    }
-
-    pub fn new_with_wait_limit(limit: usize, waiting: usize) -> Self {
         Self {
             pool: Arc::new(Pool {
                 semaphore: Arc::new(Semaphore::new(limit.clamp(1, Semaphore::MAX_PERMITS))),
-                waiters: Arc::new(Semaphore::new(waiting.min(Semaphore::MAX_PERMITS))),
                 resuming: watch::Sender::new(0),
             }),
         }
@@ -82,10 +76,6 @@ impl RunSlots {
     /// Slots free right now.
     pub fn available(&self) -> usize {
         self.pool.semaphore.available_permits()
-    }
-
-    pub fn available_permits(&self) -> usize {
-        self.available()
     }
 }
 
@@ -162,16 +152,7 @@ impl RunSlotHandle {
         ParkedRun {
             handle: self.clone(),
             cancel,
-            _waiting_permit: None,
         }
-    }
-
-    pub fn try_park(&self, cancel: Option<Arc<AtomicBool>>) -> Result<ParkedRun, String> {
-        let permit = Arc::clone(&self.shared.pool.waiters).try_acquire_owned()
-            .map_err(|_| "Worker waiting-task capacity exceeded; execution capacity is reserved for runnable tasks".to_string())?;
-        let mut parked = self.park(cancel);
-        parked._waiting_permit = Some(permit);
-        Ok(parked)
     }
 }
 
@@ -180,7 +161,6 @@ impl RunSlotHandle {
 pub struct ParkedRun {
     handle: RunSlotHandle,
     cancel: Option<Arc<AtomicBool>>,
-    _waiting_permit: Option<OwnedSemaphorePermit>,
 }
 
 impl Drop for ParkedRun {

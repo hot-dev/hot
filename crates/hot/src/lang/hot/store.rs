@@ -405,6 +405,7 @@ fn search_result_to_val(result: &store::SearchResult) -> Val {
 
 pub fn put(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::store/put", args, 3);
+    crate::validate_expansion!("::hot::store/put", &args[1..]);
     let (store, config) = match ensure_store(vm, &args[0]) {
         Ok(v) => v,
         Err(e) => return HotResult::Err(e),
@@ -426,6 +427,7 @@ pub fn put(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
 
 pub fn put_if_missing(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::store/put-if-missing", args, 3);
+    crate::validate_expansion!("::hot::store/put-if-missing", &args[1..]);
     let (store, config) = match ensure_store(vm, &args[0]) {
         Ok(v) => v,
         Err(e) => return HotResult::Err(e),
@@ -465,6 +467,7 @@ pub fn put_if_missing(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
 
 pub fn put_if(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::store/put-if", args, 4);
+    crate::validate_expansion!("::hot::store/put-if", &args[1..]);
     let (store, config) = match ensure_store(vm, &args[0]) {
         Ok(v) => v,
         Err(e) => return HotResult::Err(e),
@@ -509,6 +512,7 @@ pub fn put_if(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
 
 pub fn increment(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     validate_args_range!("::hot::store/increment", args, 2, 3);
+    crate::validate_expansion!("::hot::store/increment", &args[1..]);
     let (store, config) = match ensure_store(vm, &args[0]) {
         Ok(v) => v,
         Err(e) => return HotResult::Err(e),
@@ -532,6 +536,7 @@ pub fn increment(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
 
 pub fn get(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     validate_args_range!("::hot::store/get", args, 2, 3);
+    crate::validate_expansion!("::hot::store/get", &args[1..]);
     let (store, config) = match ensure_store(vm, &args[0]) {
         Ok(v) => v,
         Err(e) => return HotResult::Err(e),
@@ -554,6 +559,7 @@ pub fn get(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
 
 pub fn delete(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::store/delete", args, 2);
+    crate::validate_expansion!("::hot::store/delete", &args[1..]);
     let (store, config) = match ensure_store(vm, &args[0]) {
         Ok(v) => v,
         Err(e) => return HotResult::Err(e),
@@ -667,6 +673,7 @@ pub fn last(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
 
 pub fn merge(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::store/merge", args, 2);
+    crate::validate_expansion!("::hot::store/merge", &args[1..]);
     let (store, config) = match ensure_store(vm, &args[0]) {
         Ok(v) => v,
         Err(e) => return HotResult::Err(e),

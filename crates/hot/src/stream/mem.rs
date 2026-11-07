@@ -20,6 +20,8 @@ use uuid::Uuid;
 /// This determines how many events can be buffered before subscribers lag
 const CHANNEL_CAPACITY: usize = 256;
 
+type TaskHistory = AHashMap<String, (VecDeque<StreamEvent>, std::time::Instant)>;
+
 /// In-memory stream pub/sub using tokio broadcast channels
 ///
 /// Uses a RwLock<HashMap> to store broadcast senders per stream_id.
@@ -27,7 +29,7 @@ const CHANNEL_CAPACITY: usize = 256;
 /// When a publisher publishes, they send to the corresponding sender.
 #[derive(Clone)]
 pub struct MemStreamPubSub {
-    task_history: Arc<RwLock<AHashMap<String, (VecDeque<StreamEvent>, std::time::Instant)>>>,
+    task_history: Arc<RwLock<TaskHistory>>,
     /// Map of channel key -> broadcast sender
     /// The sender is created lazily when first needed
     channels: Arc<RwLock<AHashMap<String, broadcast::Sender<StreamEvent>>>>,

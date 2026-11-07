@@ -453,6 +453,7 @@ pub fn send(args: &[Val]) -> HotResult<Val> {
         return HotResult::Err(err_val("::hot::ws/send: connection is closed".to_string()));
     }
 
+    crate::validate_expansion!("::hot::ws/send", &args[1..2]);
     let message = val_to_message(&args[1]);
 
     match super::native_io::block_on_result("::hot::ws/send", async {

@@ -1290,9 +1290,10 @@ impl DatabaseEngineEventEmitter {
 // Each VM thread keeps a small cache for its current run. Weak identities
 // prevent pointer reuse without retaining discarded inputs; COW invalidates them.
 // Shape decisions and data conversion happen before entering the shared queue.
+type RecordCache = (Uuid, Vec<(ShapeIdentity, Val)>, usize);
 thread_local! {
-    static RECORD_CACHE: std::cell::RefCell<(Uuid, Vec<(ShapeIdentity, Val)>, usize)> =
-        std::cell::RefCell::new((Uuid::nil(), Vec::new(), 0));
+    static RECORD_CACHE: std::cell::RefCell<RecordCache> =
+        const { std::cell::RefCell::new((Uuid::nil(), Vec::new(), 0)) };
 }
 fn prepare_record_value(run: Uuid, value: &Val) -> Val {
     let Some(identity) = ShapeIdentity::of(value) else {

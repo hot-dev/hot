@@ -1913,11 +1913,16 @@ async fn process_pending_retries(
     event_queue: &Arc<dyn Queue<Message>>,
     env_id: Option<Uuid>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    tokio::time::timeout(
+    match tokio::time::timeout(
         Duration::from_secs(30),
         hot::lang::event::queue::recover_event_outbox(db, event_queue.as_ref(), env_id),
     )
-    .await??;
+    .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => warn!(%error, "Event outbox sweep failed; continuing run retries"),
+        Err(error) => warn!(%error, "Event outbox sweep timed out; continuing run retries"),
+    }
     // Get runs pending retry (batch of 50)
     let pending_runs = hot::db::run::Run::get_pending_retries_for_environment(db, 50, env_id)
         .await
@@ -3124,6 +3129,60 @@ mod tests {
             MemQueue::new(format!("test:retry-unretryable:{}", Uuid::now_v7()))
                 .expect("memory queue"),
         );
+
+        process_pending_retries(&db, &queue, None).await.unwrap();
+        process_pending_retries(&db, &queue, None).await.unwrap();
+
+        assert!(queue.is_empty().await.unwrap(), "nothing to retry");
+        let (status, attempt, _) = run_state(&db, data.run_id).await;
+        assert_eq!(status, hot::db::run::RunStatus::Failed.as_id());
+        assert_eq!(attempt, 1, "back at the attempt it ran as, once");
+    }
+
+    #[tokio::test]
+    async fn failed_outbox_recovery_does_not_skip_run_retry_processing() {
+        let db = Arc::new(hot::db::test_db().await);
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let hot::db::DatabasePool::Sqlite(pool) = db.as_ref() else {
+            panic!("test_db should be SQLite");
+        };
+        // The worker raised retry_attempt from 1 to 2 when it scheduled the
+        // retry; the attempt has no event to retry from.
+        sqlx::query(
+            "UPDATE run SET status_id = ?, retry_attempt = 2, next_retry_at = ?, event_id = NULL WHERE run_id = ?",
+        )
+        .bind(hot::db::run::RunStatus::PendingRetry.as_id())
+        .bind(Utc::now() - chrono::Duration::seconds(60))
+        .bind(data.run_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        let event_id = Uuid::now_v7();
+        let packet = Message {
+            id: event_id,
+            head: Val::Null,
+            body: Val::Null,
+        };
+        hot::db::event::Event::insert_event_with_outbox(
+            &db,
+            &event_id,
+            &data.env_id,
+            &data.stream_id,
+            "test:outbox",
+            &serde_json::Value::Null,
+            Utc::now(),
+            &data.user_id,
+            None,
+            &serde_json::to_value(packet).unwrap(),
+        )
+        .await
+        .unwrap();
+        hot::db::event::Event::release_enqueue(&db, &event_id, Utc::now())
+            .await
+            .unwrap();
+        let queue: Arc<dyn Queue<Message>> = Arc::new(SwitchableQueue {
+            refusing: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        });
 
         process_pending_retries(&db, &queue, None).await.unwrap();
         process_pending_retries(&db, &queue, None).await.unwrap();

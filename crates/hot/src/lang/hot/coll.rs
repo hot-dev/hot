@@ -1060,6 +1060,7 @@ pub fn assoc(args: &[Val]) -> HotResult<Val> {
     let map = crate::val::as_fields(&args[0]);
     let key = &args[1];
     let value = &args[2];
+    crate::validate_expansion!("assoc map key", std::slice::from_ref(key));
 
     match map {
         Val::Map(m) => {
@@ -1067,7 +1068,7 @@ pub fn assoc(args: &[Val]) -> HotResult<Val> {
             new_map.insert(key.clone(), value.clone());
             HotResult::Ok(crate::val::with_type_of(
                 &args[0],
-                Val::map(new_map.into_inner()),
+                Val::Map(std::sync::Arc::new(new_map)),
             ))
         }
         _ => HotResult::Err(Val::from(
@@ -1180,6 +1181,7 @@ pub fn concat(args: &[Val]) -> HotResult<Val> {
 /// Merge two maps
 pub fn merge(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::coll/merge", args, 2);
+    crate::validate_expansion!("deep merge", args);
 
     match (
         crate::val::as_fields(&args[0]),
@@ -2724,15 +2726,16 @@ fn indexed_by(
 /// How many times each element occurs in a vector, in first-seen order.
 pub fn frequencies(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::coll/frequencies", args, 1);
-    into_hot_result(vec_items("frequencies", &args[0]).map(|items| {
+    into_hot_result(vec_items("frequencies", &args[0]).and_then(|items| {
         let mut counts: IndexMap<Val, i64> = IndexMap::new();
         for item in items {
+            item.check_shape("frequencies map key").map_err(Val::from)?;
             *counts.entry(item.clone()).or_default() += 1;
         }
-        counts
+        Ok(counts
             .into_iter()
             .map(|(item, count)| (item, Val::Int(count)))
-            .collect()
+            .collect())
     }))
 }
 
@@ -2845,6 +2848,7 @@ pub fn distinct(args: &[Val]) -> HotResult<Val> {
             let mut result = Vec::new();
 
             for item in items.iter() {
+                crate::validate_expansion!("distinct formatted key", std::slice::from_ref(item));
                 // Create a simple hash key for the item
                 let key = format!("{:?}", item);
                 if seen.insert(key) {
@@ -3098,6 +3102,7 @@ pub fn flatten(args: &[Val]) -> HotResult<Val> {
         )));
     }
 
+    crate::validate_expansion!("flatten", args);
     match &args[0] {
         Val::Vec(items) => {
             fn flatten_recursive(val: &Val, out: &mut Vec<Val>) {
@@ -3150,6 +3155,7 @@ pub fn zipmap(args: &[Val]) -> HotResult<Val> {
 
     // Zip keys and values together
     for (key, value) in keys.into_iter().zip(values) {
+        crate::validate_expansion!("zipmap map key", std::slice::from_ref(&key));
         result_map.insert(key, value);
     }
 
@@ -3616,6 +3622,7 @@ pub fn prewalk(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) 
         )));
     }
 
+    crate::validate_expansion!("prewalk", &args[1..2]);
     let function_val = &args[0];
     let data = &args[1];
 
@@ -3675,6 +3682,7 @@ pub fn postwalk(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val])
         )));
     }
 
+    crate::validate_expansion!("postwalk", &args[1..2]);
     let function_val = &args[0];
     let data = &args[1];
 
@@ -3737,6 +3745,7 @@ pub fn postwalk_replace(
         )));
     }
 
+    crate::validate_expansion!("postwalk-replace", &args[1..2]);
     let replacement_map = match &args[0] {
         Val::Map(m) => m,
         _ => {
