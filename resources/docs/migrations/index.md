@@ -36,6 +36,22 @@ $env:HOT_VERSION = "2.3.0"; irm https://get.hot.dev/install.ps1 | iex
 
 Pinned installs are useful when you need to finish database migrations with an older release line before moving to a newer major version.
 
+## Upgrading from Hot 3.0.4 to 3.0.5 {#upgrading-from-3-0-4-to-3-0-5}
+
+**Migrations 032, 033 and 034.** Run `hot db migrate` with the 3.0.5 CLI. Migration 032 adds a nullable `enqueue_payload` column to `event`, which holds an event's queue packet until it's enqueued. Migration 033 adds a nullable `quota_epoch` column to `parked_event`. Existing rows keep NULL, which means nothing is owed.
+
+**Migration 034 builds an index concurrently.** On PostgreSQL it creates `event_outbox_due_idx` with `CREATE INDEX CONCURRENTLY`, so writes to `event` continue while it builds. It runs outside a transaction, and waits for transactions already open on `event`. If the build is interrupted, the next `hot db migrate` drops the invalid index and builds it again.
+
+**Kata task-worker hosts need `nftables`.** Install it, or rebuild the host image, before you deploy the 3.0.5 task worker. Without `nft`, every box with network access fails. Boxes also lose `NET_RAW`, and run after the image's `ENTRYPOINT` as its `USER`. See [Box command compatibility](/docs/configuration/network).
+
+**Optional: expire old notification streams.** Redis notification streams now expire when idle, and streams created before 3.0.5 keep no expiry. Run `scripts/expire-notification-streams.sh` to preview the backfill, then again with `--apply`. It deletes nothing and leaves existing expiries alone.
+
+**What to check in your code:**
+
+- A generated constructor's refusals are all a `ConstraintError.Violation`, including a missing required field, which used to be a plain `Str`. Code that matched the old error text needs the new text.
+- `distinct` treats two maps with the same entries in a different order as one value.
+- A rest parameter checks every argument, not only the positions it declares.
+
 ## Upgrading from Hot 3.0.3 to 3.0.4 {#upgrading-from-3-0-3-to-3-0-4}
 
 **Migrations 030 and 031.** Run `hot db migrate` with the 3.0.4 CLI. Migration 030 replaces the unique index on `schedule`, and on PostgreSQL it blocks writes to that table while the new index builds. Migration 031 adds a nullable `enqueue_leased_until` column to `event`.
