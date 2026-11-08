@@ -5,7 +5,8 @@
 // Placeholder credentials for the microsoft-graph, microsoft-onedrive and
 // microsoft-sharepoint integration suites (one project). Unset environment
 // variables are skipped entirely, so absent credentials behave exactly as
-// if never configured. Every test is read-only.
+// if never configured. Every test is read-only, except the microsoft-excel
+// suite, which runs only with MS_TEST_WORKBOOK and cleans up after itself.
 //
 //   MS_TENANT_ID      tenant GUID or domain (app-only needs one; delegated defaults to common)
 //   MS_CLIENT_ID      the Entra app (client) id
@@ -14,6 +15,7 @@
 //   MS_ACCESS_TOKEN   or a ready access token
 //   MS_TEST_DRIVE_ID  a drive to read (required for app-only; default /me/drive)
 //   MS_TEST_SITE_ID   a SharePoint site id for the sharepoint suite
+//   MS_TEST_WORKBOOK  a writable .xlsx (path or id) for the excel suite; delegated tokens only
 ::hot::ctx/set(filter-vals({
     "microsoft.tenant.id": ::env/get("MS_TENANT_ID", ""),
     "microsoft.client.id": ::env/get("MS_CLIENT_ID", ""),

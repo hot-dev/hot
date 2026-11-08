@@ -1,0 +1,230 @@
+::google::slides::presentations ns
+meta {
+    doc: """
+    Presentations: fetch, create, `batchUpdate`, pages and thumbnails, and
+    helpers for the common edits (outline, add a text slide, find and
+    replace, fill a template).
+
+    **Scopes.** `get-presentation`, `get-page`, `get-thumbnail` and
+    `outline` use `presentations.readonly`; everything else
+    `presentations`. `drive.file` works for presentations the app created
+    or the user opened with it. Copying a template, moving, sharing,
+    exporting (PDF, PowerPoint) and deleting a presentation are Drive
+    calls (`google-drive`).
+    """
+}
+
+::slides ::google::slides
+::req ::google::slides::requests
+::content ::google::slides::content
+
+// ---------------------------------------------------------------------------
+// Presentations and pages
+// ---------------------------------------------------------------------------
+
+get-presentation
+meta {
+    doc: """
+    GET /{id} - the presentation: `presentationId`, `title`, `pageSize`,
+    `slides`, `masters`, `layouts`, `revisionId`. Pass `fields` to trim
+    the response. Scope: `presentations.readonly`.
+    """
+}
+fn
+(presentation-id: Str): Map {
+  get-presentation(presentation-id, {})
+},
+(presentation-id: Str, opts: Map): Map {
+  ::slides/json(::slides/READ_SCOPE, "GET", ::slides/url(`/${::slides/encode-id(presentation-id)}`, ::slides/query-params({}, opts)), "", opts)
+}
+
+build-presentation
+meta {
+    doc: """The `presentations.create` body (pure): `{title}` plus `presentationId` (choose the id), `locale` and `pageSize` from `opts` when set."""
+}
+fn (title: Str, opts: Map): Map {
+  ::slides/compact({
+    title: title,
+    presentationId: get(opts, "presentationId"),
+    locale: get(opts, "locale"),
+    pageSize: get(opts, "pageSize")
+  })
+}
+
+create-presentation
+meta {
+    doc: """
+    POST /v1/presentations - create a presentation with one title slide.
+    Returns the resource with `presentationId`. It lands in the
+    authenticated user's My Drive root (move it with google-drive's
+    `move-file`); a service account without domain-wide delegation owns
+    it alone, so share it before anyone else can open it. Scope:
+    `presentations` (or `drive.file`).
+    """
+}
+fn
+(title: Str): Map {
+  create-presentation(title, {})
+},
+(title: Str, opts: Map): Map {
+  ::slides/json(::slides/SCOPE, "POST", ::slides/url(""), build-presentation(title, opts), opts)
+}
+
+batch-update-body
+meta {
+    doc: """The `batchUpdate` body (pure): `{requests}` plus `writeControl` from `opts` when set (`{requiredRevisionId}` fails the write if the presentation changed)."""
+}
+fn (requests: Vec, opts: Map): Map {
+  ::slides/compact({requests: requests, writeControl: get(opts, "writeControl")})
+}
+
+batch-update
+meta {
+    doc: """
+    POST /{id}:batchUpdate - apply a Vec of requests atomically, in
+    order: if one is invalid, none apply. Returns `{presentationId,
+    replies, writeControl}`. Later requests can use object ids chosen in
+    earlier ones. `::google::slides::requests` builds requests; any
+    request as a plain Map works too. Scope: `presentations` (or
+    `drive.file`).
+    """
+}
+fn
+(presentation-id: Str, requests: Vec): Map {
+  batch-update(presentation-id, requests, {})
+},
+(presentation-id: Str, requests: Vec, opts: Map): Map {
+  ::slides/json(::slides/SCOPE, "POST", ::slides/url(`/${::slides/encode-id(presentation-id)}:batchUpdate`), batch-update-body(requests, opts), opts)
+}
+
+page-path fn (presentation-id: Str, page-id: Str): Str {
+  `/${::slides/encode-id(presentation-id)}/pages/${::slides/encode-id(page-id)}`
+}
+
+get-page
+meta {
+    doc: """GET /{id}/pages/{pageId} - one slide, layout or master. Scope: `presentations.readonly`."""
+}
+fn
+(presentation-id: Str, page-id: Str): Map {
+  get-page(presentation-id, page-id, {})
+},
+(presentation-id: Str, page-id: Str, opts: Map): Map {
+  ::slides/json(::slides/READ_SCOPE, "GET", ::slides/url(page-path(presentation-id, page-id), ::slides/query-params({}, opts)), "", opts)
+}
+
+thumbnail-params
+meta {
+    doc: """The query parameters `get-thumbnail` sends (pure), from `opts.mimeType` (`PNG`) and `opts.thumbnailSize` (`SMALL`, `MEDIUM`, `LARGE`)."""
+}
+fn (opts: Map): Map {
+  ::slides/compact({
+    "thumbnailProperties.mimeType": get(opts, "mimeType"),
+    "thumbnailProperties.thumbnailSize": get(opts, "thumbnailSize")
+  })
+}
+
+get-thumbnail
+meta {
+    doc: """
+    GET /{id}/pages/{pageId}/thumbnail - `{contentUrl, width, height}`
+    for a rendered image of a page. `contentUrl` is short-lived (about 30
+    minutes) and needs no credentials. Counts against the expensive-read
+    quota. Scope: `presentations.readonly`.
+    """
+}
+fn
+(presentation-id: Str, page-id: Str): Map {
+  get-thumbnail(presentation-id, page-id, {})
+},
+(presentation-id: Str, page-id: Str, opts: Map): Map {
+  ::slides/json(::slides/READ_SCOPE, "GET", ::slides/url(`${page-path(presentation-id, page-id)}/thumbnail`, thumbnail-params(opts)), "", opts)
+}
+
+// ---------------------------------------------------------------------------
+// Common edits
+// ---------------------------------------------------------------------------
+
+outline
+meta {
+    doc: """Every slide as `{id, title, text, notes}`; see `::google::slides::content/outline`. Scope: `presentations.readonly`."""
+}
+fn
+(presentation-id: Str): Vec {
+  outline(presentation-id, {})
+},
+(presentation-id: Str, opts: Map): Vec {
+  deck get-presentation(presentation-id, opts)
+  if(is-err(deck), deck, ::content/outline(deck))
+}
+
+text-slide-requests
+meta {
+    doc: """The requests `add-text-slide` sends (pure): a `TITLE_AND_BODY` slide with ids in `ids` (`{slide, title, body}`), then its title and body text. `opts.insertionIndex` places the slide."""
+}
+fn (title: Str, body: Str, ids: Map, opts: Map): Vec {
+  [
+    ::req/create-slide("TITLE_AND_BODY", {
+      objectId: ids.slide,
+      insertionIndex: get(opts, "insertionIndex"),
+      placeholders: [
+        ::req/placeholder("TITLE", 0, ids.title),
+        ::req/placeholder("BODY", 0, ids.body)
+      ]
+    }),
+    ::req/insert-text(ids.title, title),
+    ::req/insert-text(ids.body, body)
+  ]
+}
+
+add-text-slide
+meta {
+    doc: """
+    Add a title-and-body slide, at the end unless `opts.insertionIndex`.
+    Returns `{slide, title, body}`, the new object ids, for further
+    edits. Scope: `presentations` (or `drive.file`).
+    """
+}
+fn
+(presentation-id: Str, title: Str, body: Str): Map {
+  add-text-slide(presentation-id, title, body, {})
+},
+(presentation-id: Str, title: Str, body: Str, opts: Map): Map {
+  ids {slide: ::req/new-object-id(), title: ::req/new-object-id(), body: ::req/new-object-id()}
+  result batch-update(presentation-id, text-slide-requests(title, body, ids, opts), opts)
+  if(is-err(result), result, ids)
+}
+
+replace-text
+meta {
+    doc: """
+    Replace every occurrence of `search` with `replacement`, on every
+    page unless `{pageObjectIds: [...]}`. Case-sensitive unless
+    `{matchCase: false}`. The reply's `replaceAllText.occurrencesChanged`
+    is the count. Scope: `presentations` (or `drive.file`).
+    """
+}
+fn
+(presentation-id: Str, search: Str, replacement: Str): Map {
+  replace-text(presentation-id, search, replacement, {})
+},
+(presentation-id: Str, search: Str, replacement: Str, opts: Map): Map {
+  batch-update(presentation-id, [::req/replace-all-text(search, replacement, opts)], opts)
+}
+
+fill-template
+meta {
+    doc: """
+    Replace each `{{key}}` in the presentation with its value from
+    `values` (values are converted with `Str`; null values are skipped).
+    The usual template flow is google-drive's `copy-file`, then this on
+    the copy. Scope: `presentations` (or `drive.file`).
+    """
+}
+fn
+(presentation-id: Str, values: Map): Map {
+  fill-template(presentation-id, values, {})
+},
+(presentation-id: Str, values: Map, opts: Map): Map {
+  batch-update(presentation-id, ::req/fill-template(values, opts), opts)
+}

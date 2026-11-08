@@ -1,0 +1,224 @@
+::microsoft::excel::tables ns
+meta {
+    doc: """
+    Excel tables: list, create, update and delete, columns and rows, and
+    rows as records. A table is addressed by name or id. Tables are the
+    reliable way to append: Excel finds the end for you.
+    """
+}
+
+::excel ::microsoft::excel
+::records ::microsoft::excel::records
+
+list-tables
+meta {
+    doc: """GET /workbook/tables, or a worksheet's tables with `opts.sheet`. Returns a Vec of tables."""
+}
+fn
+(item: Any): Vec {
+  list-tables(item, {})
+},
+(item: Any, opts: Map): Vec {
+  sheet get(opts, "sheet")
+  base if(is-some(sheet), ::excel/worksheet-path(item, sheet, opts), ::excel/workbook-path(item, opts))
+  ::excel/collection(::excel/fetch(`${base}/tables`, {}, opts))
+}
+
+get-table
+meta {
+    doc: """GET /workbook/tables/{table}."""
+}
+fn
+(item: Any, table: Str): Map {
+  get-table(item, table, {})
+},
+(item: Any, table: Str, opts: Map): Map {
+  ::excel/fetch(::excel/table-path(item, table, opts), {}, opts)
+}
+
+create-table-body
+meta {
+    doc: """The `tables/add` body (pure): the address qualified with its sheet, and `hasHeaders` from `opts.has-headers` (default true)."""
+}
+fn (sheet: Str, address: Str, opts: Map): Map {
+  {address: ::records/a1(sheet, address), hasHeaders: get(opts, "has-headers", true)}
+}
+
+create-table
+meta {
+    doc: """POST /worksheets/{sheet}/tables/add: turn a range into a table. The first row is the header unless `opts.has-headers` is false. Returns the table; use `rename-table` to name it."""
+}
+fn
+(item: Any, sheet: Str, address: Str): Map {
+  create-table(item, sheet, address, {})
+},
+(item: Any, sheet: Str, address: Str, opts: Map): Map {
+  ::excel/call("POST", `${::excel/worksheet-path(item, sheet, opts)}/tables/add`, create-table-body(sheet, address, opts), opts)
+}
+
+update-table
+meta {
+    doc: """PATCH /workbook/tables/{table}. `changes` holds `name`, `showHeaders`, `showTotals`, `style`, ..."""
+}
+fn
+(item: Any, table: Str, changes: Map): Map {
+  update-table(item, table, changes, {})
+},
+(item: Any, table: Str, changes: Map, opts: Map): Map {
+  ::excel/call("PATCH", ::excel/table-path(item, table, opts), changes, opts)
+}
+
+rename-table
+meta {
+    doc: """Rename a table."""
+}
+fn
+(item: Any, table: Str, name: Str): Map {
+  update-table(item, table, {name: name}, {})
+},
+(item: Any, table: Str, name: Str, opts: Map): Map {
+  update-table(item, table, {name: name}, opts)
+}
+
+delete-table
+meta {
+    doc: """DELETE /workbook/tables/{table}: delete the table and its data. Returns `{}`."""
+}
+fn
+(item: Any, table: Str): Map {
+  delete-table(item, table, {})
+},
+(item: Any, table: Str, opts: Map): Map {
+  ::excel/call("DELETE", ::excel/table-path(item, table, opts), "", opts)
+}
+
+convert-to-range
+meta {
+    doc: """POST /workbook/tables/{table}/convertToRange: remove the table and keep its cells."""
+}
+fn
+(item: Any, table: Str): Map {
+  convert-to-range(item, table, {})
+},
+(item: Any, table: Str, opts: Map): Map {
+  ::excel/call("POST", `${::excel/table-path(item, table, opts)}/convertToRange`, "", opts)
+}
+
+column-names
+meta {
+    doc: """A table's column names, in order."""
+}
+fn
+(item: Any, table: Str): Vec {
+  column-names(item, table, {})
+},
+(item: Any, table: Str, opts: Map): Vec {
+  columns ::excel/collection(::excel/fetch(`${::excel/table-path(item, table, opts)}/columns`, {select: "name,index"}, opts))
+  if(is-err(columns), columns, map(columns, %.name))
+}
+
+list-rows
+meta {
+    doc: """GET /workbook/tables/{table}/rows. Returns a Vec of `{index, values}`, with `values` one row inside a grid. Pass `top` and `skip` to page."""
+}
+fn
+(item: Any, table: Str): Vec {
+  list-rows(item, table, {})
+},
+(item: Any, table: Str, opts: Map): Vec {
+  ::excel/collection(::excel/fetch(`${::excel/table-path(item, table, opts)}/rows`, {}, opts))
+}
+
+read-body-values fn (item: Any, table: Str, opts: Map): Vec {
+  result ::excel/fetch(`${::excel/table-path(item, table, opts)}/dataBodyRange`, {select: "values"}, opts)
+  if(is-err(result), result, or(get(result, "values"), []))
+}
+
+read-table-records
+meta {
+    doc: """A table's data as records keyed by its column names. Blank cells are null and fully blank rows are skipped, so an empty table gives `[]`."""
+}
+fn
+(item: Any, table: Str): Vec {
+  read-table-records(item, table, {})
+},
+(item: Any, table: Str, opts: Map): Vec {
+  columns column-names(item, table, opts)
+  cond {
+    is-err(columns) => { columns }
+    => {
+      rows read-body-values(item, table, opts)
+      if(is-err(rows), rows, ::records/rows-to-records(concat([columns], rows)))
+    }
+  }
+}
+
+add-rows-body
+meta {
+    doc: """The `rows/add` body (pure): `values`, plus `index` from `opts.index` when set."""
+}
+fn (rows: Vec, opts: Map): Map {
+  ::excel/compact({values: rows, index: get(opts, "index")})
+}
+
+add-rows
+meta {
+    doc: """POST /workbook/tables/{table}/rows/add: add rows at the end, or at `opts.index`. Send many rows in one call; adding them one at a time is slow. Not idempotent, so a blind retry can duplicate rows."""
+}
+fn
+(item: Any, table: Str, rows: Vec): Map {
+  add-rows(item, table, rows, {})
+},
+(item: Any, table: Str, rows: Vec, opts: Map): Map {
+  ::excel/call("POST", `${::excel/table-path(item, table, opts)}/rows/add`, add-rows-body(rows, opts), opts)
+}
+
+append-records
+meta {
+    doc: """
+    Add records as table rows. `columns` sets the cell order; by default
+    the table's own columns are fetched. Missing values are empty cells.
+    An empty Vec makes no call and returns `{}`.
+
+    ```hot
+    ::microsoft::excel::tables/append-records("/Reports/Q3.xlsx", "Leads", [{name: "Ada", stage: "demo"}])
+    ```
+    """
+}
+fn
+(item: Any, table: Str, records: Vec): Map {
+  append-records(item, table, records, null, {})
+},
+(item: Any, table: Str, records: Vec, columns: Vec?): Map {
+  append-records(item, table, records, columns, {})
+},
+(item: Any, table: Str, records: Vec, columns: Vec?, opts: Map): Map {
+  cond {
+    is-empty(records) => { {} }
+    is-some(columns) => { add-rows(item, table, ::records/records-to-rows(records, columns), opts) }
+    => {
+      names column-names(item, table, opts)
+      if(is-err(names), names, add-rows(item, table, ::records/records-to-rows(records, names), opts))
+    }
+  }
+}
+
+row-path
+meta {
+    doc: """The Graph path of a table row by its 0-based index (pure)."""
+}
+fn (item: Any, table: Str, index: Int, opts: Map): Str {
+  `${::excel/table-path(item, table, opts)}/rows/${index}`
+}
+
+delete-row
+meta {
+    doc: """DELETE a table row by its 0-based index. Later rows move up, so delete from the highest index first. Returns `{}`."""
+}
+fn
+(item: Any, table: Str, index: Int): Map {
+  delete-row(item, table, index, {})
+},
+(item: Any, table: Str, index: Int, opts: Map): Map {
+  ::excel/call("DELETE", row-path(item, table, index, opts), "", opts)
+}

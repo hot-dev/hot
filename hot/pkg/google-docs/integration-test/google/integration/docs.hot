@@ -1,0 +1,42 @@
+::google::integration::docs ns
+meta ["test"]
+
+// Live Docs roundtrip. Requires GOOGLE_SERVICE_ACCOUNT (set
+// GOOGLE_IMPERSONATE too for domain-wide delegation). Self-cleaning: the
+// document it creates is deleted with a direct Drive REST call through
+// google-core, so this suite needs no google-drive dependency.
+
+::documents ::google::docs::documents
+::req ::google::docs::requests
+::content ::google::docs::content
+
+delete-document fn (id: Str): Any {
+  ::google::api/json("drive.file", "DELETE", `https://www.googleapis.com/drive/v3/files/${::hot::uri/encode(id)}?supportsAllDrives=true`, {}, "")
+}
+
+test-document-roundtrip
+meta ["test"] fn () {
+    if(is-empty(::hot::env/get("GOOGLE_SERVICE_ACCOUNT", "")),
+        fail("Set GOOGLE_SERVICE_ACCOUNT in .env")
+    )
+
+    doc ::documents/create-document(`hot-it-${Uuid()}`)
+    assert(not(is-err(doc)), `create-document: ${if-err(doc, (e) { err-message(e) })}`)
+    id doc.documentId
+
+    appended ::documents/append-text(id, "Hello {{name}}\n")
+    assert(not(is-err(appended)), `append-text: ${if-err(appended, (e) { err-message(e) })}`)
+
+    filled ::documents/fill-template(id, {name: "Ada"})
+    assert(not(is-err(filled)), `fill-template: ${if-err(filled, (e) { err-message(e) })}`)
+    assert-eq(1, first(filled.replies).replaceAllText.occurrencesChanged, "one placeholder replaced")
+
+    assert(contains(::documents/read-text(id), "Hello Ada"), "text read back")
+
+    styled ::documents/batch-update(id, [::req/heading(1, 10, 1), ::req/bold(1, 6)])
+    assert(not(is-err(styled)), `batch-update: ${if-err(styled, (e) { err-message(e) })}`)
+    assert-eq(["Hello Ada"], map(::content/headings(::documents/get-document(id)), %.text), "heading applied")
+
+    cleaned delete-document(id)
+    assert(not(is-err(cleaned)), "cleanup should succeed")
+}

@@ -1,0 +1,187 @@
+::google::docs::documents ns
+meta {
+    doc: """
+    Documents: fetch, create, `batchUpdate`, and helpers for the common
+    edits (read as text, append, insert, find and replace, fill a
+    template).
+
+    **Scopes.** `get-document` and `read-text` use `documents.readonly`;
+    everything else `documents`. `drive.file` works for documents the app
+    created or the user opened with it. Copying a template, moving,
+    sharing, exporting (PDF, Markdown, Word) and deleting a document are
+    Drive calls (`google-drive`).
+    """
+}
+
+::docs ::google::docs
+::req ::google::docs::requests
+::content ::google::docs::content
+
+// Options read by these helpers, never sent as query parameters.
+READ_TEXT_KEYS ["tabId"]
+
+// ---------------------------------------------------------------------------
+// Documents
+// ---------------------------------------------------------------------------
+
+get-params
+meta {
+    doc: """The query parameters `get-document` sends (pure): `includeTabsContent`, `suggestionsViewMode`, `commentsViewMode`, `fields`; only the ones you set."""
+}
+fn (opts: Map): Map {
+  ::docs/query-params({}, opts)
+}
+
+get-document
+meta {
+    doc: """
+    GET /{id} - the document: `documentId`, `title`, `revisionId`, `body`
+    (the first tab only), `namedStyles`, `headers`, `footers`. Pass
+    `{includeTabsContent: true}` to get every tab under `tabs` instead,
+    and `suggestionsViewMode` (e.g. `"PREVIEW_WITHOUT_SUGGESTIONS"`) to
+    choose how suggestions render. Scope: `documents.readonly`.
+    """
+}
+fn
+(document-id: Str): Map {
+  get-document(document-id, {})
+},
+(document-id: Str, opts: Map): Map {
+  ::docs/json(::docs/READ_SCOPE, "GET", ::docs/url(`/${::docs/encode-id(document-id)}`, get-params(opts)), "", opts)
+}
+
+create-document
+meta {
+    doc: """
+    POST /v1/documents - create a blank document. Returns the resource
+    with `documentId`. Only `title` applies: add content with
+    `append-text` or `batch-update`. It lands in the authenticated user's
+    My Drive root (move it with google-drive's `move-file`); a service
+    account without domain-wide delegation owns it alone, so share it
+    before anyone else can open it. Scope: `documents` (or `drive.file`).
+    """
+}
+fn
+(title: Str): Map {
+  create-document(title, {})
+},
+(title: Str, opts: Map): Map {
+  ::docs/json(::docs/SCOPE, "POST", ::docs/url(""), {title: title}, opts)
+}
+
+batch-update-body
+meta {
+    doc: """The `batchUpdate` body (pure): `{requests}` plus `writeControl` from `opts` when set (`{requiredRevisionId}` fails the write if the document changed; `{targetRevisionId}` merges with changes since)."""
+}
+fn (requests: Vec, opts: Map): Map {
+  ::docs/compact({requests: requests, writeControl: get(opts, "writeControl")})
+}
+
+batch-update
+meta {
+    doc: """
+    POST /{id}:batchUpdate - apply a Vec of requests atomically, in
+    order: if one is invalid, none apply. Returns `{documentId, replies,
+    writeControl}`. Each request sees the indexes left by the one before
+    it, so when you have several insertions or deletions, apply the
+    highest index first. `::google::docs::requests` builds requests; any
+    request as a plain Map works too. Scope: `documents` (or
+    `drive.file`).
+    """
+}
+fn
+(document-id: Str, requests: Vec): Map {
+  batch-update(document-id, requests, {})
+},
+(document-id: Str, requests: Vec, opts: Map): Map {
+  ::docs/json(::docs/SCOPE, "POST", ::docs/url(`/${::docs/encode-id(document-id)}:batchUpdate`), batch-update-body(requests, opts), opts)
+}
+
+read-text
+meta {
+    doc: """
+    The document as plain text, with every tab's body in tab order. Pass
+    `{tabId: "t.abc"}` for one tab; an Err when that tab does not exist.
+    Scope: `documents.readonly`.
+    """
+}
+fn
+(document-id: Str): Str {
+  read-text(document-id, {})
+},
+(document-id: Str, opts: Map): Str {
+  params filter-keys(opts, (k) { not(in(k, READ_TEXT_KEYS)) })
+  doc get-document(document-id, {includeTabsContent: true, ...params})
+  tab-id get(opts, "tabId")
+  cond {
+    is-err(doc) => { doc }
+    is-null(tab-id) => { ::content/document-text(doc) }
+    => {
+      tab ::content/find-tab(doc, tab-id)
+      if(is-null(tab), err(`google-docs: no tab ${to-json(tab-id)} in document ${document-id}`), ::content/tab-text(tab))
+    }
+  }
+}
+
+append-text
+meta {
+    doc: """Add `text` at the end of the document's body (first tab unless `opts.tabId`). End `text` with a newline to start a new paragraph after it. Scope: `documents` (or `drive.file`)."""
+}
+fn
+(document-id: Str, text: Str): Map {
+  append-text(document-id, text, {})
+},
+(document-id: Str, text: Str, opts: Map): Map {
+  batch-update(document-id, [::req/append-text(text, opts)], opts)
+}
+
+insert-text
+meta {
+    doc: """Insert `text` at a body index (first tab unless `opts.tabId`). An index must fall inside an existing paragraph; the document starts at 1. Scope: `documents` (or `drive.file`)."""
+}
+fn
+(document-id: Str, text: Str, index: Int): Map {
+  insert-text(document-id, text, index, {})
+},
+(document-id: Str, text: Str, index: Int, opts: Map): Map {
+  batch-update(document-id, [::req/insert-text(text, index, opts)], opts)
+}
+
+replace-text
+meta {
+    doc: """
+    Replace every occurrence of `search` with `replacement` in every tab.
+    Case-sensitive unless `{matchCase: false}`; `{searchByRegex: true}`
+    treats `search` as a regular expression; `{tabIds: [...]}` limits the
+    tabs. The reply's `replaceAllText.occurrencesChanged` is the count.
+    Scope: `documents` (or `drive.file`).
+    """
+}
+fn
+(document-id: Str, search: Str, replacement: Str): Map {
+  replace-text(document-id, search, replacement, {})
+},
+(document-id: Str, search: Str, replacement: Str, opts: Map): Map {
+  batch-update(document-id, [::req/replace-all-text(search, replacement, opts)], opts)
+}
+
+fill-template
+meta {
+    doc: """
+    Replace each `{{key}}` in the document with its value from `values`
+    (values are converted with `Str`; null values are skipped). The usual
+    template flow is google-drive's `copy-file`, then this on the copy.
+    Scope: `documents` (or `drive.file`).
+
+    ```hot
+    ::google::docs::documents/fill-template(copy.id, {name: "Ada", plan: "Pro"})
+    ```
+    """
+}
+fn
+(document-id: Str, values: Map): Map {
+  fill-template(document-id, values, {})
+},
+(document-id: Str, values: Map, opts: Map): Map {
+  batch-update(document-id, ::req/fill-template(values, opts), opts)
+}

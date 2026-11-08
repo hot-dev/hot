@@ -1,0 +1,135 @@
+::google::docs ns
+meta {
+    doc: """
+    Google Docs API v1 bindings: read a document as plain text, paragraphs,
+    headings and tables (across every tab), create documents, fill
+    `{{placeholder}}` templates, and run `batchUpdate` with builders for
+    text, styles, bullets, tables, images and named ranges. Credentials
+    and scopes come from `google-core`.
+
+    **Namespaces**
+
+    - `::google::docs::documents` - get, create, `batch-update`,
+      `read-text`, `append-text`, `insert-text`, `replace-text`,
+      `fill-template`
+    - `::google::docs::requests` - pure builders for `batchUpdate` requests
+    - `::google::docs::content` - pure readers over a fetched document:
+      tabs, text, paragraphs, headings, tables, end index
+
+    Every function has an options arity taking an `opts` Map. Docs
+    parameters use the API's own names (`includeTabsContent`,
+    `suggestionsViewMode`, `fields`, `writeControl`); credential keys
+    (`token`, `refresh-token`, `service-account`, `subject`, `scopes`,
+    `retry`) are handled by `google-core` and override context for that
+    call.
+
+    **Quick start**
+
+    ```hot
+    ::docs ::google::docs::documents
+
+    doc ::docs/create-document("Weekly report")
+    ::docs/append-text(doc.documentId, "Shipped the importer.\n")
+    ::docs/read-text(doc.documentId)
+    ```
+    """
+}
+
+::api ::google::api
+::ctx ::hot::ctx
+::uri ::hot::uri
+
+API_ROOT "https://docs.googleapis.com"
+
+// Scopes. documents and documents.readonly are sensitive (OAuth
+// verification for public apps); drive.file is non-sensitive and covers
+// documents the app created or the user opened with it.
+SCOPE "https://www.googleapis.com/auth/documents"
+READ_SCOPE "https://www.googleapis.com/auth/documents.readonly"
+FILE_SCOPE "https://www.googleapis.com/auth/drive.file"
+
+// ---------------------------------------------------------------------------
+// URL and parameter helpers (shared by the sub-namespaces)
+// ---------------------------------------------------------------------------
+
+api-root
+meta {
+    ctx: {"google.docs.api-root": {required: false, secret: false}},
+    doc: """The API root, `https://docs.googleapis.com` unless the `google.docs.api-root` context variable points at a proxy or emulator."""
+}
+fn (): Str {
+  root ::ctx/get("google.docs.api-root")
+  if(or(is-null(root), eq(root, "")), API_ROOT, root)
+}
+
+url
+meta {
+    doc: """A Docs v1 URL: `/v1/documents` + `path` with non-null `params`. `url("/abc:batchUpdate")`."""
+}
+fn
+(path: Str): Str {
+  url(path, {})
+},
+(path: Str, params: Map): Str {
+  ::api/with-query(`${api-root()}/v1/documents${path}`, params)
+}
+
+encode-id
+meta {doc: """URL-encode a document id for a path segment."""}
+fn (id: Str): Str {
+  ::uri/encode(id)
+}
+
+query-params
+meta {
+    doc: """
+    Build a call's query parameters: `defaults`, overridden by the Docs
+    parameters in `opts` (credential keys and the function's own
+    `local-keys` are removed), with nulls dropped. Pass a key as null in
+    `opts` to drop a default.
+    """
+}
+fn
+(defaults: Map, opts: Map): Map {
+  query-params(defaults, opts, [])
+},
+(defaults: Map, opts: Map, local-keys: Vec): Map {
+  params filter-keys(::api/api-params(opts), (k) { not(in(k, local-keys)) })
+  filter-vals({...defaults, ...params}, is-some)
+}
+
+creds
+meta {
+    doc: """The google-core part of `opts` (credentials, scopes, retry), passed through to `::google::api`."""
+}
+fn (opts: Map): Map {
+  ::api/credential-opts(opts)
+}
+
+json
+meta {
+    doc: """`::google::api/json` with this package's conventions: credential opts and a JSON (or empty) body."""
+}
+fn (scope: Str, method: Str, full-url: Str, body: Any, opts: Map): Any {
+  ::api/json(scope, method, full-url, {}, body, creds(opts))
+}
+
+compact
+meta {
+    doc: """Drop null values from a request body (Docs bodies never carry JSON null for unset fields)."""
+}
+fn (body: Map): Map {
+  filter-vals(untype(body), is-some)
+}
+
+// ---------------------------------------------------------------------------
+// Shortcuts to the most used functions
+// ---------------------------------------------------------------------------
+
+get-document ::google::docs::documents/get-document
+create-document ::google::docs::documents/create-document
+batch-update ::google::docs::documents/batch-update
+read-text ::google::docs::documents/read-text
+append-text ::google::docs::documents/append-text
+replace-text ::google::docs::documents/replace-text
+fill-template ::google::docs::documents/fill-template

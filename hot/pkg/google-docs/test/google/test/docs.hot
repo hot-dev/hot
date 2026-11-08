@@ -1,0 +1,125 @@
+::google::test::docs ns
+
+::docs ::google::docs
+::documents ::google::docs::documents
+::req ::google::docs::requests
+::content ::google::docs::content
+
+para fn (text: Str, style: Str, start: Int, end: Int): Map {
+  {startIndex: start, endIndex: end, paragraph: {paragraphStyle: {namedStyleType: style}, elements: [{textRun: {content: text}}]}}
+}
+
+SAMPLE_BODY {content: [
+  {endIndex: 1, sectionBreak: {}},
+  para("Report\n", "TITLE", 1, 8),
+  para("Plan\n", "HEADING_2", 8, 13),
+  {startIndex: 13, endIndex: 30, table: {tableRows: [
+    {tableCells: [{content: [para("a\n", "NORMAL_TEXT", 15, 17)]}, {content: [para("b\n", "NORMAL_TEXT", 18, 20)]}]},
+    {tableCells: [{content: [para("c\n", "NORMAL_TEXT", 21, 23)]}, {content: [para("d\n", "NORMAL_TEXT", 24, 26)]}]}
+  ]}},
+  para("Done\n", "NORMAL_TEXT", 30, 35)
+]}
+
+test-urls
+meta ["test"] fn () {
+    assert-eq("https://docs.googleapis.com/v1/documents", ::docs/url(""))
+    assert-eq("https://docs.googleapis.com/v1/documents/a%2Fb:batchUpdate", ::docs/url(`/${::docs/encode-id("a/b")}:batchUpdate`))
+    assert-eq({includeTabsContent: true}, ::documents/get-params({includeTabsContent: true, token: "ya29.x", fields: null}), "credentials never reach the query")
+}
+
+test-batch-update-body
+meta ["test"] fn () {
+    assert-eq({requests: []}, ::documents/batch-update-body([], {token: "t"}))
+    w {requiredRevisionId: "r1"}
+    assert-eq({requests: [], writeControl: w}, ::documents/batch-update-body([], {writeControl: w}))
+}
+
+test-reads-a-single-body
+meta ["test"] fn () {
+    doc {body: SAMPLE_BODY}
+    assert-eq("Report\nPlan\na\nb\nc\nd\nDone\n", ::content/document-text(doc))
+    assert-eq([
+      {text: "Report", style: "TITLE", start: 1, end: 8, bullet: false},
+      {text: "Plan", style: "HEADING_2", start: 8, end: 13, bullet: false},
+      {text: "Done", style: "NORMAL_TEXT", start: 30, end: 35, bullet: false}
+    ], ::content/paragraphs(doc), "only top-level paragraphs")
+    assert-eq(["Report", "Plan"], map(::content/headings(doc), %.text))
+    assert-eq([{start: 13, end: 30, rows: [["a", "b"], ["c", "d"]]}], ::content/tables(doc))
+    assert-eq(35, ::content/end-index(SAMPLE_BODY))
+    assert-eq(1, ::content/end-index({}))
+    assert-eq("", ::content/document-text({}))
+}
+
+tab fn (id: Str, title: Str, text: Str, children: Vec): Map {
+  {tabProperties: {tabId: id, title: title}, childTabs: children, documentTab: {body: {content: [para(text, "NORMAL_TEXT", 1, 3)]}}}
+}
+
+test-reads-every-tab
+meta ["test"] fn () {
+    doc {tabs: [tab("t.1", "One", "1\n", [tab("t.2", "Two", "2\n", [])]), tab("t.3", "Three", "3\n", [])]}
+    assert-eq(["t.1", "t.2", "t.3"], map(::content/all-tabs(doc), ::content/tab-id), "children follow their parent")
+    assert-eq("1\n2\n3\n", ::content/document-text(doc))
+    assert-eq("2\n", ::content/tab-text(::content/find-tab(doc, "t.2")))
+    assert-eq("3\n", ::content/tab-text(::content/find-tab(doc, "Three")))
+    assert(is-null(::content/find-tab(doc, "nope")))
+    assert-eq(3, length(::content/paragraphs(doc)))
+}
+
+test-text-requests
+meta ["test"] fn () {
+    assert-eq({insertText: {text: "x", location: {index: 5}}}, ::req/insert-text("x", 5))
+    assert-eq({insertText: {text: "x", location: {index: 5, tabId: "t.1"}}}, ::req/insert-text("x", 5, {tabId: "t.1", token: "t"}))
+    assert-eq({insertText: {text: "x", endOfSegmentLocation: {}}}, ::req/append-text("x"), "an empty location means the body's end")
+    assert-eq({insertText: {text: "x", endOfSegmentLocation: {segmentId: "kix.h"}}}, ::req/append-text("x", {segmentId: "kix.h"}))
+    assert-eq({deleteContentRange: {range: {startIndex: 1, endIndex: 4}}}, ::req/delete-range(1, 4))
+}
+
+test-replace-and-template
+meta ["test"] fn () {
+    assert-eq({replaceAllText: {replaceText: "b", containsText: {text: "a", matchCase: true}}}, ::req/replace-all-text("a", "b"))
+    r ::req/replace-all-text("a+", "b", {matchCase: false, searchByRegex: true, tabIds: ["t.1"]})
+    assert-eq({text: "a+", matchCase: false, searchByRegex: true}, r.replaceAllText.containsText)
+    assert-eq({tabIds: ["t.1"]}, r.replaceAllText.tabsCriteria)
+    t ::req/fill-template({name: "Ada", n: 3, skip: null})
+    assert-eq(2, length(t), "null values are skipped")
+    by-token index-by(t, %.replaceAllText.containsText.text)
+    assert-eq("Ada", get(by-token, "{{name}}").replaceAllText.replaceText)
+    assert-eq("3", get(by-token, "{{n}}").replaceAllText.replaceText)
+}
+
+test-style-requests
+meta ["test"] fn () {
+    assert-eq({updateTextStyle: {range: {startIndex: 1, endIndex: 2}, textStyle: {bold: true}, fields: "bold"}}, ::req/bold(1, 2))
+    assert-eq("https://x", ::req/link(1, 2, "https://x").updateTextStyle.textStyle.link.url)
+    assert-eq({magnitude: 14, unit: "PT"}, ::req/font-size(1, 2, 14).updateTextStyle.textStyle.fontSize)
+    assert-eq({updateParagraphStyle: {range: {startIndex: 1, endIndex: 2}, paragraphStyle: {namedStyleType: "HEADING_3"}, fields: "namedStyleType"}}, ::req/heading(1, 2, 3))
+    assert(is-err(::req/heading(1, 2, 7)), "heading levels stop at 6")
+    assert-eq({createParagraphBullets: {range: {startIndex: 1, endIndex: 2}, bulletPreset: "BULLET_DISC_CIRCLE_SQUARE"}}, ::req/bullets(1, 2))
+    assert-eq({color: {rgbColor: ::req/rgb(255, 0, 0)}}, ::req/optional-color(::req/hex-color("#ff0000")))
+    assert(is-err(::req/hex-color("red")))
+    assert-eq("a,b", join(sort(split(::req/field-mask({a: 1, b: 2}), ",")), ","))
+}
+
+test-table-image-and-range-requests
+meta ["test"] fn () {
+    assert-eq({insertTable: {rows: 2, columns: 3, endOfSegmentLocation: {}}}, ::req/append-table(2, 3))
+    assert-eq({insertTableRow: {tableCellLocation: {tableStartLocation: {index: 13}, rowIndex: 1, columnIndex: 0}, insertBelow: true}}, ::req/insert-table-row(13, 1, true))
+    assert-eq({deleteTableColumn: {tableCellLocation: {tableStartLocation: {index: 13}, rowIndex: 0, columnIndex: 2}}}, ::req/delete-table-column(13, 2))
+    assert-eq({insertInlineImage: {uri: "u", location: {index: 1}}}, ::req/insert-image("u", 1), "no size unless given")
+    assert-eq({width: {magnitude: 100, unit: "PT"}}, ::req/append-image("u", {width: 100}).insertInlineImage.objectSize)
+    assert-eq({insertPageBreak: {endOfSegmentLocation: {}}}, ::req/append-page-break())
+    assert-eq({createNamedRange: {name: "n", range: {startIndex: 1, endIndex: 2}}}, ::req/create-named-range("n", 1, 2))
+    assert-eq({replaceNamedRangeContent: {namedRangeName: "n", text: "t"}}, ::req/replace-named-range("n", "t"))
+    assert-eq({createHeader: {type: "DEFAULT"}}, ::req/create-header())
+}
+
+test-calls-surface-no-credentials-err
+meta ["test"] fn () {
+    read ::documents/get-document("doc-id")
+    assert(is-err(read), "get-document without credentials errs")
+    assert(contains(err-message(read), "no credentials"), "the auth error reaches the caller")
+    assert(is-err(::documents/read-text("doc-id")), "read-text returns the Err instead of halting")
+    assert(is-err(::documents/read-text("doc-id", {tabId: "t.1"})))
+    assert(is-err(::documents/append-text("doc-id", "x")))
+    assert(is-err(::documents/fill-template("doc-id", {a: 1})))
+}

@@ -1,0 +1,422 @@
+::google::slides::requests ns
+meta {
+    doc: """
+    Pure builders for `presentations.batchUpdate` requests. Each returns
+    one request Map; pass a Vec of them to
+    `::google::slides::presentations/batch-update`, which applies them
+    atomically in order.
+
+    Object ids you choose must be 5 to 50 characters; `new-object-id`
+    makes one. Positions and sizes are `frame`s in points, `{x, y,
+    width, height}`; a default slide is 720 by 405 points.
+
+    ```hot
+    ::req ::google::slides::requests
+
+    slide ::req/new-object-id()
+    box ::req/new-object-id()
+    ::google::slides::presentations/batch-update(id, [
+      ::req/create-slide("BLANK", {objectId: slide}),
+      ::req/create-text-box(box, slide, {x: 40, y: 40, width: 400, height: 80}),
+      ::req/insert-text(box, "Hello"),
+      ::req/bold(box)
+    ])
+    ```
+    """
+}
+
+::slides ::google::slides
+
+BULLET_DISC "BULLET_DISC_CIRCLE_SQUARE"
+NUMBERED "NUMBERED_DIGIT_ALPHA_ROMAN"
+
+// ---------------------------------------------------------------------------
+// Ids, geometry and colors
+// ---------------------------------------------------------------------------
+
+new-object-id
+meta {
+    doc: """A fresh object id for `objectId` fields."""
+}
+fn (): Str {
+  `hot_${::hot::str/replace(Uuid(), "-", "")}`
+}
+
+points
+meta {
+    doc: """A `Dimension` in points."""
+}
+fn (value: Int | Dec): Map {
+  {magnitude: value, unit: "PT"}
+}
+
+element-properties
+meta {
+    doc: """`PageElementProperties` placing an element on `page-id` at a `frame`, `{x, y, width, height}` in points."""
+}
+fn (page-id: Str, frame: Map): Map {
+  {
+    pageObjectId: page-id,
+    size: {width: points(frame.width), height: points(frame.height)},
+    transform: {scaleX: 1, scaleY: 1, translateX: frame.x, translateY: frame.y, unit: "PT"}
+  }
+}
+
+rgb
+meta {
+    doc: """A Slides `RgbColor` from 0-255 channels."""
+}
+fn (red: Int, green: Int, blue: Int): Map {
+  {red: div(Dec(red), 255), green: div(Dec(green), 255), blue: div(Dec(blue), 255)}
+}
+
+hex-color
+meta {
+    doc: """A Slides `RgbColor` from a hex string (`"#1a73e8"` or `"1a73e8"`); an Err for anything else."""
+}
+fn (hex: Str): Map {
+  h lowercase(::hot::str/replace(trim(hex), "#", ""))
+  cond {
+    not(::hot::regex/is-match(h, "^[0-9a-f]{6}$")) => { err(`google-slides: invalid hex color ${to-json(hex)}`) }
+    => {
+      channels ::hot::bytes/to-vec(::hot::hex/decode(h))
+      rgb(first(channels), get(channels, 1), last(channels))
+    }
+  }
+}
+
+optional-color
+meta {
+    doc: """An `OptionalColor` wrapping an `RgbColor`, for `foregroundColor` and `backgroundColor`."""
+}
+fn (color: Map): Map {
+  {opaqueColor: {rgbColor: color}}
+}
+
+field-mask
+meta {
+    doc: """A style's top-level keys as a field mask, so only the fields you pass change."""
+}
+fn (style: Map): Str {
+  join(map(keys(style), Str), ",")
+}
+
+text-range
+meta {
+    doc: """A text `Range`: `ALL` by default, or `start` inclusive to `end` exclusive."""
+}
+fn
+(): Map {
+  {type: "ALL"}
+},
+(start: Int, end: Int): Map {
+  {type: "FIXED_RANGE", startIndex: start, endIndex: end}
+}
+
+cell-location
+meta {
+    doc: """A `TableCellLocation`, 0-based."""
+}
+fn (row: Int, column: Int): Map {
+  {rowIndex: row, columnIndex: column}
+}
+
+// The cell a text request addresses, from opts.rowIndex and opts.columnIndex.
+opts-cell fn (opts: Map): Map? {
+  row get(opts, "rowIndex")
+  column get(opts, "columnIndex")
+  if(and(is-some(row), is-some(column)), cell-location(row, column), null)
+}
+
+opts-range fn (opts: Map): Map {
+  or(get(opts, "textRange"), text-range())
+}
+
+// ---------------------------------------------------------------------------
+// Slides and page elements
+// ---------------------------------------------------------------------------
+
+placeholder
+meta {
+    doc: """A `LayoutPlaceholderIdMapping` for `create-slide`: give the layout's placeholder of `kind` and `index` the id `object-id`."""
+}
+fn (kind: Str, index: Int, object-id: Str): Map {
+  {layoutPlaceholder: {type: kind, index: index}, objectId: object-id}
+}
+
+create-slide
+meta {
+    doc: """
+    `createSlide`. `layout` is a predefined layout (`BLANK`, `TITLE`,
+    `TITLE_AND_BODY`, `TITLE_AND_TWO_COLUMNS`, `TITLE_ONLY`,
+    `SECTION_HEADER`, `ONE_COLUMN_TEXT`, `MAIN_POINT`, `BIG_NUMBER`, ...).
+    Options: `objectId`, `insertionIndex`, `placeholders` (from
+    `placeholder`) and `layoutId` (a layout in this deck, used instead of
+    `layout`).
+    """
+}
+fn
+(): Map {
+  create-slide("BLANK", {})
+},
+(layout: Str): Map {
+  create-slide(layout, {})
+},
+(layout: Str, opts: Map): Map {
+  layout-id get(opts, "layoutId")
+  {createSlide: ::slides/compact({
+    objectId: get(opts, "objectId"),
+    insertionIndex: get(opts, "insertionIndex"),
+    slideLayoutReference: if(is-some(layout-id), {layoutId: layout-id}, {predefinedLayout: layout}),
+    placeholderIdMappings: get(opts, "placeholders")
+  })}
+}
+
+create-shape
+meta {
+    doc: """`createShape` of `shape-type` (`TEXT_BOX`, `RECTANGLE`, `ROUND_RECTANGLE`, `ELLIPSE`, `ARROW_EAST`, ...) on `page-id` at a `frame`."""
+}
+fn (object-id: Str, shape-type: Str, page-id: Str, frame: Map): Map {
+  {createShape: {objectId: object-id, shapeType: shape-type, elementProperties: element-properties(page-id, frame)}}
+}
+
+create-text-box
+meta {
+    doc: """`createShape` of a `TEXT_BOX`."""
+}
+fn (object-id: Str, page-id: Str, frame: Map): Map {
+  create-shape(object-id, "TEXT_BOX", page-id, frame)
+}
+
+create-image
+meta {
+    doc: """`createImage` from a public URL (PNG, JPEG or GIF under 50 MB, at most 25 megapixels) on `page-id` at a `frame`."""
+}
+fn (object-id: Str, url: Str, page-id: Str, frame: Map): Map {
+  {createImage: {objectId: object-id, url: url, elementProperties: element-properties(page-id, frame)}}
+}
+
+create-table
+meta {
+    doc: """`createTable` on `page-id`, centered at the default size unless a `frame` is given."""
+}
+fn
+(object-id: Str, page-id: Str, rows: Int, columns: Int): Map {
+  {createTable: {objectId: object-id, elementProperties: {pageObjectId: page-id}, rows: rows, columns: columns}}
+},
+(object-id: Str, page-id: Str, rows: Int, columns: Int, frame: Map): Map {
+  {createTable: {objectId: object-id, elementProperties: element-properties(page-id, frame), rows: rows, columns: columns}}
+}
+
+delete-object
+meta {
+    doc: """`deleteObject`: a slide or a page element."""
+}
+fn (object-id: Str): Map {
+  {deleteObject: {objectId: object-id}}
+}
+
+duplicate-object
+meta {
+    doc: """`duplicateObject`: a slide or a page element. `id-map` chooses ids for the copies, keyed by original id."""
+}
+fn
+(object-id: Str): Map {
+  {duplicateObject: {objectId: object-id}}
+},
+(object-id: Str, id-map: Map): Map {
+  {duplicateObject: {objectId: object-id, objectIds: id-map}}
+}
+
+move-slides
+meta {
+    doc: """`updateSlidesPosition`: move slides, keeping their relative order, to before the slide at `insertion-index`."""
+}
+fn (slide-ids: Vec, insertion-index: Int): Map {
+  {updateSlidesPosition: {slideObjectIds: slide-ids, insertionIndex: insertion-index}}
+}
+
+// ---------------------------------------------------------------------------
+// Text
+// ---------------------------------------------------------------------------
+
+insert-text
+meta {
+    doc: """`insertText` into a shape, or a table cell with `opts.rowIndex` and `opts.columnIndex`. `opts.insertionIndex` picks the position (default 0)."""
+}
+fn
+(object-id: Str, text: Str): Map {
+  insert-text(object-id, text, {})
+},
+(object-id: Str, text: Str, opts: Map): Map {
+  {insertText: ::slides/compact({
+    objectId: object-id,
+    text: text,
+    insertionIndex: get(opts, "insertionIndex"),
+    cellLocation: opts-cell(opts)
+  })}
+}
+
+delete-text
+meta {
+    doc: """`deleteText`: all of it, or `opts.textRange` (from `text-range`). `opts.rowIndex` and `opts.columnIndex` address a table cell."""
+}
+fn
+(object-id: Str): Map {
+  delete-text(object-id, {})
+},
+(object-id: Str, opts: Map): Map {
+  {deleteText: ::slides/compact({objectId: object-id, textRange: opts-range(opts), cellLocation: opts-cell(opts)})}
+}
+
+contains-text fn (search: Str, opts: Map): Map {
+  {text: search, matchCase: get(opts, "matchCase", true)}
+}
+
+replace-all-text
+meta {
+    doc: """`replaceAllText`: every occurrence, on every page unless `opts.pageObjectIds`. Case-sensitive unless `opts.matchCase` is false."""
+}
+fn
+(search: Str, replacement: Str): Map {
+  replace-all-text(search, replacement, {})
+},
+(search: Str, replacement: Str, opts: Map): Map {
+  {replaceAllText: ::slides/compact({
+    replaceText: replacement,
+    containsText: contains-text(search, opts),
+    pageObjectIds: get(opts, "pageObjectIds")
+  })}
+}
+
+replace-shapes-with-image
+meta {
+    doc: """`replaceAllShapesWithImage`: swap every shape containing `search` for the image at a public URL, on every page unless `opts.pageObjectIds`. `opts.imageReplaceMethod` is `CENTER_INSIDE` (default) or `CENTER_CROP`."""
+}
+fn
+(search: Str, image-url: Str): Map {
+  replace-shapes-with-image(search, image-url, {})
+},
+(search: Str, image-url: Str, opts: Map): Map {
+  {replaceAllShapesWithImage: ::slides/compact({
+    imageUrl: image-url,
+    imageReplaceMethod: get(opts, "imageReplaceMethod", "CENTER_INSIDE"),
+    containsText: contains-text(search, opts),
+    pageObjectIds: get(opts, "pageObjectIds")
+  })}
+}
+
+fill-template
+meta {
+    doc: """One `replaceAllText` per entry of `values`, replacing `{{key}}` with the value as text. Null values are skipped."""
+}
+fn
+(values: Map): Vec {
+  fill-template(values, {})
+},
+(values: Map, opts: Map): Vec {
+  present filter-vals(values, is-some)
+  map(keys(present), (k) { replace-all-text(`{{${Str(k)}}}`, Str(get(present, k)), opts) })
+}
+
+// ---------------------------------------------------------------------------
+// Styles
+// ---------------------------------------------------------------------------
+
+text-style
+meta {
+    doc: """`updateTextStyle` with any `TextStyle` (`bold`, `italic`, `underline`, `fontSize`, `fontFamily`, `foregroundColor`, `link`, ...). The field mask is the keys you pass. Applies to all the text unless `opts.textRange`; `opts.rowIndex` and `opts.columnIndex` address a table cell."""
+}
+fn
+(object-id: Str, style: Map): Map {
+  text-style(object-id, style, {})
+},
+(object-id: Str, style: Map, opts: Map): Map {
+  {updateTextStyle: ::slides/compact({
+    objectId: object-id,
+    style: style,
+    textRange: opts-range(opts),
+    fields: field-mask(style),
+    cellLocation: opts-cell(opts)
+  })}
+}
+
+bold
+meta {doc: """Make a shape's text bold."""}
+fn
+(object-id: Str): Map {
+  text-style(object-id, {bold: true})
+},
+(object-id: Str, opts: Map): Map {
+  text-style(object-id, {bold: true}, opts)
+}
+
+font-size
+meta {doc: """Set a shape's font size in points."""}
+fn
+(object-id: Str, size: Int | Dec): Map {
+  text-style(object-id, {fontSize: points(size)})
+},
+(object-id: Str, size: Int | Dec, opts: Map): Map {
+  text-style(object-id, {fontSize: points(size)}, opts)
+}
+
+text-color
+meta {doc: """Set a shape's text color from an `RgbColor` (`rgb` or `hex-color`)."""}
+fn
+(object-id: Str, color: Map): Map {
+  text-style(object-id, {foregroundColor: optional-color(color)})
+},
+(object-id: Str, color: Map, opts: Map): Map {
+  text-style(object-id, {foregroundColor: optional-color(color)}, opts)
+}
+
+paragraph-style
+meta {
+    doc: """`updateParagraphStyle` with any `ParagraphStyle` (`alignment`, `lineSpacing`, `spaceAbove`, ...). The field mask is the keys you pass."""
+}
+fn
+(object-id: Str, style: Map): Map {
+  paragraph-style(object-id, style, {})
+},
+(object-id: Str, style: Map, opts: Map): Map {
+  {updateParagraphStyle: ::slides/compact({
+    objectId: object-id,
+    style: style,
+    textRange: opts-range(opts),
+    fields: field-mask(style),
+    cellLocation: opts-cell(opts)
+  })}
+}
+
+bullets
+meta {
+    doc: """`createParagraphBullets` on a shape's paragraphs. `preset` defaults to `BULLET_DISC_CIRCLE_SQUARE`; `NUMBERED` holds the usual numbered preset."""
+}
+fn
+(object-id: Str): Map {
+  bullets(object-id, BULLET_DISC, {})
+},
+(object-id: Str, preset: Str): Map {
+  bullets(object-id, preset, {})
+},
+(object-id: Str, preset: Str, opts: Map): Map {
+  {createParagraphBullets: ::slides/compact({
+    objectId: object-id,
+    bulletPreset: preset,
+    textRange: opts-range(opts),
+    cellLocation: opts-cell(opts)
+  })}
+}
+
+background
+meta {
+    doc: """`updatePageProperties`: a solid page background from an `RgbColor`."""
+}
+fn (page-id: Str, color: Map): Map {
+  {updatePageProperties: {
+    objectId: page-id,
+    pageProperties: {pageBackgroundFill: {solidFill: {color: {rgbColor: color}}}},
+    fields: "pageBackgroundFill.solidFill.color"
+  }}
+}
