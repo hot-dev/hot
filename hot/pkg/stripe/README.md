@@ -7,7 +7,7 @@ Stripe API bindings for Hot: PaymentIntents and SetupIntents, Checkout and the c
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/stripe": "1.0.0"
+"hot.dev/stripe": "1.0.1"
 ```
 
 ## Setup

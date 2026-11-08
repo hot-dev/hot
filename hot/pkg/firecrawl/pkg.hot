@@ -2,13 +2,13 @@
 
 hot.pkg.firecrawl {
   name: "hot.dev/firecrawl",
-  version: "0.1.1",
+  version: "0.1.2",
   hot-min-version: "3.0.2",
   description: "Firecrawl v2 bindings for Hot. Scrape pages to clean markdown, search the web, map and crawl sites, batch-scrape URLs, start LLM-structured extraction jobs, and verify job webhooks.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
-  tags: ["firecrawl", "ai", "agents", "scraping", "crawling"],
+  tags: ["web"],
   deps: {},
   src-paths: ["src/"],
   test-paths: ["test/"]

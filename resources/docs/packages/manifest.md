@@ -157,17 +157,19 @@ detailed terms belong in documentation rather than the top-level category list.
 Use lowercase, hyphenated IDs from the approved category set:
 
 - `ai`
-- `automation`
+- `apps`
 - `cloud`
+- `compliance`
 - `database`
 - `documents`
-- `email`
+- `finance`
 - `hot`
 - `media`
 - `messaging`
-- `payments`
 - `protocols`
+- `public-data`
+- `web`
 
 Most packages should have one tag. Use two only when both browse paths are
-important, such as `["cloud", "email"]` for an AWS email package or
+important, such as `["cloud", "messaging"]` for an AWS email package or
 `["ai", "protocols"]` for an MCP package.

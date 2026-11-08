@@ -2,16 +2,16 @@
 
 hot.pkg.google-core {
   name: "hot.dev/google-core",
-  version: "0.1.0",
+  version: "0.1.1",
   hot-min-version: "3.0.2",
   description: "Google API foundation for Hot: access-token, refresh-token, service-account and domain-wide-delegation credentials (per call or from context), a per-run token cache, configurable scopes, OAuth consent helpers, Google-shaped errors with retry classification and nextPageToken pagination for the google-* packages.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
-  tags: ["google", "oauth", "auth"],
+  tags: ["cloud"],
   deps: {
-    "hot.dev/jwt": "0.2.0",
-    "hot.dev/oauth2": "0.2.0"
+    "hot.dev/jwt": "0.2.1",
+    "hot.dev/oauth2": "0.2.1"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]

@@ -2,13 +2,13 @@
 
 hot.pkg.deepgram {
   name: "hot.dev/deepgram",
-  version: "0.1.0",
+  version: "0.1.1",
   hot-min-version: "3.0.2",
   description: "Deepgram bindings for Hot. Pre-recorded speech-to-text (Nova-3) from URLs or audio bytes, async transcription with callback verification, Aura-2 and Flux text-to-speech, and transcript, utterance and paragraph helpers.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
-  tags: ["deepgram", "ai", "voice", "audio", "speech-to-text", "text-to-speech"],
+  tags: ["ai", "media"],
   deps: {},
   src-paths: ["src/"],
   test-paths: ["test/"]

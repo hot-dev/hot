@@ -1,13 +1,11 @@
 # ssh
 
-SSH client sessions and subsystem byte streams backed by Rust's `russh` library.
-Requires a Hot runtime built with the SSH/SFTP bindings in this change. The
-manifest minimum matches the current checkout (3.0.4); older binaries without
-these bindings cannot load the package.
+SSH client sessions and subsystem byte streams. Requires Hot 3.0.5 or later,
+which includes the SSH and SFTP runtime bindings.
 
 ```hot
 hot.project.my-app.deps {
-    "hot.dev/ssh": "0.1.0"
+    "hot.dev/ssh": "0.1.1"
 }
 ```
 

@@ -1,9 +1,9 @@
 ::ssh ns
 meta {
     doc: """
-    SSH client sessions and subsystem byte streams backed by the host's russh
-    transport. Host-key verification is required. Connections are live runtime
-    handles: close them explicitly, and reconnect after a task is restored.
+    SSH client sessions and subsystem byte streams. Host-key verification is
+    required. Connections are live runtime handles: close them explicitly, and
+    reconnect after a task is restored.
     """
 }
 

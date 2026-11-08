@@ -2,15 +2,15 @@
 
 hot.pkg.sql-sqlite {
   name: "hot.dev/sql-sqlite",
-  version: "0.1.1",
+  version: "0.1.2",
   hot-min-version: "2.6.1",
   description: "SQLite driver for hot.dev/sql: the `::sql::sqlite` adapter over the embedded ::hot::sqlite runtime natives — no server, file.mode-aware storage.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
-  tags: ["database", "sql"],
+  tags: ["database"],
   deps: {
-    "hot.dev/sql": "0.1.0"
+    "hot.dev/sql": "0.1.1"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]

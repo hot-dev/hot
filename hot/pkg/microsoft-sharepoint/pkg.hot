@@ -2,16 +2,16 @@
 
 hot.pkg.microsoft-sharepoint {
   name: "hot.dev/microsoft-sharepoint",
-  version: "0.1.0",
+  version: "0.1.1",
   hot-min-version: "3.0.2",
   description: "SharePoint Online bindings for Hot over Microsoft Graph: sites (root, by URL or path, search, subsites), document libraries as drives for microsoft-onedrive, lists and list items with field selection (read, create, update), list change subscriptions, and Sites.Selected / Lists.SelectedOperations.Selected app grants for least-privilege app-only access.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
-  tags: ["microsoft", "sharepoint", "microsoft-graph", "microsoft-365", "documents", "lists"],
+  tags: ["documents"],
   deps: {
-    "hot.dev/microsoft-graph": "0.1.0",
-    "hot.dev/microsoft-onedrive": "0.1.0"
+    "hot.dev/microsoft-graph": "0.1.1",
+    "hot.dev/microsoft-onedrive": "0.1.1"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]

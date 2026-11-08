@@ -2,13 +2,13 @@
 
 hot.pkg.federal-register {
   name: "hot.dev/federal-register",
-  version: "0.1.0",
+  version: "0.1.1",
   hot-min-version: "3.0.2",
   description: "The Federal Register API for Hot, with no key: document search, documents by number, public inspection, and agencies.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
-  tags: ["regulations", "federal-register", "rulemaking", "compliance"],
+  tags: ["public-data"],
   deps: {},
   src-paths: ["src/"],
   test-paths: ["test/"]

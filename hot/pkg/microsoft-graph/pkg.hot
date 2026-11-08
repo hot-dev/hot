@@ -2,16 +2,16 @@
 
 hot.pkg.microsoft-graph {
   name: "hot.dev/microsoft-graph",
-  version: "0.1.0",
+  version: "0.1.1",
   hot-min-version: "3.0.2",
   description: "Microsoft Graph v1.0 foundation for Hot: Entra ID delegated (auth code + PKCE, rotating refresh tokens) and app-only (client secret or certificate) credentials per call or from context, a per-run token cache, national clouds, OData query building, @odata.nextLink paging, JSON batching, Graph-shaped errors with retry classification, and change-notification subscriptions with webhook validation for the microsoft-* packages.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
-  tags: ["microsoft", "microsoft-graph", "microsoft-365", "entra-id", "oauth", "auth", "webhooks"],
+  tags: ["cloud"],
   deps: {
-    "hot.dev/jwt": "0.2.0",
-    "hot.dev/oauth2": "0.2.0"
+    "hot.dev/jwt": "0.2.1",
+    "hot.dev/oauth2": "0.2.1"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]

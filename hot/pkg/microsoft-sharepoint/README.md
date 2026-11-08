@@ -8,7 +8,7 @@ Add it to your project's deps in `hot.hot` (it pulls in microsoft-graph and micr
 
 ```hot
 hot.project.my-app.deps {
-  "hot.dev/microsoft-sharepoint": "0.1.0"
+  "hot.dev/microsoft-sharepoint": "0.1.1"
 }
 ```
 

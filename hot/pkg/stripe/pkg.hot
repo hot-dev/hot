@@ -2,13 +2,13 @@
 
 hot.pkg.stripe {
   name: "hot.dev/stripe",
-  version: "1.0.0",
+  version: "1.0.1",
   hot-min-version: "3.0.2",
   description: "Stripe API bindings for Hot, pinned to API version 2026-10-28.endive. PaymentIntents, SetupIntents, Checkout, customers, subscriptions and billing, invoices, coupons, refunds, disputes, payouts, usage meters, idempotent writes, auto-pagination, and webhook signature verification.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
-  tags: ["stripe", "payments", "billing"],
+  tags: ["finance"],
   deps: {},
   src-paths: ["src/"],
   test-paths: ["test/"]

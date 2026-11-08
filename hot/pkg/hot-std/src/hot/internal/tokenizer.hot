@@ -1,7 +1,7 @@
 ::hot::internal::tokenizer ns
 meta {
     doc: """
-    Hidden bindings for the host's BPE tokenizer (currently `tiktoken-rs`).
+    Hidden bindings for the host's BPE tokenizer.
     Not a public API: use `::ai::tokenizer/*` from the `hot.dev/hot-ai`
     package instead. Function signatures may change between releases.
 

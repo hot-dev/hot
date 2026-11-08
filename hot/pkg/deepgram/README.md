@@ -7,7 +7,7 @@ Deepgram bindings for Hot: pre-recorded speech-to-text (Nova-3, from a URL or ra
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/deepgram": "0.1.0"
+"hot.dev/deepgram": "0.1.1"
 ```
 
 ## Setup

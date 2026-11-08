@@ -2,13 +2,13 @@
 
 hot.pkg.feed {
   name: "hot.dev/feed",
-  version: "0.1.0",
+  version: "0.1.1",
   hot-min-version: "3.0.3",
   description: "A stateless RSS 2.0 and Atom 1.0 reader for Hot: fetch or parse a feed, with conditional GET and a pure diff against ids the caller stores.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
-  tags: ["rss", "atom", "feeds", "monitoring"],
+  tags: ["web"],
   deps: {},
   src-paths: ["src/"],
   test-paths: ["test/"]

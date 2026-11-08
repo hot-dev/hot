@@ -2,15 +2,15 @@
 
 hot.pkg.github {
   name: "hot.dev/github",
-  version: "1.1.0",
+  version: "1.1.1",
   hot-min-version: "3.0.2",
   description: "GitHub API bindings for Hot. Repos, commits, checks, pull requests and reviews, Actions workflows, logs, artifacts, and search — with token and GitHub App authentication and webhook verification.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
-  tags: ["github", "developer-tools"],
+  tags: ["apps"],
   deps: {
-    "hot.dev/jwt": "0.2.0"
+    "hot.dev/jwt": "0.2.1"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]

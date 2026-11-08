@@ -2,13 +2,13 @@
 
 hot.pkg.ssh {
   name: "hot.dev/ssh",
-  version: "0.1.0",
+  version: "0.1.1",
   hot-min-version: "3.0.5",
-  description: "SSH client sessions and subsystem channels backed by russh, with mandatory host-key verification.",
+  description: "SSH client sessions and subsystem channels, with mandatory host-key verification.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
-  tags: ["network", "ssh", "file-transfer"],
+  tags: ["protocols"],
   deps: {},
   src-paths: ["src/"],
   test-paths: ["test/"]

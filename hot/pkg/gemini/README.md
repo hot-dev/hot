@@ -7,7 +7,7 @@ Google Gemini API bindings for Hot.
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/gemini": "1.2.0"
+"hot.dev/gemini": "1.2.1"
 ```
 
 ## Configuration

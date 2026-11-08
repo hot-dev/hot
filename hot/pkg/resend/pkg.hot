@@ -2,13 +2,13 @@
 
 hot.pkg.resend {
   name: "hot.dev/resend",
-  version: "1.2.0",
+  version: "1.2.1",
   hot-min-version: "3.0.2",
   description: "resend API bindings for Hot.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
-  tags: ["email"],
+  tags: ["messaging"],
   deps: {},
   src-paths: ["src/"],
   test-paths: ["test/"]

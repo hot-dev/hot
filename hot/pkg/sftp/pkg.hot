@@ -2,15 +2,15 @@
 
 hot.pkg.sftp {
   name: "hot.dev/sftp",
-  version: "0.1.0",
+  version: "0.1.1",
   hot-min-version: "3.0.5",
-  description: "SFTP file transfer and directory operations backed by russh/russh-sftp.",
+  description: "SFTP file transfer and directory operations.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
-  tags: ["network", "sftp", "file-transfer"],
+  tags: ["protocols"],
   deps: {
-    "hot.dev/ssh": "0.1.0"
+    "hot.dev/ssh": "0.1.1"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]

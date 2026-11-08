@@ -1,10 +1,10 @@
 ::sftp ns
 meta {
     doc: """
-    SFTP v3 client backed by russh/russh-sftp. Bulk reads and writes are
-    pipelined natively. Paths are remote POSIX paths. Use open/read/write for
-    large files; read-file has a bounded allocation. Handles cannot be saved
-    in checkpoints: reconnect and reopen after restoring a task.
+    SFTP v3 client. Bulk reads and writes are pipelined natively. Paths are
+    remote POSIX paths. Use open/read/write for large files; read-file has a
+    bounded allocation. Handles cannot be saved in checkpoints: reconnect and
+    reopen after restoring a task.
     """
 }
 

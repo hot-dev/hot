@@ -2,15 +2,15 @@
 
 hot.pkg.google-drive {
   name: "hot.dev/google-drive",
-  version: "0.1.0",
+  version: "0.1.1",
   hot-min-version: "3.0.2",
   description: "Google Drive API v3 bindings for Hot: search with a query builder, read any file as text (Docs to Markdown, Sheets to CSV), binary-safe multipart and resumable uploads, chunked downloads, shared drives, permissions, revisions, and change sync with push-notification webhooks.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
-  tags: ["google", "google-drive", "documents", "files", "storage"],
+  tags: ["documents"],
   deps: {
-    "hot.dev/google-core": "0.1.0"
+    "hot.dev/google-core": "0.1.1"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]

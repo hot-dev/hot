@@ -2,7 +2,7 @@
 
 hot.pkg.hot-ai {
   name: "hot.dev/hot-ai",
-  version: "1.9.0",
+  version: "1.9.1",
   hot-min-version: "3.0.2",
   description: "Dependency-free building blocks for AI agents: sessions, identities, messages, scoped memory, RAG, context management, and inter-agent communication.",
   author: "Hot Dev",

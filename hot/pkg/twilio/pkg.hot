@@ -2,13 +2,13 @@
 
 hot.pkg.twilio {
   name: "hot.dev/twilio",
-  version: "1.1.0",
+  version: "1.1.1",
   hot-min-version: "3.0.2",
   description: "Twilio API bindings for Hot. Send SMS/MMS/WhatsApp, place and control calls, OTP via Verify, phone number Lookup, recordings, TwiML builders, and webhook signature verification. Auth Token or API key auth.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
-  tags: ["twilio", "messaging", "sms", "voice", "verification"],
+  tags: ["messaging"],
   deps: {},
   src-paths: ["src/"],
   test-paths: ["test/"]

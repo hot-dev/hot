@@ -2,13 +2,13 @@
 
 hot.pkg.ffiec {
   name: "hot.dev/ffiec",
-  version: "0.1.0",
+  version: "0.1.1",
   hot-min-version: "3.0.2",
   description: "The FFIEC Central Data Repository Public Web Service for Hot: Call Report and UBPR reporting periods, the panel of reporters, recent filers and facsimiles.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
-  tags: ["banking", "government-data", "ffiec", "us"],
+  tags: ["public-data"],
   deps: {},
   src-paths: ["src/"],
   test-paths: ["test/"]
