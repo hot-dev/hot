@@ -124,8 +124,18 @@ jobs:
             ln -s "$runtime_assets" "$destination"
           done
 
+      # Each release test binary compiles as one codegen unit, which is heavy
+      # on memory. At -j 4 the runner was shut down partway through this
+      # compile on most nights. The memory lines stream live, so a runner that
+      # dies still leaves its last readings in the log.
       - name: Library tests (release profile)
-        run: cargo test --release --locked --workspace --lib -j 4
+        run: |
+          while sleep 30; do
+            free -m | awk '/^Mem:/ {print "memory: used " $3 " MiB, available " $7 " MiB"}'
+          done &
+          memory_logger=$!
+          trap 'kill "$memory_logger"' EXIT
+          cargo test --release --locked --workspace --lib -j 2
 
       - name: Hot tests
         env:
