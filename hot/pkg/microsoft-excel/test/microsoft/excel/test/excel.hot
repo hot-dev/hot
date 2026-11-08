@@ -1,0 +1,101 @@
+::microsoft::excel::test::excel ns
+meta ["test"]
+
+::excel ::microsoft::excel
+::books ::microsoft::excel::workbooks
+::sheets ::microsoft::excel::worksheets
+::ranges ::microsoft::excel::ranges
+::tables ::microsoft::excel::tables
+::rec ::microsoft::excel::records
+
+D {drive: "d1"}
+
+test-paths
+meta ["test"] fn () {
+    assert-eq("/me/drive/root:/Reports/Q3.xlsx:/workbook", ::excel/workbook-path("/Reports/Q3.xlsx", {}))
+    assert-eq("/drives/d1/items/I1/workbook", ::excel/workbook-path("I1", D))
+    assert-eq("/drives/d1/items/I1/workbook/worksheets/Q3%20Plan", ::excel/worksheet-path("I1", "Q3 Plan", D))
+    assert-eq("/drives/d1/items/I1/workbook/tables/Leads", ::excel/table-path("I1", "Leads", D))
+    assert-eq("/drives/d1/items/I1/workbook/worksheets/Data/range(address='A1%3AB2')", ::excel/range-path("I1", "Data", "A1:B2", D))
+    assert-eq("'it%27%27s'", ::excel/odata-string("it's"), "quotes doubled, then encoded")
+    assert-eq("/drives/d1/items/I1/workbook/worksheets/Data/usedRange", ::ranges/used-range-path("I1", "Data", D))
+    assert-eq("/drives/d1/items/I1/workbook/worksheets/Data/usedRange(valuesOnly=true)", ::ranges/used-range-path("I1", "Data", {...D, values-only: true}))
+    assert-eq("/drives/d1/items/I1/workbook/tables/T/rows/3", ::tables/row-path("I1", "T", 3, D))
+}
+
+test-sessions-and-options
+meta ["test"] fn () {
+    assert-eq({}, ::excel/session-headers({}))
+    assert-eq({"workbook-session-id": "s1"}, ::excel/session-headers({session: "s1"}))
+    assert-eq({"workbook-session-id": "s2"}, ::excel/session-headers({session: {id: "s2", persistChanges: true}}))
+    assert-eq({select: "values", top: 5}, ::excel/query-opts({select: "values"}, {top: 5, drive: "d", session: "s", token: "t", address: "A1", skip: null}), "local keys and credentials never reach the query")
+    assert-eq({calculationType: "Full"}, ::books/calculation-body("Full"))
+    assert(is-err(::books/calculation-body("Everything")))
+}
+
+test-bodies
+meta ["test"] fn () {
+    assert-eq({applyTo: "All"}, ::ranges/clear-body({}))
+    assert-eq({applyTo: "Contents"}, ::ranges/clear-body({apply-to: "Contents"}))
+    assert-eq({address: "Data!A1:B5", hasHeaders: true}, ::tables/create-table-body("Data", "A1:B5", {}))
+    assert-eq({address: "'Q3 Plan'!A1:B5", hasHeaders: false}, ::tables/create-table-body("Q3 Plan", "A1:B5", {has-headers: false}))
+    assert-eq({values: [[1]]}, ::tables/add-rows-body([[1]], {}), "no index unless given")
+    assert-eq({values: [[1]], index: 0}, ::tables/add-rows-body([[1]], {index: 0}))
+}
+
+test-records
+meta ["test"] fn () {
+    grid [["name", "score", "", "note"], ["Ada", 9, "x", "top"], ["", "", "", ""], ["Bob", "", "", ""], ["Cy"]]
+    assert-eq([
+      {name: "Ada", score: 9, note: "top"},
+      {name: "Bob", score: null, note: null},
+      {name: "Cy", score: null, note: null}
+    ], ::rec/rows-to-records(grid), "blank cells are null, blank headers skipped, blank rows dropped")
+    assert-eq([], ::rec/rows-to-records(null))
+    assert-eq([], ::rec/rows-to-records([["a", "b"], ["", ""]]), "an empty table reads as no records")
+    assert-eq([{n: 0, b: false}], ::rec/rows-to-records([["n", "b"], [0, false]]), "0 and false are values, not blanks")
+    recs [{name: "Ada", tags: ["a"]}, {name: "Bob", active: true, n: null}]
+    assert-eq(["name", "tags", "active", "n"], ::rec/record-columns(recs))
+    assert-eq([["name", "active"], ["Ada", ""], ["Bob", true]], ::rec/records-to-grid(recs, ["name", "active"]))
+    assert-eq([["Ada", "[\"a\"]", "", ""], ["Bob", "", true, ""]], ::rec/records-to-rows(recs))
+    assert-eq([[1, 2], [3, null]], ::rec/rectangular([[1, 2], [3]]))
+}
+
+test-a1-helpers
+meta ["test"] fn () {
+    assert-eq("A", ::rec/column-letter(0))
+    assert-eq("AA", ::rec/column-letter(26))
+    assert-eq("ZZ", ::rec/column-letter(701))
+    assert-eq(0, ::rec/column-index("A"))
+    assert-eq(26, ::rec/column-index("aa"))
+    assert-eq(701, ::rec/column-index("ZZ"))
+    assert-eq("B2:D3", ::rec/expand-address("B2", 2, 3))
+    assert-eq("A1:A1", ::rec/expand-address("A1", 1, 1))
+    assert-eq("Z10:AB10", ::rec/expand-address("z10", 1, 3))
+    assert-eq("A1:C3", ::rec/expand-address("A1:C3", 9, 9), "a full range is left alone")
+    assert-eq("MyRange", ::rec/expand-address("MyRange", 2, 2))
+    assert-eq("Data!A1", ::rec/a1("Data", "A1"))
+    assert-eq("'Bob''s'!A:C", ::rec/a1("Bob's", "A:C"))
+}
+
+test-no-op-writes-make-no-call
+meta ["test"] fn () {
+    assert-eq({}, ::ranges/write-values("I1", "Data", "A1", []), "no credentials are needed, because no call is made")
+    assert-eq({}, ::tables/append-records("I1", "T", []))
+}
+
+test-calls-surface-no-credentials-err
+meta ["test"] fn () {
+    read ::sheets/list-worksheets("/a.xlsx")
+    assert(is-err(read), "list-worksheets without credentials errs")
+    assert(contains(err-message(read), "credentials"), "the auth error reaches the caller")
+    assert(is-err(::ranges/read-values("/a.xlsx", "Data", "A1:B2")))
+    assert(is-err(::ranges/read-records("/a.xlsx", "Data")))
+    assert(is-err(::ranges/read-records("/a.xlsx", "Data", {address: "A:B"})))
+    assert(is-err(::ranges/write-values("/a.xlsx", "Data", "A1", [[1]])))
+    assert(is-err(::tables/read-table-records("/a.xlsx", "T")))
+    assert(is-err(::tables/append-records("/a.xlsx", "T", [{a: 1}])))
+    assert(is-err(::books/calculate("/a.xlsx")))
+    assert(is-err(::books/calculate("/a.xlsx", "Nope")))
+    assert(is-err(::books/with-session("/a.xlsx", (s) { fail("must not run") })), "a failed session never calls f")
+}

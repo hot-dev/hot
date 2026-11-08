@@ -1,0 +1,209 @@
+::microsoft::excel::records ns
+meta {
+    doc: """
+    Convert between Excel value grids (`[[...], ...]`, rows of cells) and
+    records (one Map per row, keyed by the header row), plus A1 notation
+    helpers. All functions are pure.
+    """
+}
+
+LETTERS "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+// ---------------------------------------------------------------------------
+// Grids and records
+// ---------------------------------------------------------------------------
+
+is-blank-cell fn (cell: Any): Bool {
+  or(is-null(cell), and(is-str(cell), eq(trim(cell), "")))
+}
+
+header-names
+meta {
+    doc: """The header row as column names: each cell as a trimmed Str; blank headers become null (their column is skipped)."""
+}
+fn (header: Vec): Vec {
+  map(header, (h) { if(is-blank-cell(h), null, trim(Str(h))) })
+}
+
+cell-or-null fn (cell: Any): Any {
+  if(is-blank-cell(cell), null, cell)
+}
+
+row-to-record
+meta {
+    doc: """One row as a Map keyed by `columns` (from `header-names`); blank and missing cells are null and null-named columns are skipped."""
+}
+fn (columns: Vec, row: Vec): Map {
+  n length(row)
+  reduce(range(0, length(columns)), (acc, i) {
+    name get(columns, i)
+    cond {
+      is-null(name) => { acc }
+      => { assoc(acc, name, if(lt(i, n), cell-or-null(get(row, i)), null)) }
+    }
+  }, {})
+}
+
+rows-to-records
+meta {
+    doc: """
+    A value grid whose first row is a header, as a Vec of Maps. Fully
+    blank rows are skipped. A missing or empty grid gives `[]`.
+
+    ```hot
+    ::microsoft::excel::records/rows-to-records([["name", "score"], ["Ada", 9], ["Bob", ""]])
+    // [{name: "Ada", score: 9}, {name: "Bob", score: null}]
+    ```
+    """
+}
+fn (values: Vec?): Vec {
+  grid or(values, [])
+  cond {
+    is-empty(grid) => { [] }
+    => {
+      columns header-names(first(grid))
+      rows filter(rest(grid), (row) { not(all(row, is-blank-cell)) })
+      map(rows, (row) { row-to-record(columns, row) })
+    }
+  }
+}
+
+record-columns
+meta {
+    doc: """The column names for `records`: every key, in order of first appearance."""
+}
+fn (records: Vec): Vec {
+  distinct(mapcat(records, (r) { map(keys(r), Str) }))
+}
+
+cell-value
+meta {
+    doc: """A record value as a cell: Str, Int, Dec and Bool pass through; null becomes `""` (an empty cell); Maps and Vecs become JSON text."""
+}
+fn (value: Any): Any {
+  cond {
+    is-null(value) => { "" }
+    or(is-str(value), is-int(value), is-dec(value), is-bool(value)) => { value }
+    => { to-json(untype(value)) }
+  }
+}
+
+records-to-rows
+meta {
+    doc: """Records as value rows ordered by `columns` (default: every key in order of first appearance), without a header. Missing values become `""`."""
+}
+fn
+(records: Vec): Vec {
+  records-to-rows(records, record-columns(records))
+},
+(records: Vec, columns: Vec): Vec {
+  map(records, (r) { map(columns, (c) { cell-value(get(r, c)) }) })
+}
+
+records-to-grid
+meta {
+    doc: """Records as a full grid: the header row (`columns`, default every key) followed by `records-to-rows`."""
+}
+fn
+(records: Vec): Vec {
+  records-to-grid(records, record-columns(records))
+},
+(records: Vec, columns: Vec): Vec {
+  concat([columns], records-to-rows(records, columns))
+}
+
+rectangular
+meta {
+    doc: """A grid with every row padded with null to the longest row's length, as Excel requires."""
+}
+fn (grid: Vec): Vec {
+  width reduce(grid, (w, row) { max(w, length(row)) }, 0)
+  map(grid, (row) { concat(row, map(range(length(row), width), (i) { null })) })
+}
+
+// ---------------------------------------------------------------------------
+// A1 notation
+// ---------------------------------------------------------------------------
+
+column-letter
+meta {
+    doc: """The A1 letters for a 0-based column index: 0 is `A`, 25 is `Z`, 26 is `AA`, 701 is `ZZ`."""
+}
+fn (index: Int): Str {
+  position mod(index, 26)
+  letter slice(LETTERS, position, add(position, 1))
+  cond {
+    lt(index, 26) => { letter }
+    => {
+      prefix column-letter(sub(Int(floor(div(sub(index, position), 26))), 1))
+      `${prefix}${letter}`
+    }
+  }
+}
+
+letter-value fn (letter: Str): Int {
+  add(find-first(range(0, 26), (i) { eq(slice(LETTERS, i, add(i, 1)), letter) }), 1)
+}
+
+column-index
+meta {
+    doc: """The 0-based column index for A1 letters, in either case: `A` is 0, `AA` is 26."""
+}
+fn (letters: Str): Int {
+  sub(reduce(split-letters(uppercase(letters)), (n, c) { add(mul(n, 26), letter-value(c)) }, 0), 1)
+}
+
+split-letters fn (letters: Str): Vec {
+  map(range(0, length(letters)), (i) { slice(letters, i, add(i, 1)) })
+}
+
+is-cell
+meta {
+    doc: """True for a single A1 cell such as `B2`."""
+}
+fn (address: Str): Bool {
+  ::hot::regex/is-match(address, "^[A-Za-z]{1,3}[1-9][0-9]*$")
+}
+
+expand-address
+meta {
+    doc: """
+    A single top-left cell expanded to `rows` by `columns` cells:
+    `expand-address("B2", 2, 3)` is `B2:D3`. Anything else, such as a
+    full range or a named range, is returned unchanged.
+    """
+}
+fn (address: Str, rows: Int, columns: Int): Str {
+  cond {
+    not(is-cell(address)) => { address }
+    => {
+      chars split-letters(address)
+      letters join(filter(chars, (c) { not(::hot::regex/is-match(c, "[0-9]")) }), "")
+      row Int(join(filter(chars, (c) { ::hot::regex/is-match(c, "[0-9]") }), ""))
+      last-letter column-letter(add(column-index(letters), sub(max(columns, 1), 1)))
+      `${uppercase(letters)}${row}:${last-letter}${add(row, sub(max(rows, 1), 1))}`
+    }
+  }
+}
+
+quote-sheet
+meta {
+    doc: """A sheet name quoted for A1 notation: `Sheet1` stays as is; `"Q3 Plan"` becomes `'Q3 Plan'` and a `'` inside is doubled."""
+}
+fn (name: Str): Str {
+  cond {
+    ::hot::regex/is-match(name, "^[A-Za-z_][A-Za-z0-9_]*$") => { name }
+    => {
+      doubled ::hot::str/replace(name, "'", "''")
+      `'${doubled}'`
+    }
+  }
+}
+
+a1
+meta {
+    doc: """An A1 range on a sheet: `a1("Q3 Plan", "A1:C10")` is `'Q3 Plan'!A1:C10`."""
+}
+fn (sheet: Str, address: Str): Str {
+  `${quote-sheet(sheet)}!${address}`
+}

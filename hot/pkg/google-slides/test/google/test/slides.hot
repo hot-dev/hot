@@ -1,0 +1,134 @@
+::google::test::slides ns
+
+::slides ::google::slides
+::decks ::google::slides::presentations
+::req ::google::slides::requests
+::content ::google::slides::content
+
+run fn (text: Str): Map {
+  {textElements: [{paragraphMarker: {}}, {textRun: {content: text}}]}
+}
+
+SLIDE {
+  objectId: "s1",
+  pageElements: [
+    {objectId: "t", shape: {placeholder: {type: "TITLE", index: 0}, text: run("Hello\n")}},
+    {objectId: "b", shape: {placeholder: {type: "BODY", index: 0}, text: run("World\n")}},
+    {objectId: "i", image: {contentUrl: "https://x"}},
+    {objectId: "tb", table: {tableRows: [{tableCells: [{text: run("a\n")}, {text: run("b\n")}, {}]}]}},
+    {objectId: "g", elementGroup: {children: [{objectId: "c", shape: {text: run("in group\n")}}]}}
+  ],
+  slideProperties: {notesPage: {
+    notesProperties: {speakerNotesObjectId: "n"},
+    pageElements: [{objectId: "n", shape: {text: run(" Say hi \n")}}]
+  }}
+}
+
+test-urls
+meta ["test"] fn () {
+    assert-eq("https://slides.googleapis.com/v1/presentations", ::slides/url(""))
+    assert-eq("https://slides.googleapis.com/v1/presentations/a%2Fb:batchUpdate", ::slides/url(`/${::slides/encode-id("a/b")}:batchUpdate`))
+    assert-eq({"thumbnailProperties.mimeType": "PNG", "thumbnailProperties.thumbnailSize": "LARGE"}, ::decks/thumbnail-params({mimeType: "PNG", thumbnailSize: "LARGE", token: "t"}))
+    assert-eq({}, ::decks/thumbnail-params({}))
+}
+
+test-bodies
+meta ["test"] fn () {
+    assert-eq({title: "T"}, ::decks/build-presentation("T", {token: "t"}))
+    assert-eq({title: "T", locale: "en"}, ::decks/build-presentation("T", {locale: "en"}))
+    assert-eq({requests: []}, ::decks/batch-update-body([], {token: "t"}))
+    w {requiredRevisionId: "r1"}
+    assert-eq({requests: [], writeControl: w}, ::decks/batch-update-body([], {writeControl: w}))
+}
+
+test-reads-a-slide
+meta ["test"] fn () {
+    assert-eq("Hello", ::content/slide-title(SLIDE))
+    assert-eq("Hello\nWorld\na\nb\nin group\n", ::content/slide-text(SLIDE), "shapes, table cells and groups")
+    assert-eq("Say hi", ::content/speaker-notes(SLIDE))
+    assert-eq("b", ::content/find-placeholder(SLIDE, "BODY").objectId)
+    assert-eq("tb", ::content/find-element(SLIDE, "tb").objectId)
+    assert(is-null(::content/find-placeholder(SLIDE, "SUBTITLE")))
+    assert(is-null(::content/slide-title({})), "no title placeholder")
+    assert-eq("", ::content/speaker-notes({}), "no notes page")
+    assert-eq([{id: "s1", title: "Hello", text: "Hello\nWorld\na\nb\nin group\n", notes: "Say hi"}], ::content/outline({slides: [SLIDE]}))
+    assert-eq([], ::content/outline({}))
+}
+
+test-object-ids
+meta ["test"] fn () {
+    id ::req/new-object-id()
+    assert(starts-with(id, "hot_"))
+    assert(between(length(id), 5, 50), "the API takes 5 to 50 characters")
+    assert(::hot::regex/is-match(id, "^[a-zA-Z0-9_][a-zA-Z0-9_:-]*$"))
+    assert(ne(id, ::req/new-object-id()))
+}
+
+test-slide-requests
+meta ["test"] fn () {
+    assert-eq({createSlide: {slideLayoutReference: {predefinedLayout: "BLANK"}}}, ::req/create-slide())
+    s ::req/create-slide("TITLE", {objectId: "abcde", insertionIndex: 1, placeholders: [::req/placeholder("TITLE", 0, "ttttt")]})
+    assert-eq({createSlide: {objectId: "abcde", insertionIndex: 1, slideLayoutReference: {predefinedLayout: "TITLE"}, placeholderIdMappings: [{layoutPlaceholder: {type: "TITLE", index: 0}, objectId: "ttttt"}]}}, s)
+    assert-eq({layoutId: "L"}, ::req/create-slide("BLANK", {layoutId: "L"}).createSlide.slideLayoutReference)
+    assert-eq({deleteObject: {objectId: "x"}}, ::req/delete-object("x"))
+    assert-eq({duplicateObject: {objectId: "x", objectIds: {x: "y"}}}, ::req/duplicate-object("x", {x: "y"}))
+    assert-eq({updateSlidesPosition: {slideObjectIds: ["a"], insertionIndex: 2}}, ::req/move-slides(["a"], 2))
+}
+
+test-element-requests
+meta ["test"] fn () {
+    frame {x: 10, y: 20, width: 300, height: 40}
+    p ::req/element-properties("pg", frame)
+    assert-eq({pageObjectId: "pg", size: {width: {magnitude: 300, unit: "PT"}, height: {magnitude: 40, unit: "PT"}}, transform: {scaleX: 1, scaleY: 1, translateX: 10, translateY: 20, unit: "PT"}}, p)
+    assert-eq({createShape: {objectId: "b", shapeType: "TEXT_BOX", elementProperties: p}}, ::req/create-text-box("b", "pg", frame))
+    assert-eq({createImage: {objectId: "i", url: "u", elementProperties: p}}, ::req/create-image("i", "u", "pg", frame))
+    assert-eq({createTable: {objectId: "t", elementProperties: {pageObjectId: "pg"}, rows: 2, columns: 3}}, ::req/create-table("t", "pg", 2, 3))
+}
+
+test-text-requests
+meta ["test"] fn () {
+    assert-eq({insertText: {objectId: "o", text: "x"}}, ::req/insert-text("o", "x"))
+    assert-eq({insertText: {objectId: "o", text: "x", insertionIndex: 3, cellLocation: {rowIndex: 1, columnIndex: 2}}}, ::req/insert-text("o", "x", {insertionIndex: 3, rowIndex: 1, columnIndex: 2}))
+    assert-eq({deleteText: {objectId: "o", textRange: {type: "ALL"}}}, ::req/delete-text("o"))
+    assert-eq({deleteText: {objectId: "o", textRange: {type: "FIXED_RANGE", startIndex: 1, endIndex: 3}}}, ::req/delete-text("o", {textRange: ::req/text-range(1, 3)}))
+    assert-eq({replaceAllText: {replaceText: "b", containsText: {text: "a", matchCase: true}}}, ::req/replace-all-text("a", "b"))
+    assert-eq(["p1"], ::req/replace-all-text("a", "b", {pageObjectIds: ["p1"]}).replaceAllText.pageObjectIds)
+    i ::req/replace-shapes-with-image("{{logo}}", "u")
+    assert-eq({imageUrl: "u", imageReplaceMethod: "CENTER_INSIDE", containsText: {text: "{{logo}}", matchCase: true}}, i.replaceAllShapesWithImage)
+    t ::req/fill-template({name: "Ada", skip: null})
+    assert-eq(1, length(t), "null values are skipped")
+    assert-eq("{{name}}", first(t).replaceAllText.containsText.text)
+}
+
+test-style-requests
+meta ["test"] fn () {
+    assert-eq({updateTextStyle: {objectId: "o", style: {bold: true}, textRange: {type: "ALL"}, fields: "bold"}}, ::req/bold("o"))
+    assert-eq({magnitude: 18, unit: "PT"}, ::req/font-size("o", 18).updateTextStyle.style.fontSize)
+    assert-eq({opaqueColor: {rgbColor: ::req/rgb(255, 0, 0)}}, ::req/optional-color(::req/hex-color("#ff0000")))
+    assert(is-err(::req/hex-color("red")))
+    assert-eq({createParagraphBullets: {objectId: "o", bulletPreset: "BULLET_DISC_CIRCLE_SQUARE", textRange: {type: "ALL"}}}, ::req/bullets("o"))
+    b ::req/background("pg", {red: 1, green: 1, blue: 1})
+    assert-eq("pageBackgroundFill.solidFill.color", b.updatePageProperties.fields)
+    assert-eq({red: 1, green: 1, blue: 1}, b.updatePageProperties.pageProperties.pageBackgroundFill.solidFill.color.rgbColor)
+}
+
+test-text-slide-requests
+meta ["test"] fn () {
+    ids {slide: "sssss", title: "ttttt", body: "bbbbb"}
+    r ::decks/text-slide-requests("T", "B", ids, {insertionIndex: 2})
+    assert-eq(3, length(r))
+    assert-eq(2, first(r).createSlide.insertionIndex)
+    assert-eq("TITLE_AND_BODY", first(r).createSlide.slideLayoutReference.predefinedLayout)
+    assert-eq({insertText: {objectId: "ttttt", text: "T"}}, r[1])
+    assert-eq({insertText: {objectId: "bbbbb", text: "B"}}, r[2])
+}
+
+test-calls-surface-no-credentials-err
+meta ["test"] fn () {
+    read ::decks/get-presentation("deck-id")
+    assert(is-err(read), "get-presentation without credentials errs")
+    assert(contains(err-message(read), "no credentials"), "the auth error reaches the caller")
+    assert(is-err(::decks/outline("deck-id")), "outline returns the Err instead of halting")
+    assert(is-err(::decks/add-text-slide("deck-id", "T", "B")), "a failed write is not reported as new ids")
+    assert(is-err(::decks/fill-template("deck-id", {a: 1})))
+}

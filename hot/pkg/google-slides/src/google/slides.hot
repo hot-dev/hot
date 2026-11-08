@@ -1,0 +1,135 @@
+::google::slides ns
+meta {
+    doc: """
+    Google Slides API v1 bindings: read a presentation as slide text and
+    speaker notes, create decks and text slides, fill `{{placeholder}}`
+    templates, fetch page thumbnails, and run `batchUpdate` with builders
+    for slides, shapes, images, tables, text and styles. Credentials and
+    scopes come from `google-core`.
+
+    **Namespaces**
+
+    - `::google::slides::presentations` - get, create, `batch-update`,
+      pages, thumbnails, `outline`, `add-text-slide`, `replace-text`,
+      `fill-template`
+    - `::google::slides::requests` - pure builders for `batchUpdate`
+      requests
+    - `::google::slides::content` - pure readers over a fetched
+      presentation: slide titles, text, speaker notes, placeholders
+
+    Every function has an options arity taking an `opts` Map. Slides
+    parameters use the API's own names (`fields`, `writeControl`);
+    credential keys (`token`, `refresh-token`, `service-account`,
+    `subject`, `scopes`, `retry`) are handled by `google-core` and
+    override context for that call.
+
+    **Quick start**
+
+    ```hot
+    ::decks ::google::slides::presentations
+
+    deck ::decks/create-presentation("Q3 review")
+    ::decks/add-text-slide(deck.presentationId, "Highlights", "Revenue up 12%")
+    ::decks/outline(deck.presentationId)
+    ```
+    """
+}
+
+::api ::google::api
+::ctx ::hot::ctx
+::uri ::hot::uri
+
+API_ROOT "https://slides.googleapis.com"
+
+// Scopes. presentations and presentations.readonly are sensitive (OAuth
+// verification for public apps); drive.file is non-sensitive and covers
+// presentations the app created or the user opened with it.
+SCOPE "https://www.googleapis.com/auth/presentations"
+READ_SCOPE "https://www.googleapis.com/auth/presentations.readonly"
+FILE_SCOPE "https://www.googleapis.com/auth/drive.file"
+
+// ---------------------------------------------------------------------------
+// URL and parameter helpers (shared by the sub-namespaces)
+// ---------------------------------------------------------------------------
+
+api-root
+meta {
+    ctx: {"google.slides.api-root": {required: false, secret: false}},
+    doc: """The API root, `https://slides.googleapis.com` unless the `google.slides.api-root` context variable points at a proxy or emulator."""
+}
+fn (): Str {
+  root ::ctx/get("google.slides.api-root")
+  if(or(is-null(root), eq(root, "")), API_ROOT, root)
+}
+
+url
+meta {
+    doc: """A Slides v1 URL: `/v1/presentations` + `path` with non-null `params`. `url("/abc:batchUpdate")`."""
+}
+fn
+(path: Str): Str {
+  url(path, {})
+},
+(path: Str, params: Map): Str {
+  ::api/with-query(`${api-root()}/v1/presentations${path}`, params)
+}
+
+encode-id
+meta {doc: """URL-encode a presentation or page id for a path segment."""}
+fn (id: Str): Str {
+  ::uri/encode(id)
+}
+
+query-params
+meta {
+    doc: """
+    Build a call's query parameters: `defaults`, overridden by the Slides
+    parameters in `opts` (credential keys and the function's own
+    `local-keys` are removed), with nulls dropped. Pass a key as null in
+    `opts` to drop a default.
+    """
+}
+fn
+(defaults: Map, opts: Map): Map {
+  query-params(defaults, opts, [])
+},
+(defaults: Map, opts: Map, local-keys: Vec): Map {
+  params filter-keys(::api/api-params(opts), (k) { not(in(k, local-keys)) })
+  filter-vals({...defaults, ...params}, is-some)
+}
+
+creds
+meta {
+    doc: """The google-core part of `opts` (credentials, scopes, retry), passed through to `::google::api`."""
+}
+fn (opts: Map): Map {
+  ::api/credential-opts(opts)
+}
+
+json
+meta {
+    doc: """`::google::api/json` with this package's conventions: credential opts and a JSON (or empty) body."""
+}
+fn (scope: Str, method: Str, full-url: Str, body: Any, opts: Map): Any {
+  ::api/json(scope, method, full-url, {}, body, creds(opts))
+}
+
+compact
+meta {
+    doc: """Drop null values from a request body (Slides bodies never carry JSON null for unset fields)."""
+}
+fn (body: Map): Map {
+  filter-vals(untype(body), is-some)
+}
+
+// ---------------------------------------------------------------------------
+// Shortcuts to the most used functions
+// ---------------------------------------------------------------------------
+
+get-presentation ::google::slides::presentations/get-presentation
+create-presentation ::google::slides::presentations/create-presentation
+batch-update ::google::slides::presentations/batch-update
+outline ::google::slides::presentations/outline
+add-text-slide ::google::slides::presentations/add-text-slide
+replace-text ::google::slides::presentations/replace-text
+fill-template ::google::slides::presentations/fill-template

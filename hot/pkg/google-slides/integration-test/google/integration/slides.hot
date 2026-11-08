@@ -1,0 +1,44 @@
+::google::integration::slides ns
+meta ["test"]
+
+// Live Slides roundtrip. Requires GOOGLE_SERVICE_ACCOUNT (set
+// GOOGLE_IMPERSONATE too for domain-wide delegation). Self-cleaning: the
+// presentation it creates is deleted with a direct Drive REST call through
+// google-core, so this suite needs no google-drive dependency.
+
+::decks ::google::slides::presentations
+::req ::google::slides::requests
+
+delete-presentation fn (id: Str): Any {
+  ::google::api/json("drive.file", "DELETE", `https://www.googleapis.com/drive/v3/files/${::hot::uri/encode(id)}?supportsAllDrives=true`, {}, "")
+}
+
+test-presentation-roundtrip
+meta ["test"] fn () {
+    if(is-empty(::hot::env/get("GOOGLE_SERVICE_ACCOUNT", "")),
+        fail("Set GOOGLE_SERVICE_ACCOUNT in .env")
+    )
+
+    deck ::decks/create-presentation(`hot-it-${Uuid()}`)
+    assert(not(is-err(deck)), `create-presentation: ${if-err(deck, (e) { err-message(e) })}`)
+    id deck.presentationId
+
+    ids ::decks/add-text-slide(id, "Hello {{name}}", "Body text")
+    assert(not(is-err(ids)), `add-text-slide: ${if-err(ids, (e) { err-message(e) })}`)
+
+    filled ::decks/fill-template(id, {name: "Ada"})
+    assert(not(is-err(filled)), `fill-template: ${if-err(filled, (e) { err-message(e) })}`)
+
+    styled ::decks/batch-update(id, [::req/bold(ids.title), ::req/background(ids.slide, ::req/hex-color("#f5f5f5"))])
+    assert(not(is-err(styled)), `batch-update: ${if-err(styled, (e) { err-message(e) })}`)
+
+    slide last(::decks/outline(id))
+    assert-eq("Hello Ada", slide.title, "title read back")
+    assert(contains(slide.text, "Body text"), "body read back")
+
+    thumb ::decks/get-thumbnail(id, ids.slide, {mimeType: "PNG", thumbnailSize: "SMALL"})
+    assert(is-str(thumb.contentUrl), "thumbnail url")
+
+    cleaned delete-presentation(id)
+    assert(not(is-err(cleaned)), "cleanup should succeed")
+}

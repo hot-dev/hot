@@ -1,0 +1,190 @@
+::microsoft::excel ns
+meta {
+    doc: """
+    Excel workbooks in OneDrive and SharePoint over the Microsoft Graph
+    workbook API: worksheets, cell ranges, tables, rows as records,
+    sessions and recalculation. Credentials, clouds, retries and errors
+    come from `microsoft-graph`; drives and items are addressed as in
+    `microsoft-onedrive`.
+
+    **Namespaces**
+
+    - `::microsoft::excel::workbooks` - sessions (`with-session`,
+      `create-session`, `close-session`, `refresh-session`), `calculate`
+    - `::microsoft::excel::worksheets` - list, get, add, rename, update,
+      delete
+    - `::microsoft::excel::ranges` - `read-values`, `write-values`,
+      `read-records`, `write-records`, used range, clear, insert, delete
+    - `::microsoft::excel::tables` - list, create, update, delete, rows,
+      `read-table-records`, `append-records`
+    - `::microsoft::excel::records` - pure conversion between value grids
+      and records, A1 notation helpers
+
+    **Credentials.** Microsoft documents the workbook API for delegated
+    work or school tokens. Application (app-only) tokens are not
+    supported, and most session calls are not available on personal
+    accounts.
+
+    **Addressing a workbook.** An item is an id, a path from the drive
+    root (`"/Reports/Q3.xlsx"`), or a driveItem Map. `opts.drive` picks
+    the drive, as in `microsoft-onedrive`. Only `.xlsx` files work.
+
+    **Quick start**
+
+    ```hot
+    ::ranges ::microsoft::excel::ranges
+    ::tables ::microsoft::excel::tables
+
+    book "/Reports/Q3.xlsx"
+    leads ::ranges/read-records(book, "Leads")
+    ::tables/append-records(book, "LeadsTable", [{name: "Ada", stage: "demo"}])
+    ```
+    """
+}
+
+::api ::microsoft::graph::api
+::auth ::microsoft::graph::auth
+::onedrive ::microsoft::onedrive
+
+// Keys this package reads from `opts` itself (never sent as query parameters).
+LOCAL_KEYS ["drive", "session", "sheet", "address", "persist", "values-only", "apply-to", "has-headers", "index"]
+
+// ---------------------------------------------------------------------------
+// Paths (pure)
+// ---------------------------------------------------------------------------
+
+workbook-path
+meta {
+    doc: """
+    The Graph path of an item's workbook.
+
+    ```hot
+    ::microsoft::excel/workbook-path("/Reports/Q3.xlsx", {})
+    // "/me/drive/root:/Reports/Q3.xlsx:/workbook"
+    ```
+    """
+}
+fn (item: Any, opts: Map): Str {
+  `${::onedrive/item-path(item, opts)}/workbook`
+}
+
+worksheet-path
+meta {
+    doc: """The Graph path of a worksheet, by name or id."""
+}
+fn (item: Any, sheet: Str, opts: Map): Str {
+  `${workbook-path(item, opts)}/worksheets/${::api/encode-segment(sheet)}`
+}
+
+table-path
+meta {
+    doc: """The Graph path of a table, by name or id, at the workbook level."""
+}
+fn (item: Any, table: Str, opts: Map): Str {
+  `${workbook-path(item, opts)}/tables/${::api/encode-segment(table)}`
+}
+
+odata-string
+meta {
+    doc: """A value as an encoded OData string literal: quotes doubled, then percent-encoded, wrapped in single quotes."""
+}
+fn (value: Str): Str {
+  doubled ::hot::str/replace(value, "'", "''")
+  `'${::api/encode-segment(doubled)}'`
+}
+
+range-path
+meta {
+    doc: """
+    The Graph path of a cell range on a worksheet.
+
+    ```hot
+    ::microsoft::excel/range-path("01ABC", "Data", "A1:B2", {drive: "b1"})
+    // "/drives/b1/items/01ABC/workbook/worksheets/Data/range(address='A1%3AB2')"
+    ```
+    """
+}
+fn (item: Any, sheet: Str, address: Str, opts: Map): Str {
+  `${worksheet-path(item, sheet, opts)}/range(address=${odata-string(address)})`
+}
+
+// ---------------------------------------------------------------------------
+// Options and calls
+// ---------------------------------------------------------------------------
+
+session-id
+meta {
+    doc: """The workbook session in `opts.session`, given as an id or a session Map from `create-session`; null when unset (pure)."""
+}
+fn (opts: Map): Str? {
+  session get(opts, "session")
+  cond {
+    ::auth/is-blank-value(session) => { null }
+    is-map(session) => { get(session, "id") }
+    => { Str(session) }
+  }
+}
+
+session-headers
+meta {
+    doc: """The `workbook-session-id` header for `opts.session`, or `{}` (pure)."""
+}
+fn (opts: Map): Map {
+  id session-id(opts)
+  if(is-null(id), {}, {"workbook-session-id": id})
+}
+
+query-opts
+meta {
+    doc: """The OData parameters of `opts` (pure): `defaults`, overridden by `opts` minus credential keys and this package's local keys, nulls dropped."""
+}
+fn (defaults: Map, opts: Map): Map {
+  params filter-keys(::api/api-params(opts), (k) { not(in(k, LOCAL_KEYS)) })
+  filter-vals({...defaults, ...params}, is-some)
+}
+
+call
+meta {
+    doc: """A Graph call with this package's conventions: the session header, credential opts and a JSON (or empty) body."""
+}
+fn (method: Str, path: Str, body: Any, opts: Map): Any {
+  ::api/json(method, path, session-headers(opts), body, ::api/credential-opts(opts))
+}
+
+fetch
+meta {
+    doc: """GET `path` with OData parameters from `defaults` and `opts`."""
+}
+fn (path: Str, defaults: Map, opts: Map): Any {
+  call("GET", ::api/with-query(path, query-opts(defaults, opts)), "", opts)
+}
+
+collection
+meta {
+    doc: """The items of a collection response, or the Err it holds."""
+}
+fn (result: Result): Vec {
+  if(is-err(result), result, or(get(result, "value"), []))
+}
+
+compact
+meta {
+    doc: """Drop null values from a request body."""
+}
+fn (body: Map): Map {
+  filter-vals(untype(body), is-some)
+}
+
+// ---------------------------------------------------------------------------
+// Shortcuts to the most used functions
+// ---------------------------------------------------------------------------
+
+read-values ::microsoft::excel::ranges/read-values
+write-values ::microsoft::excel::ranges/write-values
+read-records ::microsoft::excel::ranges/read-records
+write-records ::microsoft::excel::ranges/write-records
+list-worksheets ::microsoft::excel::worksheets/list-worksheets
+list-tables ::microsoft::excel::tables/list-tables
+read-table-records ::microsoft::excel::tables/read-table-records
+append-records ::microsoft::excel::tables/append-records
+with-session ::microsoft::excel::workbooks/with-session

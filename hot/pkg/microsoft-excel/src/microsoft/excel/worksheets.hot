@@ -1,0 +1,78 @@
+::microsoft::excel::worksheets ns
+meta {
+    doc: """Worksheets: list, get, add, rename, update and delete. A worksheet is addressed by name or id."""
+}
+
+::excel ::microsoft::excel
+
+list-worksheets
+meta {
+    doc: """GET /workbook/worksheets. Returns a Vec of `{id, name, position, visibility}`."""
+}
+fn
+(item: Any): Vec {
+  list-worksheets(item, {})
+},
+(item: Any, opts: Map): Vec {
+  ::excel/collection(::excel/fetch(`${::excel/workbook-path(item, opts)}/worksheets`, {}, opts))
+}
+
+get-worksheet
+meta {
+    doc: """GET /workbook/worksheets/{sheet}."""
+}
+fn
+(item: Any, sheet: Str): Map {
+  get-worksheet(item, sheet, {})
+},
+(item: Any, sheet: Str, opts: Map): Map {
+  ::excel/fetch(::excel/worksheet-path(item, sheet, opts), {}, opts)
+}
+
+add-worksheet
+meta {
+    doc: """POST /workbook/worksheets/add. Returns the new worksheet."""
+}
+fn
+(item: Any, name: Str): Map {
+  add-worksheet(item, name, {})
+},
+(item: Any, name: Str, opts: Map): Map {
+  ::excel/call("POST", `${::excel/workbook-path(item, opts)}/worksheets/add`, {name: name}, opts)
+}
+
+update-worksheet
+meta {
+    doc: """PATCH /workbook/worksheets/{sheet}. `changes` holds `name`, `position` or `visibility` (`Visible`, `Hidden`, `VeryHidden`)."""
+}
+fn
+(item: Any, sheet: Str, changes: Map): Map {
+  update-worksheet(item, sheet, changes, {})
+},
+(item: Any, sheet: Str, changes: Map, opts: Map): Map {
+  ::excel/call("PATCH", ::excel/worksheet-path(item, sheet, opts), changes, opts)
+}
+
+rename-worksheet
+meta {
+    doc: """Rename a worksheet."""
+}
+fn
+(item: Any, sheet: Str, name: Str): Map {
+  update-worksheet(item, sheet, {name: name}, {})
+},
+(item: Any, sheet: Str, name: Str, opts: Map): Map {
+  update-worksheet(item, sheet, {name: name}, opts)
+}
+
+delete-worksheet
+meta {
+    doc: """DELETE /workbook/worksheets/{sheet}. Returns `{}`."""
+}
+fn
+(item: Any, sheet: Str): Map {
+  delete-worksheet(item, sheet, {})
+},
+(item: Any, sheet: Str, opts: Map): Map {
+  ::excel/call("DELETE", ::excel/worksheet-path(item, sheet, opts), "", opts)
+}

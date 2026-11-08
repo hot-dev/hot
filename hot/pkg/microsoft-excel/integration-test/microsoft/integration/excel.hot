@@ -1,0 +1,45 @@
+::microsoft::integration::excel ns
+meta ["test"]
+
+// Live workbook roundtrip. Needs a delegated token and MS_TEST_WORKBOOK: the
+// path or id of a writable .xlsx in the signed-in user's drive. Self-cleaning:
+// everything happens on a temporary worksheet that is deleted at the end.
+
+::ctx ::microsoft::integration::ctx
+::sheets ::microsoft::excel::worksheets
+::ranges ::microsoft::excel::ranges
+::tables ::microsoft::excel::tables
+::books ::microsoft::excel::workbooks
+
+test-workbook-roundtrip
+meta ["test"] fn () {
+    book ::hot::env/get("MS_TEST_WORKBOOK", "")
+    cond {
+        not(::ctx/configured()) => { ::ctx/skip() }
+        or(is-empty(book), not(::ctx/is-delegated())) => {
+            assert(true, "needs MS_TEST_WORKBOOK and a delegated token: skipping")
+        }
+        => {
+            name `hot-it-${slice(Uuid(), 0, 8)}`
+            added ::sheets/add-worksheet(book, name)
+            assert(not(is-err(added)), `add-worksheet: ${if-err(added, (e) { err-message(e) })}`)
+
+            result ::books/with-session(book, (s) {
+                written ::ranges/write-records(book, name, "A1", [{item: "alpha", n: 1}], ["item", "n"], s)
+                assert(not(is-err(written)), `write-records: ${if-err(written, (e) { err-message(e) })}`)
+
+                table ::tables/create-table(book, name, "A1:B2", s)
+                assert(not(is-err(table)), `create-table: ${if-err(table, (e) { err-message(e) })}`)
+
+                appended ::tables/append-records(book, table.id, [{item: "beta", n: 2}], null, s)
+                assert(not(is-err(appended)), `append-records: ${if-err(appended, (e) { err-message(e) })}`)
+
+                ::tables/read-table-records(book, table.id, s)
+            })
+            assert-eq([{item: "alpha", n: 1}, {item: "beta", n: 2}], result, "records read back")
+
+            cleaned ::sheets/delete-worksheet(book, name)
+            assert(not(is-err(cleaned)), "cleanup should succeed")
+        }
+    }
+}

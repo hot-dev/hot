@@ -1,0 +1,110 @@
+::microsoft::excel::workbooks ns
+meta {
+    doc: """
+    Workbook sessions and recalculation.
+
+    A session makes a run of calls faster and keeps them consistent. Pass
+    it to any function as `opts.session`. Persistent sessions save
+    changes to the file; non-persistent ones discard them when the
+    session ends, which suits what-if calculations. Excel expires idle
+    sessions after about 5 minutes (persistent) or 7 minutes
+    (non-persistent).
+    """
+}
+
+::excel ::microsoft::excel
+
+CALCULATION_TYPES ["Recalculate", "Full", "FullRebuild"]
+
+create-session
+meta {
+    doc: """POST /workbook/createSession. Returns `{id, persistChanges}`. Changes are saved unless `opts.persist` is false."""
+}
+fn
+(item: Any): Map {
+  create-session(item, {})
+},
+(item: Any, opts: Map): Map {
+  ::excel/call("POST", `${::excel/workbook-path(item, opts)}/createSession`, {persistChanges: get(opts, "persist", true)}, opts)
+}
+
+close-session
+meta {
+    doc: """POST /workbook/closeSession. `session` is an id or a session Map."""
+}
+fn
+(item: Any, session: Any): Map {
+  close-session(item, session, {})
+},
+(item: Any, session: Any, opts: Map): Map {
+  ::excel/call("POST", `${::excel/workbook-path(item, opts)}/closeSession`, "", {...opts, session: session})
+}
+
+refresh-session
+meta {
+    doc: """POST /workbook/refreshSession: keep an idle session alive. `session` is an id or a session Map."""
+}
+fn
+(item: Any, session: Any): Map {
+  refresh-session(item, session, {})
+},
+(item: Any, session: Any, opts: Map): Map {
+  ::excel/call("POST", `${::excel/workbook-path(item, opts)}/refreshSession`, "", {...opts, session: session})
+}
+
+with-session
+meta {
+    doc: """
+    Open a session, call `f` with `opts` carrying it, close the session,
+    and return what `f` returned, an Err included. A failure to close is
+    ignored, since Excel expires the session on its own.
+
+    ```hot
+    ::excel ::microsoft::excel
+
+    ::excel/with-session("/Reports/Q3.xlsx", (s) {
+      ::excel/write-values("/Reports/Q3.xlsx", "Data", "A1", [["a", 1]], s)
+      ::excel/read-values("/Reports/Q3.xlsx", "Data", "A1:B1", s)
+    })
+    ```
+    """
+}
+fn
+(item: Any, f: Fn): Any {
+  with-session(item, {}, f)
+},
+(item: Any, opts: Map, f: Fn): Any {
+  session create-session(item, opts)
+  cond {
+    is-err(session) => { session }
+    => {
+      result f({...opts, session: session.id})
+      closed close-session(item, session.id, opts)
+      result
+    }
+  }
+}
+
+calculation-body
+meta {
+    doc: """The `calculate` body (pure); an Err for a type other than `Recalculate`, `Full` or `FullRebuild`."""
+}
+fn (kind: Str): Map {
+  if(in(kind, CALCULATION_TYPES), {calculationType: kind}, err(`microsoft-excel: calculation type must be one of ${join(CALCULATION_TYPES, ", ")}, got ${to-json(kind)}`))
+}
+
+calculate
+meta {
+    doc: """POST /workbook/application/calculate. `kind` is `Recalculate` (the default), `Full` or `FullRebuild`; an Err for anything else."""
+}
+fn
+(item: Any): Map {
+  calculate(item, "Recalculate", {})
+},
+(item: Any, kind: Str): Map {
+  calculate(item, kind, {})
+},
+(item: Any, kind: Str, opts: Map): Map {
+  body calculation-body(kind)
+  if(is-err(body), body, ::excel/call("POST", `${::excel/workbook-path(item, opts)}/application/calculate`, body, opts))
+}

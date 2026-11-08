@@ -103,6 +103,8 @@ google-core
 google-gmail
 google-drive
 google-sheets
+google-docs
+google-slides
 google-calendar
 
 # Communication (SMS/Voice)
@@ -129,6 +131,7 @@ whisper
 microsoft-graph
 microsoft-onedrive
 microsoft-sharepoint
+microsoft-excel
 dropbox
 box
 

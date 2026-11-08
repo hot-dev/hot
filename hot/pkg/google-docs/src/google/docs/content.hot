@@ -1,0 +1,196 @@
+::google::docs::content ns
+meta {
+    doc: """
+    Pure readers over a document from `get-document`: tabs, plain text,
+    paragraphs, headings, tables and the body's end index. Each reader
+    takes a whole document, in which case it covers every tab when the
+    document was fetched with `includeTabsContent`.
+    """
+}
+
+// ---------------------------------------------------------------------------
+// Tabs
+// ---------------------------------------------------------------------------
+
+flatten-tabs fn (tabs: Any): Vec {
+  mapcat(or(tabs, []), (tab) { concat([tab], flatten-tabs(get(tab, "childTabs"))) })
+}
+
+all-tabs
+meta {
+    doc: """Every tab of a document fetched with `includeTabsContent`, parents before their children, in tab order. Empty for a document fetched without it."""
+}
+fn (doc: Map): Vec {
+  flatten-tabs(get(doc, "tabs"))
+}
+
+tab-id fn (tab: Map): Str? {
+  get-in(tab, ["tabProperties", "tabId"])
+}
+
+tab-title fn (tab: Map): Str? {
+  get-in(tab, ["tabProperties", "title"])
+}
+
+find-tab
+meta {
+    doc: """The tab with this id, or else this title, or null."""
+}
+fn (doc: Map, id-or-title: Str): Map? {
+  tabs all-tabs(doc)
+  by-id find-first(tabs, (t) { eq(tab-id(t), id-or-title) })
+  if(is-some(by-id), by-id, find-first(tabs, (t) { eq(tab-title(t), id-or-title) }))
+}
+
+tab-body
+meta {
+    doc: """A tab's `Body`, or null."""
+}
+fn (tab: Map): Map? {
+  get-in(tab, ["documentTab", "body"])
+}
+
+bodies fn (doc: Map): Vec {
+  tabs all-tabs(doc)
+  found if(is-empty(tabs), [get(doc, "body")], map(tabs, tab-body))
+  filter(found, is-some)
+}
+
+// ---------------------------------------------------------------------------
+// Text
+// ---------------------------------------------------------------------------
+
+paragraph-text
+meta {
+    doc: """A Paragraph's text: its text runs and auto text joined, with the trailing newline Docs stores."""
+}
+fn (paragraph: Map): Str {
+  join(map(or(get(paragraph, "elements"), []), (e) {
+    or(get-in(e, ["textRun", "content"]), get-in(e, ["autoText", "content"]), "")
+  }), "")
+}
+
+content-text
+meta {
+    doc: """The text of a Vec of StructuralElements, descending into tables and tables of contents."""
+}
+fn (content: Any): Str {
+  join(map(or(content, []), element-text), "")
+}
+
+element-text
+meta {
+    doc: """A StructuralElement's text. Table cells end with the newline of their last paragraph, so cells read one per line."""
+}
+fn cond (element: Map): Str {
+  is-some(get(element, "paragraph")) => { paragraph-text(element.paragraph) }
+  is-some(get(element, "table")) => {
+    join(map(or(element.table.tableRows, []), (row) {
+      join(map(or(row.tableCells, []), (cell) { content-text(cell.content) }), "")
+    }), "")
+  }
+
+  is-some(get(element, "tableOfContents")) => { content-text(element.tableOfContents.content) }
+  => { "" }
+}
+
+body-text
+meta {
+    doc: """A `Body`'s text."""
+}
+fn (body: Map): Str {
+  content-text(get(body, "content"))
+}
+
+tab-text
+meta {
+    doc: """A tab's body text, empty when the tab has no body."""
+}
+fn (tab: Map): Str {
+  body tab-body(tab)
+  if(is-null(body), "", body-text(body))
+}
+
+document-text
+meta {
+    doc: """The whole document's body text, tab after tab."""
+}
+fn (doc: Map): Str {
+  join(map(bodies(doc), body-text), "")
+}
+
+// ---------------------------------------------------------------------------
+// Structure
+// ---------------------------------------------------------------------------
+
+strip-newline fn (s: Str): Str {
+  if(ends-with(s, "\n"), slice(s, 0, sub(length(s), 1)), s)
+}
+
+paragraph-record fn (element: Map): Map {
+  style get-in(element, ["paragraph", "paragraphStyle", "namedStyleType"])
+  {
+    text: strip-newline(paragraph-text(element.paragraph)),
+    style: style,
+    start: get(element, "startIndex", 0),
+    end: get(element, "endIndex", 0),
+    bullet: is-some(get(element.paragraph, "bullet"))
+  }
+}
+
+body-paragraphs fn (body: Map): Vec {
+  elements filter(or(get(body, "content"), []), (e) { is-some(get(e, "paragraph")) })
+  map(elements, paragraph-record)
+}
+
+paragraphs
+meta {
+    doc: """Top-level paragraphs as `{text, style, start, end, bullet}`: `text` has no trailing newline, `style` is the `namedStyleType` (e.g. `"HEADING_1"`), and `start` and `end` are the indexes to pass to `::google::docs::requests`. Paragraphs inside tables are not included."""
+}
+fn (doc: Map): Vec {
+  mapcat(bodies(doc), body-paragraphs)
+}
+
+is-heading fn (style: Any): Bool {
+  and(is-str(style), or(starts-with(style, "HEADING_"), eq(style, "TITLE"), eq(style, "SUBTITLE")))
+}
+
+headings
+meta {
+    doc: """The paragraphs styled as `TITLE`, `SUBTITLE` or `HEADING_1` to `HEADING_6`, in the shape of `paragraphs`."""
+}
+fn (doc: Map): Vec {
+  filter(paragraphs(doc), (p) { is-heading(p.style) })
+}
+
+table-grid fn (table: Map): Vec {
+  map(or(get(table, "tableRows"), []), (row) {
+    map(or(get(row, "tableCells"), []), (cell) { strip-newline(content-text(get(cell, "content"))) })
+  })
+}
+
+body-tables fn (body: Map): Vec {
+  elements filter(or(get(body, "content"), []), (e) { is-some(get(e, "table")) })
+  map(elements, (e) { {start: get(e, "startIndex", 0), end: get(e, "endIndex", 0), rows: table-grid(e.table)} })
+}
+
+tables
+meta {
+    doc: """Top-level tables as `{start, end, rows}`, with `rows` a Vec of rows of cell text. `start` is the table start index that `::google::docs::requests` table builders take."""
+}
+fn (doc: Map): Vec {
+  mapcat(bodies(doc), body-tables)
+}
+
+end-index
+meta {
+    doc: """
+    The index just past a `Body`'s last element. A body always ends with
+    a newline that cannot be deleted, so the last insertable index is
+    `sub(end-index(body), 1)`.
+    """
+}
+fn (body: Map): Int {
+  content or(get(body, "content"), [])
+  if(is-empty(content), 1, get(last(content), "endIndex", 1))
+}

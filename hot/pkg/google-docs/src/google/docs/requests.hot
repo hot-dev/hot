@@ -1,0 +1,522 @@
+::google::docs::requests ns
+meta {
+    doc: """
+    Pure builders for `documents.batchUpdate` requests. Each returns one
+    request Map; pass a Vec of them to
+    `::google::docs::documents/batch-update`, which applies them
+    atomically in order.
+
+    Indexes count UTF-16 code units from 1 at the start of the body.
+    Ranges are `start` inclusive to `end` exclusive. Every builder's
+    `opts` takes `tabId` and `segmentId` (a header, footer or footnote)
+    to address something other than the first tab's body.
+
+    ```hot
+    ::req ::google::docs::requests
+
+    ::google::docs::documents/batch-update(id, [
+      ::req/insert-text("Status\nAll green\n", 1),
+      ::req/heading(1, 8, 1),
+      ::req/bold(8, 17)
+    ])
+    ```
+    """
+}
+
+::docs ::google::docs
+
+BULLET_DISC "BULLET_DISC_CIRCLE_SQUARE"
+NUMBERED "NUMBERED_DECIMAL_ALPHA_ROMAN"
+
+// ---------------------------------------------------------------------------
+// Locations, ranges and values
+// ---------------------------------------------------------------------------
+
+location
+meta {
+    doc: """A `Location` at a UTF-16 index."""
+}
+fn
+(index: Int): Map {
+  location(index, {})
+},
+(index: Int, opts: Map): Map {
+  ::docs/compact({index: index, segmentId: get(opts, "segmentId"), tabId: get(opts, "tabId")})
+}
+
+end-of-segment
+meta {
+    doc: """An `EndOfSegmentLocation`: the end of the body, or of `opts.segmentId`, in the first tab or `opts.tabId`."""
+}
+fn
+(): Map {
+  end-of-segment({})
+},
+(opts: Map): Map {
+  ::docs/compact({segmentId: get(opts, "segmentId"), tabId: get(opts, "tabId")})
+}
+
+text-range
+meta {
+    doc: """A `Range`: `start` inclusive to `end` exclusive."""
+}
+fn
+(start: Int, end: Int): Map {
+  text-range(start, end, {})
+},
+(start: Int, end: Int, opts: Map): Map {
+  ::docs/compact({startIndex: start, endIndex: end, segmentId: get(opts, "segmentId"), tabId: get(opts, "tabId")})
+}
+
+points
+meta {
+    doc: """A `Dimension` in points."""
+}
+fn (value: Int | Dec): Map {
+  {magnitude: value, unit: "PT"}
+}
+
+rgb
+meta {
+    doc: """A Docs `RgbColor` from 0-255 channels."""
+}
+fn (red: Int, green: Int, blue: Int): Map {
+  {red: div(Dec(red), 255), green: div(Dec(green), 255), blue: div(Dec(blue), 255)}
+}
+
+hex-color
+meta {
+    doc: """A Docs `RgbColor` from a hex string (`"#1a73e8"` or `"1a73e8"`); an Err for anything else."""
+}
+fn (hex: Str): Map {
+  h lowercase(::hot::str/replace(trim(hex), "#", ""))
+  cond {
+    not(::hot::regex/is-match(h, "^[0-9a-f]{6}$")) => { err(`google-docs: invalid hex color ${to-json(hex)}`) }
+    => {
+      channels ::hot::bytes/to-vec(::hot::hex/decode(h))
+      rgb(first(channels), get(channels, 1), last(channels))
+    }
+  }
+}
+
+optional-color
+meta {
+    doc: """An `OptionalColor` wrapping an `RgbColor`, for `foregroundColor` and `backgroundColor`."""
+}
+fn (color: Map): Map {
+  {color: {rgbColor: color}}
+}
+
+field-mask
+meta {
+    doc: """A style's top-level keys as a field mask, so only the fields you pass change."""
+}
+fn (style: Map): Str {
+  join(map(keys(style), Str), ",")
+}
+
+// ---------------------------------------------------------------------------
+// Text
+// ---------------------------------------------------------------------------
+
+insert-text
+meta {
+    doc: """`insertText` at a UTF-16 index, which must fall inside an existing paragraph."""
+}
+fn
+(text: Str, index: Int): Map {
+  insert-text(text, index, {})
+},
+(text: Str, index: Int, opts: Map): Map {
+  {insertText: {text: text, location: location(index, opts)}}
+}
+
+append-text
+meta {
+    doc: """`insertText` at the end of the body or segment."""
+}
+fn
+(text: Str): Map {
+  append-text(text, {})
+},
+(text: Str, opts: Map): Map {
+  {insertText: {text: text, endOfSegmentLocation: end-of-segment(opts)}}
+}
+
+delete-range
+meta {
+    doc: """`deleteContentRange`. A range cannot include a segment's final newline or split a table or surrogate pair."""
+}
+fn
+(start: Int, end: Int): Map {
+  delete-range(start, end, {})
+},
+(start: Int, end: Int, opts: Map): Map {
+  {deleteContentRange: {range: text-range(start, end, opts)}}
+}
+
+tabs-criteria fn (opts: Map): Map? {
+  ids get(opts, "tabIds")
+  if(is-null(ids), null, {tabIds: ids})
+}
+
+replace-all-text
+meta {
+    doc: """`replaceAllText`: every occurrence, in every tab unless `opts.tabIds`. Case-sensitive unless `opts.matchCase` is false; `opts.searchByRegex` treats `search` as a regular expression."""
+}
+fn
+(search: Str, replacement: Str): Map {
+  replace-all-text(search, replacement, {})
+},
+(search: Str, replacement: Str, opts: Map): Map {
+  {replaceAllText: ::docs/compact({
+    replaceText: replacement,
+    containsText: ::docs/compact({
+      text: search,
+      matchCase: get(opts, "matchCase", true),
+      searchByRegex: get(opts, "searchByRegex")
+    }),
+    tabsCriteria: tabs-criteria(opts)
+  })}
+}
+
+fill-template
+meta {
+    doc: """One `replaceAllText` per entry of `values`, replacing `{{key}}` with the value as text. Null values are skipped."""
+}
+fn
+(values: Map): Vec {
+  fill-template(values, {})
+},
+(values: Map, opts: Map): Vec {
+  present filter-vals(values, is-some)
+  map(keys(present), (k) { replace-all-text(`{{${Str(k)}}}`, Str(get(present, k)), opts) })
+}
+
+// ---------------------------------------------------------------------------
+// Styles
+// ---------------------------------------------------------------------------
+
+text-style
+meta {
+    doc: """`updateTextStyle` with any `TextStyle` (`bold`, `italic`, `underline`, `strikethrough`, `fontSize`, `foregroundColor`, `backgroundColor`, `link`, `weightedFontFamily`, ...). The field mask is the keys you pass."""
+}
+fn
+(start: Int, end: Int, style: Map): Map {
+  text-style(start, end, style, {})
+},
+(start: Int, end: Int, style: Map, opts: Map): Map {
+  {updateTextStyle: {range: text-range(start, end, opts), textStyle: style, fields: field-mask(style)}}
+}
+
+bold
+meta {doc: """Make a range bold."""}
+fn
+(start: Int, end: Int): Map {
+  text-style(start, end, {bold: true})
+},
+(start: Int, end: Int, opts: Map): Map {
+  text-style(start, end, {bold: true}, opts)
+}
+
+italic
+meta {doc: """Make a range italic."""}
+fn
+(start: Int, end: Int): Map {
+  text-style(start, end, {italic: true})
+},
+(start: Int, end: Int, opts: Map): Map {
+  text-style(start, end, {italic: true}, opts)
+}
+
+link
+meta {doc: """Link a range to `url`."""}
+fn
+(start: Int, end: Int, url: Str): Map {
+  text-style(start, end, {link: {url: url}})
+},
+(start: Int, end: Int, url: Str, opts: Map): Map {
+  text-style(start, end, {link: {url: url}}, opts)
+}
+
+font-size
+meta {doc: """Set a range's font size in points."""}
+fn
+(start: Int, end: Int, size: Int | Dec): Map {
+  text-style(start, end, {fontSize: points(size)})
+},
+(start: Int, end: Int, size: Int | Dec, opts: Map): Map {
+  text-style(start, end, {fontSize: points(size)}, opts)
+}
+
+text-color
+meta {doc: """Set a range's text color from an `RgbColor` (`rgb` or `hex-color`)."""}
+fn
+(start: Int, end: Int, color: Map): Map {
+  text-style(start, end, {foregroundColor: optional-color(color)})
+},
+(start: Int, end: Int, color: Map, opts: Map): Map {
+  text-style(start, end, {foregroundColor: optional-color(color)}, opts)
+}
+
+paragraph-style
+meta {
+    doc: """`updateParagraphStyle` with any `ParagraphStyle` (`namedStyleType`, `alignment`, `lineSpacing`, `spaceAbove`, `indentStart`, ...) on every paragraph the range touches. The field mask is the keys you pass."""
+}
+fn
+(start: Int, end: Int, style: Map): Map {
+  paragraph-style(start, end, style, {})
+},
+(start: Int, end: Int, style: Map, opts: Map): Map {
+  {updateParagraphStyle: {range: text-range(start, end, opts), paragraphStyle: style, fields: field-mask(style)}}
+}
+
+named-style
+meta {
+    doc: """Apply a named style: `NORMAL_TEXT`, `TITLE`, `SUBTITLE` or `HEADING_1` to `HEADING_6`."""
+}
+fn
+(start: Int, end: Int, name: Str): Map {
+  paragraph-style(start, end, {namedStyleType: name})
+},
+(start: Int, end: Int, name: Str, opts: Map): Map {
+  paragraph-style(start, end, {namedStyleType: name}, opts)
+}
+
+heading
+meta {
+    doc: """Make the paragraphs in a range a heading of `level` 1 to 6; an Err for any other level."""
+}
+fn
+(start: Int, end: Int, level: Int): Map {
+  heading(start, end, level, {})
+},
+(start: Int, end: Int, level: Int, opts: Map): Map {
+  cond {
+    between(level, 1, 6) => { named-style(start, end, `HEADING_${level}`, opts) }
+    => { err(`google-docs: heading level must be 1 to 6, got ${level}`) }
+  }
+}
+
+align
+meta {doc: """Set paragraph alignment: `START`, `CENTER`, `END` or `JUSTIFIED`."""}
+fn
+(start: Int, end: Int, alignment: Str): Map {
+  paragraph-style(start, end, {alignment: alignment})
+},
+(start: Int, end: Int, alignment: Str, opts: Map): Map {
+  paragraph-style(start, end, {alignment: alignment}, opts)
+}
+
+bullets
+meta {
+    doc: """`createParagraphBullets` on the paragraphs in a range. `preset` defaults to `BULLET_DISC_CIRCLE_SQUARE`; `NUMBERED` holds the usual numbered preset."""
+}
+fn
+(start: Int, end: Int): Map {
+  bullets(start, end, BULLET_DISC, {})
+},
+(start: Int, end: Int, preset: Str): Map {
+  bullets(start, end, preset, {})
+},
+(start: Int, end: Int, preset: Str, opts: Map): Map {
+  {createParagraphBullets: {range: text-range(start, end, opts), bulletPreset: preset}}
+}
+
+delete-bullets
+meta {doc: """`deleteParagraphBullets` on the paragraphs in a range."""}
+fn
+(start: Int, end: Int): Map {
+  delete-bullets(start, end, {})
+},
+(start: Int, end: Int, opts: Map): Map {
+  {deleteParagraphBullets: {range: text-range(start, end, opts)}}
+}
+
+// ---------------------------------------------------------------------------
+// Tables, images and breaks
+// ---------------------------------------------------------------------------
+
+insert-table
+meta {
+    doc: """`insertTable` at an index. Docs adds a newline before the table, so its start index is `add(index, 1)`."""
+}
+fn
+(rows: Int, columns: Int, index: Int): Map {
+  insert-table(rows, columns, index, {})
+},
+(rows: Int, columns: Int, index: Int, opts: Map): Map {
+  {insertTable: {rows: rows, columns: columns, location: location(index, opts)}}
+}
+
+append-table
+meta {doc: """`insertTable` at the end of the body or segment."""}
+fn
+(rows: Int, columns: Int): Map {
+  append-table(rows, columns, {})
+},
+(rows: Int, columns: Int, opts: Map): Map {
+  {insertTable: {rows: rows, columns: columns, endOfSegmentLocation: end-of-segment(opts)}}
+}
+
+table-cell
+meta {
+    doc: """A `TableCellLocation`: 0-based row and column of the table starting at `table-start` (see `::google::docs::content/tables`)."""
+}
+fn
+(table-start: Int, row: Int, column: Int): Map {
+  table-cell(table-start, row, column, {})
+},
+(table-start: Int, row: Int, column: Int, opts: Map): Map {
+  {tableStartLocation: location(table-start, opts), rowIndex: row, columnIndex: column}
+}
+
+insert-table-row
+meta {doc: """`insertTableRow` below (or, with `below` false, above) a row."""}
+fn
+(table-start: Int, row: Int, below: Bool): Map {
+  insert-table-row(table-start, row, below, {})
+},
+(table-start: Int, row: Int, below: Bool, opts: Map): Map {
+  {insertTableRow: {tableCellLocation: table-cell(table-start, row, 0, opts), insertBelow: below}}
+}
+
+insert-table-column
+meta {
+    doc: """`insertTableColumn` to the right of (or, with `right` false, to the left of) a column."""
+}
+fn
+(table-start: Int, column: Int, right: Bool): Map {
+  insert-table-column(table-start, column, right, {})
+},
+(table-start: Int, column: Int, right: Bool, opts: Map): Map {
+  {insertTableColumn: {tableCellLocation: table-cell(table-start, 0, column, opts), insertRight: right}}
+}
+
+delete-table-row
+meta {doc: """`deleteTableRow`."""}
+fn
+(table-start: Int, row: Int): Map {
+  delete-table-row(table-start, row, {})
+},
+(table-start: Int, row: Int, opts: Map): Map {
+  {deleteTableRow: {tableCellLocation: table-cell(table-start, row, 0, opts)}}
+}
+
+delete-table-column
+meta {doc: """`deleteTableColumn`."""}
+fn
+(table-start: Int, column: Int): Map {
+  delete-table-column(table-start, column, {})
+},
+(table-start: Int, column: Int, opts: Map): Map {
+  {deleteTableColumn: {tableCellLocation: table-cell(table-start, 0, column, opts)}}
+}
+
+object-size fn (opts: Map): Map? {
+  width get(opts, "width")
+  height get(opts, "height")
+  size ::docs/compact({
+    width: if(is-null(width), null, points(width)),
+    height: if(is-null(height), null, points(height))
+  })
+  if(is-empty(size), null, size)
+}
+
+insert-image
+meta {
+    doc: """`insertInlineImage` from a public URL (PNG, JPEG or GIF under 50 MB). `opts.width` and `opts.height` are in points."""
+}
+fn
+(uri: Str, index: Int): Map {
+  insert-image(uri, index, {})
+},
+(uri: Str, index: Int, opts: Map): Map {
+  {insertInlineImage: ::docs/compact({uri: uri, location: location(index, opts), objectSize: object-size(opts)})}
+}
+
+append-image
+meta {doc: """`insertInlineImage` at the end of the body or segment."""}
+fn
+(uri: Str): Map {
+  append-image(uri, {})
+},
+(uri: Str, opts: Map): Map {
+  {insertInlineImage: ::docs/compact({uri: uri, endOfSegmentLocation: end-of-segment(opts), objectSize: object-size(opts)})}
+}
+
+insert-page-break
+meta {doc: """`insertPageBreak` at an index in the body."""}
+fn
+(index: Int): Map {
+  insert-page-break(index, {})
+},
+(index: Int, opts: Map): Map {
+  {insertPageBreak: {location: location(index, opts)}}
+}
+
+append-page-break
+meta {doc: """`insertPageBreak` at the end of the body."""}
+fn
+(): Map {
+  append-page-break({})
+},
+(opts: Map): Map {
+  {insertPageBreak: {endOfSegmentLocation: end-of-segment(opts)}}
+}
+
+// ---------------------------------------------------------------------------
+// Named ranges, headers and footers
+// ---------------------------------------------------------------------------
+
+create-named-range
+meta {
+    doc: """`createNamedRange`: a label that tracks its text as the document changes."""
+}
+fn
+(name: Str, start: Int, end: Int): Map {
+  create-named-range(name, start, end, {})
+},
+(name: Str, start: Int, end: Int, opts: Map): Map {
+  {createNamedRange: {name: name, range: text-range(start, end, opts)}}
+}
+
+delete-named-range
+meta {
+    doc: """`deleteNamedRange` for every range with this name, in every tab unless `opts.tabIds`."""
+}
+fn
+(name: Str): Map {
+  delete-named-range(name, {})
+},
+(name: Str, opts: Map): Map {
+  {deleteNamedRange: ::docs/compact({name: name, tabsCriteria: tabs-criteria(opts)})}
+}
+
+replace-named-range
+meta {
+    doc: """`replaceNamedRangeContent`: replace the text of the named range, in every tab unless `opts.tabIds`."""
+}
+fn
+(name: Str, text: Str): Map {
+  replace-named-range(name, text, {})
+},
+(name: Str, text: Str, opts: Map): Map {
+  {replaceNamedRangeContent: ::docs/compact({namedRangeName: name, text: text, tabsCriteria: tabs-criteria(opts)})}
+}
+
+create-header
+meta {
+    doc: """`createHeader` on the default section. The reply's `createHeader.headerId` is the `segmentId` for adding text to it."""
+}
+fn (): Map {
+  {createHeader: {type: "DEFAULT"}}
+}
+
+create-footer
+meta {
+    doc: """`createFooter` on the default section. The reply's `createFooter.footerId` is the `segmentId` for adding text to it."""
+}
+fn (): Map {
+  {createFooter: {type: "DEFAULT"}}
+}

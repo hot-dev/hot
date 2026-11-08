@@ -1,0 +1,106 @@
+::google::slides::content ns
+meta {
+    doc: """
+    Pure readers over a presentation or page from the Slides API: element
+    text, slide titles, speaker notes, placeholders and an outline of the
+    whole deck.
+    """
+}
+
+TITLE_TYPES ["TITLE", "CENTERED_TITLE"]
+
+text-content
+meta {
+    doc: """A `TextContent`'s text: its text runs and auto text joined."""
+}
+fn (text: Any): Str {
+  elements if(is-map(text), or(get(text, "textElements"), []), [])
+  join(map(elements, (e) {
+    or(get-in(e, ["textRun", "content"]), get-in(e, ["autoText", "content"]), "")
+  }), "")
+}
+
+table-text fn (table: Map): Str {
+  join(map(or(get(table, "tableRows"), []), (row) {
+    join(map(or(get(row, "tableCells"), []), (cell) { text-content(get(cell, "text")) }), "")
+  }), "")
+}
+
+element-text
+meta {
+    doc: """A page element's text, from a shape, a table (cell after cell) or a group (child after child); empty for images, lines and the like."""
+}
+fn cond (element: Map): Str {
+  is-some(get(element, "shape")) => { text-content(get(element.shape, "text")) }
+  is-some(get(element, "table")) => { table-text(element.table) }
+  is-some(get(element, "elementGroup")) => { join(map(or(element.elementGroup.children, []), element-text), "") }
+  => { "" }
+}
+
+page-elements fn (page: Map): Vec {
+  or(get(page, "pageElements"), [])
+}
+
+trim-text fn (text: Str): Str {
+  trim(text)
+}
+
+placeholder-type fn (element: Map): Str? {
+  get-in(element, ["shape", "placeholder", "type"])
+}
+
+find-placeholder
+meta {
+    doc: """The first element on a page whose placeholder type is `kind` (`TITLE`, `CENTERED_TITLE`, `SUBTITLE`, `BODY`, ...), or null."""
+}
+fn (page: Map, kind: Str): Map? {
+  find-first(page-elements(page), (e) { eq(placeholder-type(e), kind) })
+}
+
+find-element
+meta {
+    doc: """The element on a page with this `objectId`, or null."""
+}
+fn (page: Map, object-id: Str): Map? {
+  find-first(page-elements(page), (e) { eq(get(e, "objectId"), object-id) })
+}
+
+slide-title
+meta {
+    doc: """A slide's title placeholder text, trimmed; null when it has no title placeholder."""
+}
+fn (slide: Map): Str? {
+  el find-first(page-elements(slide), (e) { in(placeholder-type(e), TITLE_TYPES) })
+  if(is-null(el), null, trim-text(element-text(el)))
+}
+
+slide-text
+meta {
+    doc: """All text on a slide, element after element, including the title."""
+}
+fn (slide: Map): Str {
+  join(map(page-elements(slide), element-text), "")
+}
+
+speaker-notes
+meta {
+    doc: """A slide's speaker notes, trimmed; empty when it has none."""
+}
+fn (slide: Map): Str {
+  notes get-in(slide, ["slideProperties", "notesPage"])
+  notes-id if(is-map(notes), get-in(notes, ["notesProperties", "speakerNotesObjectId"]), null)
+  el if(is-null(notes-id), null, find-element(notes, notes-id))
+  if(is-null(el), "", trim-text(element-text(el)))
+}
+
+slide-outline fn (slide: Map): Map {
+  {id: get(slide, "objectId"), title: slide-title(slide), text: slide-text(slide), notes: speaker-notes(slide)}
+}
+
+outline
+meta {
+    doc: """Every slide of a presentation as `{id, title, text, notes}`, in order. `text` includes the title."""
+}
+fn (presentation: Map): Vec {
+  map(or(get(presentation, "slides"), []), slide-outline)
+}

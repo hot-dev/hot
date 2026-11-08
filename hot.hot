@@ -97,9 +97,11 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/gleif/test",
     "./hot/pkg/google-calendar/test",
     "./hot/pkg/google-core/test",
+    "./hot/pkg/google-docs/test",
     "./hot/pkg/google-drive/test",
     "./hot/pkg/google-gmail/test",
     "./hot/pkg/google-sheets/test",
+    "./hot/pkg/google-slides/test",
     "./hot/pkg/hot-ai-agent/test",
     "./hot/pkg/hot-ai/test",
     "./hot/pkg/hot-std/test",
@@ -113,6 +115,7 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/libreoffice/test",
     "./hot/pkg/linear/test",
     "./hot/pkg/mcp/test",
+    "./hot/pkg/microsoft-excel/test",
     "./hot/pkg/microsoft-graph/test",
     "./hot/pkg/microsoft-onedrive/test",
     "./hot/pkg/microsoft-sharepoint/test",
@@ -217,9 +220,11 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/gleif": { "local": "./hot/pkg/gleif" },
     "hot.dev/google-calendar": { "local": "./hot/pkg/google-calendar" },
     "hot.dev/google-core": { "local": "./hot/pkg/google-core" },
+    "hot.dev/google-docs": { "local": "./hot/pkg/google-docs" },
     "hot.dev/google-drive": { "local": "./hot/pkg/google-drive" },
     "hot.dev/google-gmail": { "local": "./hot/pkg/google-gmail" },
     "hot.dev/google-sheets": { "local": "./hot/pkg/google-sheets" },
+    "hot.dev/google-slides": { "local": "./hot/pkg/google-slides" },
     "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" },
     "hot.dev/hot-ai-agent": { "local": "./hot/pkg/hot-ai-agent" },
     "hot.dev/hubspot": { "local": "./hot/pkg/hubspot" },
@@ -232,6 +237,7 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/libreoffice": { "local": "./hot/pkg/libreoffice" },
     "hot.dev/linear": { "local": "./hot/pkg/linear" },
     "hot.dev/mcp": { "local": "./hot/pkg/mcp" },
+    "hot.dev/microsoft-excel": { "local": "./hot/pkg/microsoft-excel" },
     "hot.dev/microsoft-graph": { "local": "./hot/pkg/microsoft-graph" },
     "hot.dev/microsoft-onedrive": { "local": "./hot/pkg/microsoft-onedrive" },
     "hot.dev/microsoft-sharepoint": { "local": "./hot/pkg/microsoft-sharepoint" },
@@ -1111,14 +1117,18 @@ hot.project.pkg-test-google.src.paths [
     "./hot/pkg/google-gmail/src",
     "./hot/pkg/google-drive/src",
     "./hot/pkg/google-sheets/src",
+    "./hot/pkg/google-docs/src",
+    "./hot/pkg/google-slides/src",
     "./hot/pkg/google-calendar/src"
 ]
 hot.project.pkg-test-google.test.paths [
     "./hot/pkg/google-calendar/test",
     "./hot/pkg/google-core/test",
+    "./hot/pkg/google-docs/test",
     "./hot/pkg/google-drive/test",
     "./hot/pkg/google-gmail/test",
-    "./hot/pkg/google-sheets/test"
+    "./hot/pkg/google-sheets/test",
+    "./hot/pkg/google-slides/test"
 ]
 hot.project.pkg-test-google.test.capture true
 hot.project.pkg-test-google.deps {
@@ -1130,12 +1140,14 @@ hot.project.pkg-test-google.deps {
 hot.project.pkg-test-microsoft.src.paths [
     "./hot/pkg/microsoft-graph/src",
     "./hot/pkg/microsoft-onedrive/src",
-    "./hot/pkg/microsoft-sharepoint/src"
+    "./hot/pkg/microsoft-sharepoint/src",
+    "./hot/pkg/microsoft-excel/src"
 ]
 hot.project.pkg-test-microsoft.test.paths [
     "./hot/pkg/microsoft-graph/test",
     "./hot/pkg/microsoft-onedrive/test",
-    "./hot/pkg/microsoft-sharepoint/test"
+    "./hot/pkg/microsoft-sharepoint/test",
+    "./hot/pkg/microsoft-excel/test"
 ]
 hot.project.pkg-test-microsoft.test.capture true
 hot.project.pkg-test-microsoft.deps {
@@ -1147,12 +1159,14 @@ hot.project.pkg-test-microsoft.deps {
 hot.project.pkg-integration-microsoft.src.paths [
     "./hot/pkg/microsoft-graph/src",
     "./hot/pkg/microsoft-onedrive/src",
-    "./hot/pkg/microsoft-sharepoint/src"
+    "./hot/pkg/microsoft-sharepoint/src",
+    "./hot/pkg/microsoft-excel/src"
 ]
 hot.project.pkg-integration-microsoft.test.paths [
     "./hot/pkg/microsoft-graph/integration-test",
     "./hot/pkg/microsoft-onedrive/integration-test",
-    "./hot/pkg/microsoft-sharepoint/integration-test"
+    "./hot/pkg/microsoft-sharepoint/integration-test",
+    "./hot/pkg/microsoft-excel/integration-test"
 ]
 hot.project.pkg-integration-microsoft.test.capture true
 hot.project.pkg-integration-microsoft.deps {
@@ -1585,6 +1599,8 @@ hot.project.pkg-integration-google.src.paths [
     "./hot/pkg/google-gmail/src",
     "./hot/pkg/google-drive/src",
     "./hot/pkg/google-sheets/src",
+    "./hot/pkg/google-docs/src",
+    "./hot/pkg/google-slides/src",
     "./hot/pkg/google-calendar/src"
 ]
 hot.project.pkg-integration-google.test.paths [
@@ -1592,6 +1608,8 @@ hot.project.pkg-integration-google.test.paths [
     "./hot/pkg/google-gmail/integration-test",
     "./hot/pkg/google-drive/integration-test",
     "./hot/pkg/google-sheets/integration-test",
+    "./hot/pkg/google-docs/integration-test",
+    "./hot/pkg/google-slides/integration-test",
     "./hot/pkg/google-calendar/integration-test"
 ]
 hot.project.pkg-integration-google.test.capture true
