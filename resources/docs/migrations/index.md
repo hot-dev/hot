@@ -36,6 +36,14 @@ $env:HOT_VERSION = "2.3.0"; irm https://get.hot.dev/install.ps1 | iex
 
 Pinned installs are useful when you need to finish database migrations with an older release line before moving to a newer major version.
 
+## Upgrading from Hot 3.0.5 to 3.0.6 {#upgrading-from-3-0-5-to-3-0-6}
+
+**No migrations.** 3.0.6 doesn't change the database schema, so `hot db migrate` has nothing to apply.
+
+**Optional: arm dynamic schedules after a deploy.** Activating a build cancels the project's dynamic schedules on its other builds, as it has since 3.0.5. Hot now sends a `hot:deploy:activated` event each time a build goes live, so an app can arm them again. See [Dynamic Schedules and Deploys](/docs/schedules#dynamic-schedules-and-deploys).
+
+**What to check in your packages:** the approved tags changed. `payments` is now `finance`, `automation` folds into `web`, and `email` into `messaging`. See [Tags](/docs/packages/manifest#tags).
+
 ## Upgrading from Hot 3.0.4 to 3.0.5 {#upgrading-from-3-0-4-to-3-0-5}
 
 **Migrations 032, 033 and 034.** Run `hot db migrate` with the 3.0.5 CLI. Migration 032 adds a nullable `enqueue_payload` column to `event`, which holds an event's queue packet until it's enqueued. Migration 033 adds a nullable `quota_epoch` column to `parked_event`. Existing rows keep NULL, which means nothing is owed.
