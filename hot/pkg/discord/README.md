@@ -7,7 +7,7 @@ Discord API v10 bindings for Hot: send messages with embeds, components, polls a
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/discord": "1.1.0"
+"hot.dev/discord": "1.1.1"
 ```
 
 ## Setup

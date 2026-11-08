@@ -2,13 +2,13 @@
 
 hot.pkg.airtable {
   name: "hot.dev/airtable",
-  version: "0.2.0",
+  version: "0.2.1",
   hot-min-version: "3.0.2",
   description: "Airtable bindings for Hot. Records CRUD with formula filtering, batch upsert/delete, record comments, and the metadata API for base schemas and token identity.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
-  tags: ["database", "airtable"],
+  tags: ["apps"],
   deps: {},
   src-paths: ["src/"],
   test-paths: ["test/"]

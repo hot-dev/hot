@@ -1,14 +1,12 @@
 # sftp
 
-SFTP v3 file transfers and directory operations backed by `russh` and
-`russh-sftp`. Bulk I/O uses native request pipelining. Requires a Hot runtime
-built with the SSH/SFTP bindings in this change. The manifest minimum matches
-the current checkout (3.0.4); older binaries without these bindings cannot load
-the package.
+SFTP v3 file transfers and directory operations. Bulk I/O uses native request
+pipelining. Requires Hot 3.0.5 or later, which includes the SSH and SFTP runtime
+bindings.
 
 ```hot
 hot.project.my-app.deps {
-    "hot.dev/sftp": "0.1.0"
+    "hot.dev/sftp": "0.1.1"
 }
 ```
 

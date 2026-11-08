@@ -2,13 +2,13 @@
 
 hot.pkg.pinecone {
   name: "hot.dev/pinecone",
-  version: "0.1.0",
+  version: "0.1.1",
   hot-min-version: "3.0.2",
   description: "Pinecone vector database bindings for Hot (API 2026-07). Serverless index management with readiness checks, namespaced vector upsert/query/fetch/update/list/delete, integrated-embedding records, and hosted embed and rerank.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
-  tags: ["pinecone", "ai", "vector-database", "rag", "embeddings"],
+  tags: ["ai", "database"],
   deps: {},
   src-paths: ["src/"],
   test-paths: ["test/"]

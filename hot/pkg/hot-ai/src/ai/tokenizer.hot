@@ -1,8 +1,8 @@
 ::ai::tokenizer ns
 meta {
     doc: """
-    Accurate token counting for chat models, backed by `tiktoken-rs`
-    via `::hot::internal::tokenizer`. Designed to plug into
+    Accurate token counting for chat models via
+    `::hot::internal::tokenizer`. Designed to plug into
     `::ai::chat/ChatOptions.count-tokens-fn` so pre-call budget checks
     can refuse to send a request that would overflow the model's
     context window.

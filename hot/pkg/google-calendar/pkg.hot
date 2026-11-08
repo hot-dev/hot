@@ -2,15 +2,15 @@
 
 hot.pkg.google-calendar {
   name: "hot.dev/google-calendar",
-  version: "0.1.0",
+  version: "0.1.1",
   hot-min-version: "3.0.2",
   description: "Google Calendar API v3 bindings for Hot: events with every filter, Google Meet links and attendee notifications, recurring instances, quick add and move, incremental sync with sync tokens, push-notification webhooks, free/busy, calendars and sharing.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
-  tags: ["google", "google-calendar", "calendar", "scheduling"],
+  tags: ["apps"],
   deps: {
-    "hot.dev/google-core": "0.1.0"
+    "hot.dev/google-core": "0.1.1"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]

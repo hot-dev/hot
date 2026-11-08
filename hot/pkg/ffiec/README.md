@@ -8,7 +8,7 @@ Add it to your project's deps in `hot.hot`:
 
 ```hot
 hot.project.my-app.deps {
-  "hot.dev/ffiec": "0.1.0"
+  "hot.dev/ffiec": "0.1.1"
 }
 ```
 

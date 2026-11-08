@@ -2,13 +2,13 @@
 
 hot.pkg.gleif {
   name: "hot.dev/gleif",
-  version: "0.1.0",
+  version: "0.1.1",
   hot-min-version: "3.0.2",
   description: "The GLEIF LEI API for Hot, with no key: search, fuzzy names, LEI and ISIN lookups, and direct and ultimate parents and children.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
-  tags: ["kyb", "company-data", "gleif", "lei"],
+  tags: ["public-data"],
   deps: {},
   src-paths: ["src/"],
   test-paths: ["test/"]

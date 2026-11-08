@@ -7,7 +7,7 @@ HubSpot CRM bindings for Hot, built on HubSpot's date-versioned APIs (`2026-09`,
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/hubspot": "0.1.0"
+"hot.dev/hubspot": "0.1.1"
 ```
 
 ## Setup

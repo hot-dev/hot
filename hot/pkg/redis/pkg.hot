@@ -2,13 +2,13 @@
 
 hot.pkg.redis {
   name: "hot.dev/redis",
-  version: "0.3.0",
+  version: "0.3.1",
   hot-min-version: "3.0.2",
   description: "Redis client for Hot, speaking the RESP protocol in pure Hot over ::hot::tcp / ::hot::tls.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
-  tags: ["database", "redis", "cache", "kv"],
+  tags: ["database"],
   deps: {},
   src-paths: ["src/"],
   test-paths: ["test/"]

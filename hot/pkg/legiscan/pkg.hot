@@ -2,13 +2,13 @@
 
 hot.pkg.legiscan {
   name: "hot.dev/legiscan",
-  version: "0.1.0",
+  version: "0.1.1",
   hot-min-version: "3.0.2",
   description: "The LegiScan API for Hot: US state and federal sessions, master bill lists, bills, bill text and full-text search.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
-  tags: ["legislation", "government-data", "legiscan", "us"],
+  tags: ["public-data"],
   deps: {},
   src-paths: ["src/"],
   test-paths: ["test/"]

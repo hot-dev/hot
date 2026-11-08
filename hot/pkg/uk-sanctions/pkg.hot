@@ -2,13 +2,13 @@
 
 hot.pkg.uk-sanctions {
   name: "hot.dev/uk-sanctions",
-  version: "0.1.0",
+  version: "0.1.1",
   hot-min-version: "3.0.2",
   description: "The UK Sanctions List (FCDO) for Hot: downloads the free XML file in Range chunks and parses it into Designation records, with a cheap ETag version check. Only fetches and parses: it does not screen names and stores nothing.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
-  tags: ["sanctions", "uk", "compliance", "kyc", "aml"],
+  tags: ["compliance"],
   deps: {},
   src-paths: ["src/"],
   test-paths: ["test/"]
