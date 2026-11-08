@@ -221,11 +221,31 @@ Cancelling schedules is useful for:
 | Feature | Metadata Schedule | Dynamic Schedule |
 |---------|-------------------|------------------|
 | Defined in | Hot code (`meta {schedule: ...}`) | Runtime via `hot:schedule:new` |
-| Lifecycle | Tied to build/deployment | Can be created/cancelled anytime |
+| Lifecycle | Tied to build/deployment | Created and cancelled at runtime, and cancelled when a new build is activated |
 | One-time support | No | Yes |
 | Function called with | One argument describing the schedule that fired | The schedule's `args` |
 | Visible in UI | Always | When active |
 | Use case | Regular jobs (daily reports, cleanup) | User-triggered, conditional scheduling |
+
+### Dynamic Schedules and Deploys
+
+A dynamic schedule belongs to the build whose run created it. Its arguments were
+written for that program, so activating a new build of the project cancels every
+active dynamic schedule on the project's other builds, one-time and recurring.
+The cancelled schedule records `build replaced by deployment` as its
+`deactivation-reason`, and the deploy logs how many it cancelled.
+
+A schedule that has to outlive a deploy needs a record in your own application
+state. After each activation, Hot sends a
+[`hot:deploy:activated`](/docs/events#deploy-events) event: arm your schedules
+again from that record.
+
+```hot
+on-deployed meta {on-event: "hot:deploy:activated"}
+fn (event) {
+  if(eq(event.data.project, "reminders"), rearm-pending-reminders())
+}
+```
 
 ### Example: Scheduled Reminders
 

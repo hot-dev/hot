@@ -80,6 +80,21 @@ These handlers are defined in `hot/pkg/hot-std/src/hot/lang.hot`.
 
 > The `hot:` namespace is reserved for system behavior. Prefer your own event namespace (for example `user:created`, `billing:invoice-paid`) for application events.
 
+## Deploy Events
+
+Hot sends `hot:deploy:activated` once each time a build goes live, after the
+activation has committed. No built-in handler takes it, so it does nothing until
+you define one.
+
+| Field in `event.data` | Type | Description |
+|-----------------------|------|-------------|
+| `project` | `Str` | Name of the project that was deployed |
+| `build-id` | `Str` | UUID of the build that went live |
+| `cancelled-schedules` | `Int` | [Dynamic schedules](/docs/schedules#dynamic-schedules-and-deploys) the activation cancelled |
+
+Like any event, it reaches every handler for its type in the environment. In an
+environment with several projects, check `project` to act only on your own.
+
 ## Sending Events
 
 Send events from your code to trigger handlers:

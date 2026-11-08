@@ -769,7 +769,7 @@ pub async fn run_for_environment(
                         )
                         .await
                         {
-                            Ok(()) => sync_health.loop_passed("database sync"),
+                            Ok(_) => sync_health.loop_passed("database sync"),
                             Err(e) => error!("hot.dev: SCHEDULER database sync failed: {}", e),
                         }
                     }
@@ -1073,7 +1073,8 @@ pub async fn run_for_environment(
     Ok(())
 }
 
-/// Sync with database to update running scheduled jobs
+/// Sync with database to update running scheduled jobs. Returns how many
+/// schedules could not be added or updated.
 async fn sync_with_database(
     scheduler: &JobScheduler,
     event_queue: &Arc<dyn Queue<Message>>,
@@ -1082,7 +1083,7 @@ async fn sync_with_database(
     backfill_enabled: bool,
     schedule_policy: SchedulePolicy,
     env_id: Option<Uuid>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
     let now = Utc::now();
 
     debug!("hot.dev: SCHEDULER syncing with database");
@@ -1137,6 +1138,11 @@ async fn sync_with_database(
 
     // Add or update jobs for each schedule
     for schedule in schedules {
+        // A one-time schedule has no cron job: process_due_at_schedules fires it.
+        if schedule.cron.starts_with(hot::db::AT_SCHEDULE_PREFIX) {
+            continue;
+        }
+
         seen_schedule_ids.insert(schedule.schedule_id);
 
         // Check for missed executions BEFORE updating/adding the job (only if backfill is enabled)
@@ -1322,7 +1328,7 @@ async fn sync_with_database(
         );
     }
 
-    Ok(())
+    Ok(failed_count)
 }
 
 /// Create a scheduled job for a database schedule
@@ -2886,6 +2892,52 @@ mod tests {
         }
         fired.sort_by_key(|args| args.to_string());
         assert_eq!(fired, [val!(["step-1"]), val!(["step-2"])]);
+    }
+
+    #[tokio::test]
+    async fn a_waiting_one_time_schedule_is_not_a_cron_job() {
+        let db = Arc::new(hot::db::test_db().await);
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        hot::db::Build::activate_build_directly(&db, &data.build_id, &data.user_id)
+            .await
+            .unwrap();
+        let waiting = Schedule::insert_dynamic_schedule(
+            &db,
+            &Uuid::now_v7(),
+            &data.build_id,
+            &hot::db::ScheduleType::At(Utc::now() + chrono::Duration::hours(1)),
+            SchedulePolicy::self_hosted_default(),
+            "::app::jobs",
+            "remind",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let scheduler = JobScheduler::new().await.unwrap();
+        let queue: Arc<dyn Queue<Message>> = Arc::new(
+            MemQueue::new(format!("test:schedule-at-sync:{}", Uuid::now_v7()))
+                .expect("memory queue"),
+        );
+        let running_jobs = Arc::new(RwLock::new(AHashMap::new()));
+        // Both with and without backfill, as each visits the row.
+        for backfill in [false, true] {
+            let failed = sync_with_database(
+                &scheduler,
+                &queue,
+                &running_jobs,
+                &db,
+                backfill,
+                SchedulePolicy::self_hosted_default(),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(failed, 0, "a one-time schedule isn't a sync failure");
+        }
+        assert!(!running_jobs.read().await.contains_key(&waiting));
+        assert!(Schedule::get_schedule(&db, &waiting).await.unwrap().active);
     }
 
     #[tokio::test]
