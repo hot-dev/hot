@@ -10,6 +10,164 @@ static BUILD_CACHE: LazyLock<EntityCache<Uuid, Build>> = LazyLock::new(|| Entity
 
 type ManifestVersions = (Option<String>, Option<String>);
 
+/// The event each activation publishes to its environment, once the build is live.
+pub const BUILD_ACTIVATED_EVENT: &str = "hot:deploy:activated";
+
+/// What an activation's event says, read before its transaction starts.
+struct ActivationEventSource {
+    build_id: Uuid,
+    env_id: Uuid,
+    org_id: Uuid,
+    project_name: String,
+    user_id: Uuid,
+}
+
+/// An activation's event, written in the activation's transaction so it exists
+/// exactly when the build went live. Its lease has already ended, so the
+/// scheduler's outbox sweep enqueues it.
+struct ActivationEvent {
+    event_id: Uuid,
+    stream_id: Uuid,
+    env_id: Uuid,
+    user_id: Uuid,
+    event_time: DateTime<Utc>,
+    data: serde_json::Value,
+    payload: serde_json::Value,
+}
+
+impl ActivationEventSource {
+    async fn load(
+        db: &crate::db::DatabasePool,
+        build: &Build,
+        env_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<Self, BuildError> {
+        let project = crate::db::Project::get_project(db, &build.project_id)
+            .await
+            .map_err(activation_event_error)?;
+        let env = crate::db::Env::get_env(db, &env_id)
+            .await
+            .map_err(activation_event_error)?;
+        Ok(Self {
+            build_id: build.build_id,
+            env_id,
+            org_id: env.org_id,
+            project_name: project.name,
+            user_id,
+        })
+    }
+
+    fn event(&self, cancelled_schedules: u64) -> Result<ActivationEvent, BuildError> {
+        use crate::lang::event::{Event, ExecutionContext, queue::durable_event_message};
+        // Addressed to no project: like any event, it reaches every handler
+        // for its type in the environment, which can filter on `project`.
+        let stream_id = Uuid::now_v7();
+        let event = Event::new_with_project(
+            self.env_id,
+            stream_id,
+            BUILD_ACTIVATED_EVENT.to_string(),
+            crate::val!({
+                "project": self.project_name.clone(),
+                "build-id": self.build_id.to_string(),
+                "cancelled-schedules": cancelled_schedules as i64,
+            }),
+            None,
+            None,
+        );
+        let context = ExecutionContext::new(
+            Uuid::now_v7(),
+            stream_id,
+            crate::db::run::RunType::Event.as_id(),
+            Some(self.env_id),
+            Some(self.user_id),
+            Some(self.org_id),
+            None,
+        );
+        let data = serde_json::Value::from(&event.event_data);
+        let (event_id, event_time) = (event.event_id, event.event_time);
+        let message = durable_event_message("hot:event", &context, event);
+        let payload = serde_json::to_value(&message)
+            .map_err(|error| BuildError::Database(sqlx::Error::Protocol(error.to_string())))?;
+        Ok(ActivationEvent {
+            event_id,
+            stream_id,
+            env_id: self.env_id,
+            user_id: self.user_id,
+            event_time,
+            data,
+            payload,
+        })
+    }
+
+    fn log_cancelled(&self, cancelled_schedules: u64) {
+        if cancelled_schedules > 0 {
+            tracing::info!(
+                "hot.dev: deploy of build {} ({}) cancelled {} dynamic schedule(s) tied to replaced builds",
+                self.build_id,
+                self.project_name,
+                cancelled_schedules
+            );
+        }
+    }
+}
+
+impl ActivationEvent {
+    async fn insert_postgres(&self, connection: &mut sqlx::PgConnection) -> Result<(), BuildError> {
+        sqlx::query(
+            "INSERT INTO stream (stream_id, env_id, started_at, last_activity_at, total_events) VALUES ($1, $2, now(), now(), 1)",
+        )
+        .bind(self.stream_id)
+        .bind(self.env_id)
+        .execute(&mut *connection)
+        .await?;
+        sqlx::query(
+            "INSERT INTO event (event_id, env_id, stream_id, event_type, event_data, event_time, created_by_user_id, enqueue_leased_until, enqueue_payload) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        )
+        .bind(self.event_id)
+        .bind(self.env_id)
+        .bind(self.stream_id)
+        .bind(BUILD_ACTIVATED_EVENT)
+        .bind(&self.data)
+        .bind(self.event_time)
+        .bind(self.user_id)
+        .bind(Utc::now())
+        .bind(&self.payload)
+        .execute(&mut *connection)
+        .await?;
+        Ok(())
+    }
+
+    async fn insert_sqlite(
+        &self,
+        connection: &mut sqlx::SqliteConnection,
+    ) -> Result<(), BuildError> {
+        sqlx::query(
+            "INSERT INTO stream (stream_id, env_id, started_at, last_activity_at, total_events) VALUES (?, ?, datetime('now'), datetime('now'), 1)",
+        )
+        .bind(self.stream_id)
+        .bind(self.env_id)
+        .execute(&mut *connection)
+        .await?;
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO event (event_id, env_id, stream_id, event_type, event_data, event_time, created_at, created_by_user_id, enqueue_leased_until, enqueue_payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(self.event_id)
+        .bind(self.env_id)
+        .bind(self.stream_id)
+        .bind(BUILD_ACTIVATED_EVENT)
+        .bind(self.data.to_string())
+        .bind(self.event_time)
+        .bind(now)
+        .bind(self.user_id)
+        .bind(now)
+        .bind(self.payload.to_string())
+        .execute(&mut *connection)
+        .await?;
+        Ok(())
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum BuildError {
     #[error("Database error: {0}")]
@@ -18,6 +176,10 @@ pub enum BuildError {
     Admission(String),
     #[error("Build not found")]
     NotFound,
+}
+
+fn activation_event_error(error: impl std::fmt::Display) -> BuildError {
+    BuildError::Database(sqlx::Error::Protocol(error.to_string()))
 }
 
 /// A schedule cap denies an activation; a database failure during schedule
@@ -1135,11 +1297,13 @@ impl Build {
         }
 
         let env_id = Self::get_env_id_for_build(db, build_id).await?;
+        let activation =
+            ActivationEventSource::load(db, &build, env_id, *activated_by_user_id).await?;
 
         let admission = super::schedule::quota::Admission::begin(db, build_id, -1)
             .await
             .map_err(schedule_admission_error)?;
-        let activated = match admission {
+        let cancelled_schedules = match admission {
             super::schedule::quota::Admission::Postgres {
                 mut tx,
                 root,
@@ -1192,14 +1356,18 @@ impl Build {
 
                 // Dynamic schedules carry arguments bound to the old program. Cancel
                 // them atomically with activation rather than leaving invisible work.
-                sqlx::query("UPDATE schedule SET active = false, deactivated_at = NOW(), meta = COALESCE(meta, '{}'::jsonb) || '{\"deactivation-reason\":\"build replaced by deployment\"}'::jsonb WHERE active = true AND value IS NOT NULL AND build_id <> $1 AND build_id IN (SELECT build_id FROM build WHERE project_id = $2)")
-                    .bind(build_id).bind(build.project_id).execute(&mut *tx).await?;
+                let cancelled = sqlx::query("UPDATE schedule SET active = false, deactivated_at = NOW(), meta = COALESCE(meta, '{}'::jsonb) || '{\"deactivation-reason\":\"build replaced by deployment\"}'::jsonb WHERE active = true AND value IS NOT NULL AND build_id <> $1 AND build_id IN (SELECT build_id FROM build WHERE project_id = $2)")
+                    .bind(build_id).bind(build.project_id).execute(&mut *tx).await?.rows_affected();
+                activation
+                    .event(cancelled)?
+                    .insert_postgres(&mut tx)
+                    .await?;
 
                 super::schedule::quota::validate_postgres(&mut tx, root, limit)
                     .await
                     .map_err(schedule_admission_error)?;
                 tx.commit().await?;
-                true
+                cancelled
             }
             super::schedule::quota::Admission::Sqlite {
                 mut tx,
@@ -1251,20 +1419,22 @@ impl Build {
                 .execute(&mut *tx)
                 .await?;
 
-                sqlx::query("UPDATE schedule SET active = 0, deactivated_at = CURRENT_TIMESTAMP, meta = json_set(COALESCE(meta, '{}'), '$.deactivation-reason', 'build replaced by deployment') WHERE active = 1 AND value IS NOT NULL AND build_id <> ? AND build_id IN (SELECT build_id FROM build WHERE project_id = ?)")
-                    .bind(build_id).bind(build.project_id).execute(&mut *tx).await?;
+                let cancelled = sqlx::query("UPDATE schedule SET active = 0, deactivated_at = CURRENT_TIMESTAMP, meta = json_set(COALESCE(meta, '{}'), '$.deactivation-reason', 'build replaced by deployment') WHERE active = 1 AND value IS NOT NULL AND build_id <> ? AND build_id IN (SELECT build_id FROM build WHERE project_id = ?)")
+                    .bind(build_id).bind(build.project_id).execute(&mut *tx).await?.rows_affected();
+                activation.event(cancelled)?.insert_sqlite(&mut tx).await?;
 
                 super::schedule::quota::validate_sqlite(&mut tx, root, limit)
                     .await
                     .map_err(schedule_admission_error)?;
                 tx.commit().await?;
-                true
+                cancelled
             }
         };
 
         crate::db::event_handler::EventHandler::invalidate_event_handler_cache_for_env(&env_id);
         Self::invalidate_all_build_cache();
-        Ok(activated)
+        activation.log_cancelled(cancelled_schedules);
+        Ok(true)
     }
 
     /// Directly activate a build. This is appropriate for live/local builds that
@@ -1280,11 +1450,13 @@ impl Build {
 
         // Get env_id for cache invalidation
         let env_id = Self::get_env_id_for_build(db, build_id).await?;
+        let activation =
+            ActivationEventSource::load(db, &build, env_id, *deployed_by_user_id).await?;
 
         let admission = super::schedule::quota::Admission::begin(db, build_id, -1)
             .await
             .map_err(schedule_admission_error)?;
-        match admission {
+        let cancelled_schedules = match admission {
             super::schedule::quota::Admission::Postgres {
                 mut tx,
                 root,
@@ -1330,13 +1502,18 @@ impl Build {
                 // Commit the transaction
                 // Dynamic schedules carry arguments bound to the old program. Cancel
                 // them atomically with activation rather than leaving invisible work.
-                sqlx::query("UPDATE schedule SET active = false, deactivated_at = NOW(), meta = COALESCE(meta, '{}'::jsonb) || '{\"deactivation-reason\":\"build replaced by deployment\"}'::jsonb WHERE active = true AND value IS NOT NULL AND build_id <> $1 AND build_id IN (SELECT build_id FROM build WHERE project_id = $2)")
-                    .bind(build_id).bind(build.project_id).execute(&mut *tx).await?;
+                let cancelled = sqlx::query("UPDATE schedule SET active = false, deactivated_at = NOW(), meta = COALESCE(meta, '{}'::jsonb) || '{\"deactivation-reason\":\"build replaced by deployment\"}'::jsonb WHERE active = true AND value IS NOT NULL AND build_id <> $1 AND build_id IN (SELECT build_id FROM build WHERE project_id = $2)")
+                    .bind(build_id).bind(build.project_id).execute(&mut *tx).await?.rows_affected();
+                activation
+                    .event(cancelled)?
+                    .insert_postgres(&mut tx)
+                    .await?;
 
                 super::schedule::quota::validate_postgres(&mut tx, root, limit)
                     .await
                     .map_err(schedule_admission_error)?;
                 tx.commit().await?;
+                cancelled
             }
             super::schedule::quota::Admission::Sqlite {
                 mut tx,
@@ -1388,19 +1565,22 @@ impl Build {
                 .await?;
 
                 // Commit the transaction
-                sqlx::query("UPDATE schedule SET active = 0, deactivated_at = CURRENT_TIMESTAMP, meta = json_set(COALESCE(meta, '{}'), '$.deactivation-reason', 'build replaced by deployment') WHERE active = 1 AND value IS NOT NULL AND build_id <> ? AND build_id IN (SELECT build_id FROM build WHERE project_id = ?)")
-                    .bind(build_id).bind(build.project_id).execute(&mut *tx).await?;
+                let cancelled = sqlx::query("UPDATE schedule SET active = 0, deactivated_at = CURRENT_TIMESTAMP, meta = json_set(COALESCE(meta, '{}'), '$.deactivation-reason', 'build replaced by deployment') WHERE active = 1 AND value IS NOT NULL AND build_id <> ? AND build_id IN (SELECT build_id FROM build WHERE project_id = ?)")
+                    .bind(build_id).bind(build.project_id).execute(&mut *tx).await?.rows_affected();
+                activation.event(cancelled)?.insert_sqlite(&mut tx).await?;
 
                 super::schedule::quota::validate_sqlite(&mut tx, root, limit)
                     .await
                     .map_err(schedule_admission_error)?;
                 tx.commit().await?;
+                cancelled
             }
-        }
+        };
 
         // Invalidate event handler cache for this environment
         crate::db::event_handler::EventHandler::invalidate_event_handler_cache_for_env(&env_id);
         Self::invalidate_all_build_cache();
+        activation.log_cancelled(cancelled_schedules);
 
         Ok(())
     }
@@ -1907,6 +2087,155 @@ mod tests {
                 "build replaced by deployment"
             );
         }
+    }
+
+    /// The activation events of an environment, as (data, payload).
+    async fn activation_events(
+        db: &crate::db::DatabasePool,
+        env: &Uuid,
+    ) -> Vec<(serde_json::Value, serde_json::Value)> {
+        let crate::db::DatabasePool::Sqlite(pool) = db else {
+            panic!("test_db is SQLite");
+        };
+        let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT event_data, enqueue_payload FROM event WHERE env_id = ? AND event_type = ? ORDER BY event_id",
+        )
+        .bind(env)
+        .bind(BUILD_ACTIVATED_EVENT)
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        rows.into_iter()
+            .map(|(data, payload)| {
+                (
+                    serde_json::from_str(&data).unwrap(),
+                    serde_json::from_str(payload.as_deref().unwrap_or("null")).unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    async fn insert_dynamic_schedule(db: &crate::db::DatabasePool, build: &Uuid, step: i64) {
+        super::super::Schedule::insert_schedule(
+            db,
+            &Uuid::now_v7(),
+            build,
+            "0 * * * * *",
+            "::app",
+            "work",
+            None,
+            Some(&serde_json::json!([step])),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn activate(db: &crate::db::DatabasePool, build: &Uuid, user: &Uuid, prepared: bool) {
+        if prepared {
+            Build::request_bundle_deployment(db, build, user)
+                .await
+                .unwrap();
+            assert!(
+                Build::activate_prepared_build(db, build, user)
+                    .await
+                    .unwrap()
+            );
+        } else {
+            Build::activate_build_directly(db, build, user)
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn each_activation_publishes_one_event_with_its_cancelled_count() {
+        for prepared in [false, true] {
+            let db = test_db().await;
+            let user = Uuid::now_v7();
+            let (env, project) = insert_test_project(&db, &user).await;
+            let project_name = crate::db::Project::get_project(&db, &project)
+                .await
+                .unwrap()
+                .name;
+            let old = insert_test_build(&db, &project, &user).await;
+            let new = insert_test_build(&db, &project, &user).await;
+
+            activate(&db, &old, &user, prepared).await;
+            for step in 0..3 {
+                insert_dynamic_schedule(&db, &old, step).await;
+            }
+            activate(&db, &new, &user, prepared).await;
+
+            let events = activation_events(&db, &env).await;
+            assert_eq!(events.len(), 2, "one event per activation");
+            assert_eq!(
+                events[0].0,
+                serde_json::json!({
+                    "project": project_name,
+                    "build-id": old.to_string(),
+                    "cancelled-schedules": 0,
+                })
+            );
+            assert_eq!(
+                events[1].0,
+                serde_json::json!({
+                    "project": project_name,
+                    "build-id": new.to_string(),
+                    "cancelled-schedules": 3,
+                })
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_activation_event_is_enqueued_by_the_outbox_sweep() {
+        use crate::data::msg::Message;
+        use crate::lang::event::queue::{EventMessage, recover_event_outbox};
+        use crate::queue::{Queue, mem::MemQueue};
+
+        let db = test_db().await;
+        let user = Uuid::now_v7();
+        let (env, project) = insert_test_project(&db, &user).await;
+        let build = insert_test_build(&db, &project, &user).await;
+        activate(&db, &build, &user, false).await;
+
+        let queue: MemQueue<Message> =
+            MemQueue::new(format!("test:activation:{}", Uuid::now_v7())).unwrap();
+        assert_eq!(recover_event_outbox(&db, &queue, None).await.unwrap(), 1);
+
+        let message = queue.dequeue().await.unwrap().expect("the event's packet");
+        let event = EventMessage::try_from(message).unwrap().body.event;
+        assert_eq!(event.event_type, BUILD_ACTIVATED_EVENT);
+        assert_eq!(event.env_id, env);
+        assert!(event.target_project_id.is_none());
+
+        // Settled: a second sweep leaves it alone.
+        assert_eq!(recover_event_outbox(&db, &queue, None).await.unwrap(), 0);
+        assert_eq!(
+            activation_events(&db, &env).await[0].1,
+            serde_json::Value::Null
+        );
+    }
+
+    #[tokio::test]
+    async fn an_activation_that_changes_nothing_publishes_nothing() {
+        let db = test_db().await;
+        let user = Uuid::now_v7();
+        let (env, project) = insert_test_project(&db, &user).await;
+        let build = insert_test_build(&db, &project, &user).await;
+        activate(&db, &build, &user, false).await;
+
+        // Already live: nothing to activate.
+        assert!(
+            !Build::activate_prepared_build(&db, &build, &user)
+                .await
+                .unwrap()
+        );
+        assert_eq!(activation_events(&db, &env).await.len(), 1);
     }
 
     #[tokio::test]
