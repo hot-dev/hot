@@ -34,7 +34,17 @@ PACKAGE_AGENT "hot-dev-federal-register-pkg/0.1 (+https://hot.dev)"
 
 given
 meta {
-    doc: """True for a non-null value that is not a blank string or an empty Vec."""
+    doc: """
+    True for a non-null value that is not a blank string or an empty Vec.
+
+    **Example**
+
+    ```hot
+    ::federal-register::api/given("  ")  // false
+    ::federal-register::api/given([])    // false
+    ::federal-register::api/given(0)     // true
+    ```
+    """
 }
 fn (v: Any): Bool {
   match v {
@@ -45,7 +55,9 @@ fn (v: Any): Bool {
   }
 }
 
-pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
+pick
+meta {no-doc: true}
+fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
   from-opts get(opts, key)
   from-ctx ::ctx/get(ctx-key)
   cond {
@@ -55,7 +67,9 @@ pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
   }
 }
 
-strip-slash fn (url: Str): Str {
+strip-slash
+meta {no-doc: true}
+fn (url: Str): Str {
   ::re/replace-all(url, "/+$", "")
 }
 
@@ -101,11 +115,15 @@ type {
     message: Str
 }
 
-error-fields fn (errors: Map): Str {
+error-fields
+meta {no-doc: true}
+fn (errors: Map): Str {
   join(map(keys(errors), (k) { `${k}: ${Str(get(errors, k))}` }), "; ")
 }
 
-body-detail fn (body: Any): Str? {
+body-detail
+meta {no-doc: true}
+fn (body: Any): Str? {
   cond {
     // A missing document gets an HTML page, which has no useful one-line detail.
     and(is-str(body), ::hot::str/starts-with(trim(body), "<")) => { null }
@@ -122,7 +140,9 @@ body-detail fn (body: Any): Str? {
   }
 }
 
-retry-after fn (headers: Map): Int? {
+retry-after
+meta {no-doc: true}
+fn (headers: Map): Int? {
   v get(headers, "retry-after")
   cond {
     is-null(v) => { null }
@@ -133,7 +153,19 @@ retry-after fn (headers: Map): Int? {
 
 http-error
 meta {
-    doc: """Build an `HttpError` from a non-2xx response. Exposed for testing; every request uses it."""
+    doc: """
+    Build an `HttpError` from a non-2xx response. Exposed for testing; every
+    request uses it.
+
+    **Example**
+
+    ```hot
+    response {status: 400, headers: {}, body: {errors: {agencies: "invalid value"}}}
+    e ::federal-register::api/http-error(response, "https://www.federalregister.gov/api/v1/documents.json")
+    e.status   // 400
+    e.message  // "federal-register: HTTP 400: agencies: invalid value"
+    ```
+    """
 }
 fn (response: HttpResponse, url: Str): HttpError {
   headers or(response.headers, {})
@@ -151,7 +183,19 @@ fn (response: HttpResponse, url: Str): HttpError {
 
 html-error
 meta {
-    doc: """Build an `HttpError` for an HTML page served in place of API data. Exposed for testing."""
+    doc: """
+    Build an `HttpError` for an HTML page served in place of API data.
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    response {status: 200, headers: {}, body: "<html></html>"}
+    e ::federal-register::api/html-error(response, "https://www.federalregister.gov/api/v1/agencies.json")
+    e.status                     // 200
+    contains(e.message, "HTML")  // true
+    ```
+    """
 }
 fn (response: HttpResponse, url: Str): HttpError {
   headers or(response.headers, {})
@@ -173,6 +217,13 @@ meta {
     HTML on success, so a 200 page means the request was sent somewhere
     else. The site redirects clients it flags as automated to a CAPTCHA
     page, and `::hot::http` follows the redirect.
+
+    **Example**
+
+    ```hot
+    ::federal-register::api/is-html({headers: {content-type: "text/html; charset=utf-8"}})  // true
+    ::federal-register::api/is-html({headers: {content-type: "application/json"}})          // false
+    ```
     """
 }
 fn (response: Any): Bool {
@@ -181,7 +232,16 @@ fn (response: Any): Bool {
 
 is-not-found
 meta {
-    doc: """True when `e` is an `HttpError` with status 404."""
+    doc: """
+    True when `e` is an `HttpError` with status 404.
+
+    **Example**
+
+    ```hot
+    ::federal-register::api/is-not-found({status: 404})  // true
+    ::federal-register::api/is-not-found({status: 500})  // false
+    ```
+    """
 }
 fn (e: Any): Bool {
   cond {
@@ -195,13 +255,27 @@ fn (e: Any): Bool {
 // Requests
 // ---------------------------------------------------------------------------
 
-query-pairs fn (key: Str, value: Any): Vec<Str> {
+query-pairs
+meta {no-doc: true}
+fn (key: Str, value: Any): Vec<Str> {
   map(if(is-vec(value), value, [value]), (item) { ::uri/encode-query(zipmap([key], [item])) })
 }
 
 query-string
 meta {
-    doc: """Build a `?a=1&b=2` suffix from a Map, dropping null, blank and empty values (pure); `""` when nothing remains. A Vec repeats its key, as `conditions[agencies][]` needs, and keys are encoded."""
+    doc: """
+    Build a `?a=1&b=2` suffix from a Map, dropping null, blank and empty
+    values (pure); `""` when nothing remains. A Vec repeats its key, as
+    `conditions[agencies][]` needs, and keys are encoded.
+
+    **Example**
+
+    ```hot
+    ::federal-register::api/query-string({order: "newest", term: null, page: 2})  // "?order=newest&page=2"
+    ::federal-register::api/query-string({"fields[]": ["title", "type"]})         // "?fields%5B%5D=title&fields%5B%5D=type"
+    ::federal-register::api/query-string({term: " "})                             // ""
+    ```
+    """
 }
 fn (params: Map): Str {
   kept filter-vals(params, given)
@@ -211,7 +285,15 @@ fn (params: Map): Str {
 
 path-segment
 meta {
-    doc: """Percent-encode one path segment."""
+    doc: """
+    Percent-encode one path segment.
+
+    **Example**
+
+    ```hot
+    ::federal-register::api/path-segment("2026 18194")  // "2026%2018194"
+    ```
+    """
 }
 fn (value: Any): Str {
   ::uri/encode(Str(value))
@@ -223,6 +305,16 @@ meta {
     GET a Federal Register URL with `headers`, returning the
     `HttpResponse` on 2xx or an Err carrying `HttpError`. An HTML page is
     an Err too. A transport failure passes through as its own Err.
+
+    **Example**
+
+    ```hot
+    response ::federal-register::api/request(
+      "https://www.federalregister.gov/api/v1/agencies.json",
+      {Accept: "application/json"}
+    )
+    response.status
+    ```
     """
 }
 fn (url: Str, headers: Map): HttpResponse {
@@ -242,7 +334,17 @@ fn (url: Str, headers: Map): HttpResponse {
 
 get-json
 meta {
-    doc: """GET a JSON resource and return the decoded body, or an Err carrying `HttpError`."""
+    doc: """
+    GET a JSON resource and return the decoded body, or an Err carrying
+    `HttpError`.
+
+    **Example**
+
+    ```hot
+    doc ::federal-register::api/get-json("https://www.federalregister.gov/api/v1/documents/2026-18194.json")
+    doc.title
+    ```
+    """
 }
 fn (url: Str): Any {
   response request(url, {Accept: "application/json"})
@@ -256,7 +358,9 @@ fn (url: Str): Any {
   }
 }
 
-null-on-404 fn (out: Result): Any {
+null-on-404
+meta {no-doc: true}
+fn (out: Result): Any {
   cond {
     and(is-err(out), is-not-found(err-value(out))) => { null }
     => { out }
@@ -265,7 +369,16 @@ null-on-404 fn (out: Result): Any {
 
 get-json-or-null
 meta {
-    doc: """`get-json`, but a 404 gives null (an absent document) instead of an Err."""
+    doc: """
+    `get-json`, but a 404 gives null (an absent document) instead of an Err.
+
+    **Example**
+
+    ```hot
+    doc ::federal-register::api/get-json-or-null("https://www.federalregister.gov/api/v1/documents/2026-18194.json")
+    if(is-null(doc), "no such document", doc.title)
+    ```
+    """
 }
 fn (url: Str): Any {
   null-on-404(get-json(url))

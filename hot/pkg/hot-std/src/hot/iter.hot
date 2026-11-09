@@ -131,7 +131,7 @@ meta {
 
     ```hot
     numbers ::hot::iter/range(1, 10001)
-    sum ::hot::coll/reduce(numbers, fn (acc, n) { ::hot::math/add(acc, n) }, 0)
+    sum ::hot::coll/reduce(numbers, (acc, n) { ::hot::math/add(acc, n) }, 0)
     ```
     """
 }

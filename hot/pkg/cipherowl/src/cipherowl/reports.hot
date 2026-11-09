@@ -20,7 +20,17 @@ query ::cipherowl::api/query
 
 report-path
 meta {
-    doc: """`/api/report/v1/{kind}/chains/{chain}/addresses/{address}` plus the query, with chain and address validated. Exposed for testing."""
+    doc: """
+    `/api/report/v1/{kind}/chains/{chain}/addresses/{address}` plus the
+    query, with chain and address validated. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::reports/report-path("sar", "evm", "0x0000000000000000000000000000000000000001", {config: "co-sandbox"})
+    // "/api/report/v1/sar/chains/evm/addresses/0x0000000000000000000000000000000000000001?config=co-sandbox"
+    ```
+    """
 }
 fn (kind: Str, chain: Str, address: Str, params: Map): Str {
   // The Report API rejects a specific chain (e.g. base) and wants its class (evm).
@@ -32,14 +42,27 @@ fn (kind: Str, chain: Str, address: Str, params: Map): Str {
   }
 }
 
-config-param fn (options: Map): Str? {
+config-param
+meta {no-doc: true}
+fn (options: Map): Str? {
   config get(options, "config")
   if(is-empty(or(config, "")), null, config)
 }
 
 with-resolved-config
 meta {
-    doc: """A report body plus `resolved-config`, the configuration CipherOwl applied (from the `cipherowl-resolved-config` response header). Exposed for testing."""
+    doc: """
+    A report body plus `resolved-config`, the configuration CipherOwl
+    applied (from the `cipherowl-resolved-config` response header). Exposed
+    for testing.
+
+    **Example**
+
+    ```hot
+    response {status: 200, headers: {"cipherowl-resolved-config": "co-vasp"}, body: {found_risk: false}}
+    ::cipherowl::reports/with-resolved-config(response)  // {found_risk: false, resolved-config: "co-vasp"}
+    ```
+    """
 }
 fn (response: Any): Map {
   body ::api/unwrap(response)
@@ -77,7 +100,19 @@ fn
 
 sar-report
 meta {
-    doc: """A DRAFT suspicious-activity report (SAR) narrative, same shape as `risk-assessment`. It is evidence for an officer to read and adapt; nothing is filed."""
+    doc: """
+    A DRAFT suspicious-activity report (SAR) narrative, same shape as
+    `risk-assessment`. It is evidence for an officer to read and adapt;
+    nothing is filed.
+
+    **Example**
+
+    ```hot
+    out ::cipherowl::reports/sar-report("evm", "0x93df2c9c8786242b8fdca3f96b3914b8b4a9f704", {config: "co-sandbox"})
+    problem ::cipherowl::reports/report-error(out)
+    if(is-null(problem), out.report, problem)
+    ```
+    """
 }
 fn
 (chain: Str, address: Str, options: Map): Map {
@@ -89,7 +124,18 @@ fn
 
 report
 meta {
-    doc: """GET one narrative report for `chain` (translated to its class), with the resolved config added."""
+    doc: """
+    GET one narrative report for `chain` (translated to its class), with the
+    resolved config added.
+
+    **Example**
+
+    ```hot
+    // The same call risk-assessment and sar-report make, for another narrative kind
+    out ::cipherowl::reports/report("risk-assessment", "evm", "0x93df2c9c8786242b8fdca3f96b3914b8b4a9f704", {config: "co-sandbox"}, {})
+    out.resolved-config
+    ```
+    """
 }
 fn (kind: Str, chain: Str, address: Str, params: Map, opts: Map): Map {
   family ::risk/chain-class(chain, opts)
@@ -102,7 +148,18 @@ fn (kind: Str, chain: Str, address: Str, params: Map, opts: Map): Map {
 
 report-error
 meta {
-    doc: """The generation failure CipherOwl reports in a report or graph body (`error`), or null. Reports fail in the body, not the HTTP status, so check this before using `report` or `graph`. Pure."""
+    doc: """
+    The generation failure CipherOwl reports in a report or graph body
+    (`error`), or null. Reports fail in the body, not the HTTP status, so
+    check this before using `report` or `graph`. Pure.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::reports/report-error({error: "generation failed"})  // "generation failed"
+    ::cipherowl::reports/report-error({report: "# Summary"})  // null
+    ```
+    """
 }
 fn (body: Any): Str? {
   e if(is-map(body), get(body, "error"), null)
@@ -111,7 +168,18 @@ fn (body: Any): Str? {
 
 graph-params
 meta {
-    doc: """Query fields for the graph report: `config`, `output_format` (`mermaid` default, `html`, `png`), `interactive` (default true), `style` (`detailed` default, `compact`; compact needs mermaid). Unset options are dropped. Exposed for testing."""
+    doc: """
+    Query fields for the graph report: `config`, `output_format` (`mermaid`
+    default, `html`, `png`), `interactive` (default true), `style`
+    (`detailed` default, `compact`; compact needs mermaid). Unset options
+    are dropped. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::reports/graph-params({output_format: "png"}).output_format  // "png"
+    ```
+    """
 }
 fn (options: Map): Map {
   {
@@ -124,7 +192,19 @@ fn (options: Map): Map {
 
 graph-result
 meta {
-    doc: """Shape a graph response: an image (`content-type` starting `image/`) becomes `{content-type, bytes}` with the raw `body-bytes`; anything else is the JSON body `{graph, legend, summary, error, timestamp}`. Exposed for testing."""
+    doc: """
+    Shape a graph response: an image (`content-type` starting `image/`)
+    becomes `{content-type, bytes}` with the raw `body-bytes`; anything else
+    is the JSON body `{graph, legend, summary, error, timestamp}`. Exposed
+    for testing.
+
+    **Example**
+
+    ```hot
+    response {status: 200, headers: {"content-type": "application/json"}, body: {graph: "graph TD"}}
+    ::cipherowl::reports/graph-result(response)  // {graph: "graph TD"}
+    ```
+    """
 }
 fn (response: Any): Any {
   cond {

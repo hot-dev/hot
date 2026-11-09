@@ -175,14 +175,47 @@ type {
 }
 
 create-memory
-meta { doc: "Build an AgentMemory with all three scoped stores." }
+meta {
+    doc: """
+    Build an AgentMemory with all three scoped stores.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    mem.agent-name
+    ```
+    """
+}
 fn (agent-name: Str, session: Session, identity: Identity): AgentMemory {
     create-memory-with-options(agent-name, session, identity, null)
 }
 
 create-memory-with-options
 meta {
-    doc: "Build an AgentMemory, optionally overriding session/KB embedding configuration."
+    doc: """
+    Build an AgentMemory, optionally overriding session/KB embedding
+    configuration.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    opts ::mem/MemoryOptions({embedding: ::hot::store/EmbeddingOptions.Off})
+    mem ::mem/create-memory-with-options(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"}),
+        opts
+    )
+    mem.session-store
+    ```
+    """
 }
 fn (agent-name: Str, session: Session, identity: Identity, opts: MemoryOptions?): AgentMemory {
     embedding cond {
@@ -239,7 +272,30 @@ fn (agent-name: Str, session: Session, identity: Identity, opts: MemoryOptions?)
 // ============================================================================
 
 remember
-meta { doc: "Store a Message in session memory. Auto-generates a time-based key." }
+meta {
+    doc: """
+    Store a Message in session memory. Auto-generates a time-based key.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    ::mem/remember(mem, ::ai::message/Message({
+        id: "m1",
+        content: "Order 42 never arrived.",
+        sender: ::ai::session/Identity({id: "u1", name: "Ada"}),
+        session: ::ai::session/Session({id: "slack:C123"}),
+        timestamp: 1767225600,
+        source: "slack"
+    }))
+    ```
+    """
+}
 fn (mem: AgentMemory, message: Message): Any {
     key `${message.timestamp}:${message.id}`
     ::store/put(mem.session-store, key, {
@@ -254,7 +310,23 @@ fn (mem: AgentMemory, message: Message): Any {
 
 recent
 meta {
-    doc: "Retrieve recent messages from session memory. Options: hours (default 24), limit (default 100)."
+    doc: """
+    Retrieve recent messages from session memory. Options: hours (default
+    24), limit (default 100).
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    entries ::mem/recent(mem, {hours: 6, limit: 20})
+    map(entries, %.value.content)
+    ```
+    """
 }
 fn (mem: AgentMemory, opts: Map?): Vec {
     hours get(or(opts, {}), "hours", 24)
@@ -268,7 +340,23 @@ fn (mem: AgentMemory, opts: Map?): Vec {
 
 recall
 meta {
-    doc: "Semantic search over session memory. Options: limit (default 10), min-score (default 0.5)."
+    doc: """
+    Semantic search over session memory. Options: limit (default 10),
+    min-score (default 0.5).
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    hits ::mem/recall(mem, "missing order", {limit: 5, min-score: 0.7})
+    map(hits, %.value.content)
+    ```
+    """
 }
 fn (mem: AgentMemory, query: Str, opts: Map?): Vec {
     search-opts {
@@ -280,14 +368,49 @@ fn (mem: AgentMemory, query: Str, opts: Map?): Vec {
 }
 
 forget-session
-meta { doc: "Clear all entries in session memory." }
+meta {
+    doc: """
+    Clear all entries in session memory.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    ::mem/forget-session(mem)
+    ```
+    """
+}
 fn (mem: AgentMemory): Bool {
     ::store/clear(mem.session-store)
 }
 
 memory-provenance
 meta {
-    doc: "Build provenance for a store entry returned by `::hot::store/list`, `filter`, or `search`."
+    doc: """
+    Build provenance for a store entry returned by `::hot::store/list`,
+    `filter`, or `search`.
+
+    **Example**
+
+    ```hot
+    entry {key: "1767225600:m1", score: 0.92, value: {
+        content: "Order 42 never arrived.",
+        sender-id: "u1",
+        source: "slack",
+        timestamp: 1767225600,
+        metadata: {message_id: "m1"}
+    }}
+    prov ::ai::memory/memory-provenance(entry, "session")
+    prov.message-id  // "m1"
+    prov.source  // "slack"
+    prov.score  // 0.92
+    ```
+    """
 }
 fn (entry: Map, kind: Str): MemoryProvenance {
     v entry.value
@@ -306,7 +429,26 @@ fn (entry: Map, kind: Str): MemoryProvenance {
 }
 
 entry-record
-meta { doc: "Convert a store entry to a stable MemoryRecord export shape." }
+meta {
+    doc: """
+    Convert a store entry to a stable MemoryRecord export shape.
+
+    **Example**
+
+    ```hot
+    entry {key: "1767225600:m1", score: 0.92, value: {
+        content: "Order 42 never arrived.",
+        sender-id: "u1",
+        source: "slack",
+        timestamp: 1767225600,
+        metadata: {message_id: "m1"}
+    }}
+    record ::ai::memory/entry-record(entry, "session")
+    record.id  // "1767225600:m1"
+    record.content  // "Order 42 never arrived."
+    ```
+    """
+}
 fn (entry: Map, kind: Str): MemoryRecord {
     v entry.value
     MemoryRecord({
@@ -320,25 +462,90 @@ fn (entry: Map, kind: Str): MemoryRecord {
 }
 
 list-session-records
-meta { doc: "Export session memory entries as MemoryRecord values." }
+meta {
+    doc: """
+    Export session memory entries as MemoryRecord values.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    map(::mem/list-session-records(mem), %.content)
+    ```
+    """
+}
 fn (mem: AgentMemory): Vec<MemoryRecord> {
     map(::store/list(mem.session-store), (entry) { entry-record(entry, "session") })
 }
 
 list-user-records
-meta { doc: "Export user-profile entries as MemoryRecord values." }
+meta {
+    doc: """
+    Export user-profile entries as MemoryRecord values.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    map(::mem/list-user-records(mem), %.id)
+    ```
+    """
+}
 fn (mem: AgentMemory): Vec<MemoryRecord> {
     map(::store/list(mem.user-store), (entry) { entry-record(entry, "user") })
 }
 
 list-kb-records
-meta { doc: "Export KB entries as MemoryRecord values." }
+meta {
+    doc: """
+    Export KB entries as MemoryRecord values.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    map(::mem/list-kb-records(mem), %.content)
+    ```
+    """
+}
 fn (mem: AgentMemory): Vec<MemoryRecord> {
     map(::store/list(mem.kb-store), (entry) { entry-record(entry, "kb") })
 }
 
 delete-entries
-meta { doc: "Delete store entries and return the count deleted." }
+meta {
+    doc: """
+    Delete store entries and return the count deleted.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    stale ::hot::store/filter(mem.session-store, (k, v) { eq(v.source, "slack") })
+    ::mem/delete-entries(mem.session-store, stale)
+    ```
+    """
+}
 fn (store: ::hot::store/Map, entries: Vec): Int {
     map(entries, (entry) { ::store/delete(store, entry.key) })
     length(entries)
@@ -346,7 +553,22 @@ fn (store: ::hot::store/Map, entries: Vec): Int {
 
 forget-session-range
 meta {
-    doc: "Delete session memory entries whose `timestamp` is within the inclusive range."
+    doc: """
+    Delete session memory entries whose `timestamp` is within the inclusive
+    range.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    ::mem/forget-session-range(mem, 1767225600, 1767312000)
+    ```
+    """
 }
 fn (mem: AgentMemory, start-ts: Int, end-ts: Int): Int {
     entries ::store/filter(mem.session-store, (k, v) {
@@ -357,7 +579,22 @@ fn (mem: AgentMemory, start-ts: Int, end-ts: Int): Int {
 
 forget-session-where
 meta {
-    doc: "Delete session memory entries matching a predicate `(key, value) -> Bool`."
+    doc: """
+    Delete session memory entries matching a predicate `(key, value) ->
+    Bool`.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    ::mem/forget-session-where(mem, (k, v) { eq(v.sender-id, "u1") })
+    ```
+    """
 }
 fn (mem: AgentMemory, predicate: Fn): Int {
     entries ::store/filter(mem.session-store, predicate)
@@ -366,7 +603,22 @@ fn (mem: AgentMemory, predicate: Fn): Int {
 
 forget-by-source-id
 meta {
-    doc: "Delete session memory entries with matching key, `metadata.source_id`, or `metadata.message_id`."
+    doc: """
+    Delete session memory entries with matching key, `metadata.source_id`,
+    or `metadata.message_id`.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    ::mem/forget-by-source-id(mem, "m1")
+    ```
+    """
 }
 fn (mem: AgentMemory, source-id: Str): Int {
     entries ::store/filter(mem.session-store, (k, v) {
@@ -377,19 +629,69 @@ fn (mem: AgentMemory, source-id: Str): Int {
 }
 
 forget-user-key
-meta { doc: "Delete one key from user memory." }
+meta {
+    doc: """
+    Delete one key from user memory.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    ::mem/forget-user-key(mem, "timezone")
+    ```
+    """
+}
 fn (mem: AgentMemory, key: Str): Bool {
     ::store/delete(mem.user-store, key)
 }
 
 forget-kb-key
-meta { doc: "Delete one key from the shared KB." }
+meta {
+    doc: """
+    Delete one key from the shared KB.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    ::mem/forget-kb-key(mem, "refund-policy")
+    ```
+    """
+}
 fn (mem: AgentMemory, key: Str): Bool {
     ::store/delete(mem.kb-store, key)
 }
 
 export-memory
-meta { doc: "Export session, user, and KB records for this memory scope." }
+meta {
+    doc: """
+    Export session, user, and KB records for this memory scope.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    bundle ::mem/export-memory(mem)
+    length(bundle.session)
+    bundle.metadata.exported-at
+    ```
+    """
+}
 fn
 (mem: AgentMemory): MemoryExport {
     export-memory(mem, null)
@@ -411,13 +713,45 @@ fn
 // ============================================================================
 
 get-user-data
-meta { doc: "Read a value from the user's persistent store." }
+meta {
+    doc: """
+    Read a value from the user's persistent store.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    ::mem/get-user-data(mem, "timezone")
+    ```
+    """
+}
 fn (mem: AgentMemory, key: Str): Any {
     ::store/get(mem.user-store, key)
 }
 
 set-user-data
-meta { doc: "Write a value to the user's persistent store." }
+meta {
+    doc: """
+    Write a value to the user's persistent store.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    ::mem/set-user-data(mem, "timezone", "Europe/Paris")
+    ```
+    """
+}
 fn (mem: AgentMemory, key: Str, value: Any): Any {
     ::store/put(mem.user-store, key, value)
 }
@@ -427,14 +761,46 @@ fn (mem: AgentMemory, key: Str, value: Any): Any {
 // ============================================================================
 
 learn
-meta { doc: "Add an entry to the shared knowledge base. Auto-embedded for search." }
+meta {
+    doc: """
+    Add an entry to the shared knowledge base. Auto-embedded for search.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    ::mem/learn(mem, "refund-policy", {content: "Refunds take 5 business days."})
+    ```
+    """
+}
 fn (mem: AgentMemory, key: Str, content: Map): Any {
     ::store/put(mem.kb-store, key, content)
 }
 
 search-kb
 meta {
-    doc: "Semantic search over the shared knowledge base. Options: limit (default 5)."
+    doc: """
+    Semantic search over the shared knowledge base. Options: limit (default
+    5).
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    hits ::mem/search-kb(mem, "refunds", {limit: 3})
+    map(hits, %.value.content)
+    ```
+    """
 }
 fn (mem: AgentMemory, query: Str, opts: Map?): Vec {
     limit get(or(opts, {}), "limit", 5)
@@ -462,6 +828,19 @@ meta {
     different session has an independent thread. Pass the same
     `session` you used to build `AgentMemory` so memory and thread
     stay aligned.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    t ::mem/thread(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"}),
+        {max-turns: 10}
+    )
+    t.turn-limit
+    ```
     """
 }
 fn (agent-name: Str, session: Session, identity: Identity, opts: Map?): Thread {
@@ -477,7 +856,25 @@ fn (agent-name: Str, session: Session, identity: Identity, opts: Map?): Thread {
 }
 
 thread-add
-meta { doc: "Append a message to a conversation thread." }
+meta {
+    doc: """
+    Append a message to a conversation thread.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    t ::mem/thread(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"}),
+        {max-turns: 10}
+    )
+    ::mem/thread-add(t, ::ai::message/Role.User, "Where is order 42?")
+    ::mem/thread-add(t, ::ai::message/Role.Assistant, "It shipped on Monday.")
+    ```
+    """
+}
 fn (t: Thread, role: Role, content: Str): Any {
     // Same `::time/now -> Int` workaround as in `recent` above.
     key `${div(::time/epoch-millis(::time/now()), 1000)}:${Uuid()}`
@@ -504,7 +901,25 @@ fn (t: Thread, role: Role, content: Str): Any {
 
 thread-history
 meta {
-    doc: "Get the recent thread history as ChatMessages. Options: limit (default all)."
+    doc: """
+    Get the recent thread history as ChatMessages. Options: limit (default
+    all).
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    t ::mem/thread(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"}),
+        {max-turns: 10}
+    )
+    // The last four messages, oldest first
+    history ::mem/thread-history(t, {limit: 4})
+    ::ai::message/format-chat-messages(history)
+    ```
+    """
 }
 fn (t: Thread, opts: Map?): Vec {
     entries ::store/list(t.store)
@@ -532,7 +947,24 @@ fn (t: Thread, opts: Map?): Vec {
 }
 
 thread-clear
-meta { doc: "Reset a conversation thread." }
+meta {
+    doc: """
+    Reset a conversation thread.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    t ::mem/thread(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"}),
+        {max-turns: 10}
+    )
+    ::mem/thread-clear(t)
+    ```
+    """
+}
 fn (t: Thread): Bool {
     ::store/clear(t.store)
 }
@@ -542,13 +974,42 @@ fn (t: Thread): Bool {
 // ============================================================================
 
 capsule-key
-meta { doc: "Return the KB key used for a memory capsule." }
+meta {
+    doc: """
+    Return the KB key used for a memory capsule.
+
+    **Example**
+
+    ```hot
+    ::ai::memory/capsule-key("2026-11-09")  // "capsule:2026-11-09"
+    ```
+    """
+}
 fn (id: Str): Str {
     `capsule:${id}`
 }
 
 capsule-from-window
-meta { doc: "Build a MemoryCapsule from a summary and source store entries." }
+meta {
+    doc: """
+    Build a MemoryCapsule from a summary and source store entries.
+
+    **Example**
+
+    ```hot
+    entry {key: "1767225600:m1", score: 0.92, value: {
+        content: "Order 42 never arrived.",
+        sender-id: "u1",
+        source: "slack",
+        timestamp: 1767225600,
+        metadata: {message_id: "m1"}
+    }}
+    capsule ::ai::memory/capsule-from-window("c1", "Ada reported a missing order.", [entry], null)
+    capsule.source-ids  // ["m1"]
+    capsule.start-ts  // 1767225600
+    ```
+    """
+}
 fn (id: Str, summary: Str, entries: Vec, opts: Map?): MemoryCapsule {
     timestamps map(entries, (entry) { or(entry.value.timestamp, 0) })
     source-ids map(entries, (entry) {
@@ -573,7 +1034,26 @@ fn (id: Str, summary: Str, entries: Vec, opts: Map?): MemoryCapsule {
 
 store-capsule
 meta {
-    doc: "Persist a MemoryCapsule in the KB store with provenance and embedding-friendly content."
+    doc: """
+    Persist a MemoryCapsule in the KB store with provenance and
+    embedding-friendly content.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    ::mem/store-capsule(mem, ::mem/MemoryCapsule({
+        id: "c1",
+        summary: "Ada reported a missing order.",
+        source-ids: ["m1"]
+    }))
+    ```
+    """
 }
 fn (mem: AgentMemory, capsule: MemoryCapsule): Any {
     ::store/put(mem.kb-store, capsule-key(capsule.id), {
@@ -594,19 +1074,69 @@ fn (mem: AgentMemory, capsule: MemoryCapsule): Any {
 }
 
 get-capsule
-meta { doc: "Load a stored MemoryCapsule by id." }
+meta {
+    doc: """
+    Load a stored MemoryCapsule by id.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    ::mem/get-capsule(mem, "c1").summary
+    ```
+    """
+}
 fn (mem: AgentMemory, id: Str): Any {
     ::store/get(mem.kb-store, capsule-key(id))
 }
 
 list-capsules
-meta { doc: "List all memory capsule KB entries." }
+meta {
+    doc: """
+    List all memory capsule KB entries.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    map(::mem/list-capsules(mem), %.value.summary)
+    ```
+    """
+}
 fn (mem: AgentMemory): Vec {
     ::store/filter(mem.kb-store, (k, v) { eq(v.kind, "memory-capsule") })
 }
 
 recall-with-capsules
-meta { doc: "Retrieve raw session memory plus compacted capsules for a query." }
+meta {
+    doc: """
+    Retrieve raw session memory plus compacted capsules for a query.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    result ::mem/recall-with-capsules(mem, "missing order", {limit: 5})
+    length(result.raw)
+    map(result.capsules, %.value.summary)
+    ```
+    """
+}
 fn (mem: AgentMemory, query: Str, opts: Map?): Map {
     limit get(or(opts, {}), "limit", 10)
     raw recall(mem, query, opts)
@@ -619,19 +1149,52 @@ fn (mem: AgentMemory, query: Str, opts: Map?): Map {
 // ============================================================================
 
 graph-node-key
-meta { doc: "Return the KB key used for a graph node." }
+meta {
+    doc: """
+    Return the KB key used for a graph node.
+
+    **Example**
+
+    ```hot
+    ::ai::memory/graph-node-key("topic:refunds")  // "graph:node:topic:refunds"
+    ```
+    """
+}
 fn (id: Str): Str {
     `graph:node:${id}`
 }
 
 graph-edge-key
-meta { doc: "Return the KB key used for a graph edge." }
+meta {
+    doc: """
+    Return the KB key used for a graph edge.
+
+    **Example**
+
+    ```hot
+    ::ai::memory/graph-edge-key("e1")  // "graph:edge:e1"
+    ```
+    """
+}
 fn (id: Str): Str {
     `graph:edge:${id}`
 }
 
 candidate-node
-meta { doc: "Build a graph node candidate with provenance and confidence." }
+meta {
+    doc: """
+    Build a graph node candidate with provenance and confidence.
+
+    **Example**
+
+    ```hot
+    prov [::ai::memory/MemoryProvenance({source: "slack", message-id: "m1"})]
+    node ::ai::memory/candidate-node("topic", "Late Refunds", prov, null)
+    node.id  // "topic:late-refunds"
+    node.confidence  // 0.7
+    ```
+    """
+}
 fn (kind: Str, label: Str, provenance: Vec<MemoryProvenance>, opts: Map?): MemoryNode {
     fallback-id `${kind}:${replace(lowercase(label), " ", "-")}`
     id get(or(opts, {}), "id", fallback-id)
@@ -647,7 +1210,20 @@ fn (kind: Str, label: Str, provenance: Vec<MemoryProvenance>, opts: Map?): Memor
 }
 
 candidate-edge
-meta { doc: "Build a graph edge candidate with provenance and confidence." }
+meta {
+    doc: """
+    Build a graph edge candidate with provenance and confidence.
+
+    **Example**
+
+    ```hot
+    prov [::ai::memory/MemoryProvenance({source: "slack", message-id: "m1"})]
+    edge ::ai::memory/candidate-edge("person:ada", "reported", "topic:refunds", prov, {weight: 2.0})
+    edge.id  // "person:ada:reported:topic:refunds"
+    edge.weight  // 2.0
+    ```
+    """
+}
 fn (from: Str, relation: Str, to: Str, provenance: Vec<MemoryProvenance>, opts: Map?): MemoryEdge {
     id get(or(opts, {}), "id", `${from}:${relation}:${to}`)
     MemoryEdge({
@@ -667,6 +1243,18 @@ meta {
     doc: """
     Convert structured extraction output into graph node/edge candidates.
     Expected shape: `{nodes: [{kind,label,...}], edges: [{from,relation,to,...}]}`.
+
+    **Example**
+
+    ```hot
+    prov [::ai::memory/MemoryProvenance({source: "slack", message-id: "m1"})]
+    found ::ai::memory/extract-graph-candidates({
+        nodes: [{kind: "person", label: "Ada"}],
+        edges: [{from: "person:ada", relation: "reported", to: "topic:refunds"}]
+    }, prov)
+    map(found.nodes, %.id)  // ["person:ada"]
+    map(found.edges, %.relation)  // ["reported"]
+    ```
     """
 }
 fn (structured: Map, provenance: Vec<MemoryProvenance>): Map {
@@ -680,7 +1268,26 @@ fn (structured: Map, provenance: Vec<MemoryProvenance>): Map {
 }
 
 store-graph-candidates
-meta { doc: "Persist graph node and edge candidates into memory stores." }
+meta {
+    doc: """
+    Persist graph node and edge candidates into memory stores.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    ::mem/store-graph-candidates(mem, ::mem/extract-graph-candidates({
+        nodes: [{kind: "person", label: "Ada"}],
+        edges: []
+    }, []))
+    ```
+    """
+}
 fn (mem: AgentMemory, candidates: Map): Map {
     nodes or(candidates.nodes, [])
     edges or(candidates.edges, [])
@@ -690,7 +1297,23 @@ fn (mem: AgentMemory, candidates: Map): Map {
 }
 
 store-node
-meta { doc: "Persist a graph-RAG node in the KB store." }
+meta {
+    doc: """
+    Persist a graph-RAG node in the KB store.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    ::mem/store-node(mem, ::mem/candidate-node("topic", "Refunds", [], null))
+    ```
+    """
+}
 fn (mem: AgentMemory, node: MemoryNode): Any {
     ::store/put(mem.kb-store, graph-node-key(node.id), {
         kind: "graph-node",
@@ -706,7 +1329,23 @@ fn (mem: AgentMemory, node: MemoryNode): Any {
 }
 
 store-edge
-meta { doc: "Persist a graph-RAG edge in the KB store." }
+meta {
+    doc: """
+    Persist a graph-RAG edge in the KB store.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    ::mem/store-edge(mem, ::mem/candidate-edge("person:ada", "reported", "topic:refunds", [], null))
+    ```
+    """
+}
 fn (mem: AgentMemory, edge: MemoryEdge): Any {
     ::store/put(mem.kb-store, graph-edge-key(edge.id), {
         kind: "graph-edge",
@@ -723,19 +1362,67 @@ fn (mem: AgentMemory, edge: MemoryEdge): Any {
 }
 
 list-nodes
-meta { doc: "List all graph-RAG nodes in this memory scope." }
+meta {
+    doc: """
+    List all graph-RAG nodes in this memory scope.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    map(::mem/list-nodes(mem), %.value.label)
+    ```
+    """
+}
 fn (mem: AgentMemory): Vec {
     ::store/filter(mem.kb-store, (k, v) { eq(v.kind, "graph-node") })
 }
 
 list-edges
-meta { doc: "List all graph-RAG edges in this memory scope." }
+meta {
+    doc: """
+    List all graph-RAG edges in this memory scope.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    map(::mem/list-edges(mem), %.value.relation)
+    ```
+    """
+}
 fn (mem: AgentMemory): Vec {
     ::store/filter(mem.kb-store, (k, v) { eq(v.kind, "graph-edge") })
 }
 
 neighbor-edges
-meta { doc: "Find graph edges touching a node id." }
+meta {
+    doc: """
+    Find graph edges touching a node id.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    map(::mem/neighbor-edges(mem, "topic:refunds"), %.value.content)
+    ```
+    """
+}
 fn (mem: AgentMemory, node-id: Str): Vec {
     ::store/filter(mem.kb-store, (k, v) {
         and(eq(v.kind, "graph-edge"), or(eq(v.from, node-id), eq(v.to, node-id)))
@@ -743,7 +1430,23 @@ fn (mem: AgentMemory, node-id: Str): Vec {
 }
 
 citation-from-result
-meta { doc: "Build a normalized Citation from a search/list result." }
+meta {
+    doc: """
+    Build a normalized Citation from a search/list result.
+
+    **Example**
+
+    ```hot
+    citation ::ai::memory/citation-from-result({
+        key: "graph:node:topic:refunds",
+        score: 0.9,
+        value: {id: "topic:refunds", label: "Refunds", content: "How refunds work."}
+    })
+    citation.label  // "Refunds"
+    citation.excerpt  // "How refunds work."
+    ```
+    """
+}
 fn (result: Map): Citation {
     v result.value
     Citation({
@@ -756,7 +1459,24 @@ fn (result: Map): Citation {
 }
 
 graph-expand
-meta { doc: "Expand seed node ids into neighboring graph edges and citations." }
+meta {
+    doc: """
+    Expand seed node ids into neighboring graph edges and citations.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    graph ::mem/graph-expand(mem, ["topic:refunds"])
+    map(graph.citations, %.excerpt)
+    ```
+    """
+}
 fn (mem: AgentMemory, seed-node-ids: Vec): Map {
     edges flatten(map(seed-node-ids, (id) { neighbor-edges(mem, id) }))
     citations map(edges, citation-from-result)
@@ -765,7 +1485,24 @@ fn (mem: AgentMemory, seed-node-ids: Vec): Map {
 
 hybrid-recall
 meta {
-    doc: "Hybrid retrieval: vector recall over raw/capsule/graph text plus graph expansion from explicit seed node ids."
+    doc: """
+    Hybrid retrieval: vector recall over raw/capsule/graph text plus graph
+    expansion from explicit seed node ids.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    result ::mem/hybrid-recall(mem, "refund delays", {limit: 5, seed-node-ids: ["topic:refunds"]})
+    length(result.vector)
+    map(result.citations, %.label)
+    ```
+    """
 }
 fn (mem: AgentMemory, query: Str, opts: Map?): Map {
     limit get(or(opts, {}), "limit", 10)

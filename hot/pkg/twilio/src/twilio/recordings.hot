@@ -64,7 +64,17 @@ ListRecordingsResponse type {
 
 list-recordings-query
 meta {
-    doc: """The query string `list-recordings` sends. Exposed for testing."""
+    doc: """
+    The query string `list-recordings` sends. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::recordings ::twilio::recordings
+
+    ::recordings/list-recordings-query(::recordings/ListRecordingsRequest({CallSid: "CA123", PageSize: 10}))  // "?CallSid=CA123&PageSize=10"
+    ```
+    """
 }
 fn (request: ListRecordingsRequest): Str {
   ::twilio::api/query-string({
@@ -119,7 +129,20 @@ GetRecordingRequest type {
 get-recording
 meta {
     ctx: {"twilio.account.sid": {required: false, secret: false}},
-    doc: """GET /Accounts/{AccountSid}/Recordings/{Sid}.json - Get a recording's metadata (status, duration, source, price)."""
+    doc: """
+    GET /Accounts/{AccountSid}/Recordings/{Sid}.json - Get a recording's
+    metadata (status, duration, source, price).
+
+    **Example**
+
+    ```hot
+    ::recordings ::twilio::recordings
+
+    rec ::recordings/get-recording(::recordings/GetRecordingRequest({sid: "RE123"}))
+    rec.status
+    rec.duration
+    ```
+    """
 }
 fn
 (request: GetRecordingRequest): Recording {
@@ -148,7 +171,19 @@ type {
 
 recording-media-url
 meta {
-    doc: """The media URL `download-recording` fetches: the recording URI with `.mp3` or `.wav` in place of `.json`. Exposed for testing."""
+    doc: """
+    The media URL `download-recording` fetches: the recording URI with
+    `.mp3` or `.wav` in place of `.json`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::recordings ::twilio::recordings
+
+    c ::twilio::api/Client({account-sid: "AC123", username: "AC123", password: "test"})
+    ::recordings/recording-media-url(c, ::recordings/DownloadRecordingRequest({sid: "RE123", format: "mp3"}))  // "https://api.twilio.com/2010-04-01/Accounts/AC123/Recordings/RE123.mp3"
+    ```
+    """
 }
 fn (client: Client, request: DownloadRecordingRequest): Str {
   ext if(eq(request.format, "mp3"), "mp3", "wav")
@@ -194,7 +229,19 @@ DeleteRecordingRequest type {
 delete-recording
 meta {
     ctx: {"twilio.account.sid": {required: false, secret: false}},
-    doc: """DELETE /Accounts/{AccountSid}/Recordings/{Sid}.json - Delete a recording and its media. Permanent."""
+    doc: """
+    DELETE /Accounts/{AccountSid}/Recordings/{Sid}.json - Delete a recording
+    and its media. Permanent.
+
+    **Example**
+
+    ```hot
+    ::recordings ::twilio::recordings
+
+    deleted ::recordings/delete-recording(::recordings/DeleteRecordingRequest({sid: "RE123"}))
+    if(deleted, "Recording removed")
+    ```
+    """
 }
 fn
 (request: DeleteRecordingRequest): Bool {

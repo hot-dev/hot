@@ -81,6 +81,11 @@ meta {
     **Example**
 
     ```hot
+    ::hmac ::hot::hmac
+    ::http ::hot::http
+    secret ::hot::ctx/get("webhook.secret")
+    signature "5d41402abc4b2a76b9719d911017c592"
+    request {method: "POST", url: "https://example.com/hook", body-raw: "{}"}
     ::hmac/hmac-verify-hex(secret, ::http/raw-body(request), signature, "sha256")
     ```
     """
@@ -135,13 +140,13 @@ meta {
 
     ```hot
     // Using HttpRequest
-    response request(HttpRequest({method: "POST", url: "https://api.example.com/data", body: {name: "Alice"}}))
+    response ::hot::http/request(::hot::http/HttpRequest({method: "POST", url: "https://api.example.com/data", body: {name: "Alice"}}))
 
     // Using positional arguments
-    response request("POST", "https://api.example.com/data", {"Content-Type": "application/json"}, {name: "Alice"})
+    response ::hot::http/request("POST", "https://api.example.com/data", {"Content-Type": "application/json"}, {name: "Alice"})
 
     // Handling transport failure
-    response request(HttpRequest({method: "GET", url: url}))
+    response ::hot::http/request(::hot::http/HttpRequest({method: "GET", url: url}))
     if-err(response, (failure) { println(`network error: ${failure}`) })
     ```
     """
@@ -322,12 +327,12 @@ meta {
 
     ```hot
     // Using HttpRequest
-    response request-stream(HttpRequest({method: "GET", url: "https://api.example.com/events"}), "sse")
+    response ::hot::http/request-stream(::hot::http/HttpRequest({method: "GET", url: "https://api.example.com/events"}), "sse")
 
     // Using positional arguments
-    response request-stream("GET", "https://api.example.com/events", {}, "", "sse")
+    response ::hot::http/request-stream("GET", "https://api.example.com/events", {}, "", "sse")
 
-    for-each(response.body, fn (event) {
+    for-each(response.body, (event) {
         print(event.data)
     })
     ```
@@ -356,9 +361,9 @@ meta {
     **Example**
 
     ```hot
-    response get-stream("https://api.example.com/events", "sse")
+    response ::hot::http/get-stream("https://api.example.com/events", "sse")
 
-    for-each(response.body, fn (event) {
+    for-each(response.body, (event) {
         print(event.data)
     })
     ```
@@ -381,9 +386,9 @@ meta {
     **Example**
 
     ```hot
-    response post-stream("https://api.example.com/stream", {query: "test"}, {}, "ndjson")
+    response ::hot::http/post-stream("https://api.example.com/stream", {query: "test"}, {}, "ndjson")
 
-    for-each(response.body, fn (item) {
+    for-each(response.body, (item) {
         print(item)
     })
     ```

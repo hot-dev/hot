@@ -38,7 +38,16 @@ fn
 
 list-all-zones
 meta {
-    doc: """Every zone matching `params`, following pages (50 per request) up to `max` items (default 10000)."""
+    doc: """
+    Every zone matching `params`, following pages (50 per request) up to
+    `max` items (default 10000).
+
+    **Example**
+
+    ```hot
+    map(::cloudflare::zones/list-all-zones({status: "active"}, 500), %.name)
+    ```
+    """
 }
 fn
 (): Vec {
@@ -59,7 +68,17 @@ fn
 
 find-zone
 meta {
-    doc: """The zone whose name is exactly `name` (e.g. `"example.com"`), or null when the token can't see one."""
+    doc: """
+    The zone whose name is exactly `name` (e.g. `"example.com"`), or null
+    when the token can't see one.
+
+    **Example**
+
+    ```hot
+    zone ::cloudflare::zones/find-zone("example.com")
+    if(is-some(zone), zone.id, "not found")
+    ```
+    """
 }
 fn
 (name: Str): Map? {
@@ -76,7 +95,16 @@ fn
 
 get-zone
 meta {
-    doc: """GET /zones/{zone_id} - One zone: name, status, name servers, plan."""
+    doc: """
+    GET /zones/{zone_id} - One zone: name, status, name servers, plan.
+
+    **Example**
+
+    ```hot
+    zone ::cloudflare::zones/get-zone("023e105f4ecef8ad9ca31a8372d0c353")
+    zone.name_servers
+    ```
+    """
 }
 fn
 (zone-id: Str): Map {

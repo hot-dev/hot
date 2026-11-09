@@ -47,7 +47,16 @@ PACKAGE_AGENT "hot-dev-fdic-bankfind-pkg/0.1 (+https://hot.dev)"
 
 given
 meta {
-    doc: """True for a non-null value that is not a blank string."""
+    doc: """
+    True for a non-null value that is not a blank string.
+
+    **Example**
+
+    ```hot
+    ::fdic::bankfind::api/given("IA")  // true
+    ::fdic::bankfind::api/given("  ")  // false
+    ```
+    """
 }
 fn (v: Any): Bool {
   match v {
@@ -57,7 +66,9 @@ fn (v: Any): Bool {
   }
 }
 
-pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
+pick
+meta {no-doc: true}
+fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
   from-opts get(opts, key)
   from-ctx ::ctx/get(ctx-key)
   cond {
@@ -67,7 +78,9 @@ pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
   }
 }
 
-strip-slash fn (url: Str): Str {
+strip-slash
+meta {no-doc: true}
+fn (url: Str): Str {
   ::re/replace-all(url, "/+$", "")
 }
 
@@ -83,7 +96,9 @@ meta {
     **Example**
 
     ```hot
-    cfg ::fdic::bankfind::api/resolve({api-key: tenant.fdic-key})
+    key ::hot::ctx/get("tenant-b.fdic.api-key")
+    cfg ::fdic::bankfind::api/resolve({api-key: key})
+    cfg.base-url
     ```
     """
 }
@@ -109,7 +124,16 @@ fn (opts: Map): Map {
 
 redact-url
 meta {
-    doc: """`url` with any `api_key` value replaced by `REDACTED` (pure)."""
+    doc: """
+    `url` with any `api_key` value replaced by `REDACTED` (pure).
+
+    **Example**
+
+    ```hot
+    ::fdic::bankfind::api/redact-url("https://api.fdic.gov/banks/failures?api_key=abc&limit=1")
+    // "https://api.fdic.gov/banks/failures?api_key=REDACTED&limit=1"
+    ```
+    """
 }
 fn (url: Str): Str {
   // Stops at a quote too, as `redact-value` runs this over JSON text.
@@ -118,7 +142,16 @@ fn (url: Str): Str {
 
 redact
 meta {
-    doc: """`text` with any `api_key` value and every literal copy of `api-key` replaced by `REDACTED` (pure). `api-key` may be null."""
+    doc: """
+    `text` with any `api_key` value and every literal copy of `api-key`
+    replaced by `REDACTED` (pure). `api-key` may be null.
+
+    **Example**
+
+    ```hot
+    ::fdic::bankfind::api/redact("key abc rejected", "abc")  // "key REDACTED rejected"
+    ```
+    """
 }
 fn (text: Str, api-key: Str?): Str {
   blanked redact-url(text)
@@ -127,7 +160,16 @@ fn (text: Str, api-key: Str?): Str {
 
 redact-value
 meta {
-    doc: """`redact` over a whole response value: a string, or every string inside a Map or Vec (pure)."""
+    doc: """
+    `redact` over a whole response value: a string, or every string inside a
+    Map or Vec (pure).
+
+    **Example**
+
+    ```hot
+    ::fdic::bankfind::api/redact-value({url: "/failures?api_key=abc"}, null)  // {url: "/failures?api_key=REDACTED"}
+    ```
+    """
 }
 fn (value: Any, api-key: Str?): Any {
   cond {
@@ -137,14 +179,24 @@ fn (value: Any, api-key: Str?): Any {
   }
 }
 
-url-key fn (url: Str): Str? {
+url-key
+meta {no-doc: true}
+fn (url: Str): Str? {
   found ::re/capture(url, "[?&]api_key=([^&#]*)")
   if(is-null(found), null, ::uri/decode(found.groups[0]))
 }
 
 drop-key
 meta {
-    doc: """`body` without `api_key` in the `meta.parameters` the API echoes (pure)."""
+    doc: """
+    `body` without `api_key` in the `meta.parameters` the API echoes (pure).
+
+    **Example**
+
+    ```hot
+    ::fdic::bankfind::api/drop-key({meta: {parameters: {api_key: "abc", limit: 1}}})  // {meta: {parameters: {limit: 1}}}
+    ```
+    """
 }
 fn (body: Any): Any {
   parameters if(is-map(body), get-in(body, ["meta", "parameters"]), null)
@@ -175,7 +227,9 @@ type {
     message: Str
 }
 
-body-detail fn (body: Any): Str? {
+body-detail
+meta {no-doc: true}
+fn (body: Any): Str? {
   cond {
     is-str(body) => { if(gt(length(body), 200), `${slice(body, 0, 200)}…`, body) }
     is-map(body) => {
@@ -193,7 +247,9 @@ body-detail fn (body: Any): Str? {
   }
 }
 
-retry-after fn (headers: Map): Int? {
+retry-after
+meta {no-doc: true}
+fn (headers: Map): Int? {
   v get(headers, "retry-after")
   cond {
     is-null(v) => { null }
@@ -204,7 +260,20 @@ retry-after fn (headers: Map): Int? {
 
 http-error
 meta {
-    doc: """Build an `HttpError` from a non-2xx response. Exposed for testing; every request uses it."""
+    doc: """
+    Build an `HttpError` from a non-2xx response. Exposed for testing; every
+    request uses it.
+
+    **Example**
+
+    ```hot
+    response {status: 429, headers: {retry-after: "30"}, body: {message: "Slow down"}}
+    e ::fdic::bankfind::api/http-error(response, "https://api.fdic.gov/banks/failures?api_key=abc")
+    e.url  // "https://api.fdic.gov/banks/failures?api_key=REDACTED"
+    e.retry-after  // 30
+    e.message  // "fdic-bankfind: HTTP 429: Slow down"
+    ```
+    """
 }
 fn (response: HttpResponse, url: Str): HttpError {
   key url-key(url)
@@ -225,7 +294,20 @@ fn (response: HttpResponse, url: Str): HttpError {
 
 not-json-error
 meta {
-    doc: """An `HttpError` for a 2xx response that is not JSON, such as a maintenance page, which would otherwise read as an empty result. Exposed for testing."""
+    doc: """
+    An `HttpError` for a 2xx response that is not JSON, such as a
+    maintenance page, which would otherwise read as an empty result. Exposed
+    for testing.
+
+    **Example**
+
+    ```hot
+    response {status: 200, headers: {}, body: "<html></html>"}
+    e ::fdic::bankfind::api/not-json-error(response, "https://api.fdic.gov/banks/failures")
+    e.status  // 200
+    contains(e.message, "expected JSON")  // true
+    ```
+    """
 }
 fn (response: HttpResponse, url: Str): HttpError {
   safe-url redact-url(url)
@@ -246,7 +328,17 @@ fn (response: HttpResponse, url: Str): HttpError {
 
 query-string
 meta {
-    doc: """Build a `?a=1&b=2` suffix from a Map, dropping null and blank values (pure); `""` when nothing remains."""
+    doc: """
+    Build a `?a=1&b=2` suffix from a Map, dropping null and blank values
+    (pure); `""` when nothing remains.
+
+    **Example**
+
+    ```hot
+    ::fdic::bankfind::api/query-string({limit: 10, search: "", filters: null})  // "?limit=10"
+    ::fdic::bankfind::api/query-string({search: ""})  // ""
+    ```
+    """
 }
 fn (params: Map): Str {
   ::uri/query-string(filter-vals(params, given))
@@ -258,6 +350,13 @@ meta {
     GET (or another method) a BankFind URL with `headers`, returning the
     `HttpResponse` on 2xx or an Err carrying `HttpError`. A transport
     failure stays its own Err, with any key redacted.
+
+    **Example**
+
+    ```hot
+    response ::fdic::bankfind::api/request("GET", "https://api.fdic.gov/banks/failures?limit=1", {Accept: "application/json"})
+    response.status
+    ```
     """
 }
 fn (method: Str, url: Str, headers: Map): HttpResponse {
@@ -280,7 +379,22 @@ fn (method: Str, url: Str, headers: Map): HttpResponse {
 
 decode-body
 meta {
-    doc: """The decoded JSON of a 2xx response without `api_key` in `meta.parameters`, or an Err carrying `HttpError` when the body is not JSON (pure). Exposed for testing."""
+    doc: """
+    The decoded JSON of a 2xx response without `api_key` in
+    `meta.parameters`, or an Err carrying `HttpError` when the body is not
+    JSON (pure). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    url "https://api.fdic.gov/banks/failures"
+    good {status: 200, headers: {}, body: {meta: {total: 1}, data: []}}
+    ::fdic::bankfind::api/decode-body(good, url).meta.total  // 1
+
+    bad {status: 200, headers: {}, body: "<html></html>"}
+    is-err(::fdic::bankfind::api/decode-body(bad, url))  // true
+    ```
+    """
 }
 fn (response: HttpResponse, url: Str): Any {
   body response.body
@@ -295,7 +409,17 @@ fn (response: HttpResponse, url: Str): Any {
 
 get-json
 meta {
-    doc: """GET a JSON resource and return the decoded body, or an Err carrying `HttpError`."""
+    doc: """
+    GET a JSON resource and return the decoded body, or an Err carrying
+    `HttpError`.
+
+    **Example**
+
+    ```hot
+    page ::fdic::bankfind::api/get-json("https://api.fdic.gov/banks/failures?limit=1", {})
+    page.meta.total
+    ```
+    """
 }
 fn (url: Str, headers: Map): Any {
   response request("GET", url, {Accept: "application/json", ...headers})

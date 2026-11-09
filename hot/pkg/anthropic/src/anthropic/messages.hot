@@ -308,13 +308,13 @@ meta {
     **Example**
 
     ```hot
-    request MessagesPostRequest({
+    request ::anthropic::messages/MessagesPostRequest({
         model: "claude-sonnet-4-20250514",
         max_tokens: 1024,
         messages: [{role: "user", content: "Hello!"}]
     })
 
-    response post-stream(request)
+    response ::anthropic::messages/post-stream(request)
     // response.body is an iterator of SSE events
     events collect(response.body)
     text-events filter(events, eq(%.event, "content_block_delta"))

@@ -3,7 +3,7 @@ meta {
     doc: """
     OpenAI adapter that satisfies the `::ai::chat/run-loop` contract:
 
-    ```hot
+    ```
     chat-with-tools(
         model: Str,
         messages: Vec<::ai::chat/Message>,
@@ -23,6 +23,7 @@ meta {
     `ChatOptions.provider-opts` works through the run loop:
 
     ```hot
+    tenant-key ::hot::ctx/get("tenant.openai.key")
     opts ::ai::chat/ChatOptions({
         chat-opts-fn: ::openai::chat-tools/chat-with-tools,
         model: "gpt-4o-mini",
@@ -89,6 +90,13 @@ meta {
     output ceiling (as `max_completion_tokens`, or `max-tokens-param`),
     `reasoning_effort` when set, `stream_options` removal when
     `stream-usage` is `false`, and `extra-body` merged last.
+
+    **Example**
+
+    ```hot
+    options ::openai::chat-tools/ChatRequestOptions({max-completion-tokens: 256, max-tokens-param: "max_tokens"})
+    ::openai::chat-tools/apply-request-options({model: "llama3.2"}, options)  // {model: "llama3.2", max_tokens: 256}
+    ```
     """
 }
 fn (request: Map, options: ChatRequestOptions): Map {
@@ -112,7 +120,18 @@ fn (request: Map, options: ChatRequestOptions): Map {
 // ============================================================================
 
 to-openai-tool-call
-meta { doc: """Convert a `::ai::tool/ToolCall` into OpenAI's `tool_calls` entry.""" }
+meta {
+    doc: """
+    Convert a `::ai::tool/ToolCall` into OpenAI's `tool_calls` entry.
+
+    **Example**
+
+    ```hot
+    call ::ai::tool/ToolCall({id: "call_1", name: "add", input: {x: 1}})
+    ::openai::chat-tools/to-openai-tool-call(call).function.arguments  // "{\"x\":1}"
+    ```
+    """
+}
 fn (call: ::ai-tool/ToolCall): Map {
     {
         id: call.id,
@@ -130,6 +149,12 @@ meta {
     Convert a single normalized `::ai::chat/Message` into OpenAI's
     chat completion `Message`. `role: "tool"` maps to OpenAI's tool
     response shape and uses `tool_call_id` for correlation.
+
+    **Example**
+
+    ```hot
+    ::openai::chat-tools/to-openai-message(::ai::chat/user-message("Hi"))  // {role: "user", content: "Hi"}
+    ```
     """
 }
 fn cond (m: ::ai-chat/Message): Map {
@@ -158,6 +183,18 @@ meta {
     doc: """
     Convert a `::ai::tool/Tool` into OpenAI's tool definition shape:
     `{type: "function", function: {name, description?, parameters}}`.
+
+    **Example**
+
+    ```hot
+    tool ::ai::tool/Tool({
+      name: "add",
+      description: "Add two numbers",
+      input-schema: {type: "object"},
+      fn: (input) { input }
+    })
+    ::openai::chat-tools/to-openai-tool(tool).function.name  // "add"
+    ```
     """
 }
 fn (t: ::ai-tool/Tool): Map {
@@ -183,6 +220,14 @@ meta {
     Convert one OpenAI `tool_calls` entry into a `::ai::tool/ToolCall`.
     OpenAI ships function arguments as a JSON string; we decode it
     into a Map. A non-JSON or empty payload becomes `{}`.
+
+    **Example**
+
+    ```hot
+    call ::openai::chat-tools/parse-tool-call({id: "call_1", function: {name: "add", arguments: "{\"x\":1}"}})
+    call.name  // "add"
+    call.input  // {x: 1}
+    ```
     """
 }
 fn (tc: Map): ::ai-tool/ToolCall {
@@ -204,14 +249,34 @@ fn (tc: Map): ::ai-tool/ToolCall {
 }
 
 response-text
-meta { doc: """Extract assistant text content from an OpenAI choice's message.""" }
+meta {
+    doc: """
+    Extract assistant text content from an OpenAI choice's message.
+
+    **Example**
+
+    ```hot
+    ::openai::chat-tools/response-text({content: "Hello"})  // "Hello"
+    ::openai::chat-tools/response-text({})  // ""
+    ```
+    """
+}
 fn (msg: Map): Str {
     or(msg.content, "")
 }
 
 response-tool-calls
 meta {
-    doc: """Extract `::ai::tool/ToolCall` entries from an OpenAI choice's message."""
+    doc: """
+    Extract `::ai::tool/ToolCall` entries from an OpenAI choice's message.
+
+    **Example**
+
+    ```hot
+    msg {tool_calls: [{id: "call_1", function: {name: "add", arguments: "{}"}}]}
+    ::openai::chat-tools/response-tool-calls(msg)[0].id  // "call_1"
+    ```
+    """
 }
 fn (msg: Map): Vec<::ai-tool/ToolCall> {
     raw or(msg.tool_calls, [])
@@ -220,7 +285,15 @@ fn (msg: Map): Vec<::ai-tool/ToolCall> {
 
 response-usage
 meta {
-    doc: """Normalize OpenAI's usage shape into `{input-tokens, output-tokens}`."""
+    doc: """
+    Normalize OpenAI's usage shape into `{input-tokens, output-tokens}`.
+
+    **Example**
+
+    ```hot
+    ::openai::chat-tools/response-usage({prompt_tokens: 12, completion_tokens: 5})  // {input-tokens: 12, output-tokens: 5}
+    ```
+    """
 }
 fn (u: Any): Map? {
     cond {
@@ -283,6 +356,17 @@ meta {
     Normalize a (decoded) Chat Completions response body into a
     `::ai::chat/ChatReply`: first-choice text and tool calls, the finish
     reason (default `"stop"`), and usage. Tolerates missing fields.
+
+    **Example**
+
+    ```hot
+    reply ::openai::chat-tools/parse-chat-reply({
+      choices: [{message: {content: "Hello"}, finish_reason: "stop"}],
+      usage: {prompt_tokens: 12, completion_tokens: 5}
+    })
+    reply.text  // "Hello"
+    reply.stop-reason  // "stop"
+    ```
     """
 }
 fn (response: Map): ::ai-chat/ChatReply {
@@ -361,6 +445,14 @@ meta {
     The original four-argument function remains the provider-agnostic
     `::ai::chat/run-loop` contract; bind this function in a closure when a
     session needs model-specific request controls.
+
+    **Example**
+
+    ```hot
+    options ::openai::chat-tools/ChatRequestOptions({max-completion-tokens: 256, reasoning-effort: "none"})
+    reply ::openai::chat-tools/chat-with-tools-options("gpt-4o-mini", [::ai::chat/user-message("Hi")], "Be terse.", null, options)
+    reply.text
+    ```
     """
 }
 fn
@@ -424,6 +516,7 @@ PER_MESSAGE_OVERHEAD_TOKENS 4
 
 count-message-chars
 meta {
+    no-doc: true,
     doc: """Internal: serialize a single Message to a char-count for the heuristic."""
 }
 fn (m: ::ai-chat/Message): Int {
@@ -459,8 +552,14 @@ meta {
     Compatible with the `count-tokens-fn` slot on
     `::ai::chat/ChatOptions`:
 
-    ```hot
+    ```
     (messages: Vec<Message>, model: Str): Int
+    ```
+
+    **Example**
+
+    ```hot
+    ::openai::chat-tools/count-tokens([::ai::chat/user-message("Hello there")], "gpt-4o-mini")  // 8
     ```
     """
 }
@@ -485,6 +584,7 @@ EMPTY_STREAM_STATE {
 
 handle-tool-call-delta
 meta {
+    no-doc: true,
     doc: """
     Internal: fold one OpenAI `tool_calls` delta entry into stream
     state. OpenAI streams tool calls indexed by an `index` field;
@@ -536,6 +636,7 @@ fn (state: Map, tc: Map, on-delta: Fn): Map {
 
 handle-stream-event
 meta {
+    no-doc: true,
     doc: """
     Internal: dispatch one OpenAI streaming SSE event into ReplyDelta
     emissions and an updated accumulator state.
@@ -592,6 +693,7 @@ fn (state: Map, event: Map, on-delta: Fn): Map {
 
 drain-openai-stream
 meta {
+    no-doc: true,
     doc: """Internal: tail-recursively consume OpenAI's SSE iterator into accumulator state."""
 }
 fn cond (iter: Any, on-delta: Fn, state: Map): Map {
@@ -606,6 +708,7 @@ fn cond (iter: Any, on-delta: Fn, state: Map): Map {
 
 emit-tool-use-ends
 meta {
+    no-doc: true,
     doc: """Internal: emit a `ToolUseEnd` for every accumulated tool block in stream order."""
 }
 fn (state: Map, on-delta: Fn): Null {
@@ -622,6 +725,7 @@ fn (state: Map, on-delta: Fn): Null {
 
 finalize-stream-state
 meta {
+    no-doc: true,
     doc: """
     Internal: convert accumulated OpenAI stream state into a
     `ChatReply`. Parses each tool block's accumulated arguments
@@ -681,6 +785,19 @@ meta {
     - `tools` — optional `Vec<::ai::tool/Tool>`.
     - `on-delta` — callback `(delta: ReplyDelta): Null` invoked for
       every event during streaming.
+
+    **Example**
+
+    ```hot
+    reply ::openai::chat-tools/chat-with-tools-stream(
+      "gpt-4o-mini",
+      [::ai::chat/user-message("Hi")],
+      null,
+      null,
+      (delta) { print(delta) }
+    )
+    reply.text
+    ```
     """
 }
 fn
@@ -708,7 +825,24 @@ fn
 
 chat-with-tools-stream-options
 meta {
-    doc: "Streaming `chat-with-tools` with explicit output and reasoning controls."
+    doc: """
+    Streaming `chat-with-tools` with explicit output and reasoning controls.
+
+    **Example**
+
+    ```hot
+    options ::openai::chat-tools/ChatRequestOptions({max-completion-tokens: 256, reasoning-effort: "none"})
+    reply ::openai::chat-tools/chat-with-tools-stream-options(
+      "gpt-4o-mini",
+      [::ai::chat/user-message("Hi")],
+      null,
+      null,
+      (delta) { print(delta) },
+      options
+    )
+    reply.usage
+    ```
+    """
 }
 fn
 (model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, on-delta: Fn, options: ChatRequestOptions): ::ai-chat/ChatReply {
@@ -728,6 +862,23 @@ meta {
     events through `on-delta` and returns the aggregated `ChatReply`.
     Set `options.stream-usage` to `false` for servers that reject
     `stream_options`.
+
+    **Example**
+
+    ```hot
+    ep ::openai::api/endpoint("http://localhost:11434/v1")
+    options ::openai::chat-tools/ChatRequestOptions({max-completion-tokens: 256, stream-usage: false})
+    reply ::openai::chat-tools/chat-with-tools-stream-at(
+      ep,
+      "llama3.2",
+      [::ai::chat/user-message("Hi")],
+      null,
+      null,
+      (delta) { print(delta) },
+      options
+    )
+    reply.text
+    ```
     """
 }
 fn (ep: ::openai::api/Endpoint, model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, on-delta: Fn, options: ChatRequestOptions): ::ai-chat/ChatReply {
@@ -738,6 +889,7 @@ fn (ep: ::openai::api/Endpoint, model: Str, messages: Vec<::ai-chat/Message>, sy
 
 consume-stream
 meta {
+    no-doc: true,
     doc: """
     Internal: drain a streaming chat response into `ReplyDelta` events
     and the aggregated `ChatReply`, then emit the final `Stop` delta.

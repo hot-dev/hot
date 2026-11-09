@@ -8,7 +8,20 @@ meta {
 
 build-slots-query
 meta {
-    doc: """Build the GET /slots query: `eventTypeId`, `start`, `end`, `timeZone`, plus any `options` (`duration`, `format: "range"`, `bookingUidToReschedule`, or `eventTypeSlug`/`username`/`teamSlug`/`usernames` lookups). Nulls are dropped. Exposed for testing."""
+    doc: """
+    Build the GET /slots query: `eventTypeId`, `start`, `end`, `timeZone`,
+    plus any `options` (`duration`, `format: "range"`,
+    `bookingUidToReschedule`, or
+    `eventTypeSlug`/`username`/`teamSlug`/`usernames` lookups). Nulls are
+    dropped. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cal-com::slots/build-slots-query(123, "2026-07-10", "2026-07-14", null, {format: "range"})
+    // "?format=range&eventTypeId=123&start=2026-07-10&end=2026-07-14"
+    ```
+    """
 }
 fn (event-type-id: Any, start: Str, end: Str, time-zone: Str?, options: Map): Str {
   ::api/query-string({

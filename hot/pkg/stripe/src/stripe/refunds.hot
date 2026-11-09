@@ -51,7 +51,18 @@ fn
 
 get-refund
 meta {
-    doc: """GET /v1/refunds/{refund} - Retrieve a refund by ID."""
+    doc: """
+    GET /v1/refunds/{refund} - Retrieve a refund by ID.
+
+    **Example**
+
+    ```hot
+    ::refunds ::stripe::refunds
+
+    refund ::refunds/get-refund("re_123")
+    refund.status
+    ```
+    """
 }
 fn
 (refund: Str): Map {
@@ -66,7 +77,18 @@ fn
 
 update-refund
 meta {
-    doc: """POST /v1/refunds/{refund} - Update a refund's metadata (the only updatable field)."""
+    doc: """
+    POST /v1/refunds/{refund} - Update a refund's metadata (the only
+    updatable field).
+
+    **Example**
+
+    ```hot
+    ::refunds ::stripe::refunds
+
+    ::refunds/update-refund("re_123", {ticket_id: "4821"})
+    ```
+    """
 }
 fn
 (refund: Str, metadata: Map): Map {
@@ -78,7 +100,19 @@ fn
 
 cancel-refund
 meta {
-    doc: """POST /v1/refunds/{refund}/cancel - Cancel a refund. Only refunds with status "requires_action" can be canceled."""
+    doc: """
+    POST /v1/refunds/{refund}/cancel - Cancel a refund. Only refunds with
+    status "requires_action" can be canceled.
+
+    **Example**
+
+    ```hot
+    ::refunds ::stripe::refunds
+
+    canceled ::refunds/cancel-refund("re_123")
+    canceled.status
+    ```
+    """
 }
 fn
 (refund: Str): Map {
@@ -100,7 +134,19 @@ ListRefundsRequest type {
 
 list-refunds
 meta {
-    doc: """GET /v1/refunds - List refunds, most recent first. Filter by `payment_intent` or `charge`."""
+    doc: """
+    GET /v1/refunds - List refunds, most recent first. Filter by
+    `payment_intent` or `charge`.
+
+    **Example**
+
+    ```hot
+    ::refunds ::stripe::refunds
+
+    page ::refunds/list-refunds(::refunds/ListRefundsRequest({payment_intent: "pi_123"}))
+    amounts map(page.data, %.amount)
+    ```
+    """
 }
 fn
 (): Map {

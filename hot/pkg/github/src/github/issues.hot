@@ -11,6 +11,17 @@ meta {
     supports `state` ("open"/"closed"/"all"), `labels` (comma-separated),
     `assignee`, `since`, `per_page`, `page`. Returns a single page (GitHub
     default 30, max 100); pass `page` to paginate.
+
+    **Example**
+
+    ```hot
+    issues ::github::issues/list-issues("acme", "api", {state: "open", labels: "bug,ci"})
+    map(issues, %.title)
+
+    // For one tenant
+    other ::github::issues/list-issues("acme", "api", {}, {token: ::hot::ctx/get("acme.github-token")})
+    length(other)
+    ```
     """
 }
 fn
@@ -26,7 +37,16 @@ fn
 
 get-issue
 meta {
-    doc: """GET /repos/{owner}/{repo}/issues/{number} - One issue."""
+    doc: """
+    GET /repos/{owner}/{repo}/issues/{number} - One issue.
+
+    **Example**
+
+    ```hot
+    issue ::github::issues/get-issue("acme", "api", 42)
+    issue.state
+    ```
+    """
 }
 fn
 (owner: Str, repo: Str, number: Int): Map {
@@ -66,7 +86,17 @@ fn
 
 update-issue
 meta {
-    doc: """PATCH /repos/{owner}/{repo}/issues/{number} - Update fields: `title`, `body`, `state` ("open"/"closed"), `state_reason`, `labels`, `assignees`."""
+    doc: """
+    PATCH /repos/{owner}/{repo}/issues/{number} - Update fields: `title`,
+    `body`, `state` ("open"/"closed"), `state_reason`, `labels`,
+    `assignees`.
+
+    **Example**
+
+    ```hot
+    ::github::issues/update-issue("acme", "api", 42, {labels: ["bug", "triaged"]})
+    ```
+    """
 }
 fn
 (owner: Str, repo: Str, number: Int, changes: Map): Map {
@@ -78,7 +108,15 @@ fn
 
 close-issue
 meta {
-    doc: """Close an issue (`state: "closed"`, reason "completed")."""
+    doc: """
+    Close an issue (`state: "closed"`, reason "completed").
+
+    **Example**
+
+    ```hot
+    ::github::issues/close-issue("acme", "api", 42)
+    ```
+    """
 }
 fn
 (owner: Str, repo: Str, number: Int): Map {
@@ -90,7 +128,17 @@ fn
 
 create-comment
 meta {
-    doc: """POST /repos/{owner}/{repo}/issues/{number}/comments - Comment on an issue or pull request."""
+    doc: """
+    POST /repos/{owner}/{repo}/issues/{number}/comments - Comment on an
+    issue or pull request.
+
+    **Example**
+
+    ```hot
+    comment ::github::issues/create-comment("acme", "api", 42, "Fixed in #68.")
+    comment.html_url
+    ```
+    """
 }
 fn
 (owner: Str, repo: Str, number: Int, body: Str): Map {
@@ -102,7 +150,19 @@ fn
 
 list-comments
 meta {
-    doc: """GET /repos/{owner}/{repo}/issues/{number}/comments - The comments on an issue or pull request. `params` supports `since`, `per_page`, `page`. Returns a single page (GitHub default 30, max 100); pass `page` to paginate."""
+    doc: """
+    GET /repos/{owner}/{repo}/issues/{number}/comments - The comments on an
+    issue or pull request. `params` supports `since`, `per_page`, `page`.
+    Returns a single page (GitHub default 30, max 100); pass `page` to
+    paginate.
+
+    **Example**
+
+    ```hot
+    comments ::github::issues/list-comments("acme", "api", 42, {per_page: 100})
+    map(comments, %.body)
+    ```
+    """
 }
 fn
 (owner: Str, repo: Str, number: Int): Vec {
@@ -117,7 +177,17 @@ fn
 
 add-labels
 meta {
-    doc: """POST /repos/{owner}/{repo}/issues/{number}/labels - Add labels to an issue."""
+    doc: """
+    POST /repos/{owner}/{repo}/issues/{number}/labels - Add labels to an
+    issue.
+
+    **Example**
+
+    ```hot
+    labels ::github::issues/add-labels("acme", "api", 42, ["bug", "ci"])
+    map(labels, %.name)
+    ```
+    """
 }
 fn
 (owner: Str, repo: Str, number: Int, labels: Vec): Vec {

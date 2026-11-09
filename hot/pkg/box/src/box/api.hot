@@ -85,7 +85,9 @@ type {
     retry-after: Int?
 }
 
-decode-error-body fn (body: Any): Any {
+decode-error-body
+meta {no-doc: true}
+fn (body: Any): Any {
   cond {
     is-bytes(body) => {
       text Str(body)
@@ -115,6 +117,14 @@ meta {
     `{type: "error", status, code, message, request_id, help_url,
     context_info}` and the OAuth shape `{error, error_description}`.
     Fields are null when absent.
+
+    **Example**
+
+    ```hot
+    details ::box::api/box-error-details({type: "error", status: 404, code: "not_found", message: "Not found", request_id: "7a1"})
+    details.code  // "not_found"
+    details.request-id  // "7a1"
+    ```
     """
 }
 fn (body: Any): Map {
@@ -138,7 +148,17 @@ fn (body: Any): Map {
 
 body-excerpt
 meta {
-    doc: """A short (at most 300 characters) printable form of a response body, for error messages."""
+    doc: """
+    A short (at most 300 characters) printable form of a response body, for
+    error messages.
+
+    **Example**
+
+    ```hot
+    ::box::api/body-excerpt("upstream failed")  // "upstream failed"
+    ::box::api/body-excerpt(null)  // ""
+    ```
+    """
 }
 fn (body: Any): Str {
   text cond {
@@ -153,7 +173,16 @@ fn (body: Any): Str {
 
 error-message-for
 meta {
-    doc: """The readable `message` for an error response (pure): `box: HTTP <status> <code>: <message> (request_id <id>)`."""
+    doc: """
+    The readable `message` for an error response (pure): `box: HTTP <status>
+    <code>: <message> (request_id <id>)`.
+
+    **Example**
+
+    ```hot
+    ::box::api/error-message-for(404, {code: "not_found", message: "Not found", request-id: "7a1"}, null)  // "box: HTTP 404 not_found: Not found (request_id 7a1)"
+    ```
+    """
 }
 fn (status: Int, details: Map, body: Any): Str {
   code-part if(is-some(details.code), ` ${details.code}`, "")
@@ -187,7 +216,17 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
 
 plain-payload
 meta {
-    doc: """The payload of a `Result.Err` (or the value itself), with type tags removed so an `HttpError` / `TokenError` reads like a Map."""
+    doc: """
+    The payload of a `Result.Err` (or the value itself), with type tags
+    removed so an `HttpError` / `TokenError` reads like a Map.
+
+    **Example**
+
+    ```hot
+    ::box::api/plain-payload(err({status: 404}))  // {status: 404}
+    ::box::api/plain-payload(err("request failed"))  // "request failed"
+    ```
+    """
 }
 fn (value: Result): Any {
   payload if(is-err(value), err-value(value), value)
@@ -195,7 +234,18 @@ fn (value: Result): Any {
 }
 
 error-code
-meta {doc: """The Box `code` (or OAuth `error-code`) carried by an error, or null."""}
+meta {
+    doc: """
+    The Box `code` (or OAuth `error-code`) carried by an error, or null.
+
+    **Example**
+
+    ```hot
+    ::box::api/error-code(err({code: "not_found"}))  // "not_found"
+    ::box::api/error-code(err("request failed"))  // null
+    ```
+    """
+}
 fn (error: Result): Str? {
   payload plain-payload(error)
   cond {
@@ -207,7 +257,17 @@ fn (error: Result): Str? {
 
 has-code
 meta {
-    doc: """True when `error` (an `HttpError`, a `Result.Err` holding one, or a `TokenError`) carries the given Box `code`, e.g. `"item_name_in_use"`."""
+    doc: """
+    True when `error` (an `HttpError`, a `Result.Err` holding one, or a
+    `TokenError`) carries the given Box `code`, e.g. `"item_name_in_use"`.
+
+    **Example**
+
+    ```hot
+    ::box::api/has-code(err({code: "item_name_in_use"}), "item_name_in_use")  // true
+    ::box::api/has-code(err({code: "not_found"}), "item_name_in_use")  // false
+    ```
+    """
 }
 fn (error: Result, code: Str): Bool {
   eq(error-code(error), code)
@@ -219,7 +279,18 @@ fn (error: Result, code: Str): Bool {
 
 parse-int
 meta {
-    doc: """Parse an Int from an Int or a decimal-digit Str (surrounding whitespace allowed); null for anything else. Guards the parse so bad input never halts a run."""
+    doc: """
+    Parse an Int from an Int or a decimal-digit Str (surrounding whitespace
+    allowed); null for anything else. Guards the parse so bad input never
+    halts a run.
+
+    **Example**
+
+    ```hot
+    ::box::api/parse-int(" 42 ")  // 42
+    ::box::api/parse-int("Wed, 21 Oct")  // null
+    ```
+    """
 }
 fn (value: Any): Int? {
   cond {
@@ -235,7 +306,17 @@ fn (value: Any): Int? {
 
 retry-after-seconds
 meta {
-    doc: """The `Retry-After` header of a response's `headers` as whole seconds (Int), or null when absent or given as an HTTP date."""
+    doc: """
+    The `Retry-After` header of a response's `headers` as whole seconds
+    (Int), or null when absent or given as an HTTP date.
+
+    **Example**
+
+    ```hot
+    ::box::api/retry-after-seconds({retry-after: "30"})  // 30
+    ::box::api/retry-after-seconds({})  // null
+    ```
+    """
 }
 fn (headers: Map?): Int? {
   seconds parse-int(get(or(headers, {}), "retry-after"))
@@ -244,7 +325,18 @@ fn (headers: Map?): Int? {
 
 retry-policy
 meta {
-    doc: """The immediate-retry policy for a call (pure): `{max-retries: 1}`, or `{max-retries: 0}` when `opts.retry` is `false` or `0`. Clamped to 0..1: box never waits, so it never retries more than once."""
+    doc: """
+    The immediate-retry policy for a call (pure): `{max-retries: 1}`, or
+    `{max-retries: 0}` when `opts.retry` is `false` or `0`. Clamped to 0..1:
+    box never waits, so it never retries more than once.
+
+    **Example**
+
+    ```hot
+    ::box::api/retry-policy({})  // {max-retries: 1}
+    ::box::api/retry-policy({retry: false})  // {max-retries: 0}
+    ```
+    """
 }
 fn (opts: Map): Map {
   r opts.retry
@@ -258,7 +350,17 @@ fn (opts: Map): Map {
 
 is-retryable-status
 meta {
-    doc: """True for statuses Box asks clients to retry later: 202 (not ready), 408, 429, 500, 502, 503, 504."""
+    doc: """
+    True for statuses Box asks clients to retry later: 202 (not ready), 408,
+    429, 500, 502, 503, 504.
+
+    **Example**
+
+    ```hot
+    ::box::api/is-retryable-status(429)  // true
+    ::box::api/is-retryable-status(404)  // false
+    ```
+    """
 }
 fn (status: Int): Bool {
   in(status, RETRY_STATUSES)
@@ -266,7 +368,17 @@ fn (status: Int): Bool {
 
 is-connection-failure
 meta {
-    doc: """True when a transport error message is a connection or read failure (worth trying again), not a size-limit or URL error."""
+    doc: """
+    True when a transport error message is a connection or read failure
+    (worth trying again), not a size-limit or URL error.
+
+    **Example**
+
+    ```hot
+    ::box::api/is-connection-failure("request failed: connection reset")  // true
+    ::box::api/is-connection-failure("response exceeds http.max-response-bytes")  // false
+    ```
+    """
 }
 fn (message: Str): Bool {
   and(
@@ -277,7 +389,17 @@ fn (message: Str): Bool {
 
 is-retryable-transport
 meta {
-    doc: """True when a transport failure may be retried immediately: an idempotent method (GET, HEAD, PUT, DELETE, OPTIONS) and a connection failure."""
+    doc: """
+    True when a transport failure may be retried immediately: an idempotent
+    method (GET, HEAD, PUT, DELETE, OPTIONS) and a connection failure.
+
+    **Example**
+
+    ```hot
+    ::box::api/is-retryable-transport("GET", "request failed: connection reset")  // true
+    ::box::api/is-retryable-transport("POST", "request failed: connection reset")  // false
+    ```
+    """
 }
 fn (method: Str, message: Str): Bool {
   and(in(uppercase(method), IDEMPOTENT_METHODS), is-connection-failure(message))
@@ -334,7 +456,18 @@ fn (error: Result): Bool {
 
 send-with-retry
 meta {
-    doc: """Send an `HttpRequest`; on a connection failure of an idempotent method, send it once more straight away (per `policy`). Never waits."""
+    doc: """
+    Send an `HttpRequest`; on a connection failure of an idempotent method,
+    send it once more straight away (per `policy`). Never waits.
+
+    **Example**
+
+    ```hot
+    req ::box::api/build-http-request("GET", "https://api.box.com/2.0/users/me", {}, "", ::hot::ctx/get("box.access.token"), null)
+    response ::box::api/send-with-retry(req, {max-retries: 1})
+    response.status
+    ```
+    """
 }
 fn
 (req: HttpRequest, policy: Map): HttpResponse {
@@ -359,7 +492,17 @@ resolve ::box::auth/resolve-credentials
 
 api-params
 meta {
-    doc: """Strip box's own keys (`::box::auth/CREDENTIAL_KEYS`: credentials, `as-user`, `retry`, ...) from an `opts` Map, leaving only API parameters."""
+    doc: """
+    Strip box's own keys (`::box::auth/CREDENTIAL_KEYS`: credentials,
+    `as-user`, `retry`, ...) from an `opts` Map, leaving only API
+    parameters.
+
+    **Example**
+
+    ```hot
+    ::box::api/api-params({fields: "id", as-user: "123", retry: false})  // {fields: "id"}
+    ```
+    """
 }
 fn (opts: Map): Map {
   filter-keys(opts, (k) { not(in(k, ::auth/CREDENTIAL_KEYS)) })
@@ -367,7 +510,16 @@ fn (opts: Map): Map {
 
 credential-opts
 meta {
-    doc: """Keep only box's own keys (credentials, `as-user`, `retry`) from an `opts` Map, e.g. to pass them on to a follow-up call."""
+    doc: """
+    Keep only box's own keys (credentials, `as-user`, `retry`) from an
+    `opts` Map, e.g. to pass them on to a follow-up call.
+
+    **Example**
+
+    ```hot
+    ::box::api/credential-opts({fields: "id", as-user: "123", retry: false})  // {as-user: "123", retry: false}
+    ```
+    """
 }
 fn (opts: Map): Map {
   filter-keys(opts, (k) { in(k, ::auth/CREDENTIAL_KEYS) })
@@ -375,7 +527,18 @@ fn (opts: Map): Map {
 
 query-value
 meta {
-    doc: """Encode one query value the way Box expects (pure): Vecs are comma-joined (`fields`, `ancestor_folder_ids`, ...), Bools are `true`/`false`, Maps are JSON (`mdfilters` takes a JSON array), everything else is `Str`."""
+    doc: """
+    Encode one query value the way Box expects (pure): Vecs are comma-joined
+    (`fields`, `ancestor_folder_ids`, ...), Bools are `true`/`false`, Maps
+    are JSON (`mdfilters` takes a JSON array), everything else is `Str`.
+
+    **Example**
+
+    ```hot
+    ::box::api/query-value(["id", "name"])  // "id,name"
+    ::box::api/query-value(true)  // "true"
+    ```
+    """
 }
 fn (value: Any): Str {
   cond {
@@ -394,6 +557,13 @@ meta {
     `file_extensions`, `ancestor_folder_ids`, `event_type`, ...), Bools
     encode as `true`/`false`. Works whether or not the URL already has a
     query.
+
+    **Example**
+
+    ```hot
+    ::box::api/with-query("https://api.box.com/2.0/search", {limit: 10, sort: null})  // "https://api.box.com/2.0/search?limit=10"
+    ::box::api/with-query("https://api.box.com/2.0/search?query=q4", {limit: 10})  // "https://api.box.com/2.0/search?query=q4&limit=10"
+    ```
     """
 }
 fn (url: Str, params: Map): Str {
@@ -416,6 +586,13 @@ meta {
     disagree on where the host is in those, and a backslash ends the
     authority in the one that opens the connection, so
     `https://evil.example\@api.box.com/` connects to `evil.example`.
+
+    **Example**
+
+    ```hot
+    ::box::api/url-host("https://API.box.com/2.0/files")  // "api.box.com"
+    ::box::api/url-host("https://user@api.box.com/")  // null
+    ```
     """
 }
 fn (url: Str): Str? {
@@ -432,6 +609,14 @@ meta {
     override. `http://` is accepted only on the host of an override that
     is itself `http://` (a local test server), so an `https` override
     never downgrades.
+
+    **Example**
+
+    ```hot
+    ::box::api/is-box-url("https://api.box.com/2.0/users/me")  // true
+    ::box::api/is-box-url("http://api.box.com/2.0/users/me")  // false
+    ::box::api/is-box-url("https://example.com/")  // false
+    ```
     """
 }
 fn (url: Str): Bool {
@@ -456,6 +641,14 @@ meta {
     bodies are JSON-encoded with a JSON Content-Type; Str/Bytes bodies are
     sent verbatim (set Content-Type in `headers`); `""` or null sends no
     body. Caller headers win.
+
+    **Example**
+
+    ```hot
+    req ::box::api/build-http-request("POST", "https://api.box.com/2.0/folders", {}, {name: "Docs"}, null, "123")
+    req.headers  // {As-User: "123", Content-Type: "application/json"}
+    req.body  // "{\"name\":\"Docs\"}"
+    ```
     """
 }
 fn (method: Str, url: Str, headers: Map, body: Any, token: Str?, as-user: Str?): HttpRequest {
@@ -547,7 +740,17 @@ fn
 
 unwrap
 meta {
-    doc: """The decoded body of a 2xx response (an empty Map for 204), the Err of a failed request, or `err(HttpError)` for a non-2xx response."""
+    doc: """
+    The decoded body of a 2xx response (an empty Map for 204), the Err of a
+    failed request, or `err(HttpError)` for a non-2xx response.
+
+    **Example**
+
+    ```hot
+    ::box::api/unwrap({status: 200, body: {id: "1"}})  // {id: "1"}
+    ::box::api/unwrap({status: 204})  // {}
+    ```
+    """
 }
 fn (response: Result): Any {
   cond {
@@ -560,7 +763,23 @@ fn (response: Result): Any {
 
 json
 meta {
-    doc: """Like `request`, but unwraps: the decoded JSON body on 2xx, or an Err carrying `HttpError` (credential failures carry `::box::auth/TokenError`). The shape used by every box endpoint function."""
+    doc: """
+    Like `request`, but unwraps: the decoded JSON body on 2xx, or an Err
+    carrying `HttpError` (credential failures carry
+    `::box::auth/TokenError`). The shape used by every box endpoint
+    function.
+
+    **Example**
+
+    ```hot
+    me ::box::api/json("GET", "https://api.box.com/2.0/users/me")
+    me.login
+
+    // One call as a managed user
+    file ::box::api/json("GET", "https://api.box.com/2.0/files/12345", {}, "", {as-user: "123"})
+    file.name
+    ```
+    """
 }
 fn
 (method: Str, url: Str): Any {
@@ -604,6 +823,13 @@ meta {
     last page: null when the page was empty, when `offset + entries`
     reached `total_count`, or (with no `total_count`) when the page was
     shorter than `page-size`.
+
+    **Example**
+
+    ```hot
+    ::box::api/next-offset-for({entries: [1, 2], total_count: 5}, 0, 2)  // 2
+    ::box::api/next-offset-for({entries: [1, 2], total_count: 2}, 0, 2)  // null
+    ```
     """
 }
 fn (response: Map, offset: Int, page-size: Int): Int? {
@@ -621,7 +847,18 @@ fn (response: Map, offset: Int, page-size: Int): Int? {
 
 marker-page
 meta {
-    doc: """Turn a marker-paged response into a `Page` (pure). A blank `next_marker` means the last page."""
+    doc: """
+    Turn a marker-paged response into a `Page` (pure). A blank `next_marker`
+    means the last page.
+
+    **Example**
+
+    ```hot
+    page ::box::api/marker-page({entries: [{id: "1"}], next_marker: "abc"})
+    page.next-marker  // "abc"
+    length(page.items)  // 1
+    ```
+    """
 }
 fn (response: Map): Page {
   marker response.next_marker
@@ -634,7 +871,9 @@ fn (response: Map): Page {
   })
 }
 
-collect-marker-loop fn (fetch: Fn, limit: Int?, marker: Str?, acc: Vec, pages: Int): Vec {
+collect-marker-loop
+meta {no-doc: true}
+fn (fetch: Fn, limit: Int?, marker: Str?, acc: Vec, pages: Int): Vec {
   response fetch(marker)
   cond {
     is-err(response) => { response }
@@ -672,7 +911,9 @@ fn
   collect-marker-loop(fetch, limit, null, [], 1)
 }
 
-collect-offset-loop fn (fetch: Fn, page-size: Int, limit: Int?, max-offset: Int?, offset: Int, acc: Vec, pages: Int): Vec {
+collect-offset-loop
+meta {no-doc: true}
+fn (fetch: Fn, page-size: Int, limit: Int?, max-offset: Int?, offset: Int, acc: Vec, pages: Int): Vec {
   response fetch(offset)
   cond {
     is-err(response) => { response }
@@ -698,6 +939,15 @@ meta {
     (and usually `total_count`); `page-size` is the `limit` each call
     sends. `max-offset` stops before an offset Box would reject (search
     rejects offsets above 10000).
+
+    **Example**
+
+    ```hot
+    ::box::api/collect-offset((offset) { {entries: [offset], total_count: 3} }, 1)  // [0, 1, 2]
+
+    // At most two entries
+    ::box::api/collect-offset((offset) { {entries: [offset], total_count: 3} }, 1, 2)  // [0, 1]
+    ```
     """
 }
 fn

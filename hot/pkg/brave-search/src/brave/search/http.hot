@@ -20,7 +20,20 @@ type {
 
 error-detail
 meta {
-    doc: """Brave's error text from a response body, or null. Understands `{error: {detail}}`, `{error: {message}}`, `{error}`, and plain `{message}` or string bodies. Exposed for testing."""
+    doc: """
+    Brave's error text from a response body, or null. Understands `{error:
+    {detail}}`, `{error: {message}}`, `{error}`, and plain `{message}` or
+    string bodies. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::brave::search::http/error-detail({error: {detail: "Bad query"}})  // "Bad query"
+    ::brave::search::http/error-detail({message: "Rate limited"})  // "Rate limited"
+    ::brave::search::http/error-detail("Forbidden")  // "Forbidden"
+    ::brave::search::http/error-detail({})  // null
+    ```
+    """
 }
 fn (body: Any): Any {
   cond {
@@ -36,13 +49,25 @@ fn (body: Any): Any {
   }
 }
 
-text-or-null fn (value: Any): Any {
+text-or-null
+meta {no-doc: true}
+fn (value: Any): Any {
   if(and(is-str(value), not(is-blank(value))), value, null)
 }
 
 error-message
 meta {
-    doc: """`Brave API error <status>: <detail>`, or without the detail when the body has none. Exposed for testing."""
+    doc: """
+    `Brave API error <status>: <detail>`, or without the detail when the
+    body has none. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::brave::search::http/error-message(422, {error: {detail: "Bad query"}})  // "Brave API error 422: Bad query"
+    ::brave::search::http/error-message(500, null)  // "Brave API error 500"
+    ```
+    """
 }
 fn (status: Int, body: Any): Str {
   detail error-detail(body)
@@ -51,7 +76,16 @@ fn (status: Int, body: Any): Str {
 
 http-error
 meta {
-    doc: """Build the `HttpError` for a non-2xx response. Exposed for testing."""
+    doc: """
+    Build the `HttpError` for a non-2xx response. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    response {status: 422, headers: {}, body: {error: {detail: "Bad query"}}}
+    ::brave::search::http/http-error(response).message  // "Brave API error 422: Bad query"
+    ```
+    """
 }
 fn (response: HttpResponse): HttpError {
   HttpError({
@@ -64,7 +98,20 @@ fn (response: HttpResponse): HttpError {
 
 send
 meta {
-    doc: """Send `request` and unwrap: the decoded JSON body on 2xx, an Err carrying `HttpError` otherwise, or the transport Err."""
+    doc: """
+    Send `request` and unwrap: the decoded JSON body on 2xx, an Err carrying
+    `HttpError` otherwise, or the transport Err.
+
+    **Example**
+
+    ```hot
+    req ::brave::search/build-request("/web/search?q=rust", ::hot::ctx/get("brave.api.key"))
+    out ::brave::search::http/send(req)
+
+    // The decoded body, or the readable message when the call failed
+    if-err(out, (e) { e.message })
+    ```
+    """
 }
 fn (request: HttpRequest): Any {
   response ::hot::http/request(request)

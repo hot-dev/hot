@@ -31,6 +31,14 @@ meta {
     admin.usergroups.addChannels - Add up to 100 default channels to an IDP group.
 
     Scope: `admin.usergroups:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::usergroups ::slack::admin::usergroups
+
+    ::usergroups/add-channels(::usergroups/AddChannelsRequest({usergroup_id: "S0123ABCDEF", channel_ids: ["C0123ABCDEF"], team_id: "T0123ABCDEF"}))
+    ```
     """
 }
 fn
@@ -53,6 +61,14 @@ meta {
     admin.usergroups.addTeams - Associate workspaces with an IDP group; `auto_provision: true` creates accounts for its members.
 
     Scope: `admin.teams:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::usergroups ::slack::admin::usergroups
+
+    ::usergroups/add-teams(::usergroups/AddTeamsRequest({usergroup_id: "S0123ABCDEF", team_ids: ["T0123ABCDEF"], auto_provision: true}))
+    ```
     """
 }
 fn
@@ -75,6 +91,15 @@ meta {
     admin.usergroups.listChannels - List the channels linked to an IDP group (`channels`).
 
     Scope: `admin.usergroups:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::usergroups ::slack::admin::usergroups
+
+    res ::usergroups/list-channels(::usergroups/ListChannelsRequest({usergroup_id: "S0123ABCDEF", include_num_members: true}))
+    res.channels
+    ```
     """
 }
 fn
@@ -96,6 +121,14 @@ meta {
     admin.usergroups.removeChannels - Remove default channels from an IDP group.
 
     Scope: `admin.usergroups:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::usergroups ::slack::admin::usergroups
+
+    ::usergroups/remove-channels(::usergroups/RemoveChannelsRequest({usergroup_id: "S0123ABCDEF", channel_ids: ["C0123ABCDEF"]}))
+    ```
     """
 }
 fn

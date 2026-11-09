@@ -41,7 +41,19 @@ TYPE_PATHS {
 
 type-path
 meta {
-    doc: """The typed retrieve path for a verification type, given as `"government-id"` or `"verification/government-id"`: `/verification/government-ids/{id}`. An Err for a type without a typed endpoint (use `get-verification`). Exposed for testing."""
+    doc: """
+    The typed retrieve path for a verification type, given as
+    `"government-id"` or `"verification/government-id"`:
+    `/verification/government-ids/{id}`. An Err for a type without a typed
+    endpoint (use `get-verification`). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::persona::verifications/type-path("government-id", "ver_1")  // "/verification/government-ids/ver_1"
+    ::persona::verifications/type-path("verification/selfie", "ver_2")  // "/verification/selfies/ver_2"
+    ```
+    """
 }
 fn (type-name: Str, verification-id: Str): Str {
   short replace(trim(type-name), "verification/", "")
@@ -79,7 +91,18 @@ fn
 
 get-verification-by-type
 meta {
-    doc: """GET /verification/{type-plural}/{id} - Retrieve a verification through its typed endpoint, e.g. `get-verification-by-type("government-id", "ver_...")`. See `TYPE_PATHS` for the supported types."""
+    doc: """
+    GET /verification/{type-plural}/{id} - Retrieve a verification through
+    its typed endpoint, e.g. `get-verification-by-type("government-id",
+    "ver_...")`. See `TYPE_PATHS` for the supported types.
+
+    **Example**
+
+    ```hot
+    v ::persona::verifications/get-verification-by-type("government-id", "ver_123")
+    ::persona::verifications/failed-checks(v)
+    ```
+    """
 }
 fn
 (type-name: Str, verification-id: Str): Map {
@@ -117,7 +140,20 @@ fn
 
 from-document
 meta {
-    doc: """The verifications included in an inquiry document, in the order of its `verifications` relationship. Exposed for testing."""
+    doc: """
+    The verifications included in an inquiry document, in the order of its
+    `verifications` relationship. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    doc {
+      data: {type: "inquiry", relationships: {verifications: {data: [{id: "ver_1"}]}}},
+      included: [{id: "ver_1", type: "verification/selfie"}]
+    }
+    map(::persona::verifications/from-document(doc), %.type)  // ["verification/selfie"]
+    ```
+    """
 }
 fn (doc: Any): Vec {
   ids ::api/relationship-ids(doc, "verifications")
@@ -128,7 +164,22 @@ fn (doc: Any): Vec {
 
 failed-checks
 meta {
-    doc: """The names of a verification's checks with status `failed` (sorted), e.g. `["id_barcode_inconsistency", "id_expired"]`. These name the check, never the user's data."""
+    doc: """
+    The names of a verification's checks with status `failed` (sorted), e.g.
+    `["id_barcode_inconsistency", "id_expired"]`. These name the check,
+    never the user's data.
+
+    **Example**
+
+    ```hot
+    v {data: {type: "verification/government-id", attributes: {checks: [
+      {name: "id_expired", status: "failed"},
+      {name: "id_barcode_inconsistency", status: "failed"},
+      {name: "id_aamva_database_lookup", status: "passed"}
+    ]}}}
+    ::persona::verifications/failed-checks(v)  // ["id_barcode_inconsistency", "id_expired"]
+    ```
+    """
 }
 fn (doc: Any): Vec<Str> {
   checks or(::api/attr(doc, "checks"), [])
@@ -138,7 +189,16 @@ fn (doc: Any): Vec<Str> {
 
 redact-verification
 meta {
-    doc: """DELETE /verifications/{id} - Permanently remove a verification's PII. Persona returns 409 while it is investigation-locked."""
+    doc: """
+    DELETE /verifications/{id} - Permanently remove a verification's PII.
+    Persona returns 409 while it is investigation-locked.
+
+    **Example**
+
+    ```hot
+    ::persona::verifications/redact-verification("ver_123")
+    ```
+    """
 }
 fn
 (verification-id: Str): Map {

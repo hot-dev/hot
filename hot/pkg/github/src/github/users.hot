@@ -4,7 +4,17 @@
 
 get-authenticated
 meta {
-    doc: """GET /user - The authenticated user (login, id, plan). The cheapest way to smoke-test a token."""
+    doc: """
+    GET /user - The authenticated user (login, id, plan). The cheapest way
+    to smoke-test a token.
+
+    **Example**
+
+    ```hot
+    me ::github::users/get-authenticated()
+    me.login
+    ```
+    """
 }
 fn
 (): Map {
@@ -16,7 +26,16 @@ fn
 
 get-user
 meta {
-    doc: """GET /users/{username} - A user's public profile."""
+    doc: """
+    GET /users/{username} - A user's public profile.
+
+    **Example**
+
+    ```hot
+    user ::github::users/get-user("octocat")
+    user.public_repos
+    ```
+    """
 }
 fn
 (username: Str): Map {

@@ -58,7 +58,18 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
 }
 
 non-blank
-meta { doc: """`value`, or null when it is null or a blank Str.""" }
+meta {
+    doc: """
+    `value`, or null when it is null or a blank Str.
+
+    **Example**
+
+    ```hot
+    ::openai::api/non-blank("  ")  // null
+    ::openai::api/non-blank("sk-1")  // "sk-1"
+    ```
+    """
+}
 fn (value: Any): Any {
   cond {
     is-str(value) => { if(is-empty(trim(value)), null, value) }
@@ -156,7 +167,9 @@ fn (url: Str, root: Str): Bool {
   }
 }
 
-is-full-url fn (path: Str): Bool {
+is-full-url
+meta {no-doc: true}
+fn (path: Str): Bool {
   lowered lowercase(path)
   or(starts-with(lowered, "https://"), starts-with(lowered, "http://"))
 }
@@ -188,7 +201,9 @@ fn (base: Str, path: Str): Str {
   }
 }
 
-refused-url-error fn (url: Str, ep: Endpoint): Any {
+refused-url-error
+meta {no-doc: true}
+fn (url: Str, ep: Endpoint): Any {
   parts url-parts(url)
   destination if(is-some(parts), `${parts.scheme}://${parts.host}`, "a URL whose host cannot be read safely")
   err(`openai: refusing to send credentials to ${destination}. A full URL must be on the call's base URL (${ep.base-url}), or the call's opts must carry their own api-key.`)
@@ -294,6 +309,7 @@ fn
 
 explicit-endpoint
 meta {
+    no-doc: true,
     doc: """
     Internal: the `Endpoint` in `opts.endpoint`, or an Err when it isn't one or
     comes with keys it would override. A Map with a `base-url` counts: the
@@ -506,6 +522,13 @@ meta {
     when the endpoint has a non-blank key, `Content-Type: application/json`
     when `json-body` is true, then the endpoint's own headers, then
     `additional-headers` (later entries win).
+
+    **Example**
+
+    ```hot
+    ep ::openai::api/endpoint("http://localhost:11434/v1")
+    ::openai::api/endpoint-headers(ep, {X-Request-Id: "r1"}, true)  // {Content-Type: "application/json", X-Request-Id: "r1"}
+    ```
     """
 }
 fn (ep: Endpoint, additional-headers: Map?, json-body: Bool): Map {
@@ -521,6 +544,15 @@ meta {
     The outgoing `HttpRequest` to the final `url` with `ep`'s credentials and
     headers, pure. A Map or typed record `body` is sent as JSON; `Bytes` as-is;
     `""` or null sends no body. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ep ::openai::api/endpoint("http://localhost:11434/v1")
+    req ::openai::api/build-request(ep, "POST", "http://localhost:11434/v1/embeddings", {}, {model: "m"})
+    req.method  // "POST"
+    req.body  // "{\"model\":\"m\"}"
+    ```
     """
 }
 fn (ep: Endpoint, method: Str, url: Str, additional-headers: Map?, body: Any): HttpRequest {
@@ -571,7 +603,10 @@ fn (ep: Endpoint, method: Str, path: Str, additional-headers: Map?, body: Any): 
 }
 
 send
-meta { doc: """Internal: send a built request, or pass its Err along.""" }
+meta {
+    no-doc: true,
+    doc: """Internal: send a built request, or pass its Err along."""
+}
 fn (req: Result): HttpResponse {
   cond {
     is-err(req) => { req }
@@ -580,7 +615,10 @@ fn (req: Result): HttpResponse {
 }
 
 send-stream
-meta { doc: """Internal: send a built streaming request, or pass its Err along.""" }
+meta {
+    no-doc: true,
+    doc: """Internal: send a built streaming request, or pass its Err along."""
+}
 fn (req: Result, format: Str): StreamingHttpResponse {
   cond {
     is-err(req) => { req }
@@ -650,6 +688,15 @@ meta {
     Err carrying `HttpError`. An Err from the request passes through. The
     body is returned as a plain Map so servers that omit OpenAI-only fields
     still parse.
+
+    **Example**
+
+    ```hot
+    success ::hot::http/HttpResponse({status: 200, headers: {}, body: {id: "x"}})
+    ::openai::api/endpoint-response(success)  // {id: "x"}
+    missing ::hot::http/HttpResponse({status: 404, headers: {}, body: "nope"})
+    is-err(::openai::api/endpoint-response(missing))  // true
+    ```
     """
 }
 fn (response: Result): Any {
@@ -666,6 +713,7 @@ fn (response: Result): Any {
 
 resolved-request
 meta {
+    no-doc: true,
     doc: """
     Internal: the `HttpRequest` for `url` under a call's `opts` (see `resolve`
     and `target-url`), or an Err naming what was refused.
@@ -736,6 +784,17 @@ meta {
     Make a streaming HTTP request with pre-filled service headers. Returns a
     response with an iterator body for SSE streams. `url` and the key work as
     in `request`; the 6th argument can be an explicit key, or an `opts` Map.
+
+    **Example**
+
+    ```hot
+    response ::openai::api/request-stream("POST", "/chat/completions", {}, {
+      model: "gpt-4o-mini",
+      stream: true,
+      messages: [{role: "user", content: "Hi"}]
+    })
+    for-each(response.body, (event) { print(event.data) })
+    ```
     """,
     ctx: {
         "openai.api.key": {required: false},

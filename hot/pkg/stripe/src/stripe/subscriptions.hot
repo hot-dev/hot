@@ -74,7 +74,22 @@ fn
 
 get-subscription
 meta {
-    doc: """GET /v1/subscriptions/{subscription} - Retrieve a subscription by ID. Optional `params` such as `{expand: ["latest_invoice", "default_payment_method"]}`. Billing periods are per item: read `items.data[0].current_period_end`."""
+    doc: """
+    GET /v1/subscriptions/{subscription} - Retrieve a subscription by ID.
+    Optional `params` such as `{expand: ["latest_invoice",
+    "default_payment_method"]}`. Billing periods are per item: read
+    `items.data[0].current_period_end`.
+
+    **Example**
+
+    ```hot
+    ::subs ::stripe::subscriptions
+
+    subscription ::subs/get-subscription("sub_123", {expand: ["default_payment_method"]})
+    subscription.status
+    subscription.items.data[0].current_period_end
+    ```
+    """
 }
 fn
 (subscription: Str): Map {
@@ -184,7 +199,26 @@ ResumeSubscriptionRequest type {
 
 resume-subscription
 meta {
-    doc: """POST /v1/subscriptions/{subscription}/resume - Resume a subscription whose `status` is "paused" (one that ended a free trial without a payment method, or was paused with `pause-subscription`). This does not clear `pause_collection`; to restart collection on an active subscription, call `update-subscription` with `pause_collection: ""`. `billing_cycle_anchor` is `{type: "now"}` (default) or `{type: "unchanged"}`."""
+    doc: """
+    POST /v1/subscriptions/{subscription}/resume - Resume a subscription
+    whose `status` is "paused" (one that ended a free trial without a
+    payment method, or was paused with `pause-subscription`). This does not
+    clear `pause_collection`; to restart collection on an active
+    subscription, call `update-subscription` with `pause_collection: ""`.
+    `billing_cycle_anchor` is `{type: "now"}` (default) or `{type:
+    "unchanged"}`.
+
+    **Example**
+
+    ```hot
+    ::subs ::stripe::subscriptions
+
+    resumed ::subs/resume-subscription("sub_123", ::subs/ResumeSubscriptionRequest({
+      billing_cycle_anchor: {type: "unchanged"}
+    }))
+    resumed.status
+    ```
+    """
 }
 fn
 (subscription: Str): Map {
@@ -206,7 +240,24 @@ PauseSubscriptionRequest type {
 
 pause-subscription
 meta {
-    doc: """POST /v1/subscriptions/{subscription}/pause - Pause a subscription (its `status` becomes "paused") until `resume-subscription` is called. `invoicing_behavior` is "pending_invoice_item" (default) or "invoice"; `bill_for` controls billing for outstanding usage and unused time. Distinct from `pause_collection`, which keeps the subscription active."""
+    doc: """
+    POST /v1/subscriptions/{subscription}/pause - Pause a subscription (its
+    `status` becomes "paused") until `resume-subscription` is called.
+    `invoicing_behavior` is "pending_invoice_item" (default) or "invoice";
+    `bill_for` controls billing for outstanding usage and unused time.
+    Distinct from `pause_collection`, which keeps the subscription active.
+
+    **Example**
+
+    ```hot
+    ::subs ::stripe::subscriptions
+
+    paused ::subs/pause-subscription("sub_123", ::subs/PauseSubscriptionRequest({
+      invoicing_behavior: "invoice"
+    }))
+    paused.status
+    ```
+    """
 }
 fn
 (subscription: Str): Map {
@@ -236,7 +287,21 @@ ListSubscriptionsRequest type {
 
 list-subscriptions
 meta {
-    doc: """GET /v1/subscriptions - List subscriptions. Filter by `customer`, `price`, or `status` ("active", "canceled", "trialing", "past_due", "paused", "unpaid", "incomplete", "incomplete_expired", "ended", or "all"). By default only non-canceled subscriptions are returned."""
+    doc: """
+    GET /v1/subscriptions - List subscriptions. Filter by `customer`,
+    `price`, or `status` ("active", "canceled", "trialing", "past_due",
+    "paused", "unpaid", "incomplete", "incomplete_expired", "ended", or
+    "all"). By default only non-canceled subscriptions are returned.
+
+    **Example**
+
+    ```hot
+    ::subs ::stripe::subscriptions
+
+    page ::subs/list-subscriptions(::subs/ListSubscriptionsRequest({customer: "cus_123", status: "all"}))
+    statuses map(page.data, %.status)
+    ```
+    """
 }
 fn
 (): Map {
@@ -251,7 +316,20 @@ fn
 
 search-subscriptions
 meta {
-    doc: """GET /v1/subscriptions/search - Search subscriptions with Stripe's search query language, e.g. `status:"active" AND metadata["plan"]:"pro"`. Pass `next_page` back as `page` in `params` to continue."""
+    doc: """
+    GET /v1/subscriptions/search - Search subscriptions with Stripe's search
+    query language, e.g. `status:"active" AND metadata["plan"]:"pro"`. Pass
+    `next_page` back as `page` in `params` to continue.
+
+    **Example**
+
+    ```hot
+    ::subs ::stripe::subscriptions
+
+    results ::subs/search-subscriptions(`status:"active" AND metadata["plan"]:"pro"`, {limit: 20})
+    ids map(results.data, %.id)
+    ```
+    """
 }
 fn
 (query: Str): Map {
@@ -312,7 +390,19 @@ fn
 
 get-subscription-item
 meta {
-    doc: """GET /v1/subscription_items/{item} - Retrieve a subscription item by ID."""
+    doc: """
+    GET /v1/subscription_items/{item} - Retrieve a subscription item by ID.
+
+    **Example**
+
+    ```hot
+    ::subs ::stripe::subscriptions
+
+    item ::subs/get-subscription-item("si_123")
+    item.quantity
+    item.current_period_end
+    ```
+    """
 }
 fn
 (item: Str): Map {
@@ -338,7 +428,23 @@ UpdateSubscriptionItemRequest type {
 
 update-subscription-item
 meta {
-    doc: """POST /v1/subscription_items/{item} - Change an item's price or quantity (e.g. seat count). `proration_behavior` is "create_prorations" (default), "always_invoice", or "none"."""
+    doc: """
+    POST /v1/subscription_items/{item} - Change an item's price or quantity
+    (e.g. seat count). `proration_behavior` is "create_prorations"
+    (default), "always_invoice", or "none".
+
+    **Example**
+
+    ```hot
+    ::subs ::stripe::subscriptions
+
+    // Move to five seats and invoice the difference now
+    ::subs/update-subscription-item("si_123", ::subs/UpdateSubscriptionItemRequest({
+      quantity: 5,
+      proration_behavior: "always_invoice"
+    }))
+    ```
+    """
 }
 fn
 (item: Str, request: UpdateSubscriptionItemRequest): Map {
@@ -357,7 +463,21 @@ DeleteSubscriptionItemRequest type {
 
 delete-subscription-item
 meta {
-    doc: """DELETE /v1/subscription_items/{item} - Remove an item from its subscription. A subscription must keep at least one item; cancel the subscription instead to remove the last one."""
+    doc: """
+    DELETE /v1/subscription_items/{item} - Remove an item from its
+    subscription. A subscription must keep at least one item; cancel the
+    subscription instead to remove the last one.
+
+    **Example**
+
+    ```hot
+    ::subs ::stripe::subscriptions
+
+    ::subs/delete-subscription-item("si_123", ::subs/DeleteSubscriptionItemRequest({
+      proration_behavior: "none"
+    }))
+    ```
+    """
 }
 fn
 (item: Str): Map {
@@ -379,7 +499,18 @@ ListSubscriptionItemsRequest type {
 
 list-subscription-items
 meta {
-    doc: """GET /v1/subscription_items - List the items of a subscription."""
+    doc: """
+    GET /v1/subscription_items - List the items of a subscription.
+
+    **Example**
+
+    ```hot
+    ::subs ::stripe::subscriptions
+
+    page ::subs/list-subscription-items("sub_123", ::subs/ListSubscriptionItemsRequest({limit: 20}))
+    prices map(page.data, %.price.id)
+    ```
+    """
 }
 fn
 (subscription: Str): Map {

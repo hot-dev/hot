@@ -29,7 +29,21 @@ type {
 }
 
 job-ok
-meta { doc: "Build a successful LifecycleJob result." }
+meta {
+    doc: """
+    Build a successful LifecycleJob result.
+
+    **Example**
+
+    ```hot
+    ::lifecycle ::ai::agent::lifecycle
+
+    job ::lifecycle/job-ok(::ai::session/Session({id: "s1"}), "compact", {kept: 3})
+    job.ok  // true
+    job.session-id  // "s1"
+    ```
+    """
+}
 fn (session: Session, action: Str, result: Any?): LifecycleJob {
     LifecycleJob({
         session-id: session.id,
@@ -42,7 +56,21 @@ fn (session: Session, action: Str, result: Any?): LifecycleJob {
 
 job-error
 meta {
-    doc: "Build a failed LifecycleJob result and record it in the runtime error log."
+    doc: """
+    Build a failed LifecycleJob result and record it in the runtime error
+    log.
+
+    **Example**
+
+    ```hot
+    ::lifecycle ::ai::agent::lifecycle
+    ::runtime ::ai::agent::runtime
+
+    rt ::runtime/create-runtime("team-agent")
+    job ::lifecycle/job-error(rt, ::ai::session/Session({id: "s1"}), "compact", "store unavailable")
+    job.error
+    ```
+    """
 }
 fn (rt: AgentRuntime, session: Session, action: Str, error: Any): LifecycleJob {
     msg Str(error)
@@ -68,6 +96,20 @@ meta {
     `LifecycleJob.ok = false`. The loop always processes every session
     and always returns a uniform `Vec<LifecycleJob>` — halts never
     escape `run-session-job`.
+
+    **Example**
+
+    ```hot
+    ::lifecycle ::ai::agent::lifecycle
+    ::runtime ::ai::agent::runtime
+
+    rt ::runtime/create-runtime("team-agent")
+    jobs ::lifecycle/run-session-job(rt, "daily-recap", (session) {
+        `recap for ${session.id}`
+    })
+    // A handler failure becomes ok: false on that session's job.
+    filter(jobs, (job) { not(job.ok) })
+    ```
     """
 }
 fn (rt: AgentRuntime, action: Str, handler: Fn): Vec<LifecycleJob> {
@@ -99,14 +141,50 @@ fn (rt: AgentRuntime, action: Str, handler: Fn): Vec<LifecycleJob> {
 }
 
 compact-stale-sessions
-meta { doc: "Run an app-provided compaction handler for all registered sessions." }
+meta {
+    doc: """
+    Run an app-provided compaction handler for all registered sessions.
+
+    **Example**
+
+    ```hot
+    ::lifecycle ::ai::agent::lifecycle
+    ::runtime ::ai::agent::runtime
+
+    rt ::runtime/create-runtime("team-agent")
+    jobs ::lifecycle/compact-stale-sessions(rt, (session) {
+        {compacted: session.id}
+    })
+    length(jobs)
+    ```
+    """
+}
 fn (rt: AgentRuntime, handler: Fn): Vec<LifecycleJob> {
     run-session-job(rt, "compact-stale-sessions", handler)
 }
 
 prune-raw-memory
 meta {
-    doc: "Prune raw session memory older than `policy.raw-retention-secs`; returns deleted count."
+    doc: """
+    Prune raw session memory older than `policy.raw-retention-secs`; returns
+    deleted count.
+
+    **Example**
+
+    ```hot
+    ::lifecycle ::ai::agent::lifecycle
+    ::session ::ai::session
+
+    mem ::ai::memory/create-memory(
+        "team-agent",
+        ::session/Session({id: "slack:C123"}),
+        ::session/Identity({id: "u1", name: "Ada", meta: {}})
+    )
+    policy ::ai::agent::memory/RetentionPolicy({name: "30-days", raw-retention-secs: 2592000})
+    deleted ::lifecycle/prune-raw-memory(mem, policy)
+    `pruned ${deleted} records`
+    ```
+    """
 }
 fn (mem: AgentMemory, policy: RetentionPolicy): Int {
     retention or(policy.raw-retention-secs, 0)
@@ -121,7 +199,25 @@ fn (mem: AgentMemory, policy: RetentionPolicy): Int {
 
 prune-sessions
 meta {
-    doc: "Run an app-provided memory factory and prune handler for all registered sessions."
+    doc: """
+    Run an app-provided memory factory and prune handler for all registered
+    sessions.
+
+    **Example**
+
+    ```hot
+    ::lifecycle ::ai::agent::lifecycle
+    ::runtime ::ai::agent::runtime
+
+    rt ::runtime/create-runtime("team-agent")
+    policy ::ai::agent::memory/RetentionPolicy({name: "30-days", raw-retention-secs: 2592000})
+    owner ::ai::session/Identity({id: "team-agent", name: "Team Agent", meta: {}})
+    jobs ::lifecycle/prune-sessions(rt, policy, (session) {
+        ::ai::memory/create-memory("team-agent", session, owner)
+    })
+    map(jobs, %.result)
+    ```
+    """
 }
 fn (rt: AgentRuntime, policy: RetentionPolicy, memory-for-session: Fn): Vec<LifecycleJob> {
     run-session-job(rt, "prune-raw-memory", (session) {
@@ -132,7 +228,18 @@ fn (rt: AgentRuntime, policy: RetentionPolicy, memory-for-session: Fn): Vec<Life
 
 schedule-descriptor
 meta {
-    doc: "Return a neutral descriptor agents can attach to scheduled lifecycle functions."
+    doc: """
+    Return a neutral descriptor agents can attach to scheduled lifecycle
+    functions.
+
+    **Example**
+
+    ```hot
+    descriptor ::ai::agent::lifecycle/schedule-descriptor("nightly-prune", "0 3 * * *", "prune-raw-memory")
+    descriptor.cron  // "0 3 * * *"
+    descriptor.action  // "prune-raw-memory"
+    ```
+    """
 }
 fn (name: Str, cron: Str, action: Str): Map {
     {

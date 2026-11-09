@@ -36,6 +36,13 @@ meta {
     when `driveId` is given, then your Drive parameters (`q`, `pageSize`,
     `pageToken`, `orderBy`, `spaces`, `corpora`, `driveId`, `fields`,
     `includeItemsFromAllDrives`, ...). Nulls are dropped.
+
+    **Example**
+
+    ```hot
+    ::google::drive::files/list-params({driveId: "0ABCdrive", fields: "files(id)"})
+    // {supportsAllDrives: true, includeItemsFromAllDrives: true, corpora: "drive", fields: "files(id)", driveId: "0ABCdrive"}
+    ```
     """
 }
 fn (opts: Map): Map {
@@ -107,7 +114,21 @@ fn
 
 list-folder
 meta {
-    doc: """List the non-trashed direct children of a folder (all pages, or at most `limit`). `opts.q` is AND-ed with the folder filter. Use `"root"` for the My Drive root, or a shared drive id for its top level."""
+    doc: """
+    List the non-trashed direct children of a folder (all pages, or at most
+    `limit`). `opts.q` is AND-ed with the folder filter. Use `"root"` for
+    the My Drive root, or a shared drive id for its top level.
+
+    **Example**
+
+    ```hot
+    files ::google::drive::files/list-folder("root", {orderBy: "modifiedTime desc"})
+    map(files, %.name)
+
+    // PDFs only, at most 25
+    ::google::drive::files/list-folder("1AbCfolder", {q: "mimeType = 'application/pdf'"}, 25)
+    ```
+    """
 }
 fn
 (folder-id: Str): Vec {
@@ -127,7 +148,21 @@ fn
 
 get-file
 meta {
-    doc: """GET /files/{id} - file metadata. `fields` defaults to `::google::drive/FILE_FIELDS`; pass `{fields: "*"}` for everything. Scope: `drive.readonly` (or `drive.metadata.readonly` / `drive.file`)."""
+    doc: """
+    GET /files/{id} - file metadata. `fields` defaults to
+    `::google::drive/FILE_FIELDS`; pass `{fields: "*"}` for everything.
+    Scope: `drive.readonly` (or `drive.metadata.readonly` / `drive.file`).
+
+    **Example**
+
+    ```hot
+    file ::google::drive::files/get-file("1AbCfile")
+    file.name
+
+    // Only what you need
+    ::google::drive::files/get-file("1AbCfile", {fields: "id,name,size"})
+    ```
+    """
 }
 fn
 (id: Str): Map {
@@ -139,7 +174,18 @@ fn
 }
 
 get-doc-file
-meta {doc: """`get-file` normalised to a `::google::drive/DocFile`."""}
+meta {
+    doc: """
+    `get-file` normalised to a `::google::drive/DocFile`.
+
+    **Example**
+
+    ```hot
+    file ::google::drive::files/get-doc-file("1AbCfile")
+    file.web-url
+    ```
+    """
+}
 fn
 (id: Str): DocFile {
   get-doc-file(id, {})
@@ -151,7 +197,19 @@ fn
 
 resolve-shortcut
 meta {
-    doc: """Return the target's metadata when `file` is a shortcut (one hop; Drive does not allow shortcuts to shortcuts), else `file` itself. `file` needs `mimeType` and `shortcutDetails`."""
+    doc: """
+    Return the target's metadata when `file` is a shortcut (one hop; Drive
+    does not allow shortcuts to shortcuts), else `file` itself. `file` needs
+    `mimeType` and `shortcutDetails`.
+
+    **Example**
+
+    ```hot
+    file ::google::drive::files/get-file("1AbCshortcut")
+    target ::google::drive::files/resolve-shortcut(file)
+    target.name
+    ```
+    """
 }
 fn
 (file: Map): Map {
@@ -174,7 +232,19 @@ METADATA_KEYS ["parent", "parents", "description", "metadata"]
 
 build-metadata
 meta {
-    doc: """Build a file metadata body (pure): `name` and `mimeType` (either may be null), `parents` from `opts.parents` (Vec or Str) or `opts.parent`, `description`, then any extra fields in `opts.metadata` (e.g. `appProperties`, `properties`, `starred`). Nulls are dropped."""
+    doc: """
+    Build a file metadata body (pure): `name` and `mimeType` (either may be
+    null), `parents` from `opts.parents` (Vec or Str) or `opts.parent`,
+    `description`, then any extra fields in `opts.metadata` (e.g.
+    `appProperties`, `properties`, `starred`). Nulls are dropped.
+
+    **Example**
+
+    ```hot
+    ::google::drive::files/build-metadata("a.txt", "text/plain", {parent: "1AbCfolder", description: "Notes"})
+    // {name: "a.txt", mimeType: "text/plain", parents: ["1AbCfolder"], description: "Notes"}
+    ```
+    """
 }
 fn (name: Str?, mime-type: Str?, opts: Map): Map {
   parents ::drive/as-vec(or(get(opts, "parents"), get(opts, "parent")))
@@ -214,7 +284,17 @@ fn
 
 ensure-folder
 meta {
-    doc: """Return the first non-trashed folder named `name` under `parent-id`, creating it when missing. Handy for idempotent workflow output folders."""
+    doc: """
+    Return the first non-trashed folder named `name` under `parent-id`,
+    creating it when missing. Handy for idempotent workflow output folders.
+
+    **Example**
+
+    ```hot
+    folder ::google::drive::files/ensure-folder("Reports", "1AbCparent")
+    folder.id
+    ```
+    """
 }
 fn
 (name: Str, parent-id: Str): Map {
@@ -231,7 +311,18 @@ fn
 
 create-shortcut
 meta {
-    doc: """POST /files - create a shortcut to `target-id` (named `name`), optionally in `opts.parent`. Shortcuts are how one item appears in several folders, since shared-drive items have exactly one parent."""
+    doc: """
+    POST /files - create a shortcut to `target-id` (named `name`),
+    optionally in `opts.parent`. Shortcuts are how one item appears in
+    several folders, since shared-drive items have exactly one parent.
+
+    **Example**
+
+    ```hot
+    shortcut ::google::drive::files/create-shortcut("1AbCfile", "Q3 plan", {parent: "1AbCfolder"})
+    shortcut.id
+    ```
+    """
 }
 fn
 (target-id: Str, name: Str): Map {
@@ -255,6 +346,15 @@ meta {
     in `changes` are dropped. Options: `addParents`, `removeParents`
     (comma-separated ids), `keepRevisionForever`, `fields`, credentials.
     Use `::google::drive::upload/update-file-content` to replace content.
+
+    **Example**
+
+    ```hot
+    ::google::drive::files/update-file("1AbCfile", {description: "Final", starred: true})
+
+    // Choose the fields in the response
+    ::google::drive::files/update-file("1AbCfile", {name: "Q3 plan"}, {fields: "id,name"})
+    ```
     """
 }
 fn
@@ -267,7 +367,17 @@ fn
 }
 
 rename-file
-meta {doc: """Rename a file or folder."""}
+meta {
+    doc: """
+    Rename a file or folder.
+
+    **Example**
+
+    ```hot
+    ::google::drive::files/rename-file("1AbCfile", "Q3 plan")
+    ```
+    """
+}
 fn
 (id: Str, name: Str): Map {
   rename-file(id, name, {})
@@ -278,7 +388,16 @@ fn
 
 move-params
 meta {
-    doc: """The `addParents`/`removeParents` parameters for moving to `new-parent` from `current-parents` (pure). The new parent is never removed."""
+    doc: """
+    The `addParents`/`removeParents` parameters for moving to `new-parent`
+    from `current-parents` (pure). The new parent is never removed.
+
+    **Example**
+
+    ```hot
+    ::google::drive::files/move-params("new", ["old", "new"])  // {addParents: "new", removeParents: "old"}
+    ```
+    """
 }
 fn (new-parent: Str, current-parents: Vec): Map {
   remove filter(current-parents, (p) { ne(p, new-parent) })
@@ -290,7 +409,19 @@ fn (new-parent: Str, current-parents: Vec): Map {
 
 move-file
 meta {
-    doc: """Move a file or folder into `new-parent`, removing its current parents (read first unless `opts.removeParents` is given). In shared drives an item has exactly one parent; moving between shared drives needs organizer rights."""
+    doc: """
+    Move a file or folder into `new-parent`, removing its current parents
+    (read first unless `opts.removeParents` is given). In shared drives an
+    item has exactly one parent; moving between shared drives needs
+    organizer rights.
+
+    **Example**
+
+    ```hot
+    file ::google::drive::files/move-file("1AbCfile", "1AbCfolder")
+    file.parents
+    ```
+    """
 }
 fn
 (id: Str, new-parent: Str): Map {
@@ -310,7 +441,18 @@ fn
 
 copy-file
 meta {
-    doc: """POST /files/{id}/copy - copy a file (not folders). `changes` sets the copy's metadata (`name`, `parents`, ...). Google Docs copies stay Google Docs."""
+    doc: """
+    POST /files/{id}/copy - copy a file (not folders). `changes` sets the
+    copy's metadata (`name`, `parents`, ...). Google Docs copies stay Google
+    Docs.
+
+    **Example**
+
+    ```hot
+    copy ::google::drive::files/copy-file("1AbCfile", {name: "Q3 plan (copy)", parents: ["1AbCfolder"]})
+    copy.id
+    ```
+    """
 }
 fn
 (id: Str): Map {
@@ -326,7 +468,16 @@ fn
 
 trash-file
 meta {
-    doc: """Move a file or folder to the trash (recoverable for 30 days). Prefer this to `delete-file`."""
+    doc: """
+    Move a file or folder to the trash (recoverable for 30 days). Prefer
+    this to `delete-file`.
+
+    **Example**
+
+    ```hot
+    ::google::drive::files/trash-file("1AbCfile")
+    ```
+    """
 }
 fn
 (id: Str): Map {
@@ -337,7 +488,17 @@ fn
 }
 
 untrash-file
-meta {doc: """Restore a file or folder from the trash."""}
+meta {
+    doc: """
+    Restore a file or folder from the trash.
+
+    **Example**
+
+    ```hot
+    ::google::drive::files/untrash-file("1AbCfile")
+    ```
+    """
+}
 fn
 (id: Str): Map {
   untrash-file(id, {})
@@ -348,7 +509,19 @@ fn
 
 delete-file
 meta {
-    doc: """DELETE /files/{id} - **permanently** delete a file or folder, skipping the trash (a folder's descendants owned by the user go too). Irreversible; prefer `trash-file`. Shared-drive items need the organizer role. Returns true."""
+    doc: """
+    DELETE /files/{id} - **permanently** delete a file or folder, skipping
+    the trash (a folder's descendants owned by the user go too).
+    Irreversible; prefer `trash-file`. Shared-drive items need the organizer
+    role. Returns true.
+
+    **Example**
+
+    ```hot
+    // Permanent: there is no trash to restore from
+    ::google::drive::files/delete-file("1AbCfile")
+    ```
+    """
 }
 fn
 (id: Str): Bool {

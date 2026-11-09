@@ -72,7 +72,17 @@ TOKEN_FIELDS ["access_token", "refresh_token", "id_token"]
 
 is-truthy
 meta {
-    doc: """True for `true` and the strings "true", "1", "yes" (any case); context values often arrive as strings. Exposed for testing."""
+    doc: """
+    True for `true` and the strings "true", "1", "yes" (any case); context
+    values often arrive as strings. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::auth/is-truthy("YES")  // true
+    ::salesforce::auth/is-truthy("0")  // false
+    ```
+    """
 }
 fn (value: Any): Bool {
   cond {
@@ -82,13 +92,25 @@ fn (value: Any): Bool {
   }
 }
 
-is-blank-value fn (value: Any): Bool {
+is-blank-value
+meta {no-doc: true}
+fn (value: Any): Bool {
   or(is-null(value), and(is-str(value), is-blank(value)))
 }
 
 normalize-url
 meta {
-    doc: """Trim a host URL, drop trailing slashes, and default the scheme to `https://` (`acme.my.salesforce.com/` → `https://acme.my.salesforce.com`). Exposed for testing."""
+    doc: """
+    Trim a host URL, drop trailing slashes, and default the scheme to
+    `https://` (`acme.my.salesforce.com/` →
+    `https://acme.my.salesforce.com`). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::auth/normalize-url("acme.my.salesforce.com/")  // "https://acme.my.salesforce.com"
+    ```
+    """
 }
 fn (url: Str): Str {
   trimmed trim(url)
@@ -100,7 +122,9 @@ fn (url: Str): Str {
   strip-trailing-slashes(with-scheme)
 }
 
-strip-trailing-slashes fn (url: Str): Str {
+strip-trailing-slashes
+meta {no-doc: true}
+fn (url: Str): Str {
   cond {
     ends-with(url, "/") => { strip-trailing-slashes(slice(url, 0, sub(length(url), 1))) }
     => { url }
@@ -109,7 +133,16 @@ strip-trailing-slashes fn (url: Str): Str {
 
 login-host
 meta {
-    doc: """`https://test.salesforce.com` for sandboxes, `https://login.salesforce.com` otherwise. Exposed for testing."""
+    doc: """
+    `https://test.salesforce.com` for sandboxes,
+    `https://login.salesforce.com` otherwise. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::auth/login-host(true)  // "https://test.salesforce.com"
+    ```
+    """
 }
 fn (sandbox: Bool): Str {
   if(sandbox, ::salesforce/TEST_URL, ::salesforce/LOGIN_URL)
@@ -117,7 +150,18 @@ fn (sandbox: Bool): Str {
 
 jwt-audience
 meta {
-    doc: """The JWT-bearer `aud` claim: the explicit override (e.g. an Experience Cloud site URL) when set, else login or test by the sandbox flag. Never the My Domain URL. Exposed for testing."""
+    doc: """
+    The JWT-bearer `aud` claim: the explicit override (e.g. an Experience
+    Cloud site URL) when set, else login or test by the sandbox flag. Never
+    the My Domain URL. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::auth/jwt-audience(false, null)  // "https://login.salesforce.com"
+    ::salesforce::auth/jwt-audience(false, "https://acme.my.site.com/portal/")  // "https://acme.my.site.com/portal"
+    ```
+    """
 }
 fn (sandbox: Bool, override: Any): Str {
   cond {
@@ -134,6 +178,16 @@ meta {
     other flows use My Domain when it is set and login/test otherwise.
     Returns an Err for client credentials without a My Domain URL.
     Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::auth/token-url("refresh-token", null, true)
+    // "https://test.salesforce.com/services/oauth2/token"
+
+    ::salesforce::auth/token-url("client-credentials", "acme.my.salesforce.com", false)
+    // "https://acme.my.salesforce.com/services/oauth2/token"
+    ```
     """
 }
 fn (flow: Str, my-domain: Any, sandbox: Bool): Str {
@@ -149,7 +203,17 @@ fn (flow: Str, my-domain: Any, sandbox: Bool): Str {
 
 build-jwt-claims
 meta {
-    doc: """Build the connected-app JWT-bearer claims: `iss` = consumer key, `sub` = username, `aud` = the audience from `jwt-audience`, 3-minute expiry (Salesforce's maximum). Exposed for testing."""
+    doc: """
+    Build the connected-app JWT-bearer claims: `iss` = consumer key, `sub` =
+    username, `aud` = the audience from `jwt-audience`, 3-minute expiry
+    (Salesforce's maximum). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::auth/build-jwt-claims("3MVG...", "ada@example.com", "https://login.salesforce.com").sub  // "ada@example.com"
+    ```
+    """
 }
 fn (client-id: Str, username: Str, audience: Str): Map {
   {
@@ -168,6 +232,13 @@ meta {
     jwt-bearer, client-credentials whose credentials are present. Returns
     null when nothing usable is configured, or an Err for an unknown
     explicit flow. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::auth/select-flow({refresh-token: "r"})  // "refresh-token"
+    ::salesforce::auth/select-flow({})  // null
+    ```
     """
 }
 fn (config: Map): Any {
@@ -190,7 +261,16 @@ fn (config: Map): Any {
 
 missing-for-flow
 meta {
-    doc: """The context variable names a flow still needs, given a config Map. Empty when the flow is fully configured. Exposed for testing."""
+    doc: """
+    The context variable names a flow still needs, given a config Map. Empty
+    when the flow is fully configured. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::auth/missing-for-flow("refresh-token", {client-id: "3MVG..."})  // ["salesforce.refresh-token"]
+    ```
+    """
 }
 fn (flow: Str, config: Map): Vec {
   required cond {
@@ -205,7 +285,18 @@ fn (flow: Str, config: Map): Vec {
 
 session-expiry
 meta {
-    doc: """When a minted session should be treated as expired (epoch seconds): `expires_in` from the token response when present, else `ttl`, minus 30 seconds of slack. Exposed for testing."""
+    doc: """
+    When a minted session should be treated as expired (epoch seconds):
+    `expires_in` from the token response when present, else `ttl`, minus 30
+    seconds of slack. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::auth/session-expiry({expires_in: 3600}, 1000, 900)  // 4570
+    ::salesforce::auth/session-expiry({}, 1000, 900)  // 1870
+    ```
+    """
 }
 fn (tokens: Map, now: Int, ttl: Int): Int {
   expires-in get(tokens, "expires_in")
@@ -220,7 +311,16 @@ fn (tokens: Map, now: Int, ttl: Int): Int {
 
 fingerprint
 meta {
-    doc: """A hash of the credentials in a config Map, so a cached session is only reused for the same credentials. Exposed for testing."""
+    doc: """
+    A hash of the credentials in a config Map, so a cached session is only
+    reused for the same credentials. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    length(::salesforce::auth/fingerprint("refresh-token", {client-id: "3MVG..."}))  // 64
+    ```
+    """
 }
 fn (flow: Str, config: Map): Str {
   parts map(["client-id", "client-secret", "username", "private-key", "refresh-token", "my-domain", "audience"], (k) { Str(or(get(config, k), "")) })
@@ -247,7 +347,18 @@ meta {
         "salesforce.auth.flow": {required: false, secret: false},
         "salesforce.session.ttl": {required: false, secret: false}
     },
-    doc: """Read the auth settings from context into a Map: `access-token`, `instance-url`, `client-id`, `client-secret`, `username`, `private-key`, `refresh-token`, `my-domain`, `sandbox`, `audience`, `flow`, `ttl`."""
+    doc: """
+    Read the auth settings from context into a Map: `access-token`,
+    `instance-url`, `client-id`, `client-secret`, `username`, `private-key`,
+    `refresh-token`, `my-domain`, `sandbox`, `audience`, `flow`, `ttl`.
+
+    **Example**
+
+    ```hot
+    cfg ::salesforce::auth/config()
+    cfg.sandbox
+    ```
+    """
 }
 fn (): Map {
   {
@@ -268,7 +379,17 @@ fn (): Map {
 
 is-configured
 meta {
-    doc: """True when the context holds a complete set of credentials for some flow. Used by `hot.dev/crm` to detect Salesforce, and by the integration tests to skip without credentials."""
+    doc: """
+    True when the context holds a complete set of credentials for some flow.
+    Used by `hot.dev/crm` to detect Salesforce, and by the integration tests
+    to skip without credentials.
+
+    **Example**
+
+    ```hot
+    if(::salesforce::auth/is-configured(), ::salesforce::org/limits(), null)
+    ```
+    """
 }
 fn (): Bool {
   cfg config()
@@ -286,7 +407,17 @@ fn (): Bool {
 
 blank-option
 meta {
-    doc: """The first of `names` that `opts` has with a blank or null value, else null. Exposed for testing."""
+    doc: """
+    The first of `names` that `opts` has with a blank or null value, else
+    null. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::auth/blank-option({username: " "}, ["username", "client-id"])  // "username"
+    ::salesforce::auth/blank-option({}, ["username"])  // null
+    ```
+    """
 }
 fn (opts: Map, names: Vec): Str? {
   find-first(names, (name) { and(in(name, keys(opts)), is-blank-value(get(opts, name))) })
@@ -294,19 +425,40 @@ fn (opts: Map, names: Vec): Str? {
 
 has-identity
 meta {
-    doc: """True when `opts` carries credentials of its own. Exposed for testing."""
+    doc: """
+    True when `opts` carries credentials of its own. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::auth/has-identity({refresh-token: "r"})  // true
+    ::salesforce::auth/has-identity({instance-url: "https://acme.my.salesforce.com"})  // false
+    ```
+    """
 }
 fn (opts: Map): Bool {
   some(IDENTITY_OPTS, (name) { not(is-blank-value(get(opts, name))) })
 }
 
-setting fn (opts: Map, name: Str, fallback: Any): Any {
+setting
+meta {no-doc: true}
+fn (opts: Map, name: Str, fallback: Any): Any {
   if(in(name, keys(opts)), get(opts, name), fallback)
 }
 
 mark-credentials
 meta {
-    doc: """Mask the credentials in `opts` in this run's call records. Called first wherever `opts` arrives, so the records of the calls after it are masked too. Returns null."""
+    doc: """
+    Mask the credentials in `opts` in this run's call records. Called first
+    wherever `opts` arrives, so the records of the calls after it are masked
+    too. Returns null.
+
+    **Example**
+
+    ```hot
+    ::salesforce::auth/mark-credentials({access-token: ::hot::ctx/get("tenant.salesforce.token")})
+    ```
+    """
 }
 fn (opts: Map): Any {
   ::ctx/mark-secret([opts.token, opts.access-token, opts.refresh-token, opts.client-id, opts.client-secret, opts.private-key])
@@ -324,6 +476,14 @@ meta {
     token whatever its `flow` says. An Err when a credential or URL key is
     in `opts` but blank or null, or when `opts` has `instance-url`,
     `my-domain-url` or `audience` without a credential. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::auth/resolve-config({refresh-token: "r", client-id: "c"}, {client-id: "ctx"}).client-id  // "c"
+    ::salesforce::auth/resolve-config({}, {client-id: "ctx"}).client-id  // "ctx"
+    is-err(::salesforce::auth/resolve-config({instance-url: "https://acme.my.salesforce.com"}, {}))  // true
+    ```
     """
 }
 fn (opts: Map, ctx-config: Map): Map {
@@ -364,7 +524,17 @@ fn (opts: Map, ctx-config: Map): Map {
 
 missing-opts-for-flow
 meta {
-    doc: """The `opts` keys a flow still needs, given a config Map from `resolve-config`. Empty when the flow is fully configured. Exposed for testing."""
+    doc: """
+    The `opts` keys a flow still needs, given a config Map from
+    `resolve-config`. Empty when the flow is fully configured. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::auth/missing-opts-for-flow("refresh-token", {client-id: "3MVG..."})  // ["refresh-token"]
+    ```
+    """
 }
 fn (flow: Str, config: Map): Vec {
   required cond {
@@ -381,7 +551,9 @@ fn (flow: Str, config: Map): Vec {
 // Token exchange
 // ---------------------------------------------------------------------------
 
-to-session fn (flow: Str, tokens: Map, ttl: Int): Map {
+to-session
+meta {no-doc: true}
+fn (flow: Str, tokens: Map, ttl: Int): Map {
   ::ctx/mark-secret(filter-keys(tokens, in(%, TOKEN_FIELDS)))
   {
     token: tokens.access_token,
@@ -393,7 +565,18 @@ to-session fn (flow: Str, tokens: Map, ttl: Int): Map {
 
 exchange
 meta {
-    doc: """Mint a session for `flow` from a config Map, bypassing the cache. Returns `{token, instance-url, flow, expires-at}` or an Err (missing settings, or the token endpoint's `{status, body}`)."""
+    doc: """
+    Mint a session for `flow` from a config Map, bypassing the cache.
+    Returns `{token, instance-url, flow, expires-at}` or an Err (missing
+    settings, or the token endpoint's `{status, body}`).
+
+    **Example**
+
+    ```hot
+    minted ::salesforce::auth/exchange("refresh-token", ::salesforce::auth/config())
+    minted.instance-url
+    ```
+    """
 }
 fn (flow: Str, cfg: Map): Map {
   missing missing-for-flow(flow, cfg)
@@ -447,7 +630,19 @@ fn (flow: Str, cfg: Map): Map {
 
 cached-session
 meta {
-    doc: """The cached session for a credentials fingerprint, or null when there is none, it belongs to other credentials, or it has expired. `cache` and `now` are explicit for testing."""
+    doc: """
+    The cached session for a credentials fingerprint, or null when there is
+    none, it belongs to other credentials, or it has expired. `cache` and
+    `now` are explicit for testing.
+
+    **Example**
+
+    ```hot
+    cache {fingerprint: "abc", expires-at: 2000, session: {token: "TOKEN"}}
+    ::salesforce::auth/cached-session(cache, "abc", 1000).token  // "TOKEN"
+    ::salesforce::auth/cached-session(cache, "abc", 3000)  // null
+    ```
+    """
 }
 fn (cache: Any, key: Str, now: Int): Any {
   cond {
@@ -460,7 +655,16 @@ fn (cache: Any, key: Str, now: Int): Any {
 
 cache-key
 meta {
-    doc: """The context key holding the cached session for a credentials fingerprint. Exposed for testing."""
+    doc: """
+    The context key holding the cached session for a credentials
+    fingerprint. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::auth/cache-key("abc")  // "salesforce.session.cache.abc"
+    ```
+    """
 }
 fn (fingerprint: Str): Str {
   `${CACHE_KEY}.${fingerprint}`
@@ -531,7 +735,19 @@ fn
 
 invalidate
 meta {
-    doc: """Drop the run's cached session for these credentials so the next request mints a new one. `::salesforce::api` calls this on `401 INVALID_SESSION_ID`."""
+    doc: """
+    Drop the run's cached session for these credentials so the next request
+    mints a new one. `::salesforce::api` calls this on `401
+    INVALID_SESSION_ID`.
+
+    **Example**
+
+    ```hot
+    // The next request mints a new session
+    ::salesforce::auth/invalidate()
+    ::salesforce::org/limits()
+    ```
+    """
 }
 fn
 (): Any {

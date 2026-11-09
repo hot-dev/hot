@@ -65,7 +65,9 @@ fn (request: Map): HttpResponse {
   }
 }
 
-header fn (request: Map, name: Str): Str? {
+header
+meta {no-doc: true}
+fn (request: Map, name: Str): Str? {
   headers map-keys(or(get(request, "headers"), {}), lowercase)
   value get(headers, name)
   if(::dropbox/is-blank(value), null, trim(Str(value)))
@@ -79,6 +81,17 @@ meta {
     compared in constant time. Fails closed: an empty or null secret, a
     missing or malformed header, or a body that was re-serialised all
     give false. An explicit `app-secret` is marked as a secret.
+
+    **Example**
+
+    ```hot
+    dropbox-hook
+    meta {webhook: {service: "dropbox", path: "/dropbox/hook"}}
+    fn (request) {
+      secret ::hot::ctx/get("dropbox.app.secret")
+      if(::dropbox::webhooks/verify-signature(request, secret), "accepted", "rejected")
+    }
+    ```
     """
 }
 fn (request: Map, app-secret: Str?): Bool {
@@ -112,7 +125,19 @@ type {
 
 parse-notification
 meta {
-    doc: """Parse a notification body (pure; a webhook `request` or its decoded body Map). Unknown shapes give empty lists. Does not check the signature: use `verify-notification`."""
+    doc: """
+    Parse a notification body (pure; a webhook `request` or its decoded body
+    Map). Unknown shapes give empty lists. Does not check the signature: use
+    `verify-notification`.
+
+    **Example**
+
+    ```hot
+    note ::dropbox::webhooks/parse-notification({list_folder: {accounts: ["dbid:AAH4f99"]}, delta: {users: [12345]}})
+    note.accounts  // ["dbid:AAH4f99"]
+    note.users  // [12345]
+    ```
+    """
 }
 fn (request: Map): Notification {
   body cond {
@@ -146,15 +171,17 @@ meta {
     unset, so an unconfigured endpoint never accepts traffic.
 
     ```hot
+    HttpResponse ::hot::http/HttpResponse
+
     dropbox-hook
     meta {webhook: {service: "dropbox", path: "/dropbox/hook"}, secret-headers: ["x-dropbox-signature"]}
     fn (request) {
       note ::dropbox::webhooks/verify-notification(request)
       cond {
-        is-err(note) => { ::hot::http/HttpResponse({status: 403, body: "bad signature"}) }
+        is-err(note) => { HttpResponse({status: 403, body: "bad signature"}) }
         => {
           map(note.accounts, (account) { send("dropbox:changed", {account: account}) })
-          ::hot::http/HttpResponse({status: 200, body: ""})
+          HttpResponse({status: 200, body: ""})
         }
       }
     }

@@ -25,7 +25,9 @@ type {
     message: Str
 }
 
-body-snippet fn (body: Any): Str {
+body-snippet
+meta {no-doc: true}
+fn (body: Any): Str {
   text match body {
     Null => { "" }
     Str => { body }
@@ -38,7 +40,19 @@ body-snippet fn (body: Any): Str {
 
 http-error
 meta {
-    doc: """Build an `HttpError` from a non-2xx response. Exposed for testing; every request uses it."""
+    doc: """
+    Build an `HttpError` from a non-2xx response. Exposed for testing; every
+    request uses it.
+
+    **Example**
+
+    ```hot
+    response {status: 503, headers: {}, body: "down"}
+    e ::eu::sanctions::http/http-error(response, "https://example.com/list.xml")
+    e.status  // 503
+    e.message  // "HTTP 503 from https://example.com/list.xml: down"
+    ```
+    """
 }
 fn (response: HttpResponse, url: Str): HttpError {
   snippet body-snippet(response.body)
@@ -53,7 +67,16 @@ fn (response: HttpResponse, url: Str): HttpError {
 
 header
 meta {
-    doc: """A response header by lower-case name, or null."""
+    doc: """
+    A response header by lower-case name, or null.
+
+    **Example**
+
+    ```hot
+    ::eu::sanctions::http/header({headers: {etag: "abc"}}, "etag")  // "abc"
+    ::eu::sanctions::http/header({headers: {}}, "etag")  // null
+    ```
+    """
 }
 fn (response: Any, name: Str): Str? {
   headers or(get(or(response, {}), "headers"), {})
@@ -62,7 +85,18 @@ fn (response: Any, name: Str): Str? {
 
 body-text
 meta {
-    doc: """The response body as text: the decoded string when Hot kept it as one, otherwise the body bytes decoded as UTF-8 (a CSV served as `application/octet-stream`, or a body that happened to parse as JSON)."""
+    doc: """
+    The response body as text: the decoded string when Hot kept it as one,
+    otherwise the body bytes decoded as UTF-8 (a CSV served as
+    `application/octet-stream`, or a body that happened to parse as JSON).
+
+    **Example**
+
+    ```hot
+    ::eu::sanctions::http/body-text({body: "<export/>"})  // "<export/>"
+    ::eu::sanctions::http/body-text({})  // ""
+    ```
+    """
 }
 fn (response: Any): Str {
   body get(response, "body")
@@ -78,7 +112,19 @@ fn (response: Any): Str {
 
 request
 meta {
-    doc: """One request with the package User-Agent. Returns the `HttpResponse` on 2xx, or an Err carrying `HttpError` (transport failures pass through as their own Err)."""
+    doc: """
+    One request with the package User-Agent. Returns the `HttpResponse` on
+    2xx, or an Err carrying `HttpError` (transport failures pass through as
+    their own Err).
+
+    **Example**
+
+    ```hot
+    url "https://webgate.ec.europa.eu/fsd/fsf/public/files/xmlFullSanctionsList_1_1/content?token=dG9rZW4tMjAxNw"
+    response ::eu::sanctions::http/request("HEAD", url, {}, "")
+    ::eu::sanctions::http/header(response, "last-modified")
+    ```
+    """
 }
 fn (method: Str, url: Str, headers: Map, body: Any): HttpResponse {
   response ::hot::http/request(HttpRequest({
@@ -102,6 +148,14 @@ meta {
     with the cached version. A conditional GET would save no request: a
     changed file over the response cap still needs this HEAD for its size
     and Range support.
+
+    **Example**
+
+    ```hot
+    info ::eu::sanctions::http/head("https://webgate.ec.europa.eu/fsd/fsf/public/files/xmlFullSanctionsList_1_1/content?token=dG9rZW4tMjAxNw")
+    info.last-modified
+    info.content-length
+    ```
     """
 }
 fn (url: Str): Map {
@@ -122,7 +176,18 @@ fn (url: Str): Map {
 
 is-size-limit-error
 meta {
-    doc: """True when a request failed because the response exceeded `http.max-response-bytes`."""
+    doc: """
+    True when a request failed because the response exceeded
+    `http.max-response-bytes`.
+
+    **Example**
+
+    ```hot
+    ::eu::sanctions::http/is-size-limit-error(err("response exceeds http.max-response-bytes"))  // true
+    ::eu::sanctions::http/is-size-limit-error(err("connection refused"))  // false
+    ::eu::sanctions::http/is-size-limit-error("<export/>")  // false
+    ```
+    """
 }
 fn (result: Result): Bool {
   and(is-err(result), contains(err-message(result), "exceeds"))
@@ -130,7 +195,17 @@ fn (result: Result): Bool {
 
 too-large-message
 meta {
-    doc: """The error for a file over `http.max-response-bytes`, saying how far to raise it. Exposed for testing."""
+    doc: """
+    The error for a file over `http.max-response-bytes`, saying how far to
+    raise it. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    msg ::eu::sanctions::http/too-large-message("https://example.com/list.xml", 33554432)
+    contains(msg, "to at least 33554432 (32 MiB)")  // true
+    ```
+    """
 }
 fn (url: Str, needed-bytes: Int): Str {
   `eu-sanctions: ${url} is larger than http.max-response-bytes (16 MiB by default) and its server ignores Range requests; raise http.max-response-bytes to at least ${needed-bytes} (${floor(div(needed-bytes, 1048576))} MiB) for this list`
@@ -138,7 +213,20 @@ fn (url: Str, needed-bytes: Int): Str {
 
 get-text
 meta {
-    doc: """GET the list file as text: the body as a Str, or an Err. A response over `http.max-response-bytes` is an Err saying to raise the cap to `needed-bytes`. The server ignores Range requests, so a chunked download can't help."""
+    doc: """
+    GET the list file as text: the body as a Str, or an Err. A response over
+    `http.max-response-bytes` is an Err saying to raise the cap to
+    `needed-bytes`. The server ignores Range requests, so a chunked download
+    can't help.
+
+    **Example**
+
+    ```hot
+    // Needs http.max-response-bytes raised to at least 32 MiB
+    xml ::eu::sanctions::http/get-text("https://webgate.ec.europa.eu/fsd/fsf/public/files/xmlFullSanctionsList_1_1/content?token=dG9rZW4tMjAxNw", 33554432)
+    length(::eu::sanctions::xml/records(xml, "sanctionEntity"))
+    ```
+    """
 }
 fn (url: Str, needed-bytes: Int): Str {
   response request("GET", url, {}, "")

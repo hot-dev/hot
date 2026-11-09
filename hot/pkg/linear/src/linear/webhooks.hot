@@ -36,11 +36,13 @@ meta {
     fn (request) {
       if(not(::linear::webhooks/verify-request(request)),
         ::hot::http/HttpResponse({status: 401, body: "invalid signature"}),
-        handle-event(request.body))
+        ::hot::http/HttpResponse({status: 200, body: "ok"}))
     }
 
     // One tenant's secret, for one call
-    ::linear::webhooks/verify-request(request, {webhook-secret: "lin_wh_tenant_b"})
+    tenant-b-webhook fn (request) {
+      ::linear::webhooks/verify-request(request, {webhook-secret: ::hot::ctx/get("tenant-b.linear.webhook.secret")})
+    }
     ```
     """
 }
@@ -95,7 +97,9 @@ fn
 // True when the payload's webhookTimestamp (epoch millis) is within
 // max-age-ms of now, in either direction. Missing or malformed
 // timestamps fail closed.
-timestamp-fresh fn (raw-body: Str, max-age-ms: Int): Bool {
+timestamp-fresh
+meta {no-doc: true}
+fn (raw-body: Str, max-age-ms: Int): Bool {
   payload ::json/from-json(raw-body)
   cond {
     is-err(payload) => { false }

@@ -87,11 +87,15 @@ type {
     error: Str?,
 }
 
-ok-result fn (text: Str): SynthesisResult {
+ok-result
+meta {no-doc: true}
+fn (text: Str): SynthesisResult {
     SynthesisResult({ok: true, text: text, error: null})
 }
 
-err-result fn (msg: Str): SynthesisResult {
+err-result
+meta {no-doc: true}
+fn (msg: Str): SynthesisResult {
     SynthesisResult({ok: false, text: "", error: msg})
 }
 
@@ -108,6 +112,22 @@ meta {
     Provider halts (`fail()`) propagate to the caller. Compose with
     `::ai::agent::lifecycle/run-session-job` to get automatic per-
     session halt recovery — see the namespace doc above.
+
+    **Example**
+
+    ```hot
+    ::synthesis ::ai::agent::synthesis
+
+    // Leave out fallback-text to call the model.
+    result ::synthesis/run-once(::synthesis/SynthesisInput({
+        chat-opts: ::ai::chat/ChatOptions({model: "claude-sonnet-4-5"}),
+        system: "Summarize the last day of activity.",
+        user-text: "Alice shipped the fix. Bob opened two tickets.",
+        fallback-text: "Daily summary is offline.",
+    }))
+    result.ok  // true
+    result.text  // "Daily summary is offline."
+    ```
     """
 }
 fn (input: SynthesisInput): SynthesisResult {

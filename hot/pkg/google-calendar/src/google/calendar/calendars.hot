@@ -20,7 +20,21 @@ meta {
 
 list-calendars
 meta {
-    doc: """GET /users/me/calendarList - one page of the user's calendars: `{items: [{id, summary, timeZone, accessRole, primary?, ...}], nextPageToken?, nextSyncToken?}`. Options: `minAccessRole` (`freeBusyReader`, `reader`, `writer`, `owner`), `showHidden`, `showDeleted`, `maxResults` (max 250), `pageToken`, `syncToken`. Scope: `calendar.readonly`."""
+    doc: """
+    GET /users/me/calendarList - one page of the user's calendars: `{items:
+    [{id, summary, timeZone, accessRole, primary?, ...}], nextPageToken?,
+    nextSyncToken?}`. Options: `minAccessRole` (`freeBusyReader`, `reader`,
+    `writer`, `owner`), `showHidden`, `showDeleted`, `maxResults` (max 250),
+    `pageToken`, `syncToken`. Scope: `calendar.readonly`.
+
+    **Example**
+
+    ```hot
+    page ::google::calendar::calendars/list-calendars({minAccessRole: "writer", maxResults: 50})
+    map(page.items, %.summary)
+    page.nextPageToken
+    ```
+    """
 }
 fn
 (): Map {
@@ -32,7 +46,20 @@ fn
 
 list-all-calendars
 meta {
-    doc: """Every calendar on the user's list (all pages). Same options as `list-calendars`. Scope: `calendar.readonly`."""
+    doc: """
+    Every calendar on the user's list (all pages). Same options as
+    `list-calendars`. Scope: `calendar.readonly`.
+
+    **Example**
+
+    ```hot
+    calendars ::google::calendar::calendars/list-all-calendars()
+    find-first(calendars, %.primary)
+
+    // Hidden calendars too
+    ::google::calendar::calendars/list-all-calendars({showHidden: true})
+    ```
+    """
 }
 fn
 (): Vec {
@@ -45,7 +72,18 @@ fn
 
 get-calendar-list-entry
 meta {
-    doc: """GET /users/me/calendarList/{calendarId} - the user's entry for one calendar (summary, color, `accessRole`, notification settings). Scope: `calendar.readonly`."""
+    doc: """
+    GET /users/me/calendarList/{calendarId} - the user's entry for one
+    calendar (summary, color, `accessRole`, notification settings). Scope:
+    `calendar.readonly`.
+
+    **Example**
+
+    ```hot
+    entry ::google::calendar::calendars/get-calendar-list-entry("team@group.calendar.google.com")
+    entry.accessRole
+    ```
+    """
 }
 fn
 (calendar-id: Str): Map {
@@ -61,7 +99,18 @@ fn
 
 get-calendar
 meta {
-    doc: """GET /calendars/{calendarId} - calendar metadata: `id`, `summary`, `description`, `timeZone`, `location`. `"primary"` is the user's main calendar. Scope: `calendar.readonly`."""
+    doc: """
+    GET /calendars/{calendarId} - calendar metadata: `id`, `summary`,
+    `description`, `timeZone`, `location`. `"primary"` is the user's main
+    calendar. Scope: `calendar.readonly`.
+
+    **Example**
+
+    ```hot
+    calendar ::google::calendar::calendars/get-calendar("primary")
+    calendar.timeZone
+    ```
+    """
 }
 fn
 (calendar-id: Str): Map {
@@ -73,7 +122,16 @@ fn
 
 build-calendar
 meta {
-    doc: """The `calendars.insert` body (pure): `{summary}` plus `timeZone` (IANA), `description` and `location` from `opts` when set."""
+    doc: """
+    The `calendars.insert` body (pure): `{summary}` plus `timeZone` (IANA),
+    `description` and `location` from `opts` when set.
+
+    **Example**
+
+    ```hot
+    ::google::calendar::calendars/build-calendar("Team", {timeZone: "America/Chicago"})  // {summary: "Team", timeZone: "America/Chicago"}
+    ```
+    """
 }
 fn (summary: Str, opts: Map): Map {
   ::cal/compact({summary: summary, timeZone: get(opts, "timeZone"), description: get(opts, "description"), location: get(opts, "location")})
@@ -81,7 +139,18 @@ fn (summary: Str, opts: Map): Map {
 
 create-calendar
 meta {
-    doc: """POST /calendars - create a secondary calendar owned by the user. Options: `timeZone`, `description`, `location`. Returns the calendar with its new `id`. Scope: `calendar`."""
+    doc: """
+    POST /calendars - create a secondary calendar owned by the user.
+    Options: `timeZone`, `description`, `location`. Returns the calendar
+    with its new `id`. Scope: `calendar`.
+
+    **Example**
+
+    ```hot
+    calendar ::google::calendar::calendars/create-calendar("Team", {timeZone: "America/Chicago", description: "Shared team events"})
+    calendar.id
+    ```
+    """
 }
 fn
 (summary: Str): Map {
@@ -93,7 +162,18 @@ fn
 
 get-colors
 meta {
-    doc: """GET /colors - the color palette: `{calendar: {id: {background, foreground}}, event: {...}}`. Use the ids as `colorId` on events and calendar-list entries. Scope: `calendar.readonly`."""
+    doc: """
+    GET /colors - the color palette: `{calendar: {id: {background,
+    foreground}}, event: {...}}`. Use the ids as `colorId` on events and
+    calendar-list entries. Scope: `calendar.readonly`.
+
+    **Example**
+
+    ```hot
+    colors ::google::calendar::calendars/get-colors()
+    keys(colors.event)
+    ```
+    """
 }
 fn
 (): Map {
@@ -109,7 +189,19 @@ fn
 
 build-free-busy
 meta {
-    doc: """The `freeBusy` body (pure): `{timeMin, timeMax, items: [{id}]}` plus `timeZone`, `groupExpansionMax` and `calendarExpansionMax` from `opts` when set. `calendar-ids` may name users' primary calendars by email, or groups."""
+    doc: """
+    The `freeBusy` body (pure): `{timeMin, timeMax, items: [{id}]}` plus
+    `timeZone`, `groupExpansionMax` and `calendarExpansionMax` from `opts`
+    when set. `calendar-ids` may name users' primary calendars by email, or
+    groups.
+
+    **Example**
+
+    ```hot
+    ::google::calendar::calendars/build-free-busy("2026-11-03T13:00:00Z", "2026-11-03T22:00:00Z", ["ada@example.com"], {timeZone: "UTC"})
+    // {timeMin: "2026-11-03T13:00:00Z", timeMax: "2026-11-03T22:00:00Z", timeZone: "UTC", items: [{id: "ada@example.com"}]}
+    ```
+    """
 }
 fn (time-min: Str, time-max: Str, calendar-ids: Vec, opts: Map): Map {
   ::cal/compact({
@@ -146,7 +238,19 @@ fn
 
 busy-periods
 meta {
-    doc: """The `busy` periods (`[{start, end}]`) for one calendar in a `query-free-busy` response (pure), or an Err carrying Google's error reasons when that calendar could not be read."""
+    doc: """
+    The `busy` periods (`[{start, end}]`) for one calendar in a
+    `query-free-busy` response (pure), or an Err carrying Google's error
+    reasons when that calendar could not be read.
+
+    **Example**
+
+    ```hot
+    response {calendars: {"ada@example.com": {busy: [{start: "2026-11-03T15:00:00Z", end: "2026-11-03T15:30:00Z"}]}}}
+    ::google::calendar::calendars/busy-periods(response, "ada@example.com")
+    // [{start: "2026-11-03T15:00:00Z", end: "2026-11-03T15:30:00Z"}]
+    ```
+    """
 }
 fn (response: Map, calendar-id: Str): Vec {
   entry get(or(get(response, "calendars"), {}), calendar-id)

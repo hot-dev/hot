@@ -44,7 +44,17 @@ PACKAGE_AGENT "hot-dev-ransomware-live-pkg/0.1 (+https://hot.dev)"
 
 given
 meta {
-    doc: """True for a non-null value that is not a blank string."""
+    doc: """
+    True for a non-null value that is not a blank string.
+
+    **Example**
+
+    ```hot
+    ::ransomware-live::api/given("lockbit3")  // true
+    ::ransomware-live::api/given("  ")  // false
+    ::ransomware-live::api/given(null)  // false
+    ```
+    """
 }
 fn (v: Any): Bool {
   match v {
@@ -54,7 +64,9 @@ fn (v: Any): Bool {
   }
 }
 
-pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
+pick
+meta {no-doc: true}
+fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
   from-opts get(opts, key)
   from-ctx ::ctx/get(ctx-key)
   cond {
@@ -64,7 +76,9 @@ pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
   }
 }
 
-strip-slash fn (url: Str): Str {
+strip-slash
+meta {no-doc: true}
+fn (url: Str): Str {
   ::re/replace-all(url, "/+$", "")
 }
 
@@ -80,7 +94,8 @@ meta {
     **Example**
 
     ```hot
-    cfg ::ransomware-live::api/resolve({api-key: tenant.rl-key})
+    cfg ::ransomware-live::api/resolve({api-key: ::hot::ctx/get("ransomware-live.api-key")})
+    cfg.base-url
     ```
     """
 }
@@ -107,7 +122,16 @@ fn (opts: Map): Map {
 
 require-api-key
 meta {
-    doc: """The API key from resolved settings, or an Err naming where to set it."""
+    doc: """
+    The API key from resolved settings, or an Err naming where to set it.
+
+    **Example**
+
+    ```hot
+    cfg ::ransomware-live::api/resolve({})
+    key ::ransomware-live::api/require-api-key(cfg)
+    ```
+    """
 }
 fn (cfg: Map): Str {
   cond {
@@ -139,7 +163,9 @@ type {
     message: Str
 }
 
-body-detail fn (body: Any): Str? {
+body-detail
+meta {no-doc: true}
+fn (body: Any): Str? {
   cond {
     is-str(body) => { if(gt(length(body), 200), `${slice(body, 0, 200)}…`, body) }
     is-map(body) => {
@@ -150,7 +176,9 @@ body-detail fn (body: Any): Str? {
   }
 }
 
-retry-after fn (headers: Map): Int? {
+retry-after
+meta {no-doc: true}
+fn (headers: Map): Int? {
   v get(headers, "retry-after")
   cond {
     is-null(v) => { null }
@@ -161,7 +189,19 @@ retry-after fn (headers: Map): Int? {
 
 http-error
 meta {
-    doc: """Build an `HttpError` from a non-2xx response. Exposed for testing; every request uses it."""
+    doc: """
+    Build an `HttpError` from a non-2xx response. Exposed for testing; every
+    request uses it.
+
+    **Example**
+
+    ```hot
+    response ::hot::http/HttpResponse({status: 429, headers: {retry-after: "30"}, body: {error: "Too many requests"}})
+    e ::ransomware-live::api/http-error(response, "https://api.ransomware.live/v2/groups")
+    e.retry-after  // 30
+    e.message  // "ransomware-live: HTTP 429: Too many requests"
+    ```
+    """
 }
 fn (response: HttpResponse, url: Str): HttpError {
   headers or(response.headers, {})
@@ -179,7 +219,16 @@ fn (response: HttpResponse, url: Str): HttpError {
 
 is-not-found
 meta {
-    doc: """True when `e` is an `HttpError` with status 404."""
+    doc: """
+    True when `e` is an `HttpError` with status 404.
+
+    **Example**
+
+    ```hot
+    ::ransomware-live::api/is-not-found({status: 404})  // true
+    ::ransomware-live::api/is-not-found({status: 500})  // false
+    ```
+    """
 }
 fn (e: Any): Bool {
   and(is-map(e), eq(get(e, "status"), 404))
@@ -191,7 +240,17 @@ fn (e: Any): Bool {
 
 query-string
 meta {
-    doc: """Build a `?a=1&b=2` suffix from a Map, dropping null and blank values (pure); `""` when nothing remains."""
+    doc: """
+    Build a `?a=1&b=2` suffix from a Map, dropping null and blank values
+    (pure); `""` when nothing remains.
+
+    **Example**
+
+    ```hot
+    ::ransomware-live::api/query-string({group: "lockbit3", q: null})  // "?group=lockbit3"
+    ::ransomware-live::api/query-string({q: ""})  // ""
+    ```
+    """
 }
 fn (params: Map): Str {
   ::uri/query-string(filter-vals(params, given))
@@ -199,7 +258,15 @@ fn (params: Map): Str {
 
 path-segment
 meta {
-    doc: """Percent-encode one path segment."""
+    doc: """
+    Percent-encode one path segment.
+
+    **Example**
+
+    ```hot
+    ::ransomware-live::api/path-segment("lock bit")  // "lock%20bit"
+    ```
+    """
 }
 fn (value: Any): Str {
   ::uri/encode(Str(value))
@@ -211,6 +278,13 @@ meta {
     GET (or another method) a ransomware.live URL with `headers`, returning
     the `HttpResponse` on 2xx or an Err carrying `HttpError`. A
     transport failure passes through as its own Err.
+
+    **Example**
+
+    ```hot
+    response ::ransomware-live::api/request("GET", "https://api.ransomware.live/v2/groups", {Accept: "application/json"})
+    response.status
+    ```
     """
 }
 fn (method: Str, url: Str, headers: Map): HttpResponse {
@@ -229,7 +303,20 @@ fn (method: Str, url: Str, headers: Map): HttpResponse {
 
 get-json
 meta {
-    doc: """GET a JSON resource and return the decoded body, or an Err carrying `HttpError`."""
+    doc: """
+    GET a JSON resource and return the decoded body, or an Err carrying
+    `HttpError`.
+
+    **Example**
+
+    ```hot
+    groups ::ransomware-live::api/get-json("https://api.ransomware.live/v2/groups", {})
+    length(groups)
+
+    key ::hot::ctx/get("ransomware-live.api-key")
+    ::ransomware-live::api/get-json("https://api-pro.ransomware.live/groups", {X-API-KEY: key})
+    ```
+    """
 }
 fn (url: Str, headers: Map): Any {
   response request("GET", url, {Accept: "application/json", ...headers})

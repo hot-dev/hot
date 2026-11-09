@@ -30,7 +30,9 @@ type {
     message: Str
 }
 
-body-snippet fn (body: Any): Str {
+body-snippet
+meta {no-doc: true}
+fn (body: Any): Str {
   text match body {
     Null => { "" }
     Str => { body }
@@ -43,7 +45,19 @@ body-snippet fn (body: Any): Str {
 
 http-error
 meta {
-    doc: """Build an `HttpError` from a non-2xx response. Exposed for testing; every request uses it."""
+    doc: """
+    Build an `HttpError` from a non-2xx response. Exposed for testing; every
+    request uses it.
+
+    **Example**
+
+    ```hot
+    response ::hot::http/HttpResponse({status: 503, headers: {}, body: "down"})
+    e ::uk::sanctions::http/http-error(response, "https://example.com/list.xml")
+    e.status  // 503
+    e.message  // "HTTP 503 from https://example.com/list.xml: down"
+    ```
+    """
 }
 fn (response: HttpResponse, url: Str): HttpError {
   snippet body-snippet(response.body)
@@ -58,7 +72,16 @@ fn (response: HttpResponse, url: Str): HttpError {
 
 header
 meta {
-    doc: """A response header by lower-case name, or null."""
+    doc: """
+    A response header by lower-case name, or null.
+
+    **Example**
+
+    ```hot
+    ::uk::sanctions::http/header({headers: {etag: "abc"}}, "etag")  // "abc"
+    ::uk::sanctions::http/header({headers: {}}, "etag")  // null
+    ```
+    """
 }
 fn (response: Any, name: Str): Str? {
   headers or(get(or(response, {}), "headers"), {})
@@ -67,7 +90,18 @@ fn (response: Any, name: Str): Str? {
 
 body-text
 meta {
-    doc: """The response body as text: the decoded string when Hot kept it as one, otherwise the body bytes decoded as UTF-8 (a CSV served as `application/octet-stream`, or a body that happened to parse as JSON)."""
+    doc: """
+    The response body as text: the decoded string when Hot kept it as one,
+    otherwise the body bytes decoded as UTF-8 (a CSV served as
+    `application/octet-stream`, or a body that happened to parse as JSON).
+
+    **Example**
+
+    ```hot
+    ::uk::sanctions::http/body-text({body: "<Designations/>"})  // "<Designations/>"
+    ::uk::sanctions::http/body-text({})  // ""
+    ```
+    """
 }
 fn (response: Any): Str {
   body get(response, "body")
@@ -83,7 +117,19 @@ fn (response: Any): Str {
 
 request
 meta {
-    doc: """One request with the package User-Agent. Returns the `HttpResponse` on 2xx, or an Err carrying `HttpError` (transport failures pass through as their own Err)."""
+    doc: """
+    One request with the package User-Agent. Returns the `HttpResponse` on
+    2xx, or an Err carrying `HttpError` (transport failures pass through as
+    their own Err).
+
+    **Example**
+
+    ```hot
+    url "https://sanctionslist.fcdo.gov.uk/docs/UK-Sanctions-List.xml"
+    response ::uk::sanctions::http/request("HEAD", url, {}, "")
+    ::uk::sanctions::http/header(response, "etag")
+    ```
+    """
 }
 fn (method: Str, url: Str, headers: Map, body: Any): HttpResponse {
   response ::hot::http/request(HttpRequest({
@@ -107,6 +153,14 @@ meta {
     with the cached version. A conditional GET would save no request: a
     changed file over the response cap still needs this HEAD for its size
     and Range support.
+
+    **Example**
+
+    ```hot
+    info ::uk::sanctions::http/head("https://sanctionslist.fcdo.gov.uk/docs/UK-Sanctions-List.xml")
+    info.etag
+    info.content-length
+    ```
     """
 }
 fn (url: Str): Map {
@@ -127,7 +181,18 @@ fn (url: Str): Map {
 
 is-size-limit-error
 meta {
-    doc: """True when a request failed because the response exceeded `http.max-response-bytes`."""
+    doc: """
+    True when a request failed because the response exceeded
+    `http.max-response-bytes`.
+
+    **Example**
+
+    ```hot
+    ::uk::sanctions::http/is-size-limit-error(err("response exceeds http.max-response-bytes"))  // true
+    ::uk::sanctions::http/is-size-limit-error(err("connection refused"))  // false
+    ::uk::sanctions::http/is-size-limit-error("<Designations/>")  // false
+    ```
+    """
 }
 fn (result: Result): Bool {
   and(is-err(result), contains(err-message(result), "exceeds"))
@@ -135,7 +200,17 @@ fn (result: Result): Bool {
 
 byte-ranges
 meta {
-    doc: """Split `size` bytes into inclusive `[start, end]` ranges of at most `chunk` bytes (pure). `byte-ranges(10, 4)` is `[[0, 3], [4, 7], [8, 9]]`."""
+    doc: """
+    Split `size` bytes into inclusive `[start, end]` ranges of at most
+    `chunk` bytes (pure). `byte-ranges(10, 4)` is `[[0, 3], [4, 7], [8,
+    9]]`.
+
+    **Example**
+
+    ```hot
+    ::uk::sanctions::http/byte-ranges(10, 4)  // [[0, 3], [4, 7], [8, 9]]
+    ```
+    """
 }
 fn (size: Int, chunk: Int): Vec {
   c max(chunk, 1)
@@ -146,7 +221,9 @@ fn (size: Int, chunk: Int): Vec {
   })
 }
 
-fetch-ranges fn (url: Str, ranges: Vec, index: Int, acc: Bytes): Bytes {
+fetch-ranges
+meta {no-doc: true}
+fn (url: Str, ranges: Vec, index: Int, acc: Bytes): Bytes {
   cond {
     gte(index, length(ranges)) => { acc }
     => {
@@ -165,7 +242,17 @@ fetch-ranges fn (url: Str, ranges: Vec, index: Int, acc: Bytes): Bytes {
 
 too-large-message
 meta {
-    doc: """The error for a file over `http.max-response-bytes` that can't be fetched in Range chunks. Exposed for testing."""
+    doc: """
+    The error for a file over `http.max-response-bytes` that can't be
+    fetched in Range chunks. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    msg ::uk::sanctions::http/too-large-message("https://example.com/list.xml")
+    contains(msg, "does not support Range requests")  // true
+    ```
+    """
 }
 fn (url: Str): Str {
   `uk-sanctions: ${url} is larger than http.max-response-bytes (16 MiB by default) and its server does not support Range requests; raise http.max-response-bytes above the file's size`
@@ -178,6 +265,18 @@ meta {
     is fetched again in Range chunks of `chunk-bytes`, which the UK
     server supports. If it stops supporting them, the Err says to raise
     the cap. Returns `{text, etag, last-modified}`.
+
+    **Example**
+
+    ```hot
+    url "https://sanctionslist.fcdo.gov.uk/docs/UK-Sanctions-List.xml"
+    out ::uk::sanctions::http/get-text(url)
+    out.etag
+    length(::uk::sanctions::xml/records(out.text, "Designation"))
+
+    // Smaller Range chunks, for a lower http.max-response-bytes
+    ::uk::sanctions::http/get-text(url, 4194304)
+    ```
     """
 }
 fn

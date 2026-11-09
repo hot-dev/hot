@@ -11,7 +11,23 @@ meta {
 
 create-contact
 meta {
-    doc: """POST /contacts - Create a contact. `fields`: `email`, `external_id`, `name`, `phone`, `role` ("user" by default, or "lead"), `owner_id`, `signed_up_at`, `custom_attributes` (attributes must already exist). Unset fields are omitted."""
+    doc: """
+    POST /contacts - Create a contact. `fields`: `email`, `external_id`,
+    `name`, `phone`, `role` ("user" by default, or "lead"), `owner_id`,
+    `signed_up_at`, `custom_attributes` (attributes must already exist).
+    Unset fields are omitted.
+
+    **Example**
+
+    ```hot
+    contact ::intercom::contacts/create-contact({
+      email: "ada@example.com",
+      name: "Ada Lovelace",
+      external_id: "user-42"
+    })
+    contact.id
+    ```
+    """
 }
 fn
 (fields: Map): Any {
@@ -23,7 +39,16 @@ fn
 
 get-contact
 meta {
-    doc: """GET /contacts/{id} - One contact by Intercom id."""
+    doc: """
+    GET /contacts/{id} - One contact by Intercom id.
+
+    **Example**
+
+    ```hot
+    contact ::intercom::contacts/get-contact("6643703ffae7834d1792fd30")
+    contact.email
+    ```
+    """
 }
 fn
 (id: Str): Any {
@@ -35,7 +60,17 @@ fn
 
 find-contact-by-external-id
 meta {
-    doc: """GET /contacts/find_by_external_id/{external_id} - The contact with your `external_id`, or an Err with status 404."""
+    doc: """
+    GET /contacts/find_by_external_id/{external_id} - The contact with your
+    `external_id`, or an Err with status 404.
+
+    **Example**
+
+    ```hot
+    contact ::intercom::contacts/find-contact-by-external-id("user-42")
+    contact.id
+    ```
+    """
 }
 fn
 (external-id: Str): Any {
@@ -47,7 +82,19 @@ fn
 
 update-contact
 meta {
-    doc: """PUT /contacts/{id} - Update a contact's fields (same names as create). Unset fields are omitted."""
+    doc: """
+    PUT /contacts/{id} - Update a contact's fields (same names as create).
+    Unset fields are omitted.
+
+    **Example**
+
+    ```hot
+    ::intercom::contacts/update-contact("6643703ffae7834d1792fd30", {
+      name: "Ada King",
+      custom_attributes: {plan: "enterprise"}
+    })
+    ```
+    """
 }
 fn
 (id: Str, fields: Map): Any {
@@ -59,7 +106,20 @@ fn
 
 list-contacts
 meta {
-    doc: """GET /contacts - One page of contacts: `{data, pages, total_count}`. `options`: `per_page` (default 10, max 150), `starting_after`."""
+    doc: """
+    GET /contacts - One page of contacts: `{data, pages, total_count}`.
+    `options`: `per_page` (default 10, max 150), `starting_after`.
+
+    **Example**
+
+    ```hot
+    page ::intercom::contacts/list-contacts({per_page: 50})
+    length(page.data)
+
+    // The next page
+    more ::intercom::contacts/list-contacts({per_page: 50, starting_after: ::intercom::api/next-cursor(page)})
+    ```
+    """
 }
 fn
 (): Any {
@@ -100,7 +160,17 @@ fn
 
 search-all-contacts
 meta {
-    doc: """Run `search-contacts` across pages until `limit` contacts or the last page. Returns a Vec."""
+    doc: """
+    Run `search-contacts` across pages until `limit` contacts or the last
+    page. Returns a Vec.
+
+    **Example**
+
+    ```hot
+    contacts ::intercom::contacts/search-all-contacts({field: "custom_attributes.plan", operator: "=", value: "enterprise"}, 500)
+    length(contacts)
+    ```
+    """
 }
 fn
 (query: Map, limit: Int): Vec {
@@ -115,7 +185,17 @@ fn
 
 find-contact-by-email
 meta {
-    doc: """POST /contacts/search by exact email. Returns the first matching contact, or null."""
+    doc: """
+    POST /contacts/search by exact email. Returns the first matching
+    contact, or null.
+
+    **Example**
+
+    ```hot
+    contact ::intercom::contacts/find-contact-by-email("ada@example.com")
+    if(is-null(contact), "not found", contact.id)
+    ```
+    """
 }
 fn
 (email: Str): Any {
@@ -136,7 +216,18 @@ fn
 
 build-note-body
 meta {
-    doc: """Contact note body: `{body, admin_id?}`. A null admin id is omitted (Intercom then attributes the note to the token's admin). Exposed for testing."""
+    doc: """
+    Contact note body: `{body, admin_id?}`. A null admin id is omitted
+    (Intercom then attributes the note to the token's admin). Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::intercom::contacts/build-note-body("Called about renewal.", "814860")  // {body: "Called about renewal.", admin_id: "814860"}
+    ::intercom::contacts/build-note-body("Called about renewal.", null)  // {body: "Called about renewal."}
+    ```
+    """
 }
 fn (body: Str, admin-id: Str?): Map {
   ::api/compact({body: body, admin_id: admin-id})
@@ -145,7 +236,20 @@ fn (body: Str, admin-id: Str?): Map {
 create-note
 meta {
     ctx: {"intercom.admin.id": {required: false, secret: false}},
-    doc: """POST /contacts/{id}/notes - Add a note to a contact's profile (HTML allowed), authored by `admin-id` in `opts` or `intercom.admin.id` when set, or by an explicit admin id."""
+    doc: """
+    POST /contacts/{id}/notes - Add a note to a contact's profile (HTML
+    allowed), authored by `admin-id` in `opts` or `intercom.admin.id` when
+    set, or by an explicit admin id.
+
+    **Example**
+
+    ```hot
+    ::intercom::contacts/create-note("6643703ffae7834d1792fd30", "Asked for a <b>renewal quote</b>.")
+
+    // As one admin, for this call
+    ::intercom::contacts/create-note("6643703ffae7834d1792fd30", "Renewal signed.", {admin-id: "814860"})
+    ```
+    """
 }
 fn
 (contact-id: Str, body: Str): Any {
@@ -163,7 +267,18 @@ fn
 
 list-notes
 meta {
-    doc: """GET /contacts/{id}/notes - A contact's notes, newest first: `{data, pages, total_count}`. `options`: `page`, `per_page`, `order` ("asc"/"desc")."""
+    doc: """
+    GET /contacts/{id}/notes - A contact's notes, newest first: `{data,
+    pages, total_count}`. `options`: `page`, `per_page`, `order`
+    ("asc"/"desc").
+
+    **Example**
+
+    ```hot
+    notes ::intercom::contacts/list-notes("6643703ffae7834d1792fd30", {per_page: 20, order: "desc"})
+    map(notes.data, %.body)
+    ```
+    """
 }
 fn
 (contact-id: Str): Any {
@@ -182,7 +297,16 @@ fn
 
 attach-company
 meta {
-    doc: """POST /contacts/{id}/companies - Attach a contact to a company by the company's Intercom `id` (not your `company_id`)."""
+    doc: """
+    POST /contacts/{id}/companies - Attach a contact to a company by the
+    company's Intercom `id` (not your `company_id`).
+
+    **Example**
+
+    ```hot
+    ::intercom::contacts/attach-company("6643703ffae7834d1792fd30", "66f1a2b3c4d5e6f708192a3b")
+    ```
+    """
 }
 fn
 (contact-id: Str, company-id: Str): Any {
@@ -194,7 +318,16 @@ fn
 
 detach-company
 meta {
-    doc: """DELETE /contacts/{id}/companies/{company_id} - Detach a contact from a company (Intercom ids)."""
+    doc: """
+    DELETE /contacts/{id}/companies/{company_id} - Detach a contact from a
+    company (Intercom ids).
+
+    **Example**
+
+    ```hot
+    ::intercom::contacts/detach-company("6643703ffae7834d1792fd30", "66f1a2b3c4d5e6f708192a3b")
+    ```
+    """
 }
 fn
 (contact-id: Str, company-id: Str): Any {
@@ -206,7 +339,16 @@ fn
 
 list-companies
 meta {
-    doc: """GET /contacts/{id}/companies - The companies a contact belongs to."""
+    doc: """
+    GET /contacts/{id}/companies - The companies a contact belongs to.
+
+    **Example**
+
+    ```hot
+    companies ::intercom::contacts/list-companies("6643703ffae7834d1792fd30")
+    map(companies.data, %.name)
+    ```
+    """
 }
 fn
 (contact-id: Str): Any {

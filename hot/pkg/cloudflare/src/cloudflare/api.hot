@@ -81,7 +81,9 @@ type {
 // ---------------------------------------------------------------------------
 
 // A context value as a non-empty Str, or null.
-ctx-str fn (key: Str): Str? {
+ctx-str
+meta {no-doc: true}
+fn (key: Str): Str? {
   value ::ctx/get(key)
   cond {
     is-null(value) => { null }
@@ -90,7 +92,9 @@ ctx-str fn (key: Str): Str? {
   }
 }
 
-non-blank fn (value: Any): Str? {
+non-blank
+meta {no-doc: true}
+fn (value: Any): Str? {
   if(is-str(value), if(is-blank(value), null, trim(value)), null)
 }
 
@@ -99,13 +103,26 @@ IDENTITY_KEYS ["token", "api-key", "email", "account-id"]
 
 blank-credential
 meta {
-    doc: """The first of `names` that `opts` has but with a blank or null value, else null. Such a key is an error, never a fallback to context: a tenant whose key is missing must not run on the project's credentials."""
+    doc: """
+    The first of `names` that `opts` has but with a blank or null value,
+    else null. Such a key is an error, never a fallback to context: a tenant
+    whose key is missing must not run on the project's credentials.
+
+    **Example**
+
+    ```hot
+    ::cloudflare::api/blank-credential({token: ""}, ["token", "account-id"])  // "token"
+    ::cloudflare::api/blank-credential({account-id: "acc123"}, ["token", "account-id"])  // null
+    ```
+    """
 }
 fn (opts: Map, names: Vec): Str? {
   find-first(names, (name) { and(in(name, keys(opts)), is-null(non-blank(get(opts, name)))) })
 }
 
-blank-error fn (name: Str): Any {
+blank-error
+meta {no-doc: true}
+fn (name: Str): Any {
   err(ConfigError({message: `cloudflare: ${name} is in the call's opts but is blank or null. Pass a value, or leave ${name} out to use context.`}))
 }
 
@@ -121,6 +138,13 @@ meta {
     context), or when `opts` has only half of the pair. `account-id` may
     stay null: account-scoped calls check it. Exposed for testing;
     `resolve` feeds it the context.
+
+    **Example**
+
+    ```hot
+    settings ::cloudflare::api/resolve-from({account-id: "acc123"}, {"cloudflare.token": ::hot::ctx/get("cloudflare.token")})
+    settings.account-id
+    ```
     """
 }
 fn (opts: Map, ctx-values: Map): Map {
@@ -189,6 +213,16 @@ meta {
     `cloudflare.email`, sent as `X-Auth-Key` / `X-Auth-Email`). Returns an
     Err carrying `ConfigError` when neither is configured. The 3-arity
     form takes the values explicitly (null for unset).
+
+    **Example**
+
+    ```hot
+    // From context
+    headers ::cloudflare::api/auth-headers()
+
+    // From explicit values. Pass null for the ones you don't use.
+    token-headers ::cloudflare::api/auth-headers(::hot::ctx/get("cloudflare.token"), null, null)
+    ```
     """
 }
 fn
@@ -209,7 +243,18 @@ fn
 
 account-id
 meta {
-    doc: """The `account-id` in `opts`, else the `cloudflare.account.id` context variable, or an Err carrying `ConfigError` when it is unset — never an empty path segment. An `account-id` in `opts` that is blank or null is an Err too."""
+    doc: """
+    The `account-id` in `opts`, else the `cloudflare.account.id` context
+    variable, or an Err carrying `ConfigError` when it is unset — never an
+    empty path segment. An `account-id` in `opts` that is blank or null is
+    an Err too.
+
+    **Example**
+
+    ```hot
+    ::cloudflare::api/account-id({account-id: "acc123"})  // "acc123"
+    ```
+    """
 }
 fn
 (): Str {
@@ -234,13 +279,23 @@ fn
 
 seg
 meta {
-    doc: """URL-encode one path segment (KV keys, script, bucket and project names)."""
+    doc: """
+    URL-encode one path segment (KV keys, script, bucket and project names).
+
+    **Example**
+
+    ```hot
+    ::cloudflare::api/seg("session:abc/1")  // "session%3Aabc%2F1"
+    ```
+    """
 }
 fn (value: Any): Str {
   ::uri/encode(Str(value))
 }
 
-query-pairs fn (prefix: Str, params: Map): Vec {
+query-pairs
+meta {no-doc: true}
+fn (prefix: Str, params: Map): Vec {
   mapcat(keys(params), (k) {
     name if(is-empty(prefix), Str(k), `${prefix}.${k}`)
     value get(params, k)
@@ -262,6 +317,13 @@ meta {
     nothing is left). Nested maps use Cloudflare's dot form
     (`{name: {contains: "api"}}` → `name.contains=api`) and Vecs repeat
     the key, matching the official SDKs.
+
+    **Example**
+
+    ```hot
+    ::cloudflare::api/query({type: "A", name: {contains: "api"}, page: null})  // "?type=A&name.contains=api"
+    ::cloudflare::api/query({})  // ""
+    ```
     """
 }
 fn (params: Map): Str {
@@ -276,7 +338,9 @@ fn (params: Map): Str {
 // Responses and errors
 // ---------------------------------------------------------------------------
 
-envelope-errors fn (body: Any): Vec {
+envelope-errors
+meta {no-doc: true}
+fn (body: Any): Vec {
   cond {
     not(is-map(body)) => { [] }
     is-vec(get(body, "errors")) => { get(body, "errors") }
@@ -284,7 +348,9 @@ envelope-errors fn (body: Any): Vec {
   }
 }
 
-format-error fn (e: Any): Str {
+format-error
+meta {no-doc: true}
+fn (e: Any): Str {
   cond {
     not(is-map(e)) => { Str(e) }
     => {
@@ -303,7 +369,18 @@ format-error fn (e: Any): Str {
 
 error-message
 meta {
-    doc: """One readable line from a failed response: Cloudflare's `errors` joined with `; ` (including any `error_chain`), else the text body, else `HTTP <status>`."""
+    doc: """
+    One readable line from a failed response: Cloudflare's `errors` joined
+    with `; ` (including any `error_chain`), else the text body, else `HTTP
+    <status>`.
+
+    **Example**
+
+    ```hot
+    ::cloudflare::api/error-message(403, {errors: [{code: 10000, message: "Authentication error"}]})  // "10000: Authentication error"
+    ::cloudflare::api/error-message(502, "")  // "HTTP 502"
+    ```
+    """
 }
 fn (status: Int, body: Any): Str {
   errors envelope-errors(body)
@@ -325,7 +402,9 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   })
 }
 
-is-failed-envelope fn (body: Any): Bool {
+is-failed-envelope
+meta {no-doc: true}
+fn (body: Any): Bool {
   cond {
     not(is-map(body)) => { false }
     => { eq(get(body, "success"), false) }
@@ -334,7 +413,18 @@ is-failed-envelope fn (body: Any): Bool {
 
 check-response
 meta {
-    doc: """Return the response when it succeeded, or an Err carrying `HttpError` for a non-2xx status or a `success: false` envelope."""
+    doc: """
+    Return the response when it succeeded, or an Err carrying `HttpError`
+    for a non-2xx status or a `success: false` envelope.
+
+    **Example**
+
+    ```hot
+    ok ::hot::http/HttpResponse({status: 200, body: {success: true}})
+    ::cloudflare::api/check-response(ok).status  // 200
+    is-err(::cloudflare::api/check-response(::hot::http/HttpResponse({status: 200, body: {success: false}})))  // true
+    ```
+    """
 }
 fn (response: Result): HttpResponse {
   cond {
@@ -351,7 +441,18 @@ fn (response: Result): HttpResponse {
 
 build-request
 meta {
-    doc: """The outgoing `HttpRequest` from resolved credentials (see `resolve`). Pure; exposed for testing."""
+    doc: """
+    The outgoing `HttpRequest` from resolved credentials (see `resolve`).
+    Pure; exposed for testing.
+
+    **Example**
+
+    ```hot
+    settings ::cloudflare::api/resolve({})
+    req ::cloudflare::api/build-request("GET", "/zones", {}, "", settings)
+    req.url
+    ```
+    """
 }
 fn (method: Str, path: Str, headers: Map, body: Any, resolved: Map): HttpRequest {
   HttpRequest({
@@ -370,6 +471,17 @@ meta {
     Str or Bytes otherwise). Returns the `HttpResponse` on success, or an
     Err carrying `HttpError` / `ConfigError`. The building block for
     non-JSON calls (KV values, multipart uploads).
+
+    **Example**
+
+    ```hot
+    suffix "/accounts/acc123/storage/kv/namespaces/0f2ac74b498b48028cb68387c421e279/values/greeting"
+    response ::cloudflare::api/send("PUT", suffix, {Content-Type: "text/plain"}, "hello")
+    response.status
+
+    // Act for another account
+    ::cloudflare::api/send("GET", "/user/tokens/verify", {}, "", {token: ::hot::ctx/get("tenant-b.cloudflare.token")})
+    ```
     """
 }
 fn
@@ -392,7 +504,21 @@ fn
 
 request
 meta {
-    doc: """Send a JSON request (`body` a Map/Vec, or `""` for none) and return the whole decoded envelope `{success, errors, messages, result, result_info?}`."""
+    doc: """
+    Send a JSON request (`body` a Map/Vec, or `""` for none) and return the
+    whole decoded envelope `{success, errors, messages, result,
+    result_info?}`.
+
+    **Example**
+
+    ```hot
+    envelope ::cloudflare::api/request("GET", "/zones?per_page=5")
+    envelope.result_info.total_count
+
+    // A JSON body
+    ::cloudflare::api/request("POST", "/zones/023e105f4ecef8ad9ca31a8372d0c353/purge_cache", {purge_everything: true})
+    ```
+    """
 }
 fn
 (method: Str, path: Str): Map {
@@ -443,7 +569,17 @@ fn
 
 to-page
 meta {
-    doc: """Turn a list envelope into a `ListPage`; `items-key` picks a nested list (R2 nests buckets under `result.buckets`), `""` uses `result` itself."""
+    doc: """
+    Turn a list envelope into a `ListPage`; `items-key` picks a nested list
+    (R2 nests buckets under `result.buckets`), `""` uses `result` itself.
+
+    **Example**
+
+    ```hot
+    ::cloudflare::api/to-page({result: {buckets: [{name: "logs"}]}}, "buckets").result  // [{name: "logs"}]
+    ::cloudflare::api/to-page({result: [1, 2], result_info: {page: 1}}, "").result_info  // {page: 1}
+    ```
+    """
 }
 fn (envelope: Map, items-key: Str): ListPage {
   raw get(envelope, "result")
@@ -461,7 +597,20 @@ fn (envelope: Map, items-key: Str): ListPage {
 
 json-page
 meta {
-    doc: """GET a list endpoint and return one `ListPage`."""
+    doc: """
+    GET a list endpoint and return one `ListPage`.
+
+    **Example**
+
+    ```hot
+    page ::cloudflare::api/json-page("/zones?per_page=50")
+    page.result_info.total_pages
+
+    // R2 nests its list under result.buckets
+    buckets ::cloudflare::api/json-page("/accounts/acc123/r2/buckets", "buckets")
+    map(buckets.result, %.name)
+    ```
+    """
 }
 fn
 (path: Str): ListPage {
@@ -480,7 +629,16 @@ fn
 
 account-path
 meta {
-    doc: """`/accounts/{cloudflare.account.id}` plus `suffix`, or an Err carrying `ConfigError` when the account id is unset."""
+    doc: """
+    `/accounts/{cloudflare.account.id}` plus `suffix`, or an Err carrying
+    `ConfigError` when the account id is unset.
+
+    **Example**
+
+    ```hot
+    ::cloudflare::api/account-path("/workers/scripts", {account-id: "acc123"})  // "/accounts/acc123/workers/scripts"
+    ```
+    """
 }
 fn
 (suffix: Str): Str {
@@ -496,7 +654,20 @@ fn
 
 account-json
 meta {
-    doc: """`json` against an account-scoped path (`suffix` follows `/accounts/{id}`)."""
+    doc: """
+    `json` against an account-scoped path (`suffix` follows
+    `/accounts/{id}`).
+
+    **Example**
+
+    ```hot
+    scripts ::cloudflare::api/account-json("GET", "/workers/scripts")
+    map(scripts, %.id)
+
+    // Another account
+    ::cloudflare::api/account-json("GET", "/workers/scripts", "", {account-id: "acc456"})
+    ```
+    """
 }
 fn
 (method: Str, suffix: Str): Any {
@@ -515,7 +686,19 @@ fn
 
 account-page
 meta {
-    doc: """`json-page` against an account-scoped path."""
+    doc: """
+    `json-page` against an account-scoped path.
+
+    **Example**
+
+    ```hot
+    page ::cloudflare::api/account-page("/d1/database?per_page=100")
+    map(page.result, %.name)
+
+    buckets ::cloudflare::api/account-page("/r2/buckets", "buckets")
+    map(buckets.result, %.name)
+    ```
+    """
 }
 fn
 (suffix: Str): ListPage {
@@ -543,6 +726,13 @@ meta {
     `result_info`: `total_pages` when present, else `total_count` against
     the `collected` count, else a full page (`count`/items equal to
     `per_page`). An empty page always ends the walk.
+
+    **Example**
+
+    ```hot
+    ::cloudflare::api/has-next-page({total_pages: 3}, 1, 20, 20)  // true
+    ::cloudflare::api/has-next-page({total_pages: 3}, 3, 20, 60)  // false
+    ```
     """
 }
 fn (info: Map, page: Int, page-items: Int, collected: Int): Bool {
@@ -560,7 +750,17 @@ fn (info: Map, page: Int, page-items: Int, collected: Int): Bool {
 
 next-cursor
 meta {
-    doc: """The `result_info.cursor` of a cursor-based page, or null when it is absent or empty (the last page)."""
+    doc: """
+    The `result_info.cursor` of a cursor-based page, or null when it is
+    absent or empty (the last page).
+
+    **Example**
+
+    ```hot
+    ::cloudflare::api/next-cursor({cursor: "6Ck1la0VxJ0djhidm1MdX2FyD"})  // "6Ck1la0VxJ0djhidm1MdX2FyD"
+    ::cloudflare::api/next-cursor({cursor: ""})  // null
+    ```
+    """
 }
 fn (info: Map): Str? {
   cursor get(info, "cursor")
@@ -571,11 +771,15 @@ fn (info: Map): Str? {
   }
 }
 
-take-up-to fn (items: Vec, max: Int): Vec {
+take-up-to
+meta {no-doc: true}
+fn (items: Vec, max: Int): Vec {
   if(gt(length(items), max), slice(items, 0, max), items)
 }
 
-collect-pages-from fn (fetch: Fn, params: Map, max: Int, page: Int, acc: Vec): Vec {
+collect-pages-from
+meta {no-doc: true}
+fn (fetch: Fn, params: Map, max: Int, page: Int, acc: Vec): Vec {
   response fetch({...params, page: page})
   cond {
     is-err(response) => { response }
@@ -599,6 +803,14 @@ meta {
     Walk a page-based list: call `fetch(params)` (a function returning a
     `ListPage`) with `page` = 1, 2, … until the last page or `max` items,
     and return the items. Pages are fetched serially.
+
+    **Example**
+
+    ```hot
+    fetch (params) { ::cloudflare::api/ListPage({result: [params.page], result_info: {total_pages: 3}}) }
+    ::cloudflare::api/collect-pages(fetch, {per_page: 50}, 100)  // [1, 2, 3]
+    ::cloudflare::api/collect-pages(fetch, {per_page: 50}, 2)  // [1, 2]
+    ```
     """
 }
 fn (fetch: Fn, params: Map, max: Int): Vec {
@@ -606,7 +818,9 @@ fn (fetch: Fn, params: Map, max: Int): Vec {
   collect-pages-from(fetch, params, max, Int(start), [])
 }
 
-collect-cursor-from fn (fetch: Fn, params: Map, max: Int, acc: Vec): Vec {
+collect-cursor-from
+meta {no-doc: true}
+fn (fetch: Fn, params: Map, max: Int, acc: Vec): Vec {
   response fetch(params)
   cond {
     is-err(response) => { response }
@@ -626,7 +840,22 @@ collect-cursor-from fn (fetch: Fn, params: Map, max: Int, acc: Vec): Vec {
 
 collect-cursor
 meta {
-    doc: """Walk a cursor-based list (KV keys, R2 buckets): call `fetch(params)` and follow `result_info.cursor` until it is empty or `max` items are collected."""
+    doc: """
+    Walk a cursor-based list (KV keys, R2 buckets): call `fetch(params)` and
+    follow `result_info.cursor` until it is empty or `max` items are
+    collected.
+
+    **Example**
+
+    ```hot
+    fetch (params) {
+      if(is-some(get(params, "cursor")),
+        ::cloudflare::api/ListPage({result: ["b"], result_info: {cursor: ""}}),
+        ::cloudflare::api/ListPage({result: ["a"], result_info: {cursor: "next"}}))
+    }
+    ::cloudflare::api/collect-cursor(fetch, {}, 100)  // ["a", "b"]
+    ```
+    """
 }
 fn (fetch: Fn, params: Map, max: Int): Vec {
   collect-cursor-from(fetch, params, max, [])
@@ -638,13 +867,24 @@ fn (fetch: Fn, params: Map, max: Int): Vec {
 
 new-boundary
 meta {
-    doc: """A fresh random multipart boundary."""
+    doc: """
+    A fresh random multipart boundary.
+
+    **Example**
+
+    ```hot
+    boundary ::cloudflare::api/new-boundary()
+    ::cloudflare::api/multipart-content-type(boundary)
+    ```
+    """
 }
 fn (): Str {
   `hot-cloudflare-${::hot::random/random-string(32)}`
 }
 
-as-bytes fn (value: Any): Bytes {
+as-bytes
+meta {no-doc: true}
+fn (value: Any): Bytes {
   cond {
     is-bytes(value) => { value }
     is-str(value) => { Bytes(value) }
@@ -658,6 +898,13 @@ meta {
     One `multipart/form-data` part as Bytes. `part` is
     `{name, value, filename?, content_type?}`; `value` is Str or Bytes
     (a Map/Vec is JSON-encoded).
+
+    **Example**
+
+    ```hot
+    Str(::cloudflare::api/multipart-part("b", {name: "branch", value: "main"}))
+    // "--b\r\nContent-Disposition: form-data; name=\"branch\"\r\n\r\nmain\r\n"
+    ```
     """
 }
 fn (boundary: Str, part: Map): Bytes {
@@ -680,6 +927,13 @@ meta {
     A complete `multipart/form-data` body (Bytes) from a Vec of parts
     (see `multipart-part`), closed with the final boundary. Send it with
     `Content-Type: multipart/form-data; boundary=<boundary>`.
+
+    **Example**
+
+    ```hot
+    Str(::cloudflare::api/multipart-body("b", [{name: "branch", value: "main"}]))
+    // "--b\r\nContent-Disposition: form-data; name=\"branch\"\r\n\r\nmain\r\n--b--\r\n"
+    ```
     """
 }
 fn (boundary: Str, parts: Vec): Bytes {
@@ -687,13 +941,37 @@ fn (boundary: Str, parts: Vec): Bytes {
     |> concat(Bytes(`--${boundary}--\r\n`))
 }
 
-multipart-content-type fn (boundary: Str): Str {
+multipart-content-type
+meta {
+    doc: """
+    The `Content-Type` header value for a `multipart-body` built with
+    `boundary`.
+
+    **Example**
+
+    ```hot
+    ::cloudflare::api/multipart-content-type("b")  // "multipart/form-data; boundary=b"
+    ```
+    """
+}
+fn (boundary: Str): Str {
   `multipart/form-data; boundary=${boundary}`
 }
 
 send-multipart
 meta {
-    doc: """Send a multipart request built from `parts` and return the envelope's `result`."""
+    doc: """
+    Send a multipart request built from `parts` and return the envelope's
+    `result`.
+
+    **Example**
+
+    ```hot
+    parts [{name: "branch", value: "main"}]
+    deployment ::cloudflare::api/send-multipart("POST", "/accounts/acc123/pages/projects/marketing-site/deployments", parts)
+    deployment.id
+    ```
+    """
 }
 fn
 (method: Str, path: Str, parts: Vec): Any {

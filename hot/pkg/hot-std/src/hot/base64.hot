@@ -9,8 +9,8 @@ meta {
     **Example**
 
     ```hot
-    encode("Hello")                          // "SGVsbG8="
-    encode(Bytes([72, 101, 108, 108, 111]))  // "SGVsbG8=" ("Hello" as bytes)
+    ::hot::base64/encode("Hello")  // "SGVsbG8="
+    ::hot::base64/encode(Bytes([72, 101, 108, 108, 111]))  // "SGVsbG8=" ("Hello" as bytes)
     ```
     """
 }
@@ -28,7 +28,7 @@ meta {
 
     ```hot
     encoded "SGVsbG8="
-    bytes decode(encoded)
+    bytes ::hot::base64/decode(encoded)
     // bytes = Bytes([72, 101, 108, 108, 111])
     ```
     """
@@ -46,8 +46,8 @@ meta {
     **Example**
 
     ```hot
-    is-valid("SGVsbG8=")   // true
-    is-valid("not valid!") // false
+    ::hot::base64/is-valid("SGVsbG8=")   // true
+    ::hot::base64/is-valid("not valid!") // false
     ```
     """
 }
@@ -66,7 +66,7 @@ meta {
     **Example**
 
     ```hot
-    encode-url("Hello+World/Test")
+    ::hot::base64/encode-url("Hello+World/Test")
     // "SGVsbG8rV29ybGQvVGVzdA"  (no = padding, - and _ chars)
     ```
     """
@@ -84,7 +84,7 @@ meta {
     **Example**
 
     ```hot
-    decode-url("SGVsbG8")
+    ::hot::base64/decode-url("SGVsbG8")
     // Bytes([72, 101, 108, 108, 111])
     ```
     """

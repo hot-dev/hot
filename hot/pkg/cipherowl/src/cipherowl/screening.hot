@@ -30,7 +30,18 @@ MAX_BATCH 50
 
 screen-options
 meta {
-    doc: """Validate and normalize screening options into the query/body fields CipherOwl takes: `config`, `reference` (normalized), `hops` (0 to 8), `trackAlert`. Unset options are dropped. Exposed for testing."""
+    doc: """
+    Validate and normalize screening options into the query/body fields
+    CipherOwl takes: `config`, `reference` (normalized), `hops` (0 to 8),
+    `trackAlert`. Unset options are dropped. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::screening/screen-options({config: "co-vasp", hops: 2, reference: "Acme.Withdrawals"})
+    // {config: "co-vasp", reference: "acme.withdrawals", hops: 2}
+    ```
+    """
 }
 fn (options: Map): Map {
   config get(options, "config")
@@ -52,7 +63,18 @@ fn (options: Map): Map {
 
 screen-request
 meta {
-    doc: """The spec for screening one address (`GET /api/screen/v1/chains/{chain}/addresses/{address}`). Exposed for testing."""
+    doc: """
+    The spec for screening one address (`GET
+    /api/screen/v1/chains/{chain}/addresses/{address}`). Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::screening/screen-request("evm", "0x0000000000000000000000000000000000000001", {hops: 2}).path
+    // "/api/screen/v1/chains/evm/addresses/0x0000000000000000000000000000000000000001?hops=2"
+    ```
+    """
 }
 fn (chain: Str, address: Str, options: Map): Map {
   c ::api/validate-chain(chain)
@@ -100,7 +122,19 @@ fn
 
 batch-request
 meta {
-    doc: """The spec for batch screening (`POST /api/screen/v1/chains/{chain}/batch`). Every address is validated for the chain; an empty list errs. Exposed for testing."""
+    doc: """
+    The spec for batch screening (`POST
+    /api/screen/v1/chains/{chain}/batch`). Every address is validated for
+    the chain; an empty list errs. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    spec ::cipherowl::screening/batch-request("evm", ["0x0000000000000000000000000000000000000001"], {config: "co-sandbox"})
+    spec.path  // "/api/screen/v1/chains/evm/batch"
+    spec.body.addresses  // ["0x0000000000000000000000000000000000000001"]
+    ```
+    """
 }
 fn (chain: Str, addresses: Vec<Str>, options: Map): Map {
   c ::api/validate-chain(chain)
@@ -150,7 +184,18 @@ fn
 }
 
 risky-addresses
-meta {doc: """The addresses in a batch result with `foundRisk: true`. Pure."""}
+meta {
+    doc: """
+    The addresses in a batch result with `foundRisk: true`. Pure.
+
+    **Example**
+
+    ```hot
+    batch {results: [{address: "0x93df2c9c8786242b8fdca3f96b3914b8b4a9f704", foundRisk: true}, {address: "0x0000000000000000000000000000000000000001", foundRisk: false}]}
+    ::cipherowl::screening/risky-addresses(batch)  // ["0x93df2c9c8786242b8fdca3f96b3914b8b4a9f704"]
+    ```
+    """
+}
 fn (batch-result: Any): Vec<Str> {
   results or(get(or(batch-result, {}), "results"), [])
   map(filter(results, (r) { eq(get(r, "foundRisk"), true) }), (r) { get(r, "address") })

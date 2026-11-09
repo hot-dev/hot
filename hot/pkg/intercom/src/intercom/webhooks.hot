@@ -17,7 +17,18 @@ meta {
 
 signature-from-header
 meta {
-    doc: """Extract the hex digest from an `X-Hub-Signature` value. Only the `sha1=` scheme is accepted; anything else yields `""`, which never verifies. Exposed for testing."""
+    doc: """
+    Extract the hex digest from an `X-Hub-Signature` value. Only the `sha1=`
+    scheme is accepted; anything else yields `""`, which never verifies.
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::intercom::webhooks/signature-from-header("sha1=abc123")  // "abc123"
+    ::intercom::webhooks/signature-from-header("sha256=abc123")  // ""
+    ```
+    """
 }
 fn (header: Str): Str {
   value trim(header)
@@ -46,7 +57,7 @@ meta {
     fn (request) {
       if(not(::intercom::webhooks/verify-request(request)),
         ::hot::http/HttpResponse({status: 401, body: "invalid signature"}),
-        handle-notification(request.body))
+        ::hot::http/HttpResponse({status: 200, body: "ok"}))
     }
     ```
     """

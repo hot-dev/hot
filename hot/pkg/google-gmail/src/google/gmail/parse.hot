@@ -23,18 +23,37 @@ meta {
 // Headers
 // ---------------------------------------------------------------------------
 
-header-list fn (part: Any): Vec {
+header-list
+meta {no-doc: true}
+fn (part: Any): Vec {
   if(is-map(part), or(get(part, "headers"), []), [])
 }
 
-payload fn (message: Map): Map {
+payload
+meta {no-doc: true}
+fn (message: Map): Map {
   p get(message, "payload")
   if(is-map(p), p, {})
 }
 
 headers
 meta {
-    doc: """The message's (or a part's) headers as a Map of lowercased name to value; the first occurrence wins. Accepts a message resource or a `payload` part."""
+    doc: """
+    The message's (or a part's) headers as a Map of lowercased name to
+    value; the first occurrence wins. Accepts a message resource or a
+    `payload` part.
+
+    **Example**
+
+    ```hot
+    message {payload: {headers: [
+      {name: "Subject", value: "Q3 plan"},
+      {name: "Received", value: "by a"},
+      {name: "Received", value: "by b"}
+    ]}}
+    ::google::gmail::parse/headers(message)  // {subject: "Q3 plan", received: "by a"}
+    ```
+    """
 }
 fn (message: Map): Map {
   part if(is-map(get(message, "payload")), message.payload, message)
@@ -46,14 +65,44 @@ fn (message: Map): Map {
 
 header
 meta {
-    doc: """One header value by case-insensitive name (first occurrence), or null: `header(message, "Subject")`."""
+    doc: """
+    One header value by case-insensitive name (first occurrence), or null:
+    `header(message, "Subject")`.
+
+    **Example**
+
+    ```hot
+    message {payload: {headers: [
+      {name: "Subject", value: "Q3 plan"},
+      {name: "Received", value: "by a"},
+      {name: "Received", value: "by b"}
+    ]}}
+    ::google::gmail::parse/header(message, "subject")  // "Q3 plan"
+    ::google::gmail::parse/header(message, "X-Missing")  // null
+    ```
+    """
 }
 fn (message: Map, name: Str): Str? {
   get(headers(message), lowercase(name))
 }
 
 header-values
-meta {doc: """Every value of a header, in order (e.g. all `Received` lines)."""}
+meta {
+    doc: """
+    Every value of a header, in order (e.g. all `Received` lines).
+
+    **Example**
+
+    ```hot
+    message {payload: {headers: [
+      {name: "Subject", value: "Q3 plan"},
+      {name: "Received", value: "by a"},
+      {name: "Received", value: "by b"}
+    ]}}
+    ::google::gmail::parse/header-values(message, "Received")  // ["by a", "by b"]
+    ```
+    """
+}
 fn (message: Map, name: Str): Vec {
   part if(is-map(get(message, "payload")), message.payload, message)
   n lowercase(name)
@@ -65,7 +114,18 @@ fn (message: Map, name: Str): Vec {
 // ---------------------------------------------------------------------------
 
 walk-parts
-meta {doc: """A part and all its descendants, depth first (pure)."""}
+meta {
+    doc: """
+    A part and all its descendants, depth first (pure).
+
+    **Example**
+
+    ```hot
+    tree {partId: "0", parts: [{partId: "0.0", parts: [{partId: "0.0.0"}]}, {partId: "0.1"}]}
+    map(::google::gmail::parse/walk-parts(tree), %.partId)  // ["0", "0.0", "0.0.0", "0.1"]
+    ```
+    """
+}
 fn (part: Map): Vec {
   children or(get(part, "parts"), [])
   concat([part], mapcat(children, walk-parts))
@@ -73,7 +133,18 @@ fn (part: Map): Vec {
 
 all-parts
 meta {
-    doc: """Every MIME part of a message, depth first, starting with the top-level payload. Empty for `format: "raw"` / `"minimal"` messages."""
+    doc: """
+    Every MIME part of a message, depth first, starting with the top-level
+    payload. Empty for `format: "raw"` / `"minimal"` messages.
+
+    **Example**
+
+    ```hot
+    message {payload: {partId: "", parts: [{partId: "0"}, {partId: "1"}]}}
+    map(::google::gmail::parse/all-parts(message), %.partId)  // ["", "0", "1"]
+    ::google::gmail::parse/all-parts({raw: "SGk"})  // []
+    ```
+    """
 }
 fn (message: Map): Vec {
   p payload(message)
@@ -82,19 +153,42 @@ fn (message: Map): Vec {
 
 decode-data
 meta {
-    doc: """Decode a Gmail base64url `data` string (padded or not) to Bytes; null or `""` give empty Bytes."""
+    doc: """
+    Decode a Gmail base64url `data` string (padded or not) to Bytes; null or
+    `""` give empty Bytes.
+
+    **Example**
+
+    ```hot
+    Str(::google::gmail::parse/decode-data("SGVsbG8"))  // "Hello"
+    length(::google::gmail::parse/decode-data(null))  // 0
+    ```
+    """
 }
 fn (data: Any): Bytes {
   if(or(is-null(data), eq(data, "")), Bytes([]), ::b64/decode-url(Str(data)))
 }
 
-part-header fn (part: Map, name: Str): Str? {
+part-header
+meta {no-doc: true}
+fn (part: Map, name: Str): Str? {
   get(headers(part), lowercase(name))
 }
 
 param
 meta {
-    doc: """A parameter from a header value such as `text/plain; charset="utf-8"`: `param(value, "charset")` is `"utf-8"`. Case-insensitive; null when absent."""
+    doc: """
+    A parameter from a header value such as `text/plain; charset="utf-8"`:
+    `param(value, "charset")` is `"utf-8"`. Case-insensitive; null when
+    absent.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::parse/param("text/plain; charset=\"utf-8\"", "charset")  // "utf-8"
+    ::google::gmail::parse/param("text/plain", "charset")  // null
+    ```
+    """
 }
 fn (value: Str?, name: Str): Str? {
   cond {
@@ -108,7 +202,17 @@ fn (value: Str?, name: Str): Str? {
 
 is-attachment
 meta {
-    doc: """True for a part that is a file: it has a filename, or `Content-Disposition: attachment`."""
+    doc: """
+    True for a part that is a file: it has a filename, or
+    `Content-Disposition: attachment`.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::parse/is-attachment({filename: "report.pdf", mimeType: "application/pdf"})  // true
+    ::google::gmail::parse/is-attachment({filename: "", mimeType: "text/plain"})  // false
+    ```
+    """
 }
 fn (part: Map): Bool {
   filename or(get(part, "filename"), "")
@@ -116,13 +220,17 @@ fn (part: Map): Bool {
   or(not(eq(filename, "")), starts-with(disposition, "attachment"))
 }
 
-body-part fn (message: Map, mime-type: Str): Map? {
+body-part
+meta {no-doc: true}
+fn (message: Map, mime-type: Str): Map? {
   find-first(all-parts(message), (p) {
     and(eq(lowercase(or(get(p, "mimeType"), "")), mime-type), not(is-attachment(p)))
   })
 }
 
-part-text fn (part: Map?): Str? {
+part-text
+meta {no-doc: true}
+fn (part: Map?): Str? {
   cond {
     is-null(part) => { null }
     => {
@@ -134,7 +242,20 @@ part-text fn (part: Map?): Str? {
 
 text-body
 meta {
-    doc: """The first `text/plain` body (not an attachment), decoded to a Str, or null."""
+    doc: """
+    The first `text/plain` body (not an attachment), decoded to a Str, or
+    null.
+
+    **Example**
+
+    ```hot
+    message {payload: {mimeType: "multipart/alternative", parts: [
+      {mimeType: "text/plain", body: {data: "SGVsbG8"}},
+      {mimeType: "text/html", body: {data: "PHA-SGk8L3A-"}}
+    ]}}
+    ::google::gmail::parse/text-body(message)  // "Hello"
+    ```
+    """
 }
 fn (message: Map): Str? {
   part-text(body-part(message, "text/plain"))
@@ -142,7 +263,20 @@ fn (message: Map): Str? {
 
 html-body
 meta {
-    doc: """The first `text/html` body (not an attachment), decoded to a Str, or null."""
+    doc: """
+    The first `text/html` body (not an attachment), decoded to a Str, or
+    null.
+
+    **Example**
+
+    ```hot
+    message {payload: {mimeType: "multipart/alternative", parts: [
+      {mimeType: "text/plain", body: {data: "SGVsbG8"}},
+      {mimeType: "text/html", body: {data: "PHA-SGk8L3A-"}}
+    ]}}
+    ::google::gmail::parse/html-body(message)  // "<p>Hi</p>"
+    ```
+    """
 }
 fn (message: Map): Str? {
   part-text(body-part(message, "text/html"))
@@ -150,7 +284,19 @@ fn (message: Map): Str? {
 
 charset
 meta {
-    doc: """The declared charset of the plain-text body (else the HTML body), lowercased, or null."""
+    doc: """
+    The declared charset of the plain-text body (else the HTML body),
+    lowercased, or null.
+
+    **Example**
+
+    ```hot
+    message {payload: {mimeType: "text/plain", headers: [
+      {name: "Content-Type", value: "text/plain; charset=\"ISO-8859-1\""}
+    ]}}
+    ::google::gmail::parse/charset(message)  // "iso-8859-1"
+    ```
+    """
 }
 fn (message: Map): Str? {
   part or(body-part(message, "text/plain"), body-part(message, "text/html"))
@@ -183,7 +329,9 @@ type {
     inline: Bool
 }
 
-to-attachment fn (message-id: Str?, part: Map): Attachment {
+to-attachment
+meta {no-doc: true}
+fn (message-id: Str?, part: Map): Attachment {
   body or(get(part, "body"), {})
   cid part-header(part, "content-id")
   Attachment({
@@ -201,7 +349,23 @@ to-attachment fn (message-id: Str?, part: Map): Attachment {
 
 attachments
 meta {
-    doc: """Every attachment of a message (a Vec of `Attachment`), found by walking the parts tree."""
+    doc: """
+    Every attachment of a message (a Vec of `Attachment`), found by walking
+    the parts tree.
+
+    **Example**
+
+    ```hot
+    message {id: "m1", payload: {parts: [
+      {partId: "0", mimeType: "text/plain", filename: "", body: {data: "SGk"}},
+      {partId: "1", mimeType: "application/pdf", filename: "report.pdf", body: {attachmentId: "att1", size: 1024}}
+    ]}}
+    found ::google::gmail::parse/attachments(message)
+    length(found)  // 1
+    first(found).filename  // "report.pdf"
+    first(found).attachment-id  // "att1"
+    ```
+    """
 }
 fn (message: Map): Vec {
   map(filter(all-parts(message), is-attachment), (p) { to-attachment(get(message, "id"), p) })
@@ -261,8 +425,17 @@ meta {
     Flatten a message resource into an `Email`.
 
     ```hot
-    email ::google::gmail::parse/to-email(::google::gmail::messages/get-message(id))
-    `${email.from-email}: ${email.subject}`
+    // A resource from ::google::gmail::messages/get-message
+    message {id: "m1", labelIds: ["INBOX", "UNREAD"], payload: {
+      mimeType: "text/plain",
+      headers: [{name: "From", value: "Ada <ADA@example.com>"}, {name: "Subject", value: "Q3 plan"}],
+      body: {data: "SGVsbG8"}
+    }}
+    email ::google::gmail::parse/to-email(message)
+    email.from-email  // "ada@example.com"
+    email.subject  // "Q3 plan"
+    email.text  // "Hello"
+    email.unread  // true
     ```
     """
 }

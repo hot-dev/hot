@@ -34,7 +34,16 @@ fn
 
 get-event
 meta {
-    doc: """GET /events/{id} - Retrieve one event (`evt_...`)."""
+    doc: """
+    GET /events/{id} - Retrieve one event (`evt_...`).
+
+    **Example**
+
+    ```hot
+    event ::persona::events/get-event("evt_123")
+    ::persona::api/attr(event, "name")
+    ```
+    """
 }
 fn
 (event-id: Str): Map {

@@ -10,7 +10,7 @@ Add it to your project's deps in `hot.hot`:
 
 ```hot
 hot.project.my-app.deps {
-  "hot.dev/feed": "0.1.1"
+  "hot.dev/feed": "0.1.2"
 }
 ```
 

@@ -49,19 +49,41 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
 base-url
 meta {
     ctx: {"cal-com.url": {required: false, secret: false}},
-    doc: """The API base URL: `cal-com.url` when set (self-hosted, trailing slash removed), otherwise `https://api.cal.com/v2`."""
+    doc: """
+    The API base URL: `cal-com.url` when set (self-hosted, trailing slash
+    removed), otherwise `https://api.cal.com/v2`.
+
+    **Example**
+
+    ```hot
+    url ::cal-com::api/base-url()
+    `${url}/me`
+    ```
+    """
 }
 fn (): Str {
   normalize-base-url(::ctx/get("cal-com.url"))
 }
 
-non-blank fn (value: Any): Str? {
+non-blank
+meta {no-doc: true}
+fn (value: Any): Str? {
   if(is-str(value), if(is-empty(trim(value)), null, trim(value)), null)
 }
 
 normalize-base-url
 meta {
-    doc: """Pick the base URL from an optional override: null or blank gives the cloud default; trailing `/`s are dropped. Exposed for testing."""
+    doc: """
+    Pick the base URL from an optional override: null or blank gives the
+    cloud default; trailing `/`s are dropped. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cal-com::api/normalize-base-url("https://cal.example.com/api/v2/")  // "https://cal.example.com/api/v2"
+    ::cal-com::api/normalize-base-url(null)  // "https://api.cal.com/v2"
+    ```
+    """
 }
 fn (override: Str?): Str {
   ::re/replace-all(or(non-blank(override), ::cal-com/DEFAULT_BASE_URL), "/+$", "")
@@ -75,6 +97,14 @@ meta {
     An Err when no API key is set, when `api-key` is in `opts` but blank or
     null (that never falls back to context), or when `opts` has `base-url`
     without `api-key`. Exposed for testing; `resolve` feeds it the context.
+
+    **Example**
+
+    ```hot
+    ::cal-com::api/resolve-from({api-key: "key-a"}, {"cal-com.api.key": "key-b"})  // {api-key: "key-a", base-url: "https://api.cal.com/v2"}
+    ::cal-com::api/resolve-from({}, {"cal-com.api.key": "key-b", "cal-com.url": "https://cal.example.com/api/v2/"}).base-url  // "https://cal.example.com/api/v2"
+    is-err(::cal-com::api/resolve-from({api-key: ""}, {"cal-com.api.key": "key-b"}))  // true
+    ```
     """
 }
 fn (opts: Map, ctx-values: Map): Map {
@@ -128,7 +158,18 @@ fn (opts: Map): Map {
 
 build-headers
 meta {
-    doc: """Request headers: Bearer auth, the family's `cal-api-version` (omitted when `api-version` is empty, for unversioned families such as webhooks), and `Content-Type` only when there is a body. Exposed for testing."""
+    doc: """
+    Request headers: Bearer auth, the family's `cal-api-version` (omitted
+    when `api-version` is empty, for unversioned families such as webhooks),
+    and `Content-Type` only when there is a body. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cal-com::api/build-headers("key-a", "2024-08-13", false)  // {Authorization: "Bearer key-a", cal-api-version: "2024-08-13"}
+    ::cal-com::api/build-headers("key-a", "", true)  // {Authorization: "Bearer key-a", Content-Type: "application/json"}
+    ```
+    """
 }
 fn (api-key: Str, api-version: Str, has-body: Bool): Map {
   auth {Authorization: `Bearer ${api-key}`}
@@ -143,6 +184,14 @@ meta {
     `{status, data}`; this returns `data` when present, the body itself
     for other Maps, and null for an empty body (204, or a 2xx with no
     content). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cal-com::api/response-data({status: "success", data: {id: 1}})  // {id: 1}
+    ::cal-com::api/response-data({id: 1})  // {id: 1}
+    ::cal-com::api/response-data("")  // null
+    ```
     """
 }
 fn (body: Any): Any {
@@ -156,7 +205,18 @@ fn (body: Any): Any {
 
 response-envelope
 meta {
-    doc: """Like `response-data`, but keeps the whole envelope (`{status, data, pagination}`) so callers can page. Empty bodies become null. Exposed for testing."""
+    doc: """
+    Like `response-data`, but keeps the whole envelope (`{status, data,
+    pagination}`) so callers can page. Empty bodies become null. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::cal-com::api/response-envelope({status: "success", data: [], pagination: {hasNextPage: false}}).pagination.hasNextPage  // false
+    ::cal-com::api/response-envelope("")  // null
+    ```
+    """
 }
 fn (body: Any): Any {
   match body {
@@ -167,7 +227,18 @@ fn (body: Any): Any {
 
 send
 meta {
-    doc: """Send a request for one call: resolve `opts`, then return `unwrap` of a 2xx body, or an Err carrying `HttpError`."""
+    doc: """
+    Send a request for one call: resolve `opts`, then return `unwrap` of a
+    2xx body, or an Err carrying `HttpError`.
+
+    **Example**
+
+    ```hot
+    // Prefer `request` or `request-envelope`. This takes the unwrap step directly.
+    profile ::cal-com::api/send("GET", "/me", "", "", {}, ::cal-com::api/response-data)
+    profile.username
+    ```
+    """
 }
 fn (method: Str, path: Str, body: Any, api-version: Str, opts: Map, unwrap: Fn): Any {
   resolved resolve(opts)
@@ -225,7 +296,18 @@ fn
 request-envelope
 meta {
     ctx: {"cal-com.api.key": {required: false}},
-    doc: """Like `request`, but returns the whole decoded body (`{status, data, pagination?}`) instead of just `data`. Used by paged lists."""
+    doc: """
+    Like `request`, but returns the whole decoded body (`{status, data,
+    pagination?}`) instead of just `data`. Used by paged lists.
+
+    **Example**
+
+    ```hot
+    page ::cal-com::api/request-envelope("GET", "/bookings?take=10", "", ::cal-com/VERSION_BOOKINGS)
+    page.data
+    page.pagination.hasNextPage
+    ```
+    """
 }
 fn
 (method: Str, path: Str, body: Any, api-version: Str): Any {
@@ -240,7 +322,17 @@ fn
 
 path-segment
 meta {
-    doc: """Percent-encode one path segment (a booking uid, an id). Ints pass through as text."""
+    doc: """
+    Percent-encode one path segment (a booking uid, an id). Ints pass
+    through as text.
+
+    **Example**
+
+    ```hot
+    ::cal-com::api/path-segment("a b")  // "a%20b"
+    ::cal-com::api/path-segment(123)  // "123"
+    ```
+    """
 }
 fn (value: Any): Str {
   ::uri/encode(Str(value))
@@ -253,6 +345,13 @@ meta {
     dropped, Vec values are joined with commas (Cal.com's multi-value
     form, e.g. `status: ["upcoming", "unconfirmed"]`), and an empty
     result yields `""`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cal-com::api/query-string({take: 10, afterStart: null})  // "?take=10"
+    ::cal-com::api/query-string({})  // ""
+    ```
     """
 }
 fn (options: Map): Str {
@@ -266,7 +365,16 @@ fn (options: Map): Str {
 
 compact
 meta {
-    doc: """Drop null-valued keys from a request body Map so unset optionals are omitted rather than sent as JSON null."""
+    doc: """
+    Drop null-valued keys from a request body Map so unset optionals are
+    omitted rather than sent as JSON null.
+
+    **Example**
+
+    ```hot
+    ::cal-com::api/compact({title: "Intro call", description: null})  // {title: "Intro call"}
+    ```
+    """
 }
 fn (body: Map): Map {
   filter-vals(body, is-some)

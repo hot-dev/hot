@@ -44,7 +44,18 @@ fn
 
 get-organization
 meta {
-    doc: """Get details for a specific organization by slug."""
+    doc: """
+    Get details for a specific organization by slug.
+
+    **Example**
+
+    ```hot
+    ::orgs ::supabase::admin::organizations
+
+    org ::orgs/get-organization("my-org-slug")
+    org.name
+    ```
+    """
 }
 fn
 (slug: Str): Organization {
@@ -116,7 +127,18 @@ fn
 
 list-organization-projects
 meta {
-    doc: """List all projects belonging to an organization."""
+    doc: """
+    List all projects belonging to an organization.
+
+    **Example**
+
+    ```hot
+    ::orgs ::supabase::admin::organizations
+
+    projects ::orgs/list-organization-projects("my-org-slug")
+    map(projects, %.name)
+    ```
+    """
 }
 fn
 (slug: Str): Vec<Map> {

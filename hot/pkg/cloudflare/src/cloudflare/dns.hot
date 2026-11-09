@@ -8,11 +8,15 @@ meta {
 
 ListPage ::cloudflare::api/ListPage
 
-records-path fn (zone-id: Str): Str {
+records-path
+meta {no-doc: true}
+fn (zone-id: Str): Str {
   `/zones/${::api/seg(zone-id)}/dns_records`
 }
 
-record-path fn (zone-id: Str, record-id: Str): Str {
+record-path
+meta {no-doc: true}
+fn (zone-id: Str, record-id: Str): Str {
   `${records-path(zone-id)}/${::api/seg(record-id)}`
 }
 
@@ -29,6 +33,7 @@ meta {
     **Example**
 
     ```hot
+    zone-id "023e105f4ecef8ad9ca31a8372d0c353"
     page ::cloudflare::dns/list-dns-records(zone-id, {type: "TXT", content: {contains: "verification"}})
     page.result
     ```
@@ -47,7 +52,17 @@ fn
 
 list-all-dns-records
 meta {
-    doc: """Every record matching `params`, following pages (500 per request) up to `max` items (default 10000)."""
+    doc: """
+    Every record matching `params`, following pages (500 per request) up to
+    `max` items (default 10000).
+
+    **Example**
+
+    ```hot
+    records ::cloudflare::dns/list-all-dns-records("023e105f4ecef8ad9ca31a8372d0c353", {type: "A"}, 2000)
+    map(records, %.name)
+    ```
+    """
 }
 fn
 (zone-id: Str): Vec {
@@ -75,6 +90,7 @@ meta {
     **Example**
 
     ```hot
+    zone-id "023e105f4ecef8ad9ca31a8372d0c353"
     existing ::cloudflare::dns/find-dns-records(zone-id, "api.example.com", "A")
     ```
     """
@@ -95,7 +111,16 @@ fn
 
 get-dns-record
 meta {
-    doc: """GET /zones/{zone_id}/dns_records/{id} - One record."""
+    doc: """
+    GET /zones/{zone_id}/dns_records/{id} - One record.
+
+    **Example**
+
+    ```hot
+    record ::cloudflare::dns/get-dns-record("023e105f4ecef8ad9ca31a8372d0c353", "372e67954025e0ba6aaa6d586b9e0b59")
+    record.content
+    ```
+    """
 }
 fn
 (zone-id: Str, record-id: Str): Map {
@@ -115,6 +140,7 @@ meta {
     **Example**
 
     ```hot
+    zone-id "023e105f4ecef8ad9ca31a8372d0c353"
     ::cloudflare::dns/create-dns-record(zone-id, {type: "CNAME", name: "docs", content: "example.pages.dev", proxied: true})
     ```
     """
@@ -129,7 +155,16 @@ fn
 
 update-dns-record
 meta {
-    doc: """PATCH /zones/{zone_id}/dns_records/{id} - Change only the given fields (e.g. `{content: "203.0.113.8"}`)."""
+    doc: """
+    PATCH /zones/{zone_id}/dns_records/{id} - Change only the given fields
+    (e.g. `{content: "203.0.113.8"}`).
+
+    **Example**
+
+    ```hot
+    ::cloudflare::dns/update-dns-record("023e105f4ecef8ad9ca31a8372d0c353", "372e67954025e0ba6aaa6d586b9e0b59", {content: "203.0.113.8"})
+    ```
+    """
 }
 fn
 (zone-id: Str, record-id: Str, changes: Map): Map {
@@ -141,7 +176,16 @@ fn
 
 overwrite-dns-record
 meta {
-    doc: """PUT /zones/{zone_id}/dns_records/{id} - Replace a record entirely (`type`, `name`, `content` required; unset fields reset to defaults)."""
+    doc: """
+    PUT /zones/{zone_id}/dns_records/{id} - Replace a record entirely
+    (`type`, `name`, `content` required; unset fields reset to defaults).
+
+    **Example**
+
+    ```hot
+    ::cloudflare::dns/overwrite-dns-record("023e105f4ecef8ad9ca31a8372d0c353", "372e67954025e0ba6aaa6d586b9e0b59", {type: "A", name: "api", content: "203.0.113.8", proxied: true})
+    ```
+    """
 }
 fn
 (zone-id: Str, record-id: Str, record: Map): Map {
@@ -153,7 +197,16 @@ fn
 
 delete-dns-record
 meta {
-    doc: """DELETE /zones/{zone_id}/dns_records/{id} - Delete a record. Returns `{id}`."""
+    doc: """
+    DELETE /zones/{zone_id}/dns_records/{id} - Delete a record. Returns
+    `{id}`.
+
+    **Example**
+
+    ```hot
+    ::cloudflare::dns/delete-dns-record("023e105f4ecef8ad9ca31a8372d0c353", "372e67954025e0ba6aaa6d586b9e0b59")
+    ```
+    """
 }
 fn
 (zone-id: Str, record-id: Str): Map {

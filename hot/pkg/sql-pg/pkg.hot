@@ -2,7 +2,7 @@
 
 hot.pkg.sql-pg {
   name: "hot.dev/sql-pg",
-  version: "0.1.2",
+  version: "0.1.3",
   hot-min-version: "2.6.1",
   description: "PostgreSQL driver for hot.dev/sql: the `::sql::pg` adapter over the pure-Hot hot.dev/pg wire client.",
   author: "Hot Dev",
@@ -10,8 +10,8 @@ hot.pkg.sql-pg {
   license: "Apache-2.0",
   tags: ["database"],
   deps: {
-    "hot.dev/pg": "0.3.1",
-    "hot.dev/sql": "0.1.1"
+    "hot.dev/pg": "0.3.2",
+    "hot.dev/sql": "0.1.2"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]

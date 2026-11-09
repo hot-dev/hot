@@ -22,6 +22,8 @@ Returns a Vec of Resource, each with `uri`, `name`, `description`, and `mime-typ
 
 ```hot
 ::resources ::mcp::resources
+info ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+session ::mcp::client/connect("https://mcp.example.com/mcp", info, null)
 resources ::resources/list(session)
 // resources => [{uri: "file:///README.md", name: "README", ...}, ...]
 first(resources).uri // => "file:///README.md"
@@ -47,6 +49,8 @@ Pass null as the cursor for the first page.
 
 ```hot
 ::resources ::mcp::resources
+info ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+session ::mcp::client/connect("https://mcp.example.com/mcp", info, null)
 page ::resources/list-page(session, null)
 page.resources // => [{uri: "...", name: "...", ...}, ...]
 page.next-cursor // => "cursor-abc" or null
@@ -79,6 +83,8 @@ single Vec containing every resource.
 
 ```hot
 ::resources ::mcp::resources
+info ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+session ::mcp::client/connect("https://mcp.example.com/mcp", info, null)
 all-resources ::resources/list-all(session)
 length(all-resources) // => total number of resources across all pages
 ```
@@ -89,7 +95,9 @@ fn (session: ::types/Session): Vec<::types/Resource> {
 }
 
 // Recursive pagination helper (TCO).
-collect-pages fn cond (session: ::types/Session, cursor: Str?, acc: Vec): Vec {
+collect-pages
+meta {no-doc: true}
+fn cond (session: ::types/Session, cursor: Str?, acc: Vec): Vec {
   => {
     params {} |> assoc-some("cursor", cursor)
     result ::client/session-request(session, "resources/list", params)
@@ -106,7 +114,20 @@ collect-pages fn cond (session: ::types/Session, cursor: Str?, acc: Vec): Vec {
 
 read-result
 meta {
-    doc: """Read a resource and retain its modern result type, cache hints, and metadata."""
+    doc: """
+    Read a resource and retain its modern result type, cache hints, and
+    metadata.
+
+    **Example**
+
+    ```hot
+    info ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+    session ::mcp::client/connect("https://mcp.example.com/mcp", info, null)
+    result ::mcp::resources/read-result(session, "file:///project/README.md")
+    first(result.contents).text
+    result.ttl-ms
+    ```
+    """
 }
 fn (session: ::types/Session, uri: Str): Map {
   result ::client/session-request(session, "resources/read", {uri: uri})
@@ -135,6 +156,8 @@ or `blob` (base64-encoded, for binary resources).
 
 ```hot
 ::resources ::mcp::resources
+info ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+session ::mcp::client/connect("https://mcp.example.com/mcp", info, null)
 contents ::resources/read(session, "file:///project/README.md")
 content first(contents)
 content.uri  // => "file:///project/README.md"
@@ -148,7 +171,19 @@ fn (session: ::types/Session, uri: Str): Vec<::types/ResourceContent> {
 
 read-with-input
 meta {
-    doc: """Read a resource while fulfilling modern Multi Round-Trip input requests."""
+    doc: """
+    Read a resource while fulfilling modern Multi Round-Trip input requests.
+
+    **Example**
+
+    ```hot
+    info ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+    session ::mcp::client/connect("https://mcp.example.com/mcp", info, null)
+    ask (request) { {action: "accept", content: {confirmed: true}} }
+    contents ::mcp::resources/read-with-input(session, "file:///project/README.md", ask, 3)
+    first(contents).text
+    ```
+    """
 }
 fn (session: ::types/Session, uri: Str, handler: Fn, max-rounds: Int): Vec<::types/ResourceContent> {
   result ::client/session-request-with-input(
@@ -167,7 +202,21 @@ fn (session: ::types/Session, uri: Str, handler: Fn, max-rounds: Int): Vec<::typ
 
 // List resource URI templates.
 list-templates-result
-meta {doc: """List resource templates and retain pagination/cache metadata."""}
+meta {
+    doc: """
+    List resource templates and retain pagination/cache metadata.
+
+    **Example**
+
+    ```hot
+    info ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+    session ::mcp::client/connect("https://mcp.example.com/mcp", info, null)
+    result ::mcp::resources/list-templates-result(session)
+    map(result.templates, %.uri-template)
+    result.next-cursor
+    ```
+    """
+}
 fn (session: ::types/Session): Map {
   result ::client/session-request(session, "resources/templates/list", {})
   {
@@ -195,6 +244,8 @@ Each template has `uri-template`, `name`, `description`, and `mime-type` fields.
 
 ```hot
 ::resources ::mcp::resources
+info ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+session ::mcp::client/connect("https://mcp.example.com/mcp", info, null)
 templates ::resources/list-templates(session)
 // templates => [{uri-template: "file:///{path}", name: "File", ...}, ...]
 first(templates).uri-template // => "file:///{path}"

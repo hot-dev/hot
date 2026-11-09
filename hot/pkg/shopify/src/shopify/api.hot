@@ -94,6 +94,14 @@ meta {
     `acme.myshopify.com`, `https://acme.myshopify.com/admin` all give
     `acme`. Errs on anything else (custom storefront domains don't serve
     the Admin API).
+
+    **Example**
+
+    ```hot
+    ::shopify::api/normalize-shop("acme.myshopify.com")  // "acme"
+    ::shopify::api/normalize-shop("https://acme.myshopify.com/admin")  // "acme"
+    is-err(::shopify::api/normalize-shop("shop.acme.com"))  // true
+    ```
     """
 }
 fn (shop: Str): Str {
@@ -120,7 +128,17 @@ fn (shop: Str): Str {
 
 api-version
 meta {
-    doc: """The Admin API version in use: the `shopify.api.version` context variable when set, otherwise `::shopify/API_VERSION`."""
+    doc: """
+    The Admin API version in use: the `shopify.api.version` context variable
+    when set, otherwise `::shopify/API_VERSION`.
+
+    **Example**
+
+    ```hot
+    version ::shopify::api/api-version()
+    ::shopify::api/graphql-url("acme", version)
+    ```
+    """
 }
 fn (): Str {
   configured or(::ctx/get("shopify.api.version"), "")
@@ -129,7 +147,16 @@ fn (): Str {
 
 graphql-url
 meta {
-    doc: """The GraphQL Admin endpoint for a shop (handle or myshopify domain) and API version (`YYYY-MM` or `unstable`). Exposed for testing."""
+    doc: """
+    The GraphQL Admin endpoint for a shop (handle or myshopify domain) and
+    API version (`YYYY-MM` or `unstable`). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::shopify::api/graphql-url("acme", "2026-10")  // "https://acme.myshopify.com/admin/api/2026-10/graphql.json"
+    ```
+    """
 }
 fn
 (shop: Str): Str {
@@ -150,13 +177,25 @@ fn
 // Credentials
 // ---------------------------------------------------------------------------
 
-non-blank fn (value: Any): Str? {
+non-blank
+meta {no-doc: true}
+fn (value: Any): Str? {
   if(is-str(value), if(is-empty(trim(value)), null, trim(value)), null)
 }
 
 blank-option
 meta {
-    doc: """The first of `names` that `opts` has with a blank or null value, else null."""
+    doc: """
+    The first of `names` that `opts` has with a blank or null value, else
+    null.
+
+    **Example**
+
+    ```hot
+    ::shopify::api/blank-option({shop: " "}, ["access-token", "shop"])  // "shop"
+    ::shopify::api/blank-option({shop: "acme"}, ["access-token", "shop"])  // null
+    ```
+    """
 }
 fn (opts: Map, names: Vec): Str? {
   find-first(names, (name) { and(in(name, keys(opts)), is-null(non-blank(get(opts, name)))) })
@@ -171,6 +210,17 @@ meta {
     or `shop` is in `opts` but blank or null, when `opts` has `shop` without
     `access-token`, or when the shop or version is malformed. Exposed for
     testing; `resolve` feeds it the context.
+
+    **Example**
+
+    ```hot
+    settings ::shopify::api/resolve-from({api-version: "2026-10"}, {
+      "shopify.shop": "acme",
+      "shopify.access.token": "TOKEN"
+    })
+    settings.url  // "https://acme.myshopify.com/admin/api/2026-10/graphql.json"
+    is-err(::shopify::api/resolve-from({shop: "acme"}, {}))  // true
+    ```
     """
 }
 fn (opts: Map, ctx-values: Map): Map {
@@ -236,7 +286,9 @@ fn (opts: Map): Map {
 // Response handling
 // ---------------------------------------------------------------------------
 
-is-throttled-error fn (error: Map): Bool {
+is-throttled-error
+meta {no-doc: true}
+fn (error: Map): Bool {
   eq(get-in(error, ["extensions", "code"]), "THROTTLED")
 }
 
@@ -247,6 +299,16 @@ meta {
     from an `extensions.cost` block: `(requestedQueryCost -
     currentlyAvailable) / restoreRate`, at least Shopify's recommended
     one second. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::shopify::api/throttle-wait-ms({
+      requestedQueryCost: 500,
+      throttleStatus: {currentlyAvailable: 100, restoreRate: 50}
+    })  // 8000
+    ::shopify::api/throttle-wait-ms(null)  // 1000
+    ```
     """
 }
 fn (cost: Map?): Int {
@@ -263,7 +325,18 @@ fn (cost: Map?): Int {
 
 parse-graphql-response
 meta {
-    doc: """Unwrap a GraphQL response body: `data` when there are no errors, otherwise an Err carrying `GraphQLError`. Exposed for testing; `graphql` applies it."""
+    doc: """
+    Unwrap a GraphQL response body: `data` when there are no errors,
+    otherwise an Err carrying `GraphQLError`. Exposed for testing; `graphql`
+    applies it.
+
+    **Example**
+
+    ```hot
+    ::shopify::api/parse-graphql-response({data: {shop: {name: "Acme"}}}).shop.name  // "Acme"
+    is-err(::shopify::api/parse-graphql-response({errors: [{message: "Bad query"}]}))  // true
+    ```
+    """
 }
 fn (body: Any): Any {
   errors or(get-in(body, ["errors"]), [])
@@ -290,6 +363,16 @@ meta {
     `userErrors` list into an Err carrying `UserErrors`. Pass
     `errors-key` for mutations that report errors under another name
     (e.g. `orderCancelUserErrors`). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    data {productDelete: {deletedProductId: "gid://shopify/Product/1", userErrors: []}}
+    ::shopify::api/mutation-payload(data, "productDelete").deletedProductId  // "gid://shopify/Product/1"
+
+    rejected {productDelete: {userErrors: [{field: ["id"], message: "Not found"}]}}
+    is-err(::shopify::api/mutation-payload(rejected, "productDelete"))  // true
+    ```
     """
 }
 fn
@@ -311,7 +394,19 @@ fn
 
 build-request
 meta {
-    doc: """The outgoing `HttpRequest` from resolved settings (see `resolve`). Pure; exposed for testing."""
+    doc: """
+    The outgoing `HttpRequest` from resolved settings (see `resolve`). Pure;
+    exposed for testing.
+
+    **Example**
+
+    ```hot
+    settings {access-token: "TOKEN", url: "https://acme.myshopify.com/admin/api/2026-10/graphql.json"}
+    req ::shopify::api/build-request("{ shop { name } }", {}, settings)
+    req.method  // "POST"
+    req.url  // "https://acme.myshopify.com/admin/api/2026-10/graphql.json"
+    ```
+    """
 }
 fn (query: Str, variables: Map, resolved: Map): HttpRequest {
   HttpRequest({
@@ -378,7 +473,19 @@ fn
 
 mutate
 meta {
-    doc: """Run a mutation and return its payload (`data[field]`), with `userErrors` (or `errors-key`) turned into an Err carrying `UserErrors`. An Err from the request comes back as is."""
+    doc: """
+    Run a mutation and return its payload (`data[field]`), with `userErrors`
+    (or `errors-key`) turned into an Err carrying `UserErrors`. An Err from
+    the request comes back as is.
+
+    **Example**
+
+    ```hot
+    mutation "mutation Tag($id: ID!, $tags: [String!]!) { tagsAdd(id: $id, tags: $tags) { node { id } userErrors { field message } } }"
+    payload ::shopify::api/mutate(mutation, {id: "gid://shopify/Order/1001", tags: ["vip"]}, "tagsAdd")
+    payload.node.id
+    ```
+    """
 }
 fn
 (query: Str, variables: Map, field: Str): Any {
@@ -402,7 +509,9 @@ fn
 // Pagination
 // ---------------------------------------------------------------------------
 
-page-size fn (requested: Any): Int {
+page-size
+meta {no-doc: true}
+fn (requested: Any): Int {
   size or(requested, ::shopify/DEFAULT_PAGE_SIZE)
   max(1, min(size, ::shopify/MAX_PAGE_SIZE))
 }
@@ -413,6 +522,13 @@ meta {
     Build connection variables from list options: `first` (default 50,
     capped at 250), `after`, `query`, `sortKey`, `reverse`. Unset options
     are omitted. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::shopify::api/connection-variables({first: 500, query: "status:active"})  // {first: 250, query: "status:active"}
+    ::shopify::api/connection-variables({})  // {first: 50}
+    ```
     """
 }
 fn (options: Map): Map {
@@ -425,7 +541,9 @@ fn (options: Map): Map {
   }, is-some)
 }
 
-collect-pages fn (page-fn: Fn, options: Map, max-items: Int, acc: Vec): Vec {
+collect-pages
+meta {no-doc: true}
+fn (page-fn: Fn, options: Map, max-items: Int, acc: Vec): Vec {
   remaining sub(max-items, length(acc))
   page page-fn({...options, first: min(page-size(get(options, "first")), remaining)})
   cond {
@@ -467,7 +585,17 @@ fn (page-fn: Fn, options: Map, max-items: Int): Vec {
 
 quote-search-term
 meta {
-    doc: """Quote a value as an exact term for Shopify's search syntax (backslashes and quotes escaped, wrapped in double quotes) so operators or spaces in the value can't broaden the search. Exposed for testing."""
+    doc: """
+    Quote a value as an exact term for Shopify's search syntax (backslashes
+    and quotes escaped, wrapped in double quotes) so operators or spaces in
+    the value can't broaden the search. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::shopify::api/quote-search-term("blue shirt")  // "\"blue shirt\""
+    ```
+    """
 }
 fn (value: Str): Str {
   no-backslash join(split(value, "\\"), "\\\\")

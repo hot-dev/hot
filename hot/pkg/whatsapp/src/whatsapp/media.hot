@@ -21,6 +21,15 @@ meta {
     The text parts and the content are concatenated as Bytes, so binary
     content (images, audio) is never reinterpreted as text. `content` may
     be `Bytes` or `Str` (encoded as UTF-8). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::media ::whatsapp::media
+
+    body ::media/build-upload-body("xyz", "hello", "text/plain", "hello.txt")
+    contains(::hot::bytes/to-str(body), "filename=\"hello.txt\"")  // true
+    ```
     """
 }
 fn (boundary: Str, content: Bytes | Str, mime-type: Str, filename: Str): Bytes {
@@ -90,7 +99,19 @@ fn
 
 media-url
 meta {
-    doc: """The URL for a media id, with the optional `phone_number_id` ownership check. Exposed for testing."""
+    doc: """
+    The URL for a media id, with the optional `phone_number_id` ownership
+    check. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::media ::whatsapp::media
+
+    ::media/media-url("123", null, {api-version: "v25.0"})  // "https://graph.facebook.com/v25.0/123"
+    ::media/media-url("123", "456", {api-version: "v25.0"})  // "https://graph.facebook.com/v25.0/123?phone_number_id=456"
+    ```
+    """
 }
 fn
 (media-id: Str, phone-number-id: Str?): Str {
@@ -155,7 +176,21 @@ fn
 
 download-media-by-id
 meta {
-    doc: """Look up a media id and download it in one step. Returns `{bytes, mime_type, sha256, file_size, id}`, or the first Err. The usual way to fetch media from an inbound webhook message (`message.image.id`, ...)."""
+    doc: """
+    Look up a media id and download it in one step. Returns `{bytes,
+    mime_type, sha256, file_size, id}`, or the first Err. The usual way to
+    fetch media from an inbound webhook message (`message.image.id`, ...).
+
+    **Example**
+
+    ```hot
+    ::media ::whatsapp::media
+
+    file ::media/download-media-by-id("1234567890")
+    file.mime_type
+    length(file.bytes)
+    ```
+    """
 }
 fn
 (media-id: Str): Map {

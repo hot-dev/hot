@@ -97,7 +97,19 @@ TYPE_LABELS {
 
 export-formats
 meta {
-    doc: """The `{format-name: mime-type}` exports for a Google-native MIME type (`{}` for types that cannot be exported, e.g. Forms, Sites, Vids)."""
+    doc: """
+    The `{format-name: mime-type}` exports for a Google-native MIME type
+    (`{}` for types that cannot be exported, e.g. Forms, Sites, Vids).
+
+    **Example**
+
+    ```hot
+    ::google::drive::content/export-formats("application/vnd.google-apps.script")
+    // {json: "application/vnd.google-apps.script+json"}
+
+    ::google::drive::content/export-formats("application/vnd.google-apps.form")  // {}
+    ```
+    """
 }
 fn (native-mime: Str): Map {
   or(get(EXPORT_FORMATS, native-mime), {})
@@ -142,7 +154,17 @@ fn (native-mime: Str, format: Str?): Str {
 
 range-header
 meta {
-    doc: """An HTTP `Range` value for bytes `start`..`end` inclusive (`end` null for "to the end"): `range-header(0, 1023)` is `"bytes=0-1023"`."""
+    doc: """
+    An HTTP `Range` value for bytes `start`..`end` inclusive (`end` null for
+    "to the end"): `range-header(0, 1023)` is `"bytes=0-1023"`.
+
+    **Example**
+
+    ```hot
+    ::google::drive::content/range-header(0, 1023)  // "bytes=0-1023"
+    ::google::drive::content/range-header(1024, null)  // "bytes=1024-"
+    ```
+    """
 }
 fn (start: Int, end: Int?): Str {
   if(is-null(end), `bytes=${start}-`, `bytes=${start}-${end}`)
@@ -150,7 +172,17 @@ fn (start: Int, end: Int?): Str {
 
 download-ranges
 meta {
-    doc: """Split `size` bytes into inclusive `[start, end]` ranges of at most `chunk-size` bytes (pure). `download-ranges(10, 4)` is `[[0, 3], [4, 7], [8, 9]]`."""
+    doc: """
+    Split `size` bytes into inclusive `[start, end]` ranges of at most
+    `chunk-size` bytes (pure). `download-ranges(10, 4)` is `[[0, 3], [4, 7],
+    [8, 9]]`.
+
+    **Example**
+
+    ```hot
+    ::google::drive::content/download-ranges(10, 4)  // [[0, 3], [4, 7], [8, 9]]
+    ```
+    """
 }
 fn (size: Int, chunk-size: Int): Vec {
   c max(chunk-size, 1)
@@ -163,7 +195,17 @@ fn (size: Int, chunk-size: Int): Vec {
 
 is-size-limit-error
 meta {
-    doc: """True when a request failed because the response exceeded `http.max-response-bytes`."""
+    doc: """
+    True when a request failed because the response exceeded
+    `http.max-response-bytes`.
+
+    **Example**
+
+    ```hot
+    ::google::drive::content/is-size-limit-error(err("response exceeds http.max-response-bytes"))  // true
+    ::google::drive::content/is-size-limit-error(err("connection reset"))  // false
+    ```
+    """
 }
 fn (result: Result): Bool {
   and(is-err(result), contains(err-message(result), "exceeds"))
@@ -171,7 +213,17 @@ fn (result: Result): Bool {
 
 is-export-too-large
 meta {
-    doc: """True when an export failed on Drive's 10 MB export limit (`exportSizeLimitExceeded`)."""
+    doc: """
+    True when an export failed on Drive's 10 MB export limit
+    (`exportSizeLimitExceeded`).
+
+    **Example**
+
+    ```hot
+    ::google::drive::content/is-export-too-large(err("This file is too large to be exported."))  // true
+    ::google::drive::content/is-export-too-large(err("connection reset"))  // false
+    ```
+    """
 }
 fn (result: Result): Bool {
   and(
@@ -188,7 +240,18 @@ DOWNLOAD_LOCAL_KEYS ["range", "chunk-size"]
 
 download-params
 meta {
-    doc: """Query parameters for a blob download (pure): `alt=media`, `supportsAllDrives=true`, plus Drive parameters from `opts` such as `acknowledgeAbuse`."""
+    doc: """
+    Query parameters for a blob download (pure): `alt=media`,
+    `supportsAllDrives=true`, plus Drive parameters from `opts` such as
+    `acknowledgeAbuse`.
+
+    **Example**
+
+    ```hot
+    ::google::drive::content/download-params({acknowledgeAbuse: true, chunk-size: 1024})
+    // {alt: "media", supportsAllDrives: true, acknowledgeAbuse: true}
+    ```
+    """
 }
 fn (opts: Map): Map {
   ::drive/query-params({alt: "media", supportsAllDrives: true}, opts, DOWNLOAD_LOCAL_KEYS)
@@ -233,7 +296,18 @@ fn
 }
 
 download-range
-meta {doc: """Download bytes `start`..`end` (inclusive) of a blob file."""}
+meta {
+    doc: """
+    Download bytes `start`..`end` (inclusive) of a blob file.
+
+    **Example**
+
+    ```hot
+    part ::google::drive::content/download-range("1AbCfile", 0, 1023)
+    part.size
+    ```
+    """
+}
 fn
 (id: Str, start: Int, end: Int): FileContent {
   download-range(id, start, end, {})
@@ -242,7 +316,9 @@ fn
   download-file(id, {...opts, range: {start: start, end: end}})
 }
 
-fetch-ranges fn (full-url: Str, ranges: Vec, index: Int, acc: Bytes, opts: Map): Bytes {
+fetch-ranges
+meta {no-doc: true}
+fn (full-url: Str, ranges: Vec, index: Int, acc: Bytes, opts: Map): Bytes {
   cond {
     gte(index, length(ranges)) => { acc }
     => {
@@ -268,6 +344,13 @@ meta {
     (default 8 MiB, keep it under `http.max-response-bytes`) and join
     them, so files larger than one response can be read. The whole file
     is still held in memory.
+
+    **Example**
+
+    ```hot
+    video ::google::drive::content/download-file-chunked("1AbCfile", {chunk-size: 4194304})
+    video.size
+    ```
     """
 }
 fn
@@ -298,7 +381,17 @@ fn
 }
 
 download-text
-meta {doc: """Download a blob file and decode it as UTF-8 text."""}
+meta {
+    doc: """
+    Download a blob file and decode it as UTF-8 text.
+
+    **Example**
+
+    ```hot
+    ::google::drive::content/download-text("1AbCfile")
+    ```
+    """
+}
 fn
 (id: Str): Str {
   download-text(id, {})
@@ -314,7 +407,18 @@ fn
 
 export-via-link
 meta {
-    doc: """Fetch an `exportLinks` URL with the call's credentials (the fallback for exports over 10 MB)."""
+    doc: """
+    Fetch an `exportLinks` URL with the call's credentials (the fallback for
+    exports over 10 MB).
+
+    **Example**
+
+    ```hot
+    file ::google::drive::files/get-file("1AbCdoc", {fields: "exportLinks"})
+    pdf ::google::drive::content/export-via-link("1AbCdoc", get(file.exportLinks, "application/pdf"), {})
+    pdf.size
+    ```
+    """
 }
 fn (file-id: Str, link: Str, opts: Map): FileContent {
   response ::api/request(::drive/READ_SCOPE, "GET", link, {}, "", ::drive/creds(opts))
@@ -325,7 +429,9 @@ fn (file-id: Str, link: Str, opts: Map): FileContent {
   }
 }
 
-export-direct fn (id: Str, mime-type: Str, opts: Map): FileContent {
+export-direct
+meta {no-doc: true}
+fn (id: Str, mime-type: Str, opts: Map): FileContent {
   full-url ::drive/url(`/files/${::drive/encode-id(id)}/export`, {mimeType: mime-type})
   response ::api/request(::drive/READ_SCOPE, "GET", full-url, {}, "", ::drive/creds(opts))
   cond {
@@ -335,7 +441,9 @@ export-direct fn (id: Str, mime-type: Str, opts: Map): FileContent {
   }
 }
 
-export-with-links fn (id: Str, mime-type: Str, export-links: Any, opts: Map): FileContent {
+export-with-links
+meta {no-doc: true}
+fn (id: Str, mime-type: Str, export-links: Any, opts: Map): FileContent {
   direct export-direct(id, mime-type, opts)
   cond {
     not(is-export-too-large(direct)) => { direct }
@@ -357,7 +465,7 @@ meta {
     URL for the same type is used instead.
 
     ```hot
-    csv ::google::drive::content/export-file(sheet-id, "text/csv")
+    csv ::google::drive::content/export-file("1AbCsheet", "text/csv")
     csv.text
     ```
     """
@@ -372,7 +480,16 @@ fn
 
 export-text
 meta {
-    doc: """Export a Google-native file to a textual MIME type (`text/markdown`, `text/plain`, `text/csv`, ...) and return the text."""
+    doc: """
+    Export a Google-native file to a textual MIME type (`text/markdown`,
+    `text/plain`, `text/csv`, ...) and return the text.
+
+    **Example**
+
+    ```hot
+    ::google::drive::content/export-text("1AbCdoc", "text/markdown")
+    ```
+    """
 }
 fn
 (id: Str, mime-type: Str): Str {
@@ -389,7 +506,9 @@ fn
 
 READ_LOCAL_KEYS ["range", "chunk-size", "fields"]
 
-with-file fn (content: Result, file: Map, format: Str?): FileContent {
+with-file
+meta {no-doc: true}
+fn (content: Result, file: Map, format: Str?): FileContent {
   cond {
     is-err(content) => { content }
     => { FileContent({...untype(content), name: file.name, format: format, file: ::drive/to-doc-file(file)}) }
@@ -449,7 +568,19 @@ fn
 
 read-document-text
 meta {
-    doc: """`read-document`, returning just the text; an Err when the result is not textual (e.g. a PDF or image blob, or a `"pdf"` export)."""
+    doc: """
+    `read-document`, returning just the text; an Err when the result is not
+    textual (e.g. a PDF or image blob, or a `"pdf"` export).
+
+    **Example**
+
+    ```hot
+    ::google::drive::content/read-document-text("1AbCdoc")
+
+    // A Sheet as TSV
+    ::google::drive::content/read-document-text("1AbCsheet", "tsv")
+    ```
+    """
 }
 fn
 (id: Str): Str {

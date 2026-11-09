@@ -107,7 +107,19 @@ PauseFineTuningJobResponse type {
 
 pause-finetuning
 meta {
-    doc: """POST /fine_tuning/jobs/{fine_tuning_job_id}/pause - Pause a running fine-tuning job."""
+    doc: """
+    POST /fine_tuning/jobs/{fine_tuning_job_id}/pause - Pause a running
+    fine-tuning job.
+
+    **Example**
+
+    ```hot
+    job ::openai::pause/pause-finetuning(::openai::pause/PauseFineTuningJobRequest({
+      fine-tuning-job-id: "ftjob_abc123"
+    }))
+    job.status
+    ```
+    """
 }
 fn
 (request: PauseFineTuningJobRequest): PauseFineTuningJobResponse {

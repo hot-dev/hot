@@ -10,7 +10,18 @@ query-string ::hubspot::api/query-string
 
 list-owners
 meta {
-    doc: """GET /crm/owners/{version} - One page of owners: `{results: [{id, email, firstName, lastName, userId, type, teams, archived}], paging?}`. `params`: `email` (exact match), `limit` (max 500), `after`, `archived`."""
+    doc: """
+    GET /crm/owners/{version} - One page of owners: `{results: [{id, email,
+    firstName, lastName, userId, type, teams, archived}], paging?}`.
+    `params`: `email` (exact match), `limit` (max 500), `after`, `archived`.
+
+    **Example**
+
+    ```hot
+    page ::hubspot::owners/list-owners({limit: 100})
+    map(page.results, %.email)
+    ```
+    """
 }
 fn
 (): Map {
@@ -25,7 +36,21 @@ fn
 
 get-owner
 meta {
-    doc: """GET /crm/owners/{version}/{ownerId} - One owner by owner id. The 2-arity form looks up by `"userId"` instead (`id-property` is `"id"` or `"userId"`)."""
+    doc: """
+    GET /crm/owners/{version}/{ownerId} - One owner by owner id. The 2-arity
+    form looks up by `"userId"` instead (`id-property` is `"id"` or
+    `"userId"`).
+
+    **Example**
+
+    ```hot
+    owner ::hubspot::owners/get-owner("123")
+    owner.email
+
+    // By user id
+    ::hubspot::owners/get-owner("456", "userId")
+    ```
+    """
 }
 fn
 (owner-id: Str): Map {

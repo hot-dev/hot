@@ -207,7 +207,20 @@ ModifyAssistantResponse type {
 
 modify-assistant
 meta {
-    doc: """POST /assistants/{assistant_id} - Update an assistant's configuration (model, name, instructions, tools, etc.)."""
+    doc: """
+    POST /assistants/{assistant_id} - Update an assistant's configuration
+    (model, name, instructions, tools, etc.).
+
+    **Example**
+
+    ```hot
+    assistant ::openai::modify/modify-assistant("asst_abc123", ::openai::modify/ModifyAssistantRequest({
+      name: "Math Tutor v2",
+      instructions: "Show your work."
+    }))
+    assistant.name
+    ```
+    """
 }
 fn
 (assistant-id: Str, request: ModifyAssistantRequest): ModifyAssistantResponse {
@@ -238,7 +251,19 @@ ModifyCertificateResponse type {
 
 modify-certificate
 meta {
-    doc: """POST /organization/certificates/{certificate_id} - Update the name of a certificate."""
+    doc: """
+    POST /organization/certificates/{certificate_id} - Update the name of a
+    certificate.
+
+    **Example**
+
+    ```hot
+    // The request path is not filled in from the request yet, so no certificate id can be passed.
+    cert ::openai::modify/modify-certificate(::openai::modify/ModifyCertificateRequest({
+      name: "Production cert"
+    }))
+    ```
+    """
 }
 fn
 (request: ModifyCertificateRequest): ModifyCertificateResponse {
@@ -269,7 +294,19 @@ ModifyThreadResponse type {
 
 modify-thread
 meta {
-    doc: """POST /threads/{thread_id} - Update a thread's tool resources or metadata."""
+    doc: """
+    POST /threads/{thread_id} - Update a thread's tool resources or
+    metadata.
+
+    **Example**
+
+    ```hot
+    thread ::openai::modify/modify-thread("thread_abc123", ::openai::modify/ModifyThreadRequest({
+      metadata: {user: "u_123"}
+    }))
+    thread.metadata
+    ```
+    """
 }
 fn
 (thread-id: Str, request: ModifyThreadRequest): ModifyThreadResponse {
@@ -308,7 +345,19 @@ ModifyMessageResponse type {
 
 modify-message
 meta {
-    doc: """POST /threads/{thread_id}/messages/{message_id} - Update a message's metadata."""
+    doc: """
+    POST /threads/{thread_id}/messages/{message_id} - Update a message's
+    metadata.
+
+    **Example**
+
+    ```hot
+    message ::openai::modify/modify-message("thread_abc123", "msg_abc123", ::openai::modify/ModifyMessageRequest({
+      metadata: {reviewed: "true"}
+    }))
+    message.metadata
+    ```
+    """
 }
 fn
 (thread-id: Str, message-id: Str, request: ModifyMessageRequest): ModifyMessageResponse {
@@ -359,7 +408,20 @@ ModifyRunResponse type {
 
 
 modify-run
-meta {doc: """POST /threads/{thread_id}/runs/{run_id} - Update a run's metadata."""}
+meta {
+    doc: """
+    POST /threads/{thread_id}/runs/{run_id} - Update a run's metadata.
+
+    **Example**
+
+    ```hot
+    run ::openai::modify/modify-run("thread_abc123", "run_abc123", ::openai::modify/ModifyRunRequest({
+      metadata: {ticket: "T-42"}
+    }))
+    run.metadata
+    ```
+    """
+}
 fn
 (thread-id: Str, run-id: Str, request: ModifyRunRequest): ModifyRunResponse {
   modify-run(thread-id, run-id, request, {})
@@ -396,7 +458,20 @@ ModifyVectorStoreResponse type {
 
 modify-vector-store
 meta {
-    doc: """POST /vector_stores/{vector_store_id} - Update a vector store's name, expiration, or metadata."""
+    doc: """
+    POST /vector_stores/{vector_store_id} - Update a vector store's name,
+    expiration, or metadata.
+
+    **Example**
+
+    ```hot
+    store ::openai::modify/modify-vector-store("vs_abc123", ::openai::modify/ModifyVectorStoreRequest({
+      name: "Support docs v2",
+      expires_after: {anchor: "last_active_at", days: 30}
+    }))
+    store.name
+    ```
+    """
 }
 fn
 (vector-store-id: Str, request: ModifyVectorStoreRequest): ModifyVectorStoreResponse {

@@ -22,6 +22,8 @@ Returns a Vec of Tool, each with `name`, `description`, and `input-schema` field
 
 ```hot
 ::tools ::mcp::tools
+info ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+session ::mcp::client/connect("https://mcp.example.com/mcp", info, null)
 tools ::tools/list(session)
 // tools => [{name: "get_weather", description: "...", input-schema: {...}}, ...]
 first(tools).name // => "get_weather"
@@ -47,6 +49,8 @@ Pass null as the cursor for the first page.
 
 ```hot
 ::tools ::mcp::tools
+info ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+session ::mcp::client/connect("https://mcp.example.com/mcp", info, null)
 page ::tools/list-page(session, null)
 page.tools // => [{name: "get_weather", ...}, ...]
 page.next-cursor // => "cursor-abc" or null
@@ -84,6 +88,8 @@ single Vec containing every tool.
 
 ```hot
 ::tools ::mcp::tools
+info ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+session ::mcp::client/connect("https://mcp.example.com/mcp", info, null)
 all-tools ::tools/list-all(session)
 length(all-tools) // => total number of tools across all pages
 ```
@@ -94,7 +100,9 @@ fn (session: ::types/Session): Vec<::types/Tool> {
 }
 
 // Recursive pagination helper (TCO).
-collect-pages fn cond (session: ::types/Session, method: Str, key: Str, cursor: Str?, acc: Vec): Vec {
+collect-pages
+meta {no-doc: true}
+fn cond (session: ::types/Session, method: Str, key: Str, cursor: Str?, acc: Vec): Vec {
   => {
     params {} |> assoc-some("cursor", cursor)
     result ::client/session-request(session, method, params)
@@ -110,7 +118,9 @@ collect-pages fn cond (session: ::types/Session, method: Str, key: Str, cursor: 
 // Tool Calling
 // ============================================================================
 
-tool-result fn cond (result: Result): ::types/ToolResult {
+tool-result
+meta {no-doc: true}
+fn cond (result: Result): ::types/ToolResult {
   is-err(result) => { result }
   => {
     ::types/ToolResult({
@@ -124,7 +134,9 @@ tool-result fn cond (result: Result): ::types/ToolResult {
   }
 }
 
-find-tool fn (session: ::types/Session, name: Str): ::types/Tool {
+find-tool
+meta {no-doc: true}
+fn (session: ::types/Session, name: Str): ::types/Tool {
   tool find-first(list-all(session), eq(%.name, name))
   if(
     is-some(tool),
@@ -136,13 +148,23 @@ find-tool fn (session: ::types/Session, name: Str): ::types/Tool {
 call-tool
 meta {
     doc: """
-Call a previously listed Tool definition.
+    Call a previously listed Tool definition.
 
-Prefer this form when retaining the Tool is convenient: modern Streamable HTTP
-uses its `input-schema` to mirror any `x-mcp-header` parameters.
+    Prefer this form when retaining the Tool is convenient: modern Streamable HTTP
+    uses its `input-schema` to mirror any `x-mcp-header` parameters.
 
-Returns err() when the server answers with a JSON-RPC error.
-"""
+    Returns err() when the server answers with a JSON-RPC error.
+
+    **Example**
+
+    ```hot
+    info ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+    session ::mcp::client/connect("https://mcp.example.com/mcp", info, null)
+    tool first(::mcp::tools/list(session))
+    result ::mcp::tools/call-tool(session, tool, {location: "Portland"})
+    first(result.content).text
+    ```
+    """
 }
 fn (session: ::types/Session, tool: ::types/Tool, arguments: Map?): ::types/ToolResult {
   result ::client/session-request-with-tool(session, "tools/call", {
@@ -168,6 +190,8 @@ return is also an err().
 
 ```hot
 ::tools ::mcp::tools
+info ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+session ::mcp::client/connect("https://mcp.example.com/mcp", info, null)
 result ::tools/call(session, "get_weather", {location: "Portland"})
 result.is-error // => false
 first(result.content).text // => "Sunny, 72°F"
@@ -200,10 +224,21 @@ fn (session: ::types/Session, name: Str, arguments: Map?): ::types/ToolResult {
 call-tool-with-input
 meta {
     doc: """
-Call a Tool and fulfill modern Multi Round-Trip input requests with `handler`.
+    Call a Tool and fulfill modern Multi Round-Trip input requests with `handler`.
 
-Returns err() when the server answers with a JSON-RPC error.
-"""
+    Returns err() when the server answers with a JSON-RPC error.
+
+    **Example**
+
+    ```hot
+    info ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+    session ::mcp::client/connect("https://mcp.example.com/mcp", info, null)
+    ask (request) { {action: "accept", content: {confirmed: true}} }
+    tool first(::mcp::tools/list(session))
+    result ::mcp::tools/call-tool-with-input(session, tool, {env: "prod"}, ask, 3)
+    result.is-error
+    ```
+    """
 }
 fn (session: ::types/Session, tool: ::types/Tool, arguments: Map?, handler: Fn, max-rounds: Int): ::types/ToolResult {
   result ::client/session-request-with-tool-input(
@@ -220,11 +255,21 @@ fn (session: ::types/Session, tool: ::types/Tool, arguments: Map?, handler: Fn, 
 call-with-input
 meta {
     doc: """
-Call a named tool and fulfill modern Multi Round-Trip input requests with `handler`.
+    Call a named tool and fulfill modern Multi Round-Trip input requests with `handler`.
 
-Returns err() when the server answers with a JSON-RPC error or `tools/list`
-doesn't return the tool.
-"""
+    Returns err() when the server answers with a JSON-RPC error or `tools/list`
+    doesn't return the tool.
+
+    **Example**
+
+    ```hot
+    info ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+    session ::mcp::client/connect("https://mcp.example.com/mcp", info, null)
+    ask (request) { {action: "accept", content: {confirmed: true}} }
+    result ::mcp::tools/call-with-input(session, "deploy", {env: "prod"}, ask, 3)
+    if(is-err(result), err-message(result), first(result.content).text)
+    ```
+    """
 }
 fn (session: ::types/Session, name: Str, arguments: Map?, handler: Fn, max-rounds: Int): ::types/ToolResult {
   tool find-tool(session, name)
@@ -236,7 +281,20 @@ fn (session: ::types/Session, name: Str, arguments: Map?, handler: Fn, max-round
 // JSON-RPC response. Use for-each to process events in real time.
 call-stream-tool
 meta {
-    doc: """Stream a tool call using a retained Tool definition for modern routing headers."""
+    doc: """
+    Stream a tool call using a retained Tool definition for modern routing
+    headers.
+
+    **Example**
+
+    ```hot
+    info ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+    session ::mcp::client/connect("https://mcp.example.com/mcp", info, null)
+    tool first(::mcp::tools/list(session))
+    events collect(::mcp::tools/call-stream-tool(session, tool, {query: "sales"}))
+    last(events).data.result
+    ```
+    """
 }
 fn (session: ::types/Session, tool: ::types/Tool, arguments: Map?): Iter {
   response ::client/session-request-stream-with-tool(session, "tools/call", {
@@ -266,6 +324,8 @@ Use `collect` to gather all events, or iterate to process them in real time.
 
 ```hot
 ::tools ::mcp::tools
+info ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+session ::mcp::client/connect("https://mcp.example.com/mcp", info, null)
 
 // Collect all stream events
 events collect(::tools/call-stream(session, "long_analysis", {query: "..."}))

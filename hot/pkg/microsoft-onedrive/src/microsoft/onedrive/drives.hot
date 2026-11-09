@@ -26,7 +26,7 @@ meta {
     ```hot
     mine ::microsoft::onedrive::drives/get-drive("me")
     mine.driveType   // "business" or "personal"
-    lib ::microsoft::onedrive::drives/get-drive(::microsoft::onedrive/site-drive(site-id))
+    lib ::microsoft::onedrive::drives/get-drive(::microsoft::onedrive/site-drive("contoso.sharepoint.com,1111,2222"))
     ```
     """
 }
@@ -40,7 +40,16 @@ fn
 
 my-drive
 meta {
-    doc: """GET /me/drive - the signed-in user's OneDrive (delegated tokens only)."""
+    doc: """
+    GET /me/drive - the signed-in user's OneDrive (delegated tokens only).
+
+    **Example**
+
+    ```hot
+    mine ::microsoft::onedrive::drives/my-drive()
+    mine.quota.remaining
+    ```
+    """
 }
 fn
 (): Map {
@@ -52,7 +61,18 @@ fn
 
 user-drive
 meta {
-    doc: """GET /users/{id}/drive - a user's OneDrive (app-only needs `Files.Read.All`). The user must have signed in to OneDrive once for it to exist."""
+    doc: """
+    GET /users/{id}/drive - a user's OneDrive (app-only needs
+    `Files.Read.All`). The user must have signed in to OneDrive once for it
+    to exist.
+
+    **Example**
+
+    ```hot
+    d ::microsoft::onedrive::drives/user-drive("alex@contoso.com", {select: "id,webUrl"})
+    d.id
+    ```
+    """
 }
 fn
 (user: Str): Map {
@@ -64,7 +84,17 @@ fn
 
 list-drives-at
 meta {
-    doc: """GET {owner}/drives - the drives of `"/me"`, `"/users/{id}"`, `"/sites/{id}"` or `"/groups/{id}"`, all pages."""
+    doc: """
+    GET {owner}/drives - the drives of `"/me"`, `"/users/{id}"`,
+    `"/sites/{id}"` or `"/groups/{id}"`, all pages.
+
+    **Example**
+
+    ```hot
+    drives ::microsoft::onedrive::drives/list-drives-at("/me")
+    map(drives, %.name)
+    ```
+    """
 }
 fn
 (owner-path: Str): Vec {
@@ -76,7 +106,17 @@ fn
 
 site-drives
 meta {
-    doc: """GET /sites/{id}/drives - a SharePoint site's document libraries (each a drive). See also `::microsoft::sharepoint::sites/list-drives`."""
+    doc: """
+    GET /sites/{id}/drives - a SharePoint site's document libraries (each a
+    drive). See also `::microsoft::sharepoint::sites/list-drives`.
+
+    **Example**
+
+    ```hot
+    libraries ::microsoft::onedrive::drives/site-drives("contoso.sharepoint.com,1111,2222")
+    map(libraries, %.id)
+    ```
+    """
 }
 fn
 (site-id: Str): Vec {
@@ -88,7 +128,17 @@ fn
 
 group-drive
 meta {
-    doc: """GET /groups/{id}/drive - a Microsoft 365 group's or team's document library."""
+    doc: """
+    GET /groups/{id}/drive - a Microsoft 365 group's or team's document
+    library.
+
+    **Example**
+
+    ```hot
+    lib ::microsoft::onedrive::drives/group-drive("a1b2c3d4-0000-1111-2222-333344445555")
+    lib.webUrl
+    ```
+    """
 }
 fn
 (group-id: Str): Map {

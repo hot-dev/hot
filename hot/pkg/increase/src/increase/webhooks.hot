@@ -21,7 +21,17 @@ meta {
 
 signing-key
 meta {
-    doc: """The HMAC key for an Increase shared secret: its raw UTF-8 bytes. Increase's SDKs verify with `new Webhook("whsec_" + base64(secret))`, which decodes back to these bytes. Exposed for testing."""
+    doc: """
+    The HMAC key for an Increase shared secret: its raw UTF-8 bytes.
+    Increase's SDKs verify with `new Webhook("whsec_" + base64(secret))`,
+    which decodes back to these bytes. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    length(::increase::webhooks/signing-key("test-secret"))  // 11
+    ```
+    """
 }
 fn (secret: Str): Bytes {
   ::ctx/mark-secret(Bytes(::ctx/mark-secret(secret)))
@@ -39,17 +49,19 @@ meta {
     **Example**
 
     ```hot
+    HttpResponse ::hot::http/HttpResponse
+
     increase-webhook
     meta {webhook: {service: "increase", path: "/increase/webhook"}}
     fn (request) {
       cond {
         not(::increase::webhooks/verify-request(request)) => {
-          ::hot::http/HttpResponse({status: 401, body: "invalid signature"})
+          HttpResponse({status: 401, body: "invalid signature"})
         }
         => {
           event ::increase::events/parse-event(::hot::http/raw-body(request))
           // enqueue event.id / event.category for processing
-          ::hot::http/HttpResponse({status: 200, body: {received: true}})
+          HttpResponse({status: 200, body: {received: true}})
         }
       }
     }
@@ -79,7 +91,27 @@ fn
 construct-event
 meta {
     ctx: {"increase.webhook.secret": {required: false}},
-    doc: """Verify a delivery (see `verify-request`) and return its `::increase::events/Event`, or an Err when the signature or timestamp doesn't verify. The 2-arity form takes an explicit secret."""
+    doc: """
+    Verify a delivery (see `verify-request`) and return its
+    `::increase::events/Event`, or an Err when the signature or timestamp
+    doesn't verify. The 2-arity form takes an explicit secret.
+
+    **Example**
+
+    ```hot
+    HttpResponse ::hot::http/HttpResponse
+
+    on-increase-delivery
+    meta {webhook: {service: "increase", path: "/increase/webhook"}}
+    fn (request) {
+      event ::increase::webhooks/construct-event(request)
+      cond {
+        is-err(event) => { HttpResponse({status: 401, body: "invalid signature"}) }
+        => { HttpResponse({status: 200, body: {received: event.id}}) }
+      }
+    }
+    ```
+    """
 }
 fn
 (request: Map): Any {

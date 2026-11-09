@@ -45,7 +45,16 @@ SKIPPED_TAGS ["HEAD", "CITA", "XREF"]
 
 hierarchy-params
 meta {
-    doc: """The hierarchy query parameters from `opts`, omitted when unset (pure): `{part: "1010", section: "1010.230"}`."""
+    doc: """
+    The hierarchy query parameters from `opts` (pure). A key that isn't
+    set is null, and `query-string` drops it.
+
+    **Example**
+
+    ```hot
+    ::ecfr/hierarchy-params({part: "1010", section: "1010.230"}).section  // "1010.230"
+    ```
+    """
 }
 fn (opts: Map): Map {
   {
@@ -61,7 +70,19 @@ fn (opts: Map): Map {
 
 versions-params
 meta {
-    doc: """Query parameters for `versions` (pure): the hierarchy keys and `issue_date[on]`, `[gte]` and `[lte]` from `opts.issue-date`, `issue-date-gte` and `issue-date-lte`."""
+    doc: """
+    Query parameters for `versions` (pure): the hierarchy keys and
+    `issue_date[on]`, `[gte]` and `[lte]` from `opts.issue-date`,
+    `issue-date-gte` and `issue-date-lte`.
+
+    **Example**
+
+    ```hot
+    params ::ecfr/versions-params({part: "1010", issue-date-gte: "2024-01-01"})
+    params.part  // "1010"
+    get(params, "issue_date[gte]")  // "2024-01-01"
+    ```
+    """
 }
 fn (opts: Map): Map {
   {
@@ -74,7 +95,18 @@ fn (opts: Map): Map {
 
 search-params
 meta {
-    doc: """Query parameters for a search (pure): `query`, `date`, `hierarchy[...]` from `opts.title` and the hierarchy keys, and paging."""
+    doc: """
+    Query parameters for a search (pure): `query`, `date`, `hierarchy[...]`
+    from `opts.title` and the hierarchy keys, and paging.
+
+    **Example**
+
+    ```hot
+    params ::ecfr/search-params("beneficial ownership", {title: 31, part: "1010", per-page: 10})
+    params.per_page  // 10
+    get(params, "hierarchy[part]")  // "1010"
+    ```
+    """
 }
 fn (query: Str, opts: Map): Map {
   h hierarchy-params(opts)
@@ -88,20 +120,32 @@ fn (query: Str, opts: Map): Map {
   }
 }
 
-versioner-url fn (path: Str, params: Map, opts: Map): Str {
+versioner-url
+meta {no-doc: true}
+fn (path: Str, params: Map, opts: Map): Str {
   cfg ::api/resolve(opts)
   `${cfg.base-url}/versioner/v1${path}${::api/query-string(params)}`
 }
 
 dated-path
 meta {
-    doc: """`/{kind}/{date}/title-{title}.{ext}` with each part encoded (pure)."""
+    doc: """
+    `/{kind}/{date}/title-{title}.{ext}` with each part encoded (pure).
+
+    **Example**
+
+    ```hot
+    ::ecfr/dated-path("full", "2026-11-02", 31, "xml")  // "/full/2026-11-02/title-31.xml"
+    ```
+    """
 }
 fn (kind: Str, date: Str, title: Any, ext: Str): Str {
   `/${kind}/${::api/path-segment(date)}/title-${::api/path-segment(title)}.${ext}`
 }
 
-date-for fn (title: Any, opts: Map): Any {
+date-for
+meta {no-doc: true}
+fn (title: Any, opts: Map): Any {
   date get(opts, "date")
   if(::api/given(date), date, latest-date(title, opts))
 }
@@ -135,7 +179,17 @@ fn
 
 find-title
 meta {
-    doc: """The entry for `title` in a `titles` response, or null (pure)."""
+    doc: """
+    The entry for `title` in a `titles` response, or null (pure).
+
+    **Example**
+
+    ```hot
+    body {titles: [{number: 31, name: "Money and Finance: Treasury"}]}
+    ::ecfr/find-title(body, "31").name  // "Money and Finance: Treasury"
+    ::ecfr/find-title(body, 99)  // null
+    ```
+    """
 }
 fn (body: Any, title: Any): Map? {
   first(filter(or(get(or(body, {}), "titles"), []), (t) { eq(Str(t.number), Str(title)) }))
@@ -143,7 +197,17 @@ fn (body: Any, title: Any): Map? {
 
 get-title
 meta {
-    doc: """One title's entry from the titles list, or null when there is none."""
+    doc: """
+    One title's entry from the titles list, or null when there is none.
+
+    **Example**
+
+    ```hot
+    t ::ecfr/get-title(31)
+    t.name
+    t.latest_amended_on
+    ```
+    """
 }
 fn
 (title: Any): Map? {
@@ -155,7 +219,20 @@ fn
 
 latest-date
 meta {
-    doc: """The date a title is current to (`up_to_date_as_of`), or null for an unknown title. Today's date often isn't available yet, so dated calls use this one."""
+    doc: """
+    The date a title is current to (`up_to_date_as_of`), or null for an
+    unknown title. Today's date often isn't available yet, so dated calls
+    use this one.
+
+    **Example**
+
+    ```hot
+    date ::ecfr/latest-date(31)
+
+    // Pass it on so later calls skip the lookup
+    ::ecfr/get-section(31, "1010.230", {date: date})
+    ```
+    """
 }
 fn
 (title: Any): Str? {
@@ -257,7 +334,9 @@ fn
 // Search
 // ---------------------------------------------------------------------------
 
-search-url fn (path: Str, query: Str, opts: Map): Str {
+search-url
+meta {no-doc: true}
+fn (path: Str, query: Str, opts: Map): Str {
   cfg ::api/resolve(opts)
   `${cfg.base-url}/search/v1${path}${::api/query-string(search-params(query, opts))}`
 }
@@ -293,7 +372,16 @@ fn
 
 search-count
 meta {
-    doc: """The number of results for a search, taking the same `opts` as `search`. Returns the count as an Int."""
+    doc: """
+    The number of results for a search, taking the same `opts` as `search`.
+    Returns the count as an Int.
+
+    **Example**
+
+    ```hot
+    ::ecfr/search-count("beneficial ownership", {title: 31, date: "2026-11-02"})
+    ```
+    """
 }
 fn
 (query: Str): Int {
@@ -340,7 +428,16 @@ fn
 
 full
 meta {
-    doc: """`full-xml`, parsed by `parse-full`. Null when `full-xml` is."""
+    doc: """
+    `full-xml`, parsed by `parse-full`. Null when `full-xml` is.
+
+    **Example**
+
+    ```hot
+    out ::ecfr/full(31, {part: "1010", subpart: "A"})
+    map(out.sections, (s) { s.citation })
+    ```
+    """
 }
 fn
 (title: Any): Map? {
@@ -416,6 +513,12 @@ meta {
     Remove inline markup from eCFR XML before parsing (pure), so the
     spaces around it survive. Superscripts become `^n`, so `10<SU>6</SU>`
     doesn't read as 106, and a `<br/>` becomes a space.
+
+    **Example**
+
+    ```hot
+    ::ecfr/flatten-inline("<P>Up to 10<SU>6</SU> <I>dollars</I></P>")  // "<P>Up to 10^6 dollars</P>"
+    ```
     """
 }
 fn (xml: Str): Str {
@@ -424,17 +527,30 @@ fn (xml: Str): Str {
   ::re/replace-all(breaks, INLINE_TAGS, "")
 }
 
-squeeze fn (s: Str): Str {
+squeeze
+meta {no-doc: true}
+fn (s: Str): Str {
   trim(::re/replace-all(s, "\\s+", " "))
 }
 
-is-element fn (node: Any): Bool {
+is-element
+meta {no-doc: true}
+fn (node: Any): Bool {
   not(is-str(node))
 }
 
 node-text
 meta {
-    doc: """All the text under an XML node with whitespace collapsed (pure). `::hot::xml/text` reads only a node's direct text."""
+    doc: """
+    All the text under an XML node with whitespace collapsed (pure).
+    `::hot::xml/text` reads only a node's direct text.
+
+    **Example**
+
+    ```hot
+    ::ecfr/node-text(from-xml("<P>One <NOTE>two</NOTE></P>"))  // "One two"
+    ```
+    """
 }
 fn (node: Any): Str {
   cond {
@@ -444,11 +560,15 @@ fn (node: Any): Str {
   }
 }
 
-table-row fn (row: Any): Str {
+table-row
+meta {no-doc: true}
+fn (row: Any): Str {
   join(map(filter(row.content, is-element), node-text), " | ")
 }
 
-is-skipped fn (node: Any): Bool {
+is-skipped
+meta {no-doc: true}
+fn (node: Any): Bool {
   not(is-empty(filter(SKIPPED_TAGS, (tag) { eq(tag, node.tag) })))
 }
 
@@ -458,6 +578,12 @@ meta {
     The paragraphs of a node's text as a Vec of Str (pure). Headings,
     source notes and amendment links are left out, and a table is one
     block with a line per row and ` | ` between cells.
+
+    **Example**
+
+    ```hot
+    ::ecfr/blocks(from-xml("<DIV><HEAD>Title</HEAD><P>One.</P><P>Two.</P></DIV>"))  // ["One.", "Two."]
+    ```
     """
 }
 fn (node: Any): Vec<Str> {
@@ -477,6 +603,13 @@ meta {
     The citation in a node's `hierarchy_metadata` attribute (pure), or
     null. The attribute is JSON, and part responses escape it twice, so
     this reads the citation from either form.
+
+    **Example**
+
+    ```hot
+    node from-xml("<DIV8 hierarchy_metadata=\"{&quot;citation&quot;:&quot;31 CFR 1010.230&quot;}\"/>")
+    ::ecfr/citation-of(node)  // "31 CFR 1010.230"
+    ```
     """
 }
 fn (node: Any): Str? {
@@ -485,18 +618,24 @@ fn (node: Any): Str? {
   if(is-null(found), null, ::re/replace-all(found, "^\"citation\":\"|\"$", ""))
 }
 
-child-text fn (node: Any, tag: Str): Str? {
+child-text
+meta {no-doc: true}
+fn (node: Any, tag: Str): Str? {
   found ::xml/child(node, tag)
   if(is-null(found), null, node-text(found))
 }
 
-labelled-text fn (node: Any, tag: Str): Str? {
+labelled-text
+meta {no-doc: true}
+fn (node: Any, tag: Str): Str? {
   found ::xml/child(node, tag)
   body if(is-null(found), null, ::xml/child(found, "PSPACE"))
   if(is-null(body), child-text(node, tag), node-text(body))
 }
 
-parse-section fn (node: Any, within: Map): Map {
+parse-section
+meta {no-doc: true}
+fn (node: Any, within: Map): Map {
   {
     type: lowercase(or(::xml/attr(node, "TYPE"), "section")),
     identifier: ::xml/attr(node, "N"),
@@ -509,12 +648,16 @@ parse-section fn (node: Any, within: Map): Map {
   }
 }
 
-is-leaf fn (node: Any): Bool {
+is-leaf
+meta {no-doc: true}
+fn (node: Any): Bool {
   kind ::xml/attr(node, "TYPE")
   or(eq(kind, "SECTION"), eq(kind, "APPENDIX"))
 }
 
-collect-sections fn (node: Any, within: Map): Vec<Map> {
+collect-sections
+meta {no-doc: true}
+fn (node: Any, within: Map): Vec<Map> {
   kind or(::xml/attr(node, "TYPE"), "")
   here cond {
     eq(kind, "PART") => { {...within, part: ::xml/attr(node, "N")} }
@@ -552,8 +695,10 @@ meta {
     **Example**
 
     ```hot
+    xml "<DIV8 N=\"1010.100\" TYPE=\"SECTION\" hierarchy_metadata=\"{&quot;citation&quot;:&quot;31 CFR 1010.100&quot;}\"><HEAD>General definitions.</HEAD><P>Terms have these meanings.</P></DIV8>"
     s ::ecfr/parse-full(xml)
     s.citation  // "31 CFR 1010.100"
+    s.text  // "Terms have these meanings."
     ```
     """
 }
@@ -582,7 +727,17 @@ fn (xml: Str): Map {
 
 next-page
 meta {
-    doc: """The page number after a `search` page from `meta` (`current_page` < `total_pages`), or null on the last page (pure)."""
+    doc: """
+    The page number after a `search` page from `meta` (`current_page` <
+    `total_pages`), or null on the last page (pure).
+
+    **Example**
+
+    ```hot
+    ::ecfr/next-page({meta: {current_page: 1, total_pages: 3}})  // 2
+    ::ecfr/next-page({meta: {current_page: 3, total_pages: 3}})  // null
+    ```
+    """
 }
 fn (page: Any): Int? {
   m or(get(or(page, {}), "meta"), {})
@@ -595,7 +750,9 @@ fn (page: Any): Int? {
   }
 }
 
-collect-pages fn (fetch: Fn, page-number: Int, limit: Int, acc: Vec): Vec {
+collect-pages
+meta {no-doc: true}
+fn (fetch: Fn, page-number: Int, limit: Int, acc: Vec): Vec {
   page fetch(page-number)
   cond {
     // Not `if-ok`: a recursive call inside its lambda isn't in tail position.

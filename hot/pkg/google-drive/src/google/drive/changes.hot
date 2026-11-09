@@ -40,7 +40,19 @@ WATCH_LOCAL_KEYS ["channel-id", "channel-token", "expiration", "expires-in-ms", 
 
 get-start-page-token
 meta {
-    doc: """GET /changes/startPageToken - the token for "changes from now on" (a Str). Pass `{driveId}` for one shared drive's feed."""
+    doc: """
+    GET /changes/startPageToken - the token for "changes from now on" (a
+    Str). Pass `{driveId}` for one shared drive's feed.
+
+    **Example**
+
+    ```hot
+    token ::google::drive::changes/get-start-page-token()
+
+    // One shared drive's feed
+    ::google::drive::changes/get-start-page-token({driveId: "0ABCdrive"})
+    ```
+    """
 }
 fn
 (): Str {
@@ -54,7 +66,19 @@ fn
 
 change-params
 meta {
-    doc: """The query parameters `list-changes` sends (pure): `pageToken`, shared-drive flags on, `fields` = `CHANGE_FIELDS`, then your Drive parameters (`pageSize` up to 1000, `driveId`, `includeRemoved`, `restrictToMyDrive`, `spaces`, `includeCorpusRemovals`, `fields`)."""
+    doc: """
+    The query parameters `list-changes` sends (pure): `pageToken`,
+    shared-drive flags on, `fields` = `CHANGE_FIELDS`, then your Drive
+    parameters (`pageSize` up to 1000, `driveId`, `includeRemoved`,
+    `restrictToMyDrive`, `spaces`, `includeCorpusRemovals`, `fields`).
+
+    **Example**
+
+    ```hot
+    ::google::drive::changes/change-params("48213", {pageSize: 100, fields: null})
+    // {pageToken: "48213", supportsAllDrives: true, includeItemsFromAllDrives: true, pageSize: 100}
+    ```
+    """
 }
 fn (page-token: Str, opts: Map): Map {
   ::drive/query-params({
@@ -67,7 +91,21 @@ fn (page-token: Str, opts: Map): Map {
 
 list-changes
 meta {
-    doc: """GET /changes - one page of changes since `page-token`: `{changes, nextPageToken?}`, and on the last page `newStartPageToken` (save it for next time)."""
+    doc: """
+    GET /changes - one page of changes since `page-token`: `{changes,
+    nextPageToken?}`, and on the last page `newStartPageToken` (save it for
+    next time).
+
+    **Example**
+
+    ```hot
+    page ::google::drive::changes/list-changes("48213", {pageSize: 100})
+    length(page.changes)
+
+    // Set on the last page: store it for the next run
+    page.newStartPageToken
+    ```
+    """
 }
 fn
 (page-token: Str): Map {
@@ -94,7 +132,9 @@ type {
     pages: Int
 }
 
-sync-loop fn (page-token: Str, opts: Map, acc: Vec, pages: Int): ChangeSet {
+sync-loop
+meta {no-doc: true}
+fn (page-token: Str, opts: Map, acc: Vec, pages: Int): ChangeSet {
   page list-changes(page-token, opts)
   cond {
     is-err(page) => { page }
@@ -119,6 +159,7 @@ meta {
     ```hot
     ::changes ::google::drive::changes
 
+    saved-token "48213"
     set ::changes/sync-changes(saved-token)
     upserts ::changes/changed-files(set)       // DocFiles to (re)index
     deletes ::changes/removed-file-ids(set)    // ids to drop
@@ -137,7 +178,18 @@ fn
 
 is-removal
 meta {
-    doc: """True when a change means the file is gone for this user: removed (deleted or access lost) or trashed."""
+    doc: """
+    True when a change means the file is gone for this user: removed
+    (deleted or access lost) or trashed.
+
+    **Example**
+
+    ```hot
+    ::google::drive::changes/is-removal({removed: true})  // true
+    ::google::drive::changes/is-removal({file: {trashed: true}})  // true
+    ::google::drive::changes/is-removal({file: {trashed: false}})  // false
+    ```
+    """
 }
 fn (change: Map): Bool {
   or(eq(change.removed, true), and(is-map(change.file), eq(change.file.trashed, true)))
@@ -145,7 +197,20 @@ fn (change: Map): Bool {
 
 changed-files
 meta {
-    doc: """The file changes in a `ChangeSet` (or a Vec of changes) that still exist, as `DocFile`s, latest change per file."""
+    doc: """
+    The file changes in a `ChangeSet` (or a Vec of changes) that still
+    exist, as `DocFile`s, latest change per file.
+
+    **Example**
+
+    ```hot
+    changes [
+      {fileId: "a", file: {id: "a", name: "a.txt", mimeType: "text/plain"}},
+      {fileId: "b", removed: true}
+    ]
+    map(::google::drive::changes/changed-files(changes), %.name)  // ["a.txt"]
+    ```
+    """
 }
 fn (changes: Any): Vec {
   items if(is-vec(changes), changes, changes.changes)
@@ -156,7 +221,21 @@ fn (changes: Any): Vec {
 
 removed-file-ids
 meta {
-    doc: """The file ids a `ChangeSet` (or Vec of changes) removed or trashed, de-duplicated. A file that came back later in the same set is not included."""
+    doc: """
+    The file ids a `ChangeSet` (or Vec of changes) removed or trashed,
+    de-duplicated. A file that came back later in the same set is not
+    included.
+
+    **Example**
+
+    ```hot
+    changes [
+      {fileId: "a", file: {id: "a", name: "a.txt", mimeType: "text/plain"}},
+      {fileId: "b", removed: true}
+    ]
+    ::google::drive::changes/removed-file-ids(changes)  // ["b"]
+    ```
+    """
 }
 fn (changes: Any): Vec {
   items if(is-vec(changes), changes, changes.changes)
@@ -179,6 +258,14 @@ meta {
     `expiration` (epoch ms) or
     `expires-in-ms` (from `now-ms`), `channel-params` (e.g. `{ttl: "3600"}`).
     `address` must be HTTPS with a valid certificate.
+
+    **Example**
+
+    ```hot
+    address "https://api.example.com/drive/hook"
+    ::google::drive::changes/build-channel(address, {channel-id: "c1", expires-in-ms: 60000}, 1700000000000)
+    // {id: "c1", type: "web_hook", address: "https://api.example.com/drive/hook", expiration: "1700000060000"}
+    ```
     """
 }
 fn (address: Str, opts: Map, now-ms: Int): Map {
@@ -202,7 +289,9 @@ fn (address: Str, opts: Map, now-ms: Int): Map {
   }
 }
 
-now-ms fn (): Int {
+now-ms
+meta {no-doc: true}
+fn (): Int {
   ::time/epoch-millis(::time/now())
 }
 
@@ -216,6 +305,7 @@ meta {
     `restrictToMyDrive`, ...) and credentials also go in `opts`.
 
     ```hot
+    token ::google::drive::changes/get-start-page-token()
     channel ::google::drive::changes/watch-changes(token, "https://api.example.com/drive/hook", {
       channel-token: ::hot::ctx/get("google.drive.channel.token"),
       expires-in-ms: 518400000   // 6 days; renew before the 7-day cap
@@ -237,7 +327,21 @@ fn
 
 watch-file
 meta {
-    doc: """POST /files/{id}/watch - get notified when one file changes (states `update`, `trash`, `untrash`, `remove`). File channels last at most one day. Options as for `watch-changes`."""
+    doc: """
+    POST /files/{id}/watch - get notified when one file changes (states
+    `update`, `trash`, `untrash`, `remove`). File channels last at most one
+    day. Options as for `watch-changes`.
+
+    **Example**
+
+    ```hot
+    channel ::google::drive::changes/watch-file("1AbCfile", "https://api.example.com/drive/hook", {
+      channel-token: ::hot::ctx/get("google.drive.channel.token"),
+      expires-in-ms: 3600000
+    })
+    channel.resourceId
+    ```
+    """
 }
 fn
 (file-id: Str, address: Str): Map {
@@ -254,7 +358,18 @@ fn
 
 stop-channel
 meta {
-    doc: """POST /channels/stop - stop notifications for a channel (`id` and `resourceId` from the watch response). Only the same user and OAuth client can stop a user's channel. Returns true."""
+    doc: """
+    POST /channels/stop - stop notifications for a channel (`id` and
+    `resourceId` from the watch response). Only the same user and OAuth
+    client can stop a user's channel. Returns true.
+
+    **Example**
+
+    ```hot
+    channel ::google::drive::changes/watch-file("1AbCfile", "https://api.example.com/drive/hook")
+    ::google::drive::changes/stop-channel(channel.id, channel.resourceId)
+    ```
+    """
 }
 fn
 (channel-id: Str, resource-id: Str): Bool {
@@ -278,6 +393,8 @@ meta {
     renew-drive-watch
     meta {schedule: "0 3 */6 * *"}
     fn (event) {
+      state ::hot::store/Map({name: "drive-watch"})
+      secret ::hot::ctx/get("google.drive.channel.token")
       old ::hot::store/get(state, "channel")
       fresh ::google::drive::changes/renew-watch(old, ::hot::store/get(state, "page-token"),
         "https://api.example.com/drive/hook", {channel-token: secret, expires-in-ms: 604800000})
@@ -335,14 +452,34 @@ type {
     is-sync: Bool
 }
 
-header fn (headers: Map, name: Str): Str? {
+header
+meta {no-doc: true}
+fn (headers: Map, name: Str): Str? {
   value get(headers, name)
   if(or(is-null(value), eq(value, "")), null, Str(value))
 }
 
 parse-notification
 meta {
-    doc: """Parse a webhook `request` into a `Notification` (pure). Header names are matched case-insensitively. Does not check the channel token: use `verify-notification`."""
+    doc: """
+    Parse a webhook `request` into a `Notification` (pure). Header names are
+    matched case-insensitively. Does not check the channel token: use
+    `verify-notification`.
+
+    **Example**
+
+    ```hot
+    note ::google::drive::changes/parse-notification({headers: {
+      "X-Goog-Channel-ID": "c1",
+      "X-Goog-Resource-State": "update",
+      "X-Goog-Changed": "content,parents",
+      "X-Goog-Message-Number": "7"
+    }})
+    note.resource-state  // "update"
+    note.changed  // ["content", "parents"]
+    note.message-number  // 7
+    ```
+    """
 }
 fn (request: Map): Notification {
   headers map-keys(or(request.headers, {}), lowercase)
@@ -363,7 +500,19 @@ fn (request: Map): Notification {
 
 verify-channel-token
 meta {
-    doc: """True when the request's `X-Goog-Channel-Token` equals `expected` (constant-time compare). Fails closed: an empty `expected` or a missing header is false. `expected` is masked in call records."""
+    doc: """
+    True when the request's `X-Goog-Channel-Token` equals `expected`
+    (constant-time compare). Fails closed: an empty `expected` or a missing
+    header is false. `expected` is masked in call records.
+
+    **Example**
+
+    ```hot
+    // Fails closed when the header or the expected token is missing.
+    // Pass the expected token from ::hot::ctx/get, as in verify-notification.
+    ::google::drive::changes/verify-channel-token({headers: {}}, null)  // false
+    ```
+    """
 }
 fn (request: Map, expected: Str?): Bool {
   headers map-keys(or(request.headers, {}), lowercase)

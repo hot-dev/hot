@@ -69,6 +69,15 @@ meta {
     day-remaining, app-minute-remaining, retry-after, problem}`, each
     null when absent. `problem` is Xero's `X-Rate-Limit-Problem`
     (`minute`, `day`, `appminute`) on a 429.
+
+    **Example**
+
+    ```hot
+    limits ::xero::api/rate-limits({"x-minlimit-remaining": "58", "x-daylimit-remaining": "4990"})
+    limits.minute-remaining  // 58
+    limits.day-remaining  // 4990
+    limits.problem  // null
+    ```
     """
 }
 fn (headers: Map?): Map {
@@ -111,7 +120,9 @@ type {
     correlation-id: Str?
 }
 
-decode-body fn (body: Any): Any {
+decode-body
+meta {no-doc: true}
+fn (body: Any): Any {
   text cond {
     is-bytes(body) => { Str(body) }
     is-str(body) => { body }
@@ -128,13 +139,25 @@ decode-body fn (body: Any): Any {
   }
 }
 
-messages-of fn (errors: Any): Vec {
+messages-of
+meta {no-doc: true}
+fn (errors: Any): Vec {
   map(filter(or(errors, []), (e) { and(is-map(e), is-some(get(e, "Message"))) }), (e) { Str(get(e, "Message")) })
 }
 
 validation-messages
 meta {
-    doc: """Every validation message in an error body (pure): top-level `ValidationErrors` and each `Elements[].ValidationErrors`, de-duplicated, in order."""
+    doc: """
+    Every validation message in an error body (pure): top-level
+    `ValidationErrors` and each `Elements[].ValidationErrors`,
+    de-duplicated, in order.
+
+    **Example**
+
+    ```hot
+    ::xero::api/validation-messages({Elements: [{ValidationErrors: [{Message: "Email address must be valid."}]}]})  // ["Email address must be valid."]
+    ```
+    """
 }
 fn (body: Any): Vec {
   cond {
@@ -147,7 +170,9 @@ fn (body: Any): Vec {
   }
 }
 
-body-excerpt fn (body: Any): Str {
+body-excerpt
+meta {no-doc: true}
+fn (body: Any): Str {
   text cond {
     is-null(body) => { "" }
     is-str(body) => { body }
@@ -205,14 +230,26 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   })
 }
 
-plain-payload fn (value: Result): Any {
+plain-payload
+meta {no-doc: true}
+fn (value: Result): Any {
   payload if(is-err(value), err-value(value), value)
   if(or(is-null(payload), is-str(payload)), payload, untype(payload))
 }
 
 is-connection-failure
 meta {
-    doc: """True when a transport error message is a connection or read failure, not a size-limit or URL error."""
+    doc: """
+    True when a transport error message is a connection or read failure, not
+    a size-limit or URL error.
+
+    **Example**
+
+    ```hot
+    ::xero::api/is-connection-failure("request failed: connection reset")  // true
+    ::xero::api/is-connection-failure("request failed: body exceeds 10 MB")  // false
+    ```
+    """
 }
 fn (message: Str): Bool {
   and(
@@ -265,6 +302,13 @@ meta {
     Xero's JSON date (`"/Date(1761955200000+0000)/"`) as epoch
     milliseconds (Int), or null for anything else. Xero also sends ISO
     strings in fields such as `DateString`; read those directly.
+
+    **Example**
+
+    ```hot
+    ::xero::api/parse-date("/Date(1761955200000+0000)/")  // 1761955200000
+    ::xero::api/parse-date("2026-11-01")  // null
+    ```
     """
 }
 fn (value: Any): Int? {
@@ -283,7 +327,19 @@ fn (value: Any): Int? {
 // ---------------------------------------------------------------------------
 
 validate-tenant-id
-meta {doc: """A tenant id (GUID) or null when blank; anything else is an Err. Pure."""}
+meta {
+    doc: """
+    A tenant id (GUID) or null when blank; anything else is an Err. Pure.
+
+    **Example**
+
+    ```hot
+    ::xero::api/validate-tenant-id("c2cc9b6e-9458-4c7d-93cc-f02b81b0594f")  // "c2cc9b6e-9458-4c7d-93cc-f02b81b0594f"
+    ::xero::api/validate-tenant-id("")  // null
+    is-err(::xero::api/validate-tenant-id("acme"))  // true
+    ```
+    """
+}
 fn (value: Any): Str? {
   cond {
     is-blank(value) => { null }
@@ -294,7 +350,18 @@ fn (value: Any): Str? {
 
 tenant-id
 meta {
-    doc: """The tenant for a call: `opts.tenant-id`, else `xero.tenant.id`; null when neither is set. A `tenant-id` in `opts` that is blank or null is an Err."""
+    doc: """
+    The tenant for a call: `opts.tenant-id`, else `xero.tenant.id`; null
+    when neither is set. A `tenant-id` in `opts` that is blank or null is an
+    Err.
+
+    **Example**
+
+    ```hot
+    ::xero::api/tenant-id({tenant-id: "c2cc9b6e-9458-4c7d-93cc-f02b81b0594f"})  // "c2cc9b6e-9458-4c7d-93cc-f02b81b0594f"
+    is-err(::xero::api/tenant-id({tenant-id: ""}))  // true
+    ```
+    """
 }
 fn (opts: Map): Str? {
   cond {
@@ -305,7 +372,9 @@ fn (opts: Map): Str? {
   }
 }
 
-encode-param fn (value: Any): Str {
+encode-param
+meta {no-doc: true}
+fn (value: Any): Str {
   cond {
     is-bool(value) => { if(value, "true", "false") }
     is-vec(value) => { join(map(filter(value, is-some), encode-param), ",") }
@@ -320,6 +389,13 @@ meta {
     `true`/`false`, Vecs comma-joined (`IDs`, `Statuses`, `ContactIDs`),
     keys and values percent-encoded (spaces as `%20`, `"` as `%22`).
     `""` when nothing remains.
+
+    **Example**
+
+    ```hot
+    ::xero::api/query-string({page: 2, Statuses: ["PAID", "VOIDED"], where: null})  // "?page=2&Statuses=PAID,VOIDED"
+    ::xero::api/query-string({})  // ""
+    ```
     """
 }
 fn (params: Map): Str {
@@ -329,20 +405,41 @@ fn (params: Map): Str {
 }
 
 segment
-meta {doc: """Percent-encode one path segment (an id or file name)."""}
+meta {
+    doc: """
+    Percent-encode one path segment (an id or file name).
+
+    **Example**
+
+    ```hot
+    ::xero::api/segment("receipt 4411.pdf")  // "receipt%204411.pdf"
+    ```
+    """
+}
 fn (value: Any): Str {
   ::uri/encode(Str(value))
 }
 
 api-url
 meta {
-    doc: """The full Accounting API URL for `path` (starting with `/`) and `params` (pure)."""
+    doc: """
+    The full Accounting API URL for `path` (starting with `/`) and `params`
+    (pure).
+
+    **Example**
+
+    ```hot
+    ::xero::api/api-url("/Invoices", {page: 2})  // "https://api.xero.com/api.xro/2.0/Invoices?page=2"
+    ```
+    """
 }
 fn (path: Str, params: Map): Str {
   `${::xero/API_ROOT}${path}${query-string(params)}`
 }
 
-check-idempotency-key fn (value: Any): Str? {
+check-idempotency-key
+meta {no-doc: true}
+fn (value: Any): Str? {
   cond {
     is-blank(value) => { null }
     gt(length(Str(value)), 128) => { err("xero: idempotency-key must be at most 128 characters") }
@@ -361,6 +458,16 @@ meta {
     `application/json`), `xero-tenant-id` when set, `If-Modified-Since`
     and `Idempotency-Key` from `opts`, `Content-Type: application/json`
     for a Map/Vec body. `extra` headers win.
+
+    **Example**
+
+    ```hot
+    headers ::xero::api/build-headers("TOKEN", "c2cc9b6e-9458-4c7d-93cc-f02b81b0594f", {idempotency-key: "order-1"}, true, {})
+    headers.Authorization  // "Bearer TOKEN"
+    headers.xero-tenant-id  // "c2cc9b6e-9458-4c7d-93cc-f02b81b0594f"
+    headers.Idempotency-Key  // "order-1"
+    headers.Content-Type  // "application/json"
+    ```
     """
 }
 fn (token: Str, tenant: Str?, opts: Map, json-body: Bool, extra: Map): Map {
@@ -377,7 +484,19 @@ fn (token: Str, tenant: Str?, opts: Map, json-body: Bool, extra: Map): Map {
 
 build-request
 meta {
-    doc: """Build the outgoing `HttpRequest` (pure). Map/Vec bodies are JSON; Str/Bytes bodies are sent verbatim (set `Content-Type` in `extra`); `""`/null send none."""
+    doc: """
+    Build the outgoing `HttpRequest` (pure). Map/Vec bodies are JSON;
+    Str/Bytes bodies are sent verbatim (set `Content-Type` in `extra`);
+    `""`/null send none.
+
+    **Example**
+
+    ```hot
+    req ::xero::api/build-request("PUT", "https://api.xero.com/api.xro/2.0/Contacts", "TOKEN", null, {Contacts: []}, {}, {})
+    req.method  // "PUT"
+    req.body  // "{\"Contacts\":[]}"
+    ```
+    """
 }
 fn (method: Str, url: Str, token: Str, tenant: Str?, body: Any, opts: Map, extra: Map): HttpRequest {
   no-body or(is-null(body), and(is-str(body), is-empty(body)))
@@ -398,7 +517,20 @@ fn (method: Str, url: Str, token: Str, tenant: Str?, body: Any, opts: Map, extra
 
 retry-budget
 meta {
-    doc: """Immediate retries for a call (0 or 1): none when `opts.retry` is false/0 or the call is not idempotent (GET, or a write with `idempotency-key`). Pure."""
+    doc: """
+    Immediate retries for a call (0 or 1): none when `opts.retry` is false/0
+    or the call is not idempotent (GET, or a write with `idempotency-key`).
+    Pure.
+
+    **Example**
+
+    ```hot
+    ::xero::api/retry-budget({}, "GET")  // 1
+    ::xero::api/retry-budget({}, "POST")  // 0
+    ::xero::api/retry-budget({idempotency-key: "order-1"}, "POST")  // 1
+    ::xero::api/retry-budget({retry: false}, "GET")  // 0
+    ```
+    """
 }
 fn (opts: Map, method: Str): Int {
   r get(opts, "retry")
@@ -410,7 +542,9 @@ fn (opts: Map, method: Str): Int {
   }
 }
 
-send-with-retry fn (req: HttpRequest, budget: Int): HttpResponse {
+send-with-retry
+meta {no-doc: true}
+fn (req: HttpRequest, budget: Int): HttpResponse {
   response http-request(req)
   cond {
     and(is-err(response), gt(budget, 0), is-connection-failure(err-message(response))) => { send-with-retry(req, sub(budget, 1)) }
@@ -420,7 +554,17 @@ send-with-retry fn (req: HttpRequest, budget: Int): HttpResponse {
 
 rate-limits-key
 meta {
-    doc: """The context key the latest rate limits for a tenant are kept under: `xero.rate-limits.{tenant-id}` (`.default` without a tenant)."""
+    doc: """
+    The context key the latest rate limits for a tenant are kept under:
+    `xero.rate-limits.{tenant-id}` (`.default` without a tenant).
+
+    **Example**
+
+    ```hot
+    ::xero::api/rate-limits-key("acme")  // "xero.rate-limits.acme"
+    ::xero::api/rate-limits-key(null)  // "xero.rate-limits.default"
+    ```
+    """
 }
 fn (tenant: Str?): Str {
   `xero.rate-limits.${or(tenant, "default")}`
@@ -429,7 +573,9 @@ fn (tenant: Str?): Str {
 // Rate-limit counts are not credentials: plain `ctx/set` is fine, and the
 // key is per tenant so parallel flows for different organisations do not
 // overwrite each other's numbers.
-record-limits fn (response: Result, tenant: Str?): Bool {
+record-limits
+meta {no-doc: true}
+fn (response: Result, tenant: Str?): Bool {
   cond {
     is-err(response) => { false }
     => {
@@ -441,7 +587,21 @@ record-limits fn (response: Result, tenant: Str?): Bool {
 
 last-rate-limits
 meta {
-    doc: """The rate limits from the most recent call in this run for the tenant in `opts` / context (see `rate-limits`), or null before any call."""
+    doc: """
+    The rate limits from the most recent call in this run for the tenant in
+    `opts` / context (see `rate-limits`), or null before any call.
+
+    **Example**
+
+    ```hot
+    ::xero::accounting/list-page("Contacts")
+    limits ::xero::api/last-rate-limits()
+    limits.minute-remaining
+
+    // For a call made with tenant-id in opts
+    ::xero::api/last-rate-limits({tenant-id: "c2cc9b6e-9458-4c7d-93cc-f02b81b0594f"})
+    ```
+    """
 }
 fn
 (): Map? {
@@ -465,6 +625,7 @@ meta {
     per-call credentials are masked in call records.
 
     ```hot
+    user-refresh-token ::hot::ctx/get("acme.xero.refresh-token")
     r ::xero::api/resolve({tenant-id: "c2cc9b6e-9458-4c7d-93cc-f02b81b0594f", refresh-token: user-refresh-token})
     r.credentials.kind   // "refresh"
     ```
@@ -491,6 +652,17 @@ meta {
     `/Invoices`); `params` go in the query string; `body` is a Map/Vec
     (JSON), Str/Bytes (verbatim; set `Content-Type` in `extra-headers`) or
     `""`. See the namespace doc for `opts`.
+
+    **Example**
+
+    ```hot
+    response ::xero::api/request("GET", "/Currencies", {}, "", {})
+    response.status
+
+    // Extra headers, and a tenant for this call
+    xml ::xero::api/request("GET", "/Currencies", {}, "", {Accept: "application/xml"}, {tenant-id: "c2cc9b6e-9458-4c7d-93cc-f02b81b0594f"})
+    xml.body
+    ```
     """
 }
 fn
@@ -528,7 +700,20 @@ fn
 
 unwrap
 meta {
-    doc: """The decoded body of a 2xx response (null for 204, `{not-modified: true}` for 304), the Err of a failed request, or `err(HttpError)`."""
+    doc: """
+    The decoded body of a 2xx response (null for 204, `{not-modified: true}`
+    for 304), the Err of a failed request, or `err(HttpError)`.
+
+    **Example**
+
+    ```hot
+    ::http ::hot::http
+
+    ::xero::api/unwrap(::http/HttpResponse({status: 200, body: {Id: "a1"}}))  // {Id: "a1"}
+    ::xero::api/unwrap(::http/HttpResponse({status: 304, body: ""}))  // {not-modified: true}
+    is-err(::xero::api/unwrap(::http/HttpResponse({status: 400, body: ""})))  // true
+    ```
+    """
 }
 fn (response: Result): Any {
   cond {
@@ -566,7 +751,17 @@ fn
 
 bytes
 meta {
-    doc: """GET `path` as binary with `Accept: accept` (e.g. a PDF or an attachment). Returns `Bytes`, or an Err carrying `HttpError`."""
+    doc: """
+    GET `path` as binary with `Accept: accept` (e.g. a PDF or an
+    attachment). Returns `Bytes`, or an Err carrying `HttpError`.
+
+    **Example**
+
+    ```hot
+    pdf ::xero::api/bytes("/Invoices/243216c5-369e-4056-ac67-05388f86dc81", "application/pdf", {})
+    length(pdf)
+    ```
+    """
 }
 fn (path: Str, accept: Str, opts: Map): Bytes {
   response request("GET", path, {}, "", {Accept: accept}, opts)
@@ -588,6 +783,14 @@ meta {
     Uses the response's `pagination.pageCount` when Xero sends it (the
     endpoints that accept `pageSize`), else whether the page was full
     (`count` rows for page size `size`).
+
+    **Example**
+
+    ```hot
+    ::xero::api/next-page(1, 100, 100, null)  // 2
+    ::xero::api/next-page(1, 100, 40, null)  // null
+    ::xero::api/next-page(2, 500, 500, {pageCount: 2})  // null
+    ```
     """
 }
 fn (page: Int, size: Int, count: Int, pagination: Any): Int? {
@@ -606,7 +809,21 @@ fn (page: Int, size: Int, count: Int, pagination: Any): Int? {
 
 connections
 meta {
-    doc: """GET /connections with the credentials from `opts` / context (see `::xero::oauth/connections` for the fields). No tenant header is needed. `opts.auth-event-id` narrows the list."""
+    doc: """
+    GET /connections with the credentials from `opts` / context (see
+    `::xero::oauth/connections` for the fields). No tenant header is needed.
+    `opts.auth-event-id` narrows the list.
+
+    **Example**
+
+    ```hot
+    orgs ::xero::api/connections()
+    map(orgs, %.tenantName)
+
+    // With one user's credentials
+    ::xero::api/connections({access-token: ::hot::ctx/get("acme.xero.access-token")})
+    ```
+    """
 }
 fn
 (): Vec {
@@ -625,7 +842,18 @@ fn
 
 delete-connection
 meta {
-    doc: """DELETE /connections/{id} with the credentials from `opts` / context: disconnect one organisation (the connection `id`, not the tenant id). Returns true."""
+    doc: """
+    DELETE /connections/{id} with the credentials from `opts` / context:
+    disconnect one organisation (the connection `id`, not the tenant id).
+    Returns true.
+
+    **Example**
+
+    ```hot
+    orgs ::xero::api/connections()
+    ::xero::api/delete-connection(first(orgs).id)
+    ```
+    """
 }
 fn
 (connection-id: Str): Bool {

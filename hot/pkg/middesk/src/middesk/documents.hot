@@ -19,7 +19,18 @@ seg ::middesk::api/seg
 
 list-documents
 meta {
-    doc: """GET /businesses/{id}/documents - A business's documents: `{object: "list", data: [{id, document_type, filename, content_type, size, filing_date, ...}]}`."""
+    doc: """
+    GET /businesses/{id}/documents - A business's documents: `{object:
+    "list", data: [{id, document_type, filename, content_type, size,
+    filing_date, ...}]}`.
+
+    **Example**
+
+    ```hot
+    docs ::middesk::documents/list-documents("biz_a1b2c3")
+    map(docs.data, %.filename)
+    ```
+    """
 }
 fn
 (business-id: Str): Map {
@@ -31,7 +42,16 @@ fn
 
 get-document
 meta {
-    doc: """GET /documents/{id} - Retrieve one document's metadata."""
+    doc: """
+    GET /documents/{id} - Retrieve one document's metadata.
+
+    **Example**
+
+    ```hot
+    doc ::middesk::documents/get-document("doc_d4e5f6")
+    doc.filename
+    ```
+    """
 }
 fn
 (document-id: Str): Map {
@@ -43,7 +63,17 @@ fn
 
 get-download-url
 meta {
-    doc: """GET /documents/{id}/download_url - A fresh signed URL for the file (`{data: "<url>"}`). Treat it as a secret."""
+    doc: """
+    GET /documents/{id}/download_url - A fresh signed URL for the file
+    (`{data: "<url>"}`). Treat it as a secret.
+
+    **Example**
+
+    ```hot
+    link ::middesk::documents/get-download-url("doc_d4e5f6")
+    ::middesk::documents/fetch-signed-url(link.data)
+    ```
+    """
 }
 fn
 (document-id: Str): Map {
@@ -55,7 +85,18 @@ fn
 
 metadata
 meta {
-    doc: """A document's metadata without its signed URL: `{id, document_type, filename, content_type, size, filing_date, created_at}`. Safe to log or hand to an LLM. Exposed for testing."""
+    doc: """
+    A document's metadata without its signed URL: `{id, document_type,
+    filename, content_type, size, filing_date, created_at}`. Safe to log or
+    hand to an LLM. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::middesk::documents/metadata({id: "doc_1", filename: "cert.pdf", size: 1024, download_url: "https://files.example/signed"})
+    // {id: "doc_1", filename: "cert.pdf", size: 1024}
+    ```
+    """
 }
 fn (document: Map): Map {
   filter-vals({
@@ -71,7 +112,19 @@ fn (document: Map): Map {
 
 fetch-signed-url
 meta {
-    doc: """GET a signed URL with no credentials and return its `Bytes`. Only `https://` URLs are fetched; on failure the Err says only the HTTP status, never the URL. Exposed for testing."""
+    doc: """
+    GET a signed URL with no credentials and return its `Bytes`. Only
+    `https://` URLs are fetched; on failure the Err says only the HTTP
+    status, never the URL. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    link ::middesk::documents/get-download-url("doc_d4e5f6")
+    pdf ::middesk::documents/fetch-signed-url(link.data)
+    if(is-err(pdf), "download failed", length(pdf))
+    ```
+    """
 }
 fn (url: Any): Bytes {
   cond {

@@ -33,7 +33,7 @@ meta {
     **Example**
 
     ```hot
-    sha384("hello")
+    ::hot::hash/sha384("hello")
     // 96-character hex string
     ```
     """
@@ -51,7 +51,7 @@ meta {
     **Example**
 
     ```hot
-    sha512("hello")
+    ::hot::hash/sha512("hello")
     // 128-character hex string
     ```
     """
@@ -74,6 +74,7 @@ meta {
     // 64-character hex string
 
     // BLAKE3 is faster than SHA-256 for large inputs
+    file-contents "report body"
     blake3(file-contents)
     ```
     """
@@ -93,7 +94,8 @@ meta {
 
     ```hot
     // Verify GitHub webhook signature
-    sha1(payload)
+    payload "hello"
+    ::hot::hash/sha1(payload)
     ```
     """
 }
@@ -110,7 +112,7 @@ meta {
     **Example**
 
     ```hot
-    md5("hello")
+    ::hot::hash/md5("hello")
     // "5d41402abc4b2a76b9719d911017c592"
     ```
     """
@@ -130,7 +132,11 @@ meta {
     **Example**
 
     ```hot
-    ed25519-verify(public-key-hex, `${timestamp}${body}`, signature-hex)
+    public-key-hex "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+    timestamp "1700000000"
+    body "{}"
+    signature-hex "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155"
+    ::hot::hash/ed25519-verify(public-key-hex, `${timestamp}${body}`, signature-hex)
     // => true or false
     ```
     """

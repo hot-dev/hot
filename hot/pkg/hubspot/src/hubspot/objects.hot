@@ -16,7 +16,9 @@ query-string ::hubspot::api/query-string
 crm-path ::hubspot::api/crm-path
 segment ::hubspot::api/segment
 
-objects-path fn
+objects-path
+meta {no-doc: true}
+fn
 (object-type: Str, rest: Str): Str {
   objects-path(object-type, rest, {})
 },
@@ -74,7 +76,19 @@ fn
 
 build-create-body
 meta {
-    doc: """The create payload `{properties, associations?}`. Each association is `{to: {id}, types: [{associationCategory, associationTypeId}]}`; build them with `::hubspot::objects/association-input`. Exposed for testing."""
+    doc: """
+    The create payload `{properties, associations?}`. Each association is
+    `{to: {id}, types: [{associationCategory, associationTypeId}]}`; build
+    them with `::hubspot::objects/association-input`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::hubspot::objects/build-create-body({email: "ada@example.com"}, null)  // {properties: {email: "ada@example.com"}}
+    ::hubspot::objects/build-create-body({email: "ada@example.com"}, [::hubspot::objects/association-input("9876", 1)]).associations
+    // [{to: {id: "9876"}, types: [{associationCategory: "HUBSPOT_DEFINED", associationTypeId: 1}]}]
+    ```
+    """
 }
 fn (properties: Map, associations: Vec?): Map {
   {properties: properties}
@@ -83,7 +97,21 @@ fn (properties: Map, associations: Vec?): Map {
 
 association-input
 meta {
-    doc: """One create-time association: links the new record to record `to-id` with association type `type-id` (`HUBSPOT_DEFINED` category by default; pass `"USER_DEFINED"` for custom labels). See `::hubspot::engagements/association-type-id` for the activity ids."""
+    doc: """
+    One create-time association: links the new record to record `to-id` with
+    association type `type-id` (`HUBSPOT_DEFINED` category by default; pass
+    `"USER_DEFINED"` for custom labels). See
+    `::hubspot::engagements/association-type-id` for the activity ids.
+
+    **Example**
+
+    ```hot
+    ::hubspot::objects/association-input("9876", 1)
+    // {to: {id: "9876"}, types: [{associationCategory: "HUBSPOT_DEFINED", associationTypeId: 1}]}
+
+    ::hubspot::objects/association-input("9876", 42, "USER_DEFINED").types[0].associationCategory  // "USER_DEFINED"
+    ```
+    """
 }
 fn
 (to-id: Str, type-id: Int): Map {
@@ -95,7 +123,21 @@ fn
 
 create-object
 meta {
-    doc: """POST /crm/objects/{version}/{type} - Create a record from a properties Map. The 3-arity form also creates associations in the same call (Vec of `association-input` values)."""
+    doc: """
+    POST /crm/objects/{version}/{type} - Create a record from a properties
+    Map. The 3-arity form also creates associations in the same call (Vec of
+    `association-input` values).
+
+    **Example**
+
+    ```hot
+    ticket ::hubspot::objects/create-object("tickets", {subject: "Login broken", hs_pipeline: "0", hs_pipeline_stage: "1"})
+    ticket.id
+
+    // Associated in the same call: 1 is a contact's primary company
+    ::hubspot::objects/create-object("contacts", {email: "ada@example.com"}, [::hubspot::objects/association-input("9876", 1)])
+    ```
+    """
 }
 fn
 (object-type: Str, properties: Map): Map {
@@ -113,7 +155,21 @@ fn
 
 update-object
 meta {
-    doc: """PATCH /crm/objects/{version}/{type}/{id} - Update the given properties of a record. The 4-arity form addresses the record by a unique property (`id-property`, e.g. `"email"`) instead of its id. Set a property to `""` to clear it."""
+    doc: """
+    PATCH /crm/objects/{version}/{type}/{id} - Update the given properties
+    of a record. The 4-arity form addresses the record by a unique property
+    (`id-property`, e.g. `"email"`) instead of its id. Set a property to
+    `""` to clear it.
+
+    **Example**
+
+    ```hot
+    ::hubspot::objects/update-object("tickets", "12345", {hs_ticket_priority: "HIGH"})
+
+    // Addressed by a unique property
+    ::hubspot::objects/update-object("contacts", "ada@example.com", {lifecyclestage: "customer"}, "email")
+    ```
+    """
 }
 fn
 (object-type: Str, id: Str, properties: Map): Map {
@@ -131,7 +187,16 @@ fn
 
 archive-object
 meta {
-    doc: """DELETE /crm/objects/{version}/{type}/{id} - Archive a record (it moves to the recycle bin and can be restored for 90 days)."""
+    doc: """
+    DELETE /crm/objects/{version}/{type}/{id} - Archive a record (it moves
+    to the recycle bin and can be restored for 90 days).
+
+    **Example**
+
+    ```hot
+    ::hubspot::objects/archive-object("tickets", "12345")
+    ```
+    """
 }
 fn
 (object-type: Str, id: Str): Any {
@@ -147,7 +212,23 @@ fn
 
 list-objects
 meta {
-    doc: """GET /crm/objects/{version}/{type} - One page of records. `params`: `limit` (max 100), `after` (paging cursor), `properties` (Vec), `associations` (Vec), `archived`. Returns `{results, paging?}`; pass `::hubspot::api/next-after(page)` as `after` for the next page, or use `list-all-objects`."""
+    doc: """
+    GET /crm/objects/{version}/{type} - One page of records. `params`:
+    `limit` (max 100), `after` (paging cursor), `properties` (Vec),
+    `associations` (Vec), `archived`. Returns `{results, paging?}`; pass
+    `::hubspot::api/next-after(page)` as `after` for the next page, or use
+    `list-all-objects`.
+
+    **Example**
+
+    ```hot
+    page ::hubspot::objects/list-objects("tickets", {limit: 100, properties: ["subject"]})
+    map(page.results, %.id)
+
+    // The next page
+    ::hubspot::objects/list-objects("tickets", {limit: 100, after: ::hubspot::api/next-after(page)})
+    ```
+    """
 }
 fn
 (object-type: Str): Map {
@@ -162,7 +243,18 @@ fn
 
 list-all-objects
 meta {
-    doc: """Every record of a type across pages (100 per page), up to `max-pages` pages (default 10, so 1,000 records). `params` is as for `list-objects`, minus `after`/`limit`."""
+    doc: """
+    Every record of a type across pages (100 per page), up to `max-pages`
+    pages (default 10, so 1,000 records). `params` is as for `list-objects`,
+    minus `after`/`limit`.
+
+    **Example**
+
+    ```hot
+    tickets ::hubspot::objects/list-all-objects("tickets", {properties: ["subject"]}, 20)
+    length(tickets)
+    ```
+    """
 }
 fn
 (object-type: Str, params: Map): Vec {
@@ -186,6 +278,15 @@ meta {
     `filters`), `sorts` (Vec of `{propertyName, direction}`), `properties`,
     `limit` (max 200), `after`. Unset options are omitted. Exposed for
     testing; `search-objects` uses it.
+
+    **Example**
+
+    ```hot
+    ::hubspot::objects/build-search-body({filters: [{propertyName: "email", operator: "EQ", value: "ada@example.com"}], limit: 1})
+    // {filterGroups: [{filters: [{propertyName: "email", operator: "EQ", value: "ada@example.com"}]}], limit: 1}
+
+    ::hubspot::objects/build-search-body({query: "ada"})  // {query: "ada"}
+    ```
     """
 }
 fn (options: Map): Map {
@@ -232,7 +333,20 @@ fn
 
 search-all-objects
 meta {
-    doc: """Run a search across pages (`limit` 200 per page) up to `max-pages` (default 5). HubSpot caps any search at 10,000 total results."""
+    doc: """
+    Run a search across pages (`limit` 200 per page) up to `max-pages`
+    (default 5). HubSpot caps any search at 10,000 total results.
+
+    **Example**
+
+    ```hot
+    deals ::hubspot::objects/search-all-objects("deals", {
+      filters: [{propertyName: "dealstage", operator: "EQ", value: "closedwon"}],
+      properties: ["amount"]
+    }, 10)
+    length(deals)
+    ```
+    """
 }
 fn
 (object-type: Str, options: Map): Vec {
@@ -253,7 +367,18 @@ fn
 
 build-batch-read-body
 meta {
-    doc: """The batch-read payload. `options`: `properties`, `propertiesWithHistory` (both default to `[]`), and `idProperty` when the ids are values of a unique property. Exposed for testing."""
+    doc: """
+    The batch-read payload. `options`: `properties`, `propertiesWithHistory`
+    (both default to `[]`), and `idProperty` when the ids are values of a
+    unique property. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::hubspot::objects/build-batch-read-body(["1", 2], {properties: ["email"]})
+    // {inputs: [{id: "1"}, {id: "2"}], properties: ["email"], propertiesWithHistory: []}
+    ```
+    """
 }
 fn (ids: Vec, options: Map): Map {
   {
@@ -294,7 +419,18 @@ fn
 
 batch-create-input
 meta {
-    doc: """Normalize one batch-create input: a Map with a `properties` key passes through (so it can carry `associations`); a plain properties Map is wrapped as `{properties}`. Exposed for testing."""
+    doc: """
+    Normalize one batch-create input: a Map with a `properties` key passes
+    through (so it can carry `associations`); a plain properties Map is
+    wrapped as `{properties}`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::hubspot::objects/batch-create-input({email: "ada@example.com"})  // {properties: {email: "ada@example.com"}}
+    ::hubspot::objects/batch-create-input({properties: {email: "ada@example.com"}})  // {properties: {email: "ada@example.com"}}
+    ```
+    """
 }
 fn (input: Map): Map {
   if(in("properties", keys(input)), input, {properties: input})
@@ -302,7 +438,21 @@ fn (input: Map): Map {
 
 batch-create
 meta {
-    doc: """POST /crm/objects/{version}/{type}/batch/create - Create up to 100 records. `inputs` is a Vec of properties Maps, or of `{properties, associations}` Maps. Returns `{status, results, errors?}`."""
+    doc: """
+    POST /crm/objects/{version}/{type}/batch/create - Create up to 100
+    records. `inputs` is a Vec of properties Maps, or of `{properties,
+    associations}` Maps. Returns `{status, results, errors?}`.
+
+    **Example**
+
+    ```hot
+    out ::hubspot::objects/batch-create("contacts", [
+      {email: "ada@example.com", firstname: "Ada"},
+      {properties: {email: "grace@example.com"}, associations: [::hubspot::objects/association-input("9876", 1)]}
+    ])
+    map(out.results, %.id)
+    ```
+    """
 }
 fn
 (object-type: Str, inputs: Vec): Map {
@@ -314,7 +464,21 @@ fn
 
 batch-update
 meta {
-    doc: """POST /crm/objects/{version}/{type}/batch/update - Update up to 100 records. `inputs` is a Vec of `{id, properties}` (add `idProperty` to address a record by a unique property)."""
+    doc: """
+    POST /crm/objects/{version}/{type}/batch/update - Update up to 100
+    records. `inputs` is a Vec of `{id, properties}` (add `idProperty` to
+    address a record by a unique property).
+
+    **Example**
+
+    ```hot
+    out ::hubspot::objects/batch-update("contacts", [
+      {id: "12345", properties: {lifecyclestage: "customer"}},
+      {id: "grace@example.com", idProperty: "email", properties: {firstname: "Grace"}}
+    ])
+    out.status
+    ```
+    """
 }
 fn
 (object-type: Str, inputs: Vec): Map {
@@ -326,7 +490,17 @@ fn
 
 build-batch-upsert-body
 meta {
-    doc: """The batch-upsert payload: each `{id, properties}` record gains `idProperty`. Exposed for testing."""
+    doc: """
+    The batch-upsert payload: each `{id, properties}` record gains
+    `idProperty`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::hubspot::objects/build-batch-upsert-body("email", [{id: "ada@example.com", properties: {firstname: "Ada"}}])
+    // {inputs: [{id: "ada@example.com", idProperty: "email", properties: {firstname: "Ada"}}]}
+    ```
+    """
 }
 fn (id-property: Str, records: Vec): Map {
   {inputs: map(records, (r) { {id: Str(r.id), idProperty: id-property, properties: r.properties} })}
@@ -362,7 +536,16 @@ fn
 
 batch-archive
 meta {
-    doc: """POST /crm/objects/{version}/{type}/batch/archive - Archive up to 100 records by id. Returns null (204) on success."""
+    doc: """
+    POST /crm/objects/{version}/{type}/batch/archive - Archive up to 100
+    records by id. Returns null (204) on success.
+
+    **Example**
+
+    ```hot
+    ::hubspot::objects/batch-archive("contacts", ["12345", "67890"])
+    ```
+    """
 }
 fn
 (object-type: Str, ids: Vec): Any {
@@ -382,6 +565,12 @@ meta {
     PUT /crm/objects/{version}/{fromType}/{fromId}/associations/default/{toType}/{toId} -
     Associate two records with the default (unlabeled) association type,
     e.g. contact and company, or deal and contact.
+
+    **Example**
+
+    ```hot
+    ::hubspot::objects/associate("deals", "67890", "contacts", "12345")
+    ```
     """
 }
 fn
@@ -399,6 +588,16 @@ meta {
     Associate two records with a specific association type: a
     HUBSPOT_DEFINED id (e.g. 1 for a contact's primary company) or a
     USER_DEFINED label id from your portal's association labels.
+
+    **Example**
+
+    ```hot
+    // 1 is a contact's primary company
+    ::hubspot::objects/associate-with-label("contacts", "12345", "companies", "9876", 1)
+
+    // A label defined in your portal
+    ::hubspot::objects/associate-with-label("contacts", "12345", "companies", "9876", 42, "USER_DEFINED")
+    ```
     """
 }
 fn
@@ -415,7 +614,16 @@ fn
 
 remove-association
 meta {
-    doc: """DELETE /crm/objects/{version}/{type}/{id}/associations/{toType}/{toId} - Remove every association between two records."""
+    doc: """
+    DELETE /crm/objects/{version}/{type}/{id}/associations/{toType}/{toId} -
+    Remove every association between two records.
+
+    **Example**
+
+    ```hot
+    ::hubspot::objects/remove-association("deals", "67890", "contacts", "12345")
+    ```
+    """
 }
 fn
 (from-type: Str, from-id: Str, to-type: Str, to-id: Str): Any {
@@ -427,7 +635,19 @@ fn
 
 list-associations
 meta {
-    doc: """GET /crm/objects/{version}/{type}/{id}/associations/{toType} - The records associated with one record: `{results: [{toObjectId, associationTypes: [{category, typeId, label}]}], paging?}`. `params`: `limit` (max 500), `after`."""
+    doc: """
+    GET /crm/objects/{version}/{type}/{id}/associations/{toType} - The
+    records associated with one record: `{results: [{toObjectId,
+    associationTypes: [{category, typeId, label}]}], paging?}`. `params`:
+    `limit` (max 500), `after`.
+
+    **Example**
+
+    ```hot
+    out ::hubspot::objects/list-associations("deals", "67890", "contacts", {limit: 100})
+    map(out.results, %.toObjectId)
+    ```
+    """
 }
 fn
 (object-type: Str, id: Str, to-type: Str): Map {

@@ -22,6 +22,16 @@ meta {
     argument is a Gmail search. Options: `q`, `maxResults` (max 500),
     `pageToken`, `labelIds` (Vec), `includeSpamTrash`. Scope:
     `gmail.readonly`.
+
+    **Example**
+
+    ```hot
+    page ::google::gmail::threads/list-threads("label:inbox newer_than:7d")
+    map(or(page.threads, []), %.id)
+
+    // Gmail's own parameters
+    ::google::gmail::threads/list-threads({labelIds: ["STARRED"], maxResults: 50})
+    ```
     """
 }
 fn
@@ -37,7 +47,17 @@ fn
 
 list-all-threads
 meta {
-    doc: """Every matching thread (all pages), or at most `limit`. Same `opts` as `list-threads` (a Str is a search). Scope: `gmail.readonly`."""
+    doc: """
+    Every matching thread (all pages), or at most `limit`. Same `opts` as
+    `list-threads` (a Str is a search). Scope: `gmail.readonly`.
+
+    **Example**
+
+    ```hot
+    threads ::google::gmail::threads/list-all-threads("is:starred", 100)
+    length(threads)
+    ```
+    """
 }
 fn
 (opts: Any): Vec {
@@ -51,7 +71,21 @@ fn
 
 get-thread
 meta {
-    doc: """GET /users/me/threads/{id} - a thread with its `messages` (oldest first). Options: `format` (`full` default, `metadata` with `metadataHeaders`, `minimal`). Scope: `gmail.readonly`."""
+    doc: """
+    GET /users/me/threads/{id} - a thread with its `messages` (oldest
+    first). Options: `format` (`full` default, `metadata` with
+    `metadataHeaders`, `minimal`). Scope: `gmail.readonly`.
+
+    **Example**
+
+    ```hot
+    thread ::google::gmail::threads/get-thread("18f2a")
+    length(thread.messages)
+
+    // Only the headers you need
+    ::google::gmail::threads/get-thread("18f2a", {format: "metadata", metadataHeaders: ["From", "Subject"]})
+    ```
+    """
 }
 fn
 (id: Str): Map {
@@ -64,7 +98,17 @@ fn
 
 thread-emails
 meta {
-    doc: """A thread's messages as `Email` records, oldest first (`get-thread` + `::google::gmail::parse/to-email`). Scope: `gmail.readonly`."""
+    doc: """
+    A thread's messages as `Email` records, oldest first (`get-thread` +
+    `::google::gmail::parse/to-email`). Scope: `gmail.readonly`.
+
+    **Example**
+
+    ```hot
+    emails ::google::gmail::threads/thread-emails("18f2a")
+    map(emails, %.subject)
+    ```
+    """
 }
 fn
 (id: Str): Vec {
@@ -77,7 +121,16 @@ fn
 
 modify-thread
 meta {
-    doc: """POST /users/me/threads/{id}/modify - add and remove label ids on every message in a thread. Returns the thread. Scope: `gmail.modify`."""
+    doc: """
+    POST /users/me/threads/{id}/modify - add and remove label ids on every
+    message in a thread. Returns the thread. Scope: `gmail.modify`.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::threads/modify-thread("18f2a", ["STARRED"], ["UNREAD"])
+    ```
+    """
 }
 fn
 (id: Str, add-label-ids: Vec, remove-label-ids: Vec): Map {
@@ -90,7 +143,16 @@ fn
 
 trash-thread
 meta {
-    doc: """POST /users/me/threads/{id}/trash - move a whole thread to the trash (recoverable for 30 days). Scope: `gmail.modify`."""
+    doc: """
+    POST /users/me/threads/{id}/trash - move a whole thread to the trash
+    (recoverable for 30 days). Scope: `gmail.modify`.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::threads/trash-thread("18f2a")
+    ```
+    """
 }
 fn
 (id: Str): Map {
@@ -102,7 +164,16 @@ fn
 
 untrash-thread
 meta {
-    doc: """POST /users/me/threads/{id}/untrash - restore a thread from the trash. Scope: `gmail.modify`."""
+    doc: """
+    POST /users/me/threads/{id}/untrash - restore a thread from the trash.
+    Scope: `gmail.modify`.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::threads/untrash-thread("18f2a")
+    ```
+    """
 }
 fn
 (id: Str): Map {

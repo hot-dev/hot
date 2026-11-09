@@ -33,7 +33,17 @@ PACKAGE_AGENT "hot-dev-nppes-pkg/0.1 (+https://hot.dev)"
 
 given
 meta {
-    doc: """True for a non-null value that is not a blank string."""
+    doc: """
+    True for a non-null value that is not a blank string.
+
+    **Example**
+
+    ```hot
+    ::nppes::api/given("MN")  // true
+    ::nppes::api/given("  ")  // false
+    ::nppes::api/given(null)  // false
+    ```
+    """
 }
 fn (v: Any): Bool {
   match v {
@@ -43,7 +53,9 @@ fn (v: Any): Bool {
   }
 }
 
-pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
+pick
+meta {no-doc: true}
+fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
   from-opts get(opts, key)
   from-ctx ::ctx/get(ctx-key)
   cond {
@@ -53,7 +65,9 @@ pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
   }
 }
 
-strip-slash fn (url: Str): Str {
+strip-slash
+meta {no-doc: true}
+fn (url: Str): Str {
   ::re/replace-all(url, "/+$", "")
 }
 
@@ -100,13 +114,17 @@ type {
     message: Str
 }
 
-error-line fn (e: Map): Str {
+error-line
+meta {no-doc: true}
+fn (e: Map): Str {
   field get(e, "field")
   description get(e, "description")
   if(given(field), `${field}: ${description}`, Str(description))
 }
 
-body-detail fn (body: Any): Str? {
+body-detail
+meta {no-doc: true}
+fn (body: Any): Str? {
   cond {
     is-str(body) => { if(gt(length(body), 200), `${slice(body, 0, 200)}…`, body) }
     is-map(body) => {
@@ -120,7 +138,9 @@ body-detail fn (body: Any): Str? {
   }
 }
 
-retry-after fn (headers: Map): Int? {
+retry-after
+meta {no-doc: true}
+fn (headers: Map): Int? {
   v get(headers, "retry-after")
   cond {
     is-null(v) => { null }
@@ -131,7 +151,19 @@ retry-after fn (headers: Map): Int? {
 
 http-error
 meta {
-    doc: """Build an `HttpError` from a failed response. Exposed for testing; every request uses it."""
+    doc: """
+    Build an `HttpError` from a failed response. Exposed for testing; every
+    request uses it.
+
+    **Example**
+
+    ```hot
+    response ::hot::http/HttpResponse({status: 429, headers: {retry-after: "30"}, body: "slow down"})
+    e ::nppes::api/http-error(response, "https://npiregistry.cms.hhs.gov/api/?version=2.1")
+    e.retry-after  // 30
+    e.message  // "nppes: HTTP 429: slow down"
+    ```
+    """
 }
 fn (response: HttpResponse, url: Str): HttpError {
   headers or(response.headers, {})
@@ -149,7 +181,20 @@ fn (response: HttpResponse, url: Str): HttpError {
 
 not-json-error
 meta {
-    doc: """An `HttpError` for a 2xx response that is not a JSON object, such as a maintenance page, which would otherwise read as no such provider. Exposed for testing."""
+    doc: """
+    An `HttpError` for a 2xx response that is not a JSON object, such as a
+    maintenance page, which would otherwise read as no such provider.
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    response ::hot::http/HttpResponse({status: 200, headers: {}, body: "<html></html>"})
+    e ::nppes::api/not-json-error(response, "https://npi-proxy.example/api/")
+    e.status  // 200
+    e.body  // null
+    ```
+    """
 }
 fn (response: HttpResponse, url: Str): HttpError {
   HttpError({
@@ -169,7 +214,17 @@ fn (response: HttpResponse, url: Str): HttpError {
 
 query-string
 meta {
-    doc: """Build a `?a=1&b=2` suffix from a Map, dropping null and blank values (pure); `""` when nothing remains."""
+    doc: """
+    Build a `?a=1&b=2` suffix from a Map, dropping null and blank values
+    (pure); `""` when nothing remains.
+
+    **Example**
+
+    ```hot
+    ::nppes::api/query-string({version: "2.1", city: null, state: "  "})  // "?version=2.1"
+    ::nppes::api/query-string({city: null})  // ""
+    ```
+    """
 }
 fn (params: Map): Str {
   ::uri/query-string(filter-vals(params, given))
@@ -181,6 +236,13 @@ meta {
     GET (or another method) an NPI Registry URL with `headers`, returning
     the `HttpResponse` on 2xx or an Err carrying `HttpError`. A transport
     failure passes through as its own Err.
+
+    **Example**
+
+    ```hot
+    response ::nppes::api/request("GET", "https://npiregistry.cms.hhs.gov/api/?version=2.1&number=1881018208", {Accept: "application/json"})
+    response.status
+    ```
     """
 }
 fn (method: Str, url: Str, headers: Map): HttpResponse {
@@ -199,7 +261,17 @@ fn (method: Str, url: Str, headers: Map): HttpResponse {
 
 decode-body
 meta {
-    doc: """The decoded JSON of a 2xx response, or an Err carrying `HttpError` when it holds `Errors` or isn't a JSON object (pure). Exposed for testing."""
+    doc: """
+    The decoded JSON of a 2xx response, or an Err carrying `HttpError` when
+    it holds `Errors` or isn't a JSON object (pure). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    response ::hot::http/HttpResponse({status: 200, headers: {}, body: "{\"result_count\":0,\"results\":[]}"})
+    ::nppes::api/decode-body(response, "https://npi-proxy.example/api/")  // {result_count: 0, results: []}
+    ```
+    """
 }
 fn (response: HttpResponse, url: Str): Any {
   raw response.body
@@ -217,7 +289,17 @@ fn (response: HttpResponse, url: Str): Any {
 
 get-json
 meta {
-    doc: """GET a JSON resource and return the decoded body, or an Err carrying `HttpError`."""
+    doc: """
+    GET a JSON resource and return the decoded body, or an Err carrying
+    `HttpError`.
+
+    **Example**
+
+    ```hot
+    page ::nppes::api/get-json("https://npiregistry.cms.hhs.gov/api/?version=2.1&number=1881018208", {})
+    first(page.results).number
+    ```
+    """
 }
 fn (url: Str, headers: Map): Any {
   response request("GET", url, {Accept: "application/json", ...headers})

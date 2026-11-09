@@ -30,23 +30,33 @@ SignedUploadUrlResponse type {
   token: Str?
 }
 
-enc fn (value: Any): Str {
+enc
+meta {no-doc: true}
+fn (value: Any): Str {
   ::uri/encode(Str(value))
 }
 
-encode-object-path fn (path: Str): Str {
+encode-object-path
+meta {no-doc: true}
+fn (path: Str): Str {
   join(map(split(path, "/"), enc(%)), "/")
 }
 
-bucket-path fn (bucket: Str): Str {
+bucket-path
+meta {no-doc: true}
+fn (bucket: Str): Str {
   enc(bucket)
 }
 
-object-path fn (bucket: Str, path: Str): Str {
+object-path
+meta {no-doc: true}
+fn (bucket: Str, path: Str): Str {
   `${bucket-path(bucket)}/${encode-object-path(path)}`
 }
 
-body-or-error fn (response: Result): Any {
+body-or-error
+meta {no-doc: true}
+fn (response: Result): Any {
   ::api/body-or-error(response)
 }
 
@@ -79,7 +89,18 @@ fn
 
 get-bucket
 meta {
-    doc: """Get a bucket by ID."""
+    doc: """
+    Get a bucket by ID.
+
+    **Example**
+
+    ```hot
+    ::storage ::supabase::storage
+
+    bucket ::storage/get-bucket("avatars")
+    bucket.public
+    ```
+    """
 }
 fn
 (bucket-id: Str): StorageBucket {
@@ -138,7 +159,21 @@ UpdateBucketRequest type {
 
 update-bucket
 meta {
-    doc: """Update a bucket's settings."""
+    doc: """
+    Update a bucket's settings.
+
+    **Example**
+
+    ```hot
+    ::storage ::supabase::storage
+
+    ::storage/update-bucket(::storage/UpdateBucketRequest({
+      bucket_id: "avatars",
+      public: false,
+      file_size_limit: 1048576
+    }))
+    ```
+    """
 }
 fn
 (request: UpdateBucketRequest): Map {
@@ -155,7 +190,17 @@ fn
 
 empty-bucket
 meta {
-    doc: """Remove all objects from a bucket without deleting the bucket itself."""
+    doc: """
+    Remove all objects from a bucket without deleting the bucket itself.
+
+    **Example**
+
+    ```hot
+    ::storage ::supabase::storage
+
+    ::storage/empty-bucket("avatars")
+    ```
+    """
 }
 fn
 (bucket-id: Str): Map {
@@ -167,7 +212,18 @@ fn
 
 delete-bucket
 meta {
-    doc: """Delete a bucket. The bucket must be empty first (use `empty-bucket`)."""
+    doc: """
+    Delete a bucket. The bucket must be empty first (use `empty-bucket`).
+
+    **Example**
+
+    ```hot
+    ::storage ::supabase::storage
+
+    ::storage/empty-bucket("avatars")
+    ::storage/delete-bucket("avatars")
+    ```
+    """
 }
 fn
 (bucket-id: Str): Map {
@@ -209,7 +265,24 @@ fn
   body-or-error(upload-response(bucket, path, content, content-type, upsert, opts))
 }
 
-upload-as fn
+upload-as
+meta {
+    doc: """
+    Like `upload`, but as a signed-in user. `access-token` is the Bearer
+    token, so row level security applies as that user.
+
+    **Example**
+
+    ```hot
+    ::storage ::supabase::storage
+
+    token ::hot::ctx/get("supabase.user.token")
+    result ::storage/upload-as("avatars", "users/alice.txt", "Hello World", "text/plain", true, token)
+    result.Key
+    ```
+    """
+}
+fn
 (bucket: Str, path: Str, content: Str, content-type: Str, upsert: Bool, access-token: Str): Map {
   upload-as(bucket, path, content, content-type, upsert, access-token, {})
 },
@@ -217,7 +290,23 @@ upload-as fn
   body-or-error(upload-response-as(bucket, path, content, content-type, upsert, access-token, opts))
 }
 
-upload-service fn
+upload-service
+meta {
+    doc: """
+    Like `upload`, with the service role key, which bypasses row level
+    security. Server-side only.
+
+    **Example**
+
+    ```hot
+    ::storage ::supabase::storage
+
+    result ::storage/upload-service("avatars", "users/alice.txt", "Hello World", "text/plain", true)
+    result.Key
+    ```
+    """
+}
+fn
 (bucket: Str, path: Str, content: Str, content-type: Str, upsert: Bool): Map {
   upload-service(bucket, path, content, content-type, upsert, {})
 },
@@ -225,12 +314,30 @@ upload-service fn
   body-or-error(upload-response-service(bucket, path, content, content-type, upsert, opts))
 }
 
-upload-headers fn (content-type: Str, upsert: Bool): Map {
+upload-headers
+meta {no-doc: true}
+fn (content-type: Str, upsert: Bool): Map {
   headers {Content-Type: content-type}
   if(upsert, {...headers, "x-upsert": "true"}, headers)
 }
 
-upload-response fn
+upload-response
+meta {
+    doc: """
+    Like `upload`, but returns the full `HttpResponse`. A non-2xx status is
+    not an Err: check `status`.
+
+    **Example**
+
+    ```hot
+    ::storage ::supabase::storage
+
+    response ::storage/upload-response("avatars", "users/alice.txt", "Hello World", "text/plain", true)
+    response.status
+    ```
+    """
+}
+fn
 (bucket: Str, path: Str, content: Str, content-type: Str, upsert: Bool): ::api/HttpResponse {
   upload-response(bucket, path, content, content-type, upsert, {})
 },
@@ -238,7 +345,24 @@ upload-response fn
   ::api/request-raw-body("POST", `/storage/v1/object/${object-path(bucket, path)}`, upload-headers(content-type, upsert), content, opts)
 }
 
-upload-response-as fn
+upload-response-as
+meta {
+    doc: """
+    Like `upload-as`, but returns the full `HttpResponse`. A non-2xx status
+    is not an Err: check `status`.
+
+    **Example**
+
+    ```hot
+    ::storage ::supabase::storage
+
+    token ::hot::ctx/get("supabase.user.token")
+    response ::storage/upload-response-as("avatars", "users/alice.txt", "Hello World", "text/plain", true, token)
+    response.status
+    ```
+    """
+}
+fn
 (bucket: Str, path: Str, content: Str, content-type: Str, upsert: Bool, access-token: Str): ::api/HttpResponse {
   upload-response-as(bucket, path, content, content-type, upsert, access-token, {})
 },
@@ -246,7 +370,23 @@ upload-response-as fn
   ::api/request-raw-body-as("POST", `/storage/v1/object/${object-path(bucket, path)}`, upload-headers(content-type, upsert), content, access-token, opts)
 }
 
-upload-response-service fn
+upload-response-service
+meta {
+    doc: """
+    Like `upload-service`, but returns the full `HttpResponse`. A non-2xx
+    status is not an Err: check `status`.
+
+    **Example**
+
+    ```hot
+    ::storage ::supabase::storage
+
+    response ::storage/upload-response-service("avatars", "users/alice.txt", "Hello World", "text/plain", true)
+    response.status
+    ```
+    """
+}
+fn
 (bucket: Str, path: Str, content: Str, content-type: Str, upsert: Bool): ::api/HttpResponse {
   upload-response-service(bucket, path, content, content-type, upsert, {})
 },
@@ -276,7 +416,23 @@ fn
   ::api/request("GET", `/storage/v1/object/authenticated/${object-path(bucket, path)}`, {}, {}, opts)
 }
 
-download-as fn
+download-as
+meta {
+    doc: """
+    Like `download`, but as a signed-in user. `access-token` is the Bearer
+    token, so row level security applies as that user.
+
+    **Example**
+
+    ```hot
+    ::storage ::supabase::storage
+
+    token ::hot::ctx/get("supabase.user.token")
+    content ::storage/download-as("documents", "reports/q1.pdf", token)
+    ```
+    """
+}
+fn
 (bucket: Str, path: Str, access-token: Str): Any {
   download-as(bucket, path, access-token, {})
 },
@@ -284,7 +440,22 @@ download-as fn
   ::api/request-as("GET", `/storage/v1/object/authenticated/${object-path(bucket, path)}`, {}, {}, access-token, opts)
 }
 
-download-service fn
+download-service
+meta {
+    doc: """
+    Like `download`, with the service role key, which bypasses row level
+    security. Server-side only.
+
+    **Example**
+
+    ```hot
+    ::storage ::supabase::storage
+
+    content ::storage/download-service("documents", "reports/q1.pdf")
+    ```
+    """
+}
+fn
 (bucket: Str, path: Str): Any {
   download-service(bucket, path, {})
 },
@@ -294,7 +465,17 @@ download-service fn
 
 get-object-info
 meta {
-    doc: """Get metadata about an object (size, MIME type, cache control, etc.)."""
+    doc: """
+    Get metadata about an object (size, MIME type, cache control, etc.).
+
+    **Example**
+
+    ```hot
+    ::storage ::supabase::storage
+
+    info ::storage/get-object-info("documents", "reports/q1.pdf")
+    ```
+    """
 }
 fn
 (bucket: Str, path: Str): Map {
@@ -304,7 +485,23 @@ fn
   ::api/request("GET", `/storage/v1/object/info/${object-path(bucket, path)}`, {}, {}, opts)
 }
 
-get-object-info-as fn
+get-object-info-as
+meta {
+    doc: """
+    Like `get-object-info`, but as a signed-in user. `access-token` is the
+    Bearer token, so row level security applies as that user.
+
+    **Example**
+
+    ```hot
+    ::storage ::supabase::storage
+
+    token ::hot::ctx/get("supabase.user.token")
+    info ::storage/get-object-info-as("documents", "reports/q1.pdf", token)
+    ```
+    """
+}
+fn
 (bucket: Str, path: Str, access-token: Str): Map {
   get-object-info-as(bucket, path, access-token, {})
 },
@@ -355,7 +552,24 @@ fn
   ::api/request("POST", `/storage/v1/object/list/${bucket-path(request.bucket)}`, {}, body, opts)
 }
 
-list-objects-as fn
+list-objects-as
+meta {
+    doc: """
+    Like `list-objects`, but as a signed-in user. `access-token` is the
+    Bearer token, so row level security applies as that user.
+
+    **Example**
+
+    ```hot
+    ::storage ::supabase::storage
+
+    token ::hot::ctx/get("supabase.user.token")
+    objects ::storage/list-objects-as(::storage/ListObjectsRequest({bucket: "avatars", prefix: "users/", limit: 100}), token)
+    map(objects, %.name)
+    ```
+    """
+}
+fn
 (request: ListObjectsRequest, access-token: Str): Vec<StorageObject> {
   list-objects-as(request, access-token, {})
 },
@@ -370,7 +584,23 @@ list-objects-as fn
   ::api/request-as("POST", `/storage/v1/object/list/${bucket-path(request.bucket)}`, {}, body, access-token, opts)
 }
 
-list-objects-service fn
+list-objects-service
+meta {
+    doc: """
+    Like `list-objects`, with the service role key, which bypasses row level
+    security. Server-side only.
+
+    **Example**
+
+    ```hot
+    ::storage ::supabase::storage
+
+    objects ::storage/list-objects-service(::storage/ListObjectsRequest({bucket: "avatars", prefix: "users/", limit: 100}))
+    map(objects, %.name)
+    ```
+    """
+}
+fn
 (request: ListObjectsRequest): Vec<StorageObject> {
   list-objects-service(request, {})
 },
@@ -394,7 +624,29 @@ MoveObjectRequest type {
 
 move-object
 meta {
-    doc: """Move an object within or between buckets."""
+    doc: """
+    Move an object within or between buckets.
+
+    **Example**
+
+    ```hot
+    ::storage ::supabase::storage
+
+    ::storage/move-object(::storage/MoveObjectRequest({
+      bucket_id: "avatars",
+      source_key: "tmp/alice.jpg",
+      destination_key: "users/alice.jpg"
+    }))
+
+    // To another bucket
+    ::storage/move-object(::storage/MoveObjectRequest({
+      bucket_id: "avatars",
+      source_key: "users/alice.jpg",
+      destination_key: "alice.jpg",
+      destination_bucket: "archive"
+    }))
+    ```
+    """
 }
 fn
 (request: MoveObjectRequest): Map {
@@ -419,7 +671,21 @@ CopyObjectRequest type {
 
 copy-object
 meta {
-    doc: """Copy an object within or between buckets."""
+    doc: """
+    Copy an object within or between buckets.
+
+    **Example**
+
+    ```hot
+    ::storage ::supabase::storage
+
+    ::storage/copy-object(::storage/CopyObjectRequest({
+      bucket_id: "avatars",
+      source_key: "users/alice.jpg",
+      destination_key: "backup/alice.jpg"
+    }))
+    ```
+    """
 }
 fn
 (request: CopyObjectRequest): Map {
@@ -437,7 +703,17 @@ fn
 
 delete-object
 meta {
-    doc: """Delete a single object from a bucket."""
+    doc: """
+    Delete a single object from a bucket.
+
+    **Example**
+
+    ```hot
+    ::storage ::supabase::storage
+
+    ::storage/delete-object("avatars", "users/alice.jpg")
+    ```
+    """
 }
 fn
 (bucket: Str, path: Str): Any {
@@ -447,7 +723,23 @@ fn
   ::api/request("DELETE", `/storage/v1/object/${object-path(bucket, path)}`, {}, {}, opts)
 }
 
-delete-object-as fn
+delete-object-as
+meta {
+    doc: """
+    Like `delete-object`, but as a signed-in user. `access-token` is the
+    Bearer token, so row level security applies as that user.
+
+    **Example**
+
+    ```hot
+    ::storage ::supabase::storage
+
+    token ::hot::ctx/get("supabase.user.token")
+    ::storage/delete-object-as("avatars", "users/alice.jpg", token)
+    ```
+    """
+}
+fn
 (bucket: Str, path: Str, access-token: Str): Any {
   delete-object-as(bucket, path, access-token, {})
 },
@@ -455,7 +747,22 @@ delete-object-as fn
   ::api/request-as("DELETE", `/storage/v1/object/${object-path(bucket, path)}`, {}, {}, access-token, opts)
 }
 
-delete-object-service fn
+delete-object-service
+meta {
+    doc: """
+    Like `delete-object`, with the service role key, which bypasses row
+    level security. Server-side only.
+
+    **Example**
+
+    ```hot
+    ::storage ::supabase::storage
+
+    ::storage/delete-object-service("avatars", "users/alice.jpg")
+    ```
+    """
+}
+fn
 (bucket: Str, path: Str): Any {
   delete-object-service(bucket, path, {})
 },
@@ -485,7 +792,22 @@ fn
   ::api/request("DELETE", `/storage/v1/object/${bucket-path(bucket)}`, {}, {prefixes: prefixes}, opts)
 }
 
-delete-objects-service fn
+delete-objects-service
+meta {
+    doc: """
+    Like `delete-objects`, with the service role key, which bypasses row
+    level security. Server-side only.
+
+    **Example**
+
+    ```hot
+    ::storage ::supabase::storage
+
+    ::storage/delete-objects-service("avatars", ["old/file1.jpg", "old/file2.jpg"])
+    ```
+    """
+}
+fn
 (bucket: Str, prefixes: Vec<Str>): Any {
   delete-objects-service(bucket, prefixes, {})
 },
@@ -544,7 +866,24 @@ fn
   ::api/request("POST", `/storage/v1/object/sign/${object-path(bucket, path)}`, {}, {expiresIn: expires-in}, opts)
 }
 
-create-signed-url-as fn
+create-signed-url-as
+meta {
+    doc: """
+    Like `create-signed-url`, but as a signed-in user. `access-token` is the
+    Bearer token, so row level security applies as that user.
+
+    **Example**
+
+    ```hot
+    ::storage ::supabase::storage
+
+    token ::hot::ctx/get("supabase.user.token")
+    result ::storage/create-signed-url-as("documents", "reports/q1.pdf", 3600, token)
+    result.signedURL
+    ```
+    """
+}
+fn
 (bucket: Str, path: Str, expires-in: Int, access-token: Str): SignedUrlResponse {
   create-signed-url-as(bucket, path, expires-in, access-token, {})
 },
@@ -552,7 +891,23 @@ create-signed-url-as fn
   ::api/request-as("POST", `/storage/v1/object/sign/${object-path(bucket, path)}`, {}, {expiresIn: expires-in}, access-token, opts)
 }
 
-create-signed-url-service fn
+create-signed-url-service
+meta {
+    doc: """
+    Like `create-signed-url`, with the service role key, which bypasses row
+    level security. Server-side only.
+
+    **Example**
+
+    ```hot
+    ::storage ::supabase::storage
+
+    result ::storage/create-signed-url-service("documents", "reports/q1.pdf", 3600)
+    result.signedURL
+    ```
+    """
+}
+fn
 (bucket: Str, path: Str, expires-in: Int): SignedUrlResponse {
   create-signed-url-service(bucket, path, expires-in, {})
 },
@@ -562,7 +917,18 @@ create-signed-url-service fn
 
 create-signed-urls
 meta {
-    doc: """Create signed URLs for multiple objects in a bucket at once."""
+    doc: """
+    Create signed URLs for multiple objects in a bucket at once.
+
+    **Example**
+
+    ```hot
+    ::storage ::supabase::storage
+
+    urls ::storage/create-signed-urls("documents", ["reports/q1.pdf", "reports/q2.pdf"], 3600)
+    map(urls, %.signedURL)
+    ```
+    """
 }
 fn
 (bucket: Str, paths: Vec<Str>, expires-in: Int): Vec<Map> {
@@ -574,7 +940,20 @@ fn
 
 create-signed-upload-url
 meta {
-    doc: """Create a signed URL for uploading an object without further authentication."""
+    doc: """
+    Create a signed URL for uploading an object without further
+    authentication.
+
+    **Example**
+
+    ```hot
+    ::storage ::supabase::storage
+
+    target ::storage/create-signed-upload-url("documents", "reports/q3.pdf", 3600)
+    target.url
+    target.token
+    ```
+    """
 }
 fn
 (bucket: Str, path: Str, expires-in: Int): SignedUploadUrlResponse {
@@ -584,7 +963,24 @@ fn
   ::api/request("POST", `/storage/v1/object/upload/sign/${object-path(bucket, path)}`, {}, {expiresIn: expires-in}, opts)
 }
 
-create-signed-upload-url-as fn
+create-signed-upload-url-as
+meta {
+    doc: """
+    Like `create-signed-upload-url`, but as a signed-in user. `access-token`
+    is the Bearer token, so row level security applies as that user.
+
+    **Example**
+
+    ```hot
+    ::storage ::supabase::storage
+
+    token ::hot::ctx/get("supabase.user.token")
+    target ::storage/create-signed-upload-url-as("documents", "reports/q3.pdf", 3600, token)
+    target.url
+    ```
+    """
+}
+fn
 (bucket: Str, path: Str, expires-in: Int, access-token: Str): SignedUploadUrlResponse {
   create-signed-upload-url-as(bucket, path, expires-in, access-token, {})
 },

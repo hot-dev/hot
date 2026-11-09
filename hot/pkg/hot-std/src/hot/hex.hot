@@ -54,9 +54,9 @@ meta {
     **Example**
 
     ```hot
-    is-valid("48656c6c6f")  // true
-    is-valid("48656c6c6")   // false (odd length)
-    is-valid("ghijkl")      // false (invalid chars)
+    ::hot::hex/is-valid("48656c6c6f")  // true
+    ::hot::hex/is-valid("48656c6c6")   // false (odd length)
+    ::hot::hex/is-valid("ghijkl")      // false (invalid chars)
     ```
     """
 }

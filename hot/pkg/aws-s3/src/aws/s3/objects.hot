@@ -46,7 +46,9 @@ ListObjectsResponse type {
 }
 
 // Text of a child element, or null when it's absent
-child-text fn (elem: Any, name: Str): Str? {
+child-text
+meta {no-doc: true}
+fn (elem: Any, name: Str): Str? {
     child ::xml/child(elem, name)
     cond {
         ne(child, null) => { ::xml/text(child) }
@@ -56,13 +58,17 @@ child-text fn (elem: Any, name: Str): Str? {
 
 // Decode a listed value when the response says it encoded them.
 // A store that ignores encoding-type sends plain keys, where + is a plus.
-listed-text fn (elem: Any, name: Str, encoded: Bool): Str? {
+listed-text
+meta {no-doc: true}
+fn (elem: Any, name: Str, encoded: Bool): Str? {
     value child-text(elem, name)
     if(encoded, ::api/decode-listed(value), value)
 }
 
 // Parse S3Object from XML element. Listings ask for URL-encoded keys.
-parse-s3-object fn (elem: Any, encoded: Bool): S3Object {
+parse-s3-object
+meta {no-doc: true}
+fn (elem: Any, encoded: Bool): S3Object {
     S3Object({
         key: listed-text(elem, "Key", encoded),
         size: parse-int(child-text(elem, "Size")),
@@ -73,7 +79,9 @@ parse-s3-object fn (elem: Any, encoded: Bool): S3Object {
 }
 
 // Parse ListObjectsV2 XML response
-parse-list-objects-response fn (xml-str: Str): ListObjectsResponse {
+parse-list-objects-response
+meta {no-doc: true}
+fn (xml-str: Str): ListObjectsResponse {
     root ::xml/from-xml(xml-str)
     contents-elems ::xml/children(root, "Contents")
     prefix-elems ::xml/children(root, "CommonPrefixes")
@@ -253,7 +261,16 @@ fn
 // The query string for ListObjectsV2, every value encoded
 list-query
 meta {
-    doc: """The ListObjectsV2 query string. Exposed for testing. `encoding-type=url` makes S3 URL-encode keys in the response, so any key survives the XML."""
+    doc: """
+    The ListObjectsV2 query string. Exposed for testing. `encoding-type=url`
+    makes S3 URL-encode keys in the response, so any key survives the XML.
+
+    **Example**
+
+    ```hot
+    ::aws::s3::objects/list-query("logs/", 100, null, {delimiter: "/"})  // "list-type=2&prefix=logs%2F&max-keys=100&encoding-type=url&delimiter=%2F"
+    ```
+    """
 }
 fn (prefix: Str?, max_keys: Int, continuation_token: Str?, opts: Map): Str {
     delimiter get(opts, "delimiter")
@@ -471,8 +488,8 @@ meta {
     ```hot
     upload ::aws::s3::objects/create-multipart-upload("my-bucket", "video.mp4", "video/mp4")
 
-    part-1 ::aws::s3::objects/upload-part("my-bucket", "video.mp4", upload.upload_id, 1, first-chunk)
-    part-2 ::aws::s3::objects/upload-part("my-bucket", "video.mp4", upload.upload_id, 2, last-chunk)
+    part-1 ::aws::s3::objects/upload-part("my-bucket", "video.mp4", upload.upload_id, 1, Bytes("first chunk"))
+    part-2 ::aws::s3::objects/upload-part("my-bucket", "video.mp4", upload.upload_id, 2, Bytes("last chunk"))
 
     ::aws::s3::objects/complete-multipart-upload("my-bucket", "video.mp4", upload.upload_id, [part-1, part-2])
     ```
@@ -519,7 +536,8 @@ meta {
     **Example**
 
     ```hot
-    part ::aws::s3::objects/upload-part("my-bucket", "video.mp4", upload-id, 1, chunk)
+    upload ::aws::s3::objects/create-multipart-upload("my-bucket", "video.mp4", "video/mp4")
+    part ::aws::s3::objects/upload-part("my-bucket", "video.mp4", upload.upload_id, 1, Bytes("first chunk"))
     part.etag  // keep this for complete-multipart-upload
     ```
     """
@@ -546,7 +564,9 @@ fn
 }
 
 // Escape text for an XML element
-xml-escape fn (text: Str): Str {
+xml-escape
+meta {no-doc: true}
+fn (text: Str): Str {
     text
         |> ::aws::core/replace-all-char("&", "&amp;")
         |> ::aws::core/replace-all-char("<", "&lt;")
@@ -555,7 +575,20 @@ xml-escape fn (text: Str): Str {
 
 complete-multipart-body
 meta {
-    doc: """The CompleteMultipartUpload XML for `parts` (`UploadPartResponse` values or `{part_number, etag}` Maps), sorted by part number as S3 requires. Exposed for testing."""
+    doc: """
+    The CompleteMultipartUpload XML for `parts` (`UploadPartResponse` values
+    or `{part_number, etag}` Maps), sorted by part number as S3 requires.
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    body ::aws::s3::objects/complete-multipart-body([{part_number: 2, etag: "b"}, {part_number: 1, etag: "a"}])
+
+    // Parts come out in part-number order
+    contains(body, "<Part><PartNumber>1</PartNumber><ETag>a</ETag></Part><Part><PartNumber>2</PartNumber>")  // true
+    ```
+    """
 }
 fn (parts: Vec): Str {
     elems sort-by(map(parts, untype), %.part_number)
@@ -575,7 +608,11 @@ meta {
     **Example**
 
     ```hot
-    result ::aws::s3::objects/complete-multipart-upload("my-bucket", "video.mp4", upload-id, [part-1, part-2])
+    upload ::aws::s3::objects/create-multipart-upload("my-bucket", "video.mp4", "video/mp4")
+    part-1 ::aws::s3::objects/upload-part("my-bucket", "video.mp4", upload.upload_id, 1, Bytes("first chunk"))
+    part-2 ::aws::s3::objects/upload-part("my-bucket", "video.mp4", upload.upload_id, 2, Bytes("last chunk"))
+
+    result ::aws::s3::objects/complete-multipart-upload("my-bucket", "video.mp4", upload.upload_id, [part-1, part-2])
     result.etag
     ```
     """
@@ -620,7 +657,8 @@ meta {
     **Example**
 
     ```hot
-    ::aws::s3::objects/abort-multipart-upload("my-bucket", "video.mp4", upload-id)
+    upload ::aws::s3::objects/create-multipart-upload("my-bucket", "video.mp4", "video/mp4")
+    ::aws::s3::objects/abort-multipart-upload("my-bucket", "video.mp4", upload.upload_id)
     ```
     """
 }
@@ -699,12 +737,16 @@ type {
 }
 
 // The key split into segments, ignoring the slash that ends a folder key
-key-segments fn (key: Str): Vec {
+key-segments
+meta {no-doc: true}
+fn (key: Str): Vec {
     filter(split(key, "/"), ne(%, ""))
 }
 
 // An ETag without the quotes S3 puts around it
-bare-etag fn (etag: Str?): Str? {
+bare-etag
+meta {no-doc: true}
+fn (etag: Str?): Str? {
     cond {
         is-null(etag) => { null }
         => { ::aws::core/replace-all-char(etag, "\"", "") }
@@ -768,7 +810,21 @@ fn
 
 to-doc-files
 meta {
-    doc: """Every entry of a `ListObjectsResponse` as `DocFile`s: the objects, then the `common_prefixes` as folders. `drive-id` is the listing's bucket."""
+    doc: """
+    Every entry of a `ListObjectsResponse` as `DocFile`s: the objects, then
+    the `common_prefixes` as folders. `drive-id` is the listing's bucket.
+
+    **Example**
+
+    ```hot
+    listing ::aws::s3::objects/ListObjectsResponse({
+      name: "my-bucket",
+      contents: [::aws::s3::objects/S3Object({key: "reports/q3.pdf"})],
+      common_prefixes: ["reports/archive/"]
+    })
+    map(::aws::s3::objects/to-doc-files(listing), %.name)  // ["q3.pdf", "archive"]
+    ```
+    """
 }
 fn (listing: ListObjectsResponse): Vec {
     objects map(or(listing.contents, []), to-doc-file(%, listing.name))

@@ -17,6 +17,10 @@ meta {
     // 64-character hex string
 
     // AWS Signature v4 key derivation chain
+    secret ::hot::ctx/get("aws.secret.key")
+    date "20260101"
+    region "us-east-1"
+    service "s3"
     k-date hmac-sha256-bytes(`AWS4${secret}`, date)
     k-region hmac-sha256-bytes(k-date, region)
     k-service hmac-sha256-bytes(k-region, service)
@@ -39,6 +43,7 @@ meta {
 
     ```hot
     // Chain HMACs for key derivation
+    secret ::hot::ctx/get("aws.secret.key")
     k-date hmac-sha256-bytes(`AWS4${secret}`, "20231215")
     k-region hmac-sha256-bytes(k-date, "us-east-1")
     ```
@@ -57,7 +62,7 @@ meta {
     **Example**
 
     ```hot
-    hmac-sha512("secret-key", "message")
+    ::hot::hmac/hmac-sha512("secret-key", "message")
     // 128-character hex string
     ```
     """
@@ -77,7 +82,9 @@ meta {
 
     ```hot
     // GitHub webhook signature verification
-    hmac-sha1(webhook-secret, payload)
+    webhook-secret ::hot::ctx/get("webhook.secret")
+    payload "{}"
+    ::hot::hmac/hmac-sha1(webhook-secret, payload)
     ```
     """
 }
@@ -97,6 +104,9 @@ meta {
 
     ```hot
     // Verify a webhook signature
+    secret ::hot::ctx/get("webhook.secret")
+    payload "{}"
+    signature "5d41402abc4b2a76b9719d911017c592"
     is-valid hmac-verify(secret, payload, signature, "sha256")
 
     // Supported algorithms: "sha256", "sha512", "sha1"
@@ -122,6 +132,9 @@ meta {
     **Example**
 
     ```hot
+    secret ::hot::ctx/get("webhook.secret")
+    request {body-raw: "{}"}
+    signature-hex "5d41402abc4b2a76b9719d911017c592"
     ::hot::hmac/hmac-verify-hex(secret, request.body-raw, signature-hex, "sha256")
     ```
     """
@@ -155,6 +168,9 @@ meta {
     **Example**
 
     ```hot
+    secret ::hot::ctx/get("webhook.secret")
+    request {body-raw: "{}"}
+    signature-b64 "XUFAKrxLKna5cZ2REBfFkg=="
     ::hot::hmac/hmac-verify-base64(secret, request.body-raw, signature-b64, "sha256")
     ```
     """

@@ -18,13 +18,29 @@ meta {
 
 ::ctx ::hot::ctx
 
-non-blank fn (value: Any): Str? {
+non-blank
+meta {no-doc: true}
+fn (value: Any): Str? {
   if(is-str(value), if(is-blank(value), null, trim(value)), null)
 }
 
 resolve-from
 meta {
-    doc: """The one resolver, pure: `{api-key}` for a call from `opts` first, then `ctx-values` (a Map of context variables). An Err when no API key is set, or when `api-key` is in `opts` but blank or null (that never falls back to context). Exposed for testing; `resolve` feeds it the context."""
+    doc: """
+    The one resolver, pure: `{api-key}` for a call from `opts` first, then
+    `ctx-values` (a Map of context variables). An Err when no API key is
+    set, or when `api-key` is in `opts` but blank or null (that never falls
+    back to context). Exposed for testing; `resolve` feeds it the context.
+
+    **Example**
+
+    ```hot
+    ::brave::search::api/resolve-from({api-key: "key-a"}, {"brave.api.key": "key-b"})  // {api-key: "key-a"}
+    ::brave::search::api/resolve-from({}, {"brave.api.key": "key-b"})  // {api-key: "key-b"}
+    is-err(::brave::search::api/resolve-from({api-key: ""}, {"brave.api.key": "key-b"}))  // true
+    is-err(::brave::search::api/resolve-from({}, {}))  // true
+    ```
+    """
 }
 fn (opts: Map, ctx-values: Map): Map {
   opt-key non-blank(get(opts, "api-key"))

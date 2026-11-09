@@ -67,7 +67,18 @@ ListContainersResponse type {
 
 list-containers
 meta {
-    doc: """GET /containers - List all containers. Supports pagination with limit, order, and after parameters."""
+    doc: """
+    GET /containers - List all containers. Supports pagination with limit,
+    order, and after parameters.
+
+    **Example**
+
+    ```hot
+    page ::openai::containers/list-containers({limit: "20", order: "desc"})
+    map(page.data, %.id)
+    page.has_more
+    ```
+    """
 }
 fn
 (request: ListContainersRequest): ListContainersResponse {
@@ -99,7 +110,21 @@ CreateContainerResponse type {
 
 
 create-container
-meta {doc: """POST /containers - Create a new container for storing files."""}
+meta {
+    doc: """
+    POST /containers - Create a new container for storing files.
+
+    **Example**
+
+    ```hot
+    container ::openai::containers/create-container(::openai::containers/CreateContainerRequest({
+      name: "analysis",
+      file_ids: ["file-abc123"]
+    }))
+    container.id
+    ```
+    """
+}
 fn
 (request: CreateContainerRequest): CreateContainerResponse {
   create-container(request, {})
@@ -128,7 +153,20 @@ RetrieveContainerResponse type {
 
 
 retrieve-container
-meta {doc: """GET /containers/{container_id} - Retrieve a container by its ID."""}
+meta {
+    doc: """
+    GET /containers/{container_id} - Retrieve a container by its ID.
+
+    **Example**
+
+    ```hot
+    container ::openai::containers/retrieve-container(::openai::containers/RetrieveContainerRequest({
+      container-id: "cntr_abc123"
+    }))
+    container.status
+    ```
+    """
+}
 fn
 (request: RetrieveContainerRequest): RetrieveContainerResponse {
   retrieve-container(request, {})
@@ -152,7 +190,19 @@ DeleteContainerResponse type Map
 
 delete-container
 meta {
-    doc: """DELETE /containers/{container_id} - Permanently delete a container and its contents."""
+    doc: """
+    DELETE /containers/{container_id} - Permanently delete a container and
+    its contents.
+
+    **Example**
+
+    ```hot
+    result ::openai::containers/delete-container(::openai::containers/DeleteContainerRequest({
+      container-id: "cntr_abc123"
+    }))
+    is-err(result)
+    ```
+    """
 }
 fn
 (request: DeleteContainerRequest): DeleteContainerResponse {
@@ -184,7 +234,18 @@ ListContainerFilesResponse type {
 
 
 list-container-files
-meta {doc: """GET /containers/{container_id}/files - List all files in a container."""}
+meta {
+    doc: """
+    GET /containers/{container_id}/files - List all files in a container.
+
+    **Example**
+
+    ```hot
+    page ::openai::containers/list-container-files({container-id: "cntr_abc123", limit: "20"})
+    map(page.data, %.path)
+    ```
+    """
+}
 fn
 (request: ListContainerFilesRequest): ListContainerFilesResponse {
   list-container-files(request, {})
@@ -215,7 +276,20 @@ CreateContainerFileResponse type {
 
 
 create-container-file
-meta {doc: """POST /containers/{container_id}/files - Add a file to a container."""}
+meta {
+    doc: """
+    POST /containers/{container_id}/files - Add a file to a container.
+
+    **Example**
+
+    ```hot
+    container-file ::openai::containers/create-container-file("cntr_abc123", ::openai::containers/CreateContainerFileRequest({
+      file_id: "file-abc123"
+    }))
+    container-file.path
+    ```
+    """
+}
 fn
 (container-id: Str, request: CreateContainerFileRequest): CreateContainerFileResponse {
   create-container-file(container-id, request, {})
@@ -247,7 +321,20 @@ RetrieveContainerFileResponse type {
 
 retrieve-container-file
 meta {
-    doc: """GET /containers/{container_id}/files/{file_id} - Retrieve metadata for a file in a container."""
+    doc: """
+    GET /containers/{container_id}/files/{file_id} - Retrieve metadata for a
+    file in a container.
+
+    **Example**
+
+    ```hot
+    container-file ::openai::containers/retrieve-container-file(::openai::containers/RetrieveContainerFileRequest({
+      container-id: "cntr_abc123",
+      file-id: "cfile_abc123"
+    }))
+    container-file.bytes
+    ```
+    """
 }
 fn
 (request: RetrieveContainerFileRequest): RetrieveContainerFileResponse {
@@ -273,7 +360,20 @@ DeleteContainerFileResponse type Map
 
 delete-container-file
 meta {
-    doc: """DELETE /containers/{container_id}/files/{file_id} - Delete a container file"""
+    doc: """
+    DELETE /containers/{container_id}/files/{file_id} - Delete a container
+    file
+
+    **Example**
+
+    ```hot
+    result ::openai::containers/delete-container-file(::openai::containers/DeleteContainerFileRequest({
+      container-id: "cntr_abc123",
+      file-id: "cfile_abc123"
+    }))
+    is-err(result)
+    ```
+    """
 }
 fn
 (request: DeleteContainerFileRequest): DeleteContainerFileResponse {
@@ -299,7 +399,19 @@ RetrieveContainerFileContentResponse type Any
 
 retrieve-container-file-content
 meta {
-    doc: """GET /containers/{container_id}/files/{file_id}/content - Retrieve container file content"""
+    doc: """
+    GET /containers/{container_id}/files/{file_id}/content - Retrieve
+    container file content
+
+    **Example**
+
+    ```hot
+    content ::openai::containers/retrieve-container-file-content(::openai::containers/RetrieveContainerFileContentRequest({
+      container-id: "cntr_abc123",
+      file-id: "cfile_abc123"
+    }))
+    ```
+    """
 }
 fn
 (request: RetrieveContainerFileContentRequest): RetrieveContainerFileContentResponse {

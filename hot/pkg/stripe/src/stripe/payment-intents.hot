@@ -74,7 +74,20 @@ fn
 
 get-payment-intent
 meta {
-    doc: """GET /v1/payment_intents/{intent} - Retrieve a PaymentIntent by ID. Optional `params` such as `{expand: ["latest_charge"]}`."""
+    doc: """
+    GET /v1/payment_intents/{intent} - Retrieve a PaymentIntent by ID.
+    Optional `params` such as `{expand: ["latest_charge"]}`.
+
+    **Example**
+
+    ```hot
+    ::pi ::stripe::payment-intents
+
+    intent ::pi/get-payment-intent("pi_123", {expand: ["latest_charge"]})
+    intent.status
+    intent.latest_charge.receipt_url
+    ```
+    """
 }
 fn
 (payment-intent: Str): Map {
@@ -109,7 +122,21 @@ UpdatePaymentIntentRequest type {
 
 update-payment-intent
 meta {
-    doc: """POST /v1/payment_intents/{intent} - Update a PaymentIntent before it is confirmed."""
+    doc: """
+    POST /v1/payment_intents/{intent} - Update a PaymentIntent before it is
+    confirmed.
+
+    **Example**
+
+    ```hot
+    ::pi ::stripe::payment-intents
+
+    ::pi/update-payment-intent("pi_123", ::pi/UpdatePaymentIntentRequest({
+      amount: 2500,
+      metadata: {order_id: "42"}
+    }))
+    ```
+    """
 }
 fn
 (payment-intent: Str, request: UpdatePaymentIntentRequest): Map {
@@ -173,7 +200,25 @@ CapturePaymentIntentRequest type {
 
 capture-payment-intent
 meta {
-    doc: """POST /v1/payment_intents/{intent}/capture - Capture the funds of a PaymentIntent created with `capture_method: "manual"` (status "requires_capture"). Omit `amount_to_capture` to capture the full amount. Uncaptured card authorizations are canceled automatically after 7 days by default."""
+    doc: """
+    POST /v1/payment_intents/{intent}/capture - Capture the funds of a
+    PaymentIntent created with `capture_method: "manual"` (status
+    "requires_capture"). Omit `amount_to_capture` to capture the full
+    amount. Uncaptured card authorizations are canceled automatically after
+    7 days by default.
+
+    **Example**
+
+    ```hot
+    ::pi ::stripe::payment-intents
+
+    // Capture part of the authorization
+    captured ::pi/capture-payment-intent("pi_123",
+      ::pi/CapturePaymentIntentRequest({amount_to_capture: 1500}),
+      ::stripe::api/RequestOptions({idempotency_key: "order-42-capture"}))
+    captured.amount_received
+    ```
+    """
 }
 fn
 (payment-intent: Str): Map {
@@ -188,7 +233,23 @@ fn
 
 cancel-payment-intent
 meta {
-    doc: """POST /v1/payment_intents/{intent}/cancel - Cancel a PaymentIntent that hasn't succeeded. Optional `cancellation-reason`: "duplicate", "fraudulent", "requested_by_customer", or "abandoned"."""
+    doc: """
+    POST /v1/payment_intents/{intent}/cancel - Cancel a PaymentIntent that
+    hasn't succeeded. Optional `cancellation-reason`: "duplicate",
+    "fraudulent", "requested_by_customer", or "abandoned".
+
+    **Example**
+
+    ```hot
+    ::pi ::stripe::payment-intents
+
+    canceled ::pi/cancel-payment-intent("pi_123", "requested_by_customer")
+    canceled.status
+
+    // With no reason, for a connected account
+    ::pi/cancel-payment-intent("pi_456", {stripe-account: "acct_123"})
+    ```
+    """
 }
 fn
 (payment-intent: Str): Map {
@@ -215,7 +276,19 @@ ListPaymentIntentsRequest type {
 
 list-payment-intents
 meta {
-    doc: """GET /v1/payment_intents - List PaymentIntents, most recent first. Filter by `customer` or `created`."""
+    doc: """
+    GET /v1/payment_intents - List PaymentIntents, most recent first. Filter
+    by `customer` or `created`.
+
+    **Example**
+
+    ```hot
+    ::pi ::stripe::payment-intents
+
+    page ::pi/list-payment-intents(::pi/ListPaymentIntentsRequest({customer: "cus_123", limit: 10}))
+    statuses map(page.data, %.status)
+    ```
+    """
 }
 fn
 (): Map {
@@ -230,7 +303,21 @@ fn
 
 search-payment-intents
 meta {
-    doc: """GET /v1/payment_intents/search - Search PaymentIntents with Stripe's search query language, e.g. `status:"succeeded" AND metadata["order_id"]:"42"`. Pass `next_page` back as `page` in `params` to continue."""
+    doc: """
+    GET /v1/payment_intents/search - Search PaymentIntents with Stripe's
+    search query language, e.g. `status:"succeeded" AND
+    metadata["order_id"]:"42"`. Pass `next_page` back as `page` in `params`
+    to continue.
+
+    **Example**
+
+    ```hot
+    ::pi ::stripe::payment-intents
+
+    results ::pi/search-payment-intents(`status:"succeeded" AND metadata["order_id"]:"42"`)
+    ids map(results.data, %.id)
+    ```
+    """
 }
 fn
 (query: Str): Map {

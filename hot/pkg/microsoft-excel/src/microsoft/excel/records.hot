@@ -13,25 +13,47 @@ LETTERS "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 // Grids and records
 // ---------------------------------------------------------------------------
 
-is-blank-cell fn (cell: Any): Bool {
+is-blank-cell
+meta {no-doc: true}
+fn (cell: Any): Bool {
   or(is-null(cell), and(is-str(cell), eq(trim(cell), "")))
 }
 
 header-names
 meta {
-    doc: """The header row as column names: each cell as a trimmed Str; blank headers become null (their column is skipped)."""
+    doc: """
+    The header row as column names: each cell as a trimmed Str; blank
+    headers become null (their column is skipped).
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel::records/header-names(["name", " score ", ""])  // ["name", "score", null]
+    ```
+    """
 }
 fn (header: Vec): Vec {
   map(header, (h) { if(is-blank-cell(h), null, trim(Str(h))) })
 }
 
-cell-or-null fn (cell: Any): Any {
+cell-or-null
+meta {no-doc: true}
+fn (cell: Any): Any {
   if(is-blank-cell(cell), null, cell)
 }
 
 row-to-record
 meta {
-    doc: """One row as a Map keyed by `columns` (from `header-names`); blank and missing cells are null and null-named columns are skipped."""
+    doc: """
+    One row as a Map keyed by `columns` (from `header-names`); blank and
+    missing cells are null and null-named columns are skipped.
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel::records/row-to-record(["name", null, "score"], ["Ada", "x", ""])  // {name: "Ada", score: null}
+    ```
+    """
 }
 fn (columns: Vec, row: Vec): Map {
   n length(row)
@@ -70,7 +92,15 @@ fn (values: Vec?): Vec {
 
 record-columns
 meta {
-    doc: """The column names for `records`: every key, in order of first appearance."""
+    doc: """
+    The column names for `records`: every key, in order of first appearance.
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel::records/record-columns([{name: "Ada"}, {name: "Bob", stage: "demo"}])  // ["name", "stage"]
+    ```
+    """
 }
 fn (records: Vec): Vec {
   distinct(mapcat(records, (r) { map(keys(r), Str) }))
@@ -78,7 +108,18 @@ fn (records: Vec): Vec {
 
 cell-value
 meta {
-    doc: """A record value as a cell: Str, Int, Dec and Bool pass through; null becomes `""` (an empty cell); Maps and Vecs become JSON text."""
+    doc: """
+    A record value as a cell: Str, Int, Dec and Bool pass through; null
+    becomes `""` (an empty cell); Maps and Vecs become JSON text.
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel::records/cell-value(9)  // 9
+    ::microsoft::excel::records/cell-value(null)  // ""
+    ::microsoft::excel::records/cell-value(["a"])  // "[\"a\"]"
+    ```
+    """
 }
 fn (value: Any): Any {
   cond {
@@ -90,7 +131,17 @@ fn (value: Any): Any {
 
 records-to-rows
 meta {
-    doc: """Records as value rows ordered by `columns` (default: every key in order of first appearance), without a header. Missing values become `""`."""
+    doc: """
+    Records as value rows ordered by `columns` (default: every key in order
+    of first appearance), without a header. Missing values become `""`.
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel::records/records-to-rows([{name: "Ada", score: 9}, {name: "Bob"}])  // [["Ada", 9], ["Bob", ""]]
+    ::microsoft::excel::records/records-to-rows([{name: "Ada", score: 9}], ["score", "name"])  // [[9, "Ada"]]
+    ```
+    """
 }
 fn
 (records: Vec): Vec {
@@ -102,7 +153,17 @@ fn
 
 records-to-grid
 meta {
-    doc: """Records as a full grid: the header row (`columns`, default every key) followed by `records-to-rows`."""
+    doc: """
+    Records as a full grid: the header row (`columns`, default every key)
+    followed by `records-to-rows`.
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel::records/records-to-grid([{name: "Ada", score: 9}])  // [["name", "score"], ["Ada", 9]]
+    ::microsoft::excel::records/records-to-grid([{name: "Ada", score: 9}], ["score"])  // [["score"], [9]]
+    ```
+    """
 }
 fn
 (records: Vec): Vec {
@@ -114,7 +175,16 @@ fn
 
 rectangular
 meta {
-    doc: """A grid with every row padded with null to the longest row's length, as Excel requires."""
+    doc: """
+    A grid with every row padded with null to the longest row's length, as
+    Excel requires.
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel::records/rectangular([[1, 2], [3]])  // [[1, 2], [3, null]]
+    ```
+    """
 }
 fn (grid: Vec): Vec {
   width reduce(grid, (w, row) { max(w, length(row)) }, 0)
@@ -127,7 +197,17 @@ fn (grid: Vec): Vec {
 
 column-letter
 meta {
-    doc: """The A1 letters for a 0-based column index: 0 is `A`, 25 is `Z`, 26 is `AA`, 701 is `ZZ`."""
+    doc: """
+    The A1 letters for a 0-based column index: 0 is `A`, 25 is `Z`, 26 is
+    `AA`, 701 is `ZZ`.
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel::records/column-letter(0)  // "A"
+    ::microsoft::excel::records/column-letter(26)  // "AA"
+    ```
+    """
 }
 fn (index: Int): Str {
   position mod(index, 26)
@@ -141,25 +221,48 @@ fn (index: Int): Str {
   }
 }
 
-letter-value fn (letter: Str): Int {
+letter-value
+meta {no-doc: true}
+fn (letter: Str): Int {
   add(find-first(range(0, 26), (i) { eq(slice(LETTERS, i, add(i, 1)), letter) }), 1)
 }
 
 column-index
 meta {
-    doc: """The 0-based column index for A1 letters, in either case: `A` is 0, `AA` is 26."""
+    doc: """
+    The 0-based column index for A1 letters, in either case: `A` is 0, `AA`
+    is 26.
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel::records/column-index("A")  // 0
+    ::microsoft::excel::records/column-index("aa")  // 26
+    ```
+    """
 }
 fn (letters: Str): Int {
   sub(reduce(split-letters(uppercase(letters)), (n, c) { add(mul(n, 26), letter-value(c)) }, 0), 1)
 }
 
-split-letters fn (letters: Str): Vec {
+split-letters
+meta {no-doc: true}
+fn (letters: Str): Vec {
   map(range(0, length(letters)), (i) { slice(letters, i, add(i, 1)) })
 }
 
 is-cell
 meta {
-    doc: """True for a single A1 cell such as `B2`."""
+    doc: """
+    True for a single A1 cell such as `B2`.
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel::records/is-cell("B2")  // true
+    ::microsoft::excel::records/is-cell("A1:C3")  // false
+    ```
+    """
 }
 fn (address: Str): Bool {
   ::hot::regex/is-match(address, "^[A-Za-z]{1,3}[1-9][0-9]*$")
@@ -171,6 +274,13 @@ meta {
     A single top-left cell expanded to `rows` by `columns` cells:
     `expand-address("B2", 2, 3)` is `B2:D3`. Anything else, such as a
     full range or a named range, is returned unchanged.
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel::records/expand-address("B2", 2, 3)  // "B2:D3"
+    ::microsoft::excel::records/expand-address("A1:C3", 9, 9)  // "A1:C3"
+    ```
     """
 }
 fn (address: Str, rows: Int, columns: Int): Str {
@@ -188,7 +298,18 @@ fn (address: Str, rows: Int, columns: Int): Str {
 
 quote-sheet
 meta {
-    doc: """A sheet name quoted for A1 notation: `Sheet1` stays as is; `"Q3 Plan"` becomes `'Q3 Plan'` and a `'` inside is doubled."""
+    doc: """
+    A sheet name quoted for A1 notation: `Sheet1` stays as is; `"Q3 Plan"`
+    becomes `'Q3 Plan'` and a `'` inside is doubled.
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel::records/quote-sheet("Sheet1")  // "Sheet1"
+    ::microsoft::excel::records/quote-sheet("Q3 Plan")  // "'Q3 Plan'"
+    ::microsoft::excel::records/quote-sheet("Bob's")  // "'Bob''s'"
+    ```
+    """
 }
 fn (name: Str): Str {
   cond {
@@ -202,7 +323,16 @@ fn (name: Str): Str {
 
 a1
 meta {
-    doc: """An A1 range on a sheet: `a1("Q3 Plan", "A1:C10")` is `'Q3 Plan'!A1:C10`."""
+    doc: """
+    An A1 range on a sheet: `a1("Q3 Plan", "A1:C10")` is `'Q3 Plan'!A1:C10`.
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel::records/a1("Data", "A1:C10")  // "Data!A1:C10"
+    ::microsoft::excel::records/a1("Q3 Plan", "A1:C10")  // "'Q3 Plan'!A1:C10"
+    ```
+    """
 }
 fn (sheet: Str, address: Str): Str {
   `${quote-sheet(sheet)}!${address}`

@@ -48,7 +48,16 @@ fn
 
 get-event
 meta {
-    doc: """GET /events/{event_id}: retrieve an Event."""
+    doc: """
+    GET /events/{event_id}: retrieve an Event.
+
+    **Example**
+
+    ```hot
+    event ::increase::events/get-event("event_001dzz0r20rzr4zrhrr1364hy80")
+    event.category
+    ```
+    """
 }
 fn
 (event-id: Str): Map {
@@ -80,8 +89,8 @@ meta {
     **Example**
 
     ```hot
-    e ::increase::events/parse-event("{\\"id\\":\\"event_001\\",\\"category\\":\\"ach_transfer.updated\\",\\"associated_object_type\\":\\"ach_transfer\\",\\"associated_object_id\\":\\"ach_transfer_uoxatyh3lt5evrsdvo7q\\",\\"created_at\\":\\"2026-11-01T12:00:00Z\\",\\"type\\":\\"event\\"}")
-    e.category   // => "ach_transfer.updated"
+    e ::increase::events/parse-event("{\"id\":\"event_001\",\"category\":\"ach_transfer.updated\",\"associated_object_type\":\"ach_transfer\",\"associated_object_id\":\"ach_transfer_uoxatyh3lt5evrsdvo7q\",\"created_at\":\"2026-11-01T12:00:00Z\",\"type\":\"event\"}")
+    e.category  // "ach_transfer.updated"
     ```
     """
 }
@@ -109,7 +118,21 @@ fn (payload: Any): Event {
 
 resource-name
 meta {
-    doc: """The API collection for an object type: `"ach_transfer"` is `"ach_transfers"`, `"entity"` is `"entities"`, `"lockbox_address"` is `"lockbox_addresses"`, `"inbound_real_time_payments_request_for_payment"` is `"inbound_real_time_payments_requests_for_payment"`. Exposed for testing."""
+    doc: """
+    The API collection for an object type: `"ach_transfer"` is
+    `"ach_transfers"`, `"entity"` is `"entities"`, `"lockbox_address"` is
+    `"lockbox_addresses"`,
+    `"inbound_real_time_payments_request_for_payment"` is
+    `"inbound_real_time_payments_requests_for_payment"`. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::increase::events/resource-name("ach_transfer")  // "ach_transfers"
+    ::increase::events/resource-name("entity")  // "entities"
+    ```
+    """
 }
 fn (object-type: Str): Str {
   cond {
@@ -125,7 +148,17 @@ fn (object-type: Str): Str {
 
 object-path
 meta {
-    doc: """The retrieve path for an Event's associated object, e.g. `/ach_transfers/ach_transfer_uoxatyh3lt5evrsdvo7q`, or an Err when the event names no object. Exposed for testing."""
+    doc: """
+    The retrieve path for an Event's associated object, e.g.
+    `/ach_transfers/ach_transfer_uoxatyh3lt5evrsdvo7q`, or an Err when the
+    event names no object. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::increase::events/object-path({associated_object_type: "ach_transfer", associated_object_id: "ach_transfer_uoxatyh3lt5evrsdvo7q"})  // "/ach_transfers/ach_transfer_uoxatyh3lt5evrsdvo7q"
+    ```
+    """
 }
 fn (event: Any): Str {
   e untype(event)
@@ -150,9 +183,9 @@ meta {
     **Example**
 
     ```hot
-    e ::increase::events/parse-event(request.body)
+    e ::increase::events/get-event("event_001dzz0r20rzr4zrhrr1364hy80")
     transfer ::increase::events/fetch-associated-object(e)
-    transfer.status   // => "submitted"
+    transfer.status
     ```
     """
 }
@@ -197,7 +230,17 @@ fn
 
 get-event-subscription
 meta {
-    doc: """GET /event_subscriptions/{event_subscription_id}: retrieve an Event Subscription."""
+    doc: """
+    GET /event_subscriptions/{event_subscription_id}: retrieve an Event
+    Subscription.
+
+    **Example**
+
+    ```hot
+    subscription ::increase::events/get-event-subscription("event_subscription_001dzz0r20rzr4zrhrr1364hy80")
+    subscription.status
+    ```
+    """
 }
 fn
 (event-subscription-id: Str): Map {
@@ -209,7 +252,17 @@ fn
 
 list-event-subscriptions
 meta {
-    doc: """GET /event_subscriptions: one page of Event Subscriptions. Filters: `idempotency_key`, `limit`, `cursor`."""
+    doc: """
+    GET /event_subscriptions: one page of Event Subscriptions. Filters:
+    `idempotency_key`, `limit`, `cursor`.
+
+    **Example**
+
+    ```hot
+    page ::increase::events/list-event-subscriptions({limit: 25})
+    map(page.data, %.url)
+    ```
+    """
 }
 fn
 (): Map {
@@ -224,7 +277,16 @@ fn
 
 update-event-subscription
 meta {
-    doc: """PATCH /event_subscriptions/{event_subscription_id}: set `status` to `"active"`, `"disabled"` (pause deliveries) or `"deleted"` (permanent)."""
+    doc: """
+    PATCH /event_subscriptions/{event_subscription_id}: set `status` to
+    `"active"`, `"disabled"` (pause deliveries) or `"deleted"` (permanent).
+
+    **Example**
+
+    ```hot
+    ::increase::events/update-event-subscription("event_subscription_001dzz0r20rzr4zrhrr1364hy80", "disabled")
+    ```
+    """
 }
 fn
 (event-subscription-id: Str, status: Str): Map {
@@ -236,7 +298,16 @@ fn
 
 delete-event-subscription
 meta {
-    doc: """Delete an Event Subscription (`PATCH {status: "deleted"}`; Increase has no DELETE endpoint). Permanent."""
+    doc: """
+    Delete an Event Subscription (`PATCH {status: "deleted"}`; Increase has
+    no DELETE endpoint). Permanent.
+
+    **Example**
+
+    ```hot
+    ::increase::events/delete-event-subscription("event_subscription_001dzz0r20rzr4zrhrr1364hy80")
+    ```
+    """
 }
 fn
 (event-subscription-id: Str): Map {

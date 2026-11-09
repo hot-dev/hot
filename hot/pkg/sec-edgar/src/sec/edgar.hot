@@ -35,7 +35,17 @@ EFTS "https://efts.sec.gov/LATEST"
 
 headers
 meta {
-    doc: """The SEC request headers (`User-Agent` from settings), or an Err when no user-agent is set."""
+    doc: """
+    The SEC request headers (`User-Agent` from settings), or an Err when no
+    user-agent is set.
+
+    **Example**
+
+    ```hot
+    h ::sec::edgar/headers({user-agent: "Acme Corp ops@acme.com"})
+    h.User-Agent
+    ```
+    """
 }
 fn (opts: Map): Map {
   cfg ::api/resolve(opts)
@@ -49,7 +59,9 @@ fn (opts: Map): Map {
   }
 }
 
-sec-get fn (url: Str, opts: Map): Any {
+sec-get
+meta {no-doc: true}
+fn (url: Str, opts: Map): Any {
   h headers(opts)
   if(is-err(h), h, ::api/get-json(url, h))
 }
@@ -60,7 +72,19 @@ sec-get fn (url: Str, opts: Map): Any {
 
 cik-digits
 meta {
-    doc: """The CIK's digits without leading zeros, as a Str (`"0000320193"`, `320193` and `"CIK320193"` all give `"320193"`); an Err for anything else."""
+    doc: """
+    The CIK's digits without leading zeros, as a Str (`"0000320193"`,
+    `320193` and `"CIK320193"` all give `"320193"`); an Err for anything
+    else.
+
+    **Example**
+
+    ```hot
+    ::sec::edgar/cik-digits("0000320193")  // "320193"
+    ::sec::edgar/cik-digits("CIK320193")  // "320193"
+    is-err(::sec::edgar/cik-digits("AAPL"))  // true
+    ```
+    """
 }
 fn (cik: Any): Str {
   s ::hot::regex/replace-all(uppercase(trim(Str(cik))), "^CIK", "")
@@ -92,27 +116,89 @@ fn (cik: Any): Str {
 
 accession-plain
 meta {
-    doc: """An accession number without dashes, as used in Archives paths: `"0000320193-24-000123"` → `"000032019324000123"`."""
+    doc: """
+    An accession number without dashes, as used in Archives paths:
+    `"0000320193-24-000123"` → `"000032019324000123"`.
+
+    **Example**
+
+    ```hot
+    ::sec::edgar/accession-plain("0000320193-24-000123")  // "000032019324000123"
+    ```
+    """
 }
 fn (accession: Str): Str {
   ::hot::str/replace(trim(accession), "-", "")
 }
 
-submissions-url fn (cik: Any): Str {
+submissions-url
+meta {
+    doc: """
+    The `data.sec.gov` URL of a company's submissions JSON, with the CIK
+    zero-padded.
+
+    **Example**
+
+    ```hot
+    ::sec::edgar/submissions-url(320193)
+    // "https://data.sec.gov/submissions/CIK0000320193.json"
+    ```
+    """
+}
+fn (cik: Any): Str {
   `${DATA}/submissions/CIK${pad-cik(cik)}.json`
 }
 
-company-facts-url fn (cik: Any): Str {
+company-facts-url
+meta {
+    doc: """
+    The `data.sec.gov` URL of a company's XBRL facts JSON, with the CIK
+    zero-padded.
+
+    **Example**
+
+    ```hot
+    ::sec::edgar/company-facts-url(320193)
+    // "https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json"
+    ```
+    """
+}
+fn (cik: Any): Str {
   `${DATA}/api/xbrl/companyfacts/CIK${pad-cik(cik)}.json`
 }
 
-company-concept-url fn (cik: Any, taxonomy: Str, tag: Str): Str {
+company-concept-url
+meta {
+    doc: """
+    The `data.sec.gov` URL of one XBRL concept for a company, with the CIK
+    zero-padded.
+
+    **Example**
+
+    ```hot
+    ::sec::edgar/company-concept-url(320193, "us-gaap", "AccountsPayableCurrent")
+    // "https://data.sec.gov/api/xbrl/companyconcept/CIK0000320193/us-gaap/AccountsPayableCurrent.json"
+    ```
+    """
+}
+fn (cik: Any, taxonomy: Str, tag: Str): Str {
   `${DATA}/api/xbrl/companyconcept/CIK${pad-cik(cik)}/${::api/path-segment(taxonomy)}/${::api/path-segment(tag)}.json`
 }
 
 frames-url
 meta {
-    doc: """`/api/xbrl/frames/{taxonomy}/{tag}/{unit}/{period}.json`, e.g. period `"CY2019Q1I"` (instant) or `"CY2023"` (annual). Units with a slash such as `USD/shares` are written `USD-per-shares`."""
+    doc: """
+    `/api/xbrl/frames/{taxonomy}/{tag}/{unit}/{period}.json`, e.g. period
+    `"CY2019Q1I"` (instant) or `"CY2023"` (annual). Units with a slash such
+    as `USD/shares` are written `USD-per-shares`.
+
+    **Example**
+
+    ```hot
+    ::sec::edgar/frames-url("us-gaap", "AccountsPayableCurrent", "USD", "CY2019Q1I")
+    // "https://data.sec.gov/api/xbrl/frames/us-gaap/AccountsPayableCurrent/USD/CY2019Q1I.json"
+    ```
+    """
 }
 fn (taxonomy: Str, tag: Str, unit: Str, period: Str): Str {
   `${DATA}/api/xbrl/frames/${::api/path-segment(taxonomy)}/${::api/path-segment(tag)}/${::api/path-segment(unit)}/${::api/path-segment(period)}.json`
@@ -120,7 +206,18 @@ fn (taxonomy: Str, tag: Str, unit: Str, period: Str): Str {
 
 filing-folder-url
 meta {
-    doc: """The Archives folder of a filing: `https://www.sec.gov/Archives/edgar/data/{cik}/{accession without dashes}`."""
+    doc: """
+    The Archives folder of a filing:
+    `https://www.sec.gov/Archives/edgar/data/{cik}/{accession without
+    dashes}`.
+
+    **Example**
+
+    ```hot
+    ::sec::edgar/filing-folder-url(320193, "0000320193-24-000123")
+    // "https://www.sec.gov/Archives/edgar/data/320193/000032019324000123"
+    ```
+    """
 }
 fn (cik: Any, accession: Str): Str {
   `${WWW}/Archives/edgar/data/${cik-digits(cik)}/${accession-plain(accession)}`
@@ -147,7 +244,16 @@ fn (cik: Any, accession: Str, document: Str): Str {
 
 filing-index-url
 meta {
-    doc: """The human-readable filing index page: `.../{accession}-index.htm`."""
+    doc: """
+    The human-readable filing index page: `.../{accession}-index.htm`.
+
+    **Example**
+
+    ```hot
+    ::sec::edgar/filing-index-url(320193, "0000320193-24-000123")
+    // "https://www.sec.gov/Archives/edgar/data/320193/000032019324000123/0000320193-24-000123-index.htm"
+    ```
+    """
 }
 fn (cik: Any, accession: Str): Str {
   `${filing-folder-url(cik, accession)}/${trim(accession)}-index.htm`
@@ -163,6 +269,13 @@ meta {
     `https://www.sec.gov/files/company_tickers.json` as a Vec of
     `{cik, ticker, title}` (about 10,000 listed companies, about 800 KB).
     Fetch it once per run and reuse it; it changes daily.
+
+    **Example**
+
+    ```hot
+    tickers ::sec::edgar/company-tickers({user-agent: "Acme Corp ops@acme.com"})
+    ::sec::edgar/find-ticker(tickers, "AAPL")
+    ```
     """
 }
 fn
@@ -176,7 +289,17 @@ fn
 
 parse-tickers
 meta {
-    doc: """`{"0": {cik_str, ticker, title}, ...}` → `[{cik, ticker, title}]` with `cik` zero-padded (pure)."""
+    doc: """
+    `{"0": {cik_str, ticker, title}, ...}` → `[{cik, ticker, title}]` with
+    `cik` zero-padded (pure).
+
+    **Example**
+
+    ```hot
+    ::sec::edgar/parse-tickers({"0": {cik_str: 320193, ticker: "AAPL", title: "Apple Inc."}})
+    // [{cik: "0000320193", ticker: "AAPL", title: "Apple Inc."}]
+    ```
+    """
 }
 fn (body: Any): Vec<Map> {
   rows if(is-map(body), vals(body), [])
@@ -185,7 +308,21 @@ fn (body: Any): Vec<Map> {
 
 find-ticker
 meta {
-    doc: """The `{cik, ticker, title}` for a ticker (case-insensitive) in a ticker list, or null (pure)."""
+    doc: """
+    The `{cik, ticker, title}` for a ticker (case-insensitive) in a ticker
+    list, or null (pure).
+
+    **Example**
+
+    ```hot
+    tickers [
+      {cik: "0000320193", ticker: "AAPL", title: "Apple Inc."},
+      {cik: "0000789019", ticker: "MSFT", title: "MICROSOFT CORP"}
+    ]
+    ::sec::edgar/find-ticker(tickers, "aapl").cik  // "0000320193"
+    ::sec::edgar/find-ticker(tickers, "ZZZZ")  // null
+    ```
+    """
 }
 fn (tickers: Vec<Map>, ticker: Str): Map? {
   t uppercase(trim(ticker))
@@ -194,7 +331,20 @@ fn (tickers: Vec<Map>, ticker: Str): Map? {
 
 search-tickers
 meta {
-    doc: """Ticker-list rows whose company name contains `name` (case-insensitive), at most `limit` (pure)."""
+    doc: """
+    Ticker-list rows whose company name contains `name` (case-insensitive),
+    at most `limit` (pure).
+
+    **Example**
+
+    ```hot
+    tickers [
+      {cik: "0000320193", ticker: "AAPL", title: "Apple Inc."},
+      {cik: "0000789019", ticker: "MSFT", title: "MICROSOFT CORP"}
+    ]
+    map(::sec::edgar/search-tickers(tickers, "micro", 5), %.ticker)  // ["MSFT"]
+    ```
+    """
 }
 fn (tickers: Vec<Map>, name: Str, limit: Int): Vec<Map> {
   n lowercase(trim(name))
@@ -204,7 +354,18 @@ fn (tickers: Vec<Map>, name: Str, limit: Int): Vec<Map> {
 
 cik-for-ticker
 meta {
-    doc: """The zero-padded CIK for a ticker, or null. Downloads the ticker file; when looking up many tickers, call `company-tickers` once and use `find-ticker`."""
+    doc: """
+    The zero-padded CIK for a ticker, or null. Downloads the ticker file;
+    when looking up many tickers, call `company-tickers` once and use
+    `find-ticker`.
+
+    **Example**
+
+    ```hot
+    cik ::sec::edgar/cik-for-ticker("AAPL")
+    ::sec::edgar/submissions(cik).name
+    ```
+    """
 }
 fn
 (ticker: Str): Str? {
@@ -252,7 +413,19 @@ fn
 
 submissions-page
 meta {
-    doc: """One older submissions page named in `filings.files` (e.g. `"CIK0000320193-submissions-001.json"`); its columns are the same as `filings.recent`."""
+    doc: """
+    One older submissions page named in `filings.files` (e.g.
+    `"CIK0000320193-submissions-001.json"`); its columns are the same as
+    `filings.recent`.
+
+    **Example**
+
+    ```hot
+    subs ::sec::edgar/submissions(320193)
+    older ::sec::edgar/submissions-page(first(subs.filings.files).name)
+    length(older.accessionNumber)
+    ```
+    """
 }
 fn
 (file-name: Str): Map {
@@ -269,6 +442,20 @@ meta {
     filingDate, form, primaryDocument, ...}]`, newest first, at most
     `limit`. Each row also gets `url`, the primary document's URL.
     `opts.forms` keeps only those form types (e.g. `["10-K", "10-Q"]`).
+
+    **Example**
+
+    ```hot
+    subs {cik: "320193", filings: {recent: {
+      accessionNumber: ["0000320193-24-000123", "0000320193-24-000081"],
+      form: ["10-K", "8-K"],
+      primaryDocument: ["aapl-20240928.htm", "aapl-20240801.htm"]
+    }}}
+    rows ::sec::edgar/recent-filings(subs, 5, {forms: ["10-K"]})
+    map(rows, %.form)  // ["10-K"]
+    first(rows).url
+    // "https://www.sec.gov/Archives/edgar/data/320193/000032019324000123/aapl-20240928.htm"
+    ```
     """
 }
 fn (subs: Map, limit: Int, opts: Map): Vec<Map> {
@@ -287,7 +474,17 @@ fn (subs: Map, limit: Int, opts: Map): Vec<Map> {
 
 filing-index
 meta {
-    doc: """A filing folder's `index.json` listing (`directory.item[]` with `name`, `type`, `size`, `last-modified`)."""
+    doc: """
+    A filing folder's `index.json` listing (`directory.item[]` with `name`,
+    `type`, `size`, `last-modified`).
+
+    **Example**
+
+    ```hot
+    index ::sec::edgar/filing-index(320193, "0000320193-24-000123")
+    map(index.directory.item, %.name)
+    ```
+    """
 }
 fn
 (cik: Any, accession: Str): Map {
@@ -299,7 +496,18 @@ fn
 
 filing-document
 meta {
-    doc: """Download one filing document as `{content-type, bytes}`. Large exhibits can exceed `http.max-response-bytes`."""
+    doc: """
+    Download one filing document as `{content-type, bytes}`. Large exhibits
+    can exceed `http.max-response-bytes`.
+
+    **Example**
+
+    ```hot
+    doc ::sec::edgar/filing-document(320193, "0000320193-24-000123", "aapl-20240928.htm")
+    doc.content-type
+    ::hot::bytes/to-str(doc.bytes)
+    ```
+    """
 }
 fn
 (cik: Any, accession: Str, document: Str): Map {
@@ -321,7 +529,18 @@ fn
 
 company-facts
 meta {
-    doc: """Every XBRL fact a company has reported (`facts.{taxonomy}.{tag}.units.{unit}[]`). Large filers' files run to several MB."""
+    doc: """
+    Every XBRL fact a company has reported
+    (`facts.{taxonomy}.{tag}.units.{unit}[]`). Large filers' files run to
+    several MB.
+
+    **Example**
+
+    ```hot
+    facts ::sec::edgar/company-facts(320193)
+    last(facts.facts.us-gaap.Assets.units.USD).val
+    ```
+    """
 }
 fn
 (cik: Any): Map {
@@ -337,6 +556,13 @@ meta {
     One concept's facts for a company, e.g. taxonomy `"us-gaap"`, tag
     `"AccountsPayableCurrent"`: `units.{unit}[]` with `end`, `val`,
     `accn`, `fy`, `fp`, `form`, `filed`.
+
+    **Example**
+
+    ```hot
+    concept ::sec::edgar/company-concept(320193, "us-gaap", "AccountsPayableCurrent")
+    last(concept.units.USD).val
+    ```
     """
 }
 fn
@@ -379,7 +605,15 @@ meta {
     Query parameters for EDGAR full-text search (pure). `opts`: `forms`
     (Vec or comma list), `start-date` / `end-date` (`YYYY-MM-DD`, sets
     `dateRange=custom`), `ciks`, `from` (offset; pages are 100 hits).
-    Unset options are omitted.
+    Unset options are null, which `query-string` drops.
+
+    **Example**
+
+    ```hot
+    params ::sec::edgar/full-text-params("merger", {forms: ["10-K", "10-Q"], start-date: "2025-01-01"})
+    params.forms  // "10-K,10-Q"
+    params.dateRange  // "custom"
+    ```
     """
 }
 fn (q: Str, opts: Map): Map {
@@ -449,20 +683,35 @@ fn (cik: Any, accession: Str): Str {
   filing-document-url(cik, accession, "primary_doc.xml")
 }
 
-field fn (node: Any, path: Vec<Str>): Str? {
+field
+meta {no-doc: true}
+fn (node: Any, path: Vec<Str>): Str? {
   found if(is-null(node), null, ::xml/at(node, path))
   s if(is-null(found), "", trim(::xml/text(found)))
   if(is-empty(s), null, s)
 }
 
-flag fn (node: Any, path: Vec<Str>): Bool? {
+flag
+meta {no-doc: true}
+fn (node: Any, path: Vec<Str>): Bool? {
   v field(node, path)
   if(is-null(v), null, in(v, ["true", "1"]))
 }
 
 amount
 meta {
-    doc: """A Form D amount as an Int, or as filed when it isn't digits (`"Indefinite"`), or null when empty (pure)."""
+    doc: """
+    A Form D amount as an Int, or as filed when it isn't digits
+    (`"Indefinite"`), or null when empty (pure).
+
+    **Example**
+
+    ```hot
+    ::sec::edgar/amount("5000000")  // 5000000
+    ::sec::edgar/amount("Indefinite")  // "Indefinite"
+    ::sec::edgar/amount(null)  // null
+    ```
+    """
 }
 fn (v: Str?): Any {
   cond {
@@ -472,28 +721,40 @@ fn (v: Str?): Any {
   }
 }
 
-kid fn (node: Any, tag: Str): Any {
+kid
+meta {no-doc: true}
+fn (node: Any, tag: Str): Any {
   if(is-null(node), null, ::xml/child(node, tag))
 }
 
-kids fn (node: Any, tag: Str): Vec {
+kids
+meta {no-doc: true}
+fn (node: Any, tag: Str): Vec {
   if(is-null(node), [], ::xml/children(node, tag))
 }
 
-elements fn (node: Any): Vec {
+elements
+meta {no-doc: true}
+fn (node: Any): Vec {
   if(is-null(node), [], filter(node.content, (c) { not(is-str(c)) }))
 }
 
-element-texts fn (nodes: Vec): Vec<Str> {
+element-texts
+meta {no-doc: true}
+fn (nodes: Vec): Vec<Str> {
   filter(map(nodes, (n) { field(n, []) }), is-some)
 }
 
-previous-names fn (node: Any, tag: Str): Vec<Str> {
+previous-names
+meta {no-doc: true}
+fn (node: Any, tag: Str): Vec<Str> {
   // EDGAR writes <value>None</value> for an empty list.
   filter(element-texts(elements(kid(node, tag))), (name) { not(eq(name, "None")) })
 }
 
-address fn (node: Any): Map {
+address
+meta {no-doc: true}
+fn (node: Any): Map {
   {
     street1: field(node, ["street1"]),
     street2: field(node, ["street2"]),
@@ -504,7 +765,9 @@ address fn (node: Any): Map {
   }
 }
 
-form-d-issuer fn (node: Any): Map {
+form-d-issuer
+meta {no-doc: true}
+fn (node: Any): Map {
   year kid(node, "yearOfInc")
   choice find-first(elements(year), (e) { not(eq(e.tag, "value")) })
   {
@@ -521,7 +784,9 @@ form-d-issuer fn (node: Any): Map {
   }
 }
 
-form-d-person fn (node: Any): Map {
+form-d-person
+meta {no-doc: true}
+fn (node: Any): Map {
   first-name field(node, ["relatedPersonName", "firstName"])
   middle-name field(node, ["relatedPersonName", "middleName"])
   last-name field(node, ["relatedPersonName", "lastName"])
@@ -536,7 +801,9 @@ form-d-person fn (node: Any): Map {
   }
 }
 
-form-d-recipient fn (node: Any): Map {
+form-d-recipient
+meta {no-doc: true}
+fn (node: Any): Map {
   // A state list holds <state> and <description> pairs, or <value>All States</value>.
   states filter(elements(kid(node, "statesOfSolicitationList")), (e) { not(eq(e.tag, "description")) })
   {
@@ -550,7 +817,9 @@ form-d-recipient fn (node: Any): Map {
   }
 }
 
-form-d-signature fn (node: Any): Map {
+form-d-signature
+meta {no-doc: true}
+fn (node: Any): Map {
   {
     issuer-name: field(node, ["issuerName"]),
     signature: field(node, ["signatureName"]),
@@ -560,13 +829,17 @@ form-d-signature fn (node: Any): Map {
   }
 }
 
-security-types fn (offering: Any): Vec<Str> {
+security-types
+meta {no-doc: true}
+fn (offering: Any): Vec<Str> {
   // <isEquityType>true</isEquityType> becomes "Equity".
   ticked filter(elements(kid(offering, "typesOfSecuritiesOffered")), (e) { eq(field(e, []), "true") })
   map(ticked, (e) { ::hot::regex/replace-all(e.tag, "^is|Type$", "") })
 }
 
-form-d-fields fn (root: Any): Map {
+form-d-fields
+meta {no-doc: true}
+fn (root: Any): Map {
   o kid(root, "offeringData")
   primary form-d-issuer(kid(root, "primaryIssuer"))
   others map(kids(kid(root, "issuerList"), "issuer"), form-d-issuer)
@@ -634,6 +907,21 @@ meta {
 
     An element the filing leaves out is null. An Err for malformed XML,
     and for XML that isn't a Form D.
+
+    **Example**
+
+    ```hot
+    xml join([
+      "<edgarSubmission><submissionType>D</submissionType>",
+      "<primaryIssuer><entityName>Acme Capital LLC</entityName></primaryIssuer>",
+      "<offeringData><offeringSalesAmounts>",
+      "<totalOfferingAmount>5000000</totalOfferingAmount>",
+      "</offeringSalesAmounts></offeringData></edgarSubmission>"
+    ], "")
+    d ::sec::edgar/parse-form-d(xml)
+    d.issuer.name  // "Acme Capital LLC"
+    d.total-offering-amount  // 5000000
+    ```
     """
 }
 fn (text: Str): Map {
@@ -704,6 +992,22 @@ meta {
     ciks, names, file-numbers, exemptions, url}`. `url` is `form-d-url`
     for the first CIK, and `exemptions` are upper-cased by the index
     (`"06B"`, where the filing says `"06b"`).
+
+    **Example**
+
+    ```hot
+    hit {_source: {
+      adsh: "0002162876-26-000002",
+      form: "D",
+      file_date: "2026-10-30",
+      ciks: ["0002162876"],
+      display_names: ["Acme Capital LLC  (CIK 0002162876)"],
+      items: ["06B"]
+    }}
+    row ::sec::edgar/form-d-filing(hit)
+    row.names  // ["Acme Capital LLC"]
+    row.url  // "https://www.sec.gov/Archives/edgar/data/2162876/000216287626000002/primary_doc.xml"
+    ```
     """
 }
 fn (hit: Map): Map {
@@ -723,7 +1027,18 @@ fn (hit: Map): Map {
 
 form-d-page
 meta {
-    doc: """A full-text search body as `{total, total-is-exact, from, filings, next-from}` (pure). `from` is the offset it was asked for."""
+    doc: """
+    A full-text search body as `{total, total-is-exact, from, filings,
+    next-from}` (pure). `from` is the offset it was asked for.
+
+    **Example**
+
+    ```hot
+    body {hits: {total: {value: 0, relation: "eq"}, hits: []}}
+    ::sec::edgar/form-d-page(body, 0)
+    // {total: 0, total-is-exact: true, from: 0, filings: [], next-from: null}
+    ```
+    """
 }
 fn (body: Map, from: Int): Map {
   hits or(get-in(body, ["hits", "hits"]), [])
@@ -776,7 +1091,9 @@ fn
   if(is-err(body), body, form-d-page(body, or(get(opts, "from"), 0)))
 }
 
-collect-form-d-pages fn (start-date: Str, end-date: Str, limit: Int, opts: Map, acc: Vec): Vec {
+collect-form-d-pages
+meta {no-doc: true}
+fn (start-date: Str, end-date: Str, limit: Int, opts: Map, acc: Vec): Vec {
   page form-d-filings(start-date, end-date, opts)
   combined if(is-err(page), [], concat(acc, page.filings))
   cond {
@@ -818,7 +1135,9 @@ FORM_D_TABLES {
   signatures: "SIGNATURES"
 }
 
-form-d-datasets-page-url fn (): Str {
+form-d-datasets-page-url
+meta {no-doc: true}
+fn (): Str {
   `${WWW}/data-research/sec-markets-data/form-d-data-sets`
 }
 
@@ -828,6 +1147,15 @@ meta {
     A quarter's zip URL from the HTML of SEC's Form D data sets page, or
     null when the page doesn't list it (pure). The URLs can't be built:
     the folder has changed over the years and some names end `_d_0.zip`.
+
+    **Example**
+
+    ```hot
+    html `<a href="/files/structureddata/data/form-d-data-sets/2026q1_d.zip">2026 Q1</a>`
+    ::sec::edgar/form-d-dataset-url(html, 2026, 1)
+    // "https://www.sec.gov/files/structureddata/data/form-d-data-sets/2026q1_d.zip"
+    ::sec::edgar/form-d-dataset-url(html, 2026, 2)  // null
+    ```
     """
 }
 fn (html: Str, year: Int, quarter: Int): Str? {
@@ -835,7 +1163,9 @@ fn (html: Str, year: Int, quarter: Int): Str? {
   if(is-null(found), null, `${WWW}${found.groups[0]}`)
 }
 
-form-d-table fn (archive: Bytes, names: Vec<Str>, table: Str): Vec<Map> {
+form-d-table
+meta {no-doc: true}
+fn (archive: Bytes, names: Vec<Str>, table: Str): Vec<Map> {
   file get(FORM_D_TABLES, table)
   entry if(is-null(file), null, find-first(names, (n) { ::hot::str/ends-with(n, `/${file}.tsv`) }))
   data if(is-null(entry), null, ::zip/read-entry(archive, entry))
@@ -848,7 +1178,9 @@ form-d-table fn (archive: Bytes, names: Vec<Str>, table: Str): Vec<Map> {
   }
 }
 
-read-form-d-tables fn (archive: Bytes, names: Vec<Str>, tables: Vec<Str>, acc: Map): Map {
+read-form-d-tables
+meta {no-doc: true}
+fn (archive: Bytes, names: Vec<Str>, tables: Vec<Str>, acc: Map): Map {
   rows if(is-empty(tables), null, form-d-table(archive, names, first(tables)))
   cond {
     is-empty(tables) => { acc }
@@ -870,6 +1202,14 @@ meta {
     tables of people, which are the bulk of the data.
 
     Rows of one filing share `ACCESSIONNUMBER` across tables.
+
+    **Example**
+
+    ```hot
+    archive ::hot::zip/create([{name: "2026Q1_d/ISSUERS.tsv", data: "ACCESSIONNUMBER\tCIK\n0002162876-26-000002\t0002162876\n"}])
+    tables ::sec::edgar/parse-form-d-dataset(archive, {tables: ["issuers"]})
+    first(tables.issuers).CIK  // "0002162876"
+    ```
     """
 }
 fn

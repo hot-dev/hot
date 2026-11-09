@@ -35,6 +35,15 @@ meta {
 
     Scope: `admin.workflows:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `list-all`.
+
+    **Example**
+
+    ```hot
+    ::functions ::slack::admin::functions
+
+    page ::functions/list(::functions/ListRequest({app_ids: ["A0123ABCDEF"], limit: 50}))
+    page.functions
+    ```
     """
 }
 fn
@@ -48,7 +57,18 @@ fn
 list-all
 meta {
     doc: """
-    Every `functions` entry from `admin.functions.list`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    Every `functions` entry from `admin.functions.list`, following
+    `next_cursor` until the last page or `max-items` (default 1000).
+    `request` sets the filters; its `cursor` is the starting point.
+
+    **Example**
+
+    ```hot
+    ::functions ::slack::admin::functions
+
+    fns ::functions/list-all(::functions/ListRequest({app_ids: ["A0123ABCDEF"], team_id: "T0123ABCDEF"}), 500)
+    length(fns)
+    ```
     """
 }
 fn
@@ -72,6 +92,14 @@ meta {
     admin.functions.permissions.lookup - Get the visibility and allowed users for functions.
 
     Scope: `admin.workflows:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::functions ::slack::admin::functions
+
+    ::functions/permissions-lookup(::functions/PermissionsLookupRequest({function_ids: ["Fn0123ABCDEF"]}))
+    ```
     """
 }
 fn
@@ -94,6 +122,17 @@ meta {
     admin.functions.permissions.set - Set who can use a function: `everyone`, `app_collaborators`, `named_entities` (with `user_ids`) or `no_one`.
 
     Scope: `admin.workflows:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::functions ::slack::admin::functions
+
+    ::functions/permissions-set(::functions/PermissionsSetRequest({function_id: "Fn0123ABCDEF", visibility: "everyone"}))
+
+    // Only named users
+    ::functions/permissions-set(::functions/PermissionsSetRequest({function_id: "Fn0123ABCDEF", visibility: "named_entities", user_ids: ["U0123ABCDEF"]}))
+    ```
     """
 }
 fn

@@ -174,7 +174,16 @@ PATCHEmailsEmailIdResponse type {
 
 update-single-email
 meta {
-    doc: """Update a scheduled email. Only emails that have not yet been sent can be updated."""
+    doc: """
+    Update a scheduled email. Only emails that have not yet been sent can be
+    updated.
+
+    **Example**
+
+    ```hot
+    ::resend::emails/update-single-email(::resend::emails/PATCHEmailsEmailIdRequest({email-id: "4ef9a417-02e9-4d39-ad75-9611e0fcc33c"}))
+    ```
+    """
 }
 fn
 (request: PATCHEmailsEmailIdRequest): PATCHEmailsEmailIdResponse {
@@ -210,7 +219,18 @@ POSTEmailsEmailIdCancelResponse type {
 
 
 cancel-schedule-email
-meta {doc: """Cancel a scheduled email that has not yet been sent."""}
+meta {
+    doc: """
+    Cancel a scheduled email that has not yet been sent.
+
+    **Example**
+
+    ```hot
+    cancelled ::resend::emails/cancel-schedule-email(::resend::emails/POSTEmailsEmailIdCancelRequest({email-id: "4ef9a417-02e9-4d39-ad75-9611e0fcc33c"}))
+    cancelled.id
+    ```
+    """
+}
 fn
 (request: POSTEmailsEmailIdCancelRequest): POSTEmailsEmailIdCancelResponse {
   cancel-schedule-email(request, {})

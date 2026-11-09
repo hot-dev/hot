@@ -63,7 +63,17 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
 
 retry-after
 meta {
-    doc: """Parse the `Retry-After` header (seconds) from response headers, or null when absent or not a number. Exposed for testing."""
+    doc: """
+    Parse the `Retry-After` header (seconds) from response headers, or null
+    when absent or not a number. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::zendesk::api/retry-after({"retry-after": "30"})  // 30
+    ::zendesk::api/retry-after({})  // null
+    ```
+    """
 }
 fn (headers: Map): Int? {
   value get(headers, "retry-after")
@@ -91,6 +101,12 @@ meta {
     (lowercased). Anything that isn't a plain Zendesk handle afterwards
     (dots, slashes, `@`, empty) is an Err, so a bad value can't point
     requests and credentials at another host. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::zendesk::api/normalize-subdomain("https://Acme.zendesk.com/agent")  // "acme"
+    ```
     """
 }
 fn (subdomain: Str): Str {
@@ -106,7 +122,16 @@ fn (subdomain: Str): Str {
 
 base-url
 meta {
-    doc: """`https://{subdomain}.zendesk.com/api/v2` for a handle or full `*.zendesk.com` host (see `normalize-subdomain`)."""
+    doc: """
+    `https://{subdomain}.zendesk.com/api/v2` for a handle or full
+    `*.zendesk.com` host (see `normalize-subdomain`).
+
+    **Example**
+
+    ```hot
+    ::zendesk::api/base-url("acme.zendesk.com")  // "https://acme.zendesk.com/api/v2"
+    ```
+    """
 }
 fn (subdomain: Str): Str {
   `https://${normalize-subdomain(subdomain)}.zendesk.com/api/v2`
@@ -114,14 +139,25 @@ fn (subdomain: Str): Str {
 
 auth-header
 meta {
-    doc: """Zendesk API token auth: `Basic base64("{email}/token:{api-token}")`. Exposed for testing."""
+    doc: """
+    Zendesk API token auth: `Basic base64("{email}/token:{api-token}")`.
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::zendesk::api/auth-header("ada@example.com", "TOKEN")  // "Basic YWRhQGV4YW1wbGUuY29tL3Rva2VuOlRPS0VO"
+    ```
+    """
 }
 fn (email: Str, token: Str): Str {
   credentials `${email}/token:${token}`
   `Basic ${::b64/encode(Bytes(credentials))}`
 }
 
-non-blank fn (value: Any): Str? {
+non-blank
+meta {no-doc: true}
+fn (value: Any): Str? {
   if(is-str(value), if(is-empty(trim(value)), null, trim(value)), null)
 }
 
@@ -132,6 +168,12 @@ meta {
     {token}` and wins when set; otherwise email plus API token gives
     Basic token auth. Returns an Err naming the missing context
     variables when neither is complete. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::zendesk::api/resolve-auth("TOKEN", null, null)  // "Bearer TOKEN"
+    ```
     """
 }
 fn (oauth-token: Str?, email: Str?, api-token: Str?): Str {
@@ -146,13 +188,26 @@ CREDENTIAL_KEYS ["email", "api-token", "oauth-token"]
 
 blank-credential
 meta {
-    doc: """The first of `names` that `opts` has but with a blank or null value, else null. Such a key is an error, never a fallback to context: a tenant whose key is missing must not run on the project's credentials."""
+    doc: """
+    The first of `names` that `opts` has but with a blank or null value,
+    else null. Such a key is an error, never a fallback to context: a tenant
+    whose key is missing must not run on the project's credentials.
+
+    **Example**
+
+    ```hot
+    ::zendesk::api/blank-credential({email: "ada@example.com", api-token: ""}, ["email", "api-token"])  // "api-token"
+    ::zendesk::api/blank-credential({}, ["email", "api-token"])  // null
+    ```
+    """
 }
 fn (opts: Map, names: Vec): Str? {
   find-first(names, (name) { and(in(name, keys(opts)), is-null(non-blank(get(opts, name)))) })
 }
 
-has-opts-credentials fn (opts: Map): Bool {
+has-opts-credentials
+meta {no-doc: true}
+fn (opts: Map): Bool {
   some(CREDENTIAL_KEYS, (name) { in(name, keys(opts)) })
 }
 
@@ -165,6 +220,13 @@ meta {
     to context), when `opts` has only half of `email` and `api-token`, when
     `opts` has `subdomain` without credentials, or when no subdomain or
     credentials are set. Exposed for testing; `resolve` feeds it the context.
+
+    **Example**
+
+    ```hot
+    ctx-values {"zendesk.subdomain": "acme", "zendesk.oauth.token": "TOKEN"}
+    ::zendesk::api/resolve-from({}, ctx-values)  // {base-url: "https://acme.zendesk.com/api/v2", authorization: "Bearer TOKEN"}
+    ```
     """
 }
 fn (opts: Map, ctx-values: Map): Map {
@@ -206,7 +268,9 @@ fn (opts: Map, ctx-values: Map): Map {
   }
 }
 
-mark-opts-credentials fn (opts: Map): Bool {
+mark-opts-credentials
+meta {no-doc: true}
+fn (opts: Map): Bool {
   for-each(["api-token", "oauth-token"], (name) {
     if(in(name, keys(opts)), ::ctx/mark-secret(non-blank(get(opts, name))))
   })
@@ -252,7 +316,16 @@ fn (opts: Map): Map {
 
 build-headers
 meta {
-    doc: """Request headers: Authorization, `Accept: application/json`, and `Content-Type` only when there is a body. Exposed for testing."""
+    doc: """
+    Request headers: Authorization, `Accept: application/json`, and
+    `Content-Type` only when there is a body. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::zendesk::api/build-headers("Bearer TOKEN", false)  // {Authorization: "Bearer TOKEN", Accept: "application/json"}
+    ```
+    """
 }
 fn (authorization: Str, has-body: Bool): Map {
   base {Authorization: authorization, Accept: "application/json"}
@@ -261,7 +334,17 @@ fn (authorization: Str, has-body: Bool): Map {
 
 response-body
 meta {
-    doc: """Normalize a decoded 2xx body: empty text (204 No Content, e.g. deletes) becomes null; anything else passes through. Exposed for testing."""
+    doc: """
+    Normalize a decoded 2xx body: empty text (204 No Content, e.g. deletes)
+    becomes null; anything else passes through. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::zendesk::api/response-body("")  // null
+    ::zendesk::api/response-body({ticket: {id: 1}})  // {ticket: {id: 1}}
+    ```
+    """
 }
 fn (body: Any): Any {
   match body {
@@ -274,7 +357,9 @@ fn (body: Any): Any {
 // Requests
 // ---------------------------------------------------------------------------
 
-send fn (method: Str, path: Str, body: Any, resolved: Map): Any {
+send
+meta {no-doc: true}
+fn (method: Str, path: Str, body: Any, resolved: Map): Any {
   has-body not(eq(body, ""))
   response ::hot::http/request(HttpRequest({
     method,
@@ -291,7 +376,20 @@ send fn (method: Str, path: Str, body: Any, resolved: Map): Any {
 
 request-with-auth
 meta {
-    doc: """Make a Zendesk request with an explicit subdomain and Authorization header value, which is masked in call records. `path` is relative to `/api/v2`; `body` is a Map, or `""` for none. Returns the decoded body on 2xx (null when empty), or an Err carrying `HttpError`."""
+    doc: """
+    Make a Zendesk request with an explicit subdomain and Authorization
+    header value, which is masked in call records. `path` is relative to
+    `/api/v2`; `body` is a Map, or `""` for none. Returns the decoded body
+    on 2xx (null when empty), or an Err carrying `HttpError`.
+
+    **Example**
+
+    ```hot
+    token ::hot::ctx/get("zendesk.oauth.token")
+    body ::zendesk::api/request-with-auth("GET", "/groups", "", "acme", `Bearer ${token}`)
+    body.groups
+    ```
+    """
 }
 fn (method: Str, path: Str, body: Any, subdomain: Str, authorization: Str): Any {
   handle normalize-subdomain(subdomain)
@@ -338,7 +436,16 @@ fn
 
 path-segment
 meta {
-    doc: """Percent-encode one path segment (an id). Ints pass through as text."""
+    doc: """
+    Percent-encode one path segment (an id). Ints pass through as text.
+
+    **Example**
+
+    ```hot
+    ::zendesk::api/path-segment(35436)  // "35436"
+    ::zendesk::api/path-segment("a b")  // "a%20b"
+    ```
+    """
 }
 fn (value: Any): Str {
   ::uri/encode(Str(value))
@@ -346,7 +453,18 @@ fn (value: Any): Str {
 
 query-string
 meta {
-    doc: """Build a `?a=1` suffix from a Map, dropping null values; `""` when nothing remains. Vec values are comma-joined (Zendesk's `ids=1,2,3` form)."""
+    doc: """
+    Build a `?a=1` suffix from a Map, dropping null values; `""` when
+    nothing remains. Vec values are comma-joined (Zendesk's `ids=1,2,3`
+    form).
+
+    **Example**
+
+    ```hot
+    ::zendesk::api/query-string({ids: [1, 2, 3], page: null})  // "?ids=1%2C2%2C3"
+    ::zendesk::api/query-string({})  // ""
+    ```
+    """
 }
 fn (options: Map): Str {
   ::uri/query-string(map-vals(options, (v) {
@@ -359,7 +477,16 @@ fn (options: Map): Str {
 
 compact
 meta {
-    doc: """Drop null-valued keys so unset optionals are omitted rather than sent as JSON null."""
+    doc: """
+    Drop null-valued keys so unset optionals are omitted rather than sent as
+    JSON null.
+
+    **Example**
+
+    ```hot
+    ::zendesk::api/compact({name: "Acme", details: null})  // {name: "Acme"}
+    ```
+    """
 }
 fn (body: Map): Map {
   filter-vals(body, is-some)
@@ -376,6 +503,12 @@ meta {
     (sent as `page[size]`, default 100) and `after` (sent as
     `page[after]`, the previous page's `meta.after_cursor`); every other
     key (`sort`, `include`, filters) passes through. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::zendesk::api/cursor-query({page_size: 50, sort: "-updated_at"})  // "?sort=-updated_at&page%5Bsize%5D=50"
+    ```
     """
 }
 fn (options: Map): Str {
@@ -389,7 +522,17 @@ fn (options: Map): Str {
 
 next-after
 meta {
-    doc: """The `page[after]` cursor for the page after `page`: `meta.after_cursor` when `meta.has_more` is true, otherwise null."""
+    doc: """
+    The `page[after]` cursor for the page after `page`: `meta.after_cursor`
+    when `meta.has_more` is true, otherwise null.
+
+    **Example**
+
+    ```hot
+    ::zendesk::api/next-after({meta: {has_more: true, after_cursor: "abc"}})  // "abc"
+    ::zendesk::api/next-after({meta: {has_more: false, after_cursor: "abc"}})  // null
+    ```
+    """
 }
 fn (page: Any): Str? {
   meta-block or(get(or(page, {}), "meta"), {})
@@ -427,6 +570,17 @@ meta {
     items or `meta.has_more` is false. `fetch` is a Fn taking the cursor
     (null for the first page) and returning one page. Exposed for
     testing; `collect` uses it. A failed page comes back as its Err.
+
+    **Example**
+
+    ```hot
+    fetch (cursor) {
+      if(is-null(cursor),
+        {items: [1, 2], meta: {has_more: true, after_cursor: "c2"}},
+        {items: [3], meta: {has_more: false}})
+    }
+    ::zendesk::api/collect-pages(fetch, "items", null, 10, [])  // [1, 2, 3]
+    ```
     """
 }
 fn (fetch: Fn, key: Str, cursor: Str?, limit: Int, acc: Vec): Vec {

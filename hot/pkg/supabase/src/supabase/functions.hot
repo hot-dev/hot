@@ -18,16 +18,22 @@ InvokeFunctionRequest type {
   service: Bool?
 }
 
-function-path fn (name: Str): Str {
+function-path
+meta {no-doc: true}
+fn (name: Str): Str {
   `/functions/v1/${::uri/encode(name)}`
 }
 
-invoke-headers fn (request: InvokeFunctionRequest): Map {
+invoke-headers
+meta {no-doc: true}
+fn (request: InvokeFunctionRequest): Map {
   headers or(request.headers, {})
   headers |> assoc-some("x-region", request.region)
 }
 
-invoke-response-from-http fn (response: ::api/HttpResponse): InvokeResponse {
+invoke-response-from-http
+meta {no-doc: true}
+fn (response: ::api/HttpResponse): InvokeResponse {
   InvokeResponse({
     status: response.status,
     headers: response.headers,
@@ -35,7 +41,29 @@ invoke-response-from-http fn (response: ::api/HttpResponse): InvokeResponse {
   })
 }
 
-invoke-http-response fn
+invoke-http-response
+meta {
+    doc: """
+    Invoke an Edge Function and return the full `HttpResponse`.
+    Authenticates with the service role key when `service` is true, else
+    `access-token` when set, else the anon key. A non-2xx status is not an
+    Err: check `status`.
+
+    **Example**
+
+    ```hot
+    ::functions ::supabase::functions
+
+    response ::functions/invoke-http-response(::functions/InvokeFunctionRequest({
+      name: "process-order",
+      body: {order_id: "abc-123"}
+    }))
+    response.status
+    response.body
+    ```
+    """
+}
+fn
 (request: InvokeFunctionRequest): ::api/HttpResponse {
   invoke-http-response(request, {})
 },
@@ -86,7 +114,28 @@ fn
   ::api/body-or-error(invoke-http-response(request, opts))
 }
 
-invoke-response fn
+invoke-response
+meta {
+    doc: """
+    Like `invoke`, but returns an `InvokeResponse` with `status`, `headers`
+    and `body`. A non-2xx status is an Err carrying an `HttpError`.
+
+    **Example**
+
+    ```hot
+    ::functions ::supabase::functions
+
+    response ::functions/invoke-response(::functions/InvokeFunctionRequest({
+      name: "process-order",
+      body: {order_id: "abc-123"},
+      region: "us-east-1"
+    }))
+    response.headers
+    response.body
+    ```
+    """
+}
+fn
 (request: InvokeFunctionRequest): InvokeResponse {
   invoke-response(request, {})
 },
@@ -99,7 +148,23 @@ invoke-response fn
   }
 }
 
-invoke-as fn
+invoke-as
+meta {
+    doc: """
+    Like `invoke`, but as a signed-in user. `access-token` is the Bearer
+    token, so row level security applies as that user.
+
+    **Example**
+
+    ```hot
+    ::functions ::supabase::functions
+
+    token ::hot::ctx/get("supabase.user.token")
+    ::functions/invoke-as(::functions/InvokeFunctionRequest({name: "hello-world"}), token)
+    ```
+    """
+}
+fn
 (request: InvokeFunctionRequest, access-token: Str): Any {
   invoke-as(request, access-token, {})
 },
@@ -107,7 +172,21 @@ invoke-as fn
   invoke({...untype(request), access-token: access-token}, opts)
 }
 
-invoke-service fn
+invoke-service
+meta {
+    doc: """
+    Like `invoke`, with the service role key. Server-side only.
+
+    **Example**
+
+    ```hot
+    ::functions ::supabase::functions
+
+    ::functions/invoke-service(::functions/InvokeFunctionRequest({name: "nightly-cleanup"}))
+    ```
+    """
+}
+fn
 (request: InvokeFunctionRequest): Any {
   invoke-service(request, {})
 },

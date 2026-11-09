@@ -2,7 +2,7 @@
 
 hot.pkg.discord {
   name: "hot.dev/discord",
-  version: "1.1.1",
+  version: "1.1.2",
   hot-min-version: "3.0.2",
   description: "Discord API v10 bindings for Hot. Messages with file uploads, pins and reactions, channels and threads, guild members, roles, bans and moderation with audit-log reasons, emoji, stickers, scheduled events, auto-moderation, webhooks, application commands, and interactions with Ed25519 request verification.",
   author: "Hot Dev",

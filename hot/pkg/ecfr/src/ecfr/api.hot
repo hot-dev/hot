@@ -37,7 +37,16 @@ PACKAGE_AGENT "hot-dev-ecfr-pkg/0.1 (+https://hot.dev)"
 
 given
 meta {
-    doc: """True for a non-null value that is not a blank string."""
+    doc: """
+    True for a non-null value that is not a blank string.
+
+    **Example**
+
+    ```hot
+    ::ecfr::api/given("1010")  // true
+    ::ecfr::api/given("  ")  // false
+    ```
+    """
 }
 fn (v: Any): Bool {
   match v {
@@ -47,7 +56,9 @@ fn (v: Any): Bool {
   }
 }
 
-pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
+pick
+meta {no-doc: true}
+fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
   from-opts get(opts, key)
   from-ctx ::ctx/get(ctx-key)
   cond {
@@ -57,7 +68,9 @@ pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
   }
 }
 
-strip-slash fn (url: Str): Str {
+strip-slash
+meta {no-doc: true}
+fn (url: Str): Str {
   ::re/replace-all(url, "/+$", "")
 }
 
@@ -82,7 +95,9 @@ fn (opts: Map): Map {
 // Bodies
 // ---------------------------------------------------------------------------
 
-header fn (response: Any, name: Str): Str {
+header
+meta {no-doc: true}
+fn (response: Any, name: Str): Str {
   lowercase(Str(or(get(or(response.headers, {}), name), "")))
 }
 
@@ -92,6 +107,12 @@ meta {
     A response body as text (pure). Decompresses it when
     `content-encoding` says gzip, since a server can also answer
     uncompressed. Bad gzip is an Err.
+
+    **Example**
+
+    ```hot
+    ::ecfr::api/body-text({headers: {}, body: "<DIV8/>"})  // "<DIV8/>"
+    ```
     """
 }
 fn (response: Any): Any {
@@ -106,7 +127,9 @@ fn (response: Any): Any {
   }
 }
 
-parse-json fn (text: Any): Any {
+parse-json
+meta {no-doc: true}
+fn (text: Any): Any {
   cond {
     not(is-str(text)) => { text }
     or(::hot::str/starts-with(trim(text), "{"), ::hot::str/starts-with(trim(text), "[")) => { from-json(trim(text)) }
@@ -121,6 +144,13 @@ meta {
     HTML, so a 200 page means the request was sent somewhere else. eCFR
     redirects clients it flags as automated to a CAPTCHA page, and
     `::hot::http` follows the redirect.
+
+    **Example**
+
+    ```hot
+    ::ecfr::api/is-html({headers: {content-type: "text/html; charset=utf-8"}})  // true
+    ::ecfr::api/is-html({headers: {content-type: "application/json"}})  // false
+    ```
     """
 }
 fn (response: Any): Bool {
@@ -151,7 +181,9 @@ type {
     message: Str
 }
 
-body-detail fn (body: Any): Str? {
+body-detail
+meta {no-doc: true}
+fn (body: Any): Str? {
   cond {
     // An HTML error page has no useful one-line detail.
     and(is-str(body), ::hot::str/starts-with(trim(body), "<")) => { null }
@@ -164,7 +196,9 @@ body-detail fn (body: Any): Str? {
   }
 }
 
-retry-after fn (headers: Map): Int? {
+retry-after
+meta {no-doc: true}
+fn (headers: Map): Int? {
   v get(headers, "retry-after")
   cond {
     is-null(v) => { null }
@@ -173,7 +207,9 @@ retry-after fn (headers: Map): Int? {
   }
 }
 
-decoded-body fn (response: Any): Any {
+decoded-body
+meta {no-doc: true}
+fn (response: Any): Any {
   text body-text(response)
   parsed if(is-err(text), text, parse-json(text))
   cond {
@@ -186,7 +222,19 @@ decoded-body fn (response: Any): Any {
 
 http-error
 meta {
-    doc: """Build an `HttpError` from a non-2xx response, decoding a gzip error body. Exposed for testing; every request uses it."""
+    doc: """
+    Build an `HttpError` from a non-2xx response, decoding a gzip error
+    body. Exposed for testing; every request uses it.
+
+    **Example**
+
+    ```hot
+    response {status: 404, headers: {}, body: {error: "No matching content found."}}
+    e ::ecfr::api/http-error(response, "https://www.ecfr.gov/api/versioner/v1/titles.json")
+    e.status  // 404
+    e.message  // "ecfr: HTTP 404: No matching content found."
+    ```
+    """
 }
 fn (response: HttpResponse, url: Str): HttpError {
   headers or(response.headers, {})
@@ -205,7 +253,19 @@ fn (response: HttpResponse, url: Str): HttpError {
 
 html-error
 meta {
-    doc: """Build an `HttpError` for an HTML page served in place of API data. Exposed for testing."""
+    doc: """
+    Build an `HttpError` for an HTML page served in place of API data.
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    response {status: 200, headers: {content-type: "text/html"}, body: "<html></html>"}
+    e ::ecfr::api/html-error(response, "https://www.ecfr.gov/api/versioner/v1/titles.json")
+    e.status  // 200
+    contains(e.message, "got an HTML page")  // true
+    ```
+    """
 }
 fn (response: HttpResponse, url: Str): HttpError {
   headers or(response.headers, {})
@@ -222,7 +282,17 @@ fn (response: HttpResponse, url: Str): HttpError {
 
 is-not-found
 meta {
-    doc: """True when `e` is an `HttpError` with status 404."""
+    doc: """
+    True when `e` is an `HttpError` with status 404.
+
+    **Example**
+
+    ```hot
+    ::ecfr::api/is-not-found({status: 404})  // true
+    ::ecfr::api/is-not-found({status: 500})  // false
+    ::ecfr::api/is-not-found("timed out")  // false
+    ```
+    """
 }
 fn (e: Any): Bool {
   cond {
@@ -238,7 +308,18 @@ fn (e: Any): Bool {
 
 query-string
 meta {
-    doc: """Build a `?a=1&b=2` suffix from a Map, dropping null and blank values (pure); `""` when nothing remains. Keys may contain brackets (`hierarchy[title]`) and are encoded."""
+    doc: """
+    Build a `?a=1&b=2` suffix from a Map, dropping null and blank values
+    (pure); `""` when nothing remains. Keys may contain brackets
+    (`hierarchy[title]`) and are encoded.
+
+    **Example**
+
+    ```hot
+    ::ecfr::api/query-string({date: "2026-11-02", part: null})  // "?date=2026-11-02"
+    ::ecfr::api/query-string({part: ""})  // ""
+    ```
+    """
 }
 fn (params: Map): Str {
   ::uri/query-string(filter-vals(params, given))
@@ -246,7 +327,16 @@ fn (params: Map): Str {
 
 path-segment
 meta {
-    doc: """Percent-encode one path segment."""
+    doc: """
+    Percent-encode one path segment.
+
+    **Example**
+
+    ```hot
+    ::ecfr::api/path-segment("part 10")  // "part%2010"
+    ::ecfr::api/path-segment(31)  // "31"
+    ```
+    """
 }
 fn (value: Any): Str {
   ::uri/encode(Str(value))
@@ -259,6 +349,13 @@ meta {
     the `HttpResponse` on 2xx or an Err carrying `HttpError`. An HTML
     page is an Err too. A transport failure passes through as its own
     Err, including a response over `http.max-response-bytes`.
+
+    **Example**
+
+    ```hot
+    response ::ecfr::api/request("https://www.ecfr.gov/api/versioner/v1/titles.json", {Accept: "application/json"})
+    ::ecfr::api/body-text(response)
+    ```
     """
 }
 fn (url: Str, headers: Map): HttpResponse {
@@ -282,6 +379,14 @@ meta {
     True when `e` is the 404 eCFR gives for a date past a title's current
     date. It isn't an empty lookup: the section may well exist, and today
     is usually past the current date.
+
+    **Example**
+
+    ```hot
+    e {status: 404, body: {error: "2030-01-01 is past the title's most recent issue date"}}
+    ::ecfr::api/is-past-date(e)  // true
+    ::ecfr::api/is-past-date({status: 404, body: {error: "No matching content found."}})  // false
+    ```
     """
 }
 fn (e: Any): Bool {
@@ -292,7 +397,17 @@ fn (e: Any): Bool {
 
 null-on-404
 meta {
-    doc: """Null for a 404 Err, so a lookup that finds nothing isn't a failure. `is-past-date` errors and every other Err pass through."""
+    doc: """
+    Null for a 404 Err, so a lookup that finds nothing isn't a failure.
+    `is-past-date` errors and every other Err pass through.
+
+    **Example**
+
+    ```hot
+    ::ecfr::api/null-on-404(err({status: 404}))  // null
+    ::ecfr::api/null-on-404("<DIV8/>")  // "<DIV8/>"
+    ```
+    """
 }
 fn (out: Result): Any {
   cond {
@@ -305,7 +420,17 @@ fn (out: Result): Any {
 
 get-json
 meta {
-    doc: """GET a JSON resource and return the decoded body, or an Err carrying `HttpError`."""
+    doc: """
+    GET a JSON resource and return the decoded body, or an Err carrying
+    `HttpError`.
+
+    **Example**
+
+    ```hot
+    body ::ecfr::api/get-json("https://www.ecfr.gov/api/versioner/v1/titles.json")
+    length(body.titles)
+    ```
+    """
 }
 fn (url: Str): Any {
   response request(url, {Accept: "application/json"})
@@ -317,7 +442,16 @@ fn (url: Str): Any {
 
 get-json-or-null
 meta {
-    doc: """`get-json`, but a 404 gives null instead of an Err."""
+    doc: """
+    `get-json`, but a 404 gives null instead of an Err.
+
+    **Example**
+
+    ```hot
+    tree ::ecfr::api/get-json-or-null("https://www.ecfr.gov/api/versioner/v1/structure/2026-11-02/title-31.json")
+    if(is-null(tree), "no such title", tree.label)
+    ```
+    """
 }
 fn (url: Str): Any {
   null-on-404(get-json(url))
@@ -325,7 +459,17 @@ fn (url: Str): Any {
 
 get-xml-or-null
 meta {
-    doc: """GET an XML resource and return its text, null on a 404, or an Err carrying `HttpError`."""
+    doc: """
+    GET an XML resource and return its text, null on a 404, or an Err
+    carrying `HttpError`.
+
+    **Example**
+
+    ```hot
+    xml ::ecfr::api/get-xml-or-null("https://www.ecfr.gov/api/versioner/v1/full/2026-11-02/title-31.xml?section=1010.230")
+    if(is-null(xml), null, ::ecfr/parse-full(xml).citation)
+    ```
+    """
 }
 fn (url: Str): Any {
   response request(url, {Accept: "application/xml"})

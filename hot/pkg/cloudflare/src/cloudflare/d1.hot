@@ -14,7 +14,18 @@ ListPage ::cloudflare::api/ListPage
 
 list-databases
 meta {
-    doc: """GET /accounts/{account_id}/d1/database - One page of databases (`name` search, `page`, `per_page` 10–10000). Returns a `ListPage` of `{uuid, name, version, created_at}`."""
+    doc: """
+    GET /accounts/{account_id}/d1/database - One page of databases (`name`
+    search, `page`, `per_page` 10–10000). Returns a `ListPage` of `{uuid,
+    name, version, created_at}`.
+
+    **Example**
+
+    ```hot
+    page ::cloudflare::d1/list-databases({name: "analytics", per_page: 50})
+    map(page.result, %.uuid)
+    ```
+    """
 }
 fn
 (): ListPage {
@@ -29,7 +40,16 @@ fn
 
 list-all-databases
 meta {
-    doc: """Every database matching `params`, following pages up to `max` (default 10000)."""
+    doc: """
+    Every database matching `params`, following pages up to `max` (default
+    10000).
+
+    **Example**
+
+    ```hot
+    map(::cloudflare::d1/list-all-databases({name: "analytics"}, 200), %.name)
+    ```
+    """
 }
 fn
 (): Vec {
@@ -50,7 +70,16 @@ fn
 
 find-database
 meta {
-    doc: """The database named exactly `name`, or null."""
+    doc: """
+    The database named exactly `name`, or null.
+
+    **Example**
+
+    ```hot
+    db ::cloudflare::d1/find-database("analytics")
+    if(is-some(db), db.uuid, "no such database")
+    ```
+    """
 }
 fn
 (name: Str): Map? {
@@ -66,7 +95,17 @@ fn
 
 get-database
 meta {
-    doc: """GET /accounts/{account_id}/d1/database/{database_id} - One database, including `num_tables` and `file_size`."""
+    doc: """
+    GET /accounts/{account_id}/d1/database/{database_id} - One database,
+    including `num_tables` and `file_size`.
+
+    **Example**
+
+    ```hot
+    db ::cloudflare::d1/get-database("f4b1c7a0-8e3f-4b8a-9d3e-7f6a5c2e1b4d")
+    db.num_tables
+    ```
+    """
 }
 fn
 (database-id: Str): Map {
@@ -78,7 +117,17 @@ fn
 
 query-body
 meta {
-    doc: """The query body `{sql, params?}`; params are sent as strings, as the API requires, and omitted when empty. Exposed for testing."""
+    doc: """
+    The query body `{sql, params?}`; params are sent as strings, as the API
+    requires, and omitted when empty. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cloudflare::d1/query-body("SELECT 1", [])  // {sql: "SELECT 1"}
+    ::cloudflare::d1/query-body("SELECT ?", [1, null])  // {sql: "SELECT ?", params: ["1", null]}
+    ```
+    """
 }
 fn (sql: Str, params: Vec): Map {
   cond {
@@ -98,6 +147,7 @@ meta {
     **Example**
 
     ```hot
+    db-id "f4b1c7a0-8e3f-4b8a-9d3e-7f6a5c2e1b4d"
     out ::cloudflare::d1/query(db-id, "SELECT id, email FROM users WHERE plan = ? LIMIT ?", ["pro", 50])
     first(out).results
     ```
@@ -119,7 +169,16 @@ fn
 
 rows
 meta {
-    doc: """Run a single statement and return just its rows."""
+    doc: """
+    Run a single statement and return just its rows.
+
+    **Example**
+
+    ```hot
+    users ::cloudflare::d1/rows("f4b1c7a0-8e3f-4b8a-9d3e-7f6a5c2e1b4d", "SELECT id, email FROM users WHERE plan = ?", ["pro"])
+    map(users, %.email)
+    ```
+    """
 }
 fn
 (database-id: Str, sql: Str): Vec {

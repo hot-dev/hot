@@ -44,7 +44,9 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   })
 }
 
-has-body fn (body: Any): Bool {
+has-body
+meta {no-doc: true}
+fn (body: Any): Bool {
   cond {
     is-map(body) => { not(is-empty(filter-vals(body, is-some))) }
     is-vec(body) => { not(is-empty(body)) }
@@ -53,7 +55,9 @@ has-body fn (body: Any): Bool {
   }
 }
 
-encode-body fn (body: Any): Str {
+encode-body
+meta {no-doc: true}
+fn (body: Any): Str {
   cond {
     not(has-body(body)) => { "" }
     is-str(body) => { body }
@@ -61,7 +65,27 @@ encode-body fn (body: Any): Str {
   }
 }
 
-body-or-error fn (response: Result): Any {
+body-or-error
+meta {
+    doc: """
+    The body of a response. A non-2xx status becomes an Err carrying an
+    `HttpError`, and an Err passes through. Pair it with the `request-raw`
+    family when you want both.
+
+    **Example**
+
+    ```hot
+    ::api ::supabase::api
+
+    found ::hot::http/HttpResponse({status: 200, headers: {}, body: [{id: 1}]})
+    ::api/body-or-error(found)  // [{id: 1}]
+
+    missing ::hot::http/HttpResponse({status: 404, headers: {}, body: {message: "Not found"}})
+    is-err(::api/body-or-error(missing))  // true
+    ```
+    """
+}
+fn (response: Result): Any {
   cond {
     is-err(response) => { response }
     not(is-ok-response(response)) => { err(HttpError(response)) }
@@ -73,7 +97,19 @@ OPTS_KEYS ["url", "anon-key", "api-key", "service-key", "service-role-key"]
 
 blank-credential
 meta {
-    doc: """The first of `names` that `opts` has but with a blank or null value, else null. Such a key is an error, never a fallback to context: a tenant whose key is missing must not run on the project's credentials."""
+    doc: """
+    The first of `names` that `opts` has but with a blank or null value,
+    else null. Such a key is an error, never a fallback to context: a tenant
+    whose key is missing must not run on the project's credentials.
+
+    **Example**
+
+    ```hot
+    opts {url: "https://x.supabase.co", anon-key: ""}
+    ::supabase::api/blank-credential(opts, ["url", "anon-key"])  // "anon-key"
+    ::supabase::api/blank-credential(opts, ["url"])  // null
+    ```
+    """
 }
 fn (opts: Map, names: Vec): Str? {
   find-first(names, (name) { and(in(name, keys(opts)), or(is-null(get(opts, name)), and(is-str(get(opts, name)), is-empty(trim(Str(get(opts, name))))))) })
@@ -89,6 +125,21 @@ meta {
     or when one of those keys is in `opts` but blank or null: that never
     falls back to context, or a tenant could run on the project's credentials.
     Exposed for testing; `resolve` feeds it the context and environment.
+
+    **Example**
+
+    ```hot
+    ::api ::supabase::api
+
+    sources {url: "https://main.supabase.co", anon-key: "main-anon", service-key: "main-service"}
+
+    ::api/resolve-from({}, sources).anon-key  // "main-anon"
+
+    // A url in opts means no key comes from sources
+    ::api/resolve-from({url: "https://other.supabase.co"}, sources)  // {url: "https://other.supabase.co"}
+
+    is-err(::api/resolve-from({anon-key: ""}, sources))  // true
+    ```
     """
 }
 fn (opts: Map, sources: Map): Map {
@@ -142,7 +193,20 @@ fn (opts: Map): Map {
 
 credentials-for
 meta {
-    doc: """The `{url, key}` a role sends, from resolved credentials (pure): `role` is `"anon"` or `"service"`. An Err when that role's key is missing."""
+    doc: """
+    The `{url, key}` a role sends, from resolved credentials (pure): `role`
+    is `"anon"` or `"service"`. An Err when that role's key is missing.
+
+    **Example**
+
+    ```hot
+    ::api ::supabase::api
+
+    resolved {url: "https://x.supabase.co", anon-key: "anon"}
+    ::api/credentials-for(resolved, "anon")  // {url: "https://x.supabase.co", key: "anon"}
+    is-err(::api/credentials-for(resolved, "service"))  // true
+    ```
+    """
 }
 fn (resolved: Map, role: Str): Map {
   key if(eq(role, "service"), get(resolved, "service-key"), get(resolved, "anon-key"))
@@ -157,7 +221,9 @@ fn (resolved: Map, role: Str): Map {
   }
 }
 
-credentials fn (opts: Map, role: Str): Map {
+credentials
+meta {no-doc: true}
+fn (opts: Map, role: Str): Map {
   resolved resolve(opts)
   if(is-err(resolved), resolved, credentials-for(resolved, role))
 }
@@ -201,7 +267,23 @@ fn
 request-raw
 meta {
     ctx: {"supabase.url": {required: false, secret: false}, "supabase.anon.key": {required: false}},
-    doc: """Make an anon Supabase project API request and return the full `HttpResponse` including status and headers."""
+    doc: """
+    Make an anon Supabase project API request and return the full
+    `HttpResponse` including status and headers.
+
+    **Example**
+
+    ```hot
+    ::api ::supabase::api
+
+    response ::api/request-raw("GET", "/rest/v1/users?select=id")
+    response.status
+
+    // With headers and a body
+    created ::api/request-raw("POST", "/rest/v1/users", {Prefer: "return=representation"}, {name: "Alice"})
+    created.body
+    ```
+    """
 }
 fn
 (method: Str, path: Str): HttpResponse {
@@ -228,8 +310,10 @@ meta {
     ```hot
     ::api ::supabase::api
 
+    token ::hot::ctx/get("supabase.user.token")
+
     // Get the current user's profile
-    response ::api/request-as("GET", "/rest/v1/profiles?select=*", {}, {}, user-access-token)
+    response ::api/request-as("GET", "/rest/v1/profiles?select=*", {}, {}, token)
     ```
     """
 }
@@ -243,7 +327,20 @@ fn
 
 request-raw-as
 meta {
-    doc: """Make a request as a specific user and return the full `HttpResponse`."""
+    doc: """
+    Make a request as a specific user and return the full `HttpResponse`.
+
+    **Example**
+
+    ```hot
+    ::api ::supabase::api
+
+    token ::hot::ctx/get("supabase.user.token")
+    response ::api/request-raw-as("GET", "/rest/v1/profiles?select=*", {}, {}, token)
+    response.status
+    response.body
+    ```
+    """
 }
 fn
 (method: Str, path: Str, additional-headers: Map, body: Any, access-token: Str): HttpResponse {
@@ -260,7 +357,23 @@ fn
 request-service
 meta {
     ctx: {"supabase.url": {required: false, secret: false}, "supabase.service.key": {required: false}},
-    doc: """Make a request using the service role key (bypasses RLS). Used internally by auth-admin and other admin modules."""
+    doc: """
+    Make a request using the service role key (bypasses RLS). Used
+    internally by auth-admin and other admin modules.
+
+    **Example**
+
+    ```hot
+    ::api ::supabase::api
+
+    // Every row, regardless of row level security
+    users ::api/request-service("GET", "/rest/v1/users?select=id,email")
+
+    // Another project, for this call only
+    tenant {url: "https://tenant-b.supabase.co", service-key: ::hot::ctx/get("tenant.service.key")}
+    tenant-users ::api/request-service("GET", "/rest/v1/users?select=id", {}, {}, tenant)
+    ```
+    """
 }
 fn
 (method: Str, path: Str): Any {
@@ -276,7 +389,19 @@ fn
 request-raw-service
 meta {
     ctx: {"supabase.url": {required: false, secret: false}, "supabase.service.key": {required: false}},
-    doc: """Make a service-role request and return the full `HttpResponse`."""
+    doc: """
+    Make a service-role request and return the full `HttpResponse`.
+
+    **Example**
+
+    ```hot
+    ::api ::supabase::api
+
+    response ::api/request-raw-service("GET", "/auth/v1/admin/users")
+    response.status
+    response.body
+    ```
+    """
 }
 fn
 (method: Str, path: Str): HttpResponse {
@@ -293,7 +418,9 @@ fn
   }
 }
 
-do-request fn
+do-request
+meta {no-doc: true}
+fn
 (method: Str, path: Str, additional-headers: Map, body: Any, apikey: Str, bearer-token: Str): HttpResponse {
   do-request(method, path, additional-headers, body, apikey, bearer-token, ::core/project-url())
 },
@@ -304,7 +431,22 @@ do-request fn
 
 build-request
 meta {
-    doc: """The outgoing `HttpRequest`: `apikey` and `Authorization: Bearer` headers, `additional-headers` on top, and `Content-Type` only with a body. Pure; exposed for testing."""
+    doc: """
+    The outgoing `HttpRequest`: `apikey` and `Authorization: Bearer`
+    headers, `additional-headers` on top, and `Content-Type` only with a
+    body. Pure; exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::api ::supabase::api
+
+    req ::api/build-request("POST", "/rest/v1/todos", {Prefer: "return=minimal"}, {title: "Ship"}, "anon", "user-jwt", "https://x.supabase.co")
+    req.url  // "https://x.supabase.co/rest/v1/todos"
+    req.headers.Authorization  // "Bearer user-jwt"
+    req.body  // "{\"title\":\"Ship\"}"
+    ```
+    """
 }
 fn (method: Str, path: Str, additional-headers: Map, body: Any, apikey: Str, bearer-token: Str, base-url: Str): HttpRequest {
   url `${base-url}${path}`
@@ -328,7 +470,24 @@ fn (method: Str, path: Str, additional-headers: Map, body: Any, apikey: Str, bea
 
 request-with-keys
 meta {
-    doc: """Make a Supabase request with explicit API and bearer keys. Useful for tests and scripts that do not use context."""
+    doc: """
+    Make a Supabase request with explicit API and bearer keys. Useful for
+    tests and scripts that do not use context.
+
+    **Example**
+
+    ```hot
+    ::api ::supabase::api
+
+    anon ::hot::ctx/get("tenant.anon.key")
+
+    // Project URL from context
+    users ::api/request-with-keys("GET", "/rest/v1/users?select=id", {}, {}, anon, anon)
+
+    // Explicit project URL
+    tenant-users ::api/request-with-keys("GET", "/rest/v1/users?select=id", {}, {}, anon, anon, "https://tenant-b.supabase.co")
+    ```
+    """
 }
 fn
 (method: Str, path: Str, additional-headers: Map, body: Any, apikey: Str, bearer-token: Str): Any {
@@ -341,7 +500,21 @@ fn
 
 request-raw-with-keys
 meta {
-    doc: """Make a Supabase request with explicit API and bearer keys and return the full `HttpResponse`."""
+    doc: """
+    Make a Supabase request with explicit API and bearer keys and return the
+    full `HttpResponse`.
+
+    **Example**
+
+    ```hot
+    ::api ::supabase::api
+
+    anon ::hot::ctx/get("tenant.anon.key")
+
+    response ::api/request-raw-with-keys("GET", "/rest/v1/users?select=id", {}, {}, anon, anon, "https://tenant-b.supabase.co")
+    response.status
+    ```
+    """
 }
 fn
 (method: Str, path: Str, additional-headers: Map, body: Any, apikey: Str, bearer-token: Str): HttpResponse {
@@ -354,7 +527,19 @@ fn
 
 request-raw-body
 meta {
-    doc: """Make an anon request with an already-encoded raw body. Use for storage uploads and non-JSON payloads."""
+    doc: """
+    Make an anon request with an already-encoded raw body. Use for storage
+    uploads and non-JSON payloads.
+
+    **Example**
+
+    ```hot
+    ::api ::supabase::api
+
+    response ::api/request-raw-body("POST", "/storage/v1/object/notes/todo.txt", {Content-Type: "text/plain"}, "Buy milk")
+    response.status
+    ```
+    """
 }
 fn
 (method: Str, path: Str, additional-headers: Map, body-raw: Str): HttpResponse {
@@ -370,7 +555,19 @@ fn
 
 request-raw-body-as
 meta {
-    doc: """Make a user-authenticated request with an already-encoded raw body."""
+    doc: """
+    Make a user-authenticated request with an already-encoded raw body.
+
+    **Example**
+
+    ```hot
+    ::api ::supabase::api
+
+    token ::hot::ctx/get("supabase.user.token")
+    response ::api/request-raw-body-as("POST", "/storage/v1/object/notes/todo.txt", {Content-Type: "text/plain"}, "Buy milk", token)
+    response.status
+    ```
+    """
 }
 fn
 (method: Str, path: Str, additional-headers: Map, body-raw: Str, access-token: Str): HttpResponse {
@@ -386,7 +583,18 @@ fn
 
 request-raw-body-service
 meta {
-    doc: """Make a service-role request with an already-encoded raw body."""
+    doc: """
+    Make a service-role request with an already-encoded raw body.
+
+    **Example**
+
+    ```hot
+    ::api ::supabase::api
+
+    response ::api/request-raw-body-service("POST", "/storage/v1/object/notes/todo.txt", {Content-Type: "text/plain"}, "Buy milk")
+    response.status
+    ```
+    """
 }
 fn
 (method: Str, path: Str, additional-headers: Map, body-raw: Str): HttpResponse {
@@ -400,7 +608,9 @@ fn
   }
 }
 
-do-raw-body-request fn
+do-raw-body-request
+meta {no-doc: true}
+fn
 (method: Str, path: Str, additional-headers: Map, body-raw: Str, apikey: Str, bearer-token: Str): HttpResponse {
   do-raw-body-request(method, path, additional-headers, body-raw, apikey, bearer-token, ::core/project-url())
 },

@@ -113,7 +113,7 @@ meta {
     **Example - Simple**
 
     ```hot
-    response ::openai::chat/complete(ChatCompletionRequest({
+    response ::openai::chat/complete(::openai::chat/ChatCompletionRequest({
         model: "gpt-4o-mini",
         max_completion_tokens: 50,
         messages: [{role: "user", content: "Say 'Hello, Hot!' and nothing else."}]
@@ -127,7 +127,7 @@ meta {
     **Example - With system message**
 
     ```hot
-    response ::openai::chat/complete(ChatCompletionRequest({
+    response ::openai::chat/complete(::openai::chat/ChatCompletionRequest({
         model: "gpt-4o-mini",
         max_completion_tokens: 100,
         messages: [
@@ -140,7 +140,7 @@ meta {
     **Example - With tools**
 
     ```hot
-    response ::openai::chat/complete(ChatCompletionRequest({
+    response ::openai::chat/complete(::openai::chat/ChatCompletionRequest({
         model: "gpt-4o-mini",
         max_completion_tokens: 200,
         tools: [
@@ -196,7 +196,7 @@ meta {
     **Example**
 
     ```hot
-    response ::openai::chat/complete-stream(ChatCompletionRequest({
+    response ::openai::chat/complete-stream(::openai::chat/ChatCompletionRequest({
         model: "gpt-4o-mini",
         max_completion_tokens: 50,
         messages: [{role: "user", content: "Count from 1 to 3."}]
@@ -210,14 +210,14 @@ meta {
     **Example - Processing chunks**
 
     ```hot
-    response ::openai::chat/complete-stream(ChatCompletionRequest({
+    response ::openai::chat/complete-stream(::openai::chat/ChatCompletionRequest({
         model: "gpt-4o-mini",
         max_completion_tokens: 100,
         messages: [{role: "user", content: "Hello!"}]
     }))
 
-    for-each(response.body, fn (event) {
-        text extract-chunk-text(event)
+    for-each(response.body, (event) {
+        text ::openai::chat/extract-chunk-text(event)
         cond {
             not(is-empty(text)) => { print(text) }
         }
@@ -451,13 +451,13 @@ meta {
     **Example**
 
     ```hot
-    response ::openai::chat/complete-stream(ChatCompletionRequest({
+    response ::openai::chat/complete-stream(::openai::chat/ChatCompletionRequest({
         model: "gpt-4o-mini",
         max_completion_tokens: 50,
         messages: [{role: "user", content: "Hello!"}]
     }))
 
-    for-each(response.body, fn (event) {
+    for-each(response.body, (event) {
         text ::openai::chat/extract-chunk-text(event)
         // text is "" for empty chunks, or the content fragment
     })
@@ -493,13 +493,13 @@ meta {
     **Example**
 
     ```hot
-    response ::openai::chat/complete-stream(ChatCompletionRequest({
+    response ::openai::chat/complete-stream(::openai::chat/ChatCompletionRequest({
         model: "gpt-4o-mini",
         max_completion_tokens: 50,
         messages: [{role: "user", content: "Hi"}]
     }))
 
-    for-each(response.body, fn (event) {
+    for-each(response.body, (event) {
         done ::openai::chat/is-stream-done(event)
         // done is true when stream is finished
     })

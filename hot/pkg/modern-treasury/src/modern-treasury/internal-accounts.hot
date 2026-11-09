@@ -34,7 +34,16 @@ fn
 
 get-internal-account
 meta {
-    doc: """GET /api/internal_accounts/{id}: retrieve an internal account."""
+    doc: """
+    GET /api/internal_accounts/{id}: retrieve an internal account.
+
+    **Example**
+
+    ```hot
+    account ::modern-treasury::internal-accounts/get-internal-account("0f8e3719-3dfd-4613-9bbf-c0333781b59f")
+    account.currency
+    ```
+    """
 }
 fn
 (internal-account-id: Str): Map {
@@ -52,6 +61,13 @@ meta {
     `"previous_day"`, `"real_time"`, `"other"`), `per_page`,
     `after_cursor`. Each report's `balances` lists amounts by
     `balance_type` (e.g. `closing_ledger`, `current_available`).
+
+    **Example**
+
+    ```hot
+    page ::modern-treasury::internal-accounts/list-balance-reports("0f8e3719-3dfd-4613-9bbf-c0333781b59f", {balance_report_type: "previous_day"})
+    map(page.items, %.as_of_date)
+    ```
     """
 }
 fn
@@ -67,7 +83,17 @@ fn
 
 get-balance-report
 meta {
-    doc: """GET /api/internal_accounts/{id}/balance_reports/{report_id}: one balance report. `report-id` may be `"latest"`."""
+    doc: """
+    GET /api/internal_accounts/{id}/balance_reports/{report_id}: one balance
+    report. `report-id` may be `"latest"`.
+
+    **Example**
+
+    ```hot
+    report ::modern-treasury::internal-accounts/get-balance-report("0f8e3719-3dfd-4613-9bbf-c0333781b59f", "latest")
+    map(report.balances, %.balance_type)
+    ```
+    """
 }
 fn
 (internal-account-id: Str, report-id: Str): Map {
@@ -79,7 +105,17 @@ fn
 
 latest-balance-report
 meta {
-    doc: """The most recent balance report for an internal account (`get-balance-report(id, "latest")`)."""
+    doc: """
+    The most recent balance report for an internal account
+    (`get-balance-report(id, "latest")`).
+
+    **Example**
+
+    ```hot
+    report ::modern-treasury::internal-accounts/latest-balance-report("0f8e3719-3dfd-4613-9bbf-c0333781b59f")
+    report.as_of_date
+    ```
+    """
 }
 fn
 (internal-account-id: Str): Map {

@@ -4,7 +4,17 @@
 
 me
 meta {
-    doc: """GET /users/me - The integration's own bot user. The cheapest way to smoke-test a token. Works with any user-capability level."""
+    doc: """
+    GET /users/me - The integration's own bot user. The cheapest way to
+    smoke-test a token. Works with any user-capability level.
+
+    **Example**
+
+    ```hot
+    bot ::notion::users/me()
+    bot.name
+    ```
+    """
 }
 fn
 (): Map {
@@ -16,7 +26,17 @@ fn
 
 get-user
 meta {
-    doc: """GET /users/{id} - One user (person or bot). Requires a user-information capability; emails appear only with the include-email level."""
+    doc: """
+    GET /users/{id} - One user (person or bot). Requires a user-information
+    capability; emails appear only with the include-email level.
+
+    **Example**
+
+    ```hot
+    user ::notion::users/get-user("e79a0b74-3aba-4149-9f74-0bb5791a6ee6")
+    user.name
+    ```
+    """
 }
 fn
 (user-id: Str): Map {
@@ -28,7 +48,19 @@ fn
 
 list-users
 meta {
-    doc: """GET /users - The workspace's users, paginated. `options` (1-arity) supports `page_size` (max 100) and `start_cursor`; returns `{results, has_more, next_cursor}`. Requires a user-information capability."""
+    doc: """
+    GET /users - The workspace's users, paginated. `options` (1-arity)
+    supports `page_size` (max 100) and `start_cursor`; returns `{results,
+    has_more, next_cursor}`. Requires a user-information capability.
+
+    **Example**
+
+    ```hot
+    users ::notion::users/list-users({page_size: 50})
+    map(users.results, %.name)
+    users.next_cursor
+    ```
+    """
 }
 fn
 (): Map {

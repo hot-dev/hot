@@ -8,7 +8,18 @@ meta {
 
 list-views
 meta {
-    doc: """GET /views - One cursor page of views: `{views, meta, links}`. `options`: `active` (Bool), `access` ("personal"/"shared"/"account"), `group_id`, `page_size`, `after`."""
+    doc: """
+    GET /views - One cursor page of views: `{views, meta, links}`.
+    `options`: `active` (Bool), `access` ("personal"/"shared"/"account"),
+    `group_id`, `page_size`, `after`.
+
+    **Example**
+
+    ```hot
+    page ::zendesk::views/list-views({active: true, access: "shared", page_size: 50})
+    map(page.views, %.title)
+    ```
+    """
 }
 fn
 (): Any {
@@ -23,7 +34,16 @@ fn
 
 list-active-views
 meta {
-    doc: """GET /views/active - Active views shared with the user: `{views}`."""
+    doc: """
+    GET /views/active - Active views shared with the user: `{views}`.
+
+    **Example**
+
+    ```hot
+    out ::zendesk::views/list-active-views()
+    map(out.views, %.title)
+    ```
+    """
 }
 fn
 (): Any {
@@ -35,7 +55,17 @@ fn
 
 get-view
 meta {
-    doc: """GET /views/{id} - One view's definition. `id` may also be `"incoming"`, `"my"` or `"my_groups"`."""
+    doc: """
+    GET /views/{id} - One view's definition. `id` may also be `"incoming"`,
+    `"my"` or `"my_groups"`.
+
+    **Example**
+
+    ```hot
+    out ::zendesk::views/get-view("my")
+    out.view.title
+    ```
+    """
 }
 fn
 (id: Any): Any {
@@ -47,7 +77,20 @@ fn
 
 execute-view
 meta {
-    doc: """GET /views/{id}/execute - The view's columns and rows (`{columns, rows, groups, view, meta}`), each row carrying a partial ticket. Rate-limited to 5 requests a minute per view per agent, and results may be cached for up to 10 minutes. `options`: `sort_by`, `sort_order`, `group_by`, `page_size`, `after`."""
+    doc: """
+    GET /views/{id}/execute - The view's columns and rows (`{columns, rows,
+    groups, view, meta}`), each row carrying a partial ticket. Rate-limited
+    to 5 requests a minute per view per agent, and results may be cached for
+    up to 10 minutes. `options`: `sort_by`, `sort_order`, `group_by`,
+    `page_size`, `after`.
+
+    **Example**
+
+    ```hot
+    out ::zendesk::views/execute-view(360002, {sort_by: "updated_at", sort_order: "desc"})
+    map(out.rows, %.ticket.id)
+    ```
+    """
 }
 fn
 (id: Any): Any {
@@ -62,7 +105,18 @@ fn
 
 list-view-tickets
 meta {
-    doc: """GET /views/{id}/tickets - One cursor page of the view's full ticket objects: `{tickets, meta, links}`. `options`: `sort_by`, `sort_order`, `page_size`, `after`."""
+    doc: """
+    GET /views/{id}/tickets - One cursor page of the view's full ticket
+    objects: `{tickets, meta, links}`. `options`: `sort_by`, `sort_order`,
+    `page_size`, `after`.
+
+    **Example**
+
+    ```hot
+    page ::zendesk::views/list-view-tickets(360002, {page_size: 50})
+    map(page.tickets, %.subject)
+    ```
+    """
 }
 fn
 (id: Any): Any {
@@ -77,7 +131,17 @@ fn
 
 list-all-view-tickets
 meta {
-    doc: """Collect up to `limit` tickets from a view across cursor pages. Returns a Vec."""
+    doc: """
+    Collect up to `limit` tickets from a view across cursor pages. Returns a
+    Vec.
+
+    **Example**
+
+    ```hot
+    tickets ::zendesk::views/list-all-view-tickets(360002, 500)
+    length(tickets)
+    ```
+    """
 }
 fn
 (id: Any, limit: Int): Vec {
@@ -89,7 +153,17 @@ fn
 
 count-view-tickets
 meta {
-    doc: """GET /views/{id}/count - The view's ticket count: `{view_count: {value, pretty, fresh}}`."""
+    doc: """
+    GET /views/{id}/count - The view's ticket count: `{view_count: {value,
+    pretty, fresh}}`.
+
+    **Example**
+
+    ```hot
+    out ::zendesk::views/count-view-tickets(360002)
+    out.view_count.value
+    ```
+    """
 }
 fn
 (id: Any): Any {

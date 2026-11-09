@@ -7,7 +7,19 @@ meta {
 
 get-holdings
 meta {
-    doc: """POST /investments/holdings/get: positions per account plus the referenced `securities`. Options: `account_ids`. Returns `{accounts, holdings, securities, item}`."""
+    doc: """
+    POST /investments/holdings/get: positions per account plus the
+    referenced `securities`. Options: `account_ids`. Returns `{accounts,
+    holdings, securities, item}`.
+
+    **Example**
+
+    ```hot
+    access-token ::hot::ctx/get("plaid.access-token")
+    out ::plaid::investments/get-holdings(access-token)
+    map(out.holdings, %.quantity)
+    ```
+    """
 }
 fn
 (access-token: Str): Map {
@@ -22,7 +34,21 @@ fn
 
 get-investment-transactions
 meta {
-    doc: """POST /investments/transactions/get: buys, sells, dividends, fees and transfers between two `YYYY-MM-DD` dates, offset-paginated. Options: `account_ids`, `count` (max 500), `offset`, `async_update`. Returns `{investment_transactions, total_investment_transactions, securities, accounts}`."""
+    doc: """
+    POST /investments/transactions/get: buys, sells, dividends, fees and
+    transfers between two `YYYY-MM-DD` dates, offset-paginated. Options:
+    `account_ids`, `count` (max 500), `offset`, `async_update`. Returns
+    `{investment_transactions, total_investment_transactions, securities,
+    accounts}`.
+
+    **Example**
+
+    ```hot
+    access-token ::hot::ctx/get("plaid.access-token")
+    out ::plaid::investments/get-investment-transactions(access-token, "2026-01-01", "2026-03-31", {count: 100})
+    out.total_investment_transactions
+    ```
+    """
 }
 fn
 (access-token: Str, start-date: Str, end-date: Str): Map {
@@ -42,7 +68,19 @@ fn
 
 get-liabilities
 meta {
-    doc: """POST /liabilities/get: credit card, student loan and mortgage details (APRs, minimum payments, due dates). Options: `account_ids`. Returns `{accounts, liabilities: {credit, student, mortgage}, item}`."""
+    doc: """
+    POST /liabilities/get: credit card, student loan and mortgage details
+    (APRs, minimum payments, due dates). Options: `account_ids`. Returns
+    `{accounts, liabilities: {credit, student, mortgage}, item}`.
+
+    **Example**
+
+    ```hot
+    access-token ::hot::ctx/get("plaid.access-token")
+    out ::plaid::investments/get-liabilities(access-token)
+    out.liabilities.credit
+    ```
+    """
 }
 fn
 (access-token: Str): Map {

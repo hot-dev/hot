@@ -2,7 +2,7 @@
 
 hot.pkg.persona {
   name: "hot.dev/persona",
-  version: "0.1.1",
+  version: "0.1.2",
   hot-min-version: "3.0.2",
   description: "Persona identity verification (KYC/KYB) bindings for Hot, pinned to Persona-Version 2026-09-29. Inquiries with the hosted flow, resume and one-time links, accounts, verifications, watchlist/adverse media/business reports, cases, documents, KYB transactions, events, webhook management, Persona-Signature verification with a replay window, and decision helpers that normalize statuses to approved/declined/needs-review/pending/failed.",
   author: "Hot Dev",

@@ -7,7 +7,7 @@ Supabase Management API bindings for Hot. Manage projects, organizations, databa
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/supabase-admin": "1.1.0"
+"hot.dev/supabase-admin": "1.1.1"
 ```
 
 ## Configuration

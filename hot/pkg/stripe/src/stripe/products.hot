@@ -56,7 +56,18 @@ fn
 
 get-product
 meta {
-    doc: """GET /v1/products/{id} - Retrieve a product by ID."""
+    doc: """
+    GET /v1/products/{id} - Retrieve a product by ID.
+
+    **Example**
+
+    ```hot
+    ::products ::stripe::products
+
+    product ::products/get-product("prod_123", {expand: ["default_price"]})
+    product.default_price.unit_amount
+    ```
+    """
 }
 fn
 (product: Str): Map {
@@ -87,7 +98,20 @@ UpdateProductRequest type {
 
 update-product
 meta {
-    doc: """POST /v1/products/{id} - Update a product."""
+    doc: """
+    POST /v1/products/{id} - Update a product.
+
+    **Example**
+
+    ```hot
+    ::products ::stripe::products
+
+    ::products/update-product("prod_123", ::products/UpdateProductRequest({
+      name: "Pro Plan",
+      default_price: "price_123"
+    }))
+    ```
+    """
 }
 fn
 (product: Str, request: UpdateProductRequest): Map {
@@ -99,7 +123,19 @@ fn
 
 delete-product
 meta {
-    doc: """DELETE /v1/products/{id} - Delete a product. Only possible if it has no prices attached; otherwise set `active: false` via `update-product`."""
+    doc: """
+    DELETE /v1/products/{id} - Delete a product. Only possible if it has no
+    prices attached; otherwise set `active: false` via `update-product`.
+
+    **Example**
+
+    ```hot
+    ::products ::stripe::products
+
+    result ::products/delete-product("prod_123")
+    result.deleted
+    ```
+    """
 }
 fn
 (product: Str): Map {
@@ -123,7 +159,19 @@ ListProductsRequest type {
 
 list-products
 meta {
-    doc: """GET /v1/products - List products, most recent first. Filter by `active` or specific `ids`."""
+    doc: """
+    GET /v1/products - List products, most recent first. Filter by `active`
+    or specific `ids`.
+
+    **Example**
+
+    ```hot
+    ::products ::stripe::products
+
+    page ::products/list-products(::products/ListProductsRequest({active: true, limit: 20}))
+    names map(page.data, %.name)
+    ```
+    """
 }
 fn
 (): Map {
@@ -138,7 +186,20 @@ fn
 
 search-products
 meta {
-    doc: """GET /v1/products/search - Search products with Stripe's search query language, e.g. `active:"true" AND name~"plan"`. Pass `next_page` back as `page` in `params` to continue."""
+    doc: """
+    GET /v1/products/search - Search products with Stripe's search query
+    language, e.g. `active:"true" AND name~"plan"`. Pass `next_page` back as
+    `page` in `params` to continue.
+
+    **Example**
+
+    ```hot
+    ::products ::stripe::products
+
+    results ::products/search-products(`active:"true" AND name~"plan"`, {limit: 20})
+    ids map(results.data, %.id)
+    ```
+    """
 }
 fn
 (query: Str): Map {
@@ -207,7 +268,19 @@ fn
 
 get-price
 meta {
-    doc: """GET /v1/prices/{price} - Retrieve a price by ID."""
+    doc: """
+    GET /v1/prices/{price} - Retrieve a price by ID.
+
+    **Example**
+
+    ```hot
+    ::products ::stripe::products
+
+    price ::products/get-price("price_123", {expand: ["product"]})
+    price.unit_amount
+    price.product.name
+    ```
+    """
 }
 fn
 (price: Str): Map {
@@ -233,7 +306,21 @@ UpdatePriceRequest type {
 
 update-price
 meta {
-    doc: """POST /v1/prices/{price} - Update a price. Amounts are immutable — create a new price and deactivate the old one to change pricing."""
+    doc: """
+    POST /v1/prices/{price} - Update a price. Amounts are immutable — create
+    a new price and deactivate the old one to change pricing.
+
+    **Example**
+
+    ```hot
+    ::products ::stripe::products
+
+    ::products/update-price("price_123", ::products/UpdatePriceRequest({
+      active: false,
+      nickname: "Pro monthly (retired)"
+    }))
+    ```
+    """
 }
 fn
 (price: Str, request: UpdatePriceRequest): Map {
@@ -259,7 +346,19 @@ ListPricesRequest type {
 
 list-prices
 meta {
-    doc: """GET /v1/prices - List prices. Filter by `product`, `active`, `currency`, `type` ("one_time" or "recurring"), or `lookup_keys`."""
+    doc: """
+    GET /v1/prices - List prices. Filter by `product`, `active`, `currency`,
+    `type` ("one_time" or "recurring"), or `lookup_keys`.
+
+    **Example**
+
+    ```hot
+    ::products ::stripe::products
+
+    page ::products/list-prices(::products/ListPricesRequest({lookup_keys: ["pro_monthly"], active: true}))
+    price-id page.data[0].id
+    ```
+    """
 }
 fn
 (): Map {
@@ -274,7 +373,20 @@ fn
 
 search-prices
 meta {
-    doc: """GET /v1/prices/search - Search prices with Stripe's search query language, e.g. `active:"true" AND product:"prod_..."`. Pass `next_page` back as `page` in `params` to continue."""
+    doc: """
+    GET /v1/prices/search - Search prices with Stripe's search query
+    language, e.g. `active:"true" AND product:"prod_..."`. Pass `next_page`
+    back as `page` in `params` to continue.
+
+    **Example**
+
+    ```hot
+    ::products ::stripe::products
+
+    results ::products/search-prices(`active:"true" AND product:"prod_123"`)
+    amounts map(results.data, %.unit_amount)
+    ```
+    """
 }
 fn
 (query: Str): Map {

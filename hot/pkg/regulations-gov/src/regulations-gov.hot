@@ -29,7 +29,9 @@ MAX_PAGE_SIZE 250
 MAX_PAGE 20
 
 // Errors are returned, not consumed: consuming an Err would halt the run.
-with-key fn (opts: Map, f: Fn): Any {
+with-key
+meta {no-doc: true}
+fn (opts: Map, f: Fn): Any {
   cfg ::api/resolve(opts)
   cond {
     is-err(cfg) => { cfg }
@@ -40,7 +42,9 @@ with-key fn (opts: Map, f: Fn): Any {
   }
 }
 
-reg-get fn (path: Str, params: Map, opts: Map): Any {
+reg-get
+meta {no-doc: true}
+fn (path: Str, params: Map, opts: Map): Any {
   with-key(opts, (cfg, key) {
     ::api/get-json(`${cfg.base-url}${path}${::api/query-string(params)}`, {X-Api-Key: key})
   })
@@ -48,7 +52,16 @@ reg-get fn (path: Str, params: Map, opts: Map): Any {
 
 page-params
 meta {
-    doc: """`page[size]` (held to 5 to 250) and `page[number]` from `opts.page-size` and `opts.page`, omitted when unset (pure)."""
+    doc: """
+    `page[size]` (held to 5 to 250) and `page[number]` from `opts.page-size`
+    and `opts.page`, null when unset, which `query-string` drops (pure).
+
+    **Example**
+
+    ```hot
+    ::regulations-gov/page-params({page-size: 1000, page: 2})  // {"page[size]": 250, "page[number]": 2}
+    ```
+    """
 }
 fn (opts: Map): Map {
   size get(opts, "page-size")
@@ -88,13 +101,27 @@ fn (filters: Map?): Map {
 
 list-params
 meta {
-    doc: """Query parameters for a list call (pure): the `filters`, `sort` and paging from `opts`."""
+    doc: """
+    Query parameters for a list call (pure): the `filters`, `sort` and
+    paging from `opts`.
+
+    **Example**
+
+    ```hot
+    params ::regulations-gov/list-params({filters: {agencyId: "EPA"}, sort: "-postedDate", page-size: 25, page: 2})
+    get(params, "filter[agencyId]")  // "EPA"
+    params.sort  // "-postedDate"
+    get(params, "page[size]")  // 25
+    ```
+    """
 }
 fn (opts: Map): Map {
   {...filter-params(get(opts, "filters")), sort: get(opts, "sort"), ...page-params(opts)}
 }
 
-detail fn (kind: Str, id: Str, opts: Map): Any {
+detail
+meta {no-doc: true}
+fn (kind: Str, id: Str, opts: Map): Any {
   cond {
     // With no id the path is the list route, whose page isn't a record.
     not(::api/given(id)) => { err(`regulations-gov: ${kind} needs an id`) }
@@ -152,6 +179,16 @@ meta {
     One document, or null when there is none: `{data, included}`.
     `data.attributes.fileFormats` has the download links. Attachments are
     only returned with `{include-attachments: true}`, in `included`.
+
+    **Example**
+
+    ```hot
+    doc ::regulations-gov/document("FAA-2018-1084-0001")
+    doc.data.attributes.title
+
+    with-files ::regulations-gov/document("FAA-2018-1084-0001", {include-attachments: true})
+    with-files.included
+    ```
     """
 }
 fn
@@ -194,7 +231,21 @@ fn
 
 comment
 meta {
-    doc: """One comment, or null when there is none: `{data, included}`. `data.attributes.comment` is the text. Attachments are only returned with `{include-attachments: true}`, in `included`."""
+    doc: """
+    One comment, or null when there is none: `{data, included}`.
+    `data.attributes.comment` is the text. Attachments are only returned
+    with `{include-attachments: true}`, in `included`.
+
+    **Example**
+
+    ```hot
+    c ::regulations-gov/comment("FAA-2018-1084-0002")
+    c.data.attributes.comment
+
+    with-files ::regulations-gov/comment("FAA-2018-1084-0002", {include-attachments: true})
+    with-files.included
+    ```
+    """
 }
 fn
 (id: Str): Map? {
@@ -215,6 +266,17 @@ meta {
     `page-size`, `page`, plus `api-key`. Filters: `agencyId`, `searchTerm`,
     `lastModifiedDate`, `docketType`. Sort on `title`, `docketId` or
     `lastModifiedDate`.
+
+    **Example**
+
+    ```hot
+    page ::regulations-gov/dockets({
+      filters: {agencyId: "FAA", docketType: "Rulemaking"},
+      sort: "-lastModifiedDate",
+      page-size: 25
+    })
+    map(page.data, %.id)
+    ```
     """
 }
 fn
@@ -227,7 +289,17 @@ fn
 
 docket
 meta {
-    doc: """One docket, or null when there is none: `{data}`. The RIN is `data.attributes.rin`, which `documents` does not return."""
+    doc: """
+    One docket, or null when there is none: `{data}`. The RIN is
+    `data.attributes.rin`, which `documents` does not return.
+
+    **Example**
+
+    ```hot
+    d ::regulations-gov/docket("FAA-2018-1084")
+    d.data.attributes.rin
+    ```
+    """
 }
 fn
 (id: Str): Map? {
@@ -243,7 +315,18 @@ fn
 
 next-page
 meta {
-    doc: """The page number after `page` from `meta`, or null on the last page or after page 20, the end of the API's documented range (pure)."""
+    doc: """
+    The page number after `page` from `meta`, or null on the last page or
+    after page 20, the end of the API's documented range (pure).
+
+    **Example**
+
+    ```hot
+    ::regulations-gov/next-page({meta: {pageNumber: 2, hasNextPage: true}})  // 3
+    ::regulations-gov/next-page({meta: {pageNumber: 2, hasNextPage: false}})  // null
+    ::regulations-gov/next-page({meta: {pageNumber: 20, hasNextPage: true}})  // null
+    ```
+    """
 }
 fn (page: Any): Int? {
   m or(get(or(page, {}), "meta"), {})
@@ -277,7 +360,19 @@ fn (utc: Str): Str {
 
 window-opts
 meta {
-    doc: """`opts` for one page of a window (pure): the `sort`, the largest page size, and `filter[lastModifiedDate][ge]` set to `cursor` when there is one. Any `le` the caller gave stays."""
+    doc: """
+    `opts` for one page of a window (pure): the `sort`, the largest page
+    size, and `filter[lastModifiedDate][ge]` set to `cursor` when there is
+    one. Any `le` the caller gave stays.
+
+    **Example**
+
+    ```hot
+    o ::regulations-gov/window-opts({filters: {agencyId: "EPA"}}, "lastModifiedDate,documentId", "2026-01-01 00:00:00", 1)
+    o.filters  // {agencyId: "EPA", lastModifiedDate: {ge: "2026-01-01 00:00:00"}}
+    o.page-size  // 250
+    ```
+    """
 }
 fn (opts: Map, sort: Str, cursor: Str?, page-number: Int): Map {
   filters or(get(opts, "filters"), {})
@@ -288,7 +383,20 @@ fn (opts: Map, sort: Str, cursor: Str?, page-number: Int): Map {
 
 next-cursor
 meta {
-    doc: """The `ge` value that starts the next window: the last row's `lastModifiedDate` in Eastern time. An Err when it would not move past `cursor`, which means one timestamp holds a whole window of records (pure)."""
+    doc: """
+    The `ge` value that starts the next window: the last row's
+    `lastModifiedDate` in Eastern time. An Err when it would not move past
+    `cursor`, which means one timestamp holds a whole window of records
+    (pure).
+
+    **Example**
+
+    ```hot
+    rows [{attributes: {lastModifiedDate: "2020-08-10T15:58:52Z"}}]
+    ::regulations-gov/next-cursor(rows, null)  // "2020-08-10 11:58:52"
+    is-err(::regulations-gov/next-cursor(rows, "2020-08-10 11:58:52"))  // true
+    ```
+    """
 }
 fn (rows: Vec, cursor: Str?): Str {
   stamp get-in(last(rows), ["attributes", "lastModifiedDate"])
@@ -300,7 +408,9 @@ fn (rows: Vec, cursor: Str?): Str {
   }
 }
 
-walk-windows fn (fetch: Fn, opts: Map, sort: Str, limit: Int, cursor: Str?, page-number: Int, seen: Map, acc: Vec): Any {
+walk-windows
+meta {no-doc: true}
+fn (fetch: Fn, opts: Map, sort: Str, limit: Int, cursor: Str?, page-number: Int, seen: Map, acc: Vec): Any {
   page fetch(window-opts(opts, sort, cursor, page-number))
   cond {
     is-err(page) => { page }
@@ -340,6 +450,15 @@ meta {
     costs one more request. `fetch` takes `opts` and returns one page.
     `all-documents`, `all-comments` and `all-dockets` call this. Each
     page is one request against the hourly limit.
+
+    **Example**
+
+    ```hot
+    // A stand-in for `documents`: one page, no more after it
+    one-page {data: [{id: "a"}, {id: "b"}], meta: {hasNextPage: false}}
+    rows ::regulations-gov/collect-windows((o) { one-page }, {}, "lastModifiedDate,documentId", 10)
+    map(rows, %.id)  // ["a", "b"]
+    ```
     """
 }
 fn (fetch: Fn, opts: Map, sort: Str, limit: Int): Vec {
@@ -394,7 +513,17 @@ fn (opts: Map, limit: Int): Vec {
 
 all-dockets
 meta {
-    doc: """Up to `limit` dockets matching `opts.filters`, oldest change first, however many there are."""
+    doc: """
+    Up to `limit` dockets matching `opts.filters`, oldest change first,
+    however many there are.
+
+    **Example**
+
+    ```hot
+    rows ::regulations-gov/all-dockets({filters: {agencyId: "FAA"}}, 1000)
+    length(rows)
+    ```
+    """
 }
 fn (opts: Map, limit: Int): Vec {
   collect-windows((o) { dockets(o) }, opts, "lastModifiedDate,docketId", limit)

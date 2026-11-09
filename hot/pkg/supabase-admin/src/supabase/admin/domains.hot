@@ -69,7 +69,18 @@ fn
 
 verify-custom-hostname
 meta {
-    doc: """Verify DNS configuration for a custom hostname."""
+    doc: """
+    Verify DNS configuration for a custom hostname.
+
+    **Example**
+
+    ```hot
+    ::domains ::supabase::admin::domains
+
+    result ::domains/verify-custom-hostname("my-project-ref")
+    result.status
+    ```
+    """
 }
 fn
 (project-ref: Str): Map {
@@ -81,7 +92,18 @@ fn
 
 activate-custom-hostname
 meta {
-    doc: """Activate a verified custom hostname. DNS must be verified first."""
+    doc: """
+    Activate a verified custom hostname. DNS must be verified first.
+
+    **Example**
+
+    ```hot
+    ::domains ::supabase::admin::domains
+
+    result ::domains/activate-custom-hostname("my-project-ref")
+    result.status
+    ```
+    """
 }
 fn
 (project-ref: Str): Map {
@@ -93,7 +115,17 @@ fn
 
 delete-custom-hostname
 meta {
-    doc: """Remove the custom hostname configuration for a project."""
+    doc: """
+    Remove the custom hostname configuration for a project.
+
+    **Example**
+
+    ```hot
+    ::domains ::supabase::admin::domains
+
+    ::domains/delete-custom-hostname("my-project-ref")
+    ```
+    """
 }
 fn
 (project-ref: Str): Map {
@@ -109,7 +141,18 @@ fn
 
 get-vanity-subdomain
 meta {
-    doc: """Get the vanity subdomain configuration for a project."""
+    doc: """
+    Get the vanity subdomain configuration for a project.
+
+    **Example**
+
+    ```hot
+    ::domains ::supabase::admin::domains
+
+    config ::domains/get-vanity-subdomain("my-project-ref")
+    config.status
+    ```
+    """
 }
 fn
 (project-ref: Str): Map {
@@ -159,7 +202,21 @@ ActivateVanitySubdomainRequest type {
 
 activate-vanity-subdomain
 meta {
-    doc: """Activate a vanity subdomain for a project (e.g. `myapp.supabase.co`)."""
+    doc: """
+    Activate a vanity subdomain for a project (e.g. `myapp.supabase.co`).
+
+    **Example**
+
+    ```hot
+    ::domains ::supabase::admin::domains
+
+    result ::domains/activate-vanity-subdomain(::domains/ActivateVanitySubdomainRequest({
+      project_ref: "my-project-ref",
+      vanity_subdomain: "myapp"
+    }))
+    result.custom_domain
+    ```
+    """
 }
 fn
 (request: ActivateVanitySubdomainRequest): Map {
@@ -173,7 +230,17 @@ fn
 
 delete-vanity-subdomain
 meta {
-    doc: """Remove the vanity subdomain for a project."""
+    doc: """
+    Remove the vanity subdomain for a project.
+
+    **Example**
+
+    ```hot
+    ::domains ::supabase::admin::domains
+
+    ::domains/delete-vanity-subdomain("my-project-ref")
+    ```
+    """
 }
 fn
 (project-ref: Str): Map {

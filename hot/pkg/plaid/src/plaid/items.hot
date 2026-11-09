@@ -7,7 +7,20 @@ meta {
 
 get-item
 meta {
-    doc: """POST /item/get: the Item's institution, products, consent expiry, webhook and `error` (e.g. `ITEM_LOGIN_REQUIRED` when the user must re-authenticate through Link update mode). Returns `{item, status, request_id}`."""
+    doc: """
+    POST /item/get: the Item's institution, products, consent expiry,
+    webhook and `error` (e.g. `ITEM_LOGIN_REQUIRED` when the user must
+    re-authenticate through Link update mode). Returns `{item, status,
+    request_id}`.
+
+    **Example**
+
+    ```hot
+    access-token ::hot::ctx/get("plaid.access-token")
+    out ::plaid::items/get-item(access-token)
+    out.item.institution_id
+    ```
+    """
 }
 fn
 (access-token: Str): Map {
@@ -23,6 +36,13 @@ meta {
     POST /item/remove: invalidate the access token and stop billing for
     the Item. Irreversible. Options: `reason_code` (e.g.
     `"USER_REQUEST"`, `"FRAUD_FIRST_PARTY"`), `reason_note`.
+
+    **Example**
+
+    ```hot
+    access-token ::hot::ctx/get("plaid.access-token")
+    ::plaid::items/remove-item(access-token, {reason_code: "USER_REQUEST"})
+    ```
     """
 }
 fn
@@ -42,7 +62,17 @@ fn
 
 update-item-webhook
 meta {
-    doc: """POST /item/webhook/update: point the Item's webhooks at a new URL (Plaid then sends `WEBHOOK_UPDATE_ACKNOWLEDGED`). Returns `{item, request_id}`."""
+    doc: """
+    POST /item/webhook/update: point the Item's webhooks at a new URL (Plaid
+    then sends `WEBHOOK_UPDATE_ACKNOWLEDGED`). Returns `{item, request_id}`.
+
+    **Example**
+
+    ```hot
+    access-token ::hot::ctx/get("plaid.access-token")
+    ::plaid::items/update-item-webhook(access-token, "https://example.com/plaid/webhook")
+    ```
+    """
 }
 fn
 (access-token: Str, webhook: Str): Map {

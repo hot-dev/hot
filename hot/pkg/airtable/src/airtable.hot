@@ -15,6 +15,8 @@ meta {
     ```hot
     ::at ::airtable
 
+    base-id "appXyz123"
+
     rows ::at/list-records(base-id, "Leads", {
       filterByFormula: "AND({Status} = 'New', {Score} > 50)",
       maxRecords: 20
@@ -35,7 +37,21 @@ BASE_URL "https://api.airtable.com/v0"
 request
 meta {
     ctx: {"airtable.token": {required: false}},
-    doc: """The authenticated request behind every function: `opts` (`{token}`), then the `airtable.token` context variable. With no token from either place, it returns an Err (see `::airtable::api/resolve`)."""
+    doc: """
+    The authenticated request behind every function: `opts` (`{token}`),
+    then the `airtable.token` context variable. With no token from either
+    place, it returns an Err (see `::airtable::api/resolve`).
+
+    **Example**
+
+    ```hot
+    ::airtable/request("GET", "/meta/whoami", "")
+
+    // Per-call token
+    tenant ::airtable/request("GET", "/meta/bases", "", {token: ::hot::ctx/get("tenant.airtable.token")})
+    tenant.bases
+    ```
+    """
 }
 fn
 (method: Str, path: Str, body: Any): Any {
@@ -71,7 +87,9 @@ fn
   }
 }
 
-table-path fn (base-id: Str, table: Str): Str {
+table-path
+meta {no-doc: true}
+fn (base-id: Str, table: Str): Str {
   `/${base-id}/${::uri/encode(table)}`
 }
 
@@ -87,8 +105,10 @@ meta {
     **Example**
 
     ```hot
-    formula `{Email} = ${::airtable/escape-formula-value(input)}`
-    ::airtable/list-records(base, "Leads", {filterByFormula: formula})
+    ::airtable/escape-formula-value("O'Brien")  // "'O\\'Brien'"
+
+    // Pass this as `filterByFormula` to `list-records`
+    `{Last Name} = ${::airtable/escape-formula-value("O'Brien")}`  // "{Last Name} = 'O\\'Brien'"
     ```
     """
 }
@@ -107,6 +127,19 @@ meta {
     `offset` (paging cursor from the previous page). Returns
     `{records, offset?}`. To pass `opts` without filters, use `{}` for
     `params`.
+
+    **Example**
+
+    ```hot
+    page ::airtable/list-records(::airtable::apiASE, "Leads", {
+      filterByFormula: "{Status} = 'New'",
+      maxRecords: 20
+    })
+    map(page.records, %.fields.Name)
+
+    // The next page, with a per-call token
+    ::airtable/list-records(::airtable::apiASE, "Leads", {offset: page.offset}, {token: ::hot::ctx/get("tenant.airtable.token")})
+    ```
     """
 }
 fn
@@ -122,7 +155,16 @@ fn
 
 get-record
 meta {
-    doc: """GET /{base}/{table}/{id} - One record (`{id, createdTime, fields}`)."""
+    doc: """
+    GET /{base}/{table}/{id} - One record (`{id, createdTime, fields}`).
+
+    **Example**
+
+    ```hot
+    record ::airtable/get-record(::airtable::apiASE, "Leads", "recAbc123")
+    record.fields.Status
+    ```
+    """
 }
 fn
 (base-id: Str, table: Str, record-id: Str): Map {
@@ -134,7 +176,19 @@ fn
 
 create-records
 meta {
-    doc: """POST /{base}/{table} - Create up to 10 records: `[{fields: {...}}]`. `typecast` is enabled so string inputs coerce to the field types."""
+    doc: """
+    POST /{base}/{table} - Create up to 10 records: `[{fields: {...}}]`.
+    `typecast` is enabled so string inputs coerce to the field types.
+
+    **Example**
+
+    ```hot
+    created ::airtable/create-records(::airtable::apiASE, "Leads", [
+      {fields: {Name: "Ada Lovelace", Status: "New", Score: 99}}
+    ])
+    first(created.records).id
+    ```
+    """
 }
 fn
 (base-id: Str, table: Str, records: Vec): Map {
@@ -146,7 +200,18 @@ fn
 
 update-records
 meta {
-    doc: """PATCH /{base}/{table} - Update up to 10 records: `[{id, fields}]` (only the given fields change)."""
+    doc: """
+    PATCH /{base}/{table} - Update up to 10 records: `[{id, fields}]` (only
+    the given fields change).
+
+    **Example**
+
+    ```hot
+    ::airtable/update-records(::airtable::apiASE, "Leads", [
+      {id: "recAbc123", fields: {Status: "Qualified"}}
+    ])
+    ```
+    """
 }
 fn
 (base-id: Str, table: Str, records: Vec): Map {
@@ -158,7 +223,15 @@ fn
 
 delete-record
 meta {
-    doc: """DELETE /{base}/{table}/{id} - Delete one record."""
+    doc: """
+    DELETE /{base}/{table}/{id} - Delete one record.
+
+    **Example**
+
+    ```hot
+    ::airtable/delete-record(::airtable::apiASE, "Leads", "recAbc123")
+    ```
+    """
 }
 fn
 (base-id: Str, table: Str, record-id: Str): Map {
@@ -179,7 +252,7 @@ meta {
     **Example**
 
     ```hot
-    ::airtable/upsert-records(base-id, "Leads", ["Email"], [
+    ::airtable/upsert-records("appXyz123", "Leads", ["Email"], [
       {fields: {Email: "ada@example.com", Status: "Customer"}}
     ])
     ```
@@ -199,7 +272,17 @@ fn
 
 records-query
 meta {
-    doc: """Build the repeated `records[]=` query string batch deletion needs (query-string can't express repeated keys). Exposed for testing; `delete-records` uses it."""
+    doc: """
+    Build the repeated `records[]=` query string batch deletion needs
+    (query-string can't express repeated keys). Exposed for testing;
+    `delete-records` uses it.
+
+    **Example**
+
+    ```hot
+    ::airtable/records-query(["recAbc123", "recDef456"])  // "?records[]=recAbc123&records[]=recDef456"
+    ```
+    """
 }
 fn (record-ids: Vec): Str {
   parts map(record-ids, (id) { `records[]=${::uri/encode(id)}` })
@@ -208,7 +291,17 @@ fn (record-ids: Vec): Str {
 
 delete-records
 meta {
-    doc: """DELETE /{base}/{table}?records[]= - Delete up to 10 records in one call. Returns `{records: [{id, deleted}]}`."""
+    doc: """
+    DELETE /{base}/{table}?records[]= - Delete up to 10 records in one call.
+    Returns `{records: [{id, deleted}]}`.
+
+    **Example**
+
+    ```hot
+    out ::airtable/delete-records(::airtable::apiASE, "Leads", ["recAbc123", "recDef456"])
+    map(out.records, %.deleted)
+    ```
+    """
 }
 fn
 (base-id: Str, table: Str, record-ids: Vec): Map {
@@ -222,13 +315,25 @@ fn
 // Record comments (require the data.recordComments scopes)
 // ---------------------------------------------------------------------------
 
-comments-path fn (base-id: Str, table: Str, record-id: Str): Str {
+comments-path
+meta {no-doc: true}
+fn (base-id: Str, table: Str, record-id: Str): Str {
   `${table-path(base-id, table)}/${record-id}/comments`
 }
 
 list-comments
 meta {
-    doc: """GET /{base}/{table}/{record}/comments - A record's comments (`{comments, offset?}`). `params` (4-arity): `pageSize` (max 100), `offset`."""
+    doc: """
+    GET /{base}/{table}/{record}/comments - A record's comments (`{comments,
+    offset?}`). `params` (4-arity): `pageSize` (max 100), `offset`.
+
+    **Example**
+
+    ```hot
+    page ::airtable/list-comments(::airtable::apiASE, "Leads", "recAbc123", {pageSize: 50})
+    map(page.comments, %.text)
+    ```
+    """
 }
 fn
 (base-id: Str, table: Str, record-id: Str): Map {
@@ -243,7 +348,17 @@ fn
 
 create-comment
 meta {
-    doc: """POST /{base}/{table}/{record}/comments - Comment on a record. `@[userId]` mentions work inside `text`."""
+    doc: """
+    POST /{base}/{table}/{record}/comments - Comment on a record.
+    `@[userId]` mentions work inside `text`.
+
+    **Example**
+
+    ```hot
+    comment ::airtable/create-comment(::airtable::apiASE, "Leads", "recAbc123", "Called and left a voicemail.")
+    comment.id
+    ```
+    """
 }
 fn
 (base-id: Str, table: Str, record-id: Str, text: Str): Map {
@@ -255,7 +370,16 @@ fn
 
 update-comment
 meta {
-    doc: """PATCH /{base}/{table}/{record}/comments/{comment} - Edit a comment's text (author-owned comments only)."""
+    doc: """
+    PATCH /{base}/{table}/{record}/comments/{comment} - Edit a comment's
+    text (author-owned comments only).
+
+    **Example**
+
+    ```hot
+    ::airtable/update-comment(::airtable::apiASE, "Leads", "recAbc123", "comAbc123", "Called and booked a demo.")
+    ```
+    """
 }
 fn
 (base-id: Str, table: Str, record-id: Str, comment-id: Str, text: Str): Map {
@@ -267,7 +391,16 @@ fn
 
 delete-comment
 meta {
-    doc: """DELETE /{base}/{table}/{record}/comments/{comment} - Delete a comment (author-owned comments only)."""
+    doc: """
+    DELETE /{base}/{table}/{record}/comments/{comment} - Delete a comment
+    (author-owned comments only).
+
+    **Example**
+
+    ```hot
+    ::airtable/delete-comment(::airtable::apiASE, "Leads", "recAbc123", "comAbc123")
+    ```
+    """
 }
 fn
 (base-id: Str, table: Str, record-id: Str, comment-id: Str): Map {
@@ -283,7 +416,17 @@ fn
 
 whoami
 meta {
-    doc: """GET /meta/whoami - The token's own user id and granted scopes. The cheapest way to smoke-test a token."""
+    doc: """
+    GET /meta/whoami - The token's own user id and granted scopes. The
+    cheapest way to smoke-test a token.
+
+    **Example**
+
+    ```hot
+    me ::airtable/whoami()
+    me.scopes
+    ```
+    """
 }
 fn
 (): Map {
@@ -295,7 +438,16 @@ fn
 
 list-bases
 meta {
-    doc: """GET /meta/bases - The bases the token can access."""
+    doc: """
+    GET /meta/bases - The bases the token can access.
+
+    **Example**
+
+    ```hot
+    out ::airtable/list-bases()
+    map(out.bases, %.name)
+    ```
+    """
 }
 fn
 (): Map {
@@ -307,7 +459,17 @@ fn
 
 get-base-schema
 meta {
-    doc: """GET /meta/bases/{base}/tables - The base's tables, fields, and views — what an agent reads before writing records."""
+    doc: """
+    GET /meta/bases/{base}/tables - The base's tables, fields, and views —
+    what an agent reads before writing records.
+
+    **Example**
+
+    ```hot
+    schema ::airtable/get-base-schema(::airtable::apiASE)
+    map(schema.tables, %.name)
+    ```
+    """
 }
 fn
 (base-id: Str): Map {

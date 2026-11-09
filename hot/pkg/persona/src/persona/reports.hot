@@ -19,7 +19,17 @@ seg ::persona::api/seg
 
 report-type
 meta {
-    doc: """The JSON:API type for a report: `"watchlist"` and `"report/watchlist"` both give `"report/watchlist"`. Exposed for testing."""
+    doc: """
+    The JSON:API type for a report: `"watchlist"` and `"report/watchlist"`
+    both give `"report/watchlist"`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::persona::reports/report-type("watchlist")  // "report/watchlist"
+    ::persona::reports/report-type("report/watchlist")  // "report/watchlist"
+    ```
+    """
 }
 fn (type-name: Str): Str {
   t trim(type-name)
@@ -28,7 +38,16 @@ fn (type-name: Str): Str {
 
 create-body
 meta {
-    doc: """The JSON:API body for `create-report`. Exposed for testing."""
+    doc: """
+    The JSON:API body for `create-report`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::persona::reports/create-body("watchlist", "rptp_1", {name-last: "Doe"}, {})
+    // {data: {type: "report/watchlist", attributes: {report-template-id: "rptp_1", query: {name-last: "Doe"}}}}
+    ```
+    """
 }
 fn (type-name: Str, template-id: Str?, query: Map, opts: Map): Map {
   ::api/document(report-type(type-name), {
@@ -74,7 +93,22 @@ fn
 
 create-watchlist-report
 meta {
-    doc: """Run a `report/watchlist` (sanctions) screening on a person. `query` as in `create-report`; `term` can replace the name parts."""
+    doc: """
+    Run a `report/watchlist` (sanctions) screening on a person. `query` as
+    in `create-report`; `term` can replace the name parts.
+
+    **Example**
+
+    ```hot
+    report ::persona::reports/create-watchlist-report("rptp_123", {
+      name-first: "Jane",
+      name-last: "Doe",
+      birthdate: "1990-01-31",
+      address-country-code: "US"
+    }, {idempotency-key: "user-42-watchlist"})
+    report.data.id
+    ```
+    """
 }
 fn
 (template-id: Str, query: Map): Map {
@@ -86,7 +120,25 @@ fn
 
 create-business-lookup-report
 meta {
-    doc: """Run a `report/business-lookup` (KYB registry lookup). `query` needs `business-name`, `address-street-1`, `address-city`, `address-subdivision`, `address-postal-code`; optional `ein`, `website`, `phone-number`, `address-country-code`, `associated-people`."""
+    doc: """
+    Run a `report/business-lookup` (KYB registry lookup). `query` needs
+    `business-name`, `address-street-1`, `address-city`,
+    `address-subdivision`, `address-postal-code`; optional `ein`, `website`,
+    `phone-number`, `address-country-code`, `associated-people`.
+
+    **Example**
+
+    ```hot
+    report ::persona::reports/create-business-lookup-report("rptp_123", {
+      business-name: "Acme Robotics LLC",
+      address-street-1: "1 Main St",
+      address-city: "Austin",
+      address-subdivision: "TX",
+      address-postal-code: "78701"
+    })
+    report.data.id
+    ```
+    """
 }
 fn
 (template-id: Str, query: Map): Map {
@@ -98,7 +150,17 @@ fn
 
 get-report
 meta {
-    doc: """GET /reports/{id} - Retrieve a report. `opts` takes `include` and `fields`."""
+    doc: """
+    GET /reports/{id} - Retrieve a report. `opts` takes `include` and
+    `fields`.
+
+    **Example**
+
+    ```hot
+    report ::persona::reports/get-report("rep_123")
+    if(::persona::reports/is-done(report), ::persona::reports/has-match(report), "still running")
+    ```
+    """
 }
 fn
 (report-id: Str): Map {
@@ -113,7 +175,17 @@ fn
 
 list-reports
 meta {
-    doc: """GET /reports - One page of reports. Filters: `reference-id`, `account-id`. `opts` takes `page-size`, `after`, `before`."""
+    doc: """
+    GET /reports - One page of reports. Filters: `reference-id`,
+    `account-id`. `opts` takes `page-size`, `after`, `before`.
+
+    **Example**
+
+    ```hot
+    page ::persona::reports/list-reports({reference-id: "user-42"}, {page-size: 25})
+    map(page.data, %.id)
+    ```
+    """
 }
 fn
 (filters: Map): Map {
@@ -128,7 +200,16 @@ fn
 
 rerun-report
 meta {
-    doc: """POST /reports/{id}/run - Re-run a (continuously monitored) report now. Watch for the next `.ready` event."""
+    doc: """
+    POST /reports/{id}/run - Re-run a (continuously monitored) report now.
+    Watch for the next `.ready` event.
+
+    **Example**
+
+    ```hot
+    ::persona::reports/rerun-report("rep_123")
+    ```
+    """
 }
 fn
 (report-id: Str): Map {
@@ -140,7 +221,15 @@ fn
 
 redact-report
 meta {
-    doc: """DELETE /reports/{id} - Permanently remove a report's PII."""
+    doc: """
+    DELETE /reports/{id} - Permanently remove a report's PII.
+
+    **Example**
+
+    ```hot
+    ::persona::reports/redact-report("rep_123")
+    ```
+    """
 }
 fn
 (report-id: Str): Map {
@@ -152,7 +241,15 @@ fn
 
 add-tag
 meta {
-    doc: """POST /reports/{id}/add-tag - Add a tag by name."""
+    doc: """
+    POST /reports/{id}/add-tag - Add a tag by name.
+
+    **Example**
+
+    ```hot
+    ::persona::reports/add-tag("rep_123", "reviewed")
+    ```
+    """
 }
 fn
 (report-id: Str, tag-name: Str): Map {
@@ -164,7 +261,16 @@ fn
 
 print-report
 meta {
-    doc: """GET /reports/{id}/print - The report as a PDF (`Bytes`)."""
+    doc: """
+    GET /reports/{id}/print - The report as a PDF (`Bytes`).
+
+    **Example**
+
+    ```hot
+    pdf ::persona::reports/print-report("rep_123")
+    length(pdf)
+    ```
+    """
 }
 fn
 (report-id: Str): Bytes {
@@ -176,7 +282,16 @@ fn
 
 is-done
 meta {
-    doc: """True when a report has finished: status `ready` or `errored`."""
+    doc: """
+    True when a report has finished: status `ready` or `errored`.
+
+    **Example**
+
+    ```hot
+    ::persona::reports/is-done({data: {id: "rep_1", type: "report/watchlist", attributes: {status: "ready"}}})  // true
+    ::persona::reports/is-done({data: {id: "rep_2", type: "report/watchlist", attributes: {status: "pending"}}})  // false
+    ```
+    """
 }
 fn (doc: Any): Bool {
   in(or(::api/attr(doc, "status"), ""), ["ready", "errored"])
@@ -184,7 +299,16 @@ fn (doc: Any): Bool {
 
 has-match
 meta {
-    doc: """True when a ready report found a match (`has-match`)."""
+    doc: """
+    True when a ready report found a match (`has-match`).
+
+    **Example**
+
+    ```hot
+    ::persona::reports/has-match({data: {id: "rep_1", type: "report/watchlist", attributes: {status: "ready", has-match: true}}})  // true
+    ::persona::reports/has-match({data: {id: "rep_2", type: "report/watchlist", attributes: {status: "ready", has_match: false}}})  // false
+    ```
+    """
 }
 fn (doc: Any): Bool {
   eq(::api/attr(doc, "has-match"), true)

@@ -15,7 +15,16 @@ Role        ::ai::message/Role
 
 format-session-results
 meta {
-    doc: "Format a Vec of store search results (with v.sender-name, v.content) as `[name]: content` lines."
+    doc: """
+    Format a Vec of store search results (with v.sender-name, v.content) as
+    `[name]: content` lines.
+
+    **Example**
+
+    ```hot
+    ::ai::rag/format-session-results([{value: {sender-name: "Ada", content: "Hello"}}])  // ["[Ada]: Hello"]
+    ```
+    """
 }
 fn (results: Vec): Vec {
     map(results, (r) {
@@ -24,7 +33,17 @@ fn (results: Vec): Vec {
 }
 
 format-kb-results
-meta { doc: "Format a Vec of KB search results as `[KB] content` lines." }
+meta {
+    doc: """
+    Format a Vec of KB search results as `[KB] content` lines.
+
+    **Example**
+
+    ```hot
+    ::ai::rag/format-kb-results([{value: {content: "Refunds take 5 days."}}])  // ["[KB] Refunds take 5 days."]
+    ```
+    """
+}
 fn (results: Vec): Vec {
     map(results, (r) {
         content get(r.value, "content", to-json(r.value))
@@ -33,7 +52,20 @@ fn (results: Vec): Vec {
 }
 
 format-thread-lines
-meta { doc: "Format a Vec of ChatMessages as `role: content` lines." }
+meta {
+    doc: """
+    Format a Vec of ChatMessages as `role: content` lines.
+
+    **Example**
+
+    ```hot
+    ::ai::rag/format-thread-lines([::ai::message/user-msg("Hi")])
+    // "Previous conversation:\nuser: Hi\n---\n"
+
+    ::ai::rag/format-thread-lines([])  // ""
+    ```
+    """
+}
 fn (history: Vec): Str {
     cond {
         is-empty(history) => { "" }
@@ -53,7 +85,18 @@ fn (history: Vec): Str {
 
 build-rag-prompt
 meta {
-    doc: "Compose a RAG prompt from optional history, optional context, and a question."
+    doc: """
+    Compose a RAG prompt from optional history, optional context, and a
+    question.
+
+    **Example**
+
+    ```hot
+    ::ai::rag/build-rag-prompt("", "", "What is Hot?")  // "What is Hot?"
+    ::ai::rag/build-rag-prompt("", "Hot is a language.", "What is Hot?")
+    // "Context from memory:\nHot is a language.\n\n---\nQuestion: What is Hot?"
+    ```
+    """
 }
 fn (history-text: Str, context: Str, question: Str): Str {
     cond {
@@ -101,6 +144,13 @@ meta {
     callers can pass the result of `build-context` / `build-context-safe`
     directly without branching. When `context` is non-empty, the result is
     `${base}\n\n${heading}\n${context}`. `heading` defaults to `## Memory`.
+
+    **Example**
+
+    ```hot
+    ::ai::rag/with-memory-block("You help.", "Ada likes tea.", null)  // "You help.\n\n## Memory\nAda likes tea."
+    ::ai::rag/with-memory-block("You help.", "", null)  // "You help."
+    ```
     """
 }
 fn (base: Str, context: Str, heading: Str?): Str {
@@ -118,6 +168,13 @@ meta {
     Returns `""` when unset so role filters never accidentally drop
     untagged records (callers asking to exclude `assistant` shouldn't
     also exclude legacy un-roled writes).
+
+    **Example**
+
+    ```hot
+    ::ai::rag/role-of({value: {metadata: {role: "user"}}})  // "user"
+    ::ai::rag/role-of({value: {}})  // ""
+    ```
     """
 }
 fn (entry: Map): Str {
@@ -126,7 +183,18 @@ fn (entry: Map): Str {
 }
 
 role-in
-meta { doc: "True when `role` equals any element of `roles`." }
+meta {
+    doc: """
+    True when `role` equals any element of `roles`.
+
+    **Example**
+
+    ```hot
+    ::ai::rag/role-in(["user", "tool"], "user")  // true
+    ::ai::rag/role-in(["user", "tool"], "assistant")  // false
+    ```
+    """
+}
 fn (roles: Vec, role: Str): Bool {
     some(roles, (r) { eq(r, role) })
 }
@@ -141,6 +209,15 @@ meta {
     - `exclude-roles` is a blacklist applied next. Tagged matches are
       dropped; untagged entries pass.
     - With neither set, every entry passes.
+
+    **Example**
+
+    ```hot
+    entry {value: {metadata: {role: "assistant"}}}
+    ::ai::rag/passes-role-filter(entry, ["assistant"], null)  // true
+    ::ai::rag/passes-role-filter(entry, null, ["assistant"])  // false
+    ::ai::rag/passes-role-filter({value: {}}, null, ["assistant"])  // true
+    ```
     """
 }
 fn (entry: Map, include-roles: Vec?, exclude-roles: Vec?): Bool {
@@ -185,6 +262,18 @@ meta {
     `recent`, so `limit` bounds the window, not the post-filter count.
     For synthesis prompts that want only user turns + task records,
     pass `exclude-roles: ["assistant"]`.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    ::ai::rag/recent-text(mem, {hours: 6, limit: 20, exclude-roles: ["assistant"]})
+    ```
     """
 }
 fn (mem: AgentMemory, opts: Map?): Str {
@@ -219,7 +308,23 @@ fn (mem: AgentMemory, opts: Map?): Str {
 
 build-context
 meta {
-    doc: "Search session memory and KB, format as a context string for AI prompts. Options: limit (default 10), min-score (default 0.5)."
+    doc: """
+    Search session memory and KB, format as a context string for AI prompts.
+    Options: limit (default 10), min-score (default 0.5).
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    context ::ai::rag/build-context(mem, "refund policy", {limit: 5, min-score: 0.7})
+    if(is-err(context), "search failed", context)
+    ```
+    """
 }
 fn (mem: AgentMemory, query: Str, opts: Map?): Str {
     limit get(or(opts, {}), "limit", 10)
@@ -257,6 +362,20 @@ meta {
     Use this in interactive request paths and demos / CI / offline
     tutorials where an embedding backend may not be wired. Prefer
     `build-context` directly in code paths that should propagate errors.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    // Empty string when the store or embedding provider is unavailable
+    context ::ai::rag/build-context-safe(mem, "refund policy", null)
+    ::ai::rag/with-memory-block("You are a support agent.", context, null)
+    ```
     """
 }
 fn (mem: AgentMemory, query: Str, opts: Map?): Str {
@@ -265,7 +384,27 @@ fn (mem: AgentMemory, query: Str, opts: Map?): Str {
 
 ask
 meta {
-    doc: "Search memory for relevant context, then generate an AI answer. Returns {answer, sources}."
+    doc: """
+    Search memory for relevant context, then generate an AI answer. Returns
+    {answer, sources}.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    // Any provider's chat function fits here
+    chat-fn (model, prompt, system) { `Answer to: ${prompt}` }
+    opts ::ai::chat/ChatOptions({chat-fn: chat-fn, model: "claude-sonnet-4-5"})
+    result ::ai::rag/ask(mem, "How long do refunds take?", opts, {limit: 5})
+    result.answer
+    length(result.sources)
+    ```
+    """
 }
 fn (mem: AgentMemory, question: Str, chat-opts: ChatOptions, opts: Map?): Map {
     context build-context(mem, question, opts)
@@ -276,7 +415,32 @@ fn (mem: AgentMemory, question: Str, chat-opts: ChatOptions, opts: Map?): Map {
     }
 }
 
-ask-with-context fn (mem: AgentMemory, question: Str, chat-opts: ChatOptions, opts: Map?, context: Str): Map {
+ask-with-context
+meta {
+    doc: """
+    Like `ask`, for a `context` string you built yourself. Generates the
+    answer from it, then searches session memory for `sources`. Returns
+    `{answer, sources}`.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    // Any provider's chat function fits here
+    chat-fn (model, prompt, system) { `Answer to: ${prompt}` }
+    opts ::ai::chat/ChatOptions({chat-fn: chat-fn, model: "claude-sonnet-4-5"})
+    context ::ai::rag/build-context-safe(mem, "refund policy", null)
+    result ::ai::rag/ask-with-context(mem, "How long do refunds take?", opts, {limit: 5}, context)
+    result.answer
+    ```
+    """
+}
+fn (mem: AgentMemory, question: Str, chat-opts: ChatOptions, opts: Map?, context: Str): Map {
     prompt build-rag-prompt("", context, question)
     system or(chat-opts.system, DEFAULT_SYSTEM)
     answer ::ai::chat/complete-prompt(chat-opts, prompt, system)
@@ -286,7 +450,32 @@ ask-with-context fn (mem: AgentMemory, question: Str, chat-opts: ChatOptions, op
 
 ask-with-thread
 meta {
-    doc: "Like ask, but includes thread history for multi-turn context. Appends question and answer to the thread automatically."
+    doc: """
+    Like ask, but includes thread history for multi-turn context. Appends
+    question and answer to the thread automatically.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    // Any provider's chat function fits here
+    chat-fn (model, prompt, system) { `Answer to: ${prompt}` }
+    opts ::ai::chat/ChatOptions({chat-fn: chat-fn, model: "claude-sonnet-4-5"})
+    t ::mem/thread(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"}),
+        null
+    )
+    result ::ai::rag/ask-with-thread(mem, t, "And for digital orders?", opts, null)
+    result.answer
+    ```
+    """
 }
 fn (mem: AgentMemory, t: Thread, question: Str, chat-opts: ChatOptions, opts: Map?): Map {
     context build-context(mem, question, opts)
@@ -305,7 +494,25 @@ fn (mem: AgentMemory, t: Thread, question: Str, chat-opts: ChatOptions, opts: Ma
 
 summarize
 meta {
-    doc: "Summarize recent messages from session memory using AI. Options: hours, limit, instruction."
+    doc: """
+    Summarize recent messages from session memory using AI. Options: hours,
+    limit, instruction.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    // Any provider's chat function fits here
+    chat-fn (model, prompt, system) { `Answer to: ${prompt}` }
+    opts ::ai::chat/ChatOptions({chat-fn: chat-fn, model: "claude-sonnet-4-5"})
+    ::ai::rag/summarize(mem, opts, {hours: 24, instruction: "List the open issues."})
+    ```
+    """
 }
 fn (mem: AgentMemory, chat-opts: ChatOptions, opts: Map?): Str {
     messages ::ai::memory/recent(mem, opts)
@@ -333,7 +540,28 @@ fn (mem: AgentMemory, chat-opts: ChatOptions, opts: Map?): Str {
 
 compact-window
 meta {
-    doc: "Summarize a recent memory window into a durable MemoryCapsule and store it in the KB. Options: hours, limit, id, instruction, metadata, emit-stream."
+    doc: """
+    Summarize a recent memory window into a durable MemoryCapsule and store
+    it in the KB. Options: hours, limit, id, instruction, metadata,
+    emit-stream.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    // Any provider's chat function fits here
+    chat-fn (model, prompt, system) { `Answer to: ${prompt}` }
+    opts ::ai::chat/ChatOptions({chat-fn: chat-fn, model: "claude-sonnet-4-5"})
+    capsule ::ai::rag/compact-window(mem, opts, {hours: 24, id: "2026-11-09"})
+    capsule.summary
+    capsule.source-ids
+    ```
+    """
 }
 fn (mem: AgentMemory, chat-opts: ChatOptions, opts: Map?): MemoryCapsule {
     o or(opts, {})
@@ -370,7 +598,26 @@ fn (mem: AgentMemory, chat-opts: ChatOptions, opts: Map?): MemoryCapsule {
 
 compact-window-safe
 meta {
-    doc: "Like `compact-window`, returning `{ok, capsule, error}` and emitting compaction errors when requested."
+    doc: """
+    Like `compact-window`, returning `{ok, capsule, error}` and emitting
+    compaction errors when requested.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    // Any provider's chat function fits here
+    chat-fn (model, prompt, system) { `Answer to: ${prompt}` }
+    opts ::ai::chat/ChatOptions({chat-fn: chat-fn, model: "claude-sonnet-4-5"})
+    result ::ai::rag/compact-window-safe(mem, opts, {hours: 24, emit-stream: true})
+    if(result.ok, result.capsule.id, result.error)
+    ```
+    """
 }
 fn (mem: AgentMemory, chat-opts: ChatOptions, opts: Map?): Map {
     res if-err(compact-window(mem, chat-opts, opts), (err) {
@@ -403,7 +650,22 @@ fn (mem: AgentMemory, chat-opts: ChatOptions, opts: Map?): Map {
 
 build-hybrid-context
 meta {
-    doc: "Build a citation-preserving context string from hybrid vector + graph retrieval."
+    doc: """
+    Build a citation-preserving context string from hybrid vector + graph
+    retrieval.
+
+    **Example**
+
+    ```hot
+    ::mem ::ai::memory
+    mem ::mem/create-memory(
+        "support-bot",
+        ::ai::session/Session({id: "slack:C123"}),
+        ::ai::session/Identity({id: "u1", name: "Ada"})
+    )
+    ::ai::rag/build-hybrid-context(mem, "refund policy", {limit: 5, seed-node-ids: ["topic:refunds"]})
+    ```
+    """
 }
 fn (mem: AgentMemory, query: Str, opts: Map?): Str {
     result ::ai::memory/hybrid-recall(mem, query, opts)

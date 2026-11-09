@@ -46,7 +46,20 @@ InviteUserResponse type {
 
 create-invite
 meta {
-    doc: """POST /organization/invites - Invite a user to the organization by email."""
+    doc: """
+    POST /organization/invites - Invite a user to the organization by email.
+
+    **Example**
+
+    ```hot
+    admin {api-key: ::hot::ctx/get("openai.admin.key")}
+    invite ::openai::invite/create-invite(::openai::invite/InviteUserRequest({
+      email: "ada@example.com",
+      role: "reader"
+    }), admin)
+    invite.status
+    ```
+    """
 }
 fn
 (request: InviteUserRequest): InviteUserResponse {

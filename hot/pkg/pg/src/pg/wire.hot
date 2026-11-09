@@ -24,15 +24,45 @@ SSL-REQUEST-CODE 80877103
 // ---------------------------------------------------------------------------
 
 int32
-meta {doc: """Encode an Int as a 4-byte big-endian value."""}
+meta {
+    doc: """
+    Encode an Int as a 4-byte big-endian value.
+
+    **Example**
+
+    ```hot
+    ::hot::hex/encode(::pg::wire/int32(13))  // "0000000d"
+    ```
+    """
+}
 fn (n: Int): Bytes { ::bytes/from-int(n, 4) }
 
 int16
-meta {doc: """Encode an Int as a 2-byte big-endian value."""}
+meta {
+    doc: """
+    Encode an Int as a 2-byte big-endian value.
+
+    **Example**
+
+    ```hot
+    ::hot::hex/encode(::pg::wire/int16(1))  // "0001"
+    ```
+    """
+}
 fn (n: Int): Bytes { ::bytes/from-int(n, 2) }
 
 cstring
-meta {doc: """Encode a string as null-terminated bytes."""}
+meta {
+    doc: """
+    Encode a string as null-terminated bytes.
+
+    **Example**
+
+    ```hot
+    ::hot::hex/encode(::pg::wire/cstring("hi"))  // "686900"
+    ```
+    """
+}
 fn (s: Str): Bytes { concat(Bytes(s), Bytes([0])) }
 
 // ---------------------------------------------------------------------------
@@ -40,19 +70,50 @@ fn (s: Str): Bytes { concat(Bytes(s), Bytes([0])) }
 // ---------------------------------------------------------------------------
 
 frame
-meta {doc: """Frame a body with a 1-char type tag and Int32 length prefix."""}
+meta {
+    doc: """
+    Frame a body with a 1-char type tag and Int32 length prefix.
+
+    **Example**
+
+    ```hot
+    ::hot::hex/encode(::pg::wire/frame("Q", ::pg::wire/cstring("hi")))  // "5100000007686900"
+    ```
+    """
+}
 fn (type-char: Str, body: Bytes): Bytes {
     concat(Bytes(type-char), int32(add(length(body), 4)), body)
 }
 
 ssl-request
-meta {doc: """SSLRequest message (untyped): asks the server to start TLS."""}
+meta {
+    doc: """
+    SSLRequest message (untyped): asks the server to start TLS.
+
+    **Example**
+
+    ```hot
+    ::hot::hex/encode(::pg::wire/ssl-request())  // "0000000804d2162f"
+    ```
+    """
+}
 fn (): Bytes {
     concat(int32(8), int32(SSL-REQUEST-CODE))
 }
 
 startup-message
-meta {doc: """StartupMessage (untyped) with user and database parameters."""}
+meta {
+    doc: """
+    StartupMessage (untyped) with user and database parameters.
+
+    **Example**
+
+    ```hot
+    msg ::pg::wire/startup-message("app", "app")
+    length(msg)  // 31
+    ```
+    """
+}
 fn (user: Str, database: Str): Bytes {
     params concat(
         cstring("user"), cstring(user),
@@ -63,19 +124,59 @@ fn (user: Str, database: Str): Bytes {
 }
 
 query-message
-meta {doc: """Simple Query message ('Q')."""}
+meta {
+    doc: """
+    Simple Query message ('Q').
+
+    **Example**
+
+    ```hot
+    ::hot::hex/encode(::pg::wire/query-message("hi"))  // "5100000007686900"
+    ```
+    """
+}
 fn (sql: Str): Bytes { frame("Q", cstring(sql)) }
 
 password-message
-meta {doc: """PasswordMessage ('p') carrying a cleartext or md5 password."""}
+meta {
+    doc: """
+    PasswordMessage ('p') carrying a cleartext or md5 password.
+
+    **Example**
+
+    ```hot
+    ::hot::hex/encode(::pg::wire/password-message("x"))  // "70000000067800"
+    ```
+    """
+}
 fn (password: Str): Bytes { frame("p", cstring(password)) }
 
 terminate-message
-meta {doc: """Terminate message ('X')."""}
+meta {
+    doc: """
+    Terminate message ('X').
+
+    **Example**
+
+    ```hot
+    ::hot::hex/encode(::pg::wire/terminate-message())  // "5800000004"
+    ```
+    """
+}
 fn (): Bytes { frame("X", Bytes([])) }
 
 sync-message
-meta {doc: """Sync message ('S') for the extended-query protocol."""}
+meta {
+    doc: """
+    Sync message ('S') for the extended-query protocol.
+
+    **Example**
+
+    ```hot
+    ::hot::hex/encode(::pg::wire/sync-message())  // "5300000004"
+    ```
+    """
+}
 fn (): Bytes { frame("S", Bytes([])) }
 
 // ---------------------------------------------------------------------------
@@ -88,6 +189,16 @@ meta {
     Read one framed backend message from `socket`. Returns
     `{type: Str, payload: Bytes}` where payload excludes the type and
     length fields. Blocks until a full message arrives.
+
+    **Example**
+
+    ```hot
+    socket ::hot::tcp/connect("127.0.0.1", 5432)
+    ::hot::tcp/write(socket, ::pg::wire/startup-message("app", "app"))
+    msg ::pg::wire/read-message(socket)
+    // Type "R" asks for authentication. Type "E" is an error.
+    msg.type
+    ```
     """
 }
 fn (socket): Map {
@@ -104,19 +215,49 @@ fn (socket): Map {
 // ---------------------------------------------------------------------------
 
 read-int32
-meta {doc: """Read a signed 4-byte big-endian Int at `pos`. -> [value, pos+4]."""}
+meta {
+    doc: """
+    Read a signed 4-byte big-endian Int at `pos`. -> [value, pos+4].
+
+    **Example**
+
+    ```hot
+    ::pg::wire/read-int32(Bytes([0, 0, 0, 7, 1]), 0)  // [7, 4]
+    ```
+    """
+}
 fn (buf: Bytes, pos: Int): Vec {
     [::bytes/to-int(slice(buf, pos, add(pos, 4))), add(pos, 4)]
 }
 
 read-uint16
-meta {doc: """Read an unsigned 2-byte big-endian Int at `pos`. -> [value, pos+2]."""}
+meta {
+    doc: """
+    Read an unsigned 2-byte big-endian Int at `pos`. -> [value, pos+2].
+
+    **Example**
+
+    ```hot
+    ::pg::wire/read-uint16(Bytes([255, 255]), 0)  // [65535, 2]
+    ```
+    """
+}
 fn (buf: Bytes, pos: Int): Vec {
     [::bytes/to-uint(slice(buf, pos, add(pos, 2))), add(pos, 2)]
 }
 
 read-byte
-meta {doc: """Read one byte as an Int at `pos`. -> [value, pos+1]."""}
+meta {
+    doc: """
+    Read one byte as an Int at `pos`. -> [value, pos+1].
+
+    **Example**
+
+    ```hot
+    ::pg::wire/read-byte(Bytes([82, 9]), 1)  // [9, 2]
+    ```
+    """
+}
 fn (buf: Bytes, pos: Int): Vec {
     [::bytes/to-uint(slice(buf, pos, add(pos, 1))), add(pos, 1)]
 }
@@ -126,6 +267,12 @@ meta {
     doc: """
     Read a null-terminated string starting at `pos`.
     -> [string, position-after-terminator].
+
+    **Example**
+
+    ```hot
+    ::pg::wire/read-cstring(::pg::wire/cstring("user"), 0)  // ["user", 5]
+    ```
     """
 }
 fn (buf: Bytes, pos: Int): Vec {

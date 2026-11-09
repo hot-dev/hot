@@ -30,12 +30,16 @@ AUTH-SASL 10
 AUTH-SASL-CONTINUE 11
 AUTH-SASL-FINAL 12
 
-auth-code fn (msg: Map): Int {
+auth-code
+meta {no-doc: true}
+fn (msg: Map): Int {
     ::bytes/to-int(slice(msg.payload, 0, 4))
 }
 
 // Build an Err from the PostgreSQL error in an ErrorResponse payload.
-err-pg fn (payload: Bytes): Any {
+err-pg
+meta {no-doc: true}
+fn (payload: Bytes): Any {
     e ::decode/parse-error(payload)
     err({...e, message: `pg auth: ${e.message}`})
 }
@@ -46,6 +50,15 @@ meta {
     Handle the authentication exchange given the first Authentication
     ('R') message. Returns `true` once authenticated, or an Err with the
     failure details.
+
+    **Example**
+
+    ```hot
+    socket ::hot::tcp/connect("127.0.0.1", 5432)
+    ::hot::tcp/write(socket, ::pg::wire/startup-message("app", "app"))
+    msg ::pg::wire/read-message(socket)
+    if(eq(msg.type, "R"), ::pg::auth/run-auth(socket, "app", ::hot::ctx/get("pg.password"), msg), false)
+    ```
     """
 }
 fn (socket, user: Str, password: Str, msg: Map): Any {
@@ -61,7 +74,9 @@ fn (socket, user: Str, password: Str, msg: Map): Any {
 
 // After sending credentials the server replies with a further
 // Authentication message; expect AuthenticationOk.
-expect-auth-ok fn (socket): Any {
+expect-auth-ok
+meta {no-doc: true}
+fn (socket): Any {
     msg ::wire/read-message(socket)
     cond {
         eq(msg.type, "E") => { err-pg(msg.payload) }
@@ -70,14 +85,18 @@ expect-auth-ok fn (socket): Any {
     }
 }
 
-do-cleartext fn (socket, password: Str): Any {
+do-cleartext
+meta {no-doc: true}
+fn (socket, password: Str): Any {
     if-ok(::tcp/write(socket, ::wire/password-message(password)), (sent) {
         expect-auth-ok(socket)
     })
 }
 
 // md5 auth: "md5" + md5( md5(password + user) + salt )
-do-md5 fn (socket, user: Str, password: Str, salt: Bytes): Any {
+do-md5
+meta {no-doc: true}
+fn (socket, user: Str, password: Str, salt: Bytes): Any {
     inner ::hash/md5(concat(Bytes(password), Bytes(user)))
     outer ::hash/md5(concat(Bytes(inner), salt))
     if-ok(::tcp/write(socket, ::wire/password-message(concat("md5", outer))), (sent) {
@@ -93,7 +112,9 @@ MECHANISM "SCRAM-SHA-256"
 // base64 of the gs2-header "n,," (no channel binding, no authzid)
 GS2-HEADER-B64 "biws"
 
-do-scram fn (socket, password: Str, msg: Map): Any {
+do-scram
+meta {no-doc: true}
+fn (socket, password: Str, msg: Map): Any {
     nonce random-string(24)
     client-first-bare `n=,r=${nonce}`
     client-first concat("n,,", client-first-bare)
@@ -120,13 +141,17 @@ do-scram fn (socket, password: Str, msg: Map): Any {
 
 // Parse a comma-separated SCRAM message ("r=..,s=..,i=..") into a map
 // keyed by the single-letter attribute.
-parse-scram-attrs fn (s: Str): Map {
+parse-scram-attrs
+meta {no-doc: true}
+fn (s: Str): Map {
     reduce(split(s, ","), (acc, part) {
         assoc(acc, slice(part, 0, 1), slice(part, 2))
     }, {})
 }
 
-scram-finish fn (socket, password: Str, client-nonce: Str, client-first-bare: Str, server-first: Str): Any {
+scram-finish
+meta {no-doc: true}
+fn (socket, password: Str, client-nonce: Str, client-first-bare: Str, server-first: Str): Any {
     attrs parse-scram-attrs(server-first)
     combined-nonce get(attrs, "r")
     salt ::b64/decode(get(attrs, "s"))
@@ -168,7 +193,9 @@ scram-finish fn (socket, password: Str, client-nonce: Str, client-first-bare: St
     }
 }
 
-verify-server-signature fn (salted: Bytes, auth-message: Str, server-final: Str): Any {
+verify-server-signature
+meta {no-doc: true}
+fn (salted: Bytes, auth-message: Str, server-final: Str): Any {
     attrs parse-scram-attrs(server-final)
     server-key ::hmac/hmac-sha256-bytes(salted, "Server Key")
     expected ::b64/encode(::hmac/hmac-sha256-bytes(server-key, auth-message))

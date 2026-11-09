@@ -83,7 +83,9 @@ DeleteMessageBatchResponse type {
 }
 
 // Extract region from queue URL
-extract-region-from-url fn (queue_url: Str): Str {
+extract-region-from-url
+meta {no-doc: true}
+fn (queue_url: Str): Str {
     // Queue URL format: https://sqs.{region}.amazonaws.com/{account}/{queue}
     // or https://{queue}.{region}.amazonaws.com
     get-region()
@@ -98,6 +100,7 @@ meta {
     **Example**
 
     ```hot
+    queue-url "https://sqs.us-east-1.amazonaws.com/123456789012/my-queue"
     result ::aws::sqs::messages/send-message(queue-url, "Hello from Hot!")
     result.message_id  // => "abc123-def456..."
 
@@ -160,6 +163,7 @@ meta {
     **Example**
 
     ```hot
+    queue-url "https://sqs.us-east-1.amazonaws.com/123456789012/my-queue"
     // Receive up to 10 messages with 5-second long polling
     result ::aws::sqs::messages/receive-messages(queue-url, 10, 5)
     for-each(result.messages, (msg) {
@@ -245,6 +249,7 @@ meta {
     **Example**
 
     ```hot
+    queue-url "https://sqs.us-east-1.amazonaws.com/123456789012/my-queue"
     // Receive and process messages
     result ::aws::sqs::messages/receive-messages(queue-url, 10, 5)
     for-each(result.messages, (msg) {
@@ -293,6 +298,10 @@ meta {
     **Example**
 
     ```hot
+    queue-url "https://sqs.us-east-1.amazonaws.com/123456789012/my-queue"
+    result ::aws::sqs::messages/receive-messages(queue-url, 1, 5)
+    msg first(result.messages)
+
     // Extend visibility timeout to 60 seconds
     ::aws::sqs::messages/change-message-visibility(queue-url, msg.receipt_handle, 60)
     ```
@@ -338,6 +347,7 @@ meta {
     **Example**
 
     ```hot
+    queue-url "https://sqs.us-east-1.amazonaws.com/123456789012/my-queue"
     ::aws::sqs::messages/purge-queue(queue-url)
     ```
     """
@@ -380,6 +390,7 @@ meta {
     **Example**
 
     ```hot
+    queue-url "https://sqs.us-east-1.amazonaws.com/123456789012/my-queue"
     entries [
         {Id: "msg1", MessageBody: "First message"},
         {Id: "msg2", MessageBody: "Second message"},
@@ -447,6 +458,7 @@ meta {
     **Example**
 
     ```hot
+    queue-url "https://sqs.us-east-1.amazonaws.com/123456789012/my-queue"
     result ::aws::sqs::messages/receive-messages(queue-url, 10, 5)
     delete-entries map-indexed(result.messages, (idx, msg) {
         {Id: Str(idx), ReceiptHandle: msg.receipt_handle}

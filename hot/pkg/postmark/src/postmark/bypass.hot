@@ -21,7 +21,17 @@ BypassRulesForInboundMessageResponse type {
 
 bypass-rules-blocked-inbound-message
 meta {
-    doc: """Bypass inbound rules for a blocked message, allowing it to be processed by the inbound webhook."""
+    doc: """
+    Bypass inbound rules for a blocked message, allowing it to be processed
+    by the inbound webhook.
+
+    **Example**
+
+    ```hot
+    result ::postmark::bypass/bypass-rules-blocked-inbound-message(::postmark::bypass/BypassRulesForInboundMessageRequest({messageid: "792a3e9d-0078-40df-a6b0-fc78f87bf277"}))
+    result.ErrorCode
+    ```
+    """
 }
 fn
 (request: BypassRulesForInboundMessageRequest): BypassRulesForInboundMessageResponse {

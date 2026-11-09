@@ -40,7 +40,9 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   })
 }
 
-has-body fn (body: Any): Bool {
+has-body
+meta {no-doc: true}
+fn (body: Any): Bool {
   cond {
     is-map(body) => { not(is-empty(filter-vals(body, is-some))) }
     is-vec(body) => { not(is-empty(body)) }
@@ -49,7 +51,9 @@ has-body fn (body: Any): Bool {
   }
 }
 
-encode-body fn (body: Any): Str {
+encode-body
+meta {no-doc: true}
+fn (body: Any): Str {
   cond {
     not(has-body(body)) => { "" }
     is-str(body) => { body }
@@ -57,7 +61,9 @@ encode-body fn (body: Any): Str {
   }
 }
 
-body-or-error fn (response: Result): Any {
+body-or-error
+meta {no-doc: true}
+fn (response: Result): Any {
   cond {
     is-err(response) => { response }
     not(is-ok-response(response)) => { err(HttpError(response)) }
@@ -65,13 +71,26 @@ body-or-error fn (response: Result): Any {
   }
 }
 
-non-blank fn (value: Any): Str? {
+non-blank
+meta {no-doc: true}
+fn (value: Any): Str? {
   if(is-str(value), if(is-empty(trim(value)), null, trim(value)), null)
 }
 
 blank-credential
 meta {
-    doc: """The first of `names` that `opts` has but with a blank or null value, else null. Such a key is an error, never a fallback to context: a tenant whose key is missing must not run on the project's credentials."""
+    doc: """
+    The first of `names` that `opts` has but with a blank or null value,
+    else null. Such a key is an error, never a fallback to context: a tenant
+    whose key is missing must not run on the project's credentials.
+
+    **Example**
+
+    ```hot
+    ::supabase::admin::api/blank-credential({access-token: ""}, ["access-token"])  // "access-token"
+    ::supabase::admin::api/blank-credential({}, ["access-token"])  // null
+    ```
+    """
 }
 fn (opts: Map, names: Vec): Str? {
   find-first(names, (name) { and(in(name, keys(opts)), is-null(non-blank(get(opts, name)))) })
@@ -79,7 +98,21 @@ fn (opts: Map, names: Vec): Str? {
 
 resolve-from
 meta {
-    doc: """The one resolver, pure: `{access-token, base-url}` for a call from `opts` first, then `ctx-values` (a Map of context variables), then defaults. An Err when no token is set, when `access-token` is in `opts` but blank or null (that never falls back to context), or when `opts` has `base-url` without `access-token`. Exposed for testing; `resolve` feeds it the context."""
+    doc: """
+    The one resolver, pure: `{access-token, base-url}` for a call from
+    `opts` first, then `ctx-values` (a Map of context variables), then
+    defaults. An Err when no token is set, when `access-token` is in `opts`
+    but blank or null (that never falls back to context), or when `opts` has
+    `base-url` without `access-token`. Exposed for testing; `resolve` feeds
+    it the context.
+
+    **Example**
+
+    ```hot
+    ::supabase::admin::api/resolve-from({}, {"supabase.access.token": "test-token"}).base-url  // "https://api.supabase.com/v1"
+    is-err(::supabase::admin::api/resolve-from({}, {}))  // true
+    ```
+    """
 }
 fn (opts: Map, ctx-values: Map): Map {
   access-token or(non-blank(get(opts, "access-token")), non-blank(get(ctx-values, "supabase.access.token")))
@@ -121,7 +154,20 @@ fn (opts: Map): Map {
 
 build-request
 meta {
-    doc: """The outgoing `HttpRequest` from resolved settings (see `resolve`). `additional-headers` win over the defaults, and an empty body sends no `Content-Type`. Pure; exposed for testing."""
+    doc: """
+    The outgoing `HttpRequest` from resolved settings (see `resolve`).
+    `additional-headers` win over the defaults, and an empty body sends no
+    `Content-Type`. Pure; exposed for testing.
+
+    **Example**
+
+    ```hot
+    resolved {access-token: "test-token", base-url: "https://api.supabase.com/v1"}
+    req ::supabase::admin::api/build-request("GET", "/projects", {}, {}, resolved)
+    req.url  // "https://api.supabase.com/v1/projects"
+    req.body  // ""
+    ```
+    """
 }
 fn (method: Str, path: Str, additional-headers: Map, body: Any, resolved: Map): HttpRequest {
   default-headers {
@@ -176,7 +222,23 @@ fn
 request-raw
 meta {
     ctx: {"supabase.access.token": {required: false}},
-    doc: """Call the Supabase Management API and return the full `HttpResponse` including status and headers."""
+    doc: """
+    Call the Supabase Management API and return the full `HttpResponse`
+    including status and headers.
+
+    **Example**
+
+    ```hot
+    ::api ::supabase::admin::api
+
+    response ::api/request-raw("GET", "/projects")
+    response.status
+    response.body
+
+    // Per-call credentials
+    other ::api/request-raw("GET", "/projects", {}, {}, {access-token: ::hot::ctx/get("tenant_b.supabase.token")})
+    ```
+    """
 }
 fn
 (method: Str, path: Str): HttpResponse {

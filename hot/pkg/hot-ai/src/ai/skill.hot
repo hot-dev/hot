@@ -20,10 +20,7 @@ meta {
     meta {skill: {
         description: "Apply our customer voice rules",
         when: ["customer reply", "marketing copy", "support email"],
-        body: \"\"\"
-        Use a warm, plain-language tone. Avoid jargon. Always close
-        with a clear next step.
-        \"\"\"
+        body: "Use a warm, plain-language tone. Avoid jargon. Close with a next step."
     }}
     fn () { {} }
 
@@ -218,7 +215,8 @@ meta {
     **Example**
 
     ```hot
-    text ::ai::skill/load-body(skill, {topic: "refund"})
+    skill ::ai::skill/Skill({name: "tone", description: "Customer voice", body: "Be warm."})
+    ::ai::skill/load-body(skill, {topic: "refund"})  // "Be warm."
     ```
     """
 }
@@ -248,6 +246,14 @@ meta {
     are omitted. Modalities (when set and non-default) are appended
     in their own bracketed clause so the model can choose skills
     appropriate to the turn's input kind.
+
+    **Example**
+
+    ```hot
+    ::skill ::ai::skill
+    skills [::skill/Skill({name: "tone", description: "Customer voice", when: ["reply"], body: "Be warm."})]
+    ::skill/index-line(first(skills))  // "  - tone: Customer voice (when: reply)"
+    ```
     """
 }
 fn (skill: Skill): Str {
@@ -276,12 +282,10 @@ meta {
     **Example**
 
     ```hot
-    index ::ai::skill/build-index([tone, escalation])
-    // => \"\"\"
-    //    Available skills you can read with read_skill(name):
-    //      - customer-tone: Apply our voice (when: reply, marketing)
-    //      - escalation: Decide when to escalate (when: refund, angry)
-    //    \"\"\"
+    ::skill ::ai::skill
+    tone ::skill/Skill({name: "customer-tone", description: "Apply our voice", when: ["reply", "marketing"]})
+    ::skill/build-index([tone])
+    // "Available skills you can read with read_skill(name):\n  - customer-tone: Apply our voice (when: reply, marketing)"
     ```
     """
 }
@@ -301,7 +305,20 @@ fn (skills: Vec<Skill>): Str {
 // ============================================================================
 
 find-skill
-meta { doc: """Look up a skill by `name`, returning `null` when no match.""" }
+meta {
+    doc: """
+    Look up a skill by `name`, returning `null` when no match.
+
+    **Example**
+
+    ```hot
+    ::skill ::ai::skill
+    skills [::skill/Skill({name: "tone", description: "Customer voice", when: ["reply"], body: "Be warm."})]
+    ::skill/find-skill(skills, "tone").body  // "Be warm."
+    ::skill/find-skill(skills, "missing")  // null
+    ```
+    """
+}
 fn (skills: Vec<Skill>, name: Str): Skill? {
     find-first(skills, eq(%.name, name))
 }
@@ -311,6 +328,14 @@ meta {
     doc: """
     Build the body for a `list_skills` tool call: a vector of
     `{name, description, when}` maps suitable for an LLM to scan.
+
+    **Example**
+
+    ```hot
+    ::skill ::ai::skill
+    skills [::skill/Skill({name: "tone", description: "Customer voice", when: ["reply"], body: "Be warm."})]
+    ::skill/list-skills-of(skills)  // [{name: "tone", description: "Customer voice", when: ["reply"]}]
+    ```
     """
 }
 fn (skills: Vec<Skill>): Vec<Map> {
@@ -329,6 +354,16 @@ meta {
     Construct the `list_skills` built-in tool over the given skill
     set. Used internally by `builtins`; exposed for callers that want
     to wire individual built-ins by hand.
+
+    **Example**
+
+    ```hot
+    ::skill ::ai::skill
+    skills [::skill/Skill({name: "tone", description: "Customer voice", when: ["reply"], body: "Be warm."})]
+    tool ::skill/builtin-list-skills(skills)
+    tool.name  // "list_skills"
+    map(tool.fn(), %.name)  // ["tone"]
+    ```
     """
 }
 fn (skills: Vec<Skill>): ::tool/Tool {
@@ -347,6 +382,16 @@ meta {
     Construct the `read_skill` built-in tool over the given skill set.
     Returns the resolved body for the named skill, or an error string
     when the name is unknown.
+
+    **Example**
+
+    ```hot
+    ::skill ::ai::skill
+    skills [::skill/Skill({name: "tone", description: "Customer voice", when: ["reply"], body: "Be warm."})]
+    tool ::skill/builtin-read-skill(skills)
+    tool.fn("tone")  // "Be warm."
+    tool.fn("missing")  // "Unknown skill: missing"
+    ```
     """
 }
 fn (skills: Vec<Skill>): ::tool/Tool {
@@ -377,6 +422,15 @@ meta {
     merged into the model-supplied ctx **with harness keys winning**.
     The harness uses this to thread per-turn data (e.g. `attachments`)
     into skill activation without trusting the model to populate it.
+
+    **Example**
+
+    ```hot
+    ::skill ::ai::skill
+    skills [::skill/Skill({name: "tone", description: "Customer voice", when: ["reply"], body: "Be warm."})]
+    tool ::skill/builtin-apply-skill(skills, {user: "Ada"})
+    tool.fn("tone", {})  // "Be warm."
+    ```
     """
 }
 fn
@@ -417,6 +471,14 @@ meta {
     Equivalent to `builtins-with-resolver(in-memory-resolver(skills))`
     minus the optional `search_skills` tool. Kept for backwards
     compatibility with callers that wire skill toolsets directly.
+
+    **Example**
+
+    ```hot
+    ::skill ::ai::skill
+    skills [::skill/Skill({name: "tone", description: "Customer voice", when: ["reply"], body: "Be warm."})]
+    map(::skill/builtins(skills), %.name)  // ["list_skills", "read_skill", "apply_skill"]
+    ```
     """
 }
 fn
@@ -516,6 +578,15 @@ meta {
     (default 10); `opts.min-score` filters out weak hits (default 1).
     Returns the highest-scoring `Skill` records, ties broken by input
     order.
+
+    **Example**
+
+    ```hot
+    ::skill ::ai::skill
+    skills [::skill/Skill({name: "tone", description: "Customer voice", when: ["reply"], body: "Be warm."})]
+    map(::skill/search-skills-of(skills, "voice", {limit: 5}), %.name)  // ["tone"]
+    ::skill/search-skills-of(skills, "zzz", {})  // []
+    ```
     """
 }
 fn (skills: Vec<Skill>, query: Str, opts: Map): Vec<Skill> {
@@ -541,6 +612,16 @@ meta {
     `search-fn` is `null`. Mirrors the pre-resolver behaviour of
     `::ai::chat/run-loop` exactly, so wrapping `opts.skills` in this
     resolver is a no-op for the model.
+
+    **Example**
+
+    ```hot
+    ::skill ::ai::skill
+    skills [::skill/Skill({name: "tone", description: "Customer voice", when: ["reply"], body: "Be warm."})]
+    resolver ::skill/in-memory-resolver(skills)
+    map(resolver.list-fn({}), %.name)  // ["tone"]
+    resolver.read-fn("tone").body  // "Be warm."
+    ```
     """
 }
 fn (skills: Vec<Skill>): SkillResolver {
@@ -565,6 +646,16 @@ meta {
     are reachable only via `search_skills` and `read_skill`. This
     keeps the system-prompt index small while still letting the
     model find the long tail.
+
+    **Example**
+
+    ```hot
+    ::skill ::ai::skill
+    skills [::skill/Skill({name: "tone", description: "Customer voice", when: ["reply"], body: "Be warm."})]
+    resolver ::skill/searchable-resolver(skills, {always-on: []})
+    resolver.list-fn({})  // []
+    map(resolver.search-fn("voice", {}), %.name)  // ["tone"]
+    ```
     """
 }
 fn (skills: Vec<Skill>, opts: Map): SkillResolver {
@@ -591,6 +682,15 @@ meta {
     invocation, so resolvers that change their output over time (e.g.
     a hybrid resolver that re-ranks after new context arrives) stay
     in sync with what the model sees.
+
+    **Example**
+
+    ```hot
+    ::skill ::ai::skill
+    skills [::skill/Skill({name: "tone", description: "Customer voice", when: ["reply"], body: "Be warm."})]
+    tool ::skill/builtin-list-skills-r(::skill/in-memory-resolver(skills))
+    map(tool.fn(), %.name)  // ["tone"]
+    ```
     """
 }
 fn (resolver: SkillResolver): ::tool/Tool {
@@ -609,6 +709,15 @@ meta {
     Resolver-aware variant of `builtin-read-skill`. Routes name
     lookups through `resolver.read-fn`, so a store-backed resolver
     can serve skills it never surfaced in the index.
+
+    **Example**
+
+    ```hot
+    ::skill ::ai::skill
+    skills [::skill/Skill({name: "tone", description: "Customer voice", when: ["reply"], body: "Be warm."})]
+    tool ::skill/builtin-read-skill-r(::skill/in-memory-resolver(skills))
+    tool.fn("tone")  // "Be warm."
+    ```
     """
 }
 fn (resolver: SkillResolver): ::tool/Tool {
@@ -638,6 +747,15 @@ meta {
     The arity-2 form takes a `skill-context: Map?` whose keys are
     merged into the model-supplied ctx with harness keys winning.
     See `ChatOptions.skill-context`.
+
+    **Example**
+
+    ```hot
+    ::skill ::ai::skill
+    skills [::skill/Skill({name: "tone", description: "Customer voice", when: ["reply"], body: "Be warm."})]
+    tool ::skill/builtin-apply-skill-r(::skill/in-memory-resolver(skills), {user: "Ada"})
+    tool.fn("tone", {})  // "Be warm."
+    ```
     """
 }
 fn
@@ -670,6 +788,15 @@ meta {
     declares a `search-fn`; built around `resolver.search-fn(query,
     opts)` so any backing strategy (substring, embeddings, vendor
     APIs) works without changes here.
+
+    **Example**
+
+    ```hot
+    ::skill ::ai::skill
+    skills [::skill/Skill({name: "tone", description: "Customer voice", when: ["reply"], body: "Be warm."})]
+    tool ::skill/builtin-search-skills-r(::skill/searchable-resolver(skills, {}))
+    map(tool.fn("voice", 3), %.name)  // ["tone"]
+    ```
     """
 }
 fn (resolver: SkillResolver): ::tool/Tool {
@@ -714,6 +841,15 @@ meta {
     The arity-2 form forwards `skill-context` to `builtin-apply-skill-r`
     so per-turn harness data flows into skill activation. See
     `ChatOptions.skill-context` for the conventional usage.
+
+    **Example**
+
+    ```hot
+    ::skill ::ai::skill
+    skills [::skill/Skill({name: "tone", description: "Customer voice", when: ["reply"], body: "Be warm."})]
+    map(::skill/builtins-with-resolver(::skill/searchable-resolver(skills, {})), %.name)
+    // ["list_skills", "read_skill", "apply_skill", "search_skills"]
+    ```
     """
 }
 fn
@@ -742,6 +878,16 @@ meta {
        wrapped in `in-memory-resolver`.
     3. When neither is set, returns `null` — `run-loop` skips the
        skill index and skill builtins entirely.
+
+    **Example**
+
+    ```hot
+    ::skill ::ai::skill
+    skills [::skill/Skill({name: "tone", description: "Customer voice", when: ["reply"], body: "Be warm."})]
+    ::skill/effective-resolver(null, null)  // null
+    resolver ::skill/effective-resolver(null, skills)
+    map(resolver.list-fn({}), %.name)  // ["tone"]
+    ```
     """
 }
 fn (skill-resolver: SkillResolver?, skills: Vec<Any>?): SkillResolver? {

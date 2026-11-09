@@ -103,7 +103,9 @@ type {
     retry-after: Int?
 }
 
-decode-body fn (body: Any): Any {
+decode-body
+meta {no-doc: true}
+fn (body: Any): Any {
   cond {
     is-bytes(body) => {
       parsed from-json(Str(body))
@@ -126,7 +128,9 @@ decode-body fn (body: Any): Any {
 
 // Intuit sends `Fault` / `Error` / `Message` on most errors but lowercase
 // `fault` / `error` / `message` on authentication failures.
-pick fn (m: Any, upper: Str, lower: Str): Any {
+pick
+meta {no-doc: true}
+fn (m: Any, upper: Str, lower: Str): Any {
   cond {
     not(is-map(m)) => { null }
     is-some(get(m, upper)) => { get(m, upper) }
@@ -135,7 +139,18 @@ pick fn (m: Any, upper: Str, lower: Str): Any {
 }
 
 fault-of
-meta {doc: """The `Fault` object of a decoded body (either case), or null."""}
+meta {
+    doc: """
+    The `Fault` object of a decoded body (either case), or null.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::api/fault-of({Fault: {type: "ValidationFault"}})  // {type: "ValidationFault"}
+    ::quickbooks::api/fault-of({Invoice: {Id: "130"}})  // null
+    ```
+    """
+}
 fn (body: Any): Map? {
   f pick(decode-body(body), "Fault", "fault")
   if(is-map(f), f, null)
@@ -149,6 +164,14 @@ meta {
     failures) into `{fault-type, errors}`, where each error is
     `{message, detail, code, element}`. `errors` is empty when the body
     has no fault. Pure.
+
+    **Example**
+
+    ```hot
+    body {Fault: {type: "ValidationFault", Error: [{Message: "Duplicate Name", code: "6240"}]}}
+    ::quickbooks::api/fault-details(body)
+    // {fault-type: "ValidationFault", errors: [{message: "Duplicate Name", code: "6240"}]}
+    ```
     """
 }
 fn (body: Any): Map {
@@ -173,7 +196,17 @@ fn (body: Any): Map {
 
 body-excerpt
 meta {
-    doc: """A short (at most 300 characters) printable form of a body, for error messages."""
+    doc: """
+    A short (at most 300 characters) printable form of a body, for error
+    messages.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::api/body-excerpt("Service unavailable")  // "Service unavailable"
+    ::quickbooks::api/body-excerpt(null)  // ""
+    ```
+    """
 }
 fn (body: Any): Str {
   text cond {
@@ -186,7 +219,9 @@ fn (body: Any): Str {
   if(gt(length(text), 300), `${slice(text, 0, 300)}...`, text)
 }
 
-describe-error fn (e: Map): Str {
+describe-error
+meta {no-doc: true}
+fn (e: Map): Str {
   message get(e, "message")
   detail get(e, "detail")
   element get(e, "element")
@@ -201,7 +236,18 @@ describe-error fn (e: Map): Str {
 }
 
 retry-after-seconds
-meta {doc: """A numeric `Retry-After` header as whole seconds, or null."""}
+meta {
+    doc: """
+    A numeric `Retry-After` header as whole seconds, or null.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::api/retry-after-seconds({retry-after: "30"})  // 30
+    ::quickbooks::api/retry-after-seconds({})  // null
+    ```
+    """
+}
 fn (headers: Map?): Int? {
   int-or-null(get(or(headers, {}), "retry-after"))
 }
@@ -237,14 +283,26 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   })
 }
 
-plain-payload fn (value: Result): Any {
+plain-payload
+meta {no-doc: true}
+fn (value: Result): Any {
   payload if(is-err(value), err-value(value), value)
   if(or(is-null(payload), is-str(payload)), payload, untype(payload))
 }
 
 is-connection-failure
 meta {
-    doc: """True when a transport error message is a connection or read failure, not a size-limit or URL error."""
+    doc: """
+    True when a transport error message is a connection or read failure, not
+    a size-limit or URL error.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::api/is-connection-failure("request failed: connection reset")  // true
+    ::quickbooks::api/is-connection-failure("request failed: body exceeds limit")  // false
+    ```
+    """
 }
 fn (message: Str): Bool {
   and(
@@ -300,7 +358,18 @@ fn (error: Result): Bool {
 
 validate-environment
 meta {
-    doc: """`"sandbox"` or `"production"` (trimmed, lowercased) from a value; null means production. Anything else is an Err. Pure."""
+    doc: """
+    `"sandbox"` or `"production"` (trimmed, lowercased) from a value; null
+    means production. Anything else is an Err. Pure.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::api/validate-environment(" Sandbox ")  // "sandbox"
+    ::quickbooks::api/validate-environment(null)  // "production"
+    is-err(::quickbooks::api/validate-environment("staging"))  // true
+    ```
+    """
 }
 fn (value: Any): Str {
   cond {
@@ -312,7 +381,19 @@ fn (value: Any): Str {
 
 environment
 meta {
-    doc: """The environment for a call: `opts.environment`, else `quickbooks.environment`, else production. An `environment` in `opts` that is blank or null is an Err, so it never means production by accident."""
+    doc: """
+    The environment for a call: `opts.environment`, else
+    `quickbooks.environment`, else production. An `environment` in `opts`
+    that is blank or null is an Err, so it never means production by
+    accident.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::api/environment({environment: "sandbox"})  // "sandbox"
+    is-err(::quickbooks::api/environment({environment: ""}))  // true
+    ```
+    """
 }
 fn (opts: Map): Str {
   cond {
@@ -331,6 +412,16 @@ meta {
     (`access-token`, `refresh-token` or `token-store`): sandbox and
     production tokens differ, so context credentials never go to the other
     environment's host.
+
+    **Example**
+
+    ```hot
+    // Sandbox calls from a production project bring their own credential
+    ::quickbooks::api/call-environment({
+      environment: "sandbox",
+      access-token: ::hot::ctx/get("quickbooks.access.token")
+    })
+    ```
     """
 }
 fn (opts: Map): Str {
@@ -350,7 +441,18 @@ fn (opts: Map): Str {
 
 base-url
 meta {
-    doc: """The API host for an environment: `https://sandbox-quickbooks.api.intuit.com` or `https://quickbooks.api.intuit.com`."""
+    doc: """
+    The API host for an environment:
+    `https://sandbox-quickbooks.api.intuit.com` or
+    `https://quickbooks.api.intuit.com`.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::api/base-url("sandbox")  // "https://sandbox-quickbooks.api.intuit.com"
+    ::quickbooks::api/base-url("production")  // "https://quickbooks.api.intuit.com"
+    ```
+    """
 }
 fn (env: Str): Str {
   checked validate-environment(env)
@@ -359,7 +461,17 @@ fn (env: Str): Str {
 
 validate-realm-id
 meta {
-    doc: """A realm id (company id) as a digit Str, or an Err. Ints are accepted. Pure."""
+    doc: """
+    A realm id (company id) as a digit Str, or an Err. Ints are accepted.
+    Pure.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::api/validate-realm-id(9341453)  // "9341453"
+    is-err(::quickbooks::api/validate-realm-id("acme"))  // true
+    ```
+    """
 }
 fn (value: Any): Str {
   text if(is-null(value), "", trim(Str(value)))
@@ -372,7 +484,18 @@ fn (value: Any): Str {
 
 realm-id
 meta {
-    doc: """The company for a call: `opts.realm-id`, else `quickbooks.realm.id`. A `realm-id` in `opts` that is blank or null is an Err, so a tenant whose id is missing never runs on the configured company."""
+    doc: """
+    The company for a call: `opts.realm-id`, else `quickbooks.realm.id`. A
+    `realm-id` in `opts` that is blank or null is an Err, so a tenant whose
+    id is missing never runs on the configured company.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::api/realm-id({realm-id: "9341453"})  // "9341453"
+    is-err(::quickbooks::api/realm-id({realm-id: ""}))  // true
+    ```
+    """
 }
 fn (opts: Map): Str {
   cond {
@@ -385,7 +508,18 @@ fn (opts: Map): Str {
 
 validate-minorversion
 meta {
-    doc: """A minorversion as a digit Str: null means `MINOR_VERSION`; values below `MIN_MINOR_VERSION` (retired by Intuit) and non-numbers are Errs. Pure."""
+    doc: """
+    A minorversion as a digit Str: null means `MINOR_VERSION`; values below
+    `MIN_MINOR_VERSION` (retired by Intuit) and non-numbers are Errs. Pure.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::api/validate-minorversion(null)  // "75"
+    ::quickbooks::api/validate-minorversion(80)  // "80"
+    is-err(::quickbooks::api/validate-minorversion(60))  // true
+    ```
+    """
 }
 fn (value: Any): Str {
   text if(is-blank(value), ::quickbooks/MINOR_VERSION, trim(Str(value)))
@@ -401,7 +535,16 @@ fn (value: Any): Str {
 
 minorversion
 meta {
-    doc: """The minorversion for a call: `opts.minorversion`, else `quickbooks.minorversion`, else `MINOR_VERSION`."""
+    doc: """
+    The minorversion for a call: `opts.minorversion`, else
+    `quickbooks.minorversion`, else `MINOR_VERSION`.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::api/minorversion({minorversion: 80})  // "80"
+    ```
+    """
 }
 fn (opts: Map): Str {
   validate-minorversion(or(get(opts, "minorversion"), ::ctx/get("quickbooks.minorversion")))
@@ -409,7 +552,17 @@ fn (opts: Map): Str {
 
 validate-request-id
 meta {
-    doc: """An `opts.request-id` (1-50 characters) or null; longer values are an Err. Pure."""
+    doc: """
+    An `opts.request-id` (1-50 characters) or null; longer values are an
+    Err. Pure.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::api/validate-request-id("order-4411-invoice")  // "order-4411-invoice"
+    ::quickbooks::api/validate-request-id(null)  // null
+    ```
+    """
 }
 fn (value: Any): Str? {
   cond {
@@ -423,7 +576,9 @@ fn (value: Any): Str? {
 // URL building (pure)
 // ---------------------------------------------------------------------------
 
-encode-param fn (value: Any): Str {
+encode-param
+meta {no-doc: true}
+fn (value: Any): Str {
   cond {
     is-bool(value) => { if(value, "true", "false") }
     // Vec values are comma-joined; each element is encoded, the commas are not.
@@ -439,6 +594,14 @@ meta {
     encode as `true`/`false`, Vecs are comma-joined (`entities=Invoice,Bill`),
     and keys and values are percent-encoded (spaces as `%20`). `""` when
     nothing remains. Pure.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::api/query-string({operation: "void", include: null})  // "?operation=void"
+    ::quickbooks::api/query-string({entities: ["Invoice", "Bill"]})  // "?entities=Invoice,Bill"
+    ::quickbooks::api/query-string({})  // ""
+    ```
     """
 }
 fn (params: Map): Str {
@@ -449,7 +612,17 @@ fn (params: Map): Str {
 
 segment
 meta {
-    doc: """Percent-encode one path segment (an entity id). Ints pass through as text."""
+    doc: """
+    Percent-encode one path segment (an entity id). Ints pass through as
+    text.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::api/segment("a b")  // "a%20b"
+    ::quickbooks::api/segment(130)  // "130"
+    ```
+    """
 }
 fn (value: Any): Str {
   ::uri/encode(Str(value))
@@ -486,6 +659,7 @@ meta {
     records.
 
     ```hot
+    tenant-refresh-token ::hot::ctx/get("quickbooks.refresh.token")
     r ::quickbooks::api/resolve({realm-id: "9341453", refresh-token: tenant-refresh-token, environment: "sandbox"})
     r.credentials.kind   // "refresh"
     ```
@@ -508,7 +682,19 @@ fn (opts: Map): Map {
 }
 
 resolved-url
-meta {doc: """The full URL for `path` and `params` from a `resolve` result (pure)."""}
+meta {
+    doc: """
+    The full URL for `path` and `params` from a `resolve` result (pure).
+
+    **Example**
+
+    ```hot
+    resolved {environment: "sandbox", realm-id: "9341453", minorversion: "75", request-id: null}
+    ::quickbooks::api/resolved-url(resolved, "/invoice/130", {})
+    // "https://sandbox-quickbooks.api.intuit.com/v3/company/9341453/invoice/130?minorversion=75"
+    ```
+    """
+}
 fn (resolved: Map, path: Str, params: Map): Str {
   company-url(resolved.environment, resolved.realm-id, resolved.minorversion, path, {...params, requestid: resolved.request-id})
 }
@@ -524,6 +710,15 @@ meta {
     JSON; a Str body is sent verbatim (set its `Content-Type` in
     `headers`); `""` or null sends no body. `Accept` defaults to
     `application/json`. Caller headers win.
+
+    **Example**
+
+    ```hot
+    token ::hot::ctx/get("quickbooks.access.token")
+    url "https://sandbox-quickbooks.api.intuit.com/v3/company/9341453/customer?minorversion=75"
+    req ::quickbooks::api/build-request("POST", url, token, {DisplayName: "Acme Corp"}, {})
+    req.headers.Content-Type  // the Map body is sent as JSON
+    ```
     """
 }
 fn (method: Str, url: Str, token: Str, body: Any, headers: Map): HttpRequest {
@@ -546,7 +741,18 @@ fn (method: Str, url: Str, token: Str, body: Any, headers: Map): HttpRequest {
 
 retry-budget
 meta {
-    doc: """How many immediate retries a call gets (0 or 1): none when `opts.retry` is false or 0, or when the call is not idempotent. Pure."""
+    doc: """
+    How many immediate retries a call gets (0 or 1): none when `opts.retry`
+    is false or 0, or when the call is not idempotent. Pure.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::api/retry-budget({}, true)  // 1
+    ::quickbooks::api/retry-budget({retry: false}, true)  // 0
+    ::quickbooks::api/retry-budget({}, false)  // 0
+    ```
+    """
 }
 fn (opts: Map, idempotent: Bool): Int {
   r get(opts, "retry")
@@ -557,7 +763,9 @@ fn (opts: Map, idempotent: Bool): Int {
   }
 }
 
-send-with-retry fn (req: HttpRequest, budget: Int): HttpResponse {
+send-with-retry
+meta {no-doc: true}
+fn (req: HttpRequest, budget: Int): HttpResponse {
   response http-request(req)
   cond {
     and(is-err(response), gt(budget, 0), is-connection-failure(err-message(response))) => { send-with-retry(req, sub(budget, 1)) }
@@ -576,6 +784,16 @@ meta {
     `Content-Type` in `headers`) or `""`. `opts` carries per-call
     credentials, `realm-id`, `environment`, `minorversion`, `request-id`
     and `retry`.
+
+    **Example**
+
+    ```hot
+    response ::quickbooks::api/request("GET", "/invoice/130", {}, "", {realm-id: "9341453"})
+    if(::hot::http/is-ok-response(response), response.body.Invoice.Balance, response.status)
+
+    // Six arguments add request headers
+    ::quickbooks::api/request("POST", "/query", {}, "select * from Vendor", {Content-Type: "application/text"}, {idempotent: true})
+    ```
     """
 }
 fn
@@ -616,7 +834,21 @@ fn
 
 unwrap
 meta {
-    doc: """The decoded body of a successful response; an Err for transport failures; `err(HttpError)` for non-2xx responses and for 2xx bodies that carry a `Fault`."""
+    doc: """
+    The decoded body of a successful response; an Err for transport
+    failures; `err(HttpError)` for non-2xx responses and for 2xx bodies that
+    carry a `Fault`.
+
+    **Example**
+
+    ```hot
+    ok-response ::hot::http/HttpResponse({status: 200, body: {Invoice: {Id: "130"}}})
+    ::quickbooks::api/unwrap(ok-response).Invoice.Id  // "130"
+
+    failed ::hot::http/HttpResponse({status: 404, body: ""})
+    is-err(::quickbooks::api/unwrap(failed))  // true
+    ```
+    """
 }
 fn (response: Result): Any {
   cond {
@@ -653,7 +885,17 @@ fn
 
 bytes
 meta {
-    doc: """GET `path` as binary (e.g. `/invoice/130/pdf`) with `Accept: accept`. Returns the response `Bytes`, or an Err carrying `HttpError`."""
+    doc: """
+    GET `path` as binary (e.g. `/invoice/130/pdf`) with `Accept: accept`.
+    Returns the response `Bytes`, or an Err carrying `HttpError`.
+
+    **Example**
+
+    ```hot
+    pdf ::quickbooks::api/bytes("/invoice/130/pdf", "application/pdf", {realm-id: "9341453"})
+    length(pdf)
+    ```
+    """
 }
 fn (path: Str, accept: Str, opts: Map): Bytes {
   response request("GET", path, {}, "", {Accept: accept}, opts)

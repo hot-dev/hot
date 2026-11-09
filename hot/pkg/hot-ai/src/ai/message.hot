@@ -35,26 +35,65 @@ type {
 }
 
 user-msg
-meta { doc: "Create a ChatMessage with role User." }
+meta {
+    doc: """
+    Create a ChatMessage with role User.
+
+    **Example**
+
+    ```hot
+    ::ai::message/user-msg("Hello").content  // "Hello"
+    ```
+    """
+}
 fn (content: Str): ChatMessage {
     ChatMessage({role: Role.User, content: content})
 }
 
 assistant-msg
-meta { doc: "Create a ChatMessage with role Assistant." }
+meta {
+    doc: """
+    Create a ChatMessage with role Assistant.
+
+    **Example**
+
+    ```hot
+    ::ai::message/assistant-msg("Hi there").content  // "Hi there"
+    ```
+    """
+}
 fn (content: Str): ChatMessage {
     ChatMessage({role: Role.Assistant, content: content})
 }
 
 system-msg
-meta { doc: "Create a ChatMessage with role System." }
+meta {
+    doc: """
+    Create a ChatMessage with role System.
+
+    **Example**
+
+    ```hot
+    ::ai::message/system-msg("Be concise.").content  // "Be concise."
+    ```
+    """
+}
 fn (content: Str): ChatMessage {
     ChatMessage({role: Role.System, content: content})
 }
 
 tool-msg
 meta {
-    doc: "Create a ChatMessage with role Tool — used for tool/function call results fed back into the model."
+    doc: """
+    Create a ChatMessage with role Tool — used for tool/function call
+    results fed back into the model.
+
+    **Example**
+
+    ```hot
+    ::ai::message/tool-msg("18C and clear").content  // "18C and clear"
+    ```
+    """
 }
 fn (content: Str): ChatMessage {
     ChatMessage({role: Role.Tool, content: content})
@@ -100,7 +139,20 @@ type {
 // ============================================================================
 
 format-messages
-meta { doc: "Render a Vec of Messages as [sender]: content lines for AI prompts." }
+meta {
+    doc: """
+    Render a Vec of Messages as [sender]: content lines for AI prompts.
+
+    **Example**
+
+    ```hot
+    ::ai::message/format-messages([
+        {content: "Hello", sender: {id: "u1", name: "Ada"}},
+        {content: "Hi Ada", sender: {id: "u2"}}
+    ])  // "[Ada]: Hello\n[u2]: Hi Ada"
+    ```
+    """
+}
 fn (messages: Vec): Str {
     messages
         |> map((m) { `[${or(m.sender.name, m.sender.id)}]: ${m.content}` })
@@ -108,7 +160,20 @@ fn (messages: Vec): Str {
 }
 
 format-chat-messages
-meta { doc: "Render a Vec of ChatMessages as role: content lines." }
+meta {
+    doc: """
+    Render a Vec of ChatMessages as role: content lines.
+
+    **Example**
+
+    ```hot
+    ::ai::message/format-chat-messages([
+        ::ai::message/user-msg("Hello"),
+        ::ai::message/assistant-msg("Hi there")
+    ])  // "user: Hello\nassistant: Hi there"
+    ```
+    """
+}
 fn (messages: Vec): Str {
     messages
         |> map((m) {

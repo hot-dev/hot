@@ -19,6 +19,13 @@ meta {
     location, supported actions and line items with `remainingQuantity`.
     Options: `first`, `after`, `query` (e.g. `"status:open"`). Returns a
     connection `{nodes, pageInfo}`.
+
+    **Example**
+
+    ```hot
+    page ::shopify::fulfillments/list-fulfillment-orders("gid://shopify/Order/1001", {query: "status:open"})
+    map(page.nodes, %.status)
+    ```
     """
 }
 fn
@@ -57,7 +64,18 @@ fn
 
 build-tracking-input
 meta {
-    doc: """`FulfillmentTrackingInput` from `{company, number, url}` or `{company, numbers, urls}` (multi-package). Unset fields are omitted; returns null when nothing is set. Exposed for testing."""
+    doc: """
+    `FulfillmentTrackingInput` from `{company, number, url}` or `{company,
+    numbers, urls}` (multi-package). Unset fields are omitted; returns null
+    when nothing is set. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::shopify::fulfillments/build-tracking-input({company: "UPS", number: "1Z999", url: null})  // {company: "UPS", number: "1Z999"}
+    ::shopify::fulfillments/build-tracking-input(null)  // null
+    ```
+    """
 }
 fn (tracking: Map?): Map? {
   t or(tracking, {})
@@ -79,6 +97,14 @@ meta {
     (omit the line items to fulfil everything remaining), or a single
     fulfillment order id Str. Options: `notifyCustomer`, `originAddress`.
     Exposed for testing.
+
+    **Example**
+
+    ```hot
+    input ::shopify::fulfillments/build-fulfillment-input("gid://shopify/FulfillmentOrder/2", {company: "UPS", number: "1Z999"}, {notifyCustomer: true})
+    input.lineItemsByFulfillmentOrder  // [{fulfillmentOrderId: "gid://shopify/FulfillmentOrder/2"}]
+    input.notifyCustomer  // true
+    ```
     """
 }
 fn (line-items: Any, tracking: Map?, options: Map): Map {
@@ -108,7 +134,7 @@ meta {
     **Example**
 
     ```hot
-    fos ::shopify::fulfillments/list-fulfillment-orders(order.id, {query: "status:open"})
+    fos ::shopify::fulfillments/list-fulfillment-orders("gid://shopify/Order/1001", {query: "status:open"})
     ::shopify::fulfillments/create-fulfillment(first(fos.nodes).id, {
       company: "UPS",
       number: "1Z001985YW99744790"
@@ -145,7 +171,17 @@ fn
 
 update-tracking
 meta {
-    doc: """Replace a fulfillment's tracking (`fulfillmentTrackingInfoUpdate`). `tracking` as in `create-fulfillment`; `notify-customer` emails the customer about this and later updates."""
+    doc: """
+    Replace a fulfillment's tracking (`fulfillmentTrackingInfoUpdate`).
+    `tracking` as in `create-fulfillment`; `notify-customer` emails the
+    customer about this and later updates.
+
+    **Example**
+
+    ```hot
+    ::shopify::fulfillments/update-tracking("gid://shopify/Fulfillment/9", {company: "UPS", number: "1Z999"}, true)
+    ```
+    """
 }
 fn
 (fulfillment-id: Str, tracking: Map): Map {

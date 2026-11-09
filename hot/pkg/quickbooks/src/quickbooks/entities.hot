@@ -86,7 +86,17 @@ VOID_BY_UPDATE ["Payment", "BillPayment"]
 
 canonical-name
 meta {
-    doc: """The canonical entity name for `name` (case-insensitive, e.g. `"invoice"` gives `"Invoice"`), or an Err listing the supported names."""
+    doc: """
+    The canonical entity name for `name` (case-insensitive, e.g. `"invoice"`
+    gives `"Invoice"`), or an Err listing the supported names.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::entities/canonical-name("invoice")  // "Invoice"
+    is-err(::quickbooks::entities/canonical-name("Widget"))  // true
+    ```
+    """
 }
 fn (name: Str): Str {
   wanted lowercase(trim(name))
@@ -98,7 +108,19 @@ fn (name: Str): Str {
 }
 
 entity-info
-meta {doc: """`{name, path, kind, ops}` for an entity, or an Err."""}
+meta {
+    doc: """
+    `{name, path, kind, ops}` for an entity, or an Err.
+
+    **Example**
+
+    ```hot
+    info ::quickbooks::entities/entity-info("billpayment")
+    info.name  // "BillPayment"
+    info.kind  // "transaction"
+    ```
+    """
+}
 fn (name: Str): Map {
   canonical canonical-name(name)
   cond {
@@ -109,7 +131,17 @@ fn (name: Str): Map {
 
 require-op
 meta {
-    doc: """The entity info when the entity supports `op`, else an Err that says what to do instead."""
+    doc: """
+    The entity info when the entity supports `op`, else an Err that says
+    what to do instead.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::entities/require-op("Invoice", "void").path  // "invoice"
+    is-err(::quickbooks::entities/require-op("Customer", "delete"))  // true
+    ```
+    """
 }
 fn (name: Str, op: Str): Map {
   info entity-info(name)
@@ -125,14 +157,18 @@ fn (name: Str, op: Str): Map {
   }
 }
 
-check-id fn (id: Any, what: Str): Str {
+check-id
+meta {no-doc: true}
+fn (id: Any, what: Str): Str {
   cond {
     is-blank(id) => { err(`quickbooks: ${what} needs an entity Id`) }
     => { Str(id) }
   }
 }
 
-check-sync-token fn (sync-token: Any, what: Str): Str {
+check-sync-token
+meta {no-doc: true}
+fn (sync-token: Any, what: Str): Str {
   cond {
     is-blank(sync-token) => { err(`quickbooks: ${what} needs the entity's current SyncToken (read the entity first)`) }
     => { Str(sync-token) }
@@ -141,21 +177,52 @@ check-sync-token fn (sync-token: Any, what: Str): Str {
 
 build-sparse-body
 meta {
-    doc: """The body of a sparse update: `fields` plus `Id`, `SyncToken` and `sparse: true` (pure). Null fields are dropped; set a field to `""` or a value to change it."""
+    doc: """
+    The body of a sparse update: `fields` plus `Id`, `SyncToken` and
+    `sparse: true` (pure). Null fields are dropped; set a field to `""` or a
+    value to change it.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::entities/build-sparse-body("58", "3", {Active: false})
+    // {Active: false, Id: "58", SyncToken: "3", sparse: true}
+    ```
+    """
 }
 fn (id: Str, sync-token: Str, fields: Map): Map {
   {...filter-vals(untype(fields), is-some), Id: id, SyncToken: sync-token, sparse: true}
 }
 
 build-delete-body
-meta {doc: """The body of a delete or void: `{Id, SyncToken}` (pure)."""}
+meta {
+    doc: """
+    The body of a delete or void: `{Id, SyncToken}` (pure).
+
+    **Example**
+
+    ```hot
+    ::quickbooks::entities/build-delete-body("130", "2")  // {Id: "130", SyncToken: "2"}
+    ```
+    """
+}
 fn (id: Str, sync-token: Str): Map {
   {Id: id, SyncToken: sync-token}
 }
 
 entity-from
 meta {
-    doc: """The entity object in a write or read response: `body[Name]` (e.g. `body.Invoice`), else the body itself."""
+    doc: """
+    The entity object in a write or read response: `body[Name]` (e.g.
+    `body.Invoice`), else the body itself.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::entities/entity-from("Invoice", {Invoice: {Id: "130"}, time: "2026-11-01T00:00:00Z"})  // {Id: "130"}
+    ::quickbooks::entities/entity-from("Invoice", {Id: "130"})  // {Id: "130"}
+    ```
+    """
 }
 fn (name: Str, body: Any): Any {
   cond {
@@ -171,7 +238,23 @@ fn (name: Str, body: Any): Any {
 
 create-entity
 meta {
-    doc: """POST /{entity} - create an entity and return it (with `Id` and `SyncToken`). Pass `opts.request-id` to make the create safe to retry."""
+    doc: """
+    POST /{entity} - create an entity and return it (with `Id` and
+    `SyncToken`). Pass `opts.request-id` to make the create safe to retry.
+
+    **Example**
+
+    ```hot
+    customer ::quickbooks::entities/create-entity("Customer", {DisplayName: "Acme Corp"})
+    customer.Id
+
+    // request-id makes the create safe to retry
+    ::quickbooks::entities/create-entity("Invoice", {
+      CustomerRef: {value: customer.Id},
+      Line: [{DetailType: "SalesItemLineDetail", Amount: 1200.0, SalesItemLineDetail: {ItemRef: {value: "1"}}}]
+    }, {request-id: "order-4411-invoice"})
+    ```
+    """
 }
 fn
 (entity: Str, body: Map): Map {
@@ -186,7 +269,20 @@ fn
 }
 
 get-entity
-meta {doc: """GET /{entity}/{id} - read one entity by `Id`."""}
+meta {
+    doc: """
+    GET /{entity}/{id} - read one entity by `Id`.
+
+    **Example**
+
+    ```hot
+    invoice ::quickbooks::entities/get-entity("Invoice", "130")
+    invoice.Balance
+
+    ::quickbooks::entities/get-entity("Customer", 58, {realm-id: "9341453"})
+    ```
+    """
+}
 fn
 (entity: Str, id: Str | Int): Map {
   get-entity(entity, id, {})
@@ -208,6 +304,15 @@ meta {
     current `SyncToken`, and every writable field you leave out is
     cleared. Prefer `sparse-update`. Set `sparse: true` in `body` to make
     it sparse.
+
+    **Example**
+
+    ```hot
+    vendor ::quickbooks::entities/get-entity("Vendor", "56")
+
+    // Send the whole entity: fields left out are cleared
+    ::quickbooks::entities/update-entity("Vendor", {...vendor, CompanyName: "Acme Supplies"})
+    ```
     """
 }
 fn
@@ -256,7 +361,19 @@ fn
 
 delete-entity
 meta {
-    doc: """POST /{entity}?operation=delete - delete a transaction. Returns `{Id, status: "Deleted"}`. Name-list entities cannot be deleted: use `deactivate-entity`."""
+    doc: """
+    POST /{entity}?operation=delete - delete a transaction. Returns `{Id,
+    status: "Deleted"}`. Name-list entities cannot be deleted: use
+    `deactivate-entity`.
+
+    **Example**
+
+    ```hot
+    bill ::quickbooks::entities/get-entity("Bill", "88")
+    deleted ::quickbooks::entities/delete-entity("Bill", bill.Id, bill.SyncToken)
+    deleted.status
+    ```
+    """
 }
 fn
 (entity: Str, id: Str | Int, sync-token: Str | Int): Map {
@@ -276,7 +393,18 @@ fn
 
 void-request
 meta {
-    doc: """The `{params, body}` of a void for an entity (pure): `operation=void` for invoices and sales receipts, `operation=update&include=void` with a sparse body for payments and bill payments."""
+    doc: """
+    The `{params, body}` of a void for an entity (pure): `operation=void`
+    for invoices and sales receipts, `operation=update&include=void` with a
+    sparse body for payments and bill payments.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::entities/void-request("Invoice", "130", "2").params  // {operation: "void"}
+    ::quickbooks::entities/void-request("Payment", "95", "1").params  // {operation: "update", include: "void"}
+    ```
+    """
 }
 fn (name: Str, id: Str, sync-token: Str): Map {
   cond {
@@ -287,7 +415,19 @@ fn (name: Str, id: Str, sync-token: Str): Map {
 
 void-entity
 meta {
-    doc: """Void a transaction (Invoice, SalesReceipt, Payment, BillPayment): amounts become zero and the record stays for the audit trail. Returns the voided entity."""
+    doc: """
+    Void a transaction (Invoice, SalesReceipt, Payment, BillPayment):
+    amounts become zero and the record stays for the audit trail. Returns
+    the voided entity.
+
+    **Example**
+
+    ```hot
+    invoice ::quickbooks::entities/get-entity("Invoice", "130")
+    voided ::quickbooks::entities/void-entity("Invoice", invoice.Id, invoice.SyncToken)
+    voided.Balance
+    ```
+    """
 }
 fn
 (entity: Str, id: Str | Int, sync-token: Str | Int): Map {
@@ -310,7 +450,18 @@ fn
 
 deactivate-entity
 meta {
-    doc: """Make a name-list entity (Customer, Vendor, Item, Account, Class, Department, Employee) inactive with a sparse `Active: false` update. This is how QuickBooks "deletes" them; history is kept."""
+    doc: """
+    Make a name-list entity (Customer, Vendor, Item, Account, Class,
+    Department, Employee) inactive with a sparse `Active: false` update.
+    This is how QuickBooks "deletes" them; history is kept.
+
+    **Example**
+
+    ```hot
+    customer ::quickbooks::entities/get-entity("Customer", "58")
+    ::quickbooks::entities/deactivate-entity("Customer", customer.Id, customer.SyncToken)
+    ```
+    """
 }
 fn
 (entity: Str, id: Str | Int, sync-token: Str | Int): Map {
@@ -337,6 +488,16 @@ meta {
     on the entity (its `BillEmail`) and is saved back to it; pass null
     to use the stored address. Returns the entity with `EmailStatus`
     and `DeliveryInfo` updated.
+
+    **Example**
+
+    ```hot
+    sent ::quickbooks::entities/send-entity("Invoice", "130", "ap@acme.example")
+    sent.EmailStatus
+
+    // Null uses the address stored on the entity
+    ::quickbooks::entities/send-entity("Estimate", "41", null, {realm-id: "9341453"})
+    ```
     """
 }
 fn
@@ -362,7 +523,17 @@ fn
 
 entity-pdf
 meta {
-    doc: """GET /{entity}/{id}/pdf - the form as PDF `Bytes` (Invoice, Estimate, CreditMemo, SalesReceipt, Payment)."""
+    doc: """
+    GET /{entity}/{id}/pdf - the form as PDF `Bytes` (Invoice, Estimate,
+    CreditMemo, SalesReceipt, Payment).
+
+    **Example**
+
+    ```hot
+    pdf ::quickbooks::entities/entity-pdf("Estimate", "41")
+    length(pdf)
+    ```
+    """
 }
 fn
 (entity: Str, id: Str | Int): Bytes {
@@ -379,7 +550,18 @@ fn
 }
 
 send-invoice
-meta {doc: """Email an invoice; see `send-entity`."""}
+meta {
+    doc: """
+    Email an invoice; see `send-entity`.
+
+    **Example**
+
+    ```hot
+    sent ::quickbooks::entities/send-invoice("130", "ap@acme.example")
+    sent.DeliveryInfo
+    ```
+    """
+}
 fn
 (id: Str | Int, send-to: Str?): Map {
   send-entity("Invoice", id, send-to, {})
@@ -389,7 +571,18 @@ fn
 }
 
 invoice-pdf
-meta {doc: """An invoice as PDF `Bytes`; see `entity-pdf`."""}
+meta {
+    doc: """
+    An invoice as PDF `Bytes`; see `entity-pdf`.
+
+    **Example**
+
+    ```hot
+    pdf ::quickbooks::entities/invoice-pdf("130")
+    length(pdf)
+    ```
+    """
+}
 fn
 (id: Str | Int): Bytes {
   entity-pdf("Invoice", id, {})

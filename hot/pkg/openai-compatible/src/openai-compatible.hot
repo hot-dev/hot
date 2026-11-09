@@ -430,7 +430,9 @@ fn (preset: Preset, opts: Map, ctx-values: Map): CompatibleProvider {
     }
 }
 
-ctx-value fn (key: Str?): Any {
+ctx-value
+meta {no-doc: true}
+fn (key: Str?): Any {
     cond {
         is-null(key) => { null }
         => { ::ctx/get(key) }
@@ -482,7 +484,19 @@ fn (p: CompatibleProvider): ::ai::chat/ProviderRegistration {
 
 chat-fn
 meta {
-    doc: "The `::ai::chat/run-loop` chat function bound to `p` (for `ChatOptions.chat-fn`)."
+    doc: """
+    The `::ai::chat/run-loop` chat function bound to `p` (for
+    `ChatOptions.chat-fn`).
+
+    **Example**
+
+    ```hot
+    ::oc ::openai-compatible
+
+    opts ::ai::chat/ChatOptions({model: "llama3.2", chat-fn: ::oc/chat-fn(::oc/ollama())})
+    ::ai::chat/run-loop(opts, "Hello!")
+    ```
+    """
 }
 fn (p: CompatibleProvider): Fn {
     ::compat/chat-fn(p)
@@ -490,7 +504,19 @@ fn (p: CompatibleProvider): Fn {
 
 chat-stream-fn
 meta {
-    doc: "The `::ai::chat/run-loop-stream` chat function bound to `p` (for `ChatOptions.chat-stream-fn`)."
+    doc: """
+    The `::ai::chat/run-loop-stream` chat function bound to `p` (for
+    `ChatOptions.chat-stream-fn`).
+
+    **Example**
+
+    ```hot
+    ::oc ::openai-compatible
+
+    opts ::ai::chat/ChatOptions({model: "llama3.2", chat-stream-fn: ::oc/chat-stream-fn(::oc/ollama())})
+    ::ai::chat/run-loop-stream(opts, "Hello!", (delta) { print(delta) })
+    ```
+    """
 }
 fn (p: CompatibleProvider): Fn {
     ::compat/chat-stream-fn(p)
@@ -498,7 +524,23 @@ fn (p: CompatibleProvider): Fn {
 
 chat-opts-fn
 meta {
-    doc: "The `::ai::chat/run-loop` chat function bound to `p` that also takes `ChatOptions.provider-opts` (for `ChatOptions.chat-opts-fn`)."
+    doc: """
+    The `::ai::chat/run-loop` chat function bound to `p` that also takes
+    `ChatOptions.provider-opts` (for `ChatOptions.chat-opts-fn`).
+
+    **Example**
+
+    ```hot
+    ::oc ::openai-compatible
+
+    opts ::ai::chat/ChatOptions({
+      model: "llama-3.3-70b-versatile",
+      chat-opts-fn: ::oc/chat-opts-fn(::oc/groq()),
+      provider-opts: {api-key: ::hot::ctx/get("tenant.groq.key")}
+    })
+    ::ai::chat/run-loop(opts, "Hello!")
+    ```
+    """
 }
 fn (p: CompatibleProvider): Fn {
     ::compat/chat-opts-fn(p)
@@ -506,7 +548,24 @@ fn (p: CompatibleProvider): Fn {
 
 chat-stream-opts-fn
 meta {
-    doc: "The `::ai::chat/run-loop-stream` chat function bound to `p` that also takes `ChatOptions.provider-opts` (for `ChatOptions.chat-stream-opts-fn`)."
+    doc: """
+    The `::ai::chat/run-loop-stream` chat function bound to `p` that also
+    takes `ChatOptions.provider-opts` (for
+    `ChatOptions.chat-stream-opts-fn`).
+
+    **Example**
+
+    ```hot
+    ::oc ::openai-compatible
+
+    opts ::ai::chat/ChatOptions({
+      model: "llama-3.3-70b-versatile",
+      chat-stream-opts-fn: ::oc/chat-stream-opts-fn(::oc/groq()),
+      provider-opts: {api-key: ::hot::ctx/get("tenant.groq.key")}
+    })
+    ::ai::chat/run-loop-stream(opts, "Hello!", (delta) { print(delta) })
+    ```
+    """
 }
 fn (p: CompatibleProvider): Fn {
     ::compat/chat-stream-opts-fn(p)
@@ -522,6 +581,17 @@ meta {
     Local Ollama. `ollama.base.url` overrides the default
     `http://localhost:11434/v1` (e.g. `https://ollama.com/v1` for Ollama's
     hosted API, with `ollama.api.key`). Keyless by default.
+
+    **Example**
+
+    ```hot
+    ::oc ::openai-compatible
+
+    ::openai-compatible::chat/chat(::oc/ollama(), "llama3.2", "Say hi")
+
+    // A remote server, for one call
+    ::oc/ollama({base-url: "http://gpu-box.internal:11434/v1"})
+    ```
     """,
     ctx: {
         "ollama.base.url": {required: false, default: "http://localhost:11434/v1", secret: false},
@@ -538,7 +608,21 @@ fn
 
 vllm
 meta {
-    doc: """vLLM server at `vllm.base.url` (default `http://localhost:8000/v1`). `vllm.api.key` only when the server runs with `--api-key`.""",
+    doc: """
+    vLLM server at `vllm.base.url` (default `http://localhost:8000/v1`).
+    `vllm.api.key` only when the server runs with `--api-key`.
+
+    **Example**
+
+    ```hot
+    ::oc ::openai-compatible
+
+    ::openai-compatible::chat/chat(::oc/vllm(), "Qwen/Qwen3-8B", "Say hi")
+
+    // A remote server, for one call
+    ::oc/vllm({base-url: "http://gpu-box.internal:8000/v1"})
+    ```
+    """,
     ctx: {
         "vllm.base.url": {required: false, default: "http://localhost:8000/v1", secret: false},
         "vllm.api.key": {required: false}
@@ -554,7 +638,18 @@ fn
 
 lm-studio
 meta {
-    doc: """LM Studio server at `lm-studio.base.url` (default `http://localhost:1234/v1`). Keyless.""",
+    doc: """
+    LM Studio server at `lm-studio.base.url` (default
+    `http://localhost:1234/v1`). Keyless.
+
+    **Example**
+
+    ```hot
+    ::oc ::openai-compatible
+
+    ::openai-compatible::chat/chat(::oc/lm-studio(), "qwen/qwen3-8b", "Say hi")
+    ```
+    """,
     ctx: {"lm-studio.base.url": {required: false, default: "http://localhost:1234/v1", secret: false}}
 }
 fn
@@ -567,7 +662,20 @@ fn
 
 groq
 meta {
-    doc: "Groq with the `groq.api.key` ctx key.",
+    doc: """
+    Groq with the `groq.api.key` ctx key.
+
+    **Example**
+
+    ```hot
+    ::oc ::openai-compatible
+
+    ::openai-compatible::chat/chat(::oc/groq(), "llama-3.3-70b-versatile", "Say hi")
+
+    // Another tenant's key, for one call
+    ::oc/groq({api-key: ::hot::ctx/get("tenant.groq.key")})
+    ```
+    """,
     ctx: {"groq.api.key": {required: false}}
 }
 fn
@@ -584,6 +692,17 @@ meta {
     OpenRouter with the `openrouter.api.key` ctx key. Optional
     `openrouter.app.url` and `openrouter.app.title` are sent as the
     `HTTP-Referer` and `X-OpenRouter-Title` attribution headers.
+
+    **Example**
+
+    ```hot
+    ::oc ::openai-compatible
+
+    ::openai-compatible::chat/chat(::oc/openrouter(), "anthropic/claude-sonnet-4.5", "Say hi")
+
+    // Another tenant's key, for one call
+    ::oc/openrouter({api-key: ::hot::ctx/get("tenant.openrouter.key")})
+    ```
     """,
     ctx: {
         "openrouter.api.key": {required: false},
@@ -621,7 +740,20 @@ fn (app-url: Str?, app-title: Str?): Map {
 
 deepseek
 meta {
-    doc: "DeepSeek with the `deepseek.api.key` ctx key.",
+    doc: """
+    DeepSeek with the `deepseek.api.key` ctx key.
+
+    **Example**
+
+    ```hot
+    ::oc ::openai-compatible
+
+    ::openai-compatible::chat/chat(::oc/deepseek(), "deepseek-chat", "Say hi")
+
+    // Another tenant's key, for one call
+    ::oc/deepseek({api-key: ::hot::ctx/get("tenant.deepseek.key")})
+    ```
+    """,
     ctx: {"deepseek.api.key": {required: false}}
 }
 fn
@@ -634,7 +766,20 @@ fn
 
 together
 meta {
-    doc: "Together AI with the `together.api.key` ctx key.",
+    doc: """
+    Together AI with the `together.api.key` ctx key.
+
+    **Example**
+
+    ```hot
+    ::oc ::openai-compatible
+
+    ::openai-compatible::chat/chat(::oc/together(), "meta-llama/Llama-3.3-70B-Instruct-Turbo", "Say hi")
+
+    // Another tenant's key, for one call
+    ::oc/together({api-key: ::hot::ctx/get("tenant.together.key")})
+    ```
+    """,
     ctx: {"together.api.key": {required: false}}
 }
 fn
@@ -647,7 +792,20 @@ fn
 
 fireworks
 meta {
-    doc: "Fireworks AI with the `fireworks.api.key` ctx key.",
+    doc: """
+    Fireworks AI with the `fireworks.api.key` ctx key.
+
+    **Example**
+
+    ```hot
+    ::oc ::openai-compatible
+
+    ::openai-compatible::chat/chat(::oc/fireworks(), "accounts/fireworks/models/llama-v3p3-70b-instruct", "Say hi")
+
+    // Another tenant's key, for one call
+    ::oc/fireworks({api-key: ::hot::ctx/get("tenant.fireworks.key")})
+    ```
+    """,
     ctx: {"fireworks.api.key": {required: false}}
 }
 fn
@@ -660,7 +818,20 @@ fn
 
 mistral
 meta {
-    doc: "Mistral with the `mistral.api.key` ctx key.",
+    doc: """
+    Mistral with the `mistral.api.key` ctx key.
+
+    **Example**
+
+    ```hot
+    ::oc ::openai-compatible
+
+    ::openai-compatible::chat/chat(::oc/mistral(), "mistral-small-latest", "Say hi")
+
+    // Another tenant's key, for one call
+    ::oc/mistral({api-key: ::hot::ctx/get("tenant.mistral.key")})
+    ```
+    """,
     ctx: {"mistral.api.key": {required: false}}
 }
 fn
@@ -673,7 +844,20 @@ fn
 
 cerebras
 meta {
-    doc: "Cerebras with the `cerebras.api.key` ctx key.",
+    doc: """
+    Cerebras with the `cerebras.api.key` ctx key.
+
+    **Example**
+
+    ```hot
+    ::oc ::openai-compatible
+
+    ::openai-compatible::chat/chat(::oc/cerebras(), "llama-3.3-70b", "Say hi")
+
+    // Another tenant's key, for one call
+    ::oc/cerebras({api-key: ::hot::ctx/get("tenant.cerebras.key")})
+    ```
+    """,
     ctx: {"cerebras.api.key": {required: false}}
 }
 fn
@@ -686,7 +870,20 @@ fn
 
 perplexity
 meta {
-    doc: "Perplexity Sonar with the `perplexity.api.key` ctx key. No tool calling.",
+    doc: """
+    Perplexity Sonar with the `perplexity.api.key` ctx key. No tool calling.
+
+    **Example**
+
+    ```hot
+    ::oc ::openai-compatible
+
+    ::openai-compatible::chat/chat(::oc/perplexity(), "sonar", "Say hi")
+
+    // Another tenant's key, for one call
+    ::oc/perplexity({api-key: ::hot::ctx/get("tenant.perplexity.key")})
+    ```
+    """,
     ctx: {"perplexity.api.key": {required: false}}
 }
 fn
@@ -704,6 +901,18 @@ meta {
     `openai-compatible.url`, or `base-url` in `opts`, and an optional
     `openai-compatible.api.key`. Routing prefix `custom/`. No URL at all is
     an Err, so a key can't end up at a default.
+
+    **Example**
+
+    ```hot
+    ::oc ::openai-compatible
+
+    gateway ::oc/custom({
+      base-url: "https://llm.internal.example.com/v1",
+      api-key: ::hot::ctx/get("gateway.api.key")
+    })
+    ::openai-compatible::chat/chat(gateway, "my-model", "Say hi")
+    ```
     """,
     ctx: {
         "openai-compatible.url": {required: false, secret: false},

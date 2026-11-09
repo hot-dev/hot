@@ -2,7 +2,7 @@
 
 hot.pkg.ecfr {
   name: "hot.dev/ecfr",
-  version: "0.1.1",
+  version: "0.1.2",
   hot-min-version: "3.0.3",
   description: "The eCFR API for Hot, with no key: titles, structure, ancestry, versions, search, and full text by part or section.",
   author: "Hot Dev",

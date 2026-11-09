@@ -26,11 +26,15 @@ DocFile ::microsoft::onedrive/DocFile
 
 DEFAULT_PAGE_SIZE 200
 
-json fn (method: Str, path: Str, headers: Map, body: Any, opts: Map): Any {
+json
+meta {no-doc: true}
+fn (method: Str, path: Str, headers: Map, body: Any, opts: Map): Any {
   ::api/json(method, path, headers, body, ::od/creds(opts))
 }
 
-with-query fn (path: Str, opts: Map): Str {
+with-query
+meta {no-doc: true}
+fn (path: Str, opts: Map): Str {
   ::api/with-query(path, ::od/query-opts({}, opts))
 }
 
@@ -60,7 +64,19 @@ fn
 }
 
 get-doc-file
-meta {doc: """`get-item` normalised to a `::microsoft::onedrive/DocFile`."""}
+meta {
+    doc: """
+    `get-item` normalised to a `::microsoft::onedrive/DocFile`.
+
+    **Example**
+
+    ```hot
+    f ::microsoft::onedrive::items/get-doc-file("/Reports/Q3.xlsx")
+    f.version
+    f.web-url
+    ```
+    """
+}
 fn
 (item: Any): DocFile {
   get-doc-file(item, {})
@@ -72,7 +88,18 @@ fn
 
 resolve-remote
 meta {
-    doc: """For a shared item (`remoteItem`), fetch the target item from its own drive; otherwise return `item`. One hop."""
+    doc: """
+    For a shared item (`remoteItem`), fetch the target item from its own
+    drive; otherwise return `item`. One hop.
+
+    **Example**
+
+    ```hot
+    hits ::microsoft::onedrive::items/search("budget", {scope: "drive"}, 1)
+    target ::microsoft::onedrive::items/resolve-remote(first(hits))
+    target.id
+    ```
+    """
 }
 fn
 (item: Map): Map {
@@ -94,6 +121,14 @@ meta {
     `opts` takes `select`, `expand`, `top` (page size), `orderby` (e.g.
     `"name"`, `"lastModifiedDateTime desc"`; not on every drive type) and
     `drive`.
+
+    **Example**
+
+    ```hot
+    page ::microsoft::onedrive::items/list-children("/Reports", {top: 50, select: "id,name,file"})
+    map(page.value, %.name)
+    get(page, "@odata.nextLink")
+    ```
     """
 }
 fn
@@ -131,7 +166,16 @@ fn
 
 search-function
 meta {
-    doc: """The OData function segment for a search (pure): `search(q='...')` with `'` doubled and the text percent-encoded."""
+    doc: """
+    The OData function segment for a search (pure): `search(q='...')` with
+    `'` doubled and the text percent-encoded.
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive::items/search-function("q3 report")  // "search(q='q3%20report')"
+    ```
+    """
 }
 fn (query: Str): Str {
   `search(q='${::api/encode-segment(replace(query, "'", "''"))}')`
@@ -177,6 +221,13 @@ meta {
     (delegated only; entries from other drives carry `remoteItem`).
     **Deprecated by Microsoft:** degraded until November 2026, after
     which it returns no data. Prefer delta sync or `search`.
+
+    **Example**
+
+    ```hot
+    items ::microsoft::onedrive::items/recent()
+    map(items, %.name)
+    ```
     """
 }
 fn
@@ -196,6 +247,13 @@ meta {
     drive). `opts.allow-external: true` includes other tenants' items.
     **Deprecated by Microsoft:** degraded until November 2026, after
     which it returns no data.
+
+    **Example**
+
+    ```hot
+    items ::microsoft::onedrive::items/shared-with-me({allow-external: true})
+    map(items, %.remoteItem.id)
+    ```
     """
 }
 fn
@@ -214,7 +272,16 @@ fn
 
 build-folder
 meta {
-    doc: """The body for creating a folder (pure): `{name, folder: {}, @microsoft.graph.conflictBehavior}`, plus `opts.description`."""
+    doc: """
+    The body for creating a folder (pure): `{name, folder: {},
+    @microsoft.graph.conflictBehavior}`.
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive::items/build-folder("Reports", "fail")  // {name: "Reports", folder: {}, "@microsoft.graph.conflictBehavior": "fail"}
+    ```
+    """
 }
 fn (name: Str, conflict: Str): Map {
   {name: name, folder: {}, "@microsoft.graph.conflictBehavior": conflict}
@@ -245,7 +312,17 @@ fn
 
 ensure-folder
 meta {
-    doc: """Return the folder at `/path` (from the drive root), creating it and any missing parents. Returns the folder driveItem."""
+    doc: """
+    Return the folder at `/path` (from the drive root), creating it and any
+    missing parents. Returns the folder driveItem.
+
+    **Example**
+
+    ```hot
+    folder ::microsoft::onedrive::items/ensure-folder("/Reports/2026/Q3")
+    folder.id
+    ```
+    """
 }
 fn
 (path: Str): Map {
@@ -280,7 +357,20 @@ fn
 
 update-item
 meta {
-    doc: """PATCH an item's metadata (`name`, `description`, `parentReference`, `fileSystemInfo`, ...). `opts.if-match` (an eTag) makes it conditional (412 when changed). Returns the item."""
+    doc: """
+    PATCH an item's metadata (`name`, `description`, `parentReference`,
+    `fileSystemInfo`, ...). `opts.if-match` (an eTag) makes it conditional
+    (412 when changed). Returns the item.
+
+    **Example**
+
+    ```hot
+    item ::microsoft::onedrive::items/get-item("/Reports/Q3.xlsx")
+
+    // Fails with 412 if someone changed the file first
+    ::microsoft::onedrive::items/update-item(item, {description: "Final numbers"}, {if-match: item.eTag})
+    ```
+    """
 }
 fn
 (item: Any, fields: Map): Map {
@@ -291,7 +381,18 @@ fn
 }
 
 rename-item
-meta {doc: """Rename an item. Returns the item."""}
+meta {
+    doc: """
+    Rename an item. Returns the item.
+
+    **Example**
+
+    ```hot
+    renamed ::microsoft::onedrive::items/rename-item("/Reports/Q3.xlsx", "Q3 final.xlsx")
+    renamed.name
+    ```
+    """
+}
 fn
 (item: Any, new-name: Str): Map {
   rename-item(item, new-name, {})
@@ -302,7 +403,16 @@ fn
 
 build-move
 meta {
-    doc: """The PATCH body for a move (pure): `{parentReference: {id, driveId?}, name?}`."""
+    doc: """
+    The PATCH body for a move (pure): `{parentReference: {id, driveId?},
+    name?}`.
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive::items/build-move("01FOLDER", {name: "Q3.xlsx"})  // {parentReference: {id: "01FOLDER"}, name: "Q3.xlsx"}
+    ```
+    """
 }
 fn (new-parent-id: Str, opts: Map): Map {
   ::auth/compact({
@@ -317,6 +427,13 @@ meta {
     Move an item to another folder (by id) in the same drive, optionally
     renaming it (`opts.name`). Moving across drives is not supported by
     PATCH: use `copy-item` then `delete-item`. Returns the item.
+
+    **Example**
+
+    ```hot
+    moved ::microsoft::onedrive::items/move-item("/Reports/Q3.xlsx", "01ARCHIVE", {name: "Q3 (archive).xlsx"})
+    moved.parentReference.id
+    ```
     """
 }
 fn
@@ -333,7 +450,16 @@ fn
 
 build-copy
 meta {
-    doc: """The copy body (pure): `parentReference` `{driveId?, id}`, `name`, `childrenOnly`, `includeAllVersionHistory`; unset options are omitted."""
+    doc: """
+    The copy body (pure): `parentReference` `{driveId?, id}`, `name`,
+    `childrenOnly`, `includeAllVersionHistory`; unset options are omitted.
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive::items/build-copy("01FOLDER", {drive-id: "b!xyz", name: "Copy.xlsx"})  // {parentReference: {driveId: "b!xyz", id: "01FOLDER"}, name: "Copy.xlsx"}
+    ```
+    """
 }
 fn (dest-parent-id: Str, opts: Map): Map {
   ::auth/compact({
@@ -356,7 +482,7 @@ meta {
     in a loop.
 
     ```hot
-    job ::microsoft::onedrive::items/copy-item(file-id, archive-folder-id, {name: "Q3 (archive).xlsx"})
+    job ::microsoft::onedrive::items/copy-item("/Reports/Q3.xlsx", "01ARCHIVE", {name: "Q3 (archive).xlsx"})
     send("copy:started", {monitor-url: job.monitor-url})
     ```
     """
@@ -417,6 +543,14 @@ meta {
     the new item's URL: a 401 or 403 (its API URL needs a token) or a
     driveItem both mean completed. A 303 without `Location` arrives as
     itself and also means completed.
+
+    **Example**
+
+    ```hot
+    status ::microsoft::onedrive::items/classify-copy-status({status: 202, headers: {}, body: {status: "inProgress", percentageComplete: 40}})
+    status.done  // false
+    status.percent  // 40
+    ```
     """
 }
 fn (response: Result): CopyStatus {
@@ -451,6 +585,7 @@ meta {
     schedule or event, not in a loop; the monitor URL is short-lived.
 
     ```hot
+    job ::microsoft::onedrive::items/copy-item("/Reports/Q3.xlsx", "01ARCHIVE")
     status ::microsoft::onedrive::items/copy-status(job.monitor-url)
     cond {
       not(status.done) => { send("copy:pending", {monitor-url: job.monitor-url}) }
@@ -471,7 +606,18 @@ fn
 }
 
 is-copy-done
-meta {doc: """True when a `CopyStatus` is `completed` or `failed`."""}
+meta {
+    doc: """
+    True when a `CopyStatus` is `completed` or `failed`.
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive::items/is-copy-done({done: true})  // true
+    ::microsoft::onedrive::items/is-copy-done({done: false})  // false
+    ```
+    """
+}
 fn (status: Map): Bool {
   eq(status.done, true)
 }
@@ -482,7 +628,21 @@ fn (status: Map): Bool {
 
 delete-item
 meta {
-    doc: """DELETE an item: it moves to the recycle bin (restorable for 93 days on work/school, 30 days on personal). `opts.if-match` (eTag) makes it conditional. Returns true."""
+    doc: """
+    DELETE an item: it moves to the recycle bin (restorable for 93 days on
+    work/school, 30 days on personal). `opts.if-match` (eTag) makes it
+    conditional. Returns true.
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive::items/delete-item("/Reports/Old.xlsx")
+
+    // Only if nobody changed it since it was read
+    item ::microsoft::onedrive::items/get-item("/Reports/Draft.xlsx")
+    ::microsoft::onedrive::items/delete-item(item, {if-match: item.eTag})
+    ```
+    """
 }
 fn
 (item: Any): Bool {
@@ -495,7 +655,16 @@ fn
 
 permanent-delete
 meta {
-    doc: """POST {item}/permanentDelete - delete without the recycle bin (OneDrive for work or school and SharePoint only). Cannot be undone. Returns true."""
+    doc: """
+    POST {item}/permanentDelete - delete without the recycle bin (OneDrive
+    for work or school and SharePoint only). Cannot be undone. Returns true.
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive::items/permanent-delete("/Reports/Old.xlsx")
+    ```
+    """
 }
 fn
 (item: Any): Bool {
@@ -508,7 +677,17 @@ fn
 
 restore-item
 meta {
-    doc: """POST {item}/restore - restore a deleted item from the recycle bin (personal OneDrive only). `opts.parent-id` restores into another folder and `opts.name` renames. Returns the restored item."""
+    doc: """
+    POST {item}/restore - restore a deleted item from the recycle bin
+    (personal OneDrive only). `opts.parent-id` restores into another folder
+    and `opts.name` renames. Returns the restored item.
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive::items/restore-item("01ABC", {parent-id: "01FOLDER", name: "Recovered.xlsx"})
+    ```
+    """
 }
 fn
 (item: Any): Map {

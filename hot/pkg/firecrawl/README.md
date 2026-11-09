@@ -7,7 +7,7 @@ Firecrawl v2 bindings for Hot: scrape any URL to clean markdown, search the web 
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/firecrawl": "0.1.2"
+"hot.dev/firecrawl": "0.1.3"
 ```
 
 ## Setup

@@ -23,7 +23,7 @@ meta {
     fn (request) {
       if(not(::github::webhooks/verify-request(request)),
         ::hot::http/HttpResponse({status: 401, body: "invalid signature"}),
-        handle-event(request.body))
+        send("github:webhook", request.body))
     }
     ```
     """

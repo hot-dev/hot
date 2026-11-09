@@ -45,7 +45,17 @@ fn (params: Map, opts: Map): Map {
 
 get-fednow-transfer
 meta {
-    doc: """GET /fednow_transfers/{id}: retrieve a FedNow Transfer."""
+    doc: """
+    GET /fednow_transfers/{id}: retrieve a FedNow Transfer.
+
+    **Example**
+
+    ```hot
+    transfer ::increase::fednow-transfers/get-fednow-transfer("fednow_transfer_uoxatyh3lt5evrsdvo7q")
+    transfer.status
+    transfer.amount
+    ```
+    """
 }
 fn
 (transfer-id: Str): Map {
@@ -57,7 +67,19 @@ fn
 
 list-fednow-transfers
 meta {
-    doc: """GET /fednow_transfers: one page of FedNow Transfers (`{data, next_cursor}`). Filters: `account_id`, `external_account_id`, `"status.in"`, `idempotency_key`, `created_at: {after, before, on_or_after, on_or_before}`, `limit`, `cursor`."""
+    doc: """
+    GET /fednow_transfers: one page of FedNow Transfers (`{data,
+    next_cursor}`). Filters: `account_id`, `external_account_id`,
+    `"status.in"`, `idempotency_key`, `created_at: {after, before,
+    on_or_after, on_or_before}`, `limit`, `cursor`.
+
+    **Example**
+
+    ```hot
+    page ::increase::fednow-transfers/list-fednow-transfers({account_id: "account_in71c4amph0vgo2qllky", "status.in": ["pending_approval"], limit: 25})
+    map(page.data, %.id)
+    ```
+    """
 }
 fn
 (): Map {
@@ -72,7 +94,20 @@ fn
 
 approve-fednow-transfer
 meta {
-    doc: """POST /fednow_transfers/{id}/approve: approve a FedNow Transfer in `pending_approval`. Approving releases the transfer to be sent: agents must not approve on their own; leave it to a person (in the Increase dashboard, or through your own approval step that calls this)."""
+    doc: """
+    POST /fednow_transfers/{id}/approve: approve a FedNow Transfer in
+    `pending_approval`. Approving releases the transfer to be sent: agents
+    must not approve on their own; leave it to a person (in the Increase
+    dashboard, or through your own approval step that calls this).
+
+    **Example**
+
+    ```hot
+    // Call this from a person's approval step, never from an agent.
+    transfer ::increase::fednow-transfers/approve-fednow-transfer("fednow_transfer_uoxatyh3lt5evrsdvo7q")
+    transfer.status
+    ```
+    """
 }
 fn
 (transfer-id: Str): Map {
@@ -84,7 +119,17 @@ fn
 
 cancel-fednow-transfer
 meta {
-    doc: """POST /fednow_transfers/{id}/cancel: cancel a FedNow Transfer that is still `pending_approval`."""
+    doc: """
+    POST /fednow_transfers/{id}/cancel: cancel a FedNow Transfer that is
+    still `pending_approval`.
+
+    **Example**
+
+    ```hot
+    transfer ::increase::fednow-transfers/cancel-fednow-transfer("fednow_transfer_uoxatyh3lt5evrsdvo7q")
+    transfer.status
+    ```
+    """
 }
 fn
 (transfer-id: Str): Map {

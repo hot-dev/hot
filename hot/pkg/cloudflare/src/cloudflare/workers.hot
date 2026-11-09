@@ -15,13 +15,24 @@ meta {
 // own in `options.compatibility_date` for reproducible behaviour.
 DEFAULT_COMPATIBILITY_DATE "2025-09-01"
 
-script-suffix fn (name: Str): Str {
+script-suffix
+meta {no-doc: true}
+fn (name: Str): Str {
   `/workers/scripts/${::api/seg(name)}`
 }
 
 list-scripts
 meta {
-    doc: """GET /accounts/{account_id}/workers/scripts - Every Worker script in the account (`id` is the script name). Not paginated."""
+    doc: """
+    GET /accounts/{account_id}/workers/scripts - Every Worker script in the
+    account (`id` is the script name). Not paginated.
+
+    **Example**
+
+    ```hot
+    map(::cloudflare::workers/list-scripts(), %.id)
+    ```
+    """
 }
 fn
 (): Vec {
@@ -33,7 +44,17 @@ fn
 
 get-script-settings
 meta {
-    doc: """GET .../workers/scripts/{name}/settings - A script's bindings, compatibility date and flags, and observability settings."""
+    doc: """
+    GET .../workers/scripts/{name}/settings - A script's bindings,
+    compatibility date and flags, and observability settings.
+
+    **Example**
+
+    ```hot
+    settings ::cloudflare::workers/get-script-settings("hello")
+    settings.compatibility_date
+    ```
+    """
 }
 fn
 (name: Str): Map {
@@ -51,6 +72,13 @@ meta {
     (`[{type: "plain_text", name, text}, {type: "kv_namespace", name, namespace_id}, …]`),
     `keep_bindings`, `observability`, and `tags`; unset fields are
     omitted. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cloudflare::workers/script-metadata("worker.js", {compatibility_date: "2026-01-01", tags: ["prod"]})
+    // {main_module: "worker.js", compatibility_date: "2026-01-01", tags: ["prod"]}
+    ```
     """
 }
 fn
@@ -68,7 +96,17 @@ fn
 
 deploy-parts
 meta {
-    doc: """The multipart parts for a module upload: the JSON `metadata` part and the module itself as `application/javascript+module`. Exposed for testing."""
+    doc: """
+    The multipart parts for a module upload: the JSON `metadata` part and
+    the module itself as `application/javascript+module`. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    map(::cloudflare::workers/deploy-parts("worker.js", "export default {}", {}), %.name)  // ["metadata", "worker.js"]
+    ```
+    """
 }
 fn
 (main-module: Str, code: Str, options: Map): Vec {
@@ -115,7 +153,19 @@ fn
 
 delete-script
 meta {
-    doc: """DELETE .../workers/scripts/{name} - Delete a script. The 2-arity form with `force: true` also deletes it when other Workers bind to it."""
+    doc: """
+    DELETE .../workers/scripts/{name} - Delete a script. The 2-arity form
+    with `force: true` also deletes it when other Workers bind to it.
+
+    **Example**
+
+    ```hot
+    ::cloudflare::workers/delete-script("hello")
+
+    // Also when other Workers bind to it
+    ::cloudflare::workers/delete-script("hello", true)
+    ```
+    """
 }
 fn
 (name: Str): Any {
@@ -137,7 +187,17 @@ fn
 
 list-routes
 meta {
-    doc: """GET /zones/{zone_id}/workers/routes - A zone's Worker routes: `[{id, pattern, script}]`."""
+    doc: """
+    GET /zones/{zone_id}/workers/routes - A zone's Worker routes: `[{id,
+    pattern, script}]`.
+
+    **Example**
+
+    ```hot
+    routes ::cloudflare::workers/list-routes("023e105f4ecef8ad9ca31a8372d0c353")
+    map(routes, %.pattern)
+    ```
+    """
 }
 fn
 (zone-id: Str): Vec {
@@ -149,7 +209,18 @@ fn
 
 create-route
 meta {
-    doc: """POST /zones/{zone_id}/workers/routes - Route `pattern` (e.g. `"example.com/api/*"`) to the Worker `script`. Returns `{id, pattern, script}`."""
+    doc: """
+    POST /zones/{zone_id}/workers/routes - Route `pattern` (e.g.
+    `"example.com/api/*"`) to the Worker `script`. Returns `{id, pattern,
+    script}`.
+
+    **Example**
+
+    ```hot
+    route ::cloudflare::workers/create-route("023e105f4ecef8ad9ca31a8372d0c353", "example.com/api/*", "hello")
+    route.id
+    ```
+    """
 }
 fn
 (zone-id: Str, pattern: Str, script: Str): Map {
@@ -161,7 +232,15 @@ fn
 
 delete-route
 meta {
-    doc: """DELETE /zones/{zone_id}/workers/routes/{route_id} - Remove a route."""
+    doc: """
+    DELETE /zones/{zone_id}/workers/routes/{route_id} - Remove a route.
+
+    **Example**
+
+    ```hot
+    ::cloudflare::workers/delete-route("023e105f4ecef8ad9ca31a8372d0c353", "9a7806061c88ada191ed06f989cc3dac")
+    ```
+    """
 }
 fn
 (zone-id: Str, route-id: Str): Any {

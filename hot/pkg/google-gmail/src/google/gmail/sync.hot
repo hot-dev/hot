@@ -52,7 +52,17 @@ MAX_HISTORY_PAGE 500
 
 get-profile
 meta {
-    doc: """GET /users/me/profile - `{emailAddress, messagesTotal, threadsTotal, historyId}` for the authenticated user. Scope: `gmail.readonly`."""
+    doc: """
+    GET /users/me/profile - `{emailAddress, messagesTotal, threadsTotal,
+    historyId}` for the authenticated user. Scope: `gmail.readonly`.
+
+    **Example**
+
+    ```hot
+    profile ::google::gmail::sync/get-profile()
+    profile.historyId
+    ```
+    """
 }
 fn
 (): Map {
@@ -64,7 +74,19 @@ fn
 
 history-params
 meta {
-    doc: """The query parameters `list-history` sends (pure): `startHistoryId`, then your options: `historyTypes` (a Vec of `messageAdded`, `messageDeleted`, `labelAdded`, `labelRemoved`; sent repeated), `labelId`, `maxResults` (max 500), `pageToken`."""
+    doc: """
+    The query parameters `list-history` sends (pure): `startHistoryId`, then
+    your options: `historyTypes` (a Vec of `messageAdded`, `messageDeleted`,
+    `labelAdded`, `labelRemoved`; sent repeated), `labelId`, `maxResults`
+    (max 500), `pageToken`.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::sync/history-params(12345, {historyTypes: ["messageAdded"], maxResults: 100})
+    // {startHistoryId: "12345", historyTypes: ["messageAdded"], maxResults: 100}
+    ```
+    """
 }
 fn (start-history-id: Any, opts: Map): Map {
   ::gmail/query-params({startHistoryId: Str(start-history-id)}, opts)
@@ -78,6 +100,14 @@ meta {
     Each history record has `id`, `messages`, and `messagesAdded`,
     `messagesDeleted`, `labelsAdded`, `labelsRemoved`. A 404 means the
     id is too old (`is-history-expired`). Scope: `gmail.readonly`.
+
+    **Example**
+
+    ```hot
+    page ::google::gmail::sync/list-history("12345", {historyTypes: ["messageAdded"], maxResults: 100})
+    map(or(page.history, []), %.id)
+    page.nextPageToken
+    ```
     """
 }
 fn
@@ -90,7 +120,19 @@ fn
 
 is-history-expired
 meta {
-    doc: """True when a `list-history` / `sync-history` result is Gmail's 404 for a start id that is too old (typically older than about a week): do a full sync."""
+    doc: """
+    True when a `list-history` / `sync-history` result is Gmail's 404 for a
+    start id that is too old (typically older than about a week): do a full
+    sync.
+
+    **Example**
+
+    ```hot
+    gone err(::google::api/HttpError(::hot::http/HttpResponse({status: 404, headers: {}, body: ""})))
+    ::google::gmail::sync/is-history-expired(gone)  // true
+    ::google::gmail::sync/is-history-expired(err("no credentials"))  // false
+    ```
+    """
 }
 fn (result: Result): Bool {
   payload if(is-err(result), err-value(result), null)
@@ -123,7 +165,9 @@ type {
     pages: Int
 }
 
-record-ids fn (records: Vec, key: Str): Vec {
+record-ids
+meta {no-doc: true}
+fn (records: Vec, key: Str): Vec {
   distinct(mapcat(records, (r) {
     map(or(get(r, key), []), (entry) { get(or(get(entry, "message"), {}), "id") })
   }))
@@ -131,7 +175,23 @@ record-ids fn (records: Vec, key: Str): Vec {
 
 summarize-history
 meta {
-    doc: """Build a `HistorySet` from history records and the latest history id (pure)."""
+    doc: """
+    Build a `HistorySet` from history records and the latest history id
+    (pure).
+
+    **Example**
+
+    ```hot
+    records [
+      {id: "1", messagesAdded: [{message: {id: "a"}}, {message: {id: "b"}}]},
+      {id: "2", messagesDeleted: [{message: {id: "b"}}]}
+    ]
+    changes ::google::gmail::sync/summarize-history(records, "2", 1)
+    changes.added-message-ids  // ["a"]
+    changes.deleted-message-ids  // ["b"]
+    changes.history-id  // "2"
+    ```
+    """
 }
 fn (records: Vec, history-id: Str, pages: Int): HistorySet {
   deleted filter(record-ids(records, "messagesDeleted"), is-some)
@@ -147,7 +207,9 @@ fn (records: Vec, history-id: Str, pages: Int): HistorySet {
   })
 }
 
-history-loop fn (start: Str, opts: Map, page-token: Str?, acc: Vec, pages: Int): HistorySet {
+history-loop
+meta {no-doc: true}
+fn (start: Str, opts: Map, page-token: Str?, acc: Vec, pages: Int): HistorySet {
   page list-history(start, {...opts, pageToken: page-token})
   cond {
     is-err(page) => { page }
@@ -174,9 +236,9 @@ meta {
     ::sync ::google::gmail::sync
     ::messages ::google::gmail::messages
 
-    set ::sync/sync-history(saved-history-id)
+    set ::sync/sync-history("12345")
     cond {
-      ::sync/is-history-expired(set) => { full-resync() }
+      ::sync/is-history-expired(set) => { ::messages/list-all-messages({labelIds: ["INBOX"]}) }
       => {
         new-mail map(set.added-message-ids, (id) { ::messages/get-email(id) })
         set.history-id
@@ -200,7 +262,18 @@ fn
 
 build-watch
 meta {
-    doc: """The `users.watch` body (pure): `{topicName}` plus `labelIds` (e.g. `["INBOX"]`) and `labelFilterBehavior` (`"include"` or `"exclude"`) from `opts` (`label-ids` / `label-filter-behavior`, or Gmail's own names)."""
+    doc: """
+    The `users.watch` body (pure): `{topicName}` plus `labelIds` (e.g.
+    `["INBOX"]`) and `labelFilterBehavior` (`"include"` or `"exclude"`) from
+    `opts` (`label-ids` / `label-filter-behavior`, or Gmail's own names).
+
+    **Example**
+
+    ```hot
+    ::google::gmail::sync/build-watch("projects/my-project/topics/gmail", {label-ids: ["INBOX"], label-filter-behavior: "include"})
+    // {topicName: "projects/my-project/topics/gmail", labelIds: ["INBOX"], labelFilterBehavior: "include"}
+    ```
+    """
 }
 fn (topic-name: Str, opts: Map): Map {
   ::gmail/compact({
@@ -239,7 +312,16 @@ fn
 
 stop-watch
 meta {
-    doc: """POST /users/me/stop - stop push notifications for this mailbox. Returns true. Scope: `gmail.readonly`."""
+    doc: """
+    POST /users/me/stop - stop push notifications for this mailbox. Returns
+    true. Scope: `gmail.readonly`.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::sync/stop-watch()
+    ```
+    """
 }
 fn
 (): Bool {
@@ -275,7 +357,9 @@ type {
     attributes: Map
 }
 
-request-json fn (request: Map): Any {
+request-json
+meta {no-doc: true}
+fn (request: Map): Any {
   body get(request, "body")
   cond {
     is-map(body) => { body }
@@ -288,7 +372,22 @@ request-json fn (request: Map): Any {
 
 parse-push
 meta {
-    doc: """Parse a Pub/Sub push request into a `PushNotification` (pure): the envelope `{message: {data, messageId, publishTime, attributes}, subscription}` with `data` the base64 JSON `{emailAddress, historyId}`. Returns an Err for a body that is not a push envelope. Does not authenticate: use `verify-push`."""
+    doc: """
+    Parse a Pub/Sub push request into a `PushNotification` (pure): the
+    envelope `{message: {data, messageId, publishTime, attributes},
+    subscription}` with `data` the base64 JSON `{emailAddress, historyId}`.
+    Returns an Err for a body that is not a push envelope. Does not
+    authenticate: use `verify-push`.
+
+    **Example**
+
+    ```hot
+    data ::hot::base64/encode("{\"emailAddress\":\"ada@example.com\",\"historyId\":99}")
+    note ::google::gmail::sync/parse-push({body: {message: {data: data, messageId: "m1"}, subscription: "projects/p/subscriptions/gmail"}})
+    note.email-address  // "ada@example.com"
+    note.history-id  // "99"
+    ```
+    """
 }
 fn (request: Map): PushNotification {
   envelope request-json(request)
@@ -315,7 +414,20 @@ fn (request: Map): PushNotification {
 
 verify-push-token
 meta {
-    doc: """True when the request's `token` query parameter equals `expected` (constant-time compare). Fails closed: an empty `expected` or a missing parameter is false. `expected` is masked in call records."""
+    doc: """
+    True when the request's `token` query parameter equals `expected`
+    (constant-time compare). Fails closed: an empty `expected` or a missing
+    parameter is false. `expected` is masked in call records.
+
+    **Example**
+
+    ```hot
+    // In a push webhook, with the secret from context
+    check-push fn (request: Map): Bool {
+      ::google::gmail::sync/verify-push-token(request, ::hot::ctx/get("google.gmail.push.token"))
+    }
+    ```
+    """
 }
 fn (request: Map, expected: Str?): Bool {
   query or(get(request, "query"), {})

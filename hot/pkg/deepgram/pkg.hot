@@ -2,7 +2,7 @@
 
 hot.pkg.deepgram {
   name: "hot.dev/deepgram",
-  version: "0.1.1",
+  version: "0.1.2",
   hot-min-version: "3.0.2",
   description: "Deepgram bindings for Hot. Pre-recorded speech-to-text (Nova-3) from URLs or audio bytes, async transcription with callback verification, Aura-2 and Flux text-to-speech, and transcript, utterance and paragraph helpers.",
   author: "Hot Dev",

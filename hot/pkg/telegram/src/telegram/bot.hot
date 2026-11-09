@@ -38,7 +38,21 @@ GetMyNameRequest type {
 
 get-my-name
 meta {
-    doc: """getMyName - Get the bot's name for the given language. Returns `{name: "Bot Name"}`."""
+    doc: """
+    getMyName - Get the bot's name for the given language. Returns `{name:
+    "Bot Name"}`.
+
+    **Example**
+
+    ```hot
+    ::bot ::telegram::bot
+
+    result ::bot/get-my-name(::bot/GetMyNameRequest({
+      language_code: "en"
+    }))
+    result.name
+    ```
+    """
 }
 fn
 (request: GetMyNameRequest): Map {
@@ -55,7 +69,19 @@ SetMyNameRequest type {
 
 set-my-name
 meta {
-    doc: """setMyName - Change the bot's name. Max 64 characters."""
+    doc: """
+    setMyName - Change the bot's name. Max 64 characters.
+
+    **Example**
+
+    ```hot
+    ::bot ::telegram::bot
+
+    ::bot/set-my-name(::bot/SetMyNameRequest({
+      name: "Hot Bot"
+    }))
+    ```
+    """
 }
 fn
 (request: SetMyNameRequest): Bool {
@@ -71,7 +97,21 @@ GetMyDescriptionRequest type {
 
 get-my-description
 meta {
-    doc: """getMyDescription - Get the bot's description (shown on the bot's profile and share page)."""
+    doc: """
+    getMyDescription - Get the bot's description (shown on the bot's profile
+    and share page).
+
+    **Example**
+
+    ```hot
+    ::bot ::telegram::bot
+
+    result ::bot/get-my-description(::bot/GetMyDescriptionRequest({
+      language_code: "en"
+    }))
+    result.description
+    ```
+    """
 }
 fn
 (request: GetMyDescriptionRequest): Map {
@@ -88,7 +128,20 @@ SetMyDescriptionRequest type {
 
 set-my-description
 meta {
-    doc: """setMyDescription - Change the bot's description. Max 512 characters. Shown on the bot's profile page."""
+    doc: """
+    setMyDescription - Change the bot's description. Max 512 characters.
+    Shown on the bot's profile page.
+
+    **Example**
+
+    ```hot
+    ::bot ::telegram::bot
+
+    ::bot/set-my-description(::bot/SetMyDescriptionRequest({
+      description: "Answers questions about your orders."
+    }))
+    ```
+    """
 }
 fn
 (request: SetMyDescriptionRequest): Bool {
@@ -104,7 +157,21 @@ GetMyShortDescriptionRequest type {
 
 get-my-short-description
 meta {
-    doc: """getMyShortDescription - Get the bot's short description (shown on the start screen)."""
+    doc: """
+    getMyShortDescription - Get the bot's short description (shown on the
+    start screen).
+
+    **Example**
+
+    ```hot
+    ::bot ::telegram::bot
+
+    result ::bot/get-my-short-description(::bot/GetMyShortDescriptionRequest({
+      language_code: "en"
+    }))
+    result.short_description
+    ```
+    """
 }
 fn
 (request: GetMyShortDescriptionRequest): Map {
@@ -121,7 +188,20 @@ SetMyShortDescriptionRequest type {
 
 set-my-short-description
 meta {
-    doc: """setMyShortDescription - Change the bot's short description. Max 120 characters. Shown when users open a chat with the bot."""
+    doc: """
+    setMyShortDescription - Change the bot's short description. Max 120
+    characters. Shown when users open a chat with the bot.
+
+    **Example**
+
+    ```hot
+    ::bot ::telegram::bot
+
+    ::bot/set-my-short-description(::bot/SetMyShortDescriptionRequest({
+      short_description: "Order help, around the clock."
+    }))
+    ```
+    """
 }
 fn
 (request: SetMyShortDescriptionRequest): Bool {
@@ -204,7 +284,20 @@ DeleteMyCommandsRequest type {
 
 delete-my-commands
 meta {
-    doc: """deleteMyCommands - Delete the bot's command list for the given scope and language."""
+    doc: """
+    deleteMyCommands - Delete the bot's command list for the given scope and
+    language.
+
+    **Example**
+
+    ```hot
+    ::bot ::telegram::bot
+
+    ::bot/delete-my-commands(::bot/DeleteMyCommandsRequest({
+      scope: {type: "all_private_chats"}
+    }))
+    ```
+    """
 }
 fn
 (request: DeleteMyCommandsRequest): Bool {

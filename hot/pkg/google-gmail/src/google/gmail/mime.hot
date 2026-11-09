@@ -69,30 +69,65 @@ MAX_PLAIN_HEADER 900
 // ---------------------------------------------------------------------------
 
 is-ascii
-meta {doc: """True when `s` has only 7-bit ASCII characters."""}
+meta {
+    doc: """
+    True when `s` has only 7-bit ASCII characters.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::mime/is-ascii("hello")  // true
+    ::google::gmail::mime/is-ascii("Zoë")  // false
+    ```
+    """
+}
 fn (s: Str): Bool {
   not(::re/is-match(s, "[^\\x00-\\x7F]"))
 }
 
 has-line-break
-meta {doc: """True when `s` contains a CR or LF."""}
+meta {
+    doc: """
+    True when `s` contains a CR or LF.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::mime/has-line-break("one\ntwo")  // true
+    ::google::gmail::mime/has-line-break("one two")  // false
+    ```
+    """
+}
 fn (s: Str): Bool {
   ::re/is-match(s, LINE_BREAK_PATTERN)
 }
 
 clean-header-value
 meta {
-    doc: """Fold every run of CR, LF and other control characters (tab excepted) to one space and trim, so a value can never start a new header line."""
+    doc: """
+    Fold every run of CR, LF and other control characters (tab excepted) to
+    one space and trim, so a value can never start a new header line.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::mime/clean-header-value("Hi\r\nBcc: x@example.com")  // "Hi Bcc: x@example.com"
+    ```
+    """
 }
 fn (value: Any): Str {
   trim(::re/replace-all(Str(value), CONTROL_PATTERN, " "))
 }
 
-byte-length fn (text: Str): Int {
+byte-length
+meta {no-doc: true}
+fn (text: Str): Int {
   length(Bytes(text))
 }
 
-utf8-chunks fn (text: Str, max-bytes: Int): Vec {
+utf8-chunks
+meta {no-doc: true}
+fn (text: Str, max-bytes: Int): Vec {
   chars filter(split(text, ""), (c) { not(eq(c, "")) })
   reduce(chars, (acc, ch) {
     current last(acc)
@@ -109,6 +144,12 @@ meta {
     RFC 2047 encode `text` as UTF-8 B encoded words, split on character
     boundaries by byte count so each word stays within 75 characters and
     a character is never cut in two, joined with a folding `CRLF SP`: `encode-words("Zoë")` is `"=?UTF-8?B?Wm/Dqw==?="`.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::mime/encode-words("Zoë")  // "=?UTF-8?B?Wm/Dqw==?="
+    ```
     """
 }
 fn (text: Str): Str {
@@ -117,7 +158,18 @@ fn (text: Str): Str {
 
 encode-header-text
 meta {
-    doc: """A header value safe to emit: control characters folded (`clean-header-value`), then RFC 2047 encoded when it is not ASCII or is very long."""
+    doc: """
+    A header value safe to emit: control characters folded
+    (`clean-header-value`), then RFC 2047 encoded when it is not ASCII or is
+    very long.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::mime/encode-header-text("Weekly report")  // "Weekly report"
+    ::google::gmail::mime/encode-header-text("Résumé")  // "=?UTF-8?B?UsOpc3Vtw6k=?="
+    ```
+    """
 }
 fn (value: Any): Str {
   v clean-header-value(value)
@@ -126,7 +178,18 @@ fn (value: Any): Str {
 
 encode-phrase
 meta {
-    doc: """A display name for an address header: as is when it is plain ASCII words, a quoted string when it has specials (`"Doe, Jane"`), or RFC 2047 encoded when it is not ASCII."""
+    doc: """
+    A display name for an address header: as is when it is plain ASCII
+    words, a quoted string when it has specials (`"Doe, Jane"`), or RFC 2047
+    encoded when it is not ASCII.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::mime/encode-phrase("Ada Lovelace")  // "Ada Lovelace"
+    ::google::gmail::mime/encode-phrase("Doe, Jane")  // "\"Doe, Jane\""
+    ```
+    """
 }
 fn (name: Str): Str {
   n clean-header-value(name)
@@ -141,14 +204,34 @@ fn (name: Str): Str {
 }
 
 normalize-newlines
-meta {doc: """Convert LF, CR and CRLF line endings to CRLF (what SMTP requires)."""}
+meta {
+    doc: """
+    Convert LF, CR and CRLF line endings to CRLF (what SMTP requires).
+
+    **Example**
+
+    ```hot
+    ::google::gmail::mime/normalize-newlines("a\nb\r\nc")  // "a\r\nb\r\nc"
+    ```
+    """
+}
 fn (text: Str): Str {
   ::str/replace(::str/replace(::str/replace(text, "\r\n", "\n"), "\r", "\n"), "\n", "\r\n")
 }
 
 wrap-base64
 meta {
-    doc: """Break a base64 Str into CRLF-separated lines of at most 76 characters (RFC 2045)."""
+    doc: """
+    Break a base64 Str into CRLF-separated lines of at most 76 characters
+    (RFC 2045).
+
+    **Example**
+
+    ```hot
+    encoded join(map(range(80), (i) { "A" }), "")
+    map(split(::google::gmail::mime/wrap-base64(encoded), "\r\n"), length)  // [76, 4]
+    ```
+    """
 }
 fn (encoded: Str): Str {
   trim-end(::re/replace-all(encoded, "(.{76})", "${1}\r\n"))
@@ -160,13 +243,25 @@ fn (encoded: Str): Str {
 
 is-email
 meta {
-    doc: """True when `email` is a plain `local@domain.tld` address (ASCII; no display name, spaces or line breaks)."""
+    doc: """
+    True when `email` is a plain `local@domain.tld` address (ASCII; no
+    display name, spaces or line breaks).
+
+    **Example**
+
+    ```hot
+    ::google::gmail::mime/is-email("ada@example.com")  // true
+    ::google::gmail::mime/is-email("Ada <ada@example.com>")  // false
+    ```
+    """
 }
 fn (email: Any): Bool {
   and(is-str(email), ::re/is-match(email, EMAIL_PATTERN))
 }
 
-unquote fn (s: Str): Str {
+unquote
+meta {no-doc: true}
+fn (s: Str): Str {
   t trim(s)
   m ::re/capture(t, "^\"(.*)\"$")
   if(is-null(m), t, ::str/replace(::str/replace(first(m.groups), "\\\"", "\""), "\\\\", "\\"))
@@ -174,7 +269,18 @@ unquote fn (s: Str): Str {
 
 read-address
 meta {
-    doc: """Parse one address (`"ada@example.com"`, `"Ada Lovelace <ada@example.com>"`, or `{name, email}`) into `{name, email, error}` (pure); `error` is null when the address is valid."""
+    doc: """
+    Parse one address (`"ada@example.com"`, `"Ada Lovelace
+    <ada@example.com>"`, or `{name, email}`) into `{name, email, error}`
+    (pure); `error` is null when the address is valid.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::mime/read-address("Ada <ada@example.com>")  // {name: "Ada", email: "ada@example.com", error: null}
+    ::google::gmail::mime/read-address("nope").error  // "google-gmail: invalid email address \"nope\""
+    ```
+    """
 }
 fn (value: Any): Map {
   parsed cond {
@@ -201,14 +307,25 @@ fn (value: Any): Map {
 
 split-address-list
 meta {
-    doc: """Split an address-list Str on commas outside double quotes: `"\"Doe, Jane\" <j@x.io>, bob@x.io"` gives two entries."""
+    doc: """
+    Split an address-list Str on commas outside double quotes: `"\"Doe,
+    Jane\" <j@x.io>, bob@x.io"` gives two entries.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::mime/split-address-list("\"Doe, Jane\" <j@example.com>, bob@example.com")  // ["\"Doe, Jane\" <j@example.com>", "bob@example.com"]
+    ```
+    """
 }
 fn (value: Str): Vec {
   pieces map(::re/find-all(value, "(?:\"[^\"]*\"|[^,\"])+"), (m) { trim(m.match) })
   filter(pieces, (p) { not(eq(p, "")) })
 }
 
-address-items fn (value: Any): Vec {
+address-items
+meta {no-doc: true}
+fn (value: Any): Vec {
   cond {
     is-null(value) => { [] }
     is-vec(value) => { mapcat(value, (v) { if(is-str(v), split-address-list(v), [v]) }) }
@@ -219,7 +336,17 @@ address-items fn (value: Any): Vec {
 
 parse-addresses
 meta {
-    doc: """Parse an address field (Str list, Vec, or `{name, email}` Map) into a Vec of `{name, email}`, or an Err naming the first invalid address."""
+    doc: """
+    Parse an address field (Str list, Vec, or `{name, email}` Map) into a
+    Vec of `{name, email}`, or an Err naming the first invalid address.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::mime/parse-addresses("Ada <ada@example.com>, bob@example.com")  // [{name: "Ada", email: "ada@example.com"}, {name: null, email: "bob@example.com"}]
+    is-err(::google::gmail::mime/parse-addresses("not-an-address"))  // true
+    ```
+    """
 }
 fn (value: Any): Vec {
   parsed map(address-items(value), read-address)
@@ -232,7 +359,17 @@ fn (value: Any): Vec {
 
 format-address
 meta {
-    doc: """Render `{name, email}` for a header: `Ada <ada@example.com>`, with the name quoted or RFC 2047 encoded as needed."""
+    doc: """
+    Render `{name, email}` for a header: `Ada <ada@example.com>`, with the
+    name quoted or RFC 2047 encoded as needed.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::mime/format-address({name: "Ada", email: "ada@example.com"})  // "Ada <ada@example.com>"
+    ::google::gmail::mime/format-address({name: null, email: "bob@example.com"})  // "bob@example.com"
+    ```
+    """
 }
 fn (address: Map): Str {
   if(is-null(address.name), address.email, `${encode-phrase(address.name)} <${address.email}>`)
@@ -240,7 +377,16 @@ fn (address: Map): Str {
 
 format-addresses
 meta {
-    doc: """Render a Vec of `{name, email}` as one header value, comma separated (folded when long)."""
+    doc: """
+    Render a Vec of `{name, email}` as one header value, comma separated
+    (folded when long).
+
+    **Example**
+
+    ```hot
+    ::google::gmail::mime/format-addresses([{name: "Ada", email: "ada@example.com"}, {name: null, email: "bob@example.com"}])  // "Ada <ada@example.com>, bob@example.com"
+    ```
+    """
 }
 fn (addresses: Vec): Str {
   parts map(addresses, format-address)
@@ -250,7 +396,16 @@ fn (addresses: Vec): Str {
 
 emails
 meta {
-    doc: """Just the email addresses of an address field, lowercased; invalid entries are skipped (pure). Handy for comparing senders."""
+    doc: """
+    Just the email addresses of an address field, lowercased; invalid
+    entries are skipped (pure). Handy for comparing senders.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::mime/emails("Ada <ADA@example.com>, not-an-address")  // ["ada@example.com"]
+    ```
+    """
 }
 fn (value: Any): Vec {
   parsed map(address-items(value), read-address)
@@ -261,7 +416,9 @@ fn (value: Any): Vec {
 // Headers (pure)
 // ---------------------------------------------------------------------------
 
-message-ids fn (value: Any): Vec {
+message-ids
+meta {no-doc: true}
+fn (value: Any): Vec {
   items cond {
     is-null(value) => { [] }
     is-vec(value) => { value }
@@ -272,7 +429,9 @@ message-ids fn (value: Any): Vec {
   map(filter(cleaned, (v) { not(eq(v, "")) }), (v) { if(starts-with(v, "<"), v, `<${v}>`) })
 }
 
-header-error fn (name: Any): Str? {
+header-error
+meta {no-doc: true}
+fn (name: Any): Str? {
   n Str(name)
   cond {
     not(::re/is-match(n, HEADER_NAME_PATTERN)) => { `google-gmail: invalid header name ${to-json(n)}` }
@@ -281,7 +440,9 @@ header-error fn (name: Any): Str? {
   }
 }
 
-address-header fn (name: Str, value: Any): Any {
+address-header
+meta {no-doc: true}
+fn (name: Str, value: Any): Any {
   cond {
     is-null(value) => { "" }
     => {
@@ -302,6 +463,12 @@ meta {
     CRLF, ending with `MIME-Version: 1.0`: From, To, Cc, Bcc, Reply-To,
     Subject, In-Reply-To, References, then `message.headers`. Returns an
     Err for an invalid address or header name.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::mime/build-headers({to: "ada@example.com", subject: "Hi"})  // "To: ada@example.com\r\nSubject: Hi\r\nMIME-Version: 1.0\r\n"
+    ```
     """
 }
 fn (message: Map): Str {
@@ -347,7 +514,18 @@ fn (message: Map): Str {
 
 to-bytes
 meta {
-    doc: """Content as Bytes: Bytes pass through, a Str becomes its UTF-8 bytes, null is empty, anything else is JSON-encoded."""
+    doc: """
+    Content as Bytes: Bytes pass through, a Str becomes its UTF-8 bytes,
+    null is empty, anything else is JSON-encoded.
+
+    **Example**
+
+    ```hot
+    Str(::google::gmail::mime/to-bytes("Hi"))  // "Hi"
+    length(::google::gmail::mime/to-bytes(null))  // 0
+    Str(::google::gmail::mime/to-bytes({a: 1}))  // "{\"a\":1}"
+    ```
+    """
 }
 fn (content: Any): Bytes {
   cond {
@@ -360,7 +538,16 @@ fn (content: Any): Bytes {
 
 new-boundary
 meta {
-    doc: """A random MIME boundary. It contains `=_`, which never occurs in base64 content."""
+    doc: """
+    A random MIME boundary. It contains `=_`, which never occurs in base64
+    content.
+
+    **Example**
+
+    ```hot
+    starts-with(::google::gmail::mime/new-boundary(), "=_hot_")  // true
+    ```
+    """
 }
 fn (): Str {
   `=_hot_${::hot::random/random-string(28)}`
@@ -368,7 +555,17 @@ fn (): Str {
 
 text-part
 meta {
-    doc: """A `text/<subtype>; charset="UTF-8"` part (headers, blank line, body) as Bytes: `7bit` when the text is ASCII with lines under 999 characters, else base64. Line endings become CRLF."""
+    doc: """
+    A `text/<subtype>; charset="UTF-8"` part (headers, blank line, body) as
+    Bytes: `7bit` when the text is ASCII with lines under 999 characters,
+    else base64. Line endings become CRLF.
+
+    **Example**
+
+    ```hot
+    Str(::google::gmail::mime/text-part("Hi", "plain"))  // "Content-Type: text/plain; charset=\"UTF-8\"\r\nContent-Transfer-Encoding: 7bit\r\n\r\nHi"
+    ```
+    """
 }
 fn (text: Str, subtype: Str): Bytes {
   body normalize-newlines(text)
@@ -380,7 +577,17 @@ fn (text: Str, subtype: Str): Bytes {
 
 attachment-error
 meta {
-    doc: """Why an attachment Map is unusable (missing filename or content, a bad MIME type), or null (pure)."""
+    doc: """
+    Why an attachment Map is unusable (missing filename or content, a bad
+    MIME type), or null (pure).
+
+    **Example**
+
+    ```hot
+    ::google::gmail::mime/attachment-error({filename: "a.txt", content: "hi"})  // null
+    ::google::gmail::mime/attachment-error({filename: "a.txt"})  // "google-gmail: attachment a.txt has no content"
+    ```
+    """
 }
 fn (attachment: Any): Str? {
   cond {
@@ -396,7 +603,17 @@ fn (attachment: Any): Str? {
 
 attachment-mime-type
 meta {
-    doc: """The MIME type for an attachment: its `mime-type`, else guessed from the filename, else `application/octet-stream`."""
+    doc: """
+    The MIME type for an attachment: its `mime-type`, else guessed from the
+    filename, else `application/octet-stream`.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::mime/attachment-mime-type({filename: "a.pdf"})  // "application/pdf"
+    ::google::gmail::mime/attachment-mime-type({filename: "a.pdf", mime-type: "text/plain"})  // "text/plain"
+    ```
+    """
 }
 fn (attachment: Map): Str {
   or(get(attachment, "mime-type"), ::hot::mime/from-path(Str(attachment.filename)), "application/octet-stream")
@@ -404,7 +621,17 @@ fn (attachment: Map): Str {
 
 filename-params
 meta {
-    doc: """The `name` (Content-Type) and `filename` (Content-Disposition) parameters for a file name: quoted ASCII, or RFC 2047 / RFC 2231 encoded when not ASCII."""
+    doc: """
+    The `name` (Content-Type) and `filename` (Content-Disposition)
+    parameters for a file name: quoted ASCII, or RFC 2047 / RFC 2231 encoded
+    when not ASCII.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::mime/filename-params("report.pdf")  // {name: "; name=\"report.pdf\"", filename: "; filename=\"report.pdf\""}
+    ```
+    """
 }
 fn (filename: Str): Map {
   f clean-header-value(::str/replace(::str/replace(filename, "\"", "'"), "\\", "_"))
@@ -416,7 +643,19 @@ fn (filename: Str): Map {
 
 attachment-part
 meta {
-    doc: """An attachment part as Bytes: Content-Type with name, Content-Disposition (`attachment`, or `inline` with a `content-id`), and the content base64 encoded in 76-character lines. A `message/rfc822` attachment (a forwarded email) is embedded as is, `8bit`."""
+    doc: """
+    An attachment part as Bytes: Content-Type with name, Content-Disposition
+    (`attachment`, or `inline` with a `content-id`), and the content base64
+    encoded in 76-character lines. A `message/rfc822` attachment (a
+    forwarded email) is embedded as is, `8bit`.
+
+    **Example**
+
+    ```hot
+    Str(::google::gmail::mime/attachment-part({filename: "a.txt", content: "hi", mime-type: "text/plain"}))
+    // "Content-Type: text/plain; name=\"a.txt\"\r\nContent-Disposition: attachment; filename=\"a.txt\"\r\nContent-Transfer-Encoding: base64\r\n\r\naGk="
+    ```
+    """
 }
 fn (attachment: Map): Bytes {
   mime attachment-mime-type(attachment)
@@ -433,7 +672,19 @@ fn (attachment: Map): Bytes {
 
 multipart
 meta {
-    doc: """A `multipart/<subtype>` entity as Bytes: its Content-Type header, then each part (Bytes, already carrying its own headers) between `boundary` delimiters."""
+    doc: """
+    A `multipart/<subtype>` entity as Bytes: its Content-Type header, then
+    each part (Bytes, already carrying its own headers) between `boundary`
+    delimiters.
+
+    **Example**
+
+    ```hot
+    part ::google::gmail::mime/text-part("Hi", "plain")
+    raw ::google::gmail::mime/multipart("mixed", [part], "b1")
+    starts-with(Str(raw), "Content-Type: multipart/mixed; boundary=\"b1\"")  // true
+    ```
+    """
 }
 fn (subtype: Str, parts: Vec, boundary: Str): Bytes {
   head Bytes(`Content-Type: multipart/${subtype}; boundary="${boundary}"\r\n\r\n`)
@@ -448,6 +699,15 @@ meta {
     `text`, `html`, or both as `multipart/alternative`; wrapped in
     `multipart/mixed` with the attachments when there are any. Nested
     boundaries derive from `boundary` (`a_` / `m_` prefixes).
+
+    **Example**
+
+    ```hot
+    Str(::google::gmail::mime/build-body({text: "Hi"}, "b1"))
+    // "Content-Type: text/plain; charset=\"UTF-8\"\r\nContent-Transfer-Encoding: 7bit\r\n\r\nHi"
+
+    contains(Str(::google::gmail::mime/build-body({text: "Hi", html: "<p>Hi</p>"}, "b1")), "multipart/alternative")  // true
+    ```
     """
 }
 fn (message: Map, boundary: Str): Bytes {
@@ -500,7 +760,17 @@ fn
 }
 
 to-raw
-meta {doc: """Base64url-encode a message (Bytes or Str) for the Gmail `raw` field."""}
+meta {
+    doc: """
+    Base64url-encode a message (Bytes or Str) for the Gmail `raw` field.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::mime/to-raw("Hi")  // "SGk"
+    ```
+    """
+}
 fn (message: Any): Str {
   ::b64/encode-url(to-bytes(message))
 }
@@ -512,6 +782,14 @@ meta {
     metadata part (nulls dropped) and the raw message as
     `message/rfc822`, concatenated as bytes. Send it with
     `Content-Type: multipart/related; boundary=<boundary>`.
+
+    **Example**
+
+    ```hot
+    raw ::google::gmail::mime/build-message({to: "ada@example.com", subject: "Hi", text: "Hello!"}, "b1")
+    body ::google::gmail::mime/build-related({threadId: "t1"}, raw, "rel1")
+    starts-with(Str(body), "--rel1\r\nContent-Type: application/json")  // true
+    ```
     """
 }
 fn (metadata: Map, message: Bytes, boundary: Str): Bytes {

@@ -1,5 +1,6 @@
 ::mysql::auth ns
 meta {
+    no-doc: true,
     doc: """
     MySQL authentication: initial-handshake parsing and the password
     scrambles for `mysql_native_password` and `caching_sha2_password`.

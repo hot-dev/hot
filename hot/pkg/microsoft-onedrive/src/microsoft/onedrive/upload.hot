@@ -51,7 +51,18 @@ DEFAULT_CONFLICT "replace"
 
 to-bytes
 meta {
-    doc: """Upload content as Bytes: Bytes pass through, a Str becomes its UTF-8 bytes, null is empty, anything else is JSON-encoded (pure)."""
+    doc: """
+    Upload content as Bytes: Bytes pass through, a Str becomes its UTF-8
+    bytes, null is empty, anything else is JSON-encoded (pure).
+
+    **Example**
+
+    ```hot
+    length(::microsoft::onedrive::upload/to-bytes("hi"))  // 2
+    length(::microsoft::onedrive::upload/to-bytes(null))  // 0
+    Str(::microsoft::onedrive::upload/to-bytes([1, 2]))  // "[1,2]"
+    ```
+    """
 }
 fn (content: Any): Bytes {
   cond {
@@ -64,7 +75,17 @@ fn (content: Any): Bytes {
 
 align-chunk-size
 meta {
-    doc: """Round a chunk size down to a multiple of 320 KiB (327,680 bytes), at least 320 KiB and under 60 MiB (pure)."""
+    doc: """
+    Round a chunk size down to a multiple of 320 KiB (327,680 bytes), at
+    least 320 KiB and under 60 MiB (pure).
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive::upload/align-chunk-size(10485760)  // 10485760
+    ::microsoft::onedrive::upload/align-chunk-size(1000000)  // 983040
+    ```
+    """
 }
 fn (size: Int): Int {
   aligned mul(floor(div(size, CHUNK_ALIGN)), CHUNK_ALIGN)
@@ -73,7 +94,17 @@ fn (size: Int): Int {
 
 content-range
 meta {
-    doc: """The `Content-Range` for bytes `start` up to (not including) `end` of a `total`-byte upload: `content-range(0, 26, 128)` is `"bytes 0-25/128"` (pure)."""
+    doc: """
+    The `Content-Range` for bytes `start` up to (not including) `end` of a
+    `total`-byte upload: `content-range(0, 26, 128)` is `"bytes 0-25/128"`
+    (pure).
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive::upload/content-range(0, 26, 128)  // "bytes 0-25/128"
+    ```
+    """
 }
 fn (start: Int, end: Int, total: Int): Str {
   `bytes ${start}-${sub(end, 1)}/${total}`
@@ -81,7 +112,17 @@ fn (start: Int, end: Int, total: Int): Str {
 
 chunk-bounds
 meta {
-    doc: """The `[start, end)` of the chunk beginning at `offset` (pure): `end` is `offset + chunk-size`, capped at `total`."""
+    doc: """
+    The `[start, end)` of the chunk beginning at `offset` (pure): `end` is
+    `offset + chunk-size`, capped at `total`.
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive::upload/chunk-bounds(0, 10, 25)  // [0, 10]
+    ::microsoft::onedrive::upload/chunk-bounds(20, 10, 25)  // [20, 25]
+    ```
+    """
 }
 fn (offset: Int, chunk-size: Int, total: Int): Vec {
   [offset, min(total, add(offset, chunk-size))]
@@ -94,6 +135,14 @@ meta {
     (pure): the start of the first range (`["26-"]` is 26,
     `["12345-55232", "77829-99375"]` is 12345); null when the list is
     empty or missing.
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive::upload/next-offset-from-ranges(["26-"])  // 26
+    ::microsoft::onedrive::upload/next-offset-from-ranges(["12345-55232", "77829-99375"])  // 12345
+    ::microsoft::onedrive::upload/next-offset-from-ranges([])  // null
+    ```
     """
 }
 fn (ranges: Any): Int? {
@@ -120,7 +169,9 @@ type {
     next-expected-ranges: Vec
 }
 
-to-session fn (body: Map): UploadSession {
+to-session
+meta {no-doc: true}
+fn (body: Map): UploadSession {
   UploadSession({
     upload-url: body.uploadUrl,
     expiration: body.expirationDateTime,
@@ -130,7 +181,17 @@ to-session fn (body: Map): UploadSession {
 
 build-session-body
 meta {
-    doc: """The `createUploadSession` body (pure): `{item: {@microsoft.graph.conflictBehavior, description?, fileSize?}, deferCommit?}`. Unset options are omitted."""
+    doc: """
+    The `createUploadSession` body (pure): `{item:
+    {@microsoft.graph.conflictBehavior, description?, fileSize?},
+    deferCommit?}`. Unset options are omitted.
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive::upload/build-session-body("rename", {file-size: 1024})  // {item: {"@microsoft.graph.conflictBehavior": "rename", fileSize: 1024}}
+    ```
+    """
 }
 fn (conflict: Str, opts: Map): Map {
   ::auth/compact({
@@ -153,6 +214,13 @@ meta {
     expired session (404), a range mismatch (416: call `resume-upload`),
     a name conflict (409) or any other failure (429/5xx carry
     `retry-after`).
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive::upload/classify-chunk-response({status: 202, headers: {}, body: {nextExpectedRanges: ["26-"]}}, 26)  // {state: "incomplete", next-offset: 26}
+    ::microsoft::onedrive::upload/classify-chunk-response({status: 201, headers: {}, body: {id: "01ABC"}}, null).item.id  // "01ABC"
+    ```
     """
 }
 fn (response: Result, assumed-offset: Int?): Map {
@@ -187,6 +255,15 @@ meta {
     `opts.conflict` (`replace` default, `rename`, `fail`),
     `description`, `file-size` (personal OneDrive: checks quota up front),
     `defer-commit`, `drive`. Returns an `UploadSession`.
+
+    **Example**
+
+    ```hot
+    session ::microsoft::onedrive::upload/create-upload-session("/Backups", "db.dump", {conflict: "rename"})
+
+    // Keep this to resume
+    session.upload-url
+    ```
     """
 }
 fn
@@ -199,7 +276,19 @@ fn
 
 create-replace-session
 meta {
-    doc: """POST {item}/createUploadSession - open a session that replaces an existing file's content. `opts` as for `create-upload-session`, plus `if-match` (eTag)."""
+    doc: """
+    POST {item}/createUploadSession - open a session that replaces an
+    existing file's content. `opts` as for `create-upload-session`, plus
+    `if-match` (eTag).
+
+    **Example**
+
+    ```hot
+    item ::microsoft::onedrive::items/get-item("/Backups/db.dump")
+    session ::microsoft::onedrive::upload/create-replace-session(item, {if-match: item.eTag})
+    session.upload-url
+    ```
+    """
 }
 fn
 (item: Any): UploadSession {
@@ -209,7 +298,9 @@ fn
   start-session(`${::od/item-path(item, opts)}/createUploadSession`, opts)
 }
 
-start-session fn (path: Str, opts: Map): UploadSession {
+start-session
+meta {no-doc: true}
+fn (path: Str, opts: Map): UploadSession {
   conflict ::od/conflict-behavior(get(opts, "conflict"), DEFAULT_CONFLICT)
   cond {
     is-err(conflict) => { conflict }
@@ -222,7 +313,19 @@ start-session fn (path: Str, opts: Map): UploadSession {
 
 put-chunk
 meta {
-    doc: """PUT one chunk to an upload URL, without an Authorization header, with its `Content-Range`. Returns the raw response or a transport Err."""
+    doc: """
+    PUT one chunk to an upload URL, without an Authorization header, with
+    its `Content-Range`. Returns the raw response or a transport Err.
+
+    **Example**
+
+    ```hot
+    session ::microsoft::onedrive::upload/create-upload-session("/Backups", "note.txt")
+    chunk Bytes("hello")
+    response ::microsoft::onedrive::upload/put-chunk(session.upload-url, chunk, 0, length(chunk))
+    response.status
+    ```
+    """
 }
 fn (upload-url: Str, chunk: Bytes, start: Int, total: Int): Any {
   ::http/request(::http/HttpRequest({
@@ -233,7 +336,9 @@ fn (upload-url: Str, chunk: Bytes, start: Int, total: Int): Any {
   }))
 }
 
-upload-loop fn (upload-url: Str, bytes: Bytes, offset: Int, chunk-size: Int, attempt: Int, policy: Map): Map {
+upload-loop
+meta {no-doc: true}
+fn (upload-url: Str, bytes: Bytes, offset: Int, chunk-size: Int, attempt: Int, policy: Map): Map {
   total length(bytes)
   bounds chunk-bounds(offset, chunk-size, total)
   chunk slice(bytes, first(bounds), last(bounds))
@@ -264,6 +369,14 @@ meta {
     Send `content` to an open session's `upload-url`, starting at byte 0
     (or `opts.offset`), in `opts.chunk-size` chunks (default 10 MiB,
     rounded down to a 320 KiB multiple). Returns the created driveItem.
+
+    **Example**
+
+    ```hot
+    session ::microsoft::onedrive::upload/create-upload-session("/Backups", "db.dump")
+    item ::microsoft::onedrive::upload/upload-to-session(session.upload-url, Bytes("backup contents"), {chunk-size: 5242880})
+    item.id
+    ```
     """
 }
 fn
@@ -281,7 +394,19 @@ fn
 
 upload-session-status
 meta {
-    doc: """GET an upload URL (no Authorization) - how far the session got: `{next-offset, next-expected-ranges, expiration}`. An Err when the session is gone (404)."""
+    doc: """
+    GET an upload URL (no Authorization) - how far the session got:
+    `{next-offset, next-expected-ranges, expiration}`. An Err when the
+    session is gone (404).
+
+    **Example**
+
+    ```hot
+    url "https://contoso-my.sharepoint.com/_api/v2.0/drives/b!xyz/items/01ABC/uploadSession?guid=abc"
+    status ::microsoft::onedrive::upload/upload-session-status(url)
+    status.next-offset
+    ```
+    """
 }
 fn
 (upload-url: Str): Map {
@@ -309,6 +434,8 @@ meta {
     session where it stands, then send the rest. Returns the driveItem.
 
     ```hot
+    saved-upload-url "https://contoso-my.sharepoint.com/_api/v2.0/drives/b!xyz/items/01ABC/uploadSession?guid=abc"
+    bytes ::microsoft::onedrive::content/download("/Raw/video.mp4").bytes
     item ::microsoft::onedrive::upload/resume-upload(saved-upload-url, bytes)
     ```
     """
@@ -328,7 +455,17 @@ fn
 
 cancel-upload-session
 meta {
-    doc: """DELETE an upload URL (no Authorization) - discard the session and its uploaded bytes. Returns true."""
+    doc: """
+    DELETE an upload URL (no Authorization) - discard the session and its
+    uploaded bytes. Returns true.
+
+    **Example**
+
+    ```hot
+    session ::microsoft::onedrive::upload/create-upload-session("/Backups", "db.dump")
+    ::microsoft::onedrive::upload/cancel-upload-session(session.upload-url)
+    ```
+    """
 }
 fn
 (upload-url: Str): Bool {
@@ -345,7 +482,18 @@ fn
 
 upload-large
 meta {
-    doc: """Upload `content` as `name` under `parent` through an upload session (any size). Returns the driveItem. See `create-upload-session` and `upload-to-session` for `opts`."""
+    doc: """
+    Upload `content` as `name` under `parent` through an upload session (any
+    size). Returns the driveItem. See `create-upload-session` and
+    `upload-to-session` for `opts`.
+
+    **Example**
+
+    ```hot
+    item ::microsoft::onedrive::upload/upload-large("/Backups", "db.dump", Bytes("backup contents"), {conflict: "rename", chunk-size: 5242880})
+    item.id
+    ```
+    """
 }
 fn
 (parent: Any, name: Str, content: Any): Map {
@@ -360,11 +508,15 @@ fn
 // Simple uploads and one-call helpers
 // ---------------------------------------------------------------------------
 
-conflict-query fn (conflict: Str?): Str {
+conflict-query
+meta {no-doc: true}
+fn (conflict: Str?): Str {
   if(is-null(conflict), "", `?@microsoft.graph.conflictBehavior=${conflict}`)
 }
 
-put-content fn (path: Str, bytes: Bytes, mime-type: Str?, conflict: Str?, opts: Map): Map {
+put-content
+meta {no-doc: true}
+fn (path: Str, bytes: Bytes, mime-type: Str?, conflict: Str?, opts: Map): Map {
   headers {
       Content-Type: if(::auth/is-blank-value(mime-type), "application/octet-stream", mime-type),
       ...::od/if-match-headers(opts)
@@ -380,6 +532,13 @@ meta {
     request (best up to 4 MiB; Graph accepts up to 250 MB, but a session
     survives dropped connections). `opts.conflict` (`replace` default,
     `rename`, `fail`), `drive`. Returns the driveItem.
+
+    **Example**
+
+    ```hot
+    item ::microsoft::onedrive::upload/upload-small("/Reports", "notes.txt", "First draft\n", "text/plain", {conflict: "fail"})
+    item.id
+    ```
     """
 }
 fn
@@ -404,6 +563,7 @@ meta {
 
     ```hot
     item ::microsoft::onedrive::upload/upload-file("/Reports", "q3.csv", "region,total\nwest,42\n", "text/csv")
+    video-bytes ::microsoft::onedrive::content/download("/Raw/video.mp4").bytes
     big ::microsoft::onedrive::upload/upload-file("root", "video.mp4", video-bytes, "video/mp4", {conflict: "rename"})
     ```
     """
@@ -422,7 +582,21 @@ fn
 
 replace-content
 meta {
-    doc: """Replace an existing file's content (a new version): a simple PUT to `{item}/content` up to 4 MiB, an upload session above. `opts.if-match` (eTag) guards against overwriting someone else's change. Returns the driveItem."""
+    doc: """
+    Replace an existing file's content (a new version): a simple PUT to
+    `{item}/content` up to 4 MiB, an upload session above. `opts.if-match`
+    (eTag) guards against overwriting someone else's change. Returns the
+    driveItem.
+
+    **Example**
+
+    ```hot
+    item ::microsoft::onedrive::items/get-item("/Reports/q3.csv")
+
+    // Fails with 412 if someone changed the file first
+    ::microsoft::onedrive::upload/replace-content(item, "region,total\nwest,42\n", "text/csv", {if-match: item.eTag})
+    ```
+    """
 }
 fn
 (item: Any, content: Any, mime-type: Str?): Map {

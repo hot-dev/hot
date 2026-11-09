@@ -23,11 +23,16 @@ Uses the `whatsapp.app.secret` context variable by default (failing when it is u
 ```hot
 ::webhooks ::whatsapp::webhooks
 
+request {
+  headers: {"x-hub-signature-256": "sha256=5f2b8c1e"},
+  body-raw: "{\"entry\":[]}"
+}
+
 // Using context variable (1-arity)
 is-valid ::webhooks/verify-request(request)
 
 // With explicit secret (2-arity)
-is-valid ::webhooks/verify-request(request, "my-app-secret")
+is-valid ::webhooks/verify-request(request, ::hot::ctx/get("tenant.whatsapp.app.secret"))
 ```
 """
 }
@@ -71,8 +76,9 @@ Uses the `whatsapp.verify.token` context variable by default (failing when it is
 ```hot
 ::webhooks ::whatsapp::webhooks
 
-// In a webhook handler for GET requests:
-result ::webhooks/verify-challenge(request.query)
+// In a webhook handler for GET requests, this is request.query:
+query {"hub.mode": "subscribe", "hub.verify_token": "token-from-dashboard", "hub.challenge": "1158201444"}
+result ::webhooks/verify-challenge(query)
 // Returns the challenge string on success, or an Err on failure:
 // reply 200 with the challenge as the plain-text body, else 403.
 ```
@@ -107,7 +113,22 @@ fn
 
 change-values
 meta {
-    doc: """The `value` objects of every `messages`-field change in a notification payload (`entry[].changes[].value`). Exposed for testing."""
+    doc: """
+    The `value` objects of every `messages`-field change in a notification
+    payload (`entry[].changes[].value`). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::webhooks ::whatsapp::webhooks
+
+    payload {entry: [{changes: [
+      {field: "messages", value: {metadata: {phone_number_id: "1"}}},
+      {field: "account_update", value: {event: "VERIFIED"}}
+    ]}]}
+    ::webhooks/change-values(payload)  // [{metadata: {phone_number_id: "1"}}]
+    ```
+    """
 }
 fn (payload: Any): Vec {
   entries if(is-map(payload), or(get(payload, "entry"), []), [])
@@ -124,10 +145,11 @@ meta {
     **Example**
 
     ```hot
-    messages ::whatsapp::webhooks/extract-messages(request.body)
-    map(messages, (m) {
-      if(eq(m.type, "text"), println(`${m.from}: ${m.text.body}`), null)
-    })
+    payload {entry: [{changes: [{field: "messages", value: {
+      metadata: {phone_number_id: "109876543210"},
+      messages: [{from: "15551234567", id: "wamid.1", type: "text", text: {body: "Hi"}}]
+    }}]}]}
+    first(::whatsapp::webhooks/extract-messages(payload)).text.body  // "Hi"
     ```
     """
 }
@@ -146,7 +168,26 @@ fn (payload: Any): Vec {
 
 extract-statuses
 meta {
-    doc: """The outbound message status updates in a webhook notification payload (`sent`, `delivered`, `read`, `failed`), flattened across entries and changes, each with `phone_number_id` added. Each status carries `id` (the `wamid` you sent), `status`, `timestamp`, `recipient_id`, and `errors` on failure."""
+    doc: """
+    The outbound message status updates in a webhook notification payload
+    (`sent`, `delivered`, `read`, `failed`), flattened across entries and
+    changes, each with `phone_number_id` added. Each status carries `id`
+    (the `wamid` you sent), `status`, `timestamp`, `recipient_id`, and
+    `errors` on failure.
+
+    **Example**
+
+    ```hot
+    ::webhooks ::whatsapp::webhooks
+
+    payload {entry: [{changes: [{field: "messages", value: {
+      metadata: {phone_number_id: "109876543210"},
+      statuses: [{id: "wamid.1", status: "delivered"}]
+    }}]}]}
+    first(::webhooks/extract-statuses(payload)).status  // "delivered"
+    first(::webhooks/extract-statuses(payload)).phone_number_id  // "109876543210"
+    ```
+    """
 }
 fn (payload: Any): Vec {
   mapcat(change-values(payload), (value) {

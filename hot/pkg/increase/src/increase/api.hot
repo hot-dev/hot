@@ -77,7 +77,18 @@ SENSITIVE_KEYS [
 
 redact-text
 meta {
-    doc: """Mask every run of 8 or more digits in `text` down to its last four (`"acct 123456789"` becomes `"acct ****6789"`), so an account or routing number echoed in an error detail is never kept whole. Exposed for testing."""
+    doc: """
+    Mask every run of 8 or more digits in `text` down to its last four
+    (`"acct 123456789"` becomes `"acct ****6789"`), so an account or routing
+    number echoed in an error detail is never kept whole. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::increase::api/redact-text("acct 123456789")  // "acct ****6789"
+    ```
+    """
 }
 fn (text: Str): Str {
   ::re/replace-all(text, "[0-9]{4,}([0-9]{4})", "****$1")
@@ -91,6 +102,13 @@ meta {
     secrets) become `"[redacted]"`, and long digit runs in every other
     string are masked by `redact-text`. Applied to every `HttpError`.
     Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::increase::api/redact({account_number: "123456789", detail: "acct 123456789", amount: 100})
+    // {account_number: "[redacted]", detail: "acct ****6789", amount: 100}
+    ```
     """
 }
 fn (value: Any): Any {
@@ -153,7 +171,17 @@ type {
 
 parse-int
 meta {
-    doc: """An Int from an Int or a decimal-digit Str; null for anything else. Never errs on bad input. Exposed for testing."""
+    doc: """
+    An Int from an Int or a decimal-digit Str; null for anything else. Never
+    errs on bad input. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::increase::api/parse-int("42")  // 42
+    ::increase::api/parse-int("abc")  // null
+    ```
+    """
 }
 fn (value: Any): Int? {
   cond {
@@ -165,16 +193,22 @@ fn (value: Any): Int? {
   }
 }
 
-field fn (body: Any, key: Str): Any {
+field
+meta {no-doc: true}
+fn (body: Any, key: Str): Any {
   if(is-map(body), get(body, key), null)
 }
 
-str-field fn (body: Any, key: Str): Str? {
+str-field
+meta {no-doc: true}
+fn (body: Any, key: Str): Str? {
   v field(body, key)
   if(is-str(v), v, null)
 }
 
-body-excerpt fn (body: Any): Str {
+body-excerpt
+meta {no-doc: true}
+fn (body: Any): Str {
   text cond {
     is-null(body) => { "" }
     is-str(body) => { body }
@@ -185,7 +219,9 @@ body-excerpt fn (body: Any): Str {
   if(gt(length(text), 300), `${slice(text, 0, 300)}...`, text)
 }
 
-decode-body fn (body: Any): Any {
+decode-body
+meta {no-doc: true}
+fn (body: Any): Any {
   cond {
     is-bytes(body) => {
       parsed from-json(Str(body))
@@ -208,7 +244,18 @@ decode-body fn (body: Any): Any {
 
 error-message
 meta {
-    doc: """The readable `message` line for an error body (already redacted): `increase: HTTP {status} {type}: {title} {detail}`, or a body excerpt when the body isn't an Increase error object. Exposed for testing."""
+    doc: """
+    The readable `message` line for an error body (already redacted):
+    `increase: HTTP {status} {type}: {title} {detail}`, or a body excerpt
+    when the body isn't an Increase error object. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::increase::api/error-message(409, {type: "invalid_operation_error", title: "Not allowed."})
+    // "increase: HTTP 409 invalid_operation_error: Not allowed."
+    ```
+    """
 }
 fn (status: Int, body: Any): Str {
   type-name str-field(body, "type")
@@ -242,14 +289,25 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   })
 }
 
-plain-error fn (error: Result): Any {
+plain-error
+meta {no-doc: true}
+fn (error: Result): Any {
   payload if(is-err(error), err-value(error), error)
   if(or(is-null(payload), is-str(payload)), payload, untype(payload))
 }
 
 is-error-type
 meta {
-    doc: """True when `error` (an `HttpError`, or a `Result.Err` holding one) has this Increase error `type`, e.g. `"idempotency_key_already_used_error"`."""
+    doc: """
+    True when `error` (an `HttpError`, or a `Result.Err` holding one) has
+    this Increase error `type`, e.g. `"idempotency_key_already_used_error"`.
+
+    **Example**
+
+    ```hot
+    ::increase::api/is-error-type(err({type: "object_not_found_error"}), "object_not_found_error")  // true
+    ```
+    """
 }
 fn (error: Result, type-name: Str): Bool {
   payload plain-error(error)
@@ -262,7 +320,20 @@ fn (error: Result, type-name: Str): Bool {
 
 environment-base-url
 meta {
-    doc: """The base URL for an environment name: `"sandbox"` is `https://sandbox.increase.com` and `"production"` is `https://api.increase.com`. Surrounding whitespace and case are ignored; anything else errs, so a typo can never send requests to an unintended host. Exposed for testing."""
+    doc: """
+    The base URL for an environment name: `"sandbox"` is
+    `https://sandbox.increase.com` and `"production"` is
+    `https://api.increase.com`. Surrounding whitespace and case are ignored;
+    anything else errs, so a typo can never send requests to an unintended
+    host. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::increase::api/environment-base-url("sandbox")  // "https://sandbox.increase.com"
+    ::increase::api/environment-base-url(" Production ")  // "https://api.increase.com"
+    ```
+    """
 }
 fn (environment: Str): Str {
   name lowercase(trim(environment))
@@ -275,7 +346,17 @@ fn (environment: Str): Str {
 
 normalize-environment
 meta {
-    doc: """`"sandbox"` or `"production"` for an environment name (case and whitespace ignored), or an Err for anything else. Exposed for testing."""
+    doc: """
+    `"sandbox"` or `"production"` for an environment name (case and
+    whitespace ignored), or an Err for anything else. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::increase::api/normalize-environment(" Production ")  // "production"
+    is-err(::increase::api/normalize-environment("staging"))  // true
+    ```
+    """
 }
 fn (environment: Str): Str {
   checked environment-base-url(environment)
@@ -284,7 +365,18 @@ fn (environment: Str): Str {
 
 current-environment
 meta {
-    doc: """The configured environment: `increase.environment` normalized to `"sandbox"` or `"production"`, `"sandbox"` when unset or empty, and an Err for any other value."""
+    doc: """
+    The configured environment: `increase.environment` normalized to
+    `"sandbox"` or `"production"`, `"sandbox"` when unset or empty, and an
+    Err for any other value.
+
+    **Example**
+
+    ```hot
+    environment ::increase::api/current-environment()
+    if(eq(environment, "production"), "live", "test")
+    ```
+    """
 }
 fn (): Str {
   configured trim(Str(or(::ctx/get("increase.environment"), "")))
@@ -295,7 +387,16 @@ fn (): Str {
 
 is-sandbox
 meta {
-    doc: """True when the configured environment is `"sandbox"`; false for `"production"` and for an invalid value."""
+    doc: """
+    True when the configured environment is `"sandbox"`; false for
+    `"production"` and for an invalid value.
+
+    **Example**
+
+    ```hot
+    if(::increase::api/is-sandbox(), "safe to simulate", "skip simulations")
+    ```
+    """
 }
 fn (): Bool {
   env current-environment()
@@ -304,7 +405,18 @@ fn (): Bool {
 
 require-sandbox
 meta {
-    doc: """`true` when `environment` is `"sandbox"`, otherwise an Err naming `operation`. Simulation endpoints check the environment their call would use, so they never reach production. Exposed for testing."""
+    doc: """
+    `true` when `environment` is `"sandbox"`, otherwise an Err naming
+    `operation`. Simulation endpoints check the environment their call would
+    use, so they never reach production. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::increase::api/require-sandbox("sandbox", "settle-ach-transfer")  // true
+    is-err(::increase::api/require-sandbox("production", "settle-ach-transfer"))  // true
+    ```
+    """
 }
 fn (environment: Str, operation: Str): Bool {
   cond {
@@ -328,7 +440,17 @@ fn (environment: Str, operation: Str): Bool {
 
 option-headers
 meta {
-    doc: """The headers `opts` adds: `Idempotency-Key` when `opts` has an `idempotency-key`. Exposed for testing."""
+    doc: """
+    The headers `opts` adds: `Idempotency-Key` when `opts` has an
+    `idempotency-key`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::increase::api/option-headers({idempotency-key: "invoice-42"})  // {Idempotency-Key: "invoice-42"}
+    ::increase::api/option-headers({})  // {}
+    ```
+    """
 }
 fn (opts: Map): Map {
   key get(opts, "idempotency-key")
@@ -337,7 +459,18 @@ fn (opts: Map): Map {
 
 require-idempotency-key
 meta {
-    doc: """`opts` when it carries a non-empty `idempotency-key` of at most 200 characters, otherwise an Err. Every money-movement function checks this before sending anything."""
+    doc: """
+    `opts` when it carries a non-empty `idempotency-key` of at most 200
+    characters, otherwise an Err. Every money-movement function checks this
+    before sending anything.
+
+    **Example**
+
+    ```hot
+    ::increase::api/require-idempotency-key({idempotency-key: "invoice-42"}, "create-ach-transfer")  // {idempotency-key: "invoice-42"}
+    is-err(::increase::api/require-idempotency-key({}, "create-ach-transfer"))  // true
+    ```
+    """
 }
 fn (opts: Map, operation: Str): Map {
   key get(opts, "idempotency-key")
@@ -359,7 +492,18 @@ fn (opts: Map, operation: Str): Map {
 
 compact
 meta {
-    doc: """Drop null values from a request body, recursively through nested maps and the maps inside vectors, so unset optionals are omitted rather than sent as JSON `null`. `false`, `0` and `""` are kept. Exposed for testing."""
+    doc: """
+    Drop null values from a request body, recursively through nested maps
+    and the maps inside vectors, so unset optionals are omitted rather than
+    sent as JSON `null`. `false`, `0` and `""` are kept. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::increase::api/compact({a: 1, b: null, c: {d: null, e: false}})  // {a: 1, c: {e: false}}
+    ```
+    """
 }
 fn (value: Any): Any {
   cond {
@@ -377,7 +521,16 @@ fn (value: Any): Any {
 
 missing-fields
 meta {
-    doc: """The names in `fields` that are null or absent in `params`. Exposed for testing."""
+    doc: """
+    The names in `fields` that are null or absent in `params`. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::increase::api/missing-fields({name: "Operating"}, ["name", "entity_id"])  // ["entity_id"]
+    ```
+    """
 }
 fn (params: Map, fields: Vec): Vec {
   filter(fields, (f) { is-null(get(params, f)) })
@@ -385,14 +538,26 @@ fn (params: Map, fields: Vec): Vec {
 
 require-fields
 meta {
-    doc: """`params` when every name in `fields` is set, otherwise an Err listing the missing names (never their values). Exposed for testing."""
+    doc: """
+    `params` when every name in `fields` is set, otherwise an Err listing
+    the missing names (never their values). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::increase::api/require-fields({name: "Operating"}, ["name"], "create-account")  // {name: "Operating"}
+    is-err(::increase::api/require-fields({}, ["name"], "create-account"))  // true
+    ```
+    """
 }
 fn (params: Map, fields: Vec, operation: Str): Map {
   missing missing-fields(params, fields)
   if(is-empty(missing), params, err(`increase: ${operation} needs ${join(missing, ", ")}; nothing was sent`))
 }
 
-query-value fn (value: Any): Str {
+query-value
+meta {no-doc: true}
+fn (value: Any): Str {
   cond {
     is-vec(value) => { join(map(filter(value, is-some), (v) { Str(v) }), ",") }
     => { Str(value) }
@@ -405,9 +570,15 @@ meta {
     Flatten query params the way Increase reads them: nested maps join
     their keys with dots (`{created_at: {after: "2026-01-01T00:00:00Z"}}`
     gives `created_at.after=...`), vectors become comma-delimited lists
-    (`{"status.in": ["open", "closed"]}` gives `status.in=open,closed`),
+    (`{"status.in": ["open", "closed"]}` gives `status.in=open%2Cclosed`),
     and null values and empty vectors are dropped. Keys and values are
     percent-encoded. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::increase::api/query-pairs({created_at: {after: "2026"}, limit: 10, cursor: null}, "")  // ["created_at.after=2026", "limit=10"]
+    ```
     """
 }
 fn (params: Map, prefix: Str): Vec<Str> {
@@ -425,7 +596,17 @@ fn (params: Map, prefix: Str): Vec<Str> {
 
 query-string
 meta {
-    doc: """`?a=1&b=2` from `params` (see `query-pairs`), or `""` when nothing remains."""
+    doc: """
+    `?a=1&b=2` from `params` (see `query-pairs`), or `""` when nothing
+    remains.
+
+    **Example**
+
+    ```hot
+    ::increase::api/query-string({limit: 10})  // "?limit=10"
+    ::increase::api/query-string({})  // ""
+    ```
+    """
 }
 fn (params: Map): Str {
   pairs query-pairs(params, "")
@@ -434,7 +615,16 @@ fn (params: Map): Str {
 
 seg
 meta {
-    doc: """Percent-encode one path segment (an object id), so an id from user input can't change which endpoint is called."""
+    doc: """
+    Percent-encode one path segment (an object id), so an id from user input
+    can't change which endpoint is called.
+
+    **Example**
+
+    ```hot
+    ::increase::api/seg("account 1/2")  // "account%201%2F2"
+    ```
+    """
 }
 fn (id: Any): Str {
   ::uri/encode(Str(id))
@@ -457,8 +647,8 @@ meta {
 
     ```hot
     req ::increase::api/build-request("POST", "https://sandbox.increase.com/account_transfers", {amount: 100}, {Idempotency-Key: "k1"}, "test_key")
-    req.headers.Authorization   // => "Bearer test_key"
-    req.body                    // => "{\\"amount\\":100}"
+    req.headers.Authorization  // "Bearer test_key"
+    req.body  // "{\"amount\":100}"
     ```
     """
 }
@@ -481,7 +671,17 @@ fn (method: Str, url: Str, body: Any, headers: Map, api-key: Str): HttpRequest {
 
 response-body
 meta {
-    doc: """Normalize a 2xx body: empty text becomes null; anything else passes through. Exposed for testing."""
+    doc: """
+    Normalize a 2xx body: empty text becomes null; anything else passes
+    through. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::increase::api/response-body("  ")  // null
+    ::increase::api/response-body({id: "account_1"})  // {id: "account_1"}
+    ```
+    """
 }
 fn (body: Any): Any {
   cond {
@@ -490,17 +690,33 @@ fn (body: Any): Any {
   }
 }
 
-present fn (value: Any): Bool {
+present
+meta {no-doc: true}
+fn (value: Any): Bool {
   and(is-some(value), not(is-empty(trim(Str(or(value, ""))))))
 }
 
-non-blank fn (value: Any): Str? {
+non-blank
+meta {no-doc: true}
+fn (value: Any): Str? {
   if(is-str(value), if(is-empty(trim(value)), null, trim(value)), null)
 }
 
 blank-option
 meta {
-    doc: """The first of `names` that `opts` has but with a blank or null value, else null. Such a key is an Err, never a fallback to context: a tenant whose key or environment is missing must not run on the project's. Exposed for testing."""
+    doc: """
+    The first of `names` that `opts` has but with a blank or null value,
+    else null. Such a key is an Err, never a fallback to context: a tenant
+    whose key or environment is missing must not run on the project's.
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::increase::api/blank-option({api-key: "  "}, ["api-key", "environment"])  // "api-key"
+    ::increase::api/blank-option({}, ["api-key", "environment"])  // null
+    ```
+    """
 }
 fn (opts: Map, names: Vec): Str? {
   find-first(names, (name) { and(in(name, keys(opts)), is-null(non-blank(get(opts, name)))) })
@@ -526,8 +742,8 @@ meta {
     **Example**
 
     ```hot
-    settings ::increase::api/resolve({api-key: "tenant_b_key", environment: "production"})
-    settings.base-url   // => "https://api.increase.com"
+    settings ::increase::api/resolve({api-key: ::hot::ctx/get("tenant-b.increase.api.key"), environment: "production"})
+    settings.base-url
     ```
     """
 }
@@ -605,7 +821,17 @@ fn
 
 environment-of
 meta {
-    doc: """The environment a call with `opts` would use: its `environment`, else `increase.environment` (`"sandbox"` when unset). An Err for an invalid value."""
+    doc: """
+    The environment a call with `opts` would use: its `environment`, else
+    `increase.environment` (`"sandbox"` when unset). An Err for an invalid
+    value.
+
+    **Example**
+
+    ```hot
+    ::increase::api/environment-of({environment: " Production "})  // "production"
+    ```
+    """
 }
 fn (opts: Map): Str {
   explicit get(opts, "environment")
@@ -618,7 +844,16 @@ fn (opts: Map): Str {
 
 approval-required-by-default
 meta {
-    doc: """True when the `increase.transfers.require-approval` context variable is `true` (or `"true"`)."""
+    doc: """
+    True when the `increase.transfers.require-approval` context variable is
+    `true` (or `"true"`).
+
+    **Example**
+
+    ```hot
+    ::increase::api/apply-approval-default({amount: 100}, ::increase::api/approval-required-by-default())
+    ```
+    """
 }
 fn (): Bool {
   v ::ctx/get("increase.transfers.require-approval")
@@ -627,7 +862,18 @@ fn (): Bool {
 
 apply-approval-default
 meta {
-    doc: """`params` with `require_approval: true` added when `required` is true and the caller didn't set `require_approval` either way. Exposed for testing."""
+    doc: """
+    `params` with `require_approval: true` added when `required` is true and
+    the caller didn't set `require_approval` either way. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::increase::api/apply-approval-default({amount: 100}, true)  // {amount: 100, require_approval: true}
+    ::increase::api/apply-approval-default({amount: 100, require_approval: false}, true)  // {amount: 100, require_approval: false}
+    ```
+    """
 }
 fn (params: Map, required: Bool): Map {
   if(and(required, is-null(get(params, "require_approval"))), {...params, require_approval: true}, params)
@@ -641,6 +887,19 @@ meta {
     the `increase.transfers.require-approval` default when `approval` is
     true, then send it once. Any failed check is an Err and nothing is
     sent. The transfer and return functions are built on it.
+
+    **Example**
+
+    ```hot
+    ::increase::api/move-money("/ach_transfers", {
+      account_id: "account_in71c4amph0vgo2qllky",
+      external_account_id: "external_account_ukk55lr923a3ac0pp7iv",
+      amount: 10000,
+      statement_descriptor: "Invoice 42",
+      require_approval: true
+    }, ["account_id", "amount", "statement_descriptor"], true,
+      {idempotency-key: "invoice-42-payout"}, "create-ach-transfer")
+    ```
     """
 }
 fn (path: Str, params: Map, required: Vec, approval: Bool, opts: Map, operation: Str): Map {
@@ -656,7 +915,18 @@ fn (path: Str, params: Map, required: Vec, approval: Bool, opts: Map, operation:
 
 create
 meta {
-    doc: """POST a create request after checking that `params` has every `required` field. The idempotency key is optional here (it is required by `move-money`)."""
+    doc: """
+    POST a create request after checking that `params` has every `required`
+    field. The idempotency key is optional here (it is required by
+    `move-money`).
+
+    **Example**
+
+    ```hot
+    ::increase::api/create("/lockboxes", {account_id: "account_in71c4amph0vgo2qllky", description: "Rent"}, ["account_id"],
+      {idempotency-key: "lockbox-rent"}, "create-lockbox")
+    ```
+    """
 }
 fn (path: Str, params: Map, required: Vec, opts: Map, operation: Str): Map {
   body require-fields(compact(params), required, operation)
@@ -669,7 +939,16 @@ fn (path: Str, params: Map, required: Vec, opts: Map, operation: Str): Map {
 
 next-cursor
 meta {
-    doc: """The `next_cursor` of a list page, or null on the last page."""
+    doc: """
+    The `next_cursor` of a list page, or null on the last page.
+
+    **Example**
+
+    ```hot
+    ::increase::api/next-cursor({data: [], next_cursor: "djE6"})  // "djE6"
+    ::increase::api/next-cursor({data: [], next_cursor: null})  // null
+    ```
+    """
 }
 fn (page: Any): Str? {
   c field(page, "next_cursor")
@@ -687,7 +966,7 @@ meta {
 
     ```hot
     ::increase::api/next-page-params({account_id: "account_1", limit: 2}, {data: [{id: "t1"}, {id: "t2"}], next_cursor: "djE6"})
-    // => {account_id: "account_1", limit: 2, cursor: "djE6"}
+    // {account_id: "account_1", limit: 2, cursor: "djE6"}
     ```
     """
 }
@@ -721,7 +1000,21 @@ fn
 
 collect-pages
 meta {
-    doc: """Follow `next_cursor` from `params`, concatenating each page's `data`, until `limit` items (0 means no limit), the last page, or `MAX_PAGES` pages. `fetch` takes the params for one page and returns it. An Err from any page is returned as is. Exposed for testing; `collect-all` uses it."""
+    doc: """
+    Follow `next_cursor` from `params`, concatenating each page's `data`,
+    until `limit` items (0 means no limit), the last page, or `MAX_PAGES`
+    pages. `fetch` takes the params for one page and returns it. An Err from
+    any page is returned as is. Exposed for testing; `collect-all` uses it.
+
+    **Example**
+
+    ```hot
+    fetch (params) {
+      if(eq(get(params, "cursor"), "p2"), {data: [{id: "b"}], next_cursor: null}, {data: [{id: "a"}], next_cursor: "p2"})
+    }
+    map(::increase::api/collect-pages(fetch, {}, 0, [], 0), %.id)  // ["a", "b"]
+    ```
+    """
 }
 fn (fetch: Fn, params: Map, limit: Int, acc: Vec, pages: Int): Vec {
   page fetch(params)

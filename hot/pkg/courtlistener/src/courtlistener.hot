@@ -28,7 +28,9 @@ meta {
 ::api ::courtlistener::api
 
 // Errors are returned, not consumed: consuming an Err would halt the run.
-with-token fn (opts: Map, f: Fn): Any {
+with-token
+meta {no-doc: true}
+fn (opts: Map, f: Fn): Any {
   cfg ::api/resolve(opts)
   cond {
     is-err(cfg) => { cfg }
@@ -41,25 +43,40 @@ with-token fn (opts: Map, f: Fn): Any {
 
 auth-header
 meta {
-    doc: """`Token <token>`, the `Authorization` value CourtListener expects (pure)."""
+    doc: """
+    `Token <token>`, the `Authorization` value CourtListener expects (pure).
+
+    **Example**
+
+    ```hot
+    token ::hot::ctx/get("courtlistener.api-token")
+    headers {Authorization: ::courtlistener/auth-header(token)}
+    ```
+    """
 }
 fn (token: Str): Str {
   `Token ${token}`
 }
 
-cl-get fn (path: Str, params: Map, opts: Map): Any {
+cl-get
+meta {no-doc: true}
+fn (path: Str, params: Map, opts: Map): Any {
   with-token(opts, (cfg, headers) {
     ::api/get-json(`${cfg.base-url}${path}${::api/query-string(params)}`, headers)
   })
 }
 
-cl-get-or-null fn (path: Str, params: Map, opts: Map): Any {
+cl-get-or-null
+meta {no-doc: true}
+fn (path: Str, params: Map, opts: Map): Any {
   with-token(opts, (cfg, headers) {
     ::api/get-json-or-null(`${cfg.base-url}${path}${::api/query-string(params)}`, headers)
   })
 }
 
-field-list fn (v: Any): Str? {
+field-list
+meta {no-doc: true}
+fn (v: Any): Str? {
   cond {
     is-vec(v) => { join(v, ",") }
     => { v }
@@ -73,6 +90,13 @@ meta {
     `omit` (a Vec or a comma-separated Str, `__` for nested fields),
     `order-by`, `cursor` and `page`. Unset values stay null and drop out
     of the query string.
+
+    **Example**
+
+    ```hot
+    ::courtlistener/refine-params({fields: ["id", "case_name"]}).fields  // "id,case_name"
+    ::courtlistener/refine-params({order-by: "id"}).order_by  // "id"
+    ```
     """
 }
 fn (opts: Map): Map {
@@ -85,7 +109,9 @@ fn (opts: Map): Map {
   }
 }
 
-list-params fn (filters: Map?, opts: Map): Map {
+list-params
+meta {no-doc: true}
+fn (filters: Map?, opts: Map): Map {
   {...or(filters, {}), ...refine-params(opts)}
 }
 
@@ -119,6 +145,14 @@ meta {
     default `"o"`), `order_by`, `filed_after`, `filed_before`, `highlight`
     (`opts.highlight` true gives `on`) and `cursor`. `opts.params` adds any
     other parameter the search front end sends.
+
+    **Example**
+
+    ```hot
+    ::courtlistener/search-params("privacy", {}).type  // "o"
+    ::courtlistener/search-params("privacy", {highlight: true}).highlight  // "on"
+    ::courtlistener/search-params("privacy", {params: {court: "ca9"}}).court  // "ca9"
+    ```
     """
 }
 fn (q: Str, opts: Map): Map {
@@ -162,7 +196,16 @@ fn
 
 search-opinions
 meta {
-    doc: """Search case law (`type=o`): opinion clusters with their nested opinions."""
+    doc: """
+    Search case law (`type=o`): opinion clusters with their nested opinions.
+
+    **Example**
+
+    ```hot
+    page ::courtlistener/search-opinions("\"fair use\" court_id:scotus", {order-by: "dateFiled desc"})
+    map(page.results, %.caseName)
+    ```
+    """
 }
 fn
 (q: Str): Map {
@@ -174,7 +217,17 @@ fn
 
 search-recap
 meta {
-    doc: """Search RECAP (`type=r`): federal cases with up to three nested documents. `more_docs` is true on a result with more matches than that."""
+    doc: """
+    Search RECAP (`type=r`): federal cases with up to three nested
+    documents. `more_docs` is true on a result with more matches than that.
+
+    **Example**
+
+    ```hot
+    page ::courtlistener/search-recap("antitrust court_id:dcd", {filed-after: "2026-01-01"})
+    map(page.results, %.caseName)
+    ```
+    """
 }
 fn
 (q: Str): Map {
@@ -186,7 +239,17 @@ fn
 
 search-dockets
 meta {
-    doc: """Search federal cases only (`type=d`), without filing metadata. Above 2,000 results `count` is an estimate, within about 6%."""
+    doc: """
+    Search federal cases only (`type=d`), without filing metadata. Above
+    2,000 results `count` is an estimate, within about 6%.
+
+    **Example**
+
+    ```hot
+    page ::courtlistener/search-dockets("Google court_id:cand")
+    page.count
+    ```
+    """
 }
 fn
 (q: Str): Map {
@@ -198,7 +261,17 @@ fn
 
 search-documents
 meta {
-    doc: """Search federal filing documents from PACER (`type=rd`), without docket metadata."""
+    doc: """
+    Search federal filing documents from PACER (`type=rd`), without docket
+    metadata.
+
+    **Example**
+
+    ```hot
+    page ::courtlistener/search-documents("motion to dismiss court_id:nysd")
+    map(page.results, %.description)
+    ```
+    """
 }
 fn
 (q: Str): Map {
@@ -214,7 +287,17 @@ fn
 
 docket
 meta {
-    doc: """One docket by id, or null when there is none. `opts.fields` and `opts.omit` trim the record."""
+    doc: """
+    One docket by id, or null when there is none. `opts.fields` and
+    `opts.omit` trim the record.
+
+    **Example**
+
+    ```hot
+    d ::courtlistener/docket(4214664, {fields: ["id", "case_name", "court"]})
+    if(is-null(d), "no such docket", d.case_name)
+    ```
+    """
 }
 fn
 (id: Any): Map? {
@@ -254,6 +337,13 @@ meta {
     `{date_filed__gte: "2026-01-01"}`. The Free Law Project lists some
     APIs as available to select users only; a 403 here means this
     account lacks access.
+
+    **Example**
+
+    ```hot
+    page ::courtlistener/docket-entries(4214664, {filters: {date_filed__gte: "2026-01-01"}, order-by: "date_filed"})
+    map(page.results, %.description)
+    ```
     """
 }
 fn
@@ -274,6 +364,14 @@ meta {
     One opinion cluster by id, or null when there is none. The id in a
     CourtListener opinion URL is a cluster id. `sub_opinions` links the
     cluster's opinions and `docket` its parent.
+
+    **Example**
+
+    ```hot
+    ::cl ::courtlistener
+    c ::cl/cluster(2812209)
+    if(is-null(c), null, ::cl/resource-id(c.docket))
+    ```
     """
 }
 fn
@@ -286,7 +384,17 @@ fn
 
 opinion
 meta {
-    doc: """One opinion by id, or null when there is none. Opinion ids do not match cluster ids. Prefer `html_with_citations` for the text."""
+    doc: """
+    One opinion by id, or null when there is none. Opinion ids do not match
+    cluster ids. Prefer `html_with_citations` for the text.
+
+    **Example**
+
+    ```hot
+    o ::courtlistener/opinion(3197342, {fields: ["id", "html_with_citations"]})
+    if(is-null(o), null, o.html_with_citations)
+    ```
+    """
 }
 fn
 (id: Any): Map? {
@@ -300,7 +408,9 @@ fn
 // Courts (no token needed)
 // ---------------------------------------------------------------------------
 
-public-get fn (path: Str, params: Map, opts: Map): Any {
+public-get
+meta {no-doc: true}
+fn (path: Str, params: Map, opts: Map): Any {
   cfg ::api/resolve(opts)
   cond {
     is-err(cfg) => { cfg }
@@ -313,7 +423,17 @@ public-get fn (path: Str, params: Map, opts: Map): Any {
 
 courts
 meta {
-    doc: """One page of courts and jurisdictions, with their ids. Works without a token, and sends one when set."""
+    doc: """
+    One page of courts and jurisdictions, with their ids. Works without a
+    token, and sends one when set.
+
+    **Example**
+
+    ```hot
+    page ::courtlistener/courts({filters: {jurisdiction: "F"}})
+    map(page.results, %.id)
+    ```
+    """
 }
 fn
 (): Map {
@@ -325,7 +445,17 @@ fn
 
 court
 meta {
-    doc: """One court by id (`"scotus"`, `"ca9"`), or null when there is none. Works without a token, and sends one when set."""
+    doc: """
+    One court by id (`"scotus"`, `"ca9"`), or null when there is none. Works
+    without a token, and sends one when set.
+
+    **Example**
+
+    ```hot
+    ninth ::courtlistener/court("ca9")
+    if(is-null(ninth), null, ninth.full_name)
+    ```
+    """
 }
 fn
 (id: Str): Map? {
@@ -346,6 +476,14 @@ meta {
     `{cursor: ...}`, `{page: n}`, or null on the last page. Only the
     parameter is read, so a next call goes to the configured `base-url`
     and the token never follows a URL from a response.
+
+    **Example**
+
+    ```hot
+    ::courtlistener/next-params({next: "https://www.courtlistener.com/api/rest/v4/search/?cursor=abc&type=o"})  // {cursor: "abc"}
+    ::courtlistener/next-params({next: "https://www.courtlistener.com/api/rest/v4/dockets/?page=3"})  // {page: 3}
+    ::courtlistener/next-params({next: null})  // null
+    ```
     """
 }
 fn (page: Any): Map? {
@@ -361,7 +499,9 @@ fn (page: Any): Map? {
   }
 }
 
-collect-pages fn (fetch: Fn, opts: Map, limit: Int, acc: Vec): Any {
+collect-pages
+meta {no-doc: true}
+fn (fetch: Fn, opts: Map, limit: Int, acc: Vec): Any {
   page fetch(opts)
   cond {
     is-err(page) => { page }

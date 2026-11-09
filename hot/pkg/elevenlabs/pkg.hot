@@ -2,7 +2,7 @@
 
 hot.pkg.elevenlabs {
   name: "hot.dev/elevenlabs",
-  version: "0.1.1",
+  version: "0.1.2",
   hot-min-version: "3.0.2",
   description: "ElevenLabs API bindings for Hot. Text-to-speech (full, timestamped, streaming), Scribe speech-to-text, sound effects, voices, models, history, account quota, and webhook verification.",
   author: "Hot Dev",

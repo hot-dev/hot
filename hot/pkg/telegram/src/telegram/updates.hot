@@ -52,7 +52,18 @@ DeleteWebhookRequest type {
 
 delete-webhook
 meta {
-    doc: """deleteWebhook - Remove the webhook integration. Set `drop_pending_updates: true` to discard any pending updates."""
+    doc: """
+    deleteWebhook - Remove the webhook integration. Set
+    `drop_pending_updates: true` to discard any pending updates.
+
+    **Example**
+
+    ```hot
+    ::updates ::telegram::updates
+
+    ::updates/delete-webhook(::updates/DeleteWebhookRequest({drop_pending_updates: true}))
+    ```
+    """
 }
 fn
 (request: DeleteWebhookRequest): Bool {

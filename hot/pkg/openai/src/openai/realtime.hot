@@ -100,7 +100,21 @@ CreateRealtimeSessionResponse type {
 
 create-session
 meta {
-    doc: """POST /realtime/sessions - Create a realtime session for audio/text conversations with GPT-4o models."""
+    doc: """
+    POST /realtime/sessions - Create a realtime session for audio/text
+    conversations with GPT-4o models.
+
+    **Example**
+
+    ```hot
+    session ::openai::realtime/create-session(::openai::realtime/CreateRealtimeSessionRequest({
+      model: "gpt-4o-realtime-preview",
+      instructions: "Be brief."
+    }))
+    // Give this short-lived value to the client.
+    session.client_secret.value
+    ```
+    """
 }
 fn
 (request: CreateRealtimeSessionRequest): CreateRealtimeSessionResponse {
@@ -136,7 +150,19 @@ CreateRealtimeTranscriptionSessionResponse type {
 
 create-transcription-session
 meta {
-    doc: """POST /realtime/transcription_sessions - Create a realtime transcription session for live audio-to-text."""
+    doc: """
+    POST /realtime/transcription_sessions - Create a realtime transcription
+    session for live audio-to-text.
+
+    **Example**
+
+    ```hot
+    session ::openai::realtime/create-transcription-session(::openai::realtime/CreateRealtimeTranscriptionSessionRequest({
+      input_audio_transcription: {model: "gpt-4o-transcribe", language: "en"}
+    }))
+    session.client_secret.value
+    ```
+    """
 }
 fn
 (request: CreateRealtimeTranscriptionSessionRequest): CreateRealtimeTranscriptionSessionResponse {

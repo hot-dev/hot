@@ -46,7 +46,17 @@ OPERATORS ["==", "!=", "<", ">", "<=", ">="]
 
 quote
 meta {
-    doc: """A double-quoted string literal, or an Err when the value contains `"` or `\` (Xero documents no escape for them)."""
+    doc: """
+    A double-quoted string literal, or an Err when the value contains `"` or
+    `\` (Xero documents no escape for them).
+
+    **Example**
+
+    ```hot
+    ::xero::where/quote("ACCREC")  // "\"ACCREC\""
+    is-err(::xero::where/quote("a\"b"))  // true
+    ```
+    """
 }
 fn (value: Str): Str {
   cond {
@@ -59,7 +69,17 @@ fn (value: Str): Str {
 
 guid
 meta {
-    doc: """A `guid("...")` literal for an id field (`ContactID`, `InvoiceID`, ...), or an Err when the value is not a GUID."""
+    doc: """
+    A `guid("...")` literal for an id field (`ContactID`, `InvoiceID`, ...),
+    or an Err when the value is not a GUID.
+
+    **Example**
+
+    ```hot
+    ::xero::where/guid("6d2b51ce-0a4f-4a8b-9f7a-3c1e2d4b5a69").literal  // "guid(\"6d2b51ce-0a4f-4a8b-9f7a-3c1e2d4b5a69\")"
+    is-err(::xero::where/guid("acme"))  // true
+    ```
+    """
 }
 fn (value: Str): Map {
   cond {
@@ -68,13 +88,25 @@ fn (value: Str): Map {
   }
 }
 
-pad2 fn (n: Int): Str {
+pad2
+meta {no-doc: true}
+fn (n: Int): Str {
   if(lt(n, 10), `0${n}`, Str(n))
 }
 
 date
 meta {
-    doc: """A `DateTime(y,mm,dd)` literal (month and day zero-padded), or an Err for an impossible date."""
+    doc: """
+    A `DateTime(y,mm,dd)` literal (month and day zero-padded), or an Err for
+    an impossible date.
+
+    **Example**
+
+    ```hot
+    ::xero::where/date(2026, 1, 5).literal  // "DateTime(2026,01,05)"
+    is-err(::xero::where/date(2026, 13, 1))  // true
+    ```
+    """
 }
 fn (year: Int, month: Int, day: Int): Map {
   cond {
@@ -87,7 +119,16 @@ fn (year: Int, month: Int, day: Int): Map {
 
 raw
 meta {
-    doc: """Wrap an expression you have built and checked yourself so `condition` writes it unchanged."""
+    doc: """
+    Wrap an expression you have built and checked yourself so `condition`
+    writes it unchanged.
+
+    **Example**
+
+    ```hot
+    ::xero::where/raw("DueDate<Date")  // {literal: "DueDate<Date"}
+    ```
+    """
 }
 fn (text: Str): Map {
   {literal: text}
@@ -95,7 +136,20 @@ fn (text: Str): Map {
 
 literal
 meta {
-    doc: """The filter literal for a value: a `{literal}` Map from `guid` / `date` / `raw` as is, Strs quoted (see `quote`), Ints and Decs bare, Bools `true`/`false`. Null is an Err."""
+    doc: """
+    The filter literal for a value: a `{literal}` Map from `guid` / `date` /
+    `raw` as is, Strs quoted (see `quote`), Ints and Decs bare, Bools
+    `true`/`false`. Null is an Err.
+
+    **Example**
+
+    ```hot
+    ::xero::where/literal("PAID")  // "\"PAID\""
+    ::xero::where/literal(10.5)  // "10.5"
+    ::xero::where/literal(true)  // "true"
+    ::xero::where/literal(::xero::where/date(2026, 1, 5))  // "DateTime(2026,01,05)"
+    ```
+    """
 }
 fn (value: Any): Str {
   cond {
@@ -110,7 +164,17 @@ fn (value: Any): Str {
 
 field
 meta {
-    doc: """Check a field path (`Status`, `Contact.ContactID`): letters, digits, `_` and dots. Returns it, or an Err."""
+    doc: """
+    Check a field path (`Status`, `Contact.ContactID`): letters, digits, `_`
+    and dots. Returns it, or an Err.
+
+    **Example**
+
+    ```hot
+    ::xero::where/field("Contact.ContactID")  // "Contact.ContactID"
+    is-err(::xero::where/field("a b"))  // true
+    ```
+    """
 }
 fn (name: Str): Str {
   cond {
@@ -145,7 +209,18 @@ fn (name: Str, op: Str, value: Any): Str {
 
 clause
 meta {
-    doc: """One part for `all-of` / `any-of`: a `[field, op, value]` Vec becomes `condition(field, op, value)`; a Str (an expression you built) passes through. Anything else is an Err."""
+    doc: """
+    One part for `all-of` / `any-of`: a `[field, op, value]` Vec becomes
+    `condition(field, op, value)`; a Str (an expression you built) passes
+    through. Anything else is an Err.
+
+    **Example**
+
+    ```hot
+    ::xero::where/clause(["Status", "==", "PAID"])  // "Status==\"PAID\""
+    ::xero::where/clause("AmountDue>0")  // "AmountDue>0"
+    ```
+    """
 }
 fn (part: Any): Str {
   cond {
@@ -155,7 +230,9 @@ fn (part: Any): Str {
   }
 }
 
-combine fn (parts: Vec, joiner: Str): Str {
+combine
+meta {no-doc: true}
+fn (parts: Vec, joiner: Str): Str {
   bad find-first(parts, (p) { is-err(clause(p)) })
   cond {
     is-empty(parts) => { err("xero: a where combination needs at least one condition") }
@@ -174,7 +251,7 @@ meta {
 
     ```hot
     ::xero::where/all-of([["Type", "==", "ACCREC"], ["AmountDue", ">", 0]])
-    // (Type=="ACCREC") AND (AmountDue>0)
+    // "(Type==\"ACCREC\") AND (AmountDue>0)"
     ```
     """
 }
@@ -184,7 +261,15 @@ fn (conditions: Vec): Str {
 
 any-of
 meta {
-    doc: """Join conditions with ` OR ` (each parenthesised); parts as for `all-of`."""
+    doc: """
+    Join conditions with ` OR ` (each parenthesised); parts as for `all-of`.
+
+    **Example**
+
+    ```hot
+    ::xero::where/any-of([["Status", "==", "PAID"], ["Status", "==", "VOIDED"]])  // "(Status==\"PAID\") OR (Status==\"VOIDED\")"
+    ```
+    """
 }
 fn (conditions: Vec): Str {
   combine(conditions, " OR ")

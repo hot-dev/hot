@@ -8,7 +8,19 @@ seg ::stripe::api/encode-id
 
 get-charge
 meta {
-    doc: """GET /v1/charges/{charge} - Retrieve a charge by ID. Optional `params` such as `{expand: ["balance_transaction"]}` for fees and net amount."""
+    doc: """
+    GET /v1/charges/{charge} - Retrieve a charge by ID. Optional `params`
+    such as `{expand: ["balance_transaction"]}` for fees and net amount.
+
+    **Example**
+
+    ```hot
+    ::charges ::stripe::charges
+
+    charge ::charges/get-charge("ch_123", {expand: ["balance_transaction"]})
+    fee-cents charge.balance_transaction.fee
+    ```
+    """
 }
 fn
 (charge: Str): Map {
@@ -34,7 +46,19 @@ ListChargesRequest type {
 
 list-charges
 meta {
-    doc: """GET /v1/charges - List charges, most recent first. Filter by `customer`, `payment_intent`, or `created`."""
+    doc: """
+    GET /v1/charges - List charges, most recent first. Filter by `customer`,
+    `payment_intent`, or `created`.
+
+    **Example**
+
+    ```hot
+    ::charges ::stripe::charges
+
+    page ::charges/list-charges(::charges/ListChargesRequest({customer: "cus_123", limit: 10}))
+    paid filter(page.data, %.paid)
+    ```
+    """
 }
 fn
 (): Map {
@@ -49,7 +73,23 @@ fn
 
 search-charges
 meta {
-    doc: """GET /v1/charges/search - Search charges with Stripe's search query language, e.g. `amount>999 AND status:"succeeded"`. Pass `next_page` back as `page` in `params` to continue."""
+    doc: """
+    GET /v1/charges/search - Search charges with Stripe's search query
+    language, e.g. `amount>999 AND status:"succeeded"`. Pass `next_page`
+    back as `page` in `params` to continue.
+
+    **Example**
+
+    ```hot
+    ::charges ::stripe::charges
+
+    query `amount>999 AND status:"succeeded"`
+    results ::charges/search-charges(query, {limit: 20})
+
+    // has_more says whether next_page holds another page
+    more if(results.has_more, ::charges/search-charges(query, {page: results.next_page}))
+    ```
+    """
 }
 fn
 (query: Str): Map {

@@ -2,7 +2,7 @@
 
 hot.pkg.dropbox {
   name: "hot.dev/dropbox",
-  version: "0.1.1",
+  version: "0.1.2",
   hot-min-version: "3.0.2",
   description: "Dropbox API v2 bindings for Hot: OAuth (PKCE, offline refresh tokens, per-run token cache), team member and team-space headers, binary-safe downloads with Range chunking, exports of Paper docs to Markdown, uploads with chunked sessions and content-hash checks, folder listing, search, batch jobs, shared links, cursor sync with longpoll, and signed webhook verification.",
   author: "Hot Dev",
@@ -10,7 +10,7 @@ hot.pkg.dropbox {
   license: "Apache-2.0",
   tags: ["documents"],
   deps: {
-    "hot.dev/oauth2": "0.2.1"
+    "hot.dev/oauth2": "0.2.2"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]

@@ -81,7 +81,9 @@ type {
 // Configuration
 // ---------------------------------------------------------------------------
 
-ctx-str fn (key: Str): Str? {
+ctx-str
+meta {no-doc: true}
+fn (key: Str): Str? {
   value ::ctx/get(key)
   cond {
     is-null(value) => { null }
@@ -90,7 +92,9 @@ ctx-str fn (key: Str): Str? {
   }
 }
 
-strip-trailing-slash fn (url: Str): Str {
+strip-trailing-slash
+meta {no-doc: true}
+fn (url: Str): Str {
   cond {
     ends-with(url, "/") => { strip-trailing-slash(slice(url, 0, sub(length(url), 1))) }
     => { url }
@@ -104,6 +108,13 @@ meta {
     an explicit region host), else `https://{sentry.region}.sentry.io`
     when `sentry.region` is set (`us`, `de`), else `https://sentry.io`.
     The 2-arity form takes the values explicitly (null for unset).
+
+    **Example**
+
+    ```hot
+    ::sentry::api/instance-url(null, "DE")  // "https://de.sentry.io"
+    ::sentry::api/instance-url("https://sentry.acme.test/", null)  // "https://sentry.acme.test"
+    ```
     """
 }
 fn
@@ -120,21 +131,36 @@ fn
 
 base-url
 meta {
-    doc: """The API root: `instance-url()` plus `/api/0`."""
+    doc: """
+    The API root: `instance-url()` plus `/api/0`.
+
+    **Example**
+
+    ```hot
+    root ::sentry::api/base-url()
+    `${root}/organizations/my-org/`
+    ```
+    """
 }
 fn (): Str {
   `${instance-url()}/api/0`
 }
 
-non-blank fn (value: Any): Str? {
+non-blank
+meta {no-doc: true}
+fn (value: Any): Str? {
   if(is-str(value), if(is-blank(value), null, trim(value)), null)
 }
 
-blank-error fn (name: Str): Any {
+blank-error
+meta {no-doc: true}
+fn (name: Str): Any {
   err(ConfigError({message: `sentry: ${name} is in the call's opts but is blank or null. Pass a value, or leave ${name} out to use context.`}))
 }
 
-is-blank-in fn (opts: Map, name: Str): Bool {
+is-blank-in
+meta {no-doc: true}
+fn (opts: Map, name: Str): Bool {
   and(in(name, keys(opts)), is-null(non-blank(get(opts, name))))
 }
 
@@ -149,6 +175,14 @@ meta {
     when its `region` is malformed or would send a self-hosted `sentry.token`
     to sentry.io. `org` may stay null: organization-scoped calls check it.
     Exposed for testing; `resolve` feeds it the context.
+
+    **Example**
+
+    ```hot
+    settings ::sentry::api/resolve-from({region: "de"}, {"sentry.token": "TOKEN", "sentry.org": "my-org"})
+    settings.base-url  // "https://de.sentry.io/api/0"
+    settings.org  // "my-org"
+    ```
     """
 }
 fn (opts: Map, ctx-values: Map): Map {
@@ -218,7 +252,17 @@ fn (opts: Map): Map {
 
 org
 meta {
-    doc: """The `org` in `opts`, else the `sentry.org` organization slug, or an Err carrying `ConfigError` when it is unset. An `org` in `opts` that is blank or null is an Err too."""
+    doc: """
+    The `org` in `opts`, else the `sentry.org` organization slug, or an Err
+    carrying `ConfigError` when it is unset. An `org` in `opts` that is
+    blank or null is an Err too.
+
+    **Example**
+
+    ```hot
+    ::sentry::api/org({org: "my-org"})  // "my-org"
+    ```
+    """
 }
 fn
 (): Str {
@@ -237,7 +281,16 @@ fn
 
 org-path
 meta {
-    doc: """`/organizations/{org}` plus `suffix`, or an Err when the organization is unset (see `org`)."""
+    doc: """
+    `/organizations/{org}` plus `suffix`, or an Err when the organization is
+    unset (see `org`).
+
+    **Example**
+
+    ```hot
+    ::sentry::api/org-path("/issues/", {org: "my-org"})  // "/organizations/my-org/issues/"
+    ```
+    """
 }
 fn
 (suffix: Str): Str {
@@ -253,7 +306,16 @@ fn
 
 seg
 meta {
-    doc: """URL-encode one path segment (issue ids, release versions, project slugs)."""
+    doc: """
+    URL-encode one path segment (issue ids, release versions, project
+    slugs).
+
+    **Example**
+
+    ```hot
+    ::sentry::api/seg("my api")  // "my%20api"
+    ```
+    """
 }
 fn (value: Any): Str {
   ::uri/encode(Str(value))
@@ -269,6 +331,13 @@ meta {
     Build a `?a=1&b=2` suffix from a Map, dropping null values (`""` when
     nothing is left). Vec values repeat the key — Sentry's form for
     `project`, `environment`, and `id` filters.
+
+    **Example**
+
+    ```hot
+    ::sentry::api/query({project: ["1", "2"], cursor: null})  // "?project=1&project=2"
+    ::sentry::api/query({})  // ""
+    ```
     """
 }
 fn (params: Map): Str {
@@ -293,7 +362,9 @@ fn (params: Map): Str {
 // Link-header pagination
 // ---------------------------------------------------------------------------
 
-unquote fn (value: Str): Str {
+unquote
+meta {no-doc: true}
+fn (value: Str): Str {
   v trim(value)
   cond {
     and(starts-with(v, "\""), ends-with(v, "\"")) => { slice(v, 1, sub(length(v), 1)) }
@@ -301,7 +372,9 @@ unquote fn (value: Str): Str {
   }
 }
 
-parse-link-entry fn (entry: Str): Map {
+parse-link-entry
+meta {no-doc: true}
+fn (entry: Str): Map {
   parts split(trim(entry), ";")
   target trim(first(parts))
   url cond {
@@ -324,6 +397,14 @@ meta {
     Parse a Sentry `Link` header into entries `{url, rel, results, cursor}`.
     Sentry sends a `previous` and a `next` entry on every list response:
     `<https://…&cursor=0:100:0>; rel="next"; results="true"; cursor="0:100:0"`.
+
+    **Example**
+
+    ```hot
+    link `<https://sentry.io/api/0/projects/?cursor=0:100:0>; rel="next"; results="true"; cursor="0:100:0"`
+    first(::sentry::api/parse-link-header(link)).cursor  // "0:100:0"
+    ::sentry::api/parse-link-header(null)  // []
+    ```
     """
 }
 fn (header: Str?): Vec {
@@ -336,7 +417,18 @@ fn (header: Str?): Vec {
 
 link-cursor
 meta {
-    doc: """The cursor of the `relation` entry (`"next"` or `"previous"`) when it has `results="true"`, else null."""
+    doc: """
+    The cursor of the `relation` entry (`"next"` or `"previous"`) when it
+    has `results="true"`, else null.
+
+    **Example**
+
+    ```hot
+    headers {link: `<https://sentry.io/api/0/projects/?cursor=0:100:0>; rel="next"; results="true"; cursor="0:100:0"`}
+    ::sentry::api/link-cursor(headers, "next")  // "0:100:0"
+    ::sentry::api/link-cursor(headers, "previous")  // null
+    ```
+    """
 }
 fn (headers: Map, relation: Str): Str? {
   entries parse-link-header(or(get(headers, "link"), get(headers, "Link")))
@@ -352,7 +444,17 @@ fn (headers: Map, relation: Str): Str? {
 
 next-cursor
 meta {
-    doc: """The cursor for the next page from a response's headers, or null on the last page."""
+    doc: """
+    The cursor for the next page from a response's headers, or null on the
+    last page.
+
+    **Example**
+
+    ```hot
+    ::sentry::api/next-cursor({link: `<https://sentry.io/api/0/projects/?cursor=0:100:0>; rel="next"; results="true"; cursor="0:100:0"`})  // "0:100:0"
+    ::sentry::api/next-cursor({link: `<https://sentry.io/api/0/projects/?cursor=0:100:0>; rel="next"; results="false"; cursor="0:100:0"`})  // null
+    ```
+    """
 }
 fn (headers: Map): Str? {
   link-cursor(headers, "next")
@@ -362,7 +464,9 @@ fn (headers: Map): Str? {
 // Responses and errors
 // ---------------------------------------------------------------------------
 
-field-errors fn (body: Map): Str {
+field-errors
+meta {no-doc: true}
+fn (body: Map): Str {
   join(map(keys(body), (k) {
     value get(body, k)
     text cond {
@@ -376,7 +480,19 @@ field-errors fn (body: Map): Str {
 
 error-message
 meta {
-    doc: """One readable line from a failed response: `detail`, else field errors (`version: This field is required.`), else the text body, else `HTTP <status>`."""
+    doc: """
+    One readable line from a failed response: `detail`, else field errors
+    (`version: This field is required.`), else the text body, else `HTTP
+    <status>`.
+
+    **Example**
+
+    ```hot
+    ::sentry::api/error-message(404, {detail: "Not found"})  // "Not found"
+    ::sentry::api/error-message(400, {version: ["This field is required."]})  // "version: This field is required."
+    ::sentry::api/error-message(502, "")  // "HTTP 502"
+    ```
+    """
 }
 fn (status: Int, body: Any): Str {
   cond {
@@ -405,7 +521,9 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   })
 }
 
-response-data fn (response: HttpResponse): Any {
+response-data
+meta {no-doc: true}
+fn (response: HttpResponse): Any {
   match response.status {
     204 | 205 => { null }
     => { response.body }
@@ -418,7 +536,19 @@ response-data fn (response: HttpResponse): Any {
 
 build-request
 meta {
-    doc: """The outgoing `HttpRequest` from resolved settings (see `resolve`). A `""` body sends no `Content-Type`. Pure; exposed for testing."""
+    doc: """
+    The outgoing `HttpRequest` from resolved settings (see `resolve`). A
+    `""` body sends no `Content-Type`. Pure; exposed for testing.
+
+    **Example**
+
+    ```hot
+    settings {token: "TOKEN", base-url: "https://sentry.io/api/0"}
+    req ::sentry::api/build-request("PUT", "/organizations/my-org/issues/4501/", {status: "resolved"}, settings)
+    req.url  // "https://sentry.io/api/0/organizations/my-org/issues/4501/"
+    req.body  // "{\"status\":\"resolved\"}"
+    ```
+    """
 }
 fn (method: Str, path: Str, body: Any, resolved: Map): HttpRequest {
   auth {Authorization: `Bearer ${resolved.token}`}
@@ -437,6 +567,17 @@ meta {
     `body` (`""` for none). Returns the `HttpResponse` on 2xx, or an Err
     carrying `HttpError` / `ConfigError`. Keeps headers, so callers can
     read pagination and rate-limit headers.
+
+    **Example**
+
+    ```hot
+    response ::sentry::api/request("GET", "/organizations/my-org/repos/", "")
+    response.headers
+    response.body
+
+    // Per-call credentials
+    ::sentry::api/request("GET", "/organizations/tenant-b/repos/", "", {token: ::hot::ctx/get("tenant-b.sentry.token"), org: "tenant-b"})
+    ```
     """
 }
 fn
@@ -493,7 +634,20 @@ fn
 
 org-json
 meta {
-    doc: """`json` against an organization-scoped path (`suffix` follows `/organizations/{org}`)."""
+    doc: """
+    `json` against an organization-scoped path (`suffix` follows
+    `/organizations/{org}`).
+
+    **Example**
+
+    ```hot
+    repos ::sentry::api/org-json("GET", "/repos/")
+    map(repos, %.name)
+
+    // Another organization for this call
+    ::sentry::api/org-json("GET", "/repos/", "", {token: ::hot::ctx/get("tenant-b.sentry.token"), org: "tenant-b"})
+    ```
+    """
 }
 fn
 (method: Str, suffix: Str): Any {
@@ -512,7 +666,22 @@ fn
 
 to-page
 meta {
-    doc: """Turn a list response into a `Page` (items plus Link-header cursors)."""
+    doc: """
+    Turn a list response into a `Page` (items plus Link-header cursors).
+
+    **Example**
+
+    ```hot
+    response ::hot::http/HttpResponse({
+      status: 200,
+      headers: {link: `<https://sentry.io/api/0/projects/?cursor=0:100:0>; rel="next"; results="true"; cursor="0:100:0"`},
+      body: [{id: "1"}]
+    })
+    page ::sentry::api/to-page(response)
+    page.items  // [{id: "1"}]
+    page.next_cursor  // "0:100:0"
+    ```
+    """
 }
 fn (response: HttpResponse): Page {
   headers or(response.headers, {})
@@ -553,7 +722,17 @@ fn
 
 org-page
 meta {
-    doc: """`get-page` against an organization-scoped path."""
+    doc: """
+    `get-page` against an organization-scoped path.
+
+    **Example**
+
+    ```hot
+    page ::sentry::api/org-page("/repos/", {per_page: 50})
+    page.items
+    page.next_cursor
+    ```
+    """
 }
 fn
 (suffix: Str, params: Map): Page {
@@ -567,11 +746,15 @@ fn
   }
 }
 
-take-up-to fn (items: Vec, max: Int): Vec {
+take-up-to
+meta {no-doc: true}
+fn (items: Vec, max: Int): Vec {
   if(gt(length(items), max), slice(items, 0, max), items)
 }
 
-collect-from fn (fetch: Fn, params: Map, max: Int, acc: Vec): Vec {
+collect-from
+meta {no-doc: true}
+fn (fetch: Fn, params: Map, max: Int, acc: Vec): Vec {
   page fetch(params)
   cond {
     is-err(page) => { page }
@@ -590,7 +773,19 @@ collect-from fn (fetch: Fn, params: Map, max: Int, acc: Vec): Vec {
 
 collect-pages
 meta {
-    doc: """Walk a cursor-paginated list: call `fetch(params)` (returning a `Page`) and follow `next_cursor` until the last page or `max` items. Pages are fetched serially."""
+    doc: """
+    Walk a cursor-paginated list: call `fetch(params)` (returning a `Page`)
+    and follow `next_cursor` until the last page or `max` items. Pages are
+    fetched serially.
+
+    **Example**
+
+    ```hot
+    fetch (params) { ::sentry::api/org-page("/repos/", params) }
+    repos ::sentry::api/collect-pages(fetch, {per_page: 100}, 500)
+    length(repos)
+    ```
+    """
 }
 fn (fetch: Fn, params: Map, max: Int): Vec {
   collect-from(fetch, params, max, [])
@@ -598,7 +793,20 @@ fn (fetch: Fn, params: Map, max: Int): Vec {
 
 collect-all
 meta {
-    doc: """Every item of a list endpoint at `path` (with `params`), following cursors up to `max` items (default 1000)."""
+    doc: """
+    Every item of a list endpoint at `path` (with `params`), following
+    cursors up to `max` items (default 1000).
+
+    **Example**
+
+    ```hot
+    repos ::sentry::api/collect-all("/organizations/my-org/repos/", {per_page: 100})
+    length(repos)
+
+    // Stop after 250 items
+    ::sentry::api/collect-all("/organizations/my-org/repos/", {per_page: 100}, 250)
+    ```
+    """
 }
 fn
 (path: Str, params: Map): Vec {

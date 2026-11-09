@@ -16,7 +16,20 @@ seg ::increase::api/seg
 
 simulate
 meta {
-    doc: """POST a simulation `path` after checking the sandbox guard and the `required` fields. The functions below are built on it; use it for simulations they don't cover, e.g. `simulate("/simulations/interest_payments", {account_id: "...", amount: 1000}, ["account_id", "amount"], {}, "interest payment")`."""
+    doc: """
+    POST a simulation `path` after checking the sandbox guard and the
+    `required` fields. The functions below are built on it; use it for
+    simulations they don't cover, e.g.
+    `simulate("/simulations/interest_payments", {account_id: "...", amount:
+    1000}, ["account_id", "amount"], {}, "interest payment")`.
+
+    **Example**
+
+    ```hot
+    ::increase::simulations/simulate("/simulations/interest_payments", {account_id: "account_in71c4amph0vgo2qllky", amount: 1000},
+      ["account_id", "amount"], {}, "interest payment")
+    ```
+    """
 }
 fn (path: Str, params: Map, required: Vec, opts: Map, operation: Str): Map {
   env ::api/environment-of(opts)
@@ -62,7 +75,17 @@ fn
 
 return-ach-transfer
 meta {
-    doc: """Simulate the receiving bank returning an ACH Transfer. `params`: `reason` (an ACH return reason such as `"insufficient_fund"` or `"no_account"`; default `"no_account"`)."""
+    doc: """
+    Simulate the receiving bank returning an ACH Transfer. `params`:
+    `reason` (an ACH return reason such as `"insufficient_fund"` or
+    `"no_account"`; default `"no_account"`).
+
+    **Example**
+
+    ```hot
+    ::increase::simulations/return-ach-transfer("ach_transfer_uoxatyh3lt5evrsdvo7q", {reason: "insufficient_fund"}, {})
+    ```
+    """
 }
 fn
 (ach-transfer-id: Str): Map {
@@ -74,7 +97,16 @@ fn
 
 submit-ach-transfer
 meta {
-    doc: """Simulate submitting an ACH Transfer to the Federal Reserve (normally done in batches during the day)."""
+    doc: """
+    Simulate submitting an ACH Transfer to the Federal Reserve (normally
+    done in batches during the day).
+
+    **Example**
+
+    ```hot
+    ::increase::simulations/submit-ach-transfer("ach_transfer_uoxatyh3lt5evrsdvo7q")
+    ```
+    """
 }
 fn
 (ach-transfer-id: Str): Map {
@@ -86,7 +118,15 @@ fn
 
 submit-wire-transfer
 meta {
-    doc: """Simulate submitting a Wire Transfer to Fedwire."""
+    doc: """
+    Simulate submitting a Wire Transfer to Fedwire.
+
+    **Example**
+
+    ```hot
+    ::increase::simulations/submit-wire-transfer("wire_transfer_5akynk7dqsq25qwk9q2u")
+    ```
+    """
 }
 fn
 (wire-transfer-id: Str): Map {
@@ -98,7 +138,16 @@ fn
 
 complete-rtp-transfer
 meta {
-    doc: """Simulate the RTP network completing (or, with `params.rejection: {reject_reason_code}`, rejecting) a Real-Time Payments Transfer."""
+    doc: """
+    Simulate the RTP network completing (or, with `params.rejection:
+    {reject_reason_code}`, rejecting) a Real-Time Payments Transfer.
+
+    **Example**
+
+    ```hot
+    ::increase::simulations/complete-rtp-transfer("real_time_payments_transfer_iyuhl5kdn7ssmup83mvq")
+    ```
+    """
 }
 fn
 (rtp-transfer-id: Str): Map {
@@ -110,7 +159,16 @@ fn
 
 complete-fednow-transfer
 meta {
-    doc: """Simulate FedNow completing (or, with `params.rejection: {reject_reason_code}`, rejecting) a FedNow Transfer."""
+    doc: """
+    Simulate FedNow completing (or, with `params.rejection:
+    {reject_reason_code}`, rejecting) a FedNow Transfer.
+
+    **Example**
+
+    ```hot
+    ::increase::simulations/complete-fednow-transfer("fednow_transfer_4i0mptrdu1mueg1196bg")
+    ```
+    """
 }
 fn
 (fednow-transfer-id: Str): Map {
@@ -122,7 +180,15 @@ fn
 
 mail-check-transfer
 meta {
-    doc: """Simulate Increase mailing a physical Check Transfer."""
+    doc: """
+    Simulate Increase mailing a physical Check Transfer.
+
+    **Example**
+
+    ```hot
+    ::increase::simulations/mail-check-transfer("check_transfer_30b43acfu9vw8fyc4f5")
+    ```
+    """
 }
 fn
 (check-transfer-id: Str): Map {
@@ -162,7 +228,18 @@ fn
 
 create-inbound-wire-transfer
 meta {
-    doc: """Simulate an inbound wire to one of your Account Numbers. `params` needs `account_number_id` and `amount`; optional `creditor_name`, `debtor_name`, `unstructured_remittance_information` and the other Fedwire fields."""
+    doc: """
+    Simulate an inbound wire to one of your Account Numbers. `params` needs
+    `account_number_id` and `amount`; optional `creditor_name`,
+    `debtor_name`, `unstructured_remittance_information` and the other
+    Fedwire fields.
+
+    **Example**
+
+    ```hot
+    ::increase::simulations/create-inbound-wire-transfer({account_number_id: "account_number_v18nkfqm6afpsrvy82b2", amount: 250000, debtor_name: "Ian Crease"})
+    ```
+    """
 }
 fn
 (params: Map): Map {
@@ -174,7 +251,17 @@ fn
 
 create-inbound-rtp-transfer
 meta {
-    doc: """Simulate an inbound Real-Time Payments transfer. `params` needs `account_number_id` and `amount`; optional `debtor_name`, `unstructured_remittance_information`, `request_for_payment_id`."""
+    doc: """
+    Simulate an inbound Real-Time Payments transfer. `params` needs
+    `account_number_id` and `amount`; optional `debtor_name`,
+    `unstructured_remittance_information`, `request_for_payment_id`.
+
+    **Example**
+
+    ```hot
+    ::increase::simulations/create-inbound-rtp-transfer({account_number_id: "account_number_v18nkfqm6afpsrvy82b2", amount: 5000, debtor_name: "Ian Crease"})
+    ```
+    """
 }
 fn
 (params: Map): Map {
@@ -186,7 +273,17 @@ fn
 
 create-inbound-fednow-transfer
 meta {
-    doc: """Simulate an inbound FedNow transfer. `params` needs `account_number_id` and `amount`; optional `debtor_name`, `unstructured_remittance_information`."""
+    doc: """
+    Simulate an inbound FedNow transfer. `params` needs `account_number_id`
+    and `amount`; optional `debtor_name`,
+    `unstructured_remittance_information`.
+
+    **Example**
+
+    ```hot
+    ::increase::simulations/create-inbound-fednow-transfer({account_number_id: "account_number_v18nkfqm6afpsrvy82b2", amount: 5000, debtor_name: "Ian Crease"})
+    ```
+    """
 }
 fn
 (params: Map): Map {
@@ -226,7 +323,16 @@ fn
 
 settle-card
 meta {
-    doc: """Simulate settling a card authorization. `params` needs `card_id`; optional `pending_transaction_id` and `amount`."""
+    doc: """
+    Simulate settling a card authorization. `params` needs `card_id`;
+    optional `pending_transaction_id` and `amount`.
+
+    **Example**
+
+    ```hot
+    ::increase::simulations/settle-card({card_id: "card_oubs0hwk5rn6knuecxg2", pending_transaction_id: "pending_transaction_k1sfetcau2qbvjbzgju4"})
+    ```
+    """
 }
 fn
 (params: Map): Map {
@@ -242,7 +348,17 @@ fn
 
 submit-check-deposit
 meta {
-    doc: """Simulate the Federal Reserve accepting a Check Deposit. `params` may set `scan: {account_number, routing_number, serial_number}` (the MICR line read off the check)."""
+    doc: """
+    Simulate the Federal Reserve accepting a Check Deposit. `params` may set
+    `scan: {account_number, routing_number, serial_number}` (the MICR line
+    read off the check).
+
+    **Example**
+
+    ```hot
+    ::increase::simulations/submit-check-deposit("check_deposit_f06n9gpg7sxn8t19lfc1")
+    ```
+    """
 }
 fn
 (check-deposit-id: Str): Map {
@@ -254,7 +370,15 @@ fn
 
 return-check-deposit
 meta {
-    doc: """Simulate the paying bank returning a submitted Check Deposit."""
+    doc: """
+    Simulate the paying bank returning a submitted Check Deposit.
+
+    **Example**
+
+    ```hot
+    ::increase::simulations/return-check-deposit("check_deposit_f06n9gpg7sxn8t19lfc1")
+    ```
+    """
 }
 fn
 (check-deposit-id: Str): Map {
@@ -266,7 +390,15 @@ fn
 
 reject-check-deposit
 meta {
-    doc: """Simulate Increase rejecting a Check Deposit (e.g. an unreadable image)."""
+    doc: """
+    Simulate Increase rejecting a Check Deposit (e.g. an unreadable image).
+
+    **Example**
+
+    ```hot
+    ::increase::simulations/reject-check-deposit("check_deposit_f06n9gpg7sxn8t19lfc1")
+    ```
+    """
 }
 fn
 (check-deposit-id: Str): Map {

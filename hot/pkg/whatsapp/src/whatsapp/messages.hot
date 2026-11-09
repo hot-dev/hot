@@ -22,7 +22,21 @@ meta {
 
 build-message
 meta {
-    doc: """The common message envelope: `messaging_product`, `recipient_type`, `to`, `type`, the type-specific object under the key named by `type`, and `context.message_id` when `reply-to` is set. Exposed for testing."""
+    doc: """
+    The common message envelope: `messaging_product`, `recipient_type`,
+    `to`, `type`, the type-specific object under the key named by `type`,
+    and `context.message_id` when `reply-to` is set. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::messages ::whatsapp::messages
+
+    body ::messages/build-message("15551234567", "text", {body: "Hi"}, "wamid.1")
+    body.text  // {body: "Hi"}
+    body.context  // {message_id: "wamid.1"}
+    ```
+    """
 }
 fn (to: Str, message-type: Str, content: Map, reply-to: Str?): Map {
   {
@@ -37,7 +51,20 @@ fn (to: Str, message-type: Str, content: Map, reply-to: Str?): Map {
 
 media-object
 meta {
-    doc: """A media reference: `{id}` for uploaded media (preferred when both are given) or `{link}` for a public HTTPS URL. Fails when neither is set. Exposed for testing."""
+    doc: """
+    A media reference: `{id}` for uploaded media (preferred when both are
+    given) or `{link}` for a public HTTPS URL. Fails when neither is set.
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::messages ::whatsapp::messages
+
+    ::messages/media-object("image", "123", "https://example.com/a.png")  // {id: "123"}
+    ::messages/media-object("image", null, "https://example.com/a.png")  // {link: "https://example.com/a.png"}
+    ```
+    """
 }
 fn (kind: Str, id: Str?, link: Str?): Map {
   cond {
@@ -47,13 +74,32 @@ fn (kind: Str, id: Str?, link: Str?): Map {
   }
 }
 
-text-object fn (text: Str?): Map? {
+text-object
+meta {no-doc: true}
+fn (text: Str?): Map? {
   if(is-some(text), {text: text}, null)
 }
 
 send-message
 meta {
-    doc: """POST /{phone-number-id}/messages with a prebuilt payload — the escape hatch for message types without a dedicated function."""
+    doc: """
+    POST /{phone-number-id}/messages with a prebuilt payload — the escape
+    hatch for message types without a dedicated function.
+
+    **Example**
+
+    ```hot
+    ::messages ::whatsapp::messages
+
+    sent ::messages/send-message("109876543210", {
+      messaging_product: "whatsapp",
+      to: "15551234567",
+      type: "text",
+      text: {body: "Hello"}
+    })
+    first(sent.messages).id
+    ```
+    """
 }
 fn
 (phone-number-id: Str?, body: Map): Map {
@@ -77,7 +123,22 @@ SendTextRequest type {
   reply_to: Str?
 }
 
-build-text-body fn (request: SendTextRequest): Map {
+build-text-body
+meta {
+    doc: """
+    The JSON payload `send-text` posts.
+
+    **Example**
+
+    ```hot
+    ::messages ::whatsapp::messages
+
+    req ::messages/SendTextRequest({to: "15551234567", text: "Hi", preview_url: true})
+    ::messages/build-text-body(req).text  // {body: "Hi", preview_url: true}
+    ```
+    """
+}
+fn (request: SendTextRequest): Map {
   build-message(request.to, "text",
     {body: request.text} |> assoc-some("preview_url", request.preview_url),
     request.reply_to)
@@ -123,7 +184,23 @@ SendImageRequest type {
   reply_to: Str?
 }
 
-build-image-body fn (request: SendImageRequest): Map {
+build-image-body
+meta {
+    doc: """
+    The JSON payload `send-image` posts. Fails when neither `image_id` nor
+    `image_url` is set.
+
+    **Example**
+
+    ```hot
+    ::messages ::whatsapp::messages
+
+    req ::messages/SendImageRequest({to: "15551234567", image_id: "123", caption: "Look"})
+    ::messages/build-image-body(req).image  // {id: "123", caption: "Look"}
+    ```
+    """
+}
+fn (request: SendImageRequest): Map {
   build-message(request.to, "image",
     media-object("image", request.image_id, request.image_url)
       |> assoc-some("caption", request.caption),
@@ -167,7 +244,23 @@ SendDocumentRequest type {
   reply_to: Str?
 }
 
-build-document-body fn (request: SendDocumentRequest): Map {
+build-document-body
+meta {
+    doc: """
+    The JSON payload `send-document` posts. Fails when neither `document_id`
+    nor `document_url` is set.
+
+    **Example**
+
+    ```hot
+    ::messages ::whatsapp::messages
+
+    req ::messages/SendDocumentRequest({to: "15551234567", document_id: "123", filename: "a.pdf"})
+    ::messages/build-document-body(req).document  // {id: "123", filename: "a.pdf"}
+    ```
+    """
+}
+fn (request: SendDocumentRequest): Map {
   build-message(request.to, "document",
     media-object("document", request.document_id, request.document_url)
       |> assoc-some("caption", request.caption)
@@ -177,7 +270,24 @@ build-document-body fn (request: SendDocumentRequest): Map {
 
 send-document
 meta {
-    doc: """Send a document. Provide either `document_id` or `document_url`. `filename` sets the name shown to the recipient. Supports PDF, Office formats, plain text; max 100 MB."""
+    doc: """
+    Send a document. Provide either `document_id` or `document_url`.
+    `filename` sets the name shown to the recipient. Supports PDF, Office
+    formats, plain text; max 100 MB.
+
+    **Example**
+
+    ```hot
+    ::messages ::whatsapp::messages
+
+    sent ::messages/send-document(::messages/SendDocumentRequest({
+      phone_number_id: "109876543210", to: "15551234567",
+      document_url: "https://example.com/invoice.pdf",
+      filename: "invoice.pdf"
+    }))
+    first(sent.messages).id
+    ```
+    """
 }
 fn
 (request: SendDocumentRequest): Map {
@@ -196,7 +306,23 @@ SendVideoRequest type {
   reply_to: Str?
 }
 
-build-video-body fn (request: SendVideoRequest): Map {
+build-video-body
+meta {
+    doc: """
+    The JSON payload `send-video` posts. Fails when neither `video_id` nor
+    `video_url` is set.
+
+    **Example**
+
+    ```hot
+    ::messages ::whatsapp::messages
+
+    req ::messages/SendVideoRequest({to: "15551234567", video_url: "https://example.com/v.mp4"})
+    ::messages/build-video-body(req).video  // {link: "https://example.com/v.mp4"}
+    ```
+    """
+}
+fn (request: SendVideoRequest): Map {
   build-message(request.to, "video",
     media-object("video", request.video_id, request.video_url)
       |> assoc-some("caption", request.caption),
@@ -205,7 +331,23 @@ build-video-body fn (request: SendVideoRequest): Map {
 
 send-video
 meta {
-    doc: """Send a video. Provide either `video_id` or `video_url`. Supports MP4 and 3GPP (H.264 video, AAC audio); max 16 MB."""
+    doc: """
+    Send a video. Provide either `video_id` or `video_url`. Supports MP4 and
+    3GPP (H.264 video, AAC audio); max 16 MB.
+
+    **Example**
+
+    ```hot
+    ::messages ::whatsapp::messages
+
+    sent ::messages/send-video(::messages/SendVideoRequest({
+      phone_number_id: "109876543210", to: "15551234567",
+      video_url: "https://example.com/clip.mp4",
+      caption: "New clip"
+    }))
+    first(sent.messages).id
+    ```
+    """
 }
 fn
 (request: SendVideoRequest): Map {
@@ -223,7 +365,23 @@ SendAudioRequest type {
   reply_to: Str?
 }
 
-build-audio-body fn (request: SendAudioRequest): Map {
+build-audio-body
+meta {
+    doc: """
+    The JSON payload `send-audio` posts. Fails when neither `audio_id` nor
+    `audio_url` is set.
+
+    **Example**
+
+    ```hot
+    ::messages ::whatsapp::messages
+
+    req ::messages/SendAudioRequest({to: "15551234567", audio_id: "123"})
+    ::messages/build-audio-body(req).audio  // {id: "123"}
+    ```
+    """
+}
+fn (request: SendAudioRequest): Map {
   build-message(request.to, "audio",
     media-object("audio", request.audio_id, request.audio_url),
     request.reply_to)
@@ -231,7 +389,23 @@ build-audio-body fn (request: SendAudioRequest): Map {
 
 send-audio
 meta {
-    doc: """Send an audio file. Provide either `audio_id` or `audio_url`. Supports AAC, AMR, MP3, MP4 audio, OGG (OPUS codec only, which plays as a voice note); max 16 MB."""
+    doc: """
+    Send an audio file. Provide either `audio_id` or `audio_url`. Supports
+    AAC, AMR, MP3, MP4 audio, OGG (OPUS codec only, which plays as a voice
+    note); max 16 MB.
+
+    **Example**
+
+    ```hot
+    ::messages ::whatsapp::messages
+
+    sent ::messages/send-audio(::messages/SendAudioRequest({
+      phone_number_id: "109876543210", to: "15551234567",
+      audio_id: "1234567890"
+    }))
+    first(sent.messages).id
+    ```
+    """
 }
 fn
 (request: SendAudioRequest): Map {
@@ -249,7 +423,23 @@ SendStickerRequest type {
   reply_to: Str?
 }
 
-build-sticker-body fn (request: SendStickerRequest): Map {
+build-sticker-body
+meta {
+    doc: """
+    The JSON payload `send-sticker` posts. Fails when neither `sticker_id`
+    nor `sticker_url` is set.
+
+    **Example**
+
+    ```hot
+    ::messages ::whatsapp::messages
+
+    req ::messages/SendStickerRequest({to: "15551234567", sticker_id: "123"})
+    ::messages/build-sticker-body(req).sticker  // {id: "123"}
+    ```
+    """
+}
+fn (request: SendStickerRequest): Map {
   build-message(request.to, "sticker",
     media-object("sticker", request.sticker_id, request.sticker_url),
     request.reply_to)
@@ -257,7 +447,22 @@ build-sticker-body fn (request: SendStickerRequest): Map {
 
 send-sticker
 meta {
-    doc: """Send a sticker. Provide either `sticker_id` or `sticker_url`. WebP only; static max 100 KB, animated max 500 KB."""
+    doc: """
+    Send a sticker. Provide either `sticker_id` or `sticker_url`. WebP only;
+    static max 100 KB, animated max 500 KB.
+
+    **Example**
+
+    ```hot
+    ::messages ::whatsapp::messages
+
+    sent ::messages/send-sticker(::messages/SendStickerRequest({
+      phone_number_id: "109876543210", to: "15551234567",
+      sticker_url: "https://example.com/wave.webp"
+    }))
+    first(sent.messages).id
+    ```
+    """
 }
 fn
 (request: SendStickerRequest): Map {
@@ -281,7 +486,22 @@ SendLocationRequest type {
   reply_to: Str?
 }
 
-build-location-body fn (request: SendLocationRequest): Map {
+build-location-body
+meta {
+    doc: """
+    The JSON payload `send-location` posts.
+
+    **Example**
+
+    ```hot
+    ::messages ::whatsapp::messages
+
+    req ::messages/SendLocationRequest({to: "15551234567", latitude: 37.78, longitude: -122.41, name: "Office"})
+    ::messages/build-location-body(req).location  // {latitude: 37.78, longitude: -122.41, name: "Office"}
+    ```
+    """
+}
+fn (request: SendLocationRequest): Map {
   build-message(request.to, "location",
     {latitude: request.latitude, longitude: request.longitude}
       |> assoc-some("name", request.name)
@@ -291,7 +511,25 @@ build-location-body fn (request: SendLocationRequest): Map {
 
 send-location
 meta {
-    doc: """Send a location pin. Optionally include a `name` and `address` for the pin label."""
+    doc: """
+    Send a location pin. Optionally include a `name` and `address` for the
+    pin label.
+
+    **Example**
+
+    ```hot
+    ::messages ::whatsapp::messages
+
+    sent ::messages/send-location(::messages/SendLocationRequest({
+      phone_number_id: "109876543210", to: "15551234567",
+      latitude: 37.7749,
+      longitude: -122.4194,
+      name: "Office",
+      address: "1 Market St, San Francisco"
+    }))
+    first(sent.messages).id
+    ```
+    """
 }
 fn
 (request: SendLocationRequest): Map {
@@ -312,7 +550,24 @@ SendContactsRequest type {
   reply_to: Str?
 }
 
-build-contacts-body fn (request: SendContactsRequest): Map {
+build-contacts-body
+meta {
+    doc: """
+    The JSON payload `send-contacts` posts. `contacts` is a top-level array,
+    so it does not use the `build-message` envelope.
+
+    **Example**
+
+    ```hot
+    ::messages ::whatsapp::messages
+
+    contact {name: {formatted_name: "Jane Doe"}}
+    req ::messages/SendContactsRequest({to: "15551234567", contacts: [contact]})
+    ::messages/build-contacts-body(req).contacts  // [{name: {formatted_name: "Jane Doe"}}]
+    ```
+    """
+}
+fn (request: SendContactsRequest): Map {
   // `contacts` is an array, so the generic envelope's Map slot doesn't fit.
   {
     messaging_product: "whatsapp",
@@ -363,7 +618,22 @@ SendReactionRequest type {
   emoji: Str
 }
 
-build-reaction-body fn (request: SendReactionRequest): Map {
+build-reaction-body
+meta {
+    doc: """
+    The JSON payload `send-reaction` posts.
+
+    **Example**
+
+    ```hot
+    ::messages ::whatsapp::messages
+
+    req ::messages/SendReactionRequest({to: "15551234567", message_id: "wamid.1", emoji: "ok"})
+    ::messages/build-reaction-body(req).reaction  // {message_id: "wamid.1", emoji: "ok"}
+    ```
+    """
+}
+fn (request: SendReactionRequest): Map {
   build-message(request.to, "reaction", {message_id: request.message_id, emoji: request.emoji}, null)
 }
 
@@ -407,7 +677,22 @@ SendTemplateRequest type {
   reply_to: Str?
 }
 
-build-template-body fn (request: SendTemplateRequest): Map {
+build-template-body
+meta {
+    doc: """
+    The JSON payload `send-template` posts.
+
+    **Example**
+
+    ```hot
+    ::messages ::whatsapp::messages
+
+    req ::messages/SendTemplateRequest({to: "15551234567", template_name: "hello_world", language_code: "en_US"})
+    ::messages/build-template-body(req).template  // {name: "hello_world", language: {code: "en_US"}}
+    ```
+    """
+}
+fn (request: SendTemplateRequest): Map {
   build-message(request.to, "template",
     {name: request.template_name, language: {code: request.language_code}}
       |> assoc-some("components", request.components),
@@ -462,7 +747,19 @@ fn
 
 build-interactive
 meta {
-    doc: """An interactive message: `interactive: {type, body: {text}, action, header?, footer?}`. Exposed for testing."""
+    doc: """
+    An interactive message: `interactive: {type, body: {text}, action,
+    header?, footer?}`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::messages ::whatsapp::messages
+
+    body ::messages/build-interactive("15551234567", "button", "Pick one", {buttons: []}, null, "Thanks", null)
+    body.interactive.footer  // {text: "Thanks"}
+    ```
+    """
 }
 fn (to: Str, kind: Str, body-text: Str, action: Map, header: Map?, footer-text: Str?, reply-to: Str?): Map {
   build-message(to, "interactive",
@@ -482,7 +779,23 @@ SendButtonsRequest type {
   reply_to: Str?
 }
 
-build-buttons-body fn (request: SendButtonsRequest): Map {
+build-buttons-body
+meta {
+    doc: """
+    The JSON payload `send-buttons` posts.
+
+    **Example**
+
+    ```hot
+    ::messages ::whatsapp::messages
+
+    button {type: "reply", reply: {id: "yes", title: "Yes"}}
+    req ::messages/SendButtonsRequest({to: "15551234567", body_text: "Ready?", buttons: [button]})
+    ::messages/build-buttons-body(req).interactive.type  // "button"
+    ```
+    """
+}
+fn (request: SendButtonsRequest): Map {
   build-interactive(request.to, "button", request.body_text, {buttons: request.buttons},
     request.header, request.footer_text, request.reply_to)
 }
@@ -529,7 +842,23 @@ SendListRequest type {
   reply_to: Str?
 }
 
-build-list-body fn (request: SendListRequest): Map {
+build-list-body
+meta {
+    doc: """
+    The JSON payload `send-list` posts. `header_text` becomes a text header.
+
+    **Example**
+
+    ```hot
+    ::messages ::whatsapp::messages
+
+    section {title: "Plans", rows: [{id: "1", title: "Basic"}]}
+    req ::messages/SendListRequest({to: "15551234567", body_text: "Choose", button_text: "View", sections: [section], header_text: "Menu"})
+    ::messages/build-list-body(req).interactive.header  // {type: "text", text: "Menu"}
+    ```
+    """
+}
+fn (request: SendListRequest): Map {
   build-interactive(request.to, "list", request.body_text,
     {button: request.button_text, sections: request.sections},
     if(is-some(request.header_text), {type: "text", text: request.header_text}, null),
@@ -585,7 +914,22 @@ SendCtaUrlRequest type {
   reply_to: Str?
 }
 
-build-cta-url-body fn (request: SendCtaUrlRequest): Map {
+build-cta-url-body
+meta {
+    doc: """
+    The JSON payload `send-cta-url` posts.
+
+    **Example**
+
+    ```hot
+    ::messages ::whatsapp::messages
+
+    req ::messages/SendCtaUrlRequest({to: "15551234567", body_text: "Your invoice.", display_text: "Open", url: "https://example.com/i/1"})
+    ::messages/build-cta-url-body(req).interactive.action.name  // "cta_url"
+    ```
+    """
+}
+fn (request: SendCtaUrlRequest): Map {
   build-interactive(request.to, "cta_url", request.body_text,
     {name: "cta_url", parameters: {display_text: request.display_text, url: request.url}},
     request.header, request.footer_text, request.reply_to)
@@ -626,7 +970,22 @@ SendLocationRequestRequest type {
   reply_to: Str?
 }
 
-build-location-request-body fn (request: SendLocationRequestRequest): Map {
+build-location-request-body
+meta {
+    doc: """
+    The JSON payload `send-location-request` posts.
+
+    **Example**
+
+    ```hot
+    ::messages ::whatsapp::messages
+
+    req ::messages/SendLocationRequestRequest({to: "15551234567", body_text: "Where to?"})
+    ::messages/build-location-request-body(req).interactive.action  // {name: "send_location"}
+    ```
+    """
+}
+fn (request: SendLocationRequestRequest): Map {
   build-interactive(request.to, "location_request_message", request.body_text,
     {name: "send_location"}, null, null, request.reply_to)
 }
@@ -674,7 +1033,23 @@ SendFlowRequest type {
   reply_to: Str?
 }
 
-build-flow-body fn (request: SendFlowRequest): Map {
+build-flow-body
+meta {
+    doc: """
+    The JSON payload `send-flow` posts. Fails when neither `flow_id` nor
+    `flow_name` is set. `screen` and `data` go in `flow_action_payload`.
+
+    **Example**
+
+    ```hot
+    ::messages ::whatsapp::messages
+
+    req ::messages/SendFlowRequest({to: "15551234567", body_text: "Book now.", flow_cta: "Book", flow_id: "123", screen: "START"})
+    ::messages/build-flow-body(req).interactive.action.parameters.flow_action_payload  // {screen: "START"}
+    ```
+    """
+}
+fn (request: SendFlowRequest): Map {
   flow-ref cond {
     is-some(request.flow_id) => { {flow_id: request.flow_id} }
     is-some(request.flow_name) => { {flow_name: request.flow_name} }
@@ -736,7 +1111,23 @@ MarkReadRequest type {
   typing_indicator: Bool?
 }
 
-build-mark-read-body fn (request: MarkReadRequest): Map {
+build-mark-read-body
+meta {
+    doc: """
+    The JSON payload `mark-read` posts. `typing_indicator: true` adds the
+    typing indicator.
+
+    **Example**
+
+    ```hot
+    ::messages ::whatsapp::messages
+
+    req ::messages/MarkReadRequest({message_id: "wamid.1", typing_indicator: true})
+    ::messages/build-mark-read-body(req).typing_indicator  // {type: "text"}
+    ```
+    """
+}
+fn (request: MarkReadRequest): Map {
   {messaging_product: "whatsapp", status: "read", message_id: request.message_id}
     |> assoc-some("typing_indicator", if(eq(request.typing_indicator, true), {type: "text"}, null))
 }

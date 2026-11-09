@@ -21,7 +21,21 @@ FRAUD_LABELS ["FORGERY", "FRAUDULENT_PATTERNS", "DOCUMENT_TEMPLATE", "FRAUDULENT
 
 review-of
 meta {
-    doc: """The flat review fields of `source`: `{status, answer, reject-type, labels, button-ids, moderation-comment, client-comment}`. Reads a parsed webhook event, a top-level `reviewStatus`/`reviewResult` (status, webhook payload) or a nested `review` (applicant, transaction). Exposed for testing."""
+    doc: """
+    The flat review fields of `source`: `{status, answer, reject-type,
+    labels, button-ids, moderation-comment, client-comment}`. Reads a parsed
+    webhook event, a top-level `reviewStatus`/`reviewResult` (status,
+    webhook payload) or a nested `review` (applicant, transaction). Exposed
+    for testing.
+
+    **Example**
+
+    ```hot
+    review ::sumsub::decisions/review-of({reviewStatus: "completed", reviewResult: {reviewAnswer: "GREEN"}})
+    review.status  // "completed"
+    review.answer  // "GREEN"
+    ```
+    """
 }
 fn (source: Any): Map {
   s if(is-map(source), source, {})
@@ -45,7 +59,9 @@ fn (source: Any): Map {
   }
 }
 
-review-fields fn (review: Map): Map {
+review-fields
+meta {no-doc: true}
+fn (review: Map): Map {
   result if(is-map(get(review, "reviewResult")), get(review, "reviewResult"), {})
   {
     status: get(review, "reviewStatus"),
@@ -115,7 +131,18 @@ fn (source: Any): Map {
 }
 
 is-approved
-meta {doc: """True only for a completed GREEN review."""}
+meta {
+    doc: """
+    True only for a completed GREEN review.
+
+    **Example**
+
+    ```hot
+    ::sumsub::decisions/is-approved({reviewStatus: "completed", reviewResult: {reviewAnswer: "GREEN"}})  // true
+    ::sumsub::decisions/is-approved({reviewStatus: "pending"})  // false
+    ```
+    """
+}
 fn (source: Any): Bool {
   eq(review-outcome(source).outcome, "approved")
 }

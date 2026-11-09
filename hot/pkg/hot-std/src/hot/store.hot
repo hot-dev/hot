@@ -106,8 +106,10 @@ meta {
     **Example**
 
     ```hot
+    ::store ::hot::store
+    kb ::store/Map({name: "kb"})
     ::store/put(kb, "refund-policy", {
-      title: "Refund Policy"
+      title: "Refund Policy",
       content: "Refunds are available within 30 days..."
     })
     ```
@@ -135,6 +137,8 @@ meta {
     **Example**
 
     ```hot
+    ::store ::hot::store
+    settings ::store/Map({name: "settings"})
     created ::store/put-if-missing(settings, "initialized", true)
     ```
     """
@@ -168,6 +172,7 @@ meta {
     **Example**
 
     ```hot
+    ::store ::hot::store
     cases ::store/Map({name: "cases"})
 
     // Add one answer to a case's records; a concurrent answer is never lost
@@ -209,7 +214,9 @@ meta {
     **Example**
 
     ```hot
+    ::store ::hot::store
     counters ::store/Map({name: "counters"})
+    case-id "case-1"
     seq ::store/increment(counters, `case:${case-id}:seq`)
     ::store/increment(counters, "tickets-closed", 3)
     ```
@@ -233,6 +240,8 @@ meta {
     **Example**
 
     ```hot
+    ::store ::hot::store
+    kb ::store/Map({name: "kb"})
     doc ::store/get(kb, "refund-policy")
     doc ::store/get(kb, "missing", {title: "default"})
     ```
@@ -255,6 +264,8 @@ meta {
     **Example**
 
     ```hot
+    ::store ::hot::store
+    kb ::store/Map({name: "kb"})
     ::store/delete(kb, "refund-policy")
     ```
     """
@@ -277,7 +288,10 @@ meta {
     **Example**
 
     ```hot
+    ::store ::hot::store
+    kb ::store/Map({name: "kb"})
     all-keys ::store/keys(kb)
+    case-id "case-1"
     fact-keys ::store/keys(kb, {prefix: `case:${case-id}:`})
     ```
     """
@@ -299,6 +313,8 @@ meta {
     **Example**
 
     ```hot
+    ::store ::hot::store
+    kb ::store/Map({name: "kb"})
     all-vals ::store/vals(kb)
     ```
     """
@@ -316,6 +332,8 @@ meta {
     **Example**
 
     ```hot
+    ::store ::hot::store
+    kb ::store/Map({name: "kb"})
     count ::store/length(kb)
     ```
     """
@@ -333,6 +351,8 @@ meta {
     **Example**
 
     ```hot
+    ::store ::hot::store
+    settings ::store/Map({name: "settings"})
     empty ::store/is-empty(settings)
     ```
     """
@@ -347,6 +367,15 @@ meta {
     doc: """
     Return the first entry (by insertion order) as `{key: ..., value: ...}`, or `null`.
     Mirrors `::hot::coll/first`.
+
+    **Example**
+
+    ```hot
+    ::store ::hot::store
+    kb ::store/Map({name: "kb"})
+    entry ::store/first(kb)
+    entry.key
+    ```
     """
 }
 fn (store: Map): Any {
@@ -359,6 +388,15 @@ meta {
     doc: """
     Return the last entry (by insertion order) as `{key: ..., value: ...}`, or `null`.
     Mirrors `::hot::coll/last`.
+
+    **Example**
+
+    ```hot
+    ::store ::hot::store
+    kb ::store/Map({name: "kb"})
+    entry ::store/last(kb)
+    entry.value
+    ```
     """
 }
 fn (store: Map): Any {
@@ -374,8 +412,10 @@ meta {
     **Example**
 
     ```hot
+    ::store ::hot::store
+    settings ::store/Map({name: "settings"})
     ::store/merge(settings, {
-      "smtp-host": "mail.example.com"
+      "smtp-host": "mail.example.com",
       "smtp-port": 587
     })
     ```
@@ -394,8 +434,10 @@ meta {
     **Example**
 
     ```hot
+    ::store ::hot::store
+    kb ::store/Map({name: "kb"})
     ::store/put-many(kb, {
-      "doc-1": {title: "Returns", content: "Return within 30 days..."}
+      "doc-1": {title: "Returns", content: "Return within 30 days..."},
       "doc-2": {title: "Shipping", content: "We ship worldwide..."}
     })
     ```
@@ -421,7 +463,10 @@ meta {
     **Example**
 
     ```hot
+    ::store ::hot::store
+    kb ::store/Map({name: "kb"})
     page ::store/list(kb, {limit: 20, offset: 0})
+    case-id "case-1"
     facts ::store/list(kb, {prefix: `case:${case-id}:`, limit: 100})
     ```
     """
@@ -443,6 +488,8 @@ meta {
     **Example**
 
     ```hot
+    ::store ::hot::store
+    kb ::store/Map({name: "kb"})
     results ::store/search(kb, "how do I get my money back", {limit: 5, min-score: 0.7})
     ```
     """
@@ -466,6 +513,8 @@ meta {
     **Example**
 
     ```hot
+    ::store ::hot::store
+    kb ::store/Map({name: "kb"})
     billing-docs ::store/filter(kb, (k, v) { eq(v.category, "billing") })
     ```
     """
@@ -484,6 +533,8 @@ meta {
     **Example**
 
     ```hot
+    ::store ::hot::store
+    kb ::store/Map({name: "kb"})
     urgent ::store/find-first(kb, (k, v) { eq(v.priority, "urgent") })
     ```
     """
@@ -496,7 +547,16 @@ fn (store: Map, predicate: Fn): Any {
 some
 meta {
     doc: """
-    Return `true` if any entry matches `predicate`. Mirrors `::hot::coll/some`.
+    Return `true` if any entry matches `predicate`. Mirrors
+    `::hot::coll/some`.
+
+    **Example**
+
+    ```hot
+    ::store ::hot::store
+    kb ::store/Map({name: "kb"})
+    has-urgent ::store/some(kb, (k, v) { eq(v.priority, "urgent") })
+    ```
     """
 }
 fn (store: Map, predicate: Fn): Bool {
@@ -507,7 +567,16 @@ fn (store: Map, predicate: Fn): Bool {
 all
 meta {
     doc: """
-    Return `true` if all entries match `predicate`. Mirrors `::hot::coll/all`.
+    Return `true` if all entries match `predicate`. Mirrors
+    `::hot::coll/all`.
+
+    **Example**
+
+    ```hot
+    ::store ::hot::store
+    kb ::store/Map({name: "kb"})
+    all-reviewed ::store/all(kb, (k, v) { v.reviewed })
+    ```
     """
 }
 fn (store: Map, predicate: Fn): Bool {
@@ -524,6 +593,8 @@ meta {
     **Example**
 
     ```hot
+    ::store ::hot::store
+    kb ::store/Map({name: "kb"})
     total ::store/reduce(kb, (acc, k, v) { add(acc, v.amount) }, 0)
     ```
     """
@@ -541,6 +612,8 @@ meta {
     **Example**
 
     ```hot
+    ::store ::hot::store
+    kb ::store/Map({name: "kb"})
     first-ten ::store/slice(kb, 0, 10)
     ```
     """
@@ -562,6 +635,8 @@ meta {
     **Example**
 
     ```hot
+    ::store ::hot::store
+    settings ::store/Map({name: "settings"})
     ::store/clear(settings)
     ```
     """
@@ -579,6 +654,8 @@ meta {
     **Example**
 
     ```hot
+    ::store ::hot::store
+    old-store ::store/Map({name: "old-store"})
     ::store/destroy(old-store)
     ```
     """

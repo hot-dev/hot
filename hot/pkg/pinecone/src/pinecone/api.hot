@@ -56,7 +56,17 @@ type {
 
 error-message
 meta {
-    doc: """Readable text for a failed response, e.g. `Pinecone API error 400 (INVALID_ARGUMENT): Index name must ...`. Exposed for testing."""
+    doc: """
+    Readable text for a failed response, e.g. `Pinecone API error 400
+    (INVALID_ARGUMENT): Index name must ...`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::pinecone::api/error-message(400, {error: {code: "INVALID_ARGUMENT", message: "Bad name"}})  // "Pinecone API error 400 (INVALID_ARGUMENT): Bad name"
+    ::pinecone::api/error-message(503, "")  // "Pinecone API error 503"
+    ```
+    """
 }
 fn (status: Int, body: Any): Str {
   inner if(and(is-map(body), is-map(get(body, "error"))), get(body, "error"), body)
@@ -71,7 +81,9 @@ fn (status: Int, body: Any): Str {
   if(is-some(message), `${label}: ${message}`, label)
 }
 
-text-or-null fn (value: Any): Any {
+text-or-null
+meta {no-doc: true}
+fn (value: Any): Any {
   if(and(is-str(value), not(is-blank(value))), value, null)
 }
 
@@ -88,13 +100,25 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
 // Credentials
 // =============================================================================
 
-non-blank fn (value: Any): Str? {
+non-blank
+meta {no-doc: true}
+fn (value: Any): Str? {
   if(is-str(value), if(is-blank(value), null, trim(value)), null)
 }
 
 is-pinecone-url
 meta {
-    doc: """True for an `https://` URL on a `pinecone.io` host: the only place a context key is sent. Exposed for testing."""
+    doc: """
+    True for an `https://` URL on a `pinecone.io` host: the only place a
+    context key is sent. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::pinecone::api/is-pinecone-url("https://docs-abc.svc.pinecone.io")  // true
+    ::pinecone::api/is-pinecone-url("http://localhost:5080")  // false
+    ```
+    """
 }
 fn (url: Str): Bool {
   ::re/is-match(url, "^https://([A-Za-z0-9-]+\\.)+pinecone\\.io(:[0-9]+)?(/.*)?$")
@@ -109,6 +133,13 @@ meta {
     or null (that never falls back to context). With a `url`, also an Err
     when it isn't a Pinecone URL and `opts` has no `api-key`. Exposed for
     testing; `resolve` feeds it the context.
+
+    **Example**
+
+    ```hot
+    ::pinecone::api/resolve-from({api-key: "test-key"}, {}).api-version  // "2026-07"
+    is-err(::pinecone::api/resolve-from({}, {}))  // true
+    ```
     """
 }
 fn
@@ -139,7 +170,9 @@ fn
   }
 }
 
-ctx-values fn (): Map {
+ctx-values
+meta {no-doc: true}
+fn (): Map {
   {
     "pinecone.api.key": ::ctx/get("pinecone.api.key"),
     "pinecone.api.version": ::ctx/get("pinecone.api.version")
@@ -160,7 +193,7 @@ meta {
     **Example**
 
     ```hot
-    ::pinecone::api/resolve({api-key: "tenant-b-key"}).api-version  // "2026-07"
+    ::pinecone::api/resolve({api-key: ::hot::ctx/get("tenant.pinecone.api.key")}).api-version  // "2026-07"
     ```
     """
 }
@@ -186,6 +219,17 @@ meta {
     an Err carrying `HttpError` otherwise, or the transport Err. Pass
     `""` as `body` for requests without one. Sends `Api-Key` and
     `X-Pinecone-Api-Version` (see `resolve`).
+
+    **Example**
+
+    ```hot
+    url ::pinecone::api/control-url("indexes")
+    out ::pinecone::api/json("GET", url, "")
+    map(out.indexes, %.name)
+
+    // With another project's key
+    ::pinecone::api/json("GET", url, "", {api-key: ::hot::ctx/get("tenant.pinecone.api.key")})
+    ```
     """
 }
 fn
@@ -204,7 +248,18 @@ fn
 
 ndjson
 meta {
-    doc: """POST newline-delimited JSON (one record per line), as the Records upsert endpoint requires. Returns like `json`."""
+    doc: """
+    POST newline-delimited JSON (one record per line), as the Records upsert
+    endpoint requires. Returns like `json`.
+
+    **Example**
+
+    ```hot
+    host ::pinecone::indexes/describe-index("docs").host
+    url ::pinecone::api/data-url(host, ["records", "namespaces", "notes", "upsert"], {})
+    ::pinecone::api/ndjson(url, [{_id: "n1", chunk_text: "Hot runs workflows."}])
+    ```
+    """
 }
 fn
 (url: Str, records: Vec): Any {
@@ -219,7 +274,15 @@ fn
 
 ndjson-body
 meta {
-    doc: """Encode records as newline-delimited JSON. Exposed for testing."""
+    doc: """
+    Encode records as newline-delimited JSON. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::pinecone::api/ndjson-body([{id: "a"}, {id: "b"}])  // "{\"id\":\"a\"}\n{\"id\":\"b\"}"
+    ```
+    """
 }
 fn (records: Vec): Str {
   join(map(records, (r) { to-json(untype(r)) }), "\n")
@@ -227,7 +290,18 @@ fn (records: Vec): Str {
 
 build-request
 meta {
-    doc: """The outgoing `HttpRequest` from resolved settings (see `resolve`). Pure; exposed for testing."""
+    doc: """
+    The outgoing `HttpRequest` from resolved settings (see `resolve`). Pure;
+    exposed for testing.
+
+    **Example**
+
+    ```hot
+    req ::pinecone::api/build-request("GET", "https://api.pinecone.io/indexes", "", null, {api-key: "test-key", api-version: "2026-07"})
+    req.url  // "https://api.pinecone.io/indexes"
+    req.headers.X-Pinecone-Api-Version  // "2026-07"
+    ```
+    """
 }
 fn (method: Str, url: Str, encoded: Str, content-type: Any, resolved: Map): HttpRequest {
   base {
@@ -244,7 +318,9 @@ fn (method: Str, url: Str, encoded: Str, content-type: Any, resolved: Map): Http
   })
 }
 
-send fn (method: Str, url: Str, encoded: Str, content-type: Any, opts: Map): Any {
+send
+meta {no-doc: true}
+fn (method: Str, url: Str, encoded: Str, content-type: Any, opts: Map): Any {
   resolved resolve(opts, url)
   cond {
     is-err(resolved) => { resolved }
@@ -265,7 +341,17 @@ send fn (method: Str, url: Str, encoded: Str, content-type: Any, opts: Map): Any
 
 normalize-host
 meta {
-    doc: """Accept a bare index host (`docs-abc123.svc...pinecone.io`) or a full URL and return the `https://` base, without a trailing slash. Exposed for testing."""
+    doc: """
+    Accept a bare index host (`docs-abc123.svc...pinecone.io`) or a full URL
+    and return the `https://` base, without a trailing slash. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::pinecone::api/normalize-host("docs-abc.svc.pinecone.io/")  // "https://docs-abc.svc.pinecone.io"
+    ```
+    """
 }
 fn (host: Str): Str {
   base cond {
@@ -279,7 +365,16 @@ fn (host: Str): Str {
 
 control-url
 meta {
-    doc: """A control-plane URL: `::pinecone/CONTROL_URL` plus the path, with each path segment URL-encoded. Exposed for testing."""
+    doc: """
+    A control-plane URL: `::pinecone/CONTROL_URL` plus the path, with each
+    path segment URL-encoded. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::pinecone::api/control-url("indexes")  // "https://api.pinecone.io/indexes"
+    ```
+    """
 }
 fn (...segments: Str): Str {
   `${::pinecone/CONTROL_URL}/${join(map(segments, (s) { ::uri/encode(s) }), "/")}`
@@ -287,7 +382,17 @@ fn (...segments: Str): Str {
 
 data-url
 meta {
-    doc: """A data-plane URL on an index host: `segments` are URL-encoded and joined, then the optional query (a Map; nulls dropped) is appended. Exposed for testing."""
+    doc: """
+    A data-plane URL on an index host: `segments` are URL-encoded and
+    joined, then the optional query (a Map; nulls dropped) is appended.
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::pinecone::api/data-url("docs-abc.svc.pinecone.io", ["vectors", "list"], {limit: 10})  // "https://docs-abc.svc.pinecone.io/vectors/list?limit=10"
+    ```
+    """
 }
 fn (host: Str, segments: Vec, query: Map): Str {
   `${normalize-host(host)}/${join(map(segments, (s) { ::uri/encode(s) }), "/")}${::uri/query-string(query)}`
@@ -295,7 +400,16 @@ fn (host: Str, segments: Vec, query: Map): Str {
 
 compact
 meta {
-    doc: """Drop null values from a Map, so unset options are omitted instead of sent as JSON null. Exposed for testing."""
+    doc: """
+    Drop null values from a Map, so unset options are omitted instead of
+    sent as JSON null. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::pinecone::api/compact({a: 1, b: null})  // {a: 1}
+    ```
+    """
 }
 fn (m: Map): Map {
   filter-vals(m, is-some)

@@ -12,6 +12,11 @@ meta {
     ```hot
     ::oauth2 ::oauth2
 
+    client-id "my-app"
+    client-secret ::hot::ctx/get("oauth.client.secret")
+    state "af0ifjsldkj"
+    code "4/P7q7W91a-oMsCeLvIaQm6bTrgtp7"
+
     verifier ::oauth2/pkce-verifier()
     url ::oauth2/authorize-url({
       authorize-url: "https://accounts.google.com/o/oauth2/v2/auth",
@@ -25,7 +30,7 @@ meta {
     tokens ::oauth2/exchange-code("https://oauth2.googleapis.com/token", {
       client-id: client-id,
       client-secret: client-secret,
-      code: request.query.code,
+      code: code,
       redirect-uri: "https://myapp.hot.dev/oauth/callback",
       code-verifier: verifier
     })
@@ -63,14 +68,27 @@ SECRET_FIELDS ["client_secret", "code", "refresh_token", "code_verifier", "asser
 TOKEN_FIELDS ["access_token", "refresh_token", "id_token"]
 
 // Mask the listed keys of `values` in the run's call records. Returns `values` unchanged.
-mark-fields fn (values: Map, names: Vec): Map {
+mark-fields
+meta {no-doc: true}
+fn (values: Map, names: Vec): Map {
   ::ctx/mark-secret(filter-keys(values, in(%, names)))
   values
 }
 
 mark-tokens
 meta {
-    doc: """Mask the tokens in a token endpoint's reply and return it unchanged: `access_token`, `refresh_token` and `id_token` of a Map, or the whole reply if it isn't JSON."""
+    doc: """
+    Mask the tokens in a token endpoint's reply and return it unchanged:
+    `access_token`, `refresh_token` and `id_token` of a Map, or the whole
+    reply if it isn't JSON.
+
+    **Example**
+
+    ```hot
+    reply ::oauth2/mark-tokens({access_token: "test-token", expires_in: 3600})
+    reply.expires_in  // 3600
+    ```
+    """
 }
 fn (reply: Any): Any {
   cond {
@@ -85,7 +103,16 @@ fn (reply: Any): Any {
 
 pkce-verifier
 meta {
-    doc: """Generate a high-entropy PKCE code verifier (43 characters, base64url of 32 random bytes). Store it for the token exchange."""
+    doc: """
+    Generate a high-entropy PKCE code verifier (43 characters, base64url of
+    32 random bytes). Store it for the token exchange.
+
+    **Example**
+
+    ```hot
+    length(::oauth2/pkce-verifier())  // 43
+    ```
+    """
 }
 fn (): Str {
   ::ctx/mark-secret(::b64/encode-url(::ctx/mark-secret(::random/random-bytes(32))))
@@ -122,6 +149,17 @@ meta {
     (required), `scope`, `state`, `code-challenge` (S256 assumed),
     `extra` (Map of provider-specific params, e.g.
     `{access_type: "offline", prompt: "consent"}`).
+
+    **Example**
+
+    ```hot
+    ::oauth2/authorize-url({
+      authorize-url: "https://auth.example.com/authorize",
+      client-id: "my-app",
+      redirect-uri: "https://myapp.hot.dev/cb",
+      scope: "email"
+    })  // "https://auth.example.com/authorize?response_type=code&client_id=my-app&redirect_uri=https%3A%2F%2Fmyapp.hot.dev%2Fcb&scope=email"
+    ```
     """
 }
 fn (config: Map): Str {
@@ -144,7 +182,19 @@ fn (config: Map): Str {
 
 build-exchange-body
 meta {
-    doc: """Build the `authorization_code` grant body. Fields: `client-id`, `code`, `redirect-uri` (required); `client-secret`, `code-verifier` (optional — PKCE public clients omit the secret)."""
+    doc: """
+    Build the `authorization_code` grant body. Fields: `client-id`, `code`,
+    `redirect-uri` (required); `client-secret`, `code-verifier` (optional —
+    PKCE public clients omit the secret).
+
+    **Example**
+
+    ```hot
+    body ::oauth2/build-exchange-body({client-id: "my-app", code: "abc", redirect-uri: "https://myapp.hot.dev/cb"})
+    body.grant_type  // "authorization_code"
+    keys(body)  // ["grant_type", "code", "client_id", "redirect_uri"]
+    ```
+    """
 }
 fn (options: Map): Map {
   mark-fields(options, SECRET_OPTIONS)
@@ -160,7 +210,17 @@ fn (options: Map): Map {
 
 build-refresh-body
 meta {
-    doc: """Build the `refresh_token` grant body. Fields: `client-id`, `refresh-token` (required); `client-secret`, `scope` (optional)."""
+    doc: """
+    Build the `refresh_token` grant body. Fields: `client-id`,
+    `refresh-token` (required); `client-secret`, `scope` (optional).
+
+    **Example**
+
+    ```hot
+    ::oauth2/build-refresh-body({client-id: "my-app", refresh-token: "test-refresh"})
+    // {grant_type: "refresh_token", refresh_token: "test-refresh", client_id: "my-app"}
+    ```
+    """
 }
 fn (options: Map): Map {
   mark-fields(options, SECRET_OPTIONS)
@@ -175,7 +235,18 @@ fn (options: Map): Map {
 
 build-client-credentials-body
 meta {
-    doc: """Build the `client_credentials` grant body. Fields: `client-id`, `client-secret` (required); `scope`, `audience` (optional)."""
+    doc: """
+    Build the `client_credentials` grant body. Fields: `client-id`,
+    `client-secret` (required); `scope`, `audience` (optional).
+
+    **Example**
+
+    ```hot
+    body ::oauth2/build-client-credentials-body({client-id: "my-app", client-secret: "test-secret", scope: "read:orders"})
+    body.grant_type  // "client_credentials"
+    body.scope  // "read:orders"
+    ```
+    """
 }
 fn (options: Map): Map {
   mark-fields(options, SECRET_OPTIONS)
@@ -190,7 +261,16 @@ fn (options: Map): Map {
 
 build-jwt-bearer-body
 meta {
-    doc: """Build the RFC 7523 JWT-bearer grant body from a signed assertion (e.g. a Google service-account JWT)."""
+    doc: """
+    Build the RFC 7523 JWT-bearer grant body from a signed assertion (e.g. a
+    Google service-account JWT).
+
+    **Example**
+
+    ```hot
+    ::oauth2/build-jwt-bearer-body("header.claims.signature").grant_type  // "urn:ietf:params:oauth:grant-type:jwt-bearer"
+    ```
+    """
 }
 fn (assertion: Str): Map {
   ::ctx/mark-secret(assertion)
@@ -206,7 +286,21 @@ fn (assertion: Str): Map {
 
 token-result
 meta {
-    doc: """What `token-request` returns for an HTTP response: the decoded reply with its tokens masked, an Err `{status, body}` for a non-2xx reply, or the transport Err. Exposed for testing."""
+    doc: """
+    What `token-request` returns for an HTTP response: the decoded reply
+    with its tokens masked, an Err `{status, body}` for a non-2xx reply, or
+    the transport Err. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    granted ::hot::http/HttpResponse({status: 200, headers: {}, body: {access_token: "test-token", expires_in: 3600}})
+    ::oauth2/token-result(granted).expires_in  // 3600
+
+    denied ::hot::http/HttpResponse({status: 400, headers: {}, body: {error: "invalid_grant"}})
+    is-err(::oauth2/token-result(denied))  // true
+    ```
+    """
 }
 fn (response: Result): Map {
   cond {
@@ -224,6 +318,17 @@ meta {
     `expires_in`, ...) or an Err `{status, body}` for a non-2xx reply.
     The grant-specific helpers below are usually more convenient. Credentials
     in `body` and tokens in the reply are masked in the run's call records.
+
+    **Example**
+
+    ```hot
+    tokens ::oauth2/token-request("https://auth.example.com/token", {
+      grant_type: "client_credentials",
+      client_id: "my-app",
+      client_secret: ::hot::ctx/get("oauth.client.secret")
+    })
+    tokens.access_token
+    ```
     """
 }
 fn (token-url: Str, body: Map): Map {
@@ -239,7 +344,24 @@ fn (token-url: Str, body: Map): Map {
 
 exchange-code
 meta {
-    doc: """Exchange an authorization code for tokens. See `build-exchange-body` for the options."""
+    doc: """
+    Exchange an authorization code for tokens. See `build-exchange-body` for
+    the options.
+
+    **Example**
+
+    ```hot
+    code "4/P7q7W91a-oMsCeLvIaQm6bTrgtp7"
+    tokens ::oauth2/exchange-code("https://oauth2.googleapis.com/token", {
+      client-id: "my-app",
+      client-secret: ::hot::ctx/get("oauth.client.secret"),
+      code: code,
+      redirect-uri: "https://myapp.hot.dev/oauth/callback"
+    })
+    tokens.access_token
+    tokens.refresh_token
+    ```
+    """
 }
 fn (token-url: Str, options: Map): Map {
   token-request(token-url, build-exchange-body(options))
@@ -247,7 +369,21 @@ fn (token-url: Str, options: Map): Map {
 
 refresh
 meta {
-    doc: """Refresh an access token. See `build-refresh-body` for the options."""
+    doc: """
+    Refresh an access token. See `build-refresh-body` for the options.
+
+    **Example**
+
+    ```hot
+    tokens ::oauth2/refresh("https://oauth2.googleapis.com/token", {
+      client-id: "my-app",
+      client-secret: ::hot::ctx/get("oauth.client.secret"),
+      refresh-token: ::hot::ctx/get("oauth.refresh.token")
+    })
+    tokens.access_token
+    tokens.expires_in
+    ```
+    """
 }
 fn (token-url: Str, options: Map): Map {
   token-request(token-url, build-refresh-body(options))
@@ -255,7 +391,22 @@ fn (token-url: Str, options: Map): Map {
 
 client-credentials
 meta {
-    doc: """Machine-to-machine tokens via the `client_credentials` grant. See `build-client-credentials-body` for the options."""
+    doc: """
+    Machine-to-machine tokens via the `client_credentials` grant. See
+    `build-client-credentials-body` for the options.
+
+    **Example**
+
+    ```hot
+    tokens ::oauth2/client-credentials("https://auth.example.com/token", {
+      client-id: "my-app",
+      client-secret: ::hot::ctx/get("oauth.client.secret"),
+      scope: "read:orders",
+      audience: "https://api.example.com"
+    })
+    tokens.access_token
+    ```
+    """
 }
 fn (token-url: Str, options: Map): Map {
   token-request(token-url, build-client-credentials-body(options))
@@ -270,15 +421,11 @@ meta {
     **Example**
 
     ```hot
-    assertion ::jwt/sign({
-      iss: sa.client_email,
-      scope: "https://www.googleapis.com/auth/spreadsheets",
-      aud: "https://oauth2.googleapis.com/token",
-      iat: ::jwt/now-seconds(),
-      exp: add(::jwt/now-seconds(), 3600)
-    }, sa.private_key, "RS256")
+    // A JWT signed with the service account's key, e.g. by `hot.dev/jwt`.
+    assertion ::hot::ctx/get("google.sa.assertion")
 
     tokens ::oauth2/jwt-bearer("https://oauth2.googleapis.com/token", assertion)
+    tokens.access_token
     ```
     """
 }

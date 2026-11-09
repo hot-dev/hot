@@ -23,7 +23,7 @@ meta {
 
     ```hot
     company ::intercom::companies/upsert-company({company_id: "acme-42", name: "Acme", plan: "enterprise"})
-    ::intercom::companies/attach-contact(company.id, contact-id)
+    ::intercom::companies/attach-contact(company.id, "6643703ffae7834d1792fd30")
     ```
     """
 }
@@ -37,7 +37,16 @@ fn
 
 update-company
 meta {
-    doc: """PUT /companies/{id} - Update a company by Intercom `id`. `company_id` cannot change after creation. Unset fields are omitted."""
+    doc: """
+    PUT /companies/{id} - Update a company by Intercom `id`. `company_id`
+    cannot change after creation. Unset fields are omitted.
+
+    **Example**
+
+    ```hot
+    ::intercom::companies/update-company("66f1a2b3c4d5e6f708192a3b", {plan: "enterprise", size: 250})
+    ```
+    """
 }
 fn
 (id: Str, fields: Map): Any {
@@ -49,7 +58,16 @@ fn
 
 get-company
 meta {
-    doc: """GET /companies/{id} - One company by Intercom `id`."""
+    doc: """
+    GET /companies/{id} - One company by Intercom `id`.
+
+    **Example**
+
+    ```hot
+    company ::intercom::companies/get-company("66f1a2b3c4d5e6f708192a3b")
+    company.name
+    ```
+    """
 }
 fn
 (id: Str): Any {
@@ -61,7 +79,17 @@ fn
 
 find-company
 meta {
-    doc: """GET /companies?company_id= - The company with your `company_id`, or an Err with status 404."""
+    doc: """
+    GET /companies?company_id= - The company with your `company_id`, or an
+    Err with status 404.
+
+    **Example**
+
+    ```hot
+    company ::intercom::companies/find-company("acme-42")
+    company.id
+    ```
+    """
 }
 fn
 (company-id: Str): Any {
@@ -73,7 +101,19 @@ fn
 
 list-companies
 meta {
-    doc: """GET /companies - Companies by page number: `{data, pages, total_count}`. `options`: `page`, `per_page`, `tag_id`, `segment_id`. Capped at 10,000 companies; beyond that Intercom requires the scroll API (`GET /companies/scroll` via `::intercom::api/request`)."""
+    doc: """
+    GET /companies - Companies by page number: `{data, pages, total_count}`.
+    `options`: `page`, `per_page`, `tag_id`, `segment_id`. Capped at 10,000
+    companies; beyond that Intercom requires the scroll API (`GET
+    /companies/scroll` via `::intercom::api/request`).
+
+    **Example**
+
+    ```hot
+    page ::intercom::companies/list-companies({page: 1, per_page: 50})
+    map(page.data, %.name)
+    ```
+    """
 }
 fn
 (): Any {
@@ -88,7 +128,16 @@ fn
 
 attach-contact
 meta {
-    doc: """Attach a contact to a company (Intercom ids). Same as `::intercom::contacts/attach-company`, argument order company-first."""
+    doc: """
+    Attach a contact to a company (Intercom ids). Same as
+    `::intercom::contacts/attach-company`, argument order company-first.
+
+    **Example**
+
+    ```hot
+    ::intercom::companies/attach-contact("66f1a2b3c4d5e6f708192a3b", "6643703ffae7834d1792fd30")
+    ```
+    """
 }
 fn
 (company-id: Str, contact-id: Str): Any {
@@ -100,7 +149,15 @@ fn
 
 detach-contact
 meta {
-    doc: """Detach a contact from a company (Intercom ids)."""
+    doc: """
+    Detach a contact from a company (Intercom ids).
+
+    **Example**
+
+    ```hot
+    ::intercom::companies/detach-contact("66f1a2b3c4d5e6f708192a3b", "6643703ffae7834d1792fd30")
+    ```
+    """
 }
 fn
 (company-id: Str, contact-id: Str): Any {
@@ -112,7 +169,17 @@ fn
 
 list-contacts
 meta {
-    doc: """GET /companies/{id}/contacts - The contacts attached to a company: `{data, pages, total_count}`. `options`: `page`, `per_page`."""
+    doc: """
+    GET /companies/{id}/contacts - The contacts attached to a company:
+    `{data, pages, total_count}`. `options`: `page`, `per_page`.
+
+    **Example**
+
+    ```hot
+    page ::intercom::companies/list-contacts("66f1a2b3c4d5e6f708192a3b", {per_page: 50})
+    map(page.data, %.email)
+    ```
+    """
 }
 fn
 (company-id: Str): Any {

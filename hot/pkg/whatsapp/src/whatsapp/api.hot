@@ -54,7 +54,20 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
 
 handle-response
 meta {
-    doc: """Unwrap an HTTP response: the decoded body on 2xx, an Err carrying `HttpError` otherwise. Callers return transport Errs before calling it. Exposed for testing."""
+    doc: """
+    Unwrap an HTTP response: the decoded body on 2xx, an Err carrying
+    `HttpError` otherwise. Callers return transport Errs before calling it.
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::api ::whatsapp::api
+
+    response ::hot::http/HttpResponse({status: 200, headers: {}, body: {id: "abc"}})
+    ::api/handle-response(response)  // {id: "abc"}
+    ```
+    """
 }
 fn (response: Result): Any {
   cond {
@@ -92,17 +105,36 @@ fn (error: Any): Str? {
   }
 }
 
-auth-headers fn (access-token: Str): Map {
+auth-headers
+meta {no-doc: true}
+fn (access-token: Str): Map {
   {Authorization: `Bearer ${access-token}`, User-Agent: USER_AGENT}
 }
 
-non-blank fn (value: Any): Str? {
+non-blank
+meta {no-doc: true}
+fn (value: Any): Str? {
   if(is-str(value), if(is-empty(trim(value)), null, trim(value)), null)
 }
 
 resolve-from
 meta {
-    doc: """The one resolver, pure: `{access-token}` for a call from `opts` first, then `ctx-values` (a Map of context variables), plus `phone-number-id` when `opts` has one. An Err when no token is set, or when `access-token` is in `opts` but blank or null (that never falls back to context). Exposed for testing; `resolve` feeds it the context."""
+    doc: """
+    The one resolver, pure: `{access-token}` for a call from `opts` first,
+    then `ctx-values` (a Map of context variables), plus `phone-number-id`
+    when `opts` has one. An Err when no token is set, or when `access-token`
+    is in `opts` but blank or null (that never falls back to context).
+    Exposed for testing; `resolve` feeds it the context.
+
+    **Example**
+
+    ```hot
+    ::api ::whatsapp::api
+
+    ::api/resolve-from({phone-number-id: "123"}, {"whatsapp.access.token": "test-token"})  // {access-token: "test-token", phone-number-id: "123"}
+    is-err(::api/resolve-from({access-token: ""}, {"whatsapp.access.token": "test-token"}))  // true
+    ```
+    """
 }
 fn (opts: Map, ctx-values: Map): Map {
   opts-token non-blank(get(opts, "access-token"))
@@ -144,7 +176,20 @@ fn (opts: Map): Map {
 
 with-phone-number
 meta {
-    doc: """Run `action` with the URL-encoded business number for a call: `phone-number-id` when set, else `phone-number-id` in `opts`. An Err when neither is set."""
+    doc: """
+    Run `action` with the URL-encoded business number for a call:
+    `phone-number-id` when set, else `phone-number-id` in `opts`. An Err
+    when neither is set.
+
+    **Example**
+
+    ```hot
+    ::api ::whatsapp::api
+
+    ::api/with-phone-number("109876543210", {}, (id) { `${id}/messages` })  // "109876543210/messages"
+    ::api/with-phone-number(null, {phone-number-id: "222"}, (id) { id })  // "222"
+    ```
+    """
 }
 fn (phone-number-id: Str?, opts: Map, action: Fn): Any {
   id or(non-blank(phone-number-id), non-blank(get(opts, "phone-number-id")))
@@ -154,7 +199,9 @@ fn (phone-number-id: Str?, opts: Map, action: Fn): Any {
   }
 }
 
-send-json fn (method: Str, url: Str, additional-headers: Map, body: Map, access-token: Str): Any {
+send-json
+meta {no-doc: true}
+fn (method: Str, url: Str, additional-headers: Map, body: Map, access-token: Str): Any {
   payload filter-vals(untype(body), is-some)
   has-body not(is-empty(payload))
   base auth-headers(access-token)
@@ -219,7 +266,22 @@ fn
 request-bytes
 meta {
     ctx: {"whatsapp.access.token": {required: false}},
-    doc: """Send a raw body (e.g. a multipart upload built as `Bytes`) with an explicit `Content-Type`. Returns the decoded JSON body on 2xx, or an Err carrying `HttpError`."""
+    doc: """
+    Send a raw body (e.g. a multipart upload built as `Bytes`) with an
+    explicit `Content-Type`. Returns the decoded JSON body on 2xx, or an Err
+    carrying `HttpError`.
+
+    **Example**
+
+    ```hot
+    ::api ::whatsapp::api
+
+    boundary "hot-boundary"
+    content ::whatsapp::media/build-upload-body(boundary, "hello", "text/plain", "hello.txt")
+    uploaded ::api/request-bytes("POST", ::api/url("109876543210/media"), `multipart/form-data; boundary=${boundary}`, content)
+    uploaded.id
+    ```
+    """
 }
 fn
 (method: Str, url: Str, content-type: Str, body: Bytes): Any {
@@ -250,7 +312,20 @@ fn
 download
 meta {
     ctx: {"whatsapp.access.token": {required: false}},
-    doc: """Authenticated GET returning the raw response bytes (`Bytes`) on 2xx, or an Err carrying `HttpError`. Used for media downloads."""
+    doc: """
+    Authenticated GET returning the raw response bytes (`Bytes`) on 2xx, or
+    an Err carrying `HttpError`. Used for media downloads.
+
+    **Example**
+
+    ```hot
+    ::api ::whatsapp::api
+
+    info ::whatsapp::media/get-media("1234567890")
+    bytes ::api/download(info.url)
+    length(bytes)
+    ```
+    """
 }
 fn
 (url: Str): Bytes {
@@ -280,7 +355,20 @@ fn
 
 url
 meta {
-    doc: """Build a Graph API URL from a path relative to the versioned base, e.g. `url("123/messages")` gives `https://graph.facebook.com/v26.0/123/messages`. The version follows `::whatsapp::core/api-version`, with `opts` when given."""
+    doc: """
+    Build a Graph API URL from a path relative to the versioned base, e.g.
+    `url("123/messages")` gives
+    `https://graph.facebook.com/v26.0/123/messages`. The version follows
+    `::whatsapp::core/api-version`, with `opts` when given.
+
+    **Example**
+
+    ```hot
+    ::api ::whatsapp::api
+
+    ::api/url("123/messages", {api-version: "v25.0"})  // "https://graph.facebook.com/v25.0/123/messages"
+    ```
+    """
 }
 fn
 (path: Str): Str {
@@ -292,7 +380,17 @@ fn
 
 segment
 meta {
-    doc: """Percent-encode one path segment (an id or name). Exposed for testing."""
+    doc: """
+    Percent-encode one path segment (an id or name). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::api ::whatsapp::api
+
+    ::api/segment("a/b c")  // "a%2Fb%20c"
+    ```
+    """
 }
 fn (value: Any): Str {
   ::hot::uri/encode(Str(value))

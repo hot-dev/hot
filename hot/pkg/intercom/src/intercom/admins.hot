@@ -31,7 +31,17 @@ fn
 
 list-admins
 meta {
-    doc: """GET /admins - Every admin in the workspace: `{type: "admin.list", admins: [...]}`."""
+    doc: """
+    GET /admins - Every admin in the workspace: `{type: "admin.list",
+    admins: [...]}`.
+
+    **Example**
+
+    ```hot
+    out ::intercom::admins/list-admins()
+    map(out.admins, %.email)
+    ```
+    """
 }
 fn
 (): Any {
@@ -43,7 +53,16 @@ fn
 
 get-admin
 meta {
-    doc: """GET /admins/{id} - One admin."""
+    doc: """
+    GET /admins/{id} - One admin.
+
+    **Example**
+
+    ```hot
+    admin ::intercom::admins/get-admin("814860")
+    admin.name
+    ```
+    """
 }
 fn
 (id: Any): Any {
@@ -55,7 +74,17 @@ fn
 
 find-admin-by-email
 meta {
-    doc: """The admin whose `email` matches (case-insensitive), from `list-admins`, or null."""
+    doc: """
+    The admin whose `email` matches (case-insensitive), from `list-admins`,
+    or null.
+
+    **Example**
+
+    ```hot
+    admin ::intercom::admins/find-admin-by-email("support@example.com")
+    if(is-null(admin), "no such admin", admin.id)
+    ```
+    """
 }
 fn
 (email: Str): Any {
@@ -71,7 +100,17 @@ fn
 
 list-teams
 meta {
-    doc: """GET /teams - The workspace's teams (assignment targets for `assign-conversation` with `type: "team"`)."""
+    doc: """
+    GET /teams - The workspace's teams (assignment targets for
+    `assign-conversation` with `type: "team"`).
+
+    **Example**
+
+    ```hot
+    out ::intercom::admins/list-teams()
+    map(out.teams, %.name)
+    ```
+    """
 }
 fn
 (): Any {

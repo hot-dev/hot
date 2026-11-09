@@ -161,7 +161,7 @@ meta {
     **Example — simple**
 
     ```hot
-    response complete(ChatCompletionRequest({
+    response ::qwen::chat/complete(::qwen::chat/ChatCompletionRequest({
         model: "qwen3.7-plus",
         messages: [{role: "user", content: "Say 'Hello, Hot!' and nothing else."}],
         max_tokens: 50
@@ -175,7 +175,7 @@ meta {
     **Example — with a system message**
 
     ```hot
-    response complete(ChatCompletionRequest({
+    response ::qwen::chat/complete(::qwen::chat/ChatCompletionRequest({
         model: "qwen3.7-plus",
         messages: [
             {role: "system", content: "You are a helpful assistant that responds in JSON."},
@@ -193,7 +193,7 @@ meta {
     allow thinking when streaming; use `complete-stream` for those.
 
     ```hot
-    response complete(ChatCompletionRequest({
+    response ::qwen::chat/complete(::qwen::chat/ChatCompletionRequest({
         model: "qwen3.7-plus",
         messages: [{role: "user", content: "Is 89 prime? Show your reasoning."}],
         enable_thinking: true,
@@ -221,6 +221,18 @@ meta {
     doc: """
     The JSON body for a `ChatCompletionRequest`: unset optional fields
     are omitted rather than sent as null. Pure; exposed for testing.
+
+    **Example**
+
+    ```hot
+    body ::qwen::chat/request-body(::qwen::chat/ChatCompletionRequest({
+        model: "qwen3.8-flash",
+        messages: [{role: "user", content: "Hi"}],
+        top_k: 20
+    }))
+    body.top_k  // 20
+    in("temperature", keys(body))  // false
+    ```
     """
 }
 fn (request: ChatCompletionRequest): Map {
@@ -244,7 +256,7 @@ meta {
     **Example**
 
     ```hot
-    response complete-stream(ChatCompletionRequest({
+    response ::qwen::chat/complete-stream(::qwen::chat/ChatCompletionRequest({
         model: "qwen3.7-plus",
         messages: [{role: "user", content: "Count from 1 to 3."}],
         max_tokens: 50
@@ -253,7 +265,7 @@ meta {
     response.status // => 200
 
     for-each(response.body, (event) {
-        text extract-chunk-text(event)
+        text ::qwen::chat/extract-chunk-text(event)
         cond {
             gt(length(text), 0) => { print(text) }
         }
@@ -291,11 +303,11 @@ meta {
     **Example**
 
     ```hot
-    answer chat("qwen3.7-plus", "What is the capital of France?")
+    answer ::qwen::chat/chat("qwen3.7-plus", "What is the capital of France?")
     // => "The capital of France is Paris."
 
     // With system instructions
-    answer chat("qwen3.8-flash", "What is 2+2?", "Respond with just the number.")
+    answer ::qwen::chat/chat("qwen3.8-flash", "What is 2+2?", "Respond with just the number.")
     // => "4"
     ```
     """
@@ -351,7 +363,7 @@ meta {
     **Example**
 
     ```hot
-    msg user-message("Hello")
+    msg ::qwen::chat/user-message("Hello")
     msg.role    // => "user"
     msg.content // => "Hello"
     ```
@@ -369,7 +381,7 @@ meta {
     **Example**
 
     ```hot
-    msg system-message("You are a helpful math tutor.")
+    msg ::qwen::chat/system-message("You are a helpful math tutor.")
     msg.role // => "system"
     ```
     """
@@ -387,9 +399,9 @@ meta {
 
     ```hot
     messages [
-        user-message("My name is Alice."),
-        assistant-message("Nice to meet you, Alice!"),
-        user-message("What is my name?")
+        ::qwen::chat/user-message("My name is Alice."),
+        ::qwen::chat/assistant-message("Nice to meet you, Alice!"),
+        ::qwen::chat/user-message("What is my name?")
     ]
     ```
     """
@@ -407,13 +419,13 @@ meta {
     **Example**
 
     ```hot
-    response complete(ChatCompletionRequest({
+    response ::qwen::chat/complete(::qwen::chat/ChatCompletionRequest({
         model: "qwen3.7-plus",
         messages: [{role: "user", content: "Say 'test'"}],
         max_tokens: 50
     }))
 
-    text extract-response-text(response)
+    text ::qwen::chat/extract-response-text(response)
     ```
     """
 }
@@ -443,8 +455,13 @@ meta {
     **Example**
 
     ```hot
+    response ::qwen::chat/complete-stream(::qwen::chat/ChatCompletionRequest({
+        model: "qwen3.8-flash",
+        messages: [::qwen::chat/user-message("Hello")]
+    }))
+
     for-each(response.body, (event) {
-        text extract-chunk-text(event)
+        text ::qwen::chat/extract-chunk-text(event)
         cond { gt(length(text), 0) => { print(text) } }
     })
     ```
@@ -480,15 +497,15 @@ meta {
     **Example**
 
     ```hot
-    response complete-stream(ChatCompletionRequest({
+    response ::qwen::chat/complete-stream(::qwen::chat/ChatCompletionRequest({
         model: "qwen3.7-plus",
         messages: [{role: "user", content: "Is 89 prime?"}],
         enable_thinking: true
     }))
 
     for-each(response.body, (event) {
-        thought extract-chunk-reasoning(event)
-        answer  extract-chunk-text(event)
+        thought ::qwen::chat/extract-chunk-reasoning(event)
+        answer  ::qwen::chat/extract-chunk-text(event)
         cond {
             gt(length(thought), 0) => { print(`[thinking] ${thought}`) }
             gt(length(answer), 0)  => { print(answer) }
@@ -527,8 +544,13 @@ meta {
     **Example**
 
     ```hot
+    response ::qwen::chat/complete-stream(::qwen::chat/ChatCompletionRequest({
+        model: "qwen3.8-flash",
+        messages: [::qwen::chat/user-message("Hello")]
+    }))
+
     for-each(response.body, (event) {
-        cond { is-stream-done(event) => { println("---done---") } }
+        cond { ::qwen::chat/is-stream-done(event) => { println("---done---") } }
     })
     ```
     """

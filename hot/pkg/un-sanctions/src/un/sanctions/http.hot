@@ -25,7 +25,9 @@ type {
     message: Str
 }
 
-body-snippet fn (body: Any): Str {
+body-snippet
+meta {no-doc: true}
+fn (body: Any): Str {
   text match body {
     Null => { "" }
     Str => { body }
@@ -38,7 +40,19 @@ body-snippet fn (body: Any): Str {
 
 http-error
 meta {
-    doc: """Build an `HttpError` from a non-2xx response. Exposed for testing; every request uses it."""
+    doc: """
+    Build an `HttpError` from a non-2xx response. Exposed for testing; every
+    request uses it.
+
+    **Example**
+
+    ```hot
+    response ::hot::http/HttpResponse({status: 503, headers: {}, body: "down"})
+    e ::un::sanctions::http/http-error(response, "https://example.com/list.xml")
+    e.status  // 503
+    e.message  // "HTTP 503 from https://example.com/list.xml: down"
+    ```
+    """
 }
 fn (response: HttpResponse, url: Str): HttpError {
   snippet body-snippet(response.body)
@@ -53,7 +67,18 @@ fn (response: HttpResponse, url: Str): HttpError {
 
 body-text
 meta {
-    doc: """The response body as text: the decoded string when Hot kept it as one, otherwise the body bytes decoded as UTF-8 (a CSV served as `application/octet-stream`, or a body that happened to parse as JSON)."""
+    doc: """
+    The response body as text: the decoded string when Hot kept it as one,
+    otherwise the body bytes decoded as UTF-8 (a CSV served as
+    `application/octet-stream`, or a body that happened to parse as JSON).
+
+    **Example**
+
+    ```hot
+    ::un::sanctions::http/body-text({body: "<CONSOLIDATED_LIST/>"})  // "<CONSOLIDATED_LIST/>"
+    ::un::sanctions::http/body-text({})  // ""
+    ```
+    """
 }
 fn (response: Any): Str {
   body get(response, "body")
@@ -69,7 +94,19 @@ fn (response: Any): Str {
 
 request
 meta {
-    doc: """One request with the package User-Agent. Returns the `HttpResponse` on 2xx, or an Err carrying `HttpError` (transport failures pass through as their own Err)."""
+    doc: """
+    One request with the package User-Agent. Returns the `HttpResponse` on
+    2xx, or an Err carrying `HttpError` (transport failures pass through as
+    their own Err).
+
+    **Example**
+
+    ```hot
+    url "https://scsanctions.un.org/resources/xml/en/consolidated.xml"
+    response ::un::sanctions::http/request("GET", url, {}, "")
+    response.status
+    ```
+    """
 }
 fn (method: Str, url: Str, headers: Map, body: Any): HttpResponse {
   response ::hot::http/request(HttpRequest({
@@ -87,7 +124,16 @@ fn (method: Str, url: Str, headers: Map, body: Any): HttpResponse {
 
 get-text
 meta {
-    doc: """GET a file as text: the body as a Str, or an Err."""
+    doc: """
+    GET a file as text: the body as a Str, or an Err.
+
+    **Example**
+
+    ```hot
+    xml ::un::sanctions::http/get-text("https://scsanctions.un.org/resources/xml/en/consolidated.xml")
+    length(::un::sanctions::xml/records(xml, "INDIVIDUAL"))
+    ```
+    """
 }
 fn (url: Str): Str {
   response request("GET", url, {}, "")

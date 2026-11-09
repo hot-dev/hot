@@ -9,7 +9,17 @@ SOSL_RESERVED ["\\", "?", "&", "|", "!", "{", "}", "[", "]", "(", ")", "^", "~",
 
 escape-sosl
 meta {
-    doc: """Escape SOSL reserved characters (`? & | ! { } [ ] ( ) ^ ~ * : \\ " ' + -`) with a backslash so a user-supplied term searches literally inside `FIND {...}`. Exposed for testing."""
+    doc: """
+    Escape SOSL reserved characters (`? & | ! { } [ ] ( ) ^ ~ * : \\ " ' +
+    -`) with a backslash so a user-supplied term searches literally inside
+    `FIND {...}`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::search/escape-sosl("a&b")  // "a\\&b"
+    ```
+    """
 }
 fn (term: Str): Str {
   reduce(SOSL_RESERVED, (acc, ch) { replace(acc, ch, concat("\\", ch)) }, term)
@@ -23,6 +33,13 @@ meta {
     "FIELDS" is appended), `returning` (Vec of object clauses such as
     `"Contact(Id, Name, Email)"` or `"Lead"`), `limit`. Exposed for
     testing; `find` uses it.
+
+    **Example**
+
+    ```hot
+    ::salesforce::search/build-sosl("Ada", {in: "name", returning: ["Contact(Id)"], limit: 5})
+    // "FIND {Ada} IN NAME FIELDS RETURNING Contact(Id) LIMIT 5"
+    ```
     """
 }
 fn (term: Str, options: Map): Str {

@@ -14,13 +14,24 @@ meta {
 
 command-tag
 meta {
-    doc: """SQLite reports no command tag, so derive one from the statement's first word (`"INSERT"`, `"UPDATE"`, ...). Exposed for testing."""
+    doc: """
+    SQLite reports no command tag, so derive one from the statement's first
+    word (`"INSERT"`, `"UPDATE"`, ...). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::sql::sqlite/command-tag("insert into t (name) values ('Ada')")  // "INSERT"
+    ```
+    """
 }
 fn (sql: Str): Str {
   ::str/uppercase(first(split(::str/trim(sql), " ")))
 }
 
-sqlite-execute fn (conn: Any, sql: Str, params: Vec): Map {
+sqlite-execute
+meta {no-doc: true}
+fn (conn: Any, sql: Str, params: Vec): Map {
   out ::hot::sqlite/execute(conn, sql, params)
   match out {
     Result.Err => { err(out) }
@@ -74,7 +85,19 @@ fn (path-or-options: Str | Map): ::sql/Db {
 
 sync
 meta {
-    doc: """Commit a service-mode checkout back to managed storage without closing (see `::hot::sqlite/sync`). No-op in `direct` mode."""
+    doc: """
+    Commit a service-mode checkout back to managed storage without closing
+    (see `::hot::sqlite/sync`). No-op in `direct` mode.
+
+    **Example**
+
+    ```hot
+    db ::sql::sqlite/open("data/app.db")
+    ::sql/execute(db, "INSERT INTO t (name) VALUES (?)", ["Ada"])
+    ::sql::sqlite/sync(db)
+    ::sql/close(db)
+    ```
+    """
 }
 fn (db: ::sql/Db): Bool {
   ::hot::sqlite/sync(db.conn)

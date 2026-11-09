@@ -47,13 +47,24 @@ PARAMS {
 
 page-limit
 meta {
-    doc: """`opts.limit`, capped at 200, or 10 when unset (pure)."""
+    doc: """
+    `opts.limit`, capped at 200, or 10 when unset (pure).
+
+    **Example**
+
+    ```hot
+    ::nppes/page-limit({limit: 500})  // 200
+    ::nppes/page-limit({})  // 10
+    ```
+    """
 }
 fn (opts: Map): Int {
   min(or(get(opts, "limit"), DEFAULT_LIMIT), MAX_LIMIT)
 }
 
-alias-param fn (value: Any): Str? {
+alias-param
+meta {no-doc: true}
+fn (value: Any): Str? {
   cond {
     is-null(value) => { null }
     eq(value, true) => { "True" }
@@ -83,6 +94,13 @@ meta {
     | `state` | Two letters; needs another criterion besides `enumeration-type` and `country-code` |
     | `country-code` | Two letters; `"US"` needs other criteria |
     | `limit`, `skip` | Page size up to 200; records to skip, up to 1,000 |
+
+    **Example**
+
+    ```hot
+    ::nppes/search-params({last-name: "smi*", state: "MN", limit: 500})
+    // {version: "2.1", last_name: "smi*", state: "MN", use_first_name_alias: null, limit: 200, skip: null}
+    ```
     """
 }
 fn (opts: Map): Map {
@@ -99,7 +117,9 @@ fn (opts: Map): Map {
   }
 }
 
-registry-get fn (opts: Map): Any {
+registry-get
+meta {no-doc: true}
+fn (opts: Map): Any {
   cfg ::api/resolve(opts)
   ::api/get-json(`${cfg.base-url}/${::api/query-string(search-params(opts))}`, {})
 }
@@ -167,7 +187,20 @@ fn
 
 organizations
 meta {
-    doc: """Search organizational providers (Type 2 NPIs) by name, with any other criteria in `opts`."""
+    doc: """
+    Search organizational providers (Type 2 NPIs) by name, with any other
+    criteria in `opts`.
+
+    **Example**
+
+    ```hot
+    page ::nppes/organizations("mayo clinic*")
+    map(::nppes/results(page), %.number)
+
+    // Narrow by state, 50 to a page
+    ::nppes/organizations("mayo clinic*", {state: "MN", limit: 50})
+    ```
+    """
 }
 fn
 (name: Str): Map {
@@ -179,7 +212,17 @@ fn
 
 individuals
 meta {
-    doc: """Search individual providers (Type 1 NPIs) by last name, with `first-name` and any other criteria in `opts`."""
+    doc: """
+    Search individual providers (Type 1 NPIs) by last name, with
+    `first-name` and any other criteria in `opts`.
+
+    **Example**
+
+    ```hot
+    page ::nppes/individuals("smith", {first-name: "jo*", state: "MN"})
+    map(::nppes/results(page), %.basic.first_name)
+    ```
+    """
 }
 fn
 (last-name: Str): Map {
@@ -195,19 +238,43 @@ fn
 
 results
 meta {
-    doc: """The provider records in a page (pure)."""
+    doc: """
+    The provider records in a page (pure).
+
+    **Example**
+
+    ```hot
+    ::nppes/results({result_count: 1, results: [{number: "1881018208"}]})  // [{number: "1881018208"}]
+    ::nppes/results(null)  // []
+    ```
+    """
 }
 fn (page: Any): Vec<Map> {
   or(get(or(page, {}), "results"), [])
 }
 
-address-for fn (provider: Any, purpose: Str): Map? {
+address-for
+meta {no-doc: true}
+fn (provider: Any, purpose: Str): Map? {
   find-first(or(get(or(provider, {}), "addresses"), []), (a) { eq(get(a, "address_purpose"), purpose) })
 }
 
 location-address
 meta {
-    doc: """A provider's primary practice location address, or null (pure). Other locations are in `practiceLocations`."""
+    doc: """
+    A provider's primary practice location address, or null (pure). Other
+    locations are in `practiceLocations`.
+
+    **Example**
+
+    ```hot
+    provider {addresses: [
+      {address_purpose: "MAILING", city: "SAINT PAUL"},
+      {address_purpose: "LOCATION", city: "ROCHESTER"}
+    ]}
+    ::nppes/location-address(provider).city  // "ROCHESTER"
+    ```
+    """
 }
 fn (provider: Any): Map? {
   address-for(provider, "LOCATION")
@@ -215,7 +282,19 @@ fn (provider: Any): Map? {
 
 mailing-address
 meta {
-    doc: """A provider's mailing address, or null (pure)."""
+    doc: """
+    A provider's mailing address, or null (pure).
+
+    **Example**
+
+    ```hot
+    provider {addresses: [
+      {address_purpose: "MAILING", city: "SAINT PAUL"},
+      {address_purpose: "LOCATION", city: "ROCHESTER"}
+    ]}
+    ::nppes/mailing-address(provider).city  // "SAINT PAUL"
+    ```
+    """
 }
 fn (provider: Any): Map? {
   address-for(provider, "MAILING")
@@ -223,7 +302,20 @@ fn (provider: Any): Map? {
 
 primary-taxonomy
 meta {
-    doc: """The taxonomy marked primary, `{code, desc, license, state, primary, taxonomy_group}`, or null (pure)."""
+    doc: """
+    The taxonomy marked primary, `{code, desc, license, state, primary,
+    taxonomy_group}`, or null (pure).
+
+    **Example**
+
+    ```hot
+    provider {taxonomies: [
+      {code: "207R00000X", primary: false},
+      {code: "261QM1300X", primary: true}
+    ]}
+    ::nppes/primary-taxonomy(provider).code  // "261QM1300X"
+    ```
+    """
 }
 fn (provider: Any): Map? {
   find-first(or(get(or(provider, {}), "taxonomies"), []), (t) { eq(get(t, "primary"), true) })
@@ -231,7 +323,16 @@ fn (provider: Any): Map? {
 
 is-active
 meta {
-    doc: """True when the record's `basic.status` is `"A"` (pure)."""
+    doc: """
+    True when the record's `basic.status` is `"A"` (pure).
+
+    **Example**
+
+    ```hot
+    ::nppes/is-active({basic: {status: "A"}})  // true
+    ::nppes/is-active({basic: {status: "D"}})  // false
+    ```
+    """
 }
 fn (provider: Any): Bool {
   eq(get-in(or(provider, {}), ["basic", "status"]), "A")
@@ -239,7 +340,18 @@ fn (provider: Any): Bool {
 
 is-npi
 meta {
-    doc: """True for a syntactically valid NPI: 10 digits with a valid Luhn check digit, computed with the `80840` health-industry prefix (pure). It says nothing about whether the NPI was issued."""
+    doc: """
+    True for a syntactically valid NPI: 10 digits with a valid Luhn check
+    digit, computed with the `80840` health-industry prefix (pure). It says
+    nothing about whether the NPI was issued.
+
+    **Example**
+
+    ```hot
+    ::nppes/is-npi("1881018208")  // true
+    ::nppes/is-npi("1881018209")  // false
+    ```
+    """
 }
 fn (npi: Any): Bool {
   s trim(Str(npi))
@@ -249,7 +361,9 @@ fn (npi: Any): Bool {
   }
 }
 
-luhn-sum fn (digits: Str): Int {
+luhn-sum
+meta {no-doc: true}
+fn (digits: Str): Int {
   items reverse(filter(::hot::regex/split(digits, ""), (c) { not(is-empty(c)) }))
   reduce(range(0, length(items)), (acc, i) {
     d Int(get(items, i))
@@ -269,6 +383,14 @@ meta {
     next `skip` would pass 1,000 (pure). `opts` are the ones that fetched
     `page`. The API gives no total, so a full last page gets one more,
     empty, request.
+
+    **Example**
+
+    ```hot
+    opts {limit: 2}
+    ::nppes/next-page({results: [{number: "1"}, {number: "2"}]}, opts)  // 2
+    ::nppes/next-page({results: [{number: "1"}]}, opts)  // null
+    ```
     """
 }
 fn (page: Any, opts: Map): Int? {
@@ -281,7 +403,9 @@ fn (page: Any, opts: Map): Int? {
   }
 }
 
-final-skip fn (page: Any, opts: Map): Int? {
+final-skip
+meta {no-doc: true}
+fn (page: Any, opts: Map): Int? {
   // A page size that doesn't divide 1,000 steps over the last allowed skip.
   cond {
     lt(length(results(page)), page-limit(opts)) => { null }
@@ -290,7 +414,9 @@ final-skip fn (page: Any, opts: Map): Int? {
   }
 }
 
-collect-pages fn (fetch: Fn, opts: Map, start: Int, limit: Int, acc: Vec): Vec {
+collect-pages
+meta {no-doc: true}
+fn (fetch: Fn, opts: Map, start: Int, limit: Int, acc: Vec): Vec {
   page fetch(opts)
   cond {
     // Returned, not consumed: consuming an Err would halt the run.

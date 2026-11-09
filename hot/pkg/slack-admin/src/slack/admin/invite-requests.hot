@@ -30,6 +30,15 @@ meta {
 
     Scope: `admin.invites:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `list-all`.
+
+    **Example**
+
+    ```hot
+    ::invites ::slack::admin::invite-requests
+
+    page ::invites/list(::invites/ListRequest({team_id: "T0123ABCDEF", limit: 100}))
+    page.invite_requests
+    ```
     """
 }
 fn
@@ -46,7 +55,18 @@ fn
 list-all
 meta {
     doc: """
-    Every `invite_requests` entry from `admin.inviteRequests.list`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    Every `invite_requests` entry from `admin.inviteRequests.list`,
+    following `next_cursor` until the last page or `max-items` (default
+    1000). `request` sets the filters; its `cursor` is the starting point.
+
+    **Example**
+
+    ```hot
+    ::invites ::slack::admin::invite-requests
+
+    pending ::invites/list-all(::invites/ListRequest({team_id: "T0123ABCDEF"}), 500)
+    length(pending)
+    ```
     """
 }
 fn
@@ -74,6 +94,14 @@ meta {
     admin.inviteRequests.approve - Approve an invite request.
 
     Scope: `admin.invites:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::invites ::slack::admin::invite-requests
+
+    ::invites/approve(::invites/ApproveRequest({invite_request_id: "Ir0123ABCDEF", team_id: "T0123ABCDEF"}))
+    ```
     """
 }
 fn
@@ -95,6 +123,14 @@ meta {
     admin.inviteRequests.deny - Deny an invite request.
 
     Scope: `admin.invites:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::invites ::slack::admin::invite-requests
+
+    ::invites/deny(::invites/DenyRequest({invite_request_id: "Ir0123ABCDEF", team_id: "T0123ABCDEF"}))
+    ```
     """
 }
 fn
@@ -118,6 +154,15 @@ meta {
 
     Scope: `admin.invites:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `approved-list-all`.
+
+    **Example**
+
+    ```hot
+    ::invites ::slack::admin::invite-requests
+
+    page ::invites/approved-list(::invites/ApprovedListRequest({team_id: "T0123ABCDEF", limit: 100}))
+    page.approved_requests
+    ```
     """
 }
 fn
@@ -134,7 +179,19 @@ fn
 approved-list-all
 meta {
     doc: """
-    Every `approved_requests` entry from `admin.inviteRequests.approved.list`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    Every `approved_requests` entry from
+    `admin.inviteRequests.approved.list`, following `next_cursor` until the
+    last page or `max-items` (default 1000). `request` sets the filters; its
+    `cursor` is the starting point.
+
+    **Example**
+
+    ```hot
+    ::invites ::slack::admin::invite-requests
+
+    approved ::invites/approved-list-all(::invites/ApprovedListRequest({team_id: "T0123ABCDEF"}), 500)
+    length(approved)
+    ```
     """
 }
 fn
@@ -164,6 +221,15 @@ meta {
 
     Scope: `admin.invites:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `denied-list-all`.
+
+    **Example**
+
+    ```hot
+    ::invites ::slack::admin::invite-requests
+
+    page ::invites/denied-list(::invites/DeniedListRequest({team_id: "T0123ABCDEF", limit: 100}))
+    page.denied_requests
+    ```
     """
 }
 fn
@@ -180,7 +246,18 @@ fn
 denied-list-all
 meta {
     doc: """
-    Every `denied_requests` entry from `admin.inviteRequests.denied.list`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    Every `denied_requests` entry from `admin.inviteRequests.denied.list`,
+    following `next_cursor` until the last page or `max-items` (default
+    1000). `request` sets the filters; its `cursor` is the starting point.
+
+    **Example**
+
+    ```hot
+    ::invites ::slack::admin::invite-requests
+
+    denied ::invites/denied-list-all(::invites/DeniedListRequest({team_id: "T0123ABCDEF"}), 500)
+    length(denied)
+    ```
     """
 }
 fn

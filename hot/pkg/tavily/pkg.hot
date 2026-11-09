@@ -2,7 +2,7 @@
 
 hot.pkg.tavily {
   name: "hot.dev/tavily",
-  version: "0.1.1",
+  version: "0.1.2",
   hot-min-version: "3.0.2",
   description: "Tavily API bindings for Hot: web search built for LLM agents, with generated answers, news and finance topics, date and domain filters, and page content extraction.",
   author: "Hot Dev",

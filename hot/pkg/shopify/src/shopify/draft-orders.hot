@@ -30,7 +30,7 @@ meta {
     ```hot
     draft ::shopify::draft-orders/create-draft-order({
       email: "ada@example.com",
-      lineItems: [{variantId: variant.id, quantity: 2}]
+      lineItems: [{variantId: "gid://shopify/ProductVariant/11", quantity: 2}]
     })
     ```
     """
@@ -54,7 +54,17 @@ fn
 
 get-draft-order
 meta {
-    doc: """One draft order by GraphQL id with its line items. Returns null when not found."""
+    doc: """
+    One draft order by GraphQL id with its line items. Returns null when not
+    found.
+
+    **Example**
+
+    ```hot
+    draft ::shopify::draft-orders/get-draft-order("gid://shopify/DraftOrder/5")
+    draft.invoiceUrl
+    ```
+    """
 }
 fn
 (id: Str): Map? {
@@ -75,7 +85,16 @@ fn
 
 build-complete-variables
 meta {
-    doc: """Variables for `draftOrderComplete`. Options: `paymentGatewayId`, `sourceName`. Unset options are omitted. Exposed for testing."""
+    doc: """
+    Variables for `draftOrderComplete`. Options: `paymentGatewayId`,
+    `sourceName`. Unset options are omitted. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::shopify::draft-orders/build-complete-variables("gid://shopify/DraftOrder/5", {sourceName: "phone"})  // {id: "gid://shopify/DraftOrder/5", sourceName: "phone"}
+    ```
+    """
 }
 fn (id: Str, options: Map): Map {
   filter-vals({
@@ -93,6 +112,13 @@ meta {
     attribution). To leave it payment pending, give the draft order
     payment terms instead (Shopify deprecated `paymentPending`). Returns
     the draft order with the new `order {id name}`.
+
+    **Example**
+
+    ```hot
+    draft ::shopify::draft-orders/complete-draft-order("gid://shopify/DraftOrder/5", {sourceName: "phone"})
+    draft.order.name
+    ```
     """
 }
 fn

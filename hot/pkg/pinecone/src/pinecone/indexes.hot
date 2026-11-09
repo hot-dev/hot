@@ -18,7 +18,17 @@ meta {
 list-indexes
 meta {
     ctx: {"pinecone.api.key": {required: false}},
-    doc: """GET /indexes - Your indexes: `{indexes: [{name, host, status, deployment, schema, deletion_protection, tags?}]}`."""
+    doc: """
+    GET /indexes - Your indexes: `{indexes: [{name, host, status,
+    deployment, schema, deletion_protection, tags?}]}`.
+
+    **Example**
+
+    ```hot
+    out ::pinecone::indexes/list-indexes()
+    map(out.indexes, %.name)
+    ```
+    """
 }
 fn
 (): Map {
@@ -31,7 +41,18 @@ fn
 describe-index
 meta {
     ctx: {"pinecone.api.key": {required: false}},
-    doc: """GET /indexes/{name} - One index: `host` (what the data-plane functions take), `status: {ready, state}`, `deployment`, `schema`, `deletion_protection`, `tags`."""
+    doc: """
+    GET /indexes/{name} - One index: `host` (what the data-plane functions
+    take), `status: {ready, state}`, `deployment`, `schema`,
+    `deletion_protection`, `tags`.
+
+    **Example**
+
+    ```hot
+    index ::pinecone::indexes/describe-index("docs")
+    index.host
+    ```
+    """
 }
 fn
 (name: Str): Map {
@@ -43,7 +64,16 @@ fn
 
 build-deployment
 meta {
-    doc: """The `deployment` for a managed (serverless) index from `cloud` (default "aws") and `region` (default "us-east-1") options. Exposed for testing."""
+    doc: """
+    The `deployment` for a managed (serverless) index from `cloud` (default
+    "aws") and `region` (default "us-east-1") options. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::pinecone::indexes/build-deployment({region: "eu-west-1"})  // {deployment_type: "managed", cloud: "aws", region: "eu-west-1"}
+    ```
+    """
 }
 fn (options: Map): Map {
   {
@@ -55,7 +85,17 @@ fn (options: Map): Map {
 
 build-create-index-body
 meta {
-    doc: """The `POST /indexes` body for a classic dense vector index: a schema with only the reserved `_values` field, plus deployment and any set `deletion_protection`, `tags`, `read_capacity`. Exposed for testing."""
+    doc: """
+    The `POST /indexes` body for a classic dense vector index: a schema with
+    only the reserved `_values` field, plus deployment and any set
+    `deletion_protection`, `tags`, `read_capacity`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::pinecone::indexes/build-create-index-body("docs", 3, {metric: "dotproduct"}).schema  // {fields: {_values: {type: "dense_vector", dimension: 3, metric: "dotproduct"}}}
+    ```
+    """
 }
 fn (name: Str, dimension: Int, options: Map): Map {
   build-schema-index-body(name, {
@@ -67,7 +107,17 @@ fn (name: Str, dimension: Int, options: Map): Map {
 
 build-schema-index-body
 meta {
-    doc: """The `POST /indexes` body for an index with an explicit `schema`. Exposed for testing."""
+    doc: """
+    The `POST /indexes` body for an index with an explicit `schema`. Exposed
+    for testing.
+
+    **Example**
+
+    ```hot
+    schema {fields: {_sparse_values: {type: "sparse_vector"}}}
+    ::pinecone::indexes/build-schema-index-body("keywords", schema, {tags: {team: "search"}}).tags  // {team: "search"}
+    ```
+    """
 }
 fn (name: Str, schema: Map, options: Map): Map {
   ::api/compact({
@@ -148,7 +198,17 @@ fn
 
 build-create-for-model-body
 meta {
-    doc: """The `POST /indexes/create-for-model` body: `embed` holds `model`, `field_map` (default `{text: "text"}`), and optional `metric`, `dimension`, `read_parameters`, `write_parameters`. Exposed for testing."""
+    doc: """
+    The `POST /indexes/create-for-model` body: `embed` holds `model`,
+    `field_map` (default `{text: "text"}`), and optional `metric`,
+    `dimension`, `read_parameters`, `write_parameters`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::pinecone::indexes/build-create-for-model-body("notes", "llama-text-embed-v2", {}).embed  // {model: "llama-text-embed-v2", field_map: {text: "text"}}
+    ```
+    """
 }
 fn (name: Str, model: Str, options: Map): Map {
   ::api/compact({
@@ -204,7 +264,17 @@ fn
 
 build-configure-body
 meta {
-    doc: """The `PATCH /indexes/{name}` body from the set options among `deletion_protection`, `tags`, `read_capacity`, `deployment` (pod `replicas`/`pod_type`), and `schema`. Exposed for testing."""
+    doc: """
+    The `PATCH /indexes/{name}` body from the set options among
+    `deletion_protection`, `tags`, `read_capacity`, `deployment` (pod
+    `replicas`/`pod_type`), and `schema`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::pinecone::indexes/build-configure-body({deletion_protection: "disabled", tags: null})  // {deletion_protection: "disabled"}
+    ```
+    """
 }
 fn (options: Map): Map {
   ::api/compact({
@@ -243,7 +313,17 @@ fn
 delete-index
 meta {
     ctx: {"pinecone.api.key": {required: false}},
-    doc: """DELETE /indexes/{name} - Delete an index and all its data. Fails while `deletion_protection` is "enabled"; disable it with `configure-index` first."""
+    doc: """
+    DELETE /indexes/{name} - Delete an index and all its data. Fails while
+    `deletion_protection` is "enabled"; disable it with `configure-index`
+    first.
+
+    **Example**
+
+    ```hot
+    ::pinecone::indexes/delete-index("docs")
+    ```
+    """
 }
 fn
 (name: Str): Any {
@@ -259,7 +339,19 @@ fn
 
 ready-check
 meta {
-    doc: """Classify an index description: "ready" (`status.ready` is true), "failed" (state `InitializationFailed` or `Failed`), or "pending". Exposed for testing."""
+    doc: """
+    Classify an index description: "ready" (`status.ready` is true),
+    "failed" (state `InitializationFailed` or `Failed`), or "pending".
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::pinecone::indexes/ready-check({status: {ready: true, state: "Ready"}})  // "ready"
+    ::pinecone::indexes/ready-check({status: {ready: false, state: "Failed"}})  // "failed"
+    ::pinecone::indexes/ready-check({status: {ready: false, state: "Initializing"}})  // "pending"
+    ```
+    """
 }
 fn (index: Map): Str {
   status or(get(index, "status"), {})

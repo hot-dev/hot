@@ -32,7 +32,11 @@ meta {
     ```hot
     ::auth ::ai::agent::auth
 
-    fn meta {webhook: {…}} (request) {
+    handle-message fn (request) {
+        ::hot::http/HttpResponse({status: 200, headers: {}, body: "ok"})
+    }
+
+    on-web fn (request) {
         ::auth/protect(request, [
             ::auth/platform-verifier(),
             ::auth/hmac-verifier(::auth/HmacOptions({
@@ -152,11 +156,16 @@ type {
     error: Str?,
 }
 
-ok-result fn (): AuthResult { AuthResult({ok: true, error: null}) }
-fail-result fn (msg: Str): AuthResult { AuthResult({ok: false, error: msg}) }
+ok-result
+meta {no-doc: true}
+fn (): AuthResult { AuthResult({ok: true, error: null}) }
+fail-result
+meta {no-doc: true}
+fn (msg: Str): AuthResult { AuthResult({ok: false, error: msg}) }
 
 resolve-secret
 meta {
+    no-doc: true,
     doc: """
     Internal: resolve a literal-or-env secret. Returns `null` when
     neither field is set; returns the env value when only
@@ -178,6 +187,7 @@ fn (literal: Str?, env-name: Str?): Str? {
 
 header-lookup
 meta {
+    no-doc: true,
     doc: "Internal: case-insensitive header lookup; returns `null` if missing or empty."
 }
 fn (headers: Map?, name: Str): Str? {
@@ -195,6 +205,7 @@ fn (headers: Map?, name: Str): Str? {
 
 strip-prefix
 meta {
+    no-doc: true,
     doc: "Internal: remove `prefix` from the start of `s` if present, otherwise return `s` unchanged."
 }
 fn (s: Str, prefix: Str?): Str {
@@ -223,6 +234,22 @@ meta {
     - `timestamp-stale` — `timestamp-header` was older than
       `max-skew-seconds`.
     - `signature-mismatch` — HMAC did not match.
+
+    **Example**
+
+    ```hot
+    ::auth ::ai::agent::auth
+
+    headers {"X-Hub-Signature-256": "sha256=5d41402abc4b2a76"}
+    result ::auth/verify-hmac(headers, "{\"action\":\"opened\"}", ::auth/HmacOptions({
+        secret-env: "GITHUB_WEBHOOK_SECRET",
+        header: "x-hub-signature-256",
+        scheme: "sha256=",
+        timestamp-header: "x-request-timestamp",
+        max-skew-seconds: 300,
+    }))
+    if(result.ok, "accepted", result.error)
+    ```
     """
 }
 fn (headers: Map?, body: Str, opts: HmacOptions): AuthResult {
@@ -287,6 +314,19 @@ meta {
     - `token-not-set`
     - `token-missing`
     - `token-mismatch`
+
+    **Example**
+
+    ```hot
+    ::auth ::ai::agent::auth
+
+    presented ::hot::ctx/get("agent.webhook.token")
+    result ::auth/verify-shared-secret(
+        {authorization: `Bearer ${presented}`},
+        ::auth/BearerOptions({token-env: "AGENT_WEBHOOK_TOKEN"})
+    )
+    if(result.ok, "accepted", result.error)
+    ```
     """
 }
 fn (headers: Map?, opts: BearerOptions): AuthResult {
@@ -329,6 +369,16 @@ meta {
     This is a structural check — the platform has already validated
     the credential against the database. We only inspect the
     already-trusted `auth` map.
+
+    **Example**
+
+    ```hot
+    ::auth ::ai::agent::auth
+
+    ::auth/verify-platform({auth: {type: "api-key"}}, ::auth/PlatformOptions({})).ok  // true
+    ::auth/verify-platform({}, ::auth/PlatformOptions({})).error  // "platform-auth-missing"
+    ::auth/verify-platform({auth: {type: "session"}}, ::auth/PlatformOptions({require-types: ["api-key"]})).error  // "platform-auth-type-rejected:session"
+    ```
     """
 }
 fn (request: Any, opts: PlatformOptions): AuthResult {
@@ -375,6 +425,19 @@ meta {
 
     Prefer `verify` (which takes a full `HttpRequest` and a
     `Vec<Verifier>`) for new code.
+
+    **Example**
+
+    ```hot
+    ::auth ::ai::agent::auth
+
+    result ::auth/verify-any({"x-signature": "sha256=5d41402abc4b2a76"}, "raw body", [
+        {kind: "hmac", options: ::auth/HmacOptions({secret-env: "AGENT_HMAC_SECRET", header: "x-signature", scheme: "sha256="})},
+        {kind: "shared-secret", options: ::auth/BearerOptions({token-env: "AGENT_WEBHOOK_TOKEN"})},
+    ])
+    // When no verifier passes, result.error is the last failure.
+    if(result.ok, "accepted", result.error)
+    ```
     """
 }
 fn (headers: Map?, body: Str, candidates: Vec<Map>): AuthResult {
@@ -421,7 +484,11 @@ meta {
     to accept any authenticated caller, or with `PlatformOptions` to
     constrain by type / service-key id.
 
+    **Example**
+
     ```hot
+    ::auth ::ai::agent::auth
+
     ::auth/platform-verifier()
     ::auth/platform-verifier(::auth/PlatformOptions({
         require-types: ["api-key", "service-key"],
@@ -436,14 +503,45 @@ fn
 }
 
 hmac-verifier
-meta { doc: "Build a `Verifier` for an HMAC-signed body. See `HmacOptions`." }
+meta {
+    doc: """
+    Build a `Verifier` for an HMAC-signed body. See `HmacOptions`.
+
+    **Example**
+
+    ```hot
+    ::auth ::ai::agent::auth
+
+    verifier ::auth/hmac-verifier(::auth/HmacOptions({
+        secret-env: "GITHUB_WEBHOOK_SECRET",
+        header: "x-hub-signature-256",
+        scheme: "sha256=",
+    }))
+    request {headers: {"x-hub-signature-256": "sha256=5d41402abc4b2a76"}, body-raw: "payload"}
+    ::auth/verify(request, [verifier]).ok
+    ```
+    """
+}
 fn (opts: HmacOptions): Verifier {
     Verifier.Hmac(opts)
 }
 
 shared-secret-verifier
 meta {
-    doc: "Build a `Verifier` for a shared-secret bearer token. See `BearerOptions`."
+    doc: """
+    Build a `Verifier` for a shared-secret bearer token. See
+    `BearerOptions`.
+
+    **Example**
+
+    ```hot
+    ::auth ::ai::agent::auth
+
+    verifier ::auth/shared-secret-verifier(::auth/BearerOptions({token-env: "AGENT_WEBHOOK_TOKEN"}))
+    presented ::hot::ctx/get("agent.webhook.token")
+    ::auth/verify({headers: {authorization: `Bearer ${presented}`}}, [verifier]).ok
+    ```
+    """
 }
 fn (opts: BearerOptions): Verifier {
     Verifier.SharedSecret(opts)
@@ -455,6 +553,12 @@ meta {
     Build a `Verifier` that always succeeds. Use only when you
     intentionally want to allow unauthenticated traffic — typically
     demos and local dev. Production webhooks should never accept this.
+
+    **Example**
+
+    ```hot
+    ::ai::agent::auth/verify({}, [::ai::agent::auth/anonymous()]).ok  // true
+    ```
     """
 }
 fn (): Verifier {
@@ -462,7 +566,10 @@ fn (): Verifier {
 }
 
 run-verifier
-meta { doc: "Internal: dispatch a single `Verifier` against a request." }
+meta {
+    no-doc: true,
+    doc: "Internal: dispatch a single `Verifier` against a request."
+}
 fn (request: Any, body: Str, verifier: Verifier): AuthResult {
     headers or(get(or(request, {}), "headers"), {})
     match verifier {
@@ -486,6 +593,16 @@ meta {
 
     An empty `verifiers` list returns `fail-result("no-verifiers")`,
     which `protect` translates into a 401. **Auth fails closed.**
+
+    **Example**
+
+    ```hot
+    ::auth ::ai::agent::auth
+
+    ::auth/verify({auth: {type: "api-key"}}, [::auth/platform-verifier()]).ok  // true
+    ::auth/verify({}, [::auth/platform-verifier()]).error  // "platform-auth-missing"
+    ::auth/verify({}, []).error  // "no-verifiers"
+    ```
     """
 }
 fn (request: Any, verifiers: Vec<Verifier>): AuthResult {
@@ -507,9 +624,21 @@ meta {
     `request`; if auth succeeds, calls `handler(request)`; otherwise
     returns a 401 `HttpResponse` with `unauthorized(reason)`.
 
+    Empty `verifiers` returns 401 with `no-verifiers`. Demos can opt
+    out by passing `[::auth/anonymous()]`.
+
+    **Example**
+
     ```hot
-    fn meta {webhook: {service: "team-agent", path: "/web", method: "POST"}}
-       (request: HttpRequest): HttpResponse {
+    ::auth ::ai::agent::auth
+
+    handle-message fn (request) {
+        ::hot::http/HttpResponse({status: 200, headers: {}, body: "ok"})
+    }
+
+    on-web
+    meta {webhook: {service: "team-agent", path: "/web", method: "POST"}}
+    fn (request: ::hot::http/HttpRequest): ::hot::http/HttpResponse {
         ::auth/protect(request, [
             ::auth/platform-verifier(),
             ::auth/hmac-verifier(::auth/HmacOptions({
@@ -520,9 +649,6 @@ meta {
         ], handle-message)
     }
     ```
-
-    Empty `verifiers` returns 401 with `no-verifiers`. Demos can opt
-    out by passing `[::auth/anonymous()]`.
     """
 }
 fn (request: Any, verifiers: Vec<Verifier>, handler: Fn): Any {
@@ -538,6 +664,14 @@ meta {
     doc: """
     Build a 401 `HttpResponse` with a JSON body. `reason` is included so
     callers can correlate failures in logs without leaking secrets.
+
+    **Example**
+
+    ```hot
+    response ::ai::agent::auth/unauthorized("signature-mismatch")
+    response.status  // 401
+    response.body  // "{\"ok\":false,\"error\":\"unauthorized\",\"reason\":\"signature-mismatch\"}"
+    ```
     """
 }
 fn (reason: Str?): ::http/HttpResponse {

@@ -40,7 +40,17 @@ fn
 search-voices
 meta {
     ctx: {"elevenlabs.api.key": {required: false}},
-    doc: """GET /v2/voices?search=: search your voices by name, description, labels, or category."""
+    doc: """
+    GET /v2/voices?search=: search your voices by name, description, labels,
+    or category.
+
+    **Example**
+
+    ```hot
+    found ::elevenlabs::voices/search-voices("narrator")
+    map(found.voices, (v) { v.voice_id })
+    ```
+    """
 }
 fn
 (search: Str): Map {
@@ -53,7 +63,17 @@ fn
 get-voice
 meta {
     ctx: {"elevenlabs.api.key": {required: false}},
-    doc: """GET /v1/voices/{voice_id}: one voice's metadata, labels, preview URL, and settings."""
+    doc: """
+    GET /v1/voices/{voice_id}: one voice's metadata, labels, preview URL,
+    and settings.
+
+    **Example**
+
+    ```hot
+    voice ::elevenlabs::voices/get-voice(::elevenlabs/GEORGE_VOICE_ID)
+    voice.preview_url
+    ```
+    """
 }
 fn
 (voice-id: Str): Map {
@@ -66,7 +86,18 @@ fn
 get-voice-settings
 meta {
     ctx: {"elevenlabs.api.key": {required: false}},
-    doc: """GET /v1/voices/{voice_id}/settings: the voice's saved settings (`stability`, `similarity_boost`, `style`, `use_speaker_boost`, `speed`)."""
+    doc: """
+    GET /v1/voices/{voice_id}/settings: the voice's saved settings
+    (`stability`, `similarity_boost`, `style`, `use_speaker_boost`,
+    `speed`).
+
+    **Example**
+
+    ```hot
+    settings ::elevenlabs::voices/get-voice-settings(::elevenlabs/GEORGE_VOICE_ID)
+    settings.stability
+    ```
+    """
 }
 fn
 (voice-id: Str): Map {
@@ -79,7 +110,17 @@ fn
 get-default-voice-settings
 meta {
     ctx: {"elevenlabs.api.key": {required: false}},
-    doc: """GET /v1/voices/settings/default: the default voice settings, a starting point for tuning."""
+    doc: """
+    GET /v1/voices/settings/default: the default voice settings, a starting
+    point for tuning.
+
+    **Example**
+
+    ```hot
+    defaults ::elevenlabs::voices/get-default-voice-settings()
+    ::elevenlabs::tts/TextToSpeechRequest({text: "Hello.", voice_settings: {...defaults, stability: 0.3}})
+    ```
+    """
 }
 fn
 (): Map {

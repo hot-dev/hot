@@ -60,7 +60,17 @@ fn
 
 collect-orders
 meta {
-    doc: """Follow cursors and return up to `max-items` orders (a Vec of nodes). Options as in `list-orders`."""
+    doc: """
+    Follow cursors and return up to `max-items` orders (a Vec of nodes).
+    Options as in `list-orders`.
+
+    **Example**
+
+    ```hot
+    orders ::shopify::orders/collect-orders({query: "financial_status:paid"}, 500)
+    map(orders, %.name)
+    ```
+    """
 }
 fn
 (options: Map, max-items: Int): Vec {
@@ -72,7 +82,17 @@ fn
 
 get-order
 meta {
-    doc: """One order by GraphQL id (`gid://shopify/Order/...`) with line items (first 100) and shipping address. Returns null when not found."""
+    doc: """
+    One order by GraphQL id (`gid://shopify/Order/...`) with line items
+    (first 100) and shipping address. Returns null when not found.
+
+    **Example**
+
+    ```hot
+    order ::shopify::orders/get-order("gid://shopify/Order/1001")
+    order.name
+    ```
+    """
 }
 fn
 (id: Str): Map? {
@@ -100,7 +120,19 @@ fn
 
 build-cancel-variables
 meta {
-    doc: """Variables for `orderCancel`. Options: `notifyCustomer`, `staffNote`, `refundMethod` (e.g. `{originalPaymentMethodsRefund: true}`). Unset options are omitted. Exposed for testing."""
+    doc: """
+    Variables for `orderCancel`. Options: `notifyCustomer`, `staffNote`,
+    `refundMethod` (e.g. `{originalPaymentMethodsRefund: true}`). Unset
+    options are omitted. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    vars ::shopify::orders/build-cancel-variables("gid://shopify/Order/1001", "CUSTOMER", true, {staffNote: "Duplicate"})
+    vars.reason  // "CUSTOMER"
+    vars.staffNote  // "Duplicate"
+    ```
+    """
 }
 fn (order-id: Str, reason: Str, restock: Bool, options: Map): Map {
   filter-vals({
@@ -127,7 +159,7 @@ meta {
     **Example**
 
     ```hot
-    ::shopify::orders/cancel-order(order.id, "CUSTOMER", true, {
+    ::shopify::orders/cancel-order("gid://shopify/Order/1001", "CUSTOMER", true, {
       refundMethod: {originalPaymentMethodsRefund: true},
       notifyCustomer: true
     })
@@ -156,7 +188,17 @@ fn
 
 close-order
 meta {
-    doc: """Close (archive) an order (`orderClose`). Returns the order's id, name and `closedAt`."""
+    doc: """
+    Close (archive) an order (`orderClose`). Returns the order's id, name
+    and `closedAt`.
+
+    **Example**
+
+    ```hot
+    order ::shopify::orders/close-order("gid://shopify/Order/1001")
+    order.closedAt
+    ```
+    """
 }
 fn
 (order-id: Str): Map {
@@ -177,7 +219,15 @@ fn
 
 reopen-order
 meta {
-    doc: """Reopen a closed order (`orderOpen`)."""
+    doc: """
+    Reopen a closed order (`orderOpen`).
+
+    **Example**
+
+    ```hot
+    ::shopify::orders/reopen-order("gid://shopify/Order/1001")
+    ```
+    """
 }
 fn
 (order-id: Str): Map {
@@ -198,7 +248,18 @@ fn
 
 mark-order-as-paid
 meta {
-    doc: """Record the outstanding balance as paid by a manual method (`orderMarkAsPaid`). Needs the staff `mark_orders_as_paid` permission; check the order's `canMarkAsPaid` first."""
+    doc: """
+    Record the outstanding balance as paid by a manual method
+    (`orderMarkAsPaid`). Needs the staff `mark_orders_as_paid` permission;
+    check the order's `canMarkAsPaid` first.
+
+    **Example**
+
+    ```hot
+    order ::shopify::orders/mark-order-as-paid("gid://shopify/Order/1001")
+    order.id
+    ```
+    """
 }
 fn
 (order-id: Str): Map {
@@ -222,7 +283,19 @@ fn
 
 add-tags
 meta {
-    doc: """Add tags to any taggable resource (order, product, customer, draft order) by GraphQL id (`tagsAdd`). Returns the resource id."""
+    doc: """
+    Add tags to any taggable resource (order, product, customer, draft
+    order) by GraphQL id (`tagsAdd`). Returns the resource id.
+
+    **Example**
+
+    ```hot
+    ::shopify::orders/add-tags("gid://shopify/Order/1001", ["vip", "priority"])
+
+    // Another shop for this call
+    ::shopify::orders/add-tags("gid://shopify/Order/1001", ["vip"], {shop: "acme", access-token: ::hot::ctx/get("acme.shopify.token")})
+    ```
+    """
 }
 fn
 (id: Str, tags: Vec<Str>): Str {
@@ -243,7 +316,16 @@ fn
 
 remove-tags
 meta {
-    doc: """Remove tags from a taggable resource by GraphQL id (`tagsRemove`). Returns the resource id."""
+    doc: """
+    Remove tags from a taggable resource by GraphQL id (`tagsRemove`).
+    Returns the resource id.
+
+    **Example**
+
+    ```hot
+    ::shopify::orders/remove-tags("gid://shopify/Order/1001", ["priority"])
+    ```
+    """
 }
 fn
 (id: Str, tags: Vec<Str>): Str {

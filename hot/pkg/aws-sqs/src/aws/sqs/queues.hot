@@ -243,6 +243,7 @@ meta {
     **Example**
 
     ```hot
+    queue-url "https://sqs.us-east-1.amazonaws.com/123456789012/my-queue"
     result ::aws::sqs::queues/get-queue-attributes(queue-url, ["All"])
     result.attributes.QueueArn                        // => "arn:aws:sqs:us-east-1:123456:my-queue"
     result.attributes.ApproximateNumberOfMessages      // => "5"
@@ -289,6 +290,7 @@ meta {
     **Example**
 
     ```hot
+    queue-url "https://sqs.us-east-1.amazonaws.com/123456789012/my-queue"
     ::aws::sqs::queues/set-queue-attributes(queue-url, {
         VisibilityTimeout: "60",
         MessageRetentionPeriod: "86400"

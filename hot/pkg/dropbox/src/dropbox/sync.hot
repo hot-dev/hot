@@ -39,7 +39,19 @@ MAX_LONGPOLL_TIMEOUT 480
 
 get-latest-cursor
 meta {
-    doc: """POST files/list_folder/get_latest_cursor - a cursor for "changes to `path` from now on" (a Str), without listing. Options as for `::dropbox::files/list-folder` (`recursive`, `include_deleted`, ...); use the same ones for every sync of this cursor."""
+    doc: """
+    POST files/list_folder/get_latest_cursor - a cursor for "changes to
+    `path` from now on" (a Str), without listing. Options as for
+    `::dropbox::files/list-folder` (`recursive`, `include_deleted`, ...);
+    use the same ones for every sync of this cursor.
+
+    **Example**
+
+    ```hot
+    cursor ::dropbox::sync/get-latest-cursor("/Docs", {recursive: true})
+    cursor
+    ```
+    """
 }
 fn
 (path: Str?): Str {
@@ -69,7 +81,9 @@ type {
     reset: Bool
 }
 
-sync-loop fn (page: Result, opts: Map, acc: Vec, pages: Int, reset: Bool): ChangeSet {
+sync-loop
+meta {no-doc: true}
+fn (page: Result, opts: Map, acc: Vec, pages: Int, reset: Bool): ChangeSet {
   cond {
     is-err(page) => { page }
     => {
@@ -84,7 +98,19 @@ sync-loop fn (page: Result, opts: Map, acc: Vec, pages: Int, reset: Bool): Chang
 
 start-sync
 meta {
-    doc: """A full listing of `path` and the cursor to sync from afterwards, as a `ChangeSet` (`reset: true`, since it is a snapshot). Options as for `::dropbox::files/list-folder` (`recursive: true` for the tree)."""
+    doc: """
+    A full listing of `path` and the cursor to sync from afterwards, as a
+    `ChangeSet` (`reset: true`, since it is a snapshot). Options as for
+    `::dropbox::files/list-folder` (`recursive: true` for the tree).
+
+    **Example**
+
+    ```hot
+    snapshot ::dropbox::sync/start-sync("/Docs", {recursive: true})
+    length(snapshot.entries)
+    snapshot.cursor
+    ```
+    """
 }
 fn
 (path: Str?): ChangeSet {
@@ -106,10 +132,12 @@ meta {
     ```hot
     ::sync ::dropbox::sync
 
+    saved-cursor ::sync/get-latest-cursor("/Docs", {recursive: true})
+
     set ::sync/sync-changes(saved-cursor, {path: "/Docs", recursive: true})
     upserts ::sync/changed-files(set)     // DocFiles to (re)index
     deletes ::sync/deleted-paths(set)     // lowercased paths to drop
-    saved-cursor set.cursor
+    next-cursor set.cursor    // store this for the next run
     ```
     """
 }
@@ -128,7 +156,21 @@ fn
 
 changed-files
 meta {
-    doc: """The entries in a `ChangeSet` (or a Vec of entries) that exist (files and folders, not deletions), as `DocFile`s, the latest entry per path. A path deleted later in the same set is left out."""
+    doc: """
+    The entries in a `ChangeSet` (or a Vec of entries) that exist (files and
+    folders, not deletions), as `DocFile`s, the latest entry per path. A
+    path deleted later in the same set is left out.
+
+    **Example**
+
+    ```hot
+    entries [
+      {".tag": "file", name: "a.txt", path_lower: "/a.txt"},
+      {".tag": "deleted", name: "b.txt", path_lower: "/b.txt"}
+    ]
+    map(::dropbox::sync/changed-files(entries), %.name)  // ["a.txt"]
+    ```
+    """
 }
 fn (changes: Any): Vec {
   items if(is-vec(changes), changes, changes.entries)
@@ -138,7 +180,22 @@ fn (changes: Any): Vec {
 
 deleted-paths
 meta {
-    doc: """The lowercased paths a `ChangeSet` (or Vec of entries) deleted, de-duplicated. Deleting a folder deletes everything under it (Dropbox reports only the folder). A path re-created later in the same set is not included."""
+    doc: """
+    The lowercased paths a `ChangeSet` (or Vec of entries) deleted,
+    de-duplicated. Deleting a folder deletes everything under it (Dropbox
+    reports only the folder). A path re-created later in the same set is not
+    included.
+
+    **Example**
+
+    ```hot
+    entries [
+      {".tag": "file", name: "a.txt", path_lower: "/a.txt"},
+      {".tag": "deleted", name: "b.txt", path_lower: "/b.txt"}
+    ]
+    ::dropbox::sync/deleted-paths(entries)  // ["/b.txt"]
+    ```
+    """
 }
 fn (changes: Any): Vec {
   items if(is-vec(changes), changes, changes.entries)
@@ -148,7 +205,17 @@ fn (changes: Any): Vec {
 
 is-under
 meta {
-    doc: """True when lowercased `path` is `folder` or inside it (pure): use it to drop a deleted folder's descendants from a mirror."""
+    doc: """
+    True when lowercased `path` is `folder` or inside it (pure): use it to
+    drop a deleted folder's descendants from a mirror.
+
+    **Example**
+
+    ```hot
+    ::dropbox::sync/is-under("/Docs/a.txt", "/docs")  // true
+    ::dropbox::sync/is-under("/Docsets/a.txt", "/docs")  // false
+    ```
+    """
 }
 fn (path: Str, folder: Str): Bool {
   p lowercase(path)
@@ -162,7 +229,17 @@ fn (path: Str, folder: Str): Bool {
 
 longpoll-timeout
 meta {
-    doc: """Clamp a longpoll timeout to Dropbox's 30..480 seconds (pure; null gives 30)."""
+    doc: """
+    Clamp a longpoll timeout to Dropbox's 30..480 seconds (pure; null gives
+    30).
+
+    **Example**
+
+    ```hot
+    ::dropbox::sync/longpoll-timeout(null)  // 30
+    ::dropbox::sync/longpoll-timeout(900)  // 480
+    ```
+    """
 }
 fn (timeout: Int?): Int {
   min(max(or(timeout, MIN_LONGPOLL_TIMEOUT), MIN_LONGPOLL_TIMEOUT), MAX_LONGPOLL_TIMEOUT)
@@ -185,6 +262,7 @@ meta {
     timeout as "no news". For many accounts, webhooks scale better.
 
     ```hot
+    saved-cursor ::dropbox::sync/get-latest-cursor("/Docs")
     poll ::dropbox::sync/longpoll(saved-cursor)
     if(poll.changes, ::dropbox::sync/sync-changes(saved-cursor), null)
     ```

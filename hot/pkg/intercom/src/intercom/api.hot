@@ -54,7 +54,9 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
 // Configuration
 // ---------------------------------------------------------------------------
 
-non-blank fn (value: Any): Any {
+non-blank
+meta {no-doc: true}
+fn (value: Any): Any {
   cond {
     is-str(value) => {
       trimmed trim(value)
@@ -71,6 +73,13 @@ meta {
     The regional API host. The 1-arity form takes `"us"`, `"eu"` or
     `"au"` (case-insensitive; null means `us`) and returns an Err for
     anything else. The 0-arity form reads `intercom.region`.
+
+    **Example**
+
+    ```hot
+    ::intercom::api/base-url("eu")  // "https://api.eu.intercom.io"
+    ::intercom::api/base-url(null)  // "https://api.intercom.io"
+    ```
     """
 }
 fn
@@ -89,7 +98,17 @@ fn
 api-version
 meta {
     ctx: {"intercom.version": {required: false, secret: false}},
-    doc: """The `Intercom-Version` to send: `intercom.version` when set, otherwise the pinned `::intercom/API_VERSION`."""
+    doc: """
+    The `Intercom-Version` to send: `intercom.version` when set, otherwise
+    the pinned `::intercom/API_VERSION`.
+
+    **Example**
+
+    ```hot
+    version ::intercom::api/api-version()
+    ::intercom::api/request("GET", "/me", "", {version: version})
+    ```
+    """
 }
 fn (): Str {
   or(non-blank(::ctx/get("intercom.version")), ::intercom/API_VERSION)
@@ -104,6 +123,13 @@ meta {
     blank or null (that never falls back to context), or when the region
     isn't `us`, `eu` or `au`. Exposed for testing; `resolve` feeds it the
     context.
+
+    **Example**
+
+    ```hot
+    ::intercom::api/resolve-from({region: "eu"}, {"intercom.token": "tok"}).base-url  // "https://api.eu.intercom.io"
+    is-err(::intercom::api/resolve-from({token: ""}, {"intercom.token": "tok"}))  // true
+    ```
     """
 }
 fn (opts: Map, ctx-values: Map): Map {
@@ -141,7 +167,7 @@ meta {
     **Example**
 
     ```hot
-    ::intercom::api/resolve({token: "tenant-b-token", region: "eu"}).base-url  // "https://api.eu.intercom.io"
+    ::intercom::api/resolve({token: ::hot::ctx/get("tenant-b.intercom.token"), region: "eu"}).base-url
     ```
     """
 }
@@ -161,7 +187,18 @@ fn (opts: Map): Map {
 optional-admin-id
 meta {
     ctx: {"intercom.admin.id": {required: false, secret: false}},
-    doc: """The admin in `opts`, else `intercom.admin.id`, else null. `intercom.admin.id` belongs to the workspace of `intercom.token`, so it isn't used when `opts` has its own `token`."""
+    doc: """
+    The admin in `opts`, else `intercom.admin.id`, else null.
+    `intercom.admin.id` belongs to the workspace of `intercom.token`, so it
+    isn't used when `opts` has its own `token`.
+
+    **Example**
+
+    ```hot
+    // null when nothing is configured
+    ::intercom::api/optional-admin-id({admin-id: "814860"})
+    ```
+    """
 }
 fn (opts: Map): Str? {
   explicit non-blank(get(opts, "admin-id"))
@@ -172,7 +209,20 @@ fn (opts: Map): Str? {
 admin-id
 meta {
     ctx: {"intercom.admin.id": {required: false, secret: false}},
-    doc: """The admin to act as (see `optional-admin-id`), or an Err with a hint when there is none: look it up with `::intercom::admins/me()`."""
+    doc: """
+    The admin to act as (see `optional-admin-id`), or an Err with a hint
+    when there is none: look it up with `::intercom::admins/me()`.
+
+    **Example**
+
+    ```hot
+    // Reads intercom.admin.id
+    admin ::intercom::api/admin-id()
+
+    // A token in opts needs its own admin-id
+    tenant ::intercom::api/admin-id({token: ::hot::ctx/get("tenant-b.intercom.token"), admin-id: "814860"})
+    ```
+    """
 }
 fn
 (): Str {
@@ -190,7 +240,24 @@ fn
 
 with-admin
 meta {
-    doc: """Run `action` with the admin to act as. A problem with the call's credentials, or a missing admin, comes back as an Err before anything is sent."""
+    doc: """
+    Run `action` with the admin to act as. A problem with the call's
+    credentials, or a missing admin, comes back as an Err before anything is
+    sent.
+
+    **Example**
+
+    ```hot
+    ::intercom::api/with-admin({}, (admin) {
+      ::intercom::api/request("POST", "/conversations/215473041/reply", {
+        message_type: "note",
+        type: "admin",
+        admin_id: admin,
+        body: "Checked the logs."
+      })
+    })
+    ```
+    """
 }
 fn (opts: Map, action: Fn): Any {
   resolved resolve(opts)
@@ -204,7 +271,18 @@ fn (opts: Map, action: Fn): Any {
 
 build-headers
 meta {
-    doc: """Request headers: Bearer auth, `Intercom-Version`, `Accept: application/json`, and `Content-Type` only when there is a body. Exposed for testing."""
+    doc: """
+    Request headers: Bearer auth, `Intercom-Version`, `Accept:
+    application/json`, and `Content-Type` only when there is a body. Exposed
+    for testing.
+
+    **Example**
+
+    ```hot
+    ::intercom::api/build-headers("tok", "2.17", false)  // {Authorization: "Bearer tok", Intercom-Version: "2.17", Accept: "application/json"}
+    ::intercom::api/build-headers("tok", "2.17", true).Content-Type  // "application/json"
+    ```
+    """
 }
 fn (token: Str, version: Str, has-body: Bool): Map {
   base {
@@ -218,7 +296,18 @@ fn (token: Str, version: Str, has-body: Bool): Map {
 
 response-body
 meta {
-    doc: """Normalize a decoded 2xx body: empty text (202/204 with no content, e.g. data events) becomes null; anything else passes through. Exposed for testing."""
+    doc: """
+    Normalize a decoded 2xx body: empty text (202/204 with no content, e.g.
+    data events) becomes null; anything else passes through. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::intercom::api/response-body("  ")  // null
+    ::intercom::api/response-body({id: "1"})  // {id: "1"}
+    ```
+    """
 }
 fn (body: Any): Any {
   match body {
@@ -231,7 +320,9 @@ fn (body: Any): Any {
 // Requests
 // ---------------------------------------------------------------------------
 
-send fn (method: Str, path: Str, body: Any, resolved: Map): Any {
+send
+meta {no-doc: true}
+fn (method: Str, path: Str, body: Any, resolved: Map): Any {
   has-body not(eq(body, ""))
   response ::hot::http/request(HttpRequest({
     method,
@@ -260,7 +351,7 @@ meta {
 
     ```hot
     segments ::intercom::api/request("GET", "/segments", "")
-    tenant ::intercom::api/request("GET", "/segments", "", {token: "tenant-b-token", region: "eu"})
+    tenant ::intercom::api/request("GET", "/segments", "", {token: ::hot::ctx/get("tenant-b.intercom.token"), region: "eu"})
     ```
     """
 }
@@ -283,7 +374,16 @@ fn
 
 path-segment
 meta {
-    doc: """Percent-encode one path segment (an id). Ints pass through as text."""
+    doc: """
+    Percent-encode one path segment (an id). Ints pass through as text.
+
+    **Example**
+
+    ```hot
+    ::intercom::api/path-segment("a/b")  // "a%2Fb"
+    ::intercom::api/path-segment(42)  // "42"
+    ```
+    """
 }
 fn (value: Any): Str {
   ::uri/encode(Str(value))
@@ -291,7 +391,17 @@ fn (value: Any): Str {
 
 query-string
 meta {
-    doc: """Build a `?a=1` suffix from a Map, dropping null values; `""` when nothing remains."""
+    doc: """
+    Build a `?a=1` suffix from a Map, dropping null values; `""` when
+    nothing remains.
+
+    **Example**
+
+    ```hot
+    ::intercom::api/query-string({per_page: 20, starting_after: null})  // "?per_page=20"
+    ::intercom::api/query-string({})  // ""
+    ```
+    """
 }
 fn (options: Map): Str {
   ::uri/query-string(options)
@@ -299,7 +409,16 @@ fn (options: Map): Str {
 
 compact
 meta {
-    doc: """Drop null-valued keys so unset optionals are omitted rather than sent as JSON null."""
+    doc: """
+    Drop null-valued keys so unset optionals are omitted rather than sent as
+    JSON null.
+
+    **Example**
+
+    ```hot
+    ::intercom::api/compact({name: "Ada", phone: null})  // {name: "Ada"}
+    ```
+    """
 }
 fn (body: Map): Map {
   filter-vals(body, is-some)
@@ -317,6 +436,14 @@ meta {
     the previous page's `pages.next.starting_after`), and `sort`
     (`{field, order: "ascending"|"descending"}`, contacts only). The
     pagination object is omitted when neither is set. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    query {field: "open", operator: "=", value: true}
+    ::intercom::api/build-search-body(query, {per_page: 50}).pagination  // {per_page: 50}
+    ::intercom::api/build-search-body(query, {})  // {query: {field: "open", operator: "=", value: true}}
+    ```
     """
 }
 fn (query: Map, options: Map): Map {
@@ -330,7 +457,18 @@ fn (query: Map, options: Map): Map {
 
 next-cursor
 meta {
-    doc: """The `starting_after` cursor for the page after `page` (from `pages.next.starting_after`), or null on the last page. Works for list and search responses."""
+    doc: """
+    The `starting_after` cursor for the page after `page` (from
+    `pages.next.starting_after`), or null on the last page. Works for list
+    and search responses.
+
+    **Example**
+
+    ```hot
+    ::intercom::api/next-cursor({pages: {next: {starting_after: "WzE3"}}})  // "WzE3"
+    ::intercom::api/next-cursor({pages: {}})  // null
+    ```
+    """
 }
 fn (page: Any): Str? {
   next get(or(get(or(page, {}), "pages"), {}), "next")
@@ -348,6 +486,16 @@ meta {
     until `limit` items or the last page. `fetch` is a Fn taking the
     cursor (null for the first page) and returning one page. Exposed for
     testing; the `search-all-*` functions use it. A failed page comes back as its Err.
+
+    **Example**
+
+    ```hot
+    fetch (cursor) {
+      if(is-null(cursor), {data: [1, 2], pages: {next: {starting_after: "p2"}}}, {data: [3], pages: {}})
+    }
+    ::intercom::api/collect-pages(fetch, "data", null, 10, [])  // [1, 2, 3]
+    ::intercom::api/collect-pages(fetch, "data", null, 2, [])  // [1, 2]
+    ```
     """
 }
 fn (fetch: Fn, key: Str, cursor: Str?, limit: Int, acc: Vec): Vec {
@@ -375,7 +523,17 @@ fn (fetch: Fn, key: Str, cursor: Str?, limit: Int, acc: Vec): Vec {
 
 page-size
 meta {
-    doc: """The `per_page` to request when collecting up to `limit` items: `limit` clamped to 1..150 (Intercom's maximum)."""
+    doc: """
+    The `per_page` to request when collecting up to `limit` items: `limit`
+    clamped to 1..150 (Intercom's maximum).
+
+    **Example**
+
+    ```hot
+    ::intercom::api/page-size(500)  // 150
+    ::intercom::api/page-size(25)  // 25
+    ```
+    """
 }
 fn (limit: Int): Int {
   max(1, min(150, limit))

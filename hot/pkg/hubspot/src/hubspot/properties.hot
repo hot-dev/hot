@@ -10,7 +10,19 @@ query-string ::hubspot::api/query-string
 
 list-properties
 meta {
-    doc: """GET /crm/properties/{version}/{objectType} - Every property definition for an object type: `{results: [{name, label, type, fieldType, groupName, options, hasUniqueValue, calculated, ...}]}`. `params`: `archived`, `properties` (Vec of names to return), `locale`."""
+    doc: """
+    GET /crm/properties/{version}/{objectType} - Every property definition
+    for an object type: `{results: [{name, label, type, fieldType,
+    groupName, options, hasUniqueValue, calculated, ...}]}`. `params`:
+    `archived`, `properties` (Vec of names to return), `locale`.
+
+    **Example**
+
+    ```hot
+    out ::hubspot::properties/list-properties("contacts")
+    map(out.results, %.name)
+    ```
+    """
 }
 fn
 (object-type: Str): Map {
@@ -25,7 +37,18 @@ fn
 
 get-property
 meta {
-    doc: """GET /crm/properties/{version}/{objectType}/{propertyName} - One property definition, including `options` for enumeration properties (the valid values to write)."""
+    doc: """
+    GET /crm/properties/{version}/{objectType}/{propertyName} - One property
+    definition, including `options` for enumeration properties (the valid
+    values to write).
+
+    **Example**
+
+    ```hot
+    prop ::hubspot::properties/get-property("deals", "dealstage")
+    map(prop.options, %.value)
+    ```
+    """
 }
 fn
 (object-type: Str, name: Str): Map {
@@ -48,6 +71,15 @@ meta {
     displayOrder, hidden}` for enumerations), `hasUniqueValue`, `hidden`,
     `formField`, `displayOrder`. Unset keys are omitted. Exposed for
     testing.
+
+    **Example**
+
+    ```hot
+    ::hubspot::properties/build-property-body({name: "tier", label: "Tier", type: "string", fieldType: "text", groupName: "contactinformation", hidden: null})
+    // {name: "tier", label: "Tier", type: "string", fieldType: "text", groupName: "contactinformation"}
+
+    is-err(::hubspot::properties/build-property-body({name: "tier"}))  // true
+    ```
     """
 }
 fn (definition: Map): Map {
@@ -94,7 +126,17 @@ fn
 
 update-property
 meta {
-    doc: """PATCH /crm/properties/{version}/{objectType}/{propertyName} - Change a property's `label`, `description`, `options`, `groupName`, `hidden`, and similar fields."""
+    doc: """
+    PATCH /crm/properties/{version}/{objectType}/{propertyName} - Change a
+    property's `label`, `description`, `options`, `groupName`, `hidden`, and
+    similar fields.
+
+    **Example**
+
+    ```hot
+    ::hubspot::properties/update-property("contacts", "favorite_product", {label: "Top product"})
+    ```
+    """
 }
 fn
 (object-type: Str, name: Str, changes: Map): Map {
@@ -106,7 +148,16 @@ fn
 
 archive-property
 meta {
-    doc: """DELETE /crm/properties/{version}/{objectType}/{propertyName} - Archive a custom property (HubSpot default properties cannot be archived)."""
+    doc: """
+    DELETE /crm/properties/{version}/{objectType}/{propertyName} - Archive a
+    custom property (HubSpot default properties cannot be archived).
+
+    **Example**
+
+    ```hot
+    ::hubspot::properties/archive-property("contacts", "favorite_product")
+    ```
+    """
 }
 fn
 (object-type: Str, name: Str): Any {

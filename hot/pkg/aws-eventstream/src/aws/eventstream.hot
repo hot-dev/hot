@@ -18,8 +18,11 @@ meta {
     ```hot
     ::eventstream ::aws::eventstream
 
+    // One real frame, as Base64. In practice the bytes come from a streaming response.
+    frame ::hot::base64/decode("AAAARQAAACouisGGDTptZXNzYWdlLXR5cGUHAAVldmVudAs6ZXZlbnQtdHlwZQcABWNodW5reyJvayI6dHJ1ZX0ykozS")
+
     // Parse messages from a binary stream
-    messages ::eventstream/parse-stream(response-bytes)
+    messages ::eventstream/parse-stream(frame)
 
     for-each(messages, (msg) {
         event-type ::eventstream/get-header(msg, ":event-type")
@@ -89,7 +92,9 @@ meta {
     **Example**
 
     ```hot
-    result ::aws::eventstream/parse-message(message-bytes)
+    // A frame with `:message-type` and `:event-type` headers and a JSON payload
+    frame ::hot::base64/decode("AAAARQAAACouisGGDTptZXNzYWdlLXR5cGUHAAVldmVudAs6ZXZlbnQtdHlwZQcABWNodW5reyJvayI6dHJ1ZX0ykozS")
+    result ::aws::eventstream/parse-message(frame)
     cond {
         result.ok => {
             print(result.message.headers)
@@ -124,7 +129,9 @@ meta {
     **Example**
 
     ```hot
-    messages ::aws::eventstream/parse-stream(stream-bytes)
+    frame ::hot::base64/decode("AAAARQAAACouisGGDTptZXNzYWdlLXR5cGUHAAVldmVudAs6ZXZlbnQtdHlwZQcABWNodW5reyJvayI6dHJ1ZX0ykozS")
+    messages ::aws::eventstream/parse-stream(frame)
+    length(messages)  // 1
     for-each(messages, (msg) {
         event-type ::aws::eventstream/get-header(msg, ":event-type")
         print(event-type)
@@ -147,9 +154,10 @@ meta {
     **Example**
 
     ```hot
-    message-type ::aws::eventstream/get-header(msg, ":message-type")
-    event-type ::aws::eventstream/get-header(msg, ":event-type")
-    content-type ::aws::eventstream/get-header(msg, ":content-type")
+    msg ::aws::eventstream/Message({headers: {":message-type": "event", ":event-type": "chunk"}, payload: Bytes("")})
+    ::aws::eventstream/get-header(msg, ":message-type")  // "event"
+    ::aws::eventstream/get-header(msg, ":event-type")  // "chunk"
+    ::aws::eventstream/get-header(msg, ":content-type")  // null
     ```
     """
 }
@@ -160,7 +168,16 @@ fn (message: Message, name: Str): Any {
 
 is-event
 meta {
-    doc: """Check if a message is an event (`:message-type` is "event")."""
+    doc: """
+    Check if a message is an event (`:message-type` is "event").
+
+    **Example**
+
+    ```hot
+    msg ::aws::eventstream/Message({headers: {":message-type": "event"}, payload: Bytes("")})
+    ::aws::eventstream/is-event(msg)  // true
+    ```
+    """
 }
 fn (message: Message): Bool {
     eq(get-header(message, ":message-type"), "event")
@@ -169,7 +186,16 @@ fn (message: Message): Bool {
 
 is-exception
 meta {
-    doc: """Check if a message is an exception (`:message-type` is "exception")."""
+    doc: """
+    Check if a message is an exception (`:message-type` is "exception").
+
+    **Example**
+
+    ```hot
+    msg ::aws::eventstream/Message({headers: {":message-type": "exception"}, payload: Bytes("")})
+    ::aws::eventstream/is-exception(msg)  // true
+    ```
+    """
 }
 fn (message: Message): Bool {
     eq(get-header(message, ":message-type"), "exception")
@@ -178,7 +204,16 @@ fn (message: Message): Bool {
 
 is-error
 meta {
-    doc: """Check if a message is an error (`:message-type` is "error")."""
+    doc: """
+    Check if a message is an error (`:message-type` is "error").
+
+    **Example**
+
+    ```hot
+    msg ::aws::eventstream/Message({headers: {":message-type": "error"}, payload: Bytes("")})
+    ::aws::eventstream/is-error(msg)  // true
+    ```
+    """
 }
 fn (message: Message): Bool {
     eq(get-header(message, ":message-type"), "error")
@@ -190,7 +225,10 @@ fn (message: Message): Bool {
 // ============================================================================
 
 parse-message-internal
-meta { doc: """Internal: Parse a message assuming we have at least 16 bytes.""" }
+meta {
+    no-doc: true,
+    doc: """Internal: Parse a message assuming we have at least 16 bytes."""
+}
 fn (data: Bytes): ParseResult {
     // Parse prelude (8 bytes)
     prelude-bytes slice(data, 0, 8)
@@ -268,7 +306,10 @@ fn (data: Bytes): ParseResult {
 
 
 parse-stream-recursive
-meta { doc: """Internal: Recursively parse messages from a stream.""" }
+meta {
+    no-doc: true,
+    doc: """Internal: Recursively parse messages from a stream."""
+}
 fn cond (data: Bytes, offset: Int, messages: Vec<Message>): Vec<Message> {
     // Not enough bytes for another message - return accumulated messages
     lt(sub(length(data), offset), 16) => { messages }
@@ -292,14 +333,20 @@ fn cond (data: Bytes, offset: Int, messages: Vec<Message>): Vec<Message> {
 
 
 parse-headers
-meta { doc: """Internal: Parse headers from header bytes.""" }
+meta {
+    no-doc: true,
+    doc: """Internal: Parse headers from header bytes."""
+}
 fn (data: Bytes): Map<Str, Any> {
     parse-headers-recursive(data, 0, {})
 }
 
 
 parse-headers-recursive
-meta { doc: """Internal: Recursively parse headers.""" }
+meta {
+    no-doc: true,
+    doc: """Internal: Recursively parse headers."""
+}
 fn cond (data: Bytes, offset: Int, headers: Map<Str, Any>): Map<Str, Any> {
     // Done parsing when offset reaches or exceeds data length
     gte(offset, length(data)) => { headers }
@@ -336,7 +383,10 @@ type {
 
 
 parse-header-value
-meta { doc: """Internal: Parse a header value based on its type.""" }
+meta {
+    no-doc: true,
+    doc: """Internal: Parse a header value based on its type."""
+}
 fn (data: Bytes, offset: Int, header-type: Int): HeaderValueResult {
     cond {
         eq(header-type, HEADER_TYPE_BOOL_TRUE) => {

@@ -37,7 +37,21 @@ UploadCertificateResponse type {
 
 upload-certificate
 meta {
-    doc: """POST /organization/certificates - Upload a TLS certificate for the organization."""
+    doc: """
+    POST /organization/certificates - Upload a TLS certificate for the
+    organization.
+
+    **Example**
+
+    ```hot
+    admin {api-key: ::hot::ctx/get("openai.admin.key")}
+    cert ::openai::upload/upload-certificate(::openai::upload/UploadCertificateRequest({
+      name: "Production cert",
+      content: "-----BEGIN CERTIFICATE-----\nMIIB...\n-----END CERTIFICATE-----"
+    }), admin)
+    cert.id
+    ```
+    """
 }
 fn
 (request: UploadCertificateRequest): UploadCertificateResponse {

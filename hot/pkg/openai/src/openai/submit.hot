@@ -98,7 +98,19 @@ SubmitToolOuputsToRunResponse type {
 
 submit-tool-outputs-run
 meta {
-    doc: """POST /threads/{thread_id}/runs/{run_id}/submit_tool_outputs - Submit tool call outputs to continue a run that requires action."""
+    doc: """
+    POST /threads/{thread_id}/runs/{run_id}/submit_tool_outputs - Submit
+    tool call outputs to continue a run that requires action.
+
+    **Example**
+
+    ```hot
+    run ::openai::submit/submit-tool-outputs-run("thread_abc123", "run_abc123", ::openai::submit/SubmitToolOuputsToRunRequest({
+      tool_outputs: [{tool_call_id: "call_abc123", output: "42"}]
+    }))
+    run.status
+    ```
+    """
 }
 fn
 (thread-id: Str, run-id: Str, request: SubmitToolOuputsToRunRequest): SubmitToolOuputsToRunResponse {

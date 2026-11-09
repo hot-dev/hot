@@ -20,7 +20,19 @@ ABOUT_FIELDS "user(displayName,emailAddress,permissionId),storageQuota,maxUpload
 
 list-drives
 meta {
-    doc: """GET /drives - one page of the user's shared drives (`{drives, nextPageToken?}`). Options: `q` (e.g. `"name contains 'Eng'"`), `pageSize` (max 100), `pageToken`, `useDomainAdminAccess` (admins: every drive in the domain), `fields`, credentials."""
+    doc: """
+    GET /drives - one page of the user's shared drives (`{drives,
+    nextPageToken?}`). Options: `q` (e.g. `"name contains 'Eng'"`),
+    `pageSize` (max 100), `pageToken`, `useDomainAdminAccess` (admins: every
+    drive in the domain), `fields`, credentials.
+
+    **Example**
+
+    ```hot
+    page ::google::drive::drives/list-drives({q: "name contains 'Eng'", pageSize: 50})
+    map(page.drives, %.name)
+    ```
+    """
 }
 fn
 (): Map {
@@ -31,7 +43,18 @@ fn
 }
 
 list-all-drives
-meta {doc: """Every shared drive the user can see (follows `nextPageToken`)."""}
+meta {
+    doc: """
+    Every shared drive the user can see (follows `nextPageToken`).
+
+    **Example**
+
+    ```hot
+    drives ::google::drive::drives/list-all-drives()
+    map(drives, %.id)
+    ```
+    """
+}
 fn
 (): Vec {
   list-all-drives({})
@@ -42,7 +65,17 @@ fn
 
 get-drive
 meta {
-    doc: """GET /drives/{id} - one shared drive. Options: `useDomainAdminAccess`, `fields`, credentials."""
+    doc: """
+    GET /drives/{id} - one shared drive. Options: `useDomainAdminAccess`,
+    `fields`, credentials.
+
+    **Example**
+
+    ```hot
+    drive ::google::drive::drives/get-drive("0ABCdrive")
+    drive.name
+    ```
+    """
 }
 fn
 (drive-id: Str): Map {
@@ -59,6 +92,17 @@ meta {
     `exportFormats` / `importFormats` maps. Drive requires `fields`; the
     default is `ABOUT_FIELDS`. A Str argument is a `fields` value; a Map
     is `opts`.
+
+    **Example**
+
+    ```hot
+    info ::google::drive::drives/about()
+    info.user.emailAddress
+    info.storageQuota.usage
+
+    // Only the fields you need
+    ::google::drive::drives/about("maxUploadSize")
+    ```
     """
 }
 fn
@@ -75,7 +119,18 @@ fn
 
 export-formats
 meta {
-    doc: """The account's live export map from `about`: `{google-mime: [export-mime, ...]}`. Use it to check `::google::drive::content/EXPORT_FORMATS` against what Drive offers."""
+    doc: """
+    The account's live export map from `about`: `{google-mime: [export-mime,
+    ...]}`. Use it to check `::google::drive::content/EXPORT_FORMATS`
+    against what Drive offers.
+
+    **Example**
+
+    ```hot
+    formats ::google::drive::drives/export-formats()
+    get(formats, "application/vnd.google-apps.document")
+    ```
+    """
 }
 fn
 (): Map {

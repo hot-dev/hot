@@ -55,26 +55,64 @@ PROVIDER "microsoft-onedrive"
 // ---------------------------------------------------------------------------
 
 me-drive
-meta {doc: """The signed-in user's OneDrive: `"/me/drive"` (delegated tokens only)."""}
+meta {
+    doc: """
+    The signed-in user's OneDrive: `"/me/drive"` (delegated tokens only).
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive/me-drive()  // "/me/drive"
+    ```
+    """
+}
 fn (): Str {
   "/me/drive"
 }
 
 drive
-meta {doc: """A drive by id (any OneDrive or SharePoint library): `/drives/{id}`."""}
+meta {
+    doc: """
+    A drive by id (any OneDrive or SharePoint library): `/drives/{id}`.
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive/drive("b!xyz")  // "/drives/b%21xyz"
+    ```
+    """
+}
 fn (drive-id: Str): Str {
   `/drives/${::api/encode-segment(drive-id)}`
 }
 
 user-drive
-meta {doc: """A user's OneDrive by id or user principal name: `/users/{id}/drive`."""}
+meta {
+    doc: """
+    A user's OneDrive by id or user principal name: `/users/{id}/drive`.
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive/user-drive("u1")  // "/users/u1/drive"
+    ```
+    """
+}
 fn (user: Str): Str {
   `/users/${::api/encode-segment(user)}/drive`
 }
 
 site-drive
 meta {
-    doc: """A SharePoint site's default document library: `/sites/{site-id}/drive`."""
+    doc: """
+    A SharePoint site's default document library: `/sites/{site-id}/drive`.
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive/site-drive("site-1")  // "/sites/site-1/drive"
+    ```
+    """
 }
 fn (site-id: Str): Str {
   `/sites/${::api/encode-segment(site-id)}/drive`
@@ -82,7 +120,16 @@ fn (site-id: Str): Str {
 
 group-drive
 meta {
-    doc: """A Microsoft 365 group's (or team's) document library: `/groups/{id}/drive`."""
+    doc: """
+    A Microsoft 365 group's (or team's) document library:
+    `/groups/{id}/drive`.
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive/group-drive("group-1")  // "/groups/group-1/drive"
+    ```
+    """
 }
 fn (group-id: Str): Str {
   `/groups/${::api/encode-segment(group-id)}/drive`
@@ -96,6 +143,14 @@ meta {
     with `/` is a base path as built by `drive`, `user-drive`,
     `site-drive`, `group-drive`; any other Str is a drive id; a Map may
     carry `drive-id`, `user`, `site` or `group`.
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive/drive-base-from("me", null)  // "/me/drive"
+    ::microsoft::onedrive/drive-base-from(null, "b!xyz")  // "/drives/b%21xyz"
+    ::microsoft::onedrive/drive-base-from({site: "site-1"}, null)  // "/sites/site-1/drive"
+    ```
     """
 }
 fn (ref: Any, default-drive-id: Any): Str {
@@ -123,7 +178,17 @@ fn (ref: Any, default-drive-id: Any): Str {
 drive-base
 meta {
     ctx: {"microsoft.onedrive.drive-id": {required: false, secret: false}},
-    doc: """The base path of the drive a call targets: `opts.drive`, else the `microsoft.onedrive.drive-id` context variable, else `/me/drive`."""
+    doc: """
+    The base path of the drive a call targets: `opts.drive`, else the
+    `microsoft.onedrive.drive-id` context variable, else `/me/drive`.
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive/drive-base({drive: "me"})  // "/me/drive"
+    ::microsoft::onedrive/drive-base({drive: "/users/u1/drive"})  // "/users/u1/drive"
+    ```
+    """
 }
 fn (opts: Map): Str {
   drive-base-from(get(opts, "drive"), ::ctx/get("microsoft.onedrive.drive-id"))
@@ -147,17 +212,31 @@ fn (path: Str): Str {
   `/${join(map(segments, ::api/encode-segment), "/")}`
 }
 
-is-path-ref fn (ref: Any): Bool {
+is-path-ref
+meta {no-doc: true}
+fn (ref: Any): Bool {
   and(is-str(ref), starts-with(ref, "/"))
 }
 
-is-root-path fn (ref: Any): Bool {
+is-root-path
+meta {no-doc: true}
+fn (ref: Any): Bool {
   or(eq(ref, "root"), and(is-path-ref(ref), is-empty(filter(split(ref, "/"), (s) { not(is-empty(s)) }))))
 }
 
 item-drive-id
 meta {
-    doc: """The drive id a driveItem or `DocFile` Map belongs to (`parentReference.driveId` or `drive-id`), or null (pure)."""
+    doc: """
+    The drive id a driveItem or `DocFile` Map belongs to
+    (`parentReference.driveId` or `drive-id`), or null (pure).
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive/item-drive-id({parentReference: {driveId: "b!xyz"}})  // "b!xyz"
+    ::microsoft::onedrive/item-drive-id({id: "01ABC"})  // null
+    ```
+    """
 }
 fn (item: Map): Str? {
   parent get(item, "parentReference")
@@ -201,6 +280,13 @@ meta {
     The Graph path of a (possibly new) child named `name` under `parent`
     (pure), for uploads: `{drive}/root:/name:`, `{drive}/root:/parent/path/name:`
     or `{drive}/items/{parent-id}:/name:`.
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive/child-path("/Reports", "Q3 plan.xlsx", {drive: "me"})  // "/me/drive/root:/Reports/Q3%20plan.xlsx:"
+    ::microsoft::onedrive/child-path("01ABC", "q3.csv", {drive: "me"})  // "/me/drive/items/01ABC:/q3.csv:"
+    ```
     """
 }
 fn (parent: Any, name: Str, opts: Map): Str {
@@ -215,7 +301,18 @@ fn (parent: Any, name: Str, opts: Map): Str {
 
 remote-target
 meta {
-    doc: """For a shared or "Add to My files" item (a `remoteItem` facet), a Map addressing the target item in its own drive; otherwise `item` itself (pure)."""
+    doc: """
+    For a shared or "Add to My files" item (a `remoteItem` facet), a Map
+    addressing the target item in its own drive; otherwise `item` itself
+    (pure).
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive/remote-target({id: "local", remoteItem: {id: "target"}}).id  // "target"
+    ::microsoft::onedrive/remote-target({id: "local"}).id  // "local"
+    ```
+    """
 }
 fn (item: Map): Map {
   remote get(item, "remoteItem")
@@ -234,7 +331,19 @@ LOCAL_KEYS ["drive", "conflict", "if-match", "range", "chunk-size", "fallback", 
 
 query-opts
 meta {
-    doc: """The OData/API parameters of `opts` (pure): `defaults`, overridden by `opts` minus credential keys, this package's local keys and `extra-local`, nulls dropped. Pass a key as null in `opts` to drop a default."""
+    doc: """
+    The OData/API parameters of `opts` (pure): `defaults`, overridden by
+    `opts` minus credential keys, this package's local keys and
+    `extra-local`, nulls dropped. Pass a key as null in `opts` to drop a
+    default.
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive/query-opts({top: 200}, {top: 50, drive: "me", select: "id,name"})  // {top: 50, select: "id,name"}
+    ::microsoft::onedrive/query-opts({}, {select: "id", folder: "/Reports"}, ["folder"])  // {select: "id"}
+    ```
+    """
 }
 fn
 (defaults: Map, opts: Map): Map {
@@ -247,13 +356,24 @@ fn
 
 creds
 meta {
-    doc: """The microsoft-graph part of `opts` (credentials, cloud, retry, headers), passed through to `::microsoft::graph::api`."""
+    doc: """
+    The microsoft-graph part of `opts` (credentials, cloud, retry, headers),
+    passed through to `::microsoft::graph::api`.
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive/creds({top: 50, cloud: "usgov"})  // {cloud: "usgov"}
+    ```
+    """
 }
 fn (opts: Map): Map {
   ::api/credential-opts(opts)
 }
 
-if-match-headers fn (opts: Map): Map {
+if-match-headers
+meta {no-doc: true}
+fn (opts: Map): Map {
   tag get(opts, "if-match")
   if(::auth/is-blank-value(tag), {}, {If-Match: Str(tag)})
 }
@@ -262,7 +382,17 @@ CONFLICT_BEHAVIORS ["fail", "replace", "rename"]
 
 conflict-behavior
 meta {
-    doc: """Validate a conflict behavior (`fail`, `replace`, `rename`); null passes through as `default` (pure)."""
+    doc: """
+    Validate a conflict behavior (`fail`, `replace`, `rename`); null passes
+    through as `default` (pure).
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive/conflict-behavior("Rename", "fail")  // "rename"
+    ::microsoft::onedrive/conflict-behavior(null, "fail")  // "fail"
+    ```
+    """
 }
 fn (value: Any, default: Str?): Str? {
   v if(::auth/is-blank-value(value), default, lowercase(Str(value)))
@@ -279,7 +409,17 @@ fn (value: Any, default: Str?): Str? {
 
 extension
 meta {
-    doc: """The lower-case extension of a file name without the dot (`"Q3 Plan.DOCX"` is `"docx"`), or `""` (pure)."""
+    doc: """
+    The lower-case extension of a file name without the dot (`"Q3
+    Plan.DOCX"` is `"docx"`), or `""` (pure).
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive/extension("Q3 Plan.DOCX")  // "docx"
+    ::microsoft::onedrive/extension("README")  // ""
+    ```
+    """
 }
 fn (name: Str?): Str {
   n or(name, "")
@@ -351,7 +491,19 @@ MAX_CONVERT_BYTES 2097152
 
 conversion-formats
 meta {
-    doc: """The MIME types Graph can convert a file with this name to (pure): `application/pdf` and/or `text/html`, from the documented source extensions."""
+    doc: """
+    The MIME types Graph can convert a file with this name to (pure):
+    `application/pdf` and/or `text/html`, from the documented source
+    extensions.
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive/conversion-formats("plan.docx")  // ["application/pdf"]
+    ::microsoft::onedrive/conversion-formats("board.loop")  // ["application/pdf", "text/html"]
+    ::microsoft::onedrive/conversion-formats("photo.png")  // []
+    ```
+    """
 }
 fn (name: Str?): Vec {
   ext extension(name)
@@ -363,7 +515,17 @@ fn (name: Str?): Vec {
 
 is-folder-item
 meta {
-    doc: """True for a folder (or a shared folder via `remoteItem.folder`) or a package (OneNote notebook), which have no content to download (pure)."""
+    doc: """
+    True for a folder (or a shared folder via `remoteItem.folder`) or a
+    package (OneNote notebook), which have no content to download (pure).
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive/is-folder-item({id: "1", folder: {childCount: 2}})  // true
+    ::microsoft::onedrive/is-folder-item({id: "2", file: {mimeType: "text/plain"}})  // false
+    ```
+    """
 }
 fn (item: Map): Bool {
   remote get(item, "remoteItem")
@@ -379,8 +541,11 @@ meta {
     in what the local entry lacks.
 
     ```hot
+    item {id: "01ABC", name: "Q3.docx", size: 1024, file: {hashes: {quickXorHash: "abc="}}}
     f ::microsoft::onedrive/to-doc-file(item)
-    f.hashes.quickXorHash   // change detection on OneDrive for work / SharePoint
+    f.size  // 1024
+    // Change detection on OneDrive for work / SharePoint
+    f.hashes.quickXorHash  // "abc="
     ```
     """
 }
@@ -420,7 +585,17 @@ fn (item: Map): DocFile {
 }
 
 to-doc-files
-meta {doc: """`to-doc-file` over a Vec of driveItems."""}
+meta {
+    doc: """
+    `to-doc-file` over a Vec of driveItems.
+
+    **Example**
+
+    ```hot
+    map(::microsoft::onedrive/to-doc-files([{id: "1", name: "a.txt", size: 3}]), %.name)  // ["a.txt"]
+    ```
+    """
+}
 fn (items: Vec): Vec {
   map(items, to-doc-file)
 }
@@ -465,7 +640,17 @@ TEXT_EXTENSIONS ["txt", "text", "md", "markdown", "csv", "tsv", "json", "jsonl",
 
 base-mime
 meta {
-    doc: """A Content-Type without parameters, lower-cased: `"text/plain; charset=utf-8"` becomes `"text/plain"` (pure)."""
+    doc: """
+    A Content-Type without parameters, lower-cased: `"text/plain;
+    charset=utf-8"` becomes `"text/plain"` (pure).
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive/base-mime("Text/Plain; charset=utf-8")  // "text/plain"
+    ::microsoft::onedrive/base-mime(null)  // null
+    ```
+    """
 }
 fn (content-type: Str?): Str? {
   cond {
@@ -476,7 +661,17 @@ fn (content-type: Str?): Str? {
 
 is-textual-mime
 meta {
-    doc: """True when content of this MIME type is text: `text/*`, JSON, XML, YAML, SQL, SVG, `+json` / `+xml` (pure)."""
+    doc: """
+    True when content of this MIME type is text: `text/*`, JSON, XML, YAML,
+    SQL, SVG, `+json` / `+xml` (pure).
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive/is-textual-mime("application/json")  // true
+    ::microsoft::onedrive/is-textual-mime("image/png")  // false
+    ```
+    """
 }
 fn (mime-type: Str?): Bool {
   m or(base-mime(mime-type), "")
@@ -490,7 +685,18 @@ fn (mime-type: Str?): Bool {
 
 is-textual
 meta {
-    doc: """True when a file is text by MIME type, or by extension (`.txt`, `.md`, `.csv`, `.json`, ... since OneDrive often stores those as `application/octet-stream`) (pure)."""
+    doc: """
+    True when a file is text by MIME type, or by extension (`.txt`, `.md`,
+    `.csv`, `.json`, ... since OneDrive often stores those as
+    `application/octet-stream`) (pure).
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive/is-textual("application/octet-stream", "notes.md")  // true
+    ::microsoft::onedrive/is-textual("application/pdf", "report.pdf")  // false
+    ```
+    """
 }
 fn (mime-type: Str?, name: Str?): Bool {
   or(is-textual-mime(mime-type), in(extension(name), TEXT_EXTENSIONS))
@@ -498,7 +704,18 @@ fn (mime-type: Str?, name: Str?): Bool {
 
 content-from-bytes
 meta {
-    doc: """Build a `FileContent` from raw bytes, their MIME type, the file name (for text detection) and the source (pure)."""
+    doc: """
+    Build a `FileContent` from raw bytes, their MIME type, the file name
+    (for text detection) and the source (pure).
+
+    **Example**
+
+    ```hot
+    c ::microsoft::onedrive/content-from-bytes("01ABC", Bytes("hello"), "text/plain", "hello.txt", "download")
+    c.text  // "hello"
+    c.size  // 5
+    ```
+    """
 }
 fn (file-id: Str, bytes: Bytes, mime-type: Str?, name: Str?, source: Str): FileContent {
   mime base-mime(mime-type)
@@ -517,7 +734,16 @@ fn (file-id: Str, bytes: Bytes, mime-type: Str?, name: Str?, source: Str): FileC
 
 response-bytes
 meta {
-    doc: """The exact body of an HTTP response as Bytes: `body-bytes`, never the auto-decoded `body` (so a JSON file stays bytes) (pure)."""
+    doc: """
+    The exact body of an HTTP response as Bytes: `body-bytes`, never the
+    auto-decoded `body` (so a JSON file stays bytes) (pure).
+
+    **Example**
+
+    ```hot
+    Str(::microsoft::onedrive/response-bytes({body: [1, 2], body-bytes: Bytes("[1, 2]")}))  // "[1, 2]"
+    ```
+    """
 }
 fn (response: Map): Bytes {
   raw get(response, "body-bytes")
@@ -530,7 +756,19 @@ fn (response: Map): Bytes {
 
 content-from-response
 meta {
-    doc: """Build a `FileContent` from an HTTP response: `response-bytes` and the Content-Type header (pure)."""
+    doc: """
+    Build a `FileContent` from an HTTP response: `response-bytes` and the
+    Content-Type header (pure).
+
+    **Example**
+
+    ```hot
+    response {status: 200, headers: {Content-Type: "text/csv"}, body: "a,b\n", body-bytes: Bytes("a,b\n")}
+    c ::microsoft::onedrive/content-from-response("01ABC", response, "q3.csv", "download")
+    c.mime-type  // "text/csv"
+    c.text  // "a,b\n"
+    ```
+    """
 }
 fn (file-id: Str, response: Map, name: Str?, source: Str): FileContent {
   content-from-bytes(file-id, response-bytes(response), ::api/header-value(response.headers, "content-type"), name, source)
@@ -544,6 +782,14 @@ meta {
     without an Authorization header and return its response; otherwise
     return `response` unchanged. Hot's client normally follows the
     redirect itself; this covers a runtime that hands the 302 back.
+
+    **Example**
+
+    ```hot
+    path "/me/drive/root:/Reports/Q3.pdf:/content"
+    response ::microsoft::onedrive/follow-redirect(::microsoft::graph::api/request("GET", path, {}, "", {}))
+    ::microsoft::onedrive/response-bytes(response)
+    ```
     """
 }
 fn (response: Result): Any {
@@ -559,7 +805,17 @@ fn (response: Result): Any {
 
 content-text
 meta {
-    doc: """The text of a `FileContent`: its `text`, or the UTF-8 decoding of `bytes` (invalid sequences become U+FFFD)."""
+    doc: """
+    The text of a `FileContent`: its `text`, or the UTF-8 decoding of
+    `bytes` (invalid sequences become U+FFFD).
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive/content-text({text: "hello", bytes: Bytes("hello")})  // "hello"
+    ::microsoft::onedrive/content-text({text: null, bytes: Bytes("raw")})  // "raw"
+    ```
+    """
 }
 fn (content: Map): Str {
   if(is-some(content.text), content.text, Str(content.bytes))

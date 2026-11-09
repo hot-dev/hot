@@ -21,7 +21,20 @@ SCOPE_TYPES ["default", "user", "group", "domain"]
 
 list-acl
 meta {
-    doc: """GET /calendars/{id}/acl - one page of rules: `{items: [{id, role, scope: {type, value}}], nextPageToken?, nextSyncToken?}`. Options: `maxResults`, `pageToken`, `showDeleted`, `syncToken`. Scope: `calendar.acls.readonly`."""
+    doc: """
+    GET /calendars/{id}/acl - one page of rules: `{items: [{id, role, scope:
+    {type, value}}], nextPageToken?, nextSyncToken?}`. Options:
+    `maxResults`, `pageToken`, `showDeleted`, `syncToken`. Scope:
+    `calendar.acls.readonly`.
+
+    **Example**
+
+    ```hot
+    page ::google::calendar::acl/list-acl("team@group.calendar.google.com", {maxResults: 50})
+    map(page.items, %.id)
+    page.nextPageToken
+    ```
+    """
 }
 fn
 (calendar-id: Str): Map {
@@ -33,7 +46,16 @@ fn
 
 list-all-acl
 meta {
-    doc: """Every rule on a calendar (all pages). Scope: `calendar.acls.readonly`."""
+    doc: """
+    Every rule on a calendar (all pages). Scope: `calendar.acls.readonly`.
+
+    **Example**
+
+    ```hot
+    rules ::google::calendar::acl/list-all-acl("team@group.calendar.google.com")
+    filter(rules, eq(%.role, "owner"))
+    ```
+    """
 }
 fn
 (calendar-id: Str): Vec {
@@ -45,7 +67,18 @@ fn
 
 build-rule
 meta {
-    doc: """An AclRule body (pure): `{role, scope: {type, value?}}`; `value` is omitted for `default`. An Err for an unknown role or scope type, or a missing value."""
+    doc: """
+    An AclRule body (pure): `{role, scope: {type, value?}}`; `value` is
+    omitted for `default`. An Err for an unknown role or scope type, or a
+    missing value.
+
+    **Example**
+
+    ```hot
+    ::google::calendar::acl/build-rule("reader", "user", "ada@example.com")  // {role: "reader", scope: {type: "user", value: "ada@example.com"}}
+    ::google::calendar::acl/build-rule("reader", "default", null)  // {role: "reader", scope: {type: "default"}}
+    ```
+    """
 }
 fn (role: Str, scope-type: Str, value: Str?): Map {
   cond {
@@ -59,7 +92,19 @@ fn (role: Str, scope-type: Str, value: Str?): Map {
 
 insert-rule
 meta {
-    doc: """POST /calendars/{id}/acl - add a rule (see `build-rule`). Options: `sendNotifications` (default true: the grantee is emailed). Returns the rule with its `id`. Scope: `calendar.acls`."""
+    doc: """
+    POST /calendars/{id}/acl - add a rule (see `build-rule`). Options:
+    `sendNotifications` (default true: the grantee is emailed). Returns the
+    rule with its `id`. Scope: `calendar.acls`.
+
+    **Example**
+
+    ```hot
+    // Everyone at example.com sees free/busy. Nobody is emailed.
+    rule ::google::calendar::acl/insert-rule("team@group.calendar.google.com", "freeBusyReader", "domain", "example.com", {sendNotifications: false})
+    rule.id
+    ```
+    """
 }
 fn
 (calendar-id: Str, role: Str, scope-type: Str, value: Str?): Map {
@@ -76,6 +121,16 @@ meta {
     doc: """
     Share a calendar with one person: `share-calendar("team@group.calendar.google.com", "ada@example.com", "reader")`.
     Scope: `calendar.acls`.
+
+    **Example**
+
+    ```hot
+    rule ::google::calendar::acl/share-calendar("team@group.calendar.google.com", "ada@example.com", "reader")
+    rule.id
+
+    // Share without the notification email
+    ::google::calendar::acl/share-calendar("team@group.calendar.google.com", "bob@example.com", "writer", {sendNotifications: false})
+    ```
     """
 }
 fn
@@ -88,7 +143,16 @@ fn
 
 delete-rule
 meta {
-    doc: """DELETE /calendars/{id}/acl/{ruleId} - remove a rule (rule ids look like `user:ada@example.com`). Returns true. Scope: `calendar.acls`."""
+    doc: """
+    DELETE /calendars/{id}/acl/{ruleId} - remove a rule (rule ids look like
+    `user:ada@example.com`). Returns true. Scope: `calendar.acls`.
+
+    **Example**
+
+    ```hot
+    ::google::calendar::acl/delete-rule("team@group.calendar.google.com", "user:ada@example.com")
+    ```
+    """
 }
 fn
 (calendar-id: Str, rule-id: Str): Bool {

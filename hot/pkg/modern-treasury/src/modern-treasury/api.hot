@@ -65,7 +65,18 @@ SENSITIVE_KEYS [
 
 redact-text
 meta {
-    doc: """Mask every run of 8 or more digits in `text` down to its last four (`"acct 123456789"` becomes `"acct ****6789"`), so an account or routing number echoed in an error message is never kept whole. Exposed for testing."""
+    doc: """
+    Mask every run of 8 or more digits in `text` down to its last four
+    (`"acct 123456789"` becomes `"acct ****6789"`), so an account or routing
+    number echoed in an error message is never kept whole. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::api/redact-text("acct 123456789")  // "acct ****6789"
+    ```
+    """
 }
 fn (text: Str): Str {
   ::re/replace-all(text, "[0-9]{4,}([0-9]{4})", "****$1")
@@ -73,7 +84,18 @@ fn (text: Str): Str {
 
 redact
 meta {
-    doc: """Remove sensitive data from a decoded body: values under `SENSITIVE_KEYS` become `"[redacted]"`, and long digit runs in other strings are masked by `redact-text`. Applied to every `HttpError`. Exposed for testing."""
+    doc: """
+    Remove sensitive data from a decoded body: values under `SENSITIVE_KEYS`
+    become `"[redacted]"`, and long digit runs in other strings are masked
+    by `redact-text`. Applied to every `HttpError`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::api/redact({account_number: "123456789", note: "ref 1234567890"})
+    // {account_number: "[redacted]", note: "ref ****7890"}
+    ```
+    """
 }
 fn (value: Any): Any {
   cond {
@@ -127,7 +149,17 @@ type {
 
 parse-int
 meta {
-    doc: """An Int from an Int or a decimal-digit Str; null for anything else. Never errs on bad input. Exposed for testing."""
+    doc: """
+    An Int from an Int or a decimal-digit Str; null for anything else. Never
+    errs on bad input. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::api/parse-int("42")  // 42
+    ::modern-treasury::api/parse-int("soon")  // null
+    ```
+    """
 }
 fn (value: Any): Int? {
   cond {
@@ -139,16 +171,22 @@ fn (value: Any): Int? {
   }
 }
 
-field fn (body: Any, key: Str): Any {
+field
+meta {no-doc: true}
+fn (body: Any, key: Str): Any {
   if(is-map(body), get(body, key), null)
 }
 
-str-field fn (body: Any, key: Str): Str? {
+str-field
+meta {no-doc: true}
+fn (body: Any, key: Str): Str? {
   v field(body, key)
   if(is-str(v), v, null)
 }
 
-body-excerpt fn (body: Any): Str {
+body-excerpt
+meta {no-doc: true}
+fn (body: Any): Str {
   text cond {
     is-null(body) => { "" }
     is-str(body) => { body }
@@ -159,7 +197,9 @@ body-excerpt fn (body: Any): Str {
   if(gt(length(text), 300), `${slice(text, 0, 300)}...`, text)
 }
 
-decode-body fn (body: Any): Any {
+decode-body
+meta {no-doc: true}
+fn (body: Any): Any {
   text cond {
     is-bytes(body) => { Str(body) }
     is-str(body) => { body }
@@ -178,7 +218,21 @@ decode-body fn (body: Any): Any {
 
 error-message
 meta {
-    doc: """The readable `message` line for a (redacted) error body: `modern-treasury: HTTP {status} {code} ({parameter}): {message}`, or a body excerpt when the body isn't a Modern Treasury error. Exposed for testing."""
+    doc: """
+    The readable `message` line for a (redacted) error body:
+    `modern-treasury: HTTP {status} {code} ({parameter}): {message}`, or a
+    body excerpt when the body isn't a Modern Treasury error. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::api/error-message(422, {errors: {code: "parameter_invalid", parameter: "amount", message: "Amount must be greater than 0"}})
+    // "modern-treasury: HTTP 422 parameter_invalid (amount): Amount must be greater than 0"
+
+    ::modern-treasury::api/error-message(502, "Bad Gateway")  // "modern-treasury: HTTP 502: Bad Gateway"
+    ```
+    """
 }
 fn (status: Int, body: Any): Str {
   errors field(body, "errors")
@@ -209,14 +263,27 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   })
 }
 
-plain-error fn (error: Result): Any {
+plain-error
+meta {no-doc: true}
+fn (error: Result): Any {
   payload if(is-err(error), err-value(error), error)
   if(or(is-null(payload), is-str(payload)), payload, untype(payload))
 }
 
 is-error-code
 meta {
-    doc: """True when `error` (an `HttpError`, or a `Result.Err` holding one) has this Modern Treasury error `code`, e.g. `"resource_not_found"`."""
+    doc: """
+    True when `error` (an `HttpError`, or a `Result.Err` holding one) has
+    this Modern Treasury error `code`, e.g. `"resource_not_found"`.
+
+    **Example**
+
+    ```hot
+    e err({status: 404, code: "resource_not_found"})
+    ::modern-treasury::api/is-error-code(e, "resource_not_found")  // true
+    ::modern-treasury::api/is-error-code(e, "conflict")  // false
+    ```
+    """
 }
 fn (error: Result, code: Str): Bool {
   payload plain-error(error)
@@ -229,7 +296,17 @@ fn (error: Result, code: Str): Bool {
 
 header
 meta {
-    doc: """A header value by name, ignoring case; null when absent. Exposed for testing."""
+    doc: """
+    A header value by name, ignoring case; null when absent. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::api/header({X-Per-Page: "25"}, "x-per-page")  // "25"
+    ::modern-treasury::api/header({}, "x-per-page")  // null
+    ```
+    """
 }
 fn (headers: Any, name: Str): Str? {
   wanted lowercase(name)
@@ -241,7 +318,17 @@ fn (headers: Any, name: Str): Str? {
 
 normalize-environment
 meta {
-    doc: """`"sandbox"` or `"production"` for a configured value (case and whitespace ignored); an Err for anything else. Exposed for testing."""
+    doc: """
+    `"sandbox"` or `"production"` for a configured value (case and
+    whitespace ignored); an Err for anything else. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::api/normalize-environment(" Sandbox ")  // "sandbox"
+    is-err(::modern-treasury::api/normalize-environment("staging"))  // true
+    ```
+    """
 }
 fn (environment: Str): Str {
   name lowercase(trim(environment))
@@ -253,7 +340,18 @@ fn (environment: Str): Str {
 
 current-environment
 meta {
-    doc: """The configured `modern-treasury.environment`, normalized; `"production"` when unset (the safe assumption: simulations stay locked) and an Err for an invalid value."""
+    doc: """
+    The configured `modern-treasury.environment`, normalized; `"production"`
+    when unset (the safe assumption: simulations stay locked) and an Err for
+    an invalid value.
+
+    **Example**
+
+    ```hot
+    env ::modern-treasury::api/current-environment()
+    eq(env, "sandbox")
+    ```
+    """
 }
 fn (): Str {
   configured trim(Str(or(::ctx/get("modern-treasury.environment"), "")))
@@ -262,7 +360,17 @@ fn (): Str {
 
 require-sandbox
 meta {
-    doc: """`true` when `environment` is `"sandbox"`, otherwise an Err naming `operation`. Exposed for testing."""
+    doc: """
+    `true` when `environment` is `"sandbox"`, otherwise an Err naming
+    `operation`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::api/require-sandbox("sandbox", "create-incoming-payment-detail")  // true
+    is-err(::modern-treasury::api/require-sandbox("production", "create-incoming-payment-detail"))  // true
+    ```
+    """
 }
 fn (environment: Str, operation: Str): Bool {
   cond {
@@ -273,7 +381,18 @@ fn (environment: Str, operation: Str): Bool {
 
 auth-header
 meta {
-    doc: """`Basic base64("{organization-id}:{api-key}")`. Exposed for testing."""
+    doc: """
+    `Basic base64("{organization-id}:{api-key}")`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::api/auth-header(
+      ::hot::ctx/get("modern-treasury.organization.id"),
+      ::hot::ctx/get("modern-treasury.api.key")
+    )
+    ```
+    """
 }
 fn (organization-id: Str, api-key: Str): Str {
   credentials `${organization-id}:${api-key}`
@@ -291,7 +410,17 @@ fn (organization-id: Str, api-key: Str): Str {
 
 option-headers
 meta {
-    doc: """The headers `opts` adds: `Idempotency-Key` when `opts` has an `idempotency-key`. Exposed for testing."""
+    doc: """
+    The headers `opts` adds: `Idempotency-Key` when `opts` has an
+    `idempotency-key`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::api/option-headers({idempotency-key: "invoice-42-payout"})  // {Idempotency-Key: "invoice-42-payout"}
+    ::modern-treasury::api/option-headers({})  // {}
+    ```
+    """
 }
 fn (opts: Map): Map {
   key get(opts, "idempotency-key")
@@ -300,7 +429,19 @@ fn (opts: Map): Map {
 
 require-idempotency-key
 meta {
-    doc: """`opts` when it carries a non-empty `idempotency-key`, otherwise an Err. Every money-movement function checks this before sending anything."""
+    doc: """
+    `opts` when it carries a non-empty `idempotency-key`, otherwise an Err.
+    Every money-movement function checks this before sending anything.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::api/require-idempotency-key({idempotency-key: "invoice-42-payout"}, "create-payment-order")
+    // {idempotency-key: "invoice-42-payout"}
+
+    is-err(::modern-treasury::api/require-idempotency-key({}, "create-payment-order"))  // true
+    ```
+    """
 }
 fn (opts: Map, operation: Str): Map {
   key get(opts, "idempotency-key")
@@ -312,17 +453,33 @@ fn (opts: Map, operation: Str): Map {
   }
 }
 
-present fn (value: Any): Bool {
+present
+meta {no-doc: true}
+fn (value: Any): Bool {
   and(is-some(value), not(is-empty(trim(Str(or(value, ""))))))
 }
 
-non-blank fn (value: Any): Str? {
+non-blank
+meta {no-doc: true}
+fn (value: Any): Str? {
   if(is-str(value), if(is-empty(trim(value)), null, trim(value)), null)
 }
 
 blank-credential
 meta {
-    doc: """The first of `names` that `opts` has but with a blank or null value, else null. Such a key is an Err, never a fallback to context: a tenant whose key is missing must not run on the project's credentials. Exposed for testing."""
+    doc: """
+    The first of `names` that `opts` has but with a blank or null value,
+    else null. Such a key is an Err, never a fallback to context: a tenant
+    whose key is missing must not run on the project's credentials. Exposed
+    for testing.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::api/blank-credential({organization-id: "org_a", api-key: ""}, ["organization-id", "api-key"])  // "api-key"
+    ::modern-treasury::api/blank-credential({}, ["organization-id", "api-key"])  // null
+    ```
+    """
 }
 fn (opts: Map, names: Vec): Str? {
   find-first(names, (name) { and(in(name, keys(opts)), is-null(non-blank(get(opts, name)))) })
@@ -393,7 +550,17 @@ fn (opts: Map): Map {
 
 environment-of
 meta {
-    doc: """The environment a call with `opts` would use: its `environment`, else `modern-treasury.environment` (`"production"` when unset). An Err for an invalid value."""
+    doc: """
+    The environment a call with `opts` would use: its `environment`, else
+    `modern-treasury.environment` (`"production"` when unset). An Err for an
+    invalid value.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::api/environment-of({environment: "Sandbox"})  // "sandbox"
+    ```
+    """
 }
 fn (opts: Map): Str {
   explicit get(opts, "environment")
@@ -406,7 +573,17 @@ fn (opts: Map): Str {
 
 compact
 meta {
-    doc: """Drop null values recursively (nested maps and the maps inside vectors), so unset optionals are omitted rather than sent as JSON `null`. `false`, `0` and `""` are kept. Exposed for testing."""
+    doc: """
+    Drop null values recursively (nested maps and the maps inside vectors),
+    so unset optionals are omitted rather than sent as JSON `null`. `false`,
+    `0` and `""` are kept. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::api/compact({a: 1, b: null, c: [{d: null, e: false}]})  // {a: 1, c: [{e: false}]}
+    ```
+    """
 }
 fn (value: Any): Any {
   cond {
@@ -424,7 +601,16 @@ fn (value: Any): Any {
 
 missing-fields
 meta {
-    doc: """The names in `fields` that are null or absent in `params`. Exposed for testing."""
+    doc: """
+    The names in `fields` that are null or absent in `params`. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::api/missing-fields({name: "Acme", email: null}, ["name", "email", "phone"])  // ["email", "phone"]
+    ```
+    """
 }
 fn (params: Map, fields: Vec): Vec {
   filter(fields, (f) { is-null(get(params, f)) })
@@ -432,7 +618,17 @@ fn (params: Map, fields: Vec): Vec {
 
 require-fields
 meta {
-    doc: """`params` when every name in `fields` is set, otherwise an Err listing the missing names (never their values). Exposed for testing."""
+    doc: """
+    `params` when every name in `fields` is set, otherwise an Err listing
+    the missing names (never their values). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::api/require-fields({name: "Acme"}, ["name"], "create-counterparty")  // {name: "Acme"}
+    is-err(::modern-treasury::api/require-fields({}, ["name"], "create-counterparty"))  // true
+    ```
+    """
 }
 fn (params: Map, fields: Vec, operation: Str): Map {
   missing missing-fields(params, fields)
@@ -447,6 +643,13 @@ meta {
     `balances[as_of_date]=...`, vectors repeat with `[]`
     (`{id: ["a", "b"]}` gives `id[]=a&id[]=b`), and null values are
     dropped. Keys and values are percent-encoded. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::api/query-pairs({metadata: {key: "v"}, id: ["a", "b"], skip: null}, "")
+    // ["metadata%5Bkey%5D=v", "id%5B%5D=a", "id%5B%5D=b"]
+    ```
     """
 }
 fn (params: Map, prefix: Str): Vec<Str> {
@@ -467,7 +670,17 @@ fn (params: Map, prefix: Str): Vec<Str> {
 
 query-string
 meta {
-    doc: """`?a=1&b=2` from `params` (see `query-pairs`), or `""` when nothing remains."""
+    doc: """
+    `?a=1&b=2` from `params` (see `query-pairs`), or `""` when nothing
+    remains.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::api/query-string({per_page: 2})  // "?per_page=2"
+    ::modern-treasury::api/query-string({per_page: null})  // ""
+    ```
+    """
 }
 fn (params: Map): Str {
   pairs query-pairs(params, "")
@@ -476,7 +689,16 @@ fn (params: Map): Str {
 
 seg
 meta {
-    doc: """Percent-encode one path segment (an id), so an id from user input can't change which endpoint is called."""
+    doc: """
+    Percent-encode one path segment (an id), so an id from user input can't
+    change which endpoint is called.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::api/seg("a/b")  // "a%2Fb"
+    ```
+    """
 }
 fn (id: Any): Str {
   ::uri/encode(Str(id))
@@ -493,6 +715,14 @@ meta {
     full URL with any query string. A non-empty Map `body` is compacted
     and sent as JSON with `Content-Type: application/json`; otherwise no
     body is sent. `headers` are merged last. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    req ::modern-treasury::api/build-request("post", "https://app.moderntreasury.com/api/ledgers", {name: "Main", description: null}, {}, "Basic <credentials>")
+    req.method  // "POST"
+    req.body  // "{\"name\":\"Main\"}"
+    ```
     """
 }
 fn (method: Str, url: Str, body: Any, headers: Map, authorization: Str): HttpRequest {
@@ -514,7 +744,17 @@ fn (method: Str, url: Str, body: Any, headers: Map, authorization: Str): HttpReq
 
 response-body
 meta {
-    doc: """Normalize a 2xx body: empty text (204 No Content) becomes null. Exposed for testing."""
+    doc: """
+    Normalize a 2xx body: empty text (204 No Content) becomes null. Exposed
+    for testing.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::api/response-body("")  // null
+    ::modern-treasury::api/response-body({id: "a"})  // {id: "a"}
+    ```
+    """
 }
 fn (body: Any): Any {
   cond {
@@ -525,7 +765,19 @@ fn (body: Any): Any {
 
 request
 meta {
-    doc: """Send one request and return the raw 2xx `HttpResponse` (headers included), or an Err: `HttpError` for non-2xx, or the transport error. `call` and `list-page` are built on it. The request is sent exactly once."""
+    doc: """
+    Send one request and return the raw 2xx `HttpResponse` (headers
+    included), or an Err: `HttpError` for non-2xx, or the transport error.
+    `call` and `list-page` are built on it. The request is sent exactly
+    once.
+
+    **Example**
+
+    ```hot
+    response ::modern-treasury::api/request("GET", "/api/counterparties", {per_page: 1}, {})
+    ::modern-treasury::api/header(response.headers, "x-after-cursor")
+    ```
+    """
 }
 fn (method: Str, path: Str, params: Map, opts: Map): HttpResponse {
   settings resolve(opts)
@@ -575,7 +827,22 @@ fn
 
 ping
 meta {
-    doc: """GET /api/ping: `{ping: "pong"}` when the credentials work."""
+    doc: """
+    GET /api/ping: `{ping: "pong"}` when the credentials work.
+
+    **Example**
+
+    ```hot
+    result ::modern-treasury::api/ping()
+    result.ping
+
+    // Check one tenant's credentials
+    ::modern-treasury::api/ping({
+      organization-id: ::hot::ctx/get("tenant-a.modern-treasury.organization.id"),
+      api-key: ::hot::ctx/get("tenant-a.modern-treasury.api.key")
+    })
+    ```
+    """
 }
 fn
 (): Map {
@@ -587,7 +854,25 @@ fn
 
 move-money
 meta {
-    doc: """POST a money-movement request: check the idempotency key and the `required` fields, then send it once. Any failed check is an Err and nothing is sent. Payment orders, reversals and returns are built on it."""
+    doc: """
+    POST a money-movement request: check the idempotency key and the
+    `required` fields, then send it once. Any failed check is an Err and
+    nothing is sent. Payment orders, reversals and returns are built on it.
+
+    **Example**
+
+    ```hot
+    // The call behind create-payment-order
+    order ::modern-treasury::api/move-money("/api/payment_orders", {
+      type: "ach",
+      direction: "credit",
+      amount: 10000,
+      originating_account_id: "0f8e3719-3dfd-4613-9bbf-c0333781b59f",
+      receiving_account_id: "5acec2ef-987b-4260-aa97-b719eeb0a8d5"
+    }, ["type", "direction", "amount", "originating_account_id"], {idempotency-key: "invoice-42-payout"}, "create-payment-order")
+    order.status
+    ```
+    """
 }
 fn (path: Str, params: Map, required: Vec, opts: Map, operation: Str): Map {
   checked-options require-idempotency-key(opts, operation)
@@ -601,7 +886,17 @@ fn (path: Str, params: Map, required: Vec, opts: Map, operation: Str): Map {
 
 create
 meta {
-    doc: """POST a create request after checking the `required` fields. The idempotency key is optional here."""
+    doc: """
+    POST a create request after checking the `required` fields. The
+    idempotency key is optional here.
+
+    **Example**
+
+    ```hot
+    party ::modern-treasury::api/create("/api/counterparties", {name: "Acme"}, ["name"], {}, "create-counterparty")
+    party.id
+    ```
+    """
 }
 fn (path: Str, params: Map, required: Vec, opts: Map, operation: Str): Map {
   body require-fields(compact(params), required, operation)
@@ -614,7 +909,23 @@ fn (path: Str, params: Map, required: Vec, opts: Map, operation: Str): Map {
 
 page-from-response
 meta {
-    doc: """A list page from a raw response: `{items, after_cursor, per_page}`. List bodies are bare JSON arrays; the next cursor is the `X-After-Cursor` header (null on the last page). Exposed for testing."""
+    doc: """
+    A list page from a raw response: `{items, after_cursor, per_page}`. List
+    bodies are bare JSON arrays; the next cursor is the `X-After-Cursor`
+    header (null on the last page). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    response ::hot::http/HttpResponse({
+      status: 200,
+      headers: {X-After-Cursor: "b", X-Per-Page: "2"},
+      body: [{id: "a"}, {id: "b"}]
+    })
+    ::modern-treasury::api/page-from-response(response)
+    // {items: [{id: "a"}, {id: "b"}], after_cursor: "b", per_page: 2}
+    ```
+    """
 }
 fn (response: HttpResponse): Map {
   r untype(response)
@@ -638,7 +949,7 @@ meta {
 
     ```hot
     ::modern-treasury::api/next-page-params({per_page: 2}, {items: [{id: "a"}, {id: "b"}], after_cursor: "b"})
-    // => {per_page: 2, after_cursor: "b"}
+    // {per_page: 2, after_cursor: "b"}
     ```
     """
 }
@@ -677,7 +988,19 @@ fn
 
 collect-pages
 meta {
-    doc: """Follow `after_cursor` from `params`, concatenating `items`, until `limit` items (0 means no limit), the last page, or `MAX_PAGES` pages. `fetch` takes the params for one page and returns it. An Err from any page is returned as is. Exposed for testing; `collect-all` uses it."""
+    doc: """
+    Follow `after_cursor` from `params`, concatenating `items`, until
+    `limit` items (0 means no limit), the last page, or `MAX_PAGES` pages.
+    `fetch` takes the params for one page and returns it. An Err from any
+    page is returned as is. Exposed for testing; `collect-all` uses it.
+
+    **Example**
+
+    ```hot
+    fetch (params) { {items: [{id: "a"}, {id: "b"}], after_cursor: null} }
+    ::modern-treasury::api/collect-pages(fetch, {per_page: 100}, 1, [], 0)  // [{id: "a"}]
+    ```
+    """
 }
 fn (fetch: Fn, params: Map, limit: Int, acc: Vec, pages: Int): Vec {
   page fetch(params)

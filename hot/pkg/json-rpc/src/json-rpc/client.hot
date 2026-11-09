@@ -112,7 +112,9 @@ fn (data: Map): ::types/Response {
   if(is-some(response.error), err(response.error), response)
 }
 
-response-media-type fn (response: HttpResponse): Str {
+response-media-type
+meta {no-doc: true}
+fn (response: HttpResponse): Str {
   content-type or(
     get(response.headers, "content-type", null),
     get(response.headers, "Content-Type", "")
@@ -122,7 +124,19 @@ response-media-type fn (response: HttpResponse): Str {
 
 sse-json-rpc-response
 meta {
-    doc: """Extract the final JSON-RPC result or error from a buffered SSE response body."""
+    doc: """
+    Extract the final JSON-RPC result or error from a buffered SSE response
+    body.
+
+    **Example**
+
+    ```hot
+    ::rpc ::json-rpc::client
+    body "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":\"1\",\"result\":{\"ok\":true}}\n\n"
+    ::rpc/sse-json-rpc-response(body).result  // {ok: true}
+    ::rpc/sse-json-rpc-response(": keep-alive\n\n")  // null
+    ```
+    """
 }
 fn (body: Str): Map? {
   normalized replace(replace(body, "\r\n", "\n"), "\r", "\n")
@@ -152,12 +166,25 @@ fn (body: Str): Map? {
 parse-http-response
 meta {
     doc: """
-Parse a full `HttpResponse` as JSON-RPC.
+    Parse a full `HttpResponse` as JSON-RPC.
 
-When the body contains a JSON-RPC response, its result or error is preserved
-regardless of the HTTP status. Non-JSON-RPC HTTP failures become an internal
-JSON-RPC client error whose data contains the response body.
-"""
+    When the body contains a JSON-RPC response, its result or error is preserved
+    regardless of the HTTP status. Non-JSON-RPC HTTP failures become an internal
+    JSON-RPC client error whose data contains the response body.
+
+    **Example**
+
+    ```hot
+    ::rpc ::json-rpc::client
+    ::http ::hot::http
+    ok-body {jsonrpc: "2.0", id: "1", result: {tools: []}}
+    ::rpc/parse-http-response(::http/HttpResponse({status: 200, headers: {}, body: ok-body})).result  // {tools: []}
+
+    // Without a JSON-RPC body, a failed status becomes an Err
+    failed ::rpc/parse-http-response(::http/HttpResponse({status: 503, headers: {}, body: "down"}))
+    err-value(failed).message  // "HTTP 503"
+    ```
+    """
 }
 fn (response: Result): ::types/Response {
   sse-message if(
@@ -201,11 +228,27 @@ fn (response: Result): ::types/Response {
 send-raw
 meta {
     doc: """
-Send a JSON-RPC request over HTTP and return the full `HttpResponse`.
+    Send a JSON-RPC request over HTTP and return the full `HttpResponse`.
 
-Unlike `send`, this function does not interpret HTTP status codes or JSON-RPC
-errors. Use it when transport headers or status-aware negotiation are needed.
-"""
+    Unlike `send`, this function does not interpret HTTP status codes or JSON-RPC
+    errors. Use it when transport headers or status-aware negotiation are needed.
+
+    **Example**
+
+    ```hot
+    ::rpc ::json-rpc::client
+    req ::rpc/request("initialize", {
+      protocolVersion: "2025-11-25",
+      capabilities: {},
+      clientInfo: {name: "my-app", version: "1.0.0"}
+    })
+    response ::rpc/send-raw("https://server.example.com/rpc", {}, req)
+    response.status
+    session get(response.headers, "mcp-session-id")
+    parsed ::rpc/parse-http-response(response)
+    parsed.result.serverInfo
+    ```
+    """
 }
 fn (url: Str, headers: Map, req: ::types/Request): HttpResponse {
   body to-json(untype(req))
@@ -234,12 +277,13 @@ second argument (e.g. session or auth headers).
 
 ```hot
 ::rpc ::json-rpc::client
+url "https://server.example.com/rpc"
 req ::rpc/request("initialize", {
   protocolVersion: "2025-11-25",
   capabilities: {},
   clientInfo: {name: "my-app", version: "1.0.0"}
 })
-response ::rpc/send("https://server.example.com/rpc", {}, req)
+response ::rpc/send(url, {}, req)
 response.result.serverInfo // => {name: "...", version: "..."}
 
 // With session headers

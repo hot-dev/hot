@@ -2,7 +2,7 @@
 
 hot.pkg.increase {
   name: "hot.dev/increase",
-  version: "0.1.1",
+  version: "0.1.2",
   hot-min-version: "3.0.2",
   description: "Increase banking API bindings for Hot: entities, accounts, account numbers and statements; ACH, wire, Real-Time Payments, FedNow, check and account transfers with required idempotency keys and approval; inbound transfers and returns; transactions; cards; external accounts; events and event subscriptions; sandbox-only simulations; cursor pagination; and a Standard Webhooks signature verifier.",
   author: "Hot Dev",

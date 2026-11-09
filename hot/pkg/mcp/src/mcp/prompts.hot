@@ -22,6 +22,8 @@ Returns a Vec of Prompt, each with `name`, `description`, and `arguments` fields
 
 ```hot
 ::prompts ::mcp::prompts
+info ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+session ::mcp::client/connect("https://mcp.example.com/mcp", info, null)
 prompts ::prompts/list(session)
 // prompts => [{name: "code-review", description: "...", arguments: [...]}, ...]
 first(prompts).name // => "code-review"
@@ -46,6 +48,8 @@ Pass null as the cursor for the first page.
 
 ```hot
 ::prompts ::mcp::prompts
+info ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+session ::mcp::client/connect("https://mcp.example.com/mcp", info, null)
 page ::prompts/list-page(session, null)
 page.prompts // => [{name: "code-review", ...}, ...]
 page.next-cursor // => "cursor-abc" or null
@@ -78,6 +82,8 @@ single Vec containing every prompt.
 
 ```hot
 ::prompts ::mcp::prompts
+info ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+session ::mcp::client/connect("https://mcp.example.com/mcp", info, null)
 all-prompts ::prompts/list-all(session)
 length(all-prompts) // => total number of prompts across all pages
 ```
@@ -88,7 +94,9 @@ fn (session: ::types/Session): Vec<::types/Prompt> {
 }
 
 // Recursive pagination helper (TCO).
-collect-pages fn cond (session: ::types/Session, cursor: Str?, acc: Vec): Vec {
+collect-pages
+meta {no-doc: true}
+fn cond (session: ::types/Session, cursor: Str?, acc: Vec): Vec {
   => {
     params {} |> assoc-some("cursor", cursor)
     result ::client/session-request(session, "prompts/list", params)
@@ -105,7 +113,19 @@ collect-pages fn cond (session: ::types/Session, cursor: Str?, acc: Vec): Vec {
 
 get-result
 meta {
-    doc: """Get a prompt and retain modern result type, MRTR, and metadata fields."""
+    doc: """
+    Get a prompt and retain modern result type, MRTR, and metadata fields.
+
+    **Example**
+
+    ```hot
+    info ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+    session ::mcp::client/connect("https://mcp.example.com/mcp", info, null)
+    result ::mcp::prompts/get-result(session, "code-review", {language: "hot"})
+    result.description
+    first(result.messages).role
+    ```
+    """
 }
 fn (session: ::types/Session, name: Str, arguments: Map?): Map {
   result ::client/session-request(session, "prompts/get", {
@@ -135,6 +155,8 @@ a `role` ("user" or "assistant") and `content` map.
 
 ```hot
 ::prompts ::mcp::prompts
+info ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+session ::mcp::client/connect("https://mcp.example.com/mcp", info, null)
 messages ::prompts/get-prompt(session, "code-review", {language: "hot", code: "add(1, 2)"})
 message first(messages)
 message.role    // => "user"
@@ -150,7 +172,21 @@ fn (session: ::types/Session, name: Str, arguments: Map?): Vec<::types/PromptMes
 }
 
 get-with-input
-meta {doc: """Get a prompt while fulfilling modern Multi Round-Trip input requests."""}
+meta {
+    doc: """
+    Get a prompt while fulfilling modern Multi Round-Trip input requests.
+
+    **Example**
+
+    ```hot
+    info ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+    session ::mcp::client/connect("https://mcp.example.com/mcp", info, null)
+    ask (request) { {action: "accept", content: {confirmed: true}} }
+    messages ::mcp::prompts/get-with-input(session, "code-review", {language: "hot"}, ask, 3)
+    first(messages).content
+    ```
+    """
+}
 fn (session: ::types/Session, name: Str, arguments: Map?, handler: Fn, max-rounds: Int): Vec<::types/PromptMessage> {
   result ::client/session-request-with-input(
     session,

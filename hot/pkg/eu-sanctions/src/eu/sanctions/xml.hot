@@ -53,7 +53,9 @@ fn (s: Str): Str {
   }
 }
 
-clean fn (s: Str): Str? {
+clean
+meta {no-doc: true}
+fn (s: Str): Str? {
   t trim(::re/replace-all(decode(s), "\\s+", " "))
   if(is-empty(t), null, t)
 }
@@ -62,7 +64,9 @@ clean fn (s: Str): Str? {
 // Elements
 // ---------------------------------------------------------------------------
 
-element-pattern fn (tag: Str): Str {
+element-pattern
+meta {no-doc: true}
+fn (tag: Str): Str {
   `(?s)<${tag}(?:\\s[^>]*)?>(.*?)</${tag}>`
 }
 
@@ -85,7 +89,16 @@ fn (doc: Str, tag: Str): Vec<Str> {
 
 blocks
 meta {
-    doc: """The raw inner content of every `<tag>` element in `fragment`, in order (for nested structures)."""
+    doc: """
+    The raw inner content of every `<tag>` element in `fragment`, in order
+    (for nested structures).
+
+    **Example**
+
+    ```hot
+    ::eu::sanctions::xml/blocks("<a><b>1</b><b>2</b></a>", "b")  // ["1", "2"]
+    ```
+    """
 }
 fn (fragment: Str?, tag: Str): Vec<Str> {
   cond {
@@ -96,7 +109,16 @@ fn (fragment: Str?, tag: Str): Vec<Str> {
 
 block
 meta {
-    doc: """The inner content of the first `<tag>` element, or null."""
+    doc: """
+    The inner content of the first `<tag>` element, or null.
+
+    **Example**
+
+    ```hot
+    ::eu::sanctions::xml/block("<a><b>1</b><b>2</b></a>", "b")  // "1"
+    ::eu::sanctions::xml/block("<a/>", "b")  // null
+    ```
+    """
 }
 fn (fragment: Str?, tag: Str): Str? {
   first(blocks(fragment, tag))
@@ -122,7 +144,15 @@ fn (fragment: Str?, tag: Str): Vec<Str> {
 
 text
 meta {
-    doc: """The text of the first non-blank `<tag>` element, or null."""
+    doc: """
+    The text of the first non-blank `<tag>` element, or null.
+
+    **Example**
+
+    ```hot
+    ::eu::sanctions::xml/text("<r><v> </v><v>A &amp; B</v></r>", "v")  // "A & B"
+    ```
+    """
 }
 fn (fragment: Str?, tag: Str): Str? {
   first(texts(fragment, tag))
@@ -130,7 +160,16 @@ fn (fragment: Str?, tag: Str): Str? {
 
 start-tags
 meta {
-    doc: """Every start (or empty-element) tag `<tag .../>` in `fragment`, as raw strings, for reading attributes."""
+    doc: """
+    Every start (or empty-element) tag `<tag .../>` in `fragment`, as raw
+    strings, for reading attributes.
+
+    **Example**
+
+    ```hot
+    ::eu::sanctions::xml/start-tags("<r><a x=\"1\"/><a x=\"2\">t</a></r>", "a")  // ["<a x=\"1\"/>", "<a x=\"2\">"]
+    ```
+    """
 }
 fn (fragment: Str?, tag: Str): Vec<Str> {
   cond {
@@ -148,7 +187,7 @@ meta {
     **Example**
 
     ```hot
-    ::eu::sanctions::xml/attr("<nameAlias wholeName=\\"Abu Ali\\" strong=\\"true\\">", "wholeName")  // "Abu Ali"
+    ::eu::sanctions::xml/attr("<nameAlias wholeName=\"Abu Ali\" strong=\"true\">", "wholeName")  // "Abu Ali"
     ```
     """
 }

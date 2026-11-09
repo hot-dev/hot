@@ -8,7 +8,20 @@ seg ::modern-treasury::api/seg
 
 list-incoming-payment-details
 meta {
-    doc: """GET /api/incoming_payment_details: one page. Filters: `type`, `direction`, `status` (`"pending"`, `"completed"`, `"returned"`, `"failed"`, `"held"`), `subtype`, `virtual_account_id`, `as_of_date_start`, `as_of_date_end`, `metadata`, `per_page`, `after_cursor`."""
+    doc: """
+    GET /api/incoming_payment_details: one page. Filters: `type`,
+    `direction`, `status` (`"pending"`, `"completed"`, `"returned"`,
+    `"failed"`, `"held"`), `subtype`, `virtual_account_id`,
+    `as_of_date_start`, `as_of_date_end`, `metadata`, `per_page`,
+    `after_cursor`.
+
+    **Example**
+
+    ```hot
+    page ::modern-treasury::incoming-payment-details/list-incoming-payment-details({status: "pending", direction: "credit"})
+    map(page.items, %.amount)
+    ```
+    """
 }
 fn
 (): Map {
@@ -23,7 +36,17 @@ fn
 
 get-incoming-payment-detail
 meta {
-    doc: """GET /api/incoming_payment_details/{id}: retrieve an incoming payment detail."""
+    doc: """
+    GET /api/incoming_payment_details/{id}: retrieve an incoming payment
+    detail.
+
+    **Example**
+
+    ```hot
+    detail ::modern-treasury::incoming-payment-details/get-incoming-payment-detail("6d2e8b14-3a7f-49c1-8e06-f4b1a9d3c572")
+    detail.status
+    ```
+    """
 }
 fn
 (incoming-payment-detail-id: Str): Map {
@@ -35,7 +58,16 @@ fn
 
 update-incoming-payment-detail
 meta {
-    doc: """PATCH /api/incoming_payment_details/{id}: set `metadata` (the only writable field)."""
+    doc: """
+    PATCH /api/incoming_payment_details/{id}: set `metadata` (the only
+    writable field).
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::incoming-payment-details/update-incoming-payment-detail("6d2e8b14-3a7f-49c1-8e06-f4b1a9d3c572", {invoice_id: "42"})
+    ```
+    """
 }
 fn
 (incoming-payment-detail-id: Str, metadata: Map): Map {

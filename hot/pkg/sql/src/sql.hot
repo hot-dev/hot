@@ -39,6 +39,7 @@ meta {
     **Typed queries**
 
     ```hot
+    db ::sql::pg/open({user: "postgres", database: "app"})
     User type { id: Int, email: Str, name: Str? }
 
     get-user ::sql/Query({
@@ -136,6 +137,9 @@ meta {
     **Example**
 
     ```hot
+    db ::sql::pg/open({user: "postgres", database: "app"})
+    User type { id: Int, email: Str }
+
     ActiveUsers ::sql/Query({
       sql: "SELECT id, email FROM users WHERE active = :active",
       returns: User,
@@ -155,7 +159,9 @@ type {
 // Error normalization
 // ---------------------------------------------------------------------------
 
-wrap-error fn (driver-name: Str, payload: Any): SqlError {
+wrap-error
+meta {no-doc: true}
+fn (driver-name: Str, payload: Any): SqlError {
   cond {
     is-map(payload) => {
       SqlError({
@@ -189,6 +195,13 @@ meta {
     double quotes doubled (`weird"name` → `"weird""name"`). Correct for
     PostgreSQL and SQLite. Rejects empty identifiers and identifiers
     containing NUL.
+
+    **Example**
+
+    ```hot
+    ::sql/ansi-quote-ident("orders")  // "\"orders\""
+    ::sql/ansi-quote-ident("weird\"name")  // "\"weird\"\"name\""
+    ```
     """
 }
 fn (name: Str): Str {
@@ -214,11 +227,13 @@ meta {
     **Example**
 
     ```hot
+    db ::sql::pg/open({user: "postgres", database: "app"})
+    user-chosen-table "orders"
     table ::sql/quote-ident(db, user-chosen-table)
-    rows ::sql/query(db, `SELECT * FROM ${table} WHERE id = ?`, [id])
+    rows ::sql/query(db, `SELECT * FROM ${table} WHERE id = ?`, [42])
 
     // Qualified names: quote each part
-    target `${::sql/quote-ident(db, schema)}.${::sql/quote-ident(db, table)}`
+    target `${::sql/quote-ident(db, "sales")}.${::sql/quote-ident(db, "orders")}`
     ```
     """
 }
@@ -241,6 +256,14 @@ meta {
     `::sql/open(::sql::pg/driver, {user: "postgres", database: "app"})`.
     Driver packages usually provide a shortcut (`::sql::pg/open(options)`).
     Returns a `Db`, or an Err carrying a `SqlError`.
+
+    **Example**
+
+    ```hot
+    db ::sql/open(::sql::pg/driver, {user: "postgres", database: "app"})
+    ::sql/scalar(db, "SELECT count(*) FROM users")
+    ::sql/close(db)
+    ```
     """
 }
 fn (driver: Driver, options: Map): Db {
@@ -258,7 +281,17 @@ fn (driver: Driver, options: Map): Db {
 
 close
 meta {
-    doc: """Close the database connection. Safe to call more than once."""
+    doc: """
+    Close the database connection. Safe to call more than once.
+
+    **Example**
+
+    ```hot
+    db ::sql::pg/open({user: "postgres", database: "app"})
+    ::sql/query(db, "SELECT id FROM users")
+    ::sql/close(db)
+    ```
+    """
 }
 fn (db: Db): Bool {
   do-close db.driver.close
@@ -273,7 +306,9 @@ fn (db: Db): Bool {
 // - all-null names (positional ?): params must be a Vec of the same length
 // - named placeholders: params must be a Map (or typed value); each name
 //   is looked up by key, and repeated names are repeated per occurrence
-bind-params fn (compiled: Map, params: Any): Vec {
+bind-params
+meta {no-doc: true}
+fn (compiled: Map, params: Any): Vec {
   named gt(length(filter(compiled.names, is-some)), 0)
   cond {
     eq(compiled.count, 0) => {
@@ -316,7 +351,9 @@ bind-params fn (compiled: Map, params: Any): Vec {
 }
 
 // Compile + bind + dispatch through the driver's query fn.
-run-query fn (db: Db, sql: Str, params: Any): Vec {
+run-query
+meta {no-doc: true}
+fn (db: Db, sql: Str, params: Any): Vec {
   compiled ::compile/compile(sql, db.driver.placeholder, db.driver.name)
   match compiled {
     Result.Err => { err(wrap-error(db.driver.name, compiled)) }
@@ -340,7 +377,9 @@ run-query fn (db: Db, sql: Str, params: Any): Vec {
   }
 }
 
-run-execute fn (db: Db, sql: Str, params: Any): Map {
+run-execute
+meta {no-doc: true}
+fn (db: Db, sql: Str, params: Any): Map {
   compiled ::compile/compile(sql, db.driver.placeholder, db.driver.name)
   match compiled {
     Result.Err => { err(wrap-error(db.driver.name, compiled)) }
@@ -377,6 +416,7 @@ meta {
     **Example**
 
     ```hot
+    db ::sql::pg/open({user: "postgres", database: "app"})
     ::sql/query(db, "SELECT * FROM users WHERE active = ?", [true])
     ::sql/query(db, "SELECT * FROM users WHERE email = :email", {email: "a@b.com"})
     ```
@@ -392,7 +432,18 @@ fn
 
 query-one
 meta {
-    doc: """Run a query and return the first row as a Map, or `null` when there are no rows."""
+    doc: """
+    Run a query and return the first row as a Map, or `null` when there are
+    no rows.
+
+    **Example**
+
+    ```hot
+    db ::sql::pg/open({user: "postgres", database: "app"})
+    user ::sql/query-one(db, "SELECT id, email FROM users WHERE id = ?", [42])
+    if(is-null(user), "no such user", user.email)
+    ```
+    """
 }
 fn
 (db: Db, sql: Str): Any {
@@ -416,6 +467,7 @@ meta {
     **Example**
 
     ```hot
+    db ::sql::pg/open({user: "postgres", database: "app"})
     n ::sql/scalar(db, "SELECT count(*) FROM users")
     ```
     """
@@ -442,7 +494,8 @@ meta {
     **Example**
 
     ```hot
-    ::sql/execute(db, "DELETE FROM sessions WHERE expires_at < ?", [now])
+    db ::sql::pg/open({user: "postgres", database: "app"})
+    ::sql/execute(db, "DELETE FROM sessions WHERE expires_at < ?", ["2026-01-01"])
     ```
     """
 }
@@ -458,7 +511,9 @@ fn
 // Typed queries
 // ---------------------------------------------------------------------------
 
-coerce-row fn (q: Query, row: Map): Any {
+coerce-row
+meta {no-doc: true}
+fn (q: Query, row: Map): Any {
   cond {
     is-null(q.returns) => { row }
     => {
@@ -483,6 +538,9 @@ meta {
     **Example**
 
     ```hot
+    db ::sql::pg/open({user: "postgres", database: "app"})
+    User type { id: Int, email: Str, name: Str? }
+
     get-user ::sql/Query({
       sql: "SELECT id, email, name FROM users WHERE id = :id",
       returns: User,
@@ -540,6 +598,7 @@ meta {
     **Example**
 
     ```hot
+    db ::sql::pg/open({user: "postgres", database: "app"})
     ::sql/transaction(db, (tx) {
       if-ok(::sql/execute(tx, "UPDATE accounts SET balance = balance - ? WHERE id = ?", [100, 1]), (debited) {
         ::sql/execute(tx, "UPDATE accounts SET balance = balance + ? WHERE id = ?", [100, 2])

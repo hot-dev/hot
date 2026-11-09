@@ -68,7 +68,7 @@ meta {
     **Example - Single text**
 
     ```hot
-    response ::openai::moderations/create(ModerationRequest({
+    response ::openai::moderations/create(::openai::moderations/ModerationRequest({
         input: "I love programming and helping others learn to code!"
     }))
 
@@ -81,7 +81,7 @@ meta {
     **Example - Multiple texts**
 
     ```hot
-    response ::openai::moderations/create(ModerationRequest({
+    response ::openai::moderations/create(::openai::moderations/ModerationRequest({
         input: ["Hello world", "How are you today?"]
     }))
 

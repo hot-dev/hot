@@ -59,7 +59,17 @@ fn
 
 attendee
 meta {
-    doc: """An attendee from an email Str or a Map (`{email, displayName?, optional?, responseStatus?}`) (pure)."""
+    doc: """
+    An attendee from an email Str or a Map (`{email, displayName?,
+    optional?, responseStatus?}`) (pure).
+
+    **Example**
+
+    ```hot
+    ::google::calendar::events/attendee("ada@example.com")  // {email: "ada@example.com"}
+    ::google::calendar::events/attendee({email: "bob@example.com", optional: true})  // {email: "bob@example.com", optional: true}
+    ```
+    """
 }
 fn (value: Any): Map {
   if(is-map(value), value, {email: trim(Str(value))})
@@ -74,6 +84,13 @@ meta {
     a new UUID). Needs `conferenceDataVersion=1`, which `create-event`,
     `update-event` and `patch-event` add when they see `conferenceData`.
     The link appears as `hangoutLink` once the request succeeds.
+
+    **Example**
+
+    ```hot
+    ::google::calendar::events/meet-request("req-1").createRequest.requestId  // "req-1"
+    ::google::calendar::events/meet-request("req-1").createRequest.conferenceSolutionKey  // {type: "hangoutsMeet"}
+    ```
     """
 }
 fn
@@ -85,7 +102,19 @@ fn
 }
 
 with-meet
-meta {doc: """An event body with a Meet `conferenceData` request added (pure)."""}
+meta {
+    doc: """
+    An event body with a Meet `conferenceData` request added (pure).
+
+    **Example**
+
+    ```hot
+    event ::google::calendar::events/with-meet({summary: "Kickoff"}, "req-1")
+    event.summary  // "Kickoff"
+    event.conferenceData.createRequest.requestId  // "req-1"
+    ```
+    """
+}
 fn
 (event: Map): Map {
   {...event, conferenceData: meet-request()}
@@ -96,7 +125,19 @@ fn
 
 meet-link
 meta {
-    doc: """The Google Meet URL of an event: `hangoutLink`, else the first `video` entry point; null when there is none (or the conference is still pending)."""
+    doc: """
+    The Google Meet URL of an event: `hangoutLink`, else the first `video`
+    entry point; null when there is none (or the conference is still
+    pending).
+
+    **Example**
+
+    ```hot
+    ::google::calendar::events/meet-link({hangoutLink: "https://meet.google.com/abc-defg-hij"})  // "https://meet.google.com/abc-defg-hij"
+    ::google::calendar::events/meet-link({conferenceData: {entryPoints: [{entryPointType: "video", uri: "https://meet.google.com/xyz"}]}})  // "https://meet.google.com/xyz"
+    ::google::calendar::events/meet-link({summary: "No call"})  // null
+    ```
+    """
 }
 fn (event: Map): Str? {
   entries or(get(or(get(event, "conferenceData"), {}), "entryPoints"), [])
@@ -171,6 +212,13 @@ meta {
     options (`sendUpdates`, `conferenceDataVersion`, `supportsAttachments`,
     `maxAttendees`, ...). Unset options are omitted. An unknown
     `sendUpdates` value is an Err.
+
+    **Example**
+
+    ```hot
+    ::google::calendar::events/write-params({conferenceData: {}}, {sendUpdates: "all"})  // {conferenceDataVersion: 1, sendUpdates: "all"}
+    ::google::calendar::events/write-params({summary: "Standup"}, {})  // {}
+    ```
     """
 }
 fn (event: Map, opts: Map): Map {
@@ -190,7 +238,16 @@ fn (event: Map, opts: Map): Map {
 
 notify-params
 meta {
-    doc: """The query parameters of a delete, quick-add or move (pure): your options, with `sendUpdates` checked."""
+    doc: """
+    The query parameters of a delete, quick-add or move (pure): your
+    options, with `sendUpdates` checked.
+
+    **Example**
+
+    ```hot
+    ::google::calendar::events/notify-params({sendUpdates: "none"})  // {sendUpdates: "none"}
+    ```
+    """
 }
 fn (opts: Map): Map {
   write-params({}, opts)
@@ -216,6 +273,20 @@ meta {
     (`"key=value"`, Vec for several), `timeZone`, `maxAttendees`,
     `alwaysIncludeEmail`, `syncToken` (see `::google::calendar::sync`).
     Scope: `calendar.events.readonly`.
+
+    **Example**
+
+    ```hot
+    page ::google::calendar::events/list-events("primary", {
+      timeMin: "2026-11-02T00:00:00Z",
+      timeMax: "2026-11-09T00:00:00Z",
+      singleEvents: true,
+      orderBy: "startTime",
+      maxResults: 50
+    })
+    map(page.items, %.summary)
+    page.nextPageToken
+    ```
     """
 }
 fn
@@ -253,7 +324,20 @@ fn
 
 get-event
 meta {
-    doc: """GET /calendars/{id}/events/{eventId} - one event. Options: `timeZone`, `maxAttendees`, `alwaysIncludeEmail`. Scope: `calendar.events.readonly`."""
+    doc: """
+    GET /calendars/{id}/events/{eventId} - one event. Options: `timeZone`,
+    `maxAttendees`, `alwaysIncludeEmail`. Scope: `calendar.events.readonly`.
+
+    **Example**
+
+    ```hot
+    event ::google::calendar::events/get-event("primary", "abc123")
+    event.summary
+
+    // Times in a specific zone
+    ::google::calendar::events/get-event("primary", "abc123", {timeZone: "America/Chicago"})
+    ```
+    """
 }
 fn
 (calendar-id: Str, event-id: Str): Map {
@@ -265,7 +349,22 @@ fn
 
 list-instances
 meta {
-    doc: """GET /calendars/{id}/events/{eventId}/instances - one page of a recurring event's occurrences. Options: `timeMin`, `timeMax`, `originalStart`, `showDeleted`, `maxResults`, `pageToken`, `timeZone`, `maxAttendees`. Scope: `calendar.events.readonly`."""
+    doc: """
+    GET /calendars/{id}/events/{eventId}/instances - one page of a recurring
+    event's occurrences. Options: `timeMin`, `timeMax`, `originalStart`,
+    `showDeleted`, `maxResults`, `pageToken`, `timeZone`, `maxAttendees`.
+    Scope: `calendar.events.readonly`.
+
+    **Example**
+
+    ```hot
+    page ::google::calendar::events/list-instances("primary", "abc123", {
+      timeMin: "2026-11-02T00:00:00Z",
+      timeMax: "2026-12-01T00:00:00Z"
+    })
+    map(page.items, %.start)
+    ```
+    """
 }
 fn
 (calendar-id: Str, event-id: Str): Map {
@@ -277,7 +376,24 @@ fn
 
 list-all-instances
 meta {
-    doc: """Every occurrence of a recurring event (all pages), or at most `limit`; bound it with `timeMin`/`timeMax` for endless series. Scope: `calendar.events.readonly`."""
+    doc: """
+    Every occurrence of a recurring event (all pages), or at most `limit`;
+    bound it with `timeMin`/`timeMax` for endless series. Scope:
+    `calendar.events.readonly`.
+
+    **Example**
+
+    ```hot
+    occurrences ::google::calendar::events/list-all-instances("primary", "abc123", {
+      timeMin: "2026-11-02T00:00:00Z",
+      timeMax: "2027-01-01T00:00:00Z"
+    })
+    length(occurrences)
+
+    // The next ten
+    ::google::calendar::events/list-all-instances("primary", "abc123", {timeMin: "2026-11-02T00:00:00Z"}, 10)
+    ```
+    """
 }
 fn
 (calendar-id: Str, event-id: Str, opts: Map): Vec {
@@ -291,7 +407,9 @@ fn
 // Writing
 // ---------------------------------------------------------------------------
 
-write fn (method: Str, path: Str, event: Map, opts: Map): Map {
+write
+meta {no-doc: true}
+fn (method: Str, path: Str, event: Map, opts: Map): Map {
   body ::cal/compact(event)
   params write-params(body, opts)
   if(is-err(params), params, ::cal/json(::cal/EVENTS_SCOPE, method, ::cal/url(path, params), body, opts))
@@ -327,7 +445,18 @@ fn
 
 update-event
 meta {
-    doc: """PUT /calendars/{id}/events/{eventId} - replace an event: fields you leave out are cleared, so start from `get-event`. Prefer `patch-event` to change a few fields. Scope: `calendar.events`."""
+    doc: """
+    PUT /calendars/{id}/events/{eventId} - replace an event: fields you
+    leave out are cleared, so start from `get-event`. Prefer `patch-event`
+    to change a few fields. Scope: `calendar.events`.
+
+    **Example**
+
+    ```hot
+    event ::google::calendar::events/get-event("primary", "abc123")
+    ::google::calendar::events/update-event("primary", "abc123", {...event, summary: "Design review"}, {sendUpdates: "all"})
+    ```
+    """
 }
 fn
 (calendar-id: Str, event-id: Str, event: Map): Map {
@@ -339,7 +468,20 @@ fn
 
 patch-event
 meta {
-    doc: """PATCH /calendars/{id}/events/{eventId} - change only the given fields (a Vec such as `attendees` is replaced whole). Scope: `calendar.events`."""
+    doc: """
+    PATCH /calendars/{id}/events/{eventId} - change only the given fields (a
+    Vec such as `attendees` is replaced whole). Scope: `calendar.events`.
+
+    **Example**
+
+    ```hot
+    updated ::google::calendar::events/patch-event("primary", "abc123", {location: "Room 4"})
+    updated.location
+
+    // Tell the attendees
+    ::google::calendar::events/patch-event("primary", "abc123", {summary: "Moved to Room 4"}, {sendUpdates: "all"})
+    ```
+    """
 }
 fn
 (calendar-id: Str, event-id: Str, changes: Map): Map {
@@ -351,7 +493,21 @@ fn
 
 delete-event
 meta {
-    doc: """DELETE /calendars/{id}/events/{eventId} - cancel and remove an event (deleting one instance of a recurring event cancels just that occurrence). Options: `sendUpdates`. Returns true. Scope: `calendar.events`."""
+    doc: """
+    DELETE /calendars/{id}/events/{eventId} - cancel and remove an event
+    (deleting one instance of a recurring event cancels just that
+    occurrence). Options: `sendUpdates`. Returns true. Scope:
+    `calendar.events`.
+
+    **Example**
+
+    ```hot
+    ::google::calendar::events/delete-event("primary", "abc123")
+
+    // Email the attendees about the cancellation
+    ::google::calendar::events/delete-event("primary", "abc123", {sendUpdates: "all"})
+    ```
+    """
 }
 fn
 (calendar-id: Str, event-id: Str): Bool {
@@ -365,7 +521,18 @@ fn
 
 quick-add
 meta {
-    doc: """POST /calendars/{id}/events/quickAdd - create an event from text, e.g. `"Lunch with Sam tomorrow at noon"` (parsed in the calendar's time zone; English works best). Options: `sendUpdates`. Scope: `calendar.events`."""
+    doc: """
+    POST /calendars/{id}/events/quickAdd - create an event from text, e.g.
+    `"Lunch with Sam tomorrow at noon"` (parsed in the calendar's time zone;
+    English works best). Options: `sendUpdates`. Scope: `calendar.events`.
+
+    **Example**
+
+    ```hot
+    event ::google::calendar::events/quick-add("primary", "Lunch with Sam tomorrow at noon")
+    event.start
+    ```
+    """
 }
 fn
 (calendar-id: Str, text: Str): Map {
@@ -379,7 +546,18 @@ fn
 
 move-event
 meta {
-    doc: """POST /calendars/{id}/events/{eventId}/move - move an event to the calendar `destination` (changes its organizer; only `default` events can move). Options: `sendUpdates`. Scope: `calendar.events`."""
+    doc: """
+    POST /calendars/{id}/events/{eventId}/move - move an event to the
+    calendar `destination` (changes its organizer; only `default` events can
+    move). Options: `sendUpdates`. Scope: `calendar.events`.
+
+    **Example**
+
+    ```hot
+    moved ::google::calendar::events/move-event("primary", "abc123", "team@group.calendar.google.com", {sendUpdates: "all"})
+    moved.organizer
+    ```
+    """
 }
 fn
 (calendar-id: Str, event-id: Str, destination: Str): Map {

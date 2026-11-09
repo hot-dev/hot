@@ -48,7 +48,17 @@ fn
 
 get-entity
 meta {
-    doc: """GET /entities/{entity_id}: retrieve an Entity."""
+    doc: """
+    GET /entities/{entity_id}: retrieve an Entity.
+
+    **Example**
+
+    ```hot
+    entity ::increase::entities/get-entity("entity_n8y8tnk2p9339ti393yi")
+    entity.structure
+    entity.status
+    ```
+    """
 }
 fn
 (entity-id: Str): Map {
@@ -60,7 +70,19 @@ fn
 
 list-entities
 meta {
-    doc: """GET /entities: one page of Entities. Filters: `"status.in"` (`active`, `archived`, `disabled`), `"validation_status.in"`, `created_at: {after, before, on_or_after, on_or_before}`, `idempotency_key`, plus `limit` and `cursor`."""
+    doc: """
+    GET /entities: one page of Entities. Filters: `"status.in"` (`active`,
+    `archived`, `disabled`), `"validation_status.in"`, `created_at: {after,
+    before, on_or_after, on_or_before}`, `idempotency_key`, plus `limit` and
+    `cursor`.
+
+    **Example**
+
+    ```hot
+    page ::increase::entities/list-entities({"status.in": ["active"], limit: 25})
+    map(page.data, %.id)
+    ```
+    """
 }
 fn
 (): Map {
@@ -75,7 +97,17 @@ fn
 
 update-entity
 meta {
-    doc: """PATCH /entities/{entity_id}: update an Entity's details (e.g. `corporation`, `natural_person`, `risk_rating`, `third_party_verification`, `details_confirmed_at`)."""
+    doc: """
+    PATCH /entities/{entity_id}: update an Entity's details (e.g.
+    `corporation`, `natural_person`, `risk_rating`,
+    `third_party_verification`, `details_confirmed_at`).
+
+    **Example**
+
+    ```hot
+    ::increase::entities/update-entity("entity_n8y8tnk2p9339ti393yi", {risk_rating: {rated_at: "2026-11-01T12:00:00Z", rating: "low"}})
+    ```
+    """
 }
 fn
 (entity-id: Str, params: Map): Map {

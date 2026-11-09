@@ -31,7 +31,9 @@ type {
     raw: Str,
 }
 
-strip-bot-suffix fn (token: Str): Str {
+strip-bot-suffix
+meta {no-doc: true}
+fn (token: Str): Str {
     parts split(token, "@")
     first(parts)
 }
@@ -42,6 +44,17 @@ meta {
     Parse `/command rest of text` into `{is-command, name, arg, raw}`.
     The leading slash is removed, the command name is lowercased, and
     bot suffixes like `/ask@MyBot` become `ask`.
+
+    **Example**
+
+    ```hot
+    ::command ::ai::agent::command
+
+    parsed ::command/parse("/Ask@MyBot what now?")
+    parsed.name  // "ask"
+    parsed.arg  // "what now?"
+    ::command/parse("hello").is-command  // false
+    ```
     """
 }
 fn (text: Str): ParsedCommand {
@@ -76,26 +89,77 @@ fn (text: Str): ParsedCommand {
 }
 
 arg
-meta { doc: "Return only the parsed command argument." }
+meta {
+    doc: """
+    Return only the parsed command argument.
+
+    **Example**
+
+    ```hot
+    ::ai::agent::command/arg("/remind tomorrow 9am")  // "tomorrow 9am"
+    ```
+    """
+}
 fn (text: Str): Str {
     parse(text).arg
 }
 
 matches
-meta { doc: "True when parsed command `parsed` matches a command's name or aliases." }
+meta {
+    doc: """
+    True when parsed command `parsed` matches a command's name or aliases.
+
+    **Example**
+
+    ```hot
+    ::command ::ai::agent::command
+
+    cmd ::command/Command({name: "memory", aliases: ["mem"]})
+    ::command/matches(::command/parse("/mem"), cmd)  // true
+    ::command/matches(::command/parse("/forget"), cmd)  // false
+    ```
+    """
+}
 fn (parsed: ParsedCommand, command: Command): Bool {
     aliases or(command.aliases, [])
     or(eq(parsed.name, command.name), in(parsed.name, aliases))
 }
 
 find
-meta { doc: "Find the first command matching parsed input, or null." }
+meta {
+    doc: """
+    Find the first command matching parsed input, or null.
+
+    **Example**
+
+    ```hot
+    ::command ::ai::agent::command
+
+    commands [::command/Command({name: "help", aliases: ["h"]}), ::command/Command({name: "why"})]
+    ::command/find(commands, ::command/parse("/h")).name  // "help"
+    ::command/find(commands, ::command/parse("/nope"))  // null
+    ```
+    """
+}
 fn (commands: Vec<Command>, parsed: ParsedCommand): Command? {
     find-first(commands, (cmd) { matches(parsed, cmd) })
 }
 
 usage-line
-meta { doc: "Render one command as a concise help line." }
+meta {
+    doc: """
+    Render one command as a concise help line.
+
+    **Example**
+
+    ```hot
+    ::command ::ai::agent::command
+
+    ::command/usage-line(::command/Command({name: "why"}))  // "/why"
+    ::command/usage-line(::command/Command({name: "why", description: "Explain the last answer."}))  // "/why — Explain the last answer."
+    ```
+    """
+}
 fn (command: Command): Str {
     usage or(command.usage, concat("/", command.name))
     desc or(command.description, "")

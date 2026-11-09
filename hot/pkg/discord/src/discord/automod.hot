@@ -23,7 +23,19 @@ ListAutoModerationRulesRequest type {
 
 list-auto-moderation-rules
 meta {
-    doc: """GET /guilds/{guild_id}/auto-moderation/rules - Every auto-moderation rule in a guild."""
+    doc: """
+    GET /guilds/{guild_id}/auto-moderation/rules - Every auto-moderation
+    rule in a guild.
+
+    **Example**
+
+    ```hot
+    ::automod ::discord::automod
+
+    rules ::automod/list-auto-moderation-rules(::automod/ListAutoModerationRulesRequest({guild_id: "1000000000000000000"}))
+    map(rules, %.name)
+    ```
+    """
 }
 fn
 (request: ListAutoModerationRulesRequest): Vec<Map> {
@@ -40,7 +52,21 @@ GetAutoModerationRuleRequest type {
 
 get-auto-moderation-rule
 meta {
-    doc: """GET /guilds/{guild_id}/auto-moderation/rules/{rule_id} - One rule."""
+    doc: """
+    GET /guilds/{guild_id}/auto-moderation/rules/{rule_id} - One rule.
+
+    **Example**
+
+    ```hot
+    ::automod ::discord::automod
+
+    rule ::automod/get-auto-moderation-rule(::automod/GetAutoModerationRuleRequest({
+      guild_id: "1000000000000000000",
+      rule_id: "2000000000000000000"
+    }))
+    rule.enabled
+    ```
+    """
 }
 fn
 (request: GetAutoModerationRuleRequest): Map {
@@ -112,7 +138,24 @@ ModifyAutoModerationRuleRequest type {
 
 modify-auto-moderation-rule
 meta {
-    doc: """PATCH /guilds/{guild_id}/auto-moderation/rules/{rule_id} - Change a rule (e.g. `enabled: false` to pause it). Only fields you set are sent; `trigger_type` cannot change."""
+    doc: """
+    PATCH /guilds/{guild_id}/auto-moderation/rules/{rule_id} - Change a rule
+    (e.g. `enabled: false` to pause it). Only fields you set are sent;
+    `trigger_type` cannot change.
+
+    **Example**
+
+    ```hot
+    ::automod ::discord::automod
+
+    ::automod/modify-auto-moderation-rule(::automod/ModifyAutoModerationRuleRequest({
+      guild_id: "1000000000000000000",
+      rule_id: "2000000000000000000",
+      enabled: false,
+      reason: "Paused during the event"
+    }))
+    ```
+    """
 }
 fn
 (request: ModifyAutoModerationRuleRequest): Map {
@@ -133,7 +176,22 @@ DeleteAutoModerationRuleRequest type {
 
 delete-auto-moderation-rule
 meta {
-    doc: """DELETE /guilds/{guild_id}/auto-moderation/rules/{rule_id} - Delete a rule."""
+    doc: """
+    DELETE /guilds/{guild_id}/auto-moderation/rules/{rule_id} - Delete a
+    rule.
+
+    **Example**
+
+    ```hot
+    ::automod ::discord::automod
+
+    ::automod/delete-auto-moderation-rule(::automod/DeleteAutoModerationRuleRequest({
+      guild_id: "1000000000000000000",
+      rule_id: "2000000000000000000",
+      reason: "Replaced by a preset"
+    }))
+    ```
+    """
 }
 fn
 (request: DeleteAutoModerationRuleRequest): Bool {

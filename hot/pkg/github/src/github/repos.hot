@@ -7,13 +7,25 @@ query-string ::hot::uri/query-string
 
 // Percent-encode a repository content path per segment: each segment is a
 // URI component, but the / separators must survive as path structure.
-encode-path fn (path: Str): Str {
+encode-path
+meta {no-doc: true}
+fn (path: Str): Str {
   join(map(split(path, "/"), (segment) { ::uri/encode(segment) }), "/")
 }
 
 get-repo
 meta {
-    doc: """GET /repos/{owner}/{repo} - Repository metadata (default branch, visibility, topics, counts)."""
+    doc: """
+    GET /repos/{owner}/{repo} - Repository metadata (default branch,
+    visibility, topics, counts).
+
+    **Example**
+
+    ```hot
+    repo ::github::repos/get-repo("acme", "api")
+    repo.default_branch
+    ```
+    """
 }
 fn
 (owner: Str, repo: Str): Map {
@@ -31,6 +43,13 @@ meta {
     (GitHub default 30, max 100); pass `page` to paginate. For an
     organization's repositories (including private-repo visibility and
     org `type` filters) use `list-org-repos`.
+
+    **Example**
+
+    ```hot
+    repos ::github::repos/list-repos("octocat", {sort: "updated", per_page: 10})
+    map(repos, %.full_name)
+    ```
     """
 }
 fn
@@ -51,6 +70,13 @@ meta {
     supports `type` ("all"/"public"/"private"/"forks"/"sources"/"member"),
     `sort`, `per_page`, `page`. Returns a single page (GitHub default 30,
     max 100); pass `page` to paginate.
+
+    **Example**
+
+    ```hot
+    repos ::github::repos/list-org-repos("acme", {type: "private", per_page: 100})
+    map(repos, %.name)
+    ```
     """
 }
 fn
@@ -66,7 +92,18 @@ fn
 
 list-branches
 meta {
-    doc: """GET /repos/{owner}/{repo}/branches - List branches. `params` supports `per_page`, `page`. Returns a single page (GitHub default 30, max 100); pass `page` to paginate."""
+    doc: """
+    GET /repos/{owner}/{repo}/branches - List branches. `params` supports
+    `per_page`, `page`. Returns a single page (GitHub default 30, max 100);
+    pass `page` to paginate.
+
+    **Example**
+
+    ```hot
+    branches ::github::repos/list-branches("acme", "api", {per_page: 100})
+    map(branches, %.name)
+    ```
+    """
 }
 fn
 (owner: Str, repo: Str): Vec {
@@ -81,7 +118,19 @@ fn
 
 list-commits
 meta {
-    doc: """GET /repos/{owner}/{repo}/commits - List commits, newest first. `params` supports `sha` (branch), `path`, `author`, `since`, `until`, `per_page`, `page`. Returns a single page (GitHub default 30, max 100); pass `page` to paginate."""
+    doc: """
+    GET /repos/{owner}/{repo}/commits - List commits, newest first. `params`
+    supports `sha` (branch), `path`, `author`, `since`, `until`, `per_page`,
+    `page`. Returns a single page (GitHub default 30, max 100); pass `page`
+    to paginate.
+
+    **Example**
+
+    ```hot
+    commits ::github::repos/list-commits("acme", "api", {sha: "main", path: "src", per_page: 20})
+    map(commits, %.sha)
+    ```
+    """
 }
 fn
 (owner: Str, repo: Str): Vec {
@@ -96,7 +145,17 @@ fn
 
 decode-content
 meta {
-    doc: """Decode a contents-API response (`{content: base64-with-newlines, encoding: "base64"}`) into the file text. Exposed for testing; `get-content` applies it."""
+    doc: """
+    Decode a contents-API response (`{content: base64-with-newlines,
+    encoding: "base64"}`) into the file text. Exposed for testing;
+    `get-content` applies it.
+
+    **Example**
+
+    ```hot
+    ::github::repos/decode-content({content: "aGVsbG8=\n", encoding: "base64"})  // "hello"
+    ```
+    """
 }
 fn (resource: Map): Str {
   cond {
@@ -108,7 +167,9 @@ fn (resource: Map): Str {
 }
 
 // Shared body of get-content: `query` is "" or an encoded "?ref=..." suffix.
-fetch-content fn
+fetch-content
+meta {no-doc: true}
+fn
 (owner: Str, repo: Str, path: Str, query: Str): Map {
   fetch-content(owner, repo, path, query, {})
 },
@@ -134,6 +195,17 @@ meta {
     decoded text — the `sha` is what `put-content` needs to update it.
     Pass a `ref` (branch/tag/sha) with the 4-arity Str form. Errs when
     `path` is a directory.
+
+    **Example**
+
+    ```hot
+    file ::github::repos/get-content("acme", "api", "README.md")
+    file.content
+
+    // From a branch, tag or SHA
+    tagged ::github::repos/get-content("acme", "api", "VERSION", "v1.2.0")
+    tagged.sha
+    ```
     """
 }
 fn

@@ -4,7 +4,16 @@
 
 build-note-payload
 meta {
-    doc: """Build the create-note payload (plaintext format). Exposed for testing; `create-note` uses it."""
+    doc: """
+    Build the create-note payload (plaintext format). Exposed for testing;
+    `create-note` uses it.
+
+    **Example**
+
+    ```hot
+    ::attio::notes/build-note-payload("people", "record-1", "Intro call", "Wants a demo.").data.format  // "plaintext"
+    ```
+    """
 }
 fn (parent-object: Str, parent-record-id: Str, title: Str, content: Str): Map {
   {
@@ -26,7 +35,7 @@ meta {
     **Example**
 
     ```hot
-    ::attio::notes/create-note("people", person.id.record_id, "Demo call", "Positive; follow up Friday.")
+    ::attio::notes/create-note("people", "7f4e2a10-3b9c-4d2a-8f1e-6a5c9d0b1e23", "Demo call", "Positive; follow up Friday.")
     ```
     """
 }
@@ -45,7 +54,16 @@ fn
 
 list-notes
 meta {
-    doc: """GET /notes?parent_object=&parent_record_id= - The notes on a record."""
+    doc: """
+    GET /notes?parent_object=&parent_record_id= - The notes on a record.
+
+    **Example**
+
+    ```hot
+    notes ::attio::notes/list-notes("people", ::attio::recordsEC)
+    map(notes.data, %.title)
+    ```
+    """
 }
 fn
 (parent-object: Str, parent-record-id: Str): Map {
@@ -57,7 +75,15 @@ fn
 
 delete-note
 meta {
-    doc: """DELETE /notes/{id} - Delete a note."""
+    doc: """
+    DELETE /notes/{id} - Delete a note.
+
+    **Example**
+
+    ```hot
+    ::attio::notes/delete-note("c2d8e4f1-5a6b-47c9-b0d3-1e2f3a4b5c6d")
+    ```
+    """
 }
 fn
 (note-id: Str): Any {

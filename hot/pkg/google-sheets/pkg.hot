@@ -2,7 +2,7 @@
 
 hot.pkg.google-sheets {
   name: "hot.dev/google-sheets",
-  version: "0.1.1",
+  version: "0.1.2",
   hot-min-version: "3.0.2",
   description: "Google Sheets API v4 bindings for Hot: read and write values (single, batch, append, clear) with render and input options, rows as records, spreadsheet metadata and creation, and batchUpdate builders for tabs, freezing, resizing and formatting.",
   author: "Hot Dev",
@@ -10,7 +10,7 @@ hot.pkg.google-sheets {
   license: "Apache-2.0",
   tags: ["documents"],
   deps: {
-    "hot.dev/google-core": "0.1.1"
+    "hot.dev/google-core": "0.1.2"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]

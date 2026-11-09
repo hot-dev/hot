@@ -56,7 +56,7 @@ meta {
     **Example — single text**
 
     ```hot
-    response create(EmbeddingRequest({
+    response ::qwen::embeddings/create(::qwen::embeddings/EmbeddingRequest({
         input: "The quick brown fox jumps over the lazy dog",
         model: "text-embedding-v4"
     }))
@@ -68,7 +68,7 @@ meta {
     **Example — batch**
 
     ```hot
-    response create(EmbeddingRequest({
+    response ::qwen::embeddings/create(::qwen::embeddings/EmbeddingRequest({
         input: ["Hello world", "Goodbye world"],
         model: "text-embedding-v4"
     }))
@@ -79,7 +79,7 @@ meta {
     **Example — custom dimensions**
 
     ```hot
-    response create(EmbeddingRequest({
+    response ::qwen::embeddings/create(::qwen::embeddings/EmbeddingRequest({
         input: "Test text",
         model: "text-embedding-v4",
         dimensions: 256
@@ -104,7 +104,17 @@ fn
 
 request-body
 meta {
-    doc: """The JSON body for an `EmbeddingRequest`, with unset optional fields omitted. Pure; exposed for testing."""
+    doc: """
+    The JSON body for an `EmbeddingRequest`, with unset optional fields
+    omitted. Pure; exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::qwen::embeddings/request-body(::qwen::embeddings/EmbeddingRequest({input: "Hello", model: "text-embedding-v4"}))
+    // {input: "Hello", model: "text-embedding-v4"}
+    ```
+    """
 }
 fn (request: EmbeddingRequest): Map {
     filter-vals(untype(request), is-some)
@@ -123,7 +133,7 @@ meta {
     **Example**
 
     ```hot
-    vector embed("Hello world")
+    vector ::qwen::embeddings/embed("Hello world")
     // => Vec<Dec> with 1024 dimensions
     ```
     """
@@ -162,7 +172,7 @@ meta {
     **Example**
 
     ```hot
-    vectors embed-batch(["Hello", "World", "Test"], "text-embedding-v4")
+    vectors ::qwen::embeddings/embed-batch(["Hello", "World", "Test"], "text-embedding-v4")
     length(vectors) // => 3
     ```
     """

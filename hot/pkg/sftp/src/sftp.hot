@@ -50,99 +50,467 @@ type {
 
 connect
 meta {
-    doc: "Connect to SFTP using ::ssh/ConnectOptions. Owns its SSH connection; close shuts both down."
+    doc: """
+    Connect to SFTP using ::ssh/ConnectOptions. Owns its SSH connection;
+    close shuts both down.
+
+    **Example**
+
+    ```hot
+    session ::sftp/connect({
+      host: "files.example.com",
+      user: "integration",
+      host-key: ::hot::ctx/get("files.host.key"),
+      private-key: ::hot::ctx/get("files.private.key")
+    })
+    // host-key pins the server, as in ::ssh/connect
+    entries ::sftp/list(session, "/incoming")
+    map(entries, %.name)
+    ::sftp/close(session)
+    ```
+    """
 }
 fn (options: ConnectOptions): Session { call-lib(::hot::internal::sftp/connect, [options]) }
 
 start
 meta {
-    doc: "Start SFTP on an existing authenticated SSH connection. Closing this session leaves the shared connection open."
+    doc: """
+    Start SFTP on an existing authenticated SSH connection. Closing this
+    session leaves the shared connection open.
+
+    **Example**
+
+    ```hot
+    connection ::ssh/connect({
+      host: "files.example.com",
+      user: "integration",
+      host-key: ::hot::ctx/get("files.host.key"),
+      private-key: ::hot::ctx/get("files.private.key")
+    })
+    session ::sftp/start(connection)
+    entries ::sftp/list(session, "/incoming")
+    map(entries, %.name)
+
+    // The connection stays open, so close it too
+    ::sftp/close(session)
+    ::ssh/close(connection)
+    ```
+    """
 }
 fn (connection: Connection): Session { call-lib(::hot::internal::sftp/start, [connection]) }
 
 stat
 meta {
-    doc: "Read file metadata, following symlinks. Times are Unix seconds; unavailable attributes are null."
+    doc: """
+    Read file metadata, following symlinks. Times are Unix seconds;
+    unavailable attributes are null.
+
+    **Example**
+
+    ```hot
+    session ::sftp/connect({
+      host: "files.example.com",
+      user: "integration",
+      host-key: ::hot::ctx/get("files.host.key"),
+      private-key: ::hot::ctx/get("files.private.key")
+    })
+    attrs ::sftp/stat(session, "/incoming/report.csv")
+    attrs.size
+    attrs.kind
+
+    // Unix seconds, or null if the server did not send it
+    attrs.modified
+    ::sftp/close(session)
+    ```
+    """
 }
 fn (session: Session, path: Str): Attributes { call-lib(::hot::internal::sftp/stat, [session, path]) }
 
 lstat
-meta {doc: "Read metadata without following the final symlink."}
+meta {
+    doc: """
+    Read metadata without following the final symlink.
+
+    **Example**
+
+    ```hot
+    session ::sftp/connect({
+      host: "files.example.com",
+      user: "integration",
+      host-key: ::hot::ctx/get("files.host.key"),
+      private-key: ::hot::ctx/get("files.private.key")
+    })
+    // Describes the link itself, not the file it points at
+    attrs ::sftp/lstat(session, "/incoming/latest.csv")
+    eq(attrs.kind, "symlink")
+    ::sftp/close(session)
+    ```
+    """
+}
 fn (session: Session, path: Str): Attributes { call-lib(::hot::internal::sftp/lstat, [session, path]) }
 
 list
 meta {
-    doc: "List a directory. Entries named '.' and '..' are omitted. Paths use POSIX separators."
+    doc: """
+    List a directory. Entries named '.' and '..' are omitted. Paths use
+    POSIX separators.
+
+    **Example**
+
+    ```hot
+    session ::sftp/connect({
+      host: "files.example.com",
+      user: "integration",
+      host-key: ::hot::ctx/get("files.host.key"),
+      private-key: ::hot::ctx/get("files.private.key")
+    })
+    entries ::sftp/list(session, "/incoming")
+    files filter(entries, eq(%.attributes.kind, "file"))
+    map(files, %.path)
+    ::sftp/close(session)
+    ```
+    """
 }
 fn (session: Session, path: Str): Vec<Entry> { call-lib(::hot::internal::sftp/list, [session, path]) }
 
 exists
 meta {
-    doc: "Return false only when the server reports a missing path. Permission and transport errors remain Err."
+    doc: """
+    Return false only when the server reports a missing path. Permission and
+    transport errors remain Err.
+
+    **Example**
+
+    ```hot
+    session ::sftp/connect({
+      host: "files.example.com",
+      user: "integration",
+      host-key: ::hot::ctx/get("files.host.key"),
+      private-key: ::hot::ctx/get("files.private.key")
+    })
+    path "/incoming/report.csv"
+    if(::sftp/exists(session, path), ::sftp/read-file(session, path), null)
+    ::sftp/close(session)
+    ```
+    """
 }
 fn (session: Session, path: Str): Bool { call-lib(::hot::internal::sftp/exists, [session, path]) }
 
 realpath
-meta {doc: "Resolve a remote path to its canonical absolute path."}
+meta {
+    doc: """
+    Resolve a remote path to its canonical absolute path.
+
+    **Example**
+
+    ```hot
+    session ::sftp/connect({
+      host: "files.example.com",
+      user: "integration",
+      host-key: ::hot::ctx/get("files.host.key"),
+      private-key: ::hot::ctx/get("files.private.key")
+    })
+    // The directory this login starts in
+    ::sftp/realpath(session, ".")
+
+    ::sftp/realpath(session, "/incoming/../outgoing")
+    ::sftp/close(session)
+    ```
+    """
+}
 fn (session: Session, path: Str): Str { call-lib(::hot::internal::sftp/realpath, [session, path]) }
 
 readlink
-meta {doc: "Read a symbolic link's target."}
+meta {
+    doc: """
+    Read a symbolic link's target.
+
+    **Example**
+
+    ```hot
+    session ::sftp/connect({
+      host: "files.example.com",
+      user: "integration",
+      host-key: ::hot::ctx/get("files.host.key"),
+      private-key: ::hot::ctx/get("files.private.key")
+    })
+    // The stored target, which may be relative
+    ::sftp/readlink(session, "/incoming/latest.csv")
+    ::sftp/close(session)
+    ```
+    """
+}
 fn (session: Session, path: Str): Str { call-lib(::hot::internal::sftp/readlink, [session, path]) }
 
 mkdir
-meta {doc: "Create one directory. Parent directories must already exist."}
+meta {
+    doc: """
+    Create one directory. Parent directories must already exist.
+
+    **Example**
+
+    ```hot
+    session ::sftp/connect({
+      host: "files.example.com",
+      user: "integration",
+      host-key: ::hot::ctx/get("files.host.key"),
+      private-key: ::hot::ctx/get("files.private.key")
+    })
+    // Create each level in turn
+    ::sftp/mkdir(session, "/archive")
+    ::sftp/mkdir(session, "/archive/2026")
+    ::sftp/close(session)
+    ```
+    """
+}
 fn (session: Session, path: Str): Bool { call-lib(::hot::internal::sftp/mkdir, [session, path]) }
 
 rmdir
-meta {doc: "Remove an empty directory."}
+meta {
+    doc: """
+    Remove an empty directory.
+
+    **Example**
+
+    ```hot
+    session ::sftp/connect({
+      host: "files.example.com",
+      user: "integration",
+      host-key: ::hot::ctx/get("files.host.key"),
+      private-key: ::hot::ctx/get("files.private.key")
+    })
+    ::sftp/remove(session, "/archive/2026/report.csv")
+    ::sftp/rmdir(session, "/archive/2026")
+    ::sftp/close(session)
+    ```
+    """
+}
 fn (session: Session, path: Str): Bool { call-lib(::hot::internal::sftp/rmdir, [session, path]) }
 
 remove
-meta {doc: "Remove a file or symbolic link."}
+meta {
+    doc: """
+    Remove a file or symbolic link.
+
+    **Example**
+
+    ```hot
+    session ::sftp/connect({
+      host: "files.example.com",
+      user: "integration",
+      host-key: ::hot::ctx/get("files.host.key"),
+      private-key: ::hot::ctx/get("files.private.key")
+    })
+    ::sftp/remove(session, "/incoming/report.csv")
+    ::sftp/close(session)
+    ```
+    """
+}
 fn (session: Session, path: Str): Bool { call-lib(::hot::internal::sftp/remove, [session, path]) }
 
 rename
 meta {
-    doc: "Rename a file or directory. Replacement behavior follows the server's SFTP v3 semantics."
+    doc: """
+    Rename a file or directory. Replacement behavior follows the server's
+    SFTP v3 semantics.
+
+    **Example**
+
+    ```hot
+    session ::sftp/connect({
+      host: "files.example.com",
+      user: "integration",
+      host-key: ::hot::ctx/get("files.host.key"),
+      private-key: ::hot::ctx/get("files.private.key")
+    })
+    // Write under a temporary name, then publish it
+    ::sftp/write-file(session, "/outgoing/report.csv.part", "id,total")
+    ::sftp/rename(session, "/outgoing/report.csv.part", "/outgoing/report.csv")
+    ::sftp/close(session)
+    ```
+    """
 }
 fn (session: Session, old-path: Str, new-path: Str): Bool { call-lib(::hot::internal::sftp/rename, [session, old-path, new-path]) }
 
 symlink
-meta {doc: "Create link-path pointing at target."}
+meta {
+    doc: """
+    Create link-path pointing at target.
+
+    **Example**
+
+    ```hot
+    session ::sftp/connect({
+      host: "files.example.com",
+      user: "integration",
+      host-key: ::hot::ctx/get("files.host.key"),
+      private-key: ::hot::ctx/get("files.private.key")
+    })
+    ::sftp/symlink(session, "/incoming/report-2026-11.csv", "/incoming/latest.csv")
+    ::sftp/readlink(session, "/incoming/latest.csv")
+    ::sftp/close(session)
+    ```
+    """
+}
 fn (session: Session, target: Str, link-path: Str): Bool { call-lib(::hot::internal::sftp/symlink, [session, target, link-path]) }
 
 write-file
 meta {
-    doc: "Create or truncate a file, write Bytes or UTF-8 Str, and wait for acknowledged writes and close. Returns bytes written."
+    doc: """
+    Create or truncate a file, write Bytes or UTF-8 Str, and wait for
+    acknowledged writes and close. Returns bytes written.
+
+    **Example**
+
+    ```hot
+    session ::sftp/connect({
+      host: "files.example.com",
+      user: "integration",
+      host-key: ::hot::ctx/get("files.host.key"),
+      private-key: ::hot::ctx/get("files.private.key")
+    })
+    // Returns the number of bytes written
+    ::sftp/write-file(session, "/outgoing/notes.txt", "Shipped.")
+    ::sftp/write-file(session, "/outgoing/blob.bin", Bytes([0, 1, 2]))
+    ::sftp/close(session)
+    ```
+    """
 }
 fn (session: Session, path: Str, data: Bytes | Str): Int { call-lib(::hot::internal::sftp/write-file, [session, path, data]) }
 
 read
 meta {
-    doc: "Read up to max bytes (1..67108864) from an open file. Returns null at EOF. A short read does not mean EOF."
+    doc: """
+    Read up to max bytes (1..67108864) from an open file. Returns null at
+    EOF. A short read does not mean EOF.
+
+    **Example**
+
+    ```hot
+    session ::sftp/connect({
+      host: "files.example.com",
+      user: "integration",
+      host-key: ::hot::ctx/get("files.host.key"),
+      private-key: ::hot::ctx/get("files.private.key")
+    })
+    file ::sftp/open(session, "/incoming/large.bin")
+
+    // Call again for the next chunk. Stop when it returns null.
+    chunk ::sftp/read(file, 65536)
+    if(is-null(chunk), 0, length(chunk))
+
+    ::sftp/close(file)
+    ::sftp/close(session)
+    ```
+    """
 }
 fn (file: File, max: Int): Bytes? { call-lib(::hot::internal::sftp/read, [file, max]) }
 
 write
-meta {doc: "Write a chunk and wait for server acknowledgement. Returns bytes written."}
+meta {
+    doc: """
+    Write a chunk and wait for server acknowledgement. Returns bytes
+    written.
+
+    **Example**
+
+    ```hot
+    session ::sftp/connect({
+      host: "files.example.com",
+      user: "integration",
+      host-key: ::hot::ctx/get("files.host.key"),
+      private-key: ::hot::ctx/get("files.private.key")
+    })
+    file ::sftp/open(session, "/outgoing/events.log", "append")
+
+    // Each call returns the number of bytes written
+    ::sftp/write(file, "first line")
+    ::sftp/write(file, Bytes([10]))
+
+    ::sftp/close(file)
+    ::sftp/close(session)
+    ```
+    """
+}
 fn (file: File, data: Bytes | Str): Int { call-lib(::hot::internal::sftp/write, [file, data]) }
 
 seek
 meta {
-    doc: "Set an open file's absolute byte offset. Flushes pending writes before seeking."
+    doc: """
+    Set an open file's absolute byte offset. Flushes pending writes before
+    seeking.
+
+    **Example**
+
+    ```hot
+    session ::sftp/connect({
+      host: "files.example.com",
+      user: "integration",
+      host-key: ::hot::ctx/get("files.host.key"),
+      private-key: ::hot::ctx/get("files.private.key")
+    })
+    file ::sftp/open(session, "/incoming/large.bin")
+
+    // Returns the new offset
+    ::sftp/seek(file, 1024)
+    chunk ::sftp/read(file, 512)
+
+    ::sftp/close(file)
+    ::sftp/close(session)
+    ```
+    """
 }
 fn (file: File, offset: Int): Int { call-lib(::hot::internal::sftp/seek, [file, offset]) }
 
 close
 meta {
-    doc: "Close a session or file. Close files before their session. Safe to repeat."
+    doc: """
+    Close a session or file. Close files before their session. Safe to
+    repeat.
+
+    **Example**
+
+    ```hot
+    session ::sftp/connect({
+      host: "files.example.com",
+      user: "integration",
+      host-key: ::hot::ctx/get("files.host.key"),
+      private-key: ::hot::ctx/get("files.private.key")
+    })
+    file ::sftp/open(session, "/incoming/report.csv")
+    ::sftp/read(file, 1024)
+
+    // The file first, then the session
+    ::sftp/close(file)
+    ::sftp/close(session)
+    ```
+    """
 }
 fn (handle: Session | File): Bool { call-lib(::hot::internal::sftp/close, [handle]) }
 
 read-file
 meta {
-    doc: "Read a whole file as Bytes, up to max bytes (default and maximum 67108864). A larger file returns Err; use open/read for large files."
+    doc: """
+    Read a whole file as Bytes, up to max bytes (default and maximum
+    67108864). A larger file returns Err; use open/read for large files.
+
+    **Example**
+
+    ```hot
+    session ::sftp/connect({
+      host: "files.example.com",
+      user: "integration",
+      host-key: ::hot::ctx/get("files.host.key"),
+      private-key: ::hot::ctx/get("files.private.key")
+    })
+    data ::sftp/read-file(session, "/incoming/report.csv")
+    ::hot::bytes/to-str(data)
+
+    // Returns Err if the file is larger than 1 MiB
+    ::sftp/read-file(session, "/incoming/small.json", 1048576)
+    ::sftp/close(session)
+    ```
+    """
 }
 fn
 (session: Session, path: Str): Bytes { call-lib(::hot::internal::sftp/read-file, [session, path, 67108864]) },
@@ -150,7 +518,31 @@ fn
 
 open
 meta {
-    doc: "Open a file. Modes: read (default), write (create/truncate), append (create), or read-write (create without truncating)."
+    doc: """
+    Open a file. Modes: read (default), write (create/truncate), append
+    (create), or read-write (create without truncating).
+
+    **Example**
+
+    ```hot
+    session ::sftp/connect({
+      host: "files.example.com",
+      user: "integration",
+      host-key: ::hot::ctx/get("files.host.key"),
+      private-key: ::hot::ctx/get("files.private.key")
+    })
+    // Read is the default
+    reader ::sftp/open(session, "/incoming/large.bin")
+    chunk ::sftp/read(reader, 65536)
+    ::sftp/close(reader)
+
+    // Create the file, or replace what is there
+    writer ::sftp/open(session, "/outgoing/copy.bin", "write")
+    ::sftp/write(writer, chunk)
+    ::sftp/close(writer)
+    ::sftp/close(session)
+    ```
+    """
 }
 fn
 (session: Session, path: Str): File { call-lib(::hot::internal::sftp/open, [session, path, "read"]) },

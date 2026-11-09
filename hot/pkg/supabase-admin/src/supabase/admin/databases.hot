@@ -14,11 +14,15 @@ Migration type {
   inserted_at: Str?
 }
 
-pooler-path fn (project-ref: Str): Str {
+pooler-path
+meta {no-doc: true}
+fn (project-ref: Str): Str {
   `/projects/${project-ref}/config/database/pooler`
 }
 
-upgrade-eligibility-path fn (project-ref: Str): Str {
+upgrade-eligibility-path
+meta {no-doc: true}
+fn (project-ref: Str): Str {
   `/projects/${project-ref}/upgrade/eligibility`
 }
 
@@ -50,7 +54,21 @@ fn
 
 update-postgres-config
 meta {
-    doc: """Update Postgres configuration. Pass a Map of config fields (e.g. `{statement_timeout: "30s", max_connections: 200}`)."""
+    doc: """
+    Update Postgres configuration. Pass a Map of config fields (e.g.
+    `{statement_timeout: "30s", max_connections: 200}`).
+
+    **Example**
+
+    ```hot
+    ::databases ::supabase::admin::databases
+
+    ::databases/update-postgres-config("my-project-ref", {
+      statement_timeout: "30s",
+      max_connections: 200
+    })
+    ```
+    """
 }
 fn
 (project-ref: Str, config: Map): Map {
@@ -62,7 +80,18 @@ fn
 
 get-pooler-config
 meta {
-    doc: """Get the current Supavisor connection pooler configuration."""
+    doc: """
+    Get the current Supavisor connection pooler configuration.
+
+    **Example**
+
+    ```hot
+    ::databases ::supabase::admin::databases
+
+    poolers ::databases/get-pooler-config("my-project-ref")
+    map(poolers, %.pool_mode)
+    ```
+    """
 }
 fn
 (project-ref: Str): Vec<Map> {
@@ -74,7 +103,17 @@ fn
 
 update-pooler-config
 meta {
-    doc: """Update the Supavisor connection pooler configuration."""
+    doc: """
+    Update the Supavisor connection pooler configuration.
+
+    **Example**
+
+    ```hot
+    ::databases ::supabase::admin::databases
+
+    ::databases/update-pooler-config("my-project-ref", {default_pool_size: 20})
+    ```
+    """
 }
 fn
 (project-ref: Str, config: Map): Map {
@@ -117,7 +156,18 @@ fn
 
 list-migrations
 meta {
-    doc: """List database migrations that have been run on a project."""
+    doc: """
+    List database migrations that have been run on a project.
+
+    **Example**
+
+    ```hot
+    ::databases ::supabase::admin::databases
+
+    migrations ::databases/list-migrations("my-project-ref")
+    map(migrations, %.version)
+    ```
+    """
 }
 fn
 (project-ref: Str): Vec<Migration> {
@@ -167,7 +217,18 @@ fn
 
 list-read-replicas
 meta {
-    doc: """List read replicas for a project."""
+    doc: """
+    List read replicas for a project.
+
+    **Example**
+
+    ```hot
+    ::databases ::supabase::admin::databases
+
+    replicas ::databases/list-read-replicas("my-project-ref")
+    length(replicas)
+    ```
+    """
 }
 fn
 (project-ref: Str): Vec<Map> {
@@ -179,7 +240,18 @@ fn
 
 get-readonly-mode
 meta {
-    doc: """Check if the project database is in read-only mode."""
+    doc: """
+    Check if the project database is in read-only mode.
+
+    **Example**
+
+    ```hot
+    ::databases ::supabase::admin::databases
+
+    mode ::databases/get-readonly-mode("my-project-ref")
+    mode.enabled
+    ```
+    """
 }
 fn
 (project-ref: Str): Map {
@@ -195,7 +267,18 @@ fn
 
 get-upgrade-status
 meta {
-    doc: """Get the current database upgrade status."""
+    doc: """
+    Get the current database upgrade status.
+
+    **Example**
+
+    ```hot
+    ::databases ::supabase::admin::databases
+
+    upgrade ::databases/get-upgrade-status("my-project-ref")
+    upgrade.databaseUpgradeStatus
+    ```
+    """
 }
 fn
 (project-ref: Str): Map {
@@ -207,7 +290,18 @@ fn
 
 list-available-versions
 meta {
-    doc: """List available Postgres versions for upgrade."""
+    doc: """
+    List available Postgres versions for upgrade.
+
+    **Example**
+
+    ```hot
+    ::databases ::supabase::admin::databases
+
+    eligibility ::databases/list-available-versions("my-project-ref")
+    eligibility.target_upgrade_versions
+    ```
+    """
 }
 fn
 (project-ref: Str): Map {

@@ -44,13 +44,27 @@ fn (value: Any): Str {
     |> ::hot::str/replace("'", "&apos;")
 }
 
-attr-value fn (value: Any): Str {
+attr-value
+meta {no-doc: true}
+fn (value: Any): Str {
   if(is-vec(value), join(map(value, (v) { `${v}` }), " "), `${value}`)
 }
 
 attrs-string
 meta {
-    doc: """Render an attribute Map as ` name="value"` pairs in key order. Nulls are omitted. Exposed for testing."""
+    doc: """
+    Render an attribute Map as ` name="value"` pairs in key order. Nulls are
+    omitted. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::twiml ::twilio::twiml
+
+    ::twiml/attrs-string({voice: "alice", loop: null})  // " voice=\"alice\""
+    ::twiml/attrs-string({statusCallbackEvent: ["initiated", "answered"]})  // " statusCallbackEvent=\"initiated answered\""
+    ```
+    """
 }
 fn (attrs: Map): Str {
   filtered filter-vals(attrs, is-some)
@@ -163,7 +177,19 @@ fn (twiml: Str): HttpResponse {
 
 say
 meta {
-    doc: """`<Say>`: speak text. Attributes: `voice` (e.g. `"Polly.Joanna"`, `"Google.en-US-Neural2-F"`), `language`, `loop`."""
+    doc: """
+    `<Say>`: speak text. Attributes: `voice` (e.g. `"Polly.Joanna"`,
+    `"Google.en-US-Neural2-F"`), `language`, `loop`.
+
+    **Example**
+
+    ```hot
+    ::twiml ::twilio::twiml
+
+    ::twiml/say("Hello")  // "<Say>Hello</Say>"
+    ::twiml/say("Hello", {voice: "Polly.Joanna"})  // "<Say voice=\"Polly.Joanna\">Hello</Say>"
+    ```
+    """
 }
 fn
 (text: Str): Str { element("Say", {}, text) },
@@ -171,7 +197,18 @@ fn
 
 play
 meta {
-    doc: """`<Play>`: play an audio URL. Attributes: `loop`, `digits` (send DTMF instead; pass `""` as the URL)."""
+    doc: """
+    `<Play>`: play an audio URL. Attributes: `loop`, `digits` (send DTMF
+    instead; pass `""` as the URL).
+
+    **Example**
+
+    ```hot
+    ::twiml ::twilio::twiml
+
+    ::twiml/play("https://example.com/hold.mp3", {loop: 2})  // "<Play loop=\"2\">https://example.com/hold.mp3</Play>"
+    ```
+    """
 }
 fn
 (url: Str): Str { element("Play", {}, url) },
@@ -179,7 +216,18 @@ fn
 
 pause
 meta {
-    doc: """`<Pause>`: wait silently for `length` seconds (default 1)."""
+    doc: """
+    `<Pause>`: wait silently for `length` seconds (default 1).
+
+    **Example**
+
+    ```hot
+    ::twiml ::twilio::twiml
+
+    ::twiml/pause()  // "<Pause/>"
+    ::twiml/pause(5)  // "<Pause length=\"5\"/>"
+    ```
+    """
 }
 fn
 (): Str { element("Pause", {}, null) },
@@ -194,6 +242,14 @@ meta {
     `finishOnKey`, `speechTimeout`, `speechModel`, `language`, `hints`,
     `actionOnEmptyResult`, `partialResultCallback`, `profanityFilter`,
     `bargeIn`. `nested` holds the `say`/`play`/`pause` prompts.
+
+    **Example**
+
+    ```hot
+    ::twiml ::twilio::twiml
+
+    ::twiml/gather({numDigits: 1}, [::twiml/say("Press 1 for sales.")])  // "<Gather numDigits=\"1\"><Say>Press 1 for sales.</Say></Gather>"
+    ```
     """
 }
 fn
@@ -226,7 +282,19 @@ fn
 
 number
 meta {
-    doc: """`<Number>` noun inside `dial`. Attributes: `sendDigits`, `url`, `method`, `statusCallback`, `statusCallbackEvent`, `machineDetection`."""
+    doc: """
+    `<Number>` noun inside `dial`. Attributes: `sendDigits`, `url`,
+    `method`, `statusCallback`, `statusCallbackEvent`, `machineDetection`.
+
+    **Example**
+
+    ```hot
+    ::twiml ::twilio::twiml
+
+    ::twiml/number("+15558675310")  // "<Number>+15558675310</Number>"
+    ::twiml/number("+15558675310", {sendDigits: "ww1"})  // "<Number sendDigits=\"ww1\">+15558675310</Number>"
+    ```
+    """
 }
 fn
 (phone: Str): Str { element("Number", {}, phone) },
@@ -234,7 +302,18 @@ fn
 
 client
 meta {
-    doc: """`<Client>` noun inside `dial`: a Twilio Voice SDK identity. Attributes: `url`, `method`, `statusCallback`, `statusCallbackEvent`."""
+    doc: """
+    `<Client>` noun inside `dial`: a Twilio Voice SDK identity. Attributes:
+    `url`, `method`, `statusCallback`, `statusCallbackEvent`.
+
+    **Example**
+
+    ```hot
+    ::twiml ::twilio::twiml
+
+    ::twiml/client("alice")  // "<Client>alice</Client>"
+    ```
+    """
 }
 fn
 (identity: Str): Str { element("Client", {}, identity) },
@@ -242,7 +321,18 @@ fn
 
 sip
 meta {
-    doc: """`<Sip>` noun inside `dial`: a SIP URI. Attributes: `username`, `password`, `url`, `method`, `statusCallback`."""
+    doc: """
+    `<Sip>` noun inside `dial`: a SIP URI. Attributes: `username`,
+    `password`, `url`, `method`, `statusCallback`.
+
+    **Example**
+
+    ```hot
+    ::twiml ::twilio::twiml
+
+    ::twiml/sip("sip:alice@example.com")  // "<Sip>sip:alice@example.com</Sip>"
+    ```
+    """
 }
 fn
 (uri: Str): Str { element("Sip", {}, uri) },
@@ -250,7 +340,20 @@ fn
 
 conference
 meta {
-    doc: """`<Conference>` noun inside `dial`: join a named room. Attributes: `startConferenceOnEnter`, `endConferenceOnExit`, `muted`, `beep`, `record`, `waitUrl`, `maxParticipants`, `statusCallback`, `statusCallbackEvent`."""
+    doc: """
+    `<Conference>` noun inside `dial`: join a named room. Attributes:
+    `startConferenceOnEnter`, `endConferenceOnExit`, `muted`, `beep`,
+    `record`, `waitUrl`, `maxParticipants`, `statusCallback`,
+    `statusCallbackEvent`.
+
+    **Example**
+
+    ```hot
+    ::twiml ::twilio::twiml
+
+    ::twiml/conference("standup", {beep: false})  // "<Conference beep=\"false\">standup</Conference>"
+    ```
+    """
 }
 fn
 (name: Str): Str { element("Conference", {}, name) },
@@ -258,7 +361,18 @@ fn
 
 queue
 meta {
-    doc: """`<Queue>` noun inside `dial`: take the next caller from a queue. Attributes: `url`, `method`."""
+    doc: """
+    `<Queue>` noun inside `dial`: take the next caller from a queue.
+    Attributes: `url`, `method`.
+
+    **Example**
+
+    ```hot
+    ::twiml ::twilio::twiml
+
+    ::twiml/queue("support")  // "<Queue>support</Queue>"
+    ```
+    """
 }
 fn
 (name: Str): Str { element("Queue", {}, name) },
@@ -266,7 +380,18 @@ fn
 
 enqueue
 meta {
-    doc: """`<Enqueue>`: place the caller in a named queue. Attributes: `action`, `method`, `waitUrl`, `waitUrlMethod`, `maxQueueSize`, `workflowSid`."""
+    doc: """
+    `<Enqueue>`: place the caller in a named queue. Attributes: `action`,
+    `method`, `waitUrl`, `waitUrlMethod`, `maxQueueSize`, `workflowSid`.
+
+    **Example**
+
+    ```hot
+    ::twiml ::twilio::twiml
+
+    ::twiml/enqueue("support", {waitUrl: "/hold"})  // "<Enqueue waitUrl=\"/hold\">support</Enqueue>"
+    ```
+    """
 }
 fn
 (name: Str): Str { element("Enqueue", {}, name) },
@@ -274,7 +399,21 @@ fn
 
 record
 meta {
-    doc: """`<Record>`: record the caller (voicemail). The recording URL is POSTed to `action`. Attributes: `action`, `method`, `timeout`, `finishOnKey`, `maxLength`, `playBeep`, `trim`, `recordingStatusCallback`, `recordingStatusCallbackEvent`, `transcribe`, `transcribeCallback`."""
+    doc: """
+    `<Record>`: record the caller (voicemail). The recording URL is POSTed
+    to `action`. Attributes: `action`, `method`, `timeout`, `finishOnKey`,
+    `maxLength`, `playBeep`, `trim`, `recordingStatusCallback`,
+    `recordingStatusCallbackEvent`, `transcribe`, `transcribeCallback`.
+
+    **Example**
+
+    ```hot
+    ::twiml ::twilio::twiml
+
+    ::twiml/record()  // "<Record/>"
+    ::twiml/record({maxLength: 30})  // "<Record maxLength=\"30\"/>"
+    ```
+    """
 }
 fn
 (): Str { element("Record", {}, null) },
@@ -282,13 +421,34 @@ fn
 
 hangup
 meta {
-    doc: """`<Hangup>`: end the call."""
+    doc: """
+    `<Hangup>`: end the call.
+
+    **Example**
+
+    ```hot
+    ::twiml ::twilio::twiml
+
+    ::twiml/hangup()  // "<Hangup/>"
+    ```
+    """
 }
 fn (): Str { element("Hangup", {}, null) }
 
 reject
 meta {
-    doc: """`<Reject>`: decline an incoming call without billing it. Attribute `reason`: `"rejected"` (default) or `"busy"`."""
+    doc: """
+    `<Reject>`: decline an incoming call without billing it. Attribute
+    `reason`: `"rejected"` (default) or `"busy"`.
+
+    **Example**
+
+    ```hot
+    ::twiml ::twilio::twiml
+
+    ::twiml/reject({reason: "busy"})  // "<Reject reason=\"busy\"/>"
+    ```
+    """
 }
 fn
 (): Str { element("Reject", {}, null) },
@@ -296,7 +456,18 @@ fn
 
 redirect
 meta {
-    doc: """`<Redirect>`: continue with the TwiML at another URL (voice or messaging). Attribute `method` (default POST)."""
+    doc: """
+    `<Redirect>`: continue with the TwiML at another URL (voice or
+    messaging). Attribute `method` (default POST).
+
+    **Example**
+
+    ```hot
+    ::twiml ::twilio::twiml
+
+    ::twiml/redirect("/twilio/next")  // "<Redirect>/twilio/next</Redirect>"
+    ```
+    """
 }
 fn
 (url: Str): Str { element("Redirect", {}, url) },
@@ -329,12 +500,33 @@ fn
 
 body
 meta {
-    doc: """`<Body>` noun inside `message`: the text of an MMS reply."""
+    doc: """
+    `<Body>` noun inside `message`: the text of an MMS reply.
+
+    **Example**
+
+    ```hot
+    ::twiml ::twilio::twiml
+
+    ::twiml/body("Here you go")  // "<Body>Here you go</Body>"
+    ```
+    """
 }
 fn (text: Str): Str { element("Body", {}, text) }
 
 media
 meta {
-    doc: """`<Media>` noun inside `message`: a public URL of an image or file to attach (up to 10)."""
+    doc: """
+    `<Media>` noun inside `message`: a public URL of an image or file to
+    attach (up to 10).
+
+    **Example**
+
+    ```hot
+    ::twiml ::twilio::twiml
+
+    ::twiml/media("https://example.com/map.png")  // "<Media>https://example.com/map.png</Media>"
+    ```
+    """
 }
 fn (url: Str): Str { element("Media", {}, url) }

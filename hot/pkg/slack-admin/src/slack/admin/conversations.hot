@@ -32,6 +32,14 @@ meta {
     admin.conversations.archive - Archive a public or private channel.
 
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::conversations ::slack::admin::conversations
+
+    ::conversations/archive(::conversations/ArchiveRequest({channel_id: "C0123ABCDEF"}))
+    ```
     """
 }
 fn
@@ -52,6 +60,14 @@ meta {
     admin.conversations.unarchive - Unarchive a public or private channel.
 
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::conversations ::slack::admin::conversations
+
+    ::conversations/unarchive(::conversations/UnarchiveRequest({channel_id: "C0123ABCDEF"}))
+    ```
     """
 }
 fn
@@ -72,6 +88,16 @@ meta {
     admin.conversations.bulkArchive - Archive up to 100 channels in one background job. Returns `bulk_action_id`; channels that could not be queued are in `not_added`.
 
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::conversations ::slack::admin::conversations
+
+    res ::conversations/bulk-archive(::conversations/BulkArchiveRequest({channel_ids: ["C0123ABCDEF", "C0456GHIJKL"]}))
+    res.bulk_action_id
+    res.not_added
+    ```
     """
 }
 fn
@@ -92,6 +118,15 @@ meta {
     admin.conversations.bulkDelete - Permanently delete up to 100 channels in one background job. Returns `bulk_action_id` and `not_added`. Irreversible.
 
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::conversations ::slack::admin::conversations
+
+    res ::conversations/bulk-delete(::conversations/BulkDeleteRequest({channel_ids: ["C0123ABCDEF", "C0456GHIJKL"]}))
+    res.bulk_action_id
+    ```
     """
 }
 fn
@@ -113,6 +148,14 @@ meta {
     admin.conversations.bulkMove - Move up to 100 public channels to the workspace `target_team_id` in one background job.
 
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::conversations ::slack::admin::conversations
+
+    ::conversations/bulk-move(::conversations/BulkMoveRequest({channel_ids: ["C0123ABCDEF"], target_team_id: "T0123ABCDEF"}))
+    ```
     """
 }
 fn
@@ -134,6 +177,14 @@ meta {
     admin.conversations.convertToPrivate - Convert a public channel to private. `name` is only used when converting a group DM.
 
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::conversations ::slack::admin::conversations
+
+    ::conversations/convert-to-private(::conversations/ConvertToPrivateRequest({channel_id: "C0123ABCDEF"}))
+    ```
     """
 }
 fn
@@ -154,6 +205,14 @@ meta {
     admin.conversations.convertToPublic - Convert a private channel to public.
 
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::conversations ::slack::admin::conversations
+
+    ::conversations/convert-to-public(::conversations/ConvertToPublicRequest({channel_id: "C0123ABCDEF"}))
+    ```
     """
 }
 fn
@@ -178,6 +237,18 @@ meta {
     admin.conversations.create - Create a channel. Pass `team_id` for a single workspace, or `org_wide: true` for an org-wide channel. Returns `channel_id`.
 
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::conversations ::slack::admin::conversations
+
+    res ::conversations/create(::conversations/CreateRequest({name: "incident-1234", is_private: true, team_id: "T0123ABCDEF"}))
+    res.channel_id
+
+    // Across the whole organization
+    ::conversations/create(::conversations/CreateRequest({name: "announcements", is_private: false, org_wide: true, description: "Company news"}))
+    ```
     """
 }
 fn
@@ -198,6 +269,14 @@ meta {
     admin.conversations.delete - Permanently delete a public or private channel. Irreversible.
 
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::conversations ::slack::admin::conversations
+
+    ::conversations/delete-conversation(::conversations/DeleteConversationRequest({channel_id: "C0123ABCDEF"}))
+    ```
     """
 }
 fn
@@ -219,6 +298,14 @@ meta {
     admin.conversations.disconnectShared - Disconnect a connected channel from one or more workspaces (`leaving_team_ids`, optional when only two teams share it).
 
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::conversations ::slack::admin::conversations
+
+    ::conversations/disconnect-shared(::conversations/DisconnectSharedRequest({channel_id: "C0123ABCDEF", leaving_team_ids: ["T0123ABCDEF"]}))
+    ```
     """
 }
 fn
@@ -239,6 +326,15 @@ meta {
     admin.conversations.getConversationPrefs - Get a channel's posting preferences (`prefs.who_can_post`, `prefs.can_thread`).
 
     Scope: `admin.conversations:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::conversations ::slack::admin::conversations
+
+    res ::conversations/get-conversation-prefs(::conversations/GetConversationPrefsRequest({channel_id: "C0123ABCDEF"}))
+    res.prefs.who_can_post
+    ```
     """
 }
 fn
@@ -260,6 +356,17 @@ meta {
     admin.conversations.setConversationPrefs - Set a channel's posting preferences, e.g. `prefs: {who_can_post: "type:admin,user:U1234"}`. The Map is sent as the stringified JSON Slack expects.
 
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::conversations ::slack::admin::conversations
+
+    ::conversations/set-conversation-prefs(::conversations/SetConversationPrefsRequest({
+      channel_id: "C0123ABCDEF",
+      prefs: {who_can_post: "type:admin,user:U0123ABCDEF"}
+    }))
+    ```
     """
 }
 fn
@@ -280,6 +387,15 @@ meta {
     admin.conversations.getCustomRetention - Get a channel's custom message retention (`duration_days`, `is_policy_enabled`).
 
     Scope: `admin.conversations:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::conversations ::slack::admin::conversations
+
+    res ::conversations/get-custom-retention(::conversations/GetCustomRetentionRequest({channel_id: "C0123ABCDEF"}))
+    if(res.is_policy_enabled, res.duration_days, null)
+    ```
     """
 }
 fn
@@ -301,6 +417,14 @@ meta {
     admin.conversations.setCustomRetention - Set a channel's custom message retention in days.
 
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::conversations ::slack::admin::conversations
+
+    ::conversations/set-custom-retention(::conversations/SetCustomRetentionRequest({channel_id: "C0123ABCDEF", duration_days: 90}))
+    ```
     """
 }
 fn
@@ -321,6 +445,14 @@ meta {
     admin.conversations.removeCustomRetention - Remove a channel's custom retention so the org/workspace policy applies.
 
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::conversations ::slack::admin::conversations
+
+    ::conversations/remove-custom-retention(::conversations/RemoveCustomRetentionRequest({channel_id: "C0123ABCDEF"}))
+    ```
     """
 }
 fn
@@ -344,6 +476,15 @@ meta {
 
     Scope: `admin.conversations:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `get-teams-all`.
+
+    **Example**
+
+    ```hot
+    ::conversations ::slack::admin::conversations
+
+    page ::conversations/get-teams(::conversations/GetTeamsRequest({channel_id: "C0123ABCDEF", limit: 100}))
+    page.team_ids
+    ```
     """
 }
 fn
@@ -357,7 +498,18 @@ fn
 get-teams-all
 meta {
     doc: """
-    Every `team_ids` entry from `admin.conversations.getTeams`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    Every `team_ids` entry from `admin.conversations.getTeams`, following
+    `next_cursor` until the last page or `max-items` (default 1000).
+    `request` sets the filters; its `cursor` is the starting point.
+
+    **Example**
+
+    ```hot
+    ::conversations ::slack::admin::conversations
+
+    teams ::conversations/get-teams-all(::conversations/GetTeamsRequest({channel_id: "C0123ABCDEF"}))
+    length(teams)
+    ```
     """
 }
 fn
@@ -384,6 +536,17 @@ meta {
     admin.conversations.setTeams - Set the workspaces a channel is shared to (`target_team_ids`), or make it org-wide with `org_channel: true`.
 
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::conversations ::slack::admin::conversations
+
+    ::conversations/set-teams(::conversations/SetTeamsRequest({channel_id: "C0123ABCDEF", target_team_ids: ["T0123ABCDEF", "T0456GHIJKL"]}))
+
+    // Share with the whole organization
+    ::conversations/set-teams(::conversations/SetTeamsRequest({channel_id: "C0123ABCDEF", org_channel: true}))
+    ```
     """
 }
 fn
@@ -405,6 +568,14 @@ meta {
     admin.conversations.invite - Invite up to 1000 users to a channel.
 
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::conversations ::slack::admin::conversations
+
+    ::conversations/invite(::conversations/InviteRequest({channel_id: "C0123ABCDEF", user_ids: ["U0123ABCDEF", "U0456GHIJKL"]}))
+    ```
     """
 }
 fn
@@ -426,6 +597,14 @@ meta {
     admin.conversations.rename - Rename a channel.
 
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::conversations ::slack::admin::conversations
+
+    ::conversations/rename(::conversations/RenameRequest({channel_id: "C0123ABCDEF", name: "incident-1234-closed"}))
+    ```
     """
 }
 fn
@@ -451,6 +630,20 @@ meta {
 
     Scope: `admin.conversations:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `lookup-all`.
+
+    **Example**
+
+    ```hot
+    ::conversations ::slack::admin::conversations
+
+    page ::conversations/lookup(::conversations/LookupRequest({
+      team_ids: ["T0123ABCDEF"],
+      last_message_activity_before: 1735689600,
+      max_member_count: 5,
+      limit: 100
+    }))
+    page.channel_ids
+    ```
     """
 }
 fn
@@ -464,7 +657,18 @@ fn
 lookup-all
 meta {
     doc: """
-    Every `channel_ids` entry from `admin.conversations.lookup`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    Every `channel_ids` entry from `admin.conversations.lookup`, following
+    `next_cursor` until the last page or `max-items` (default 1000).
+    `request` sets the filters; its `cursor` is the starting point.
+
+    **Example**
+
+    ```hot
+    ::conversations ::slack::admin::conversations
+
+    stale ::conversations/lookup-all(::conversations/LookupRequest({team_ids: ["T0123ABCDEF"], last_message_activity_before: 1735689600}), 500)
+    length(stale)
+    ```
     """
 }
 fn
@@ -497,6 +701,21 @@ meta {
 
     Scope: `admin.conversations:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `search-all`.
+
+    **Example**
+
+    ```hot
+    ::conversations ::slack::admin::conversations
+
+    page ::conversations/search(::conversations/SearchRequest({
+      query: "incident",
+      search_channel_types: ["private", "exclude_archived"],
+      sort: "member_count",
+      sort_dir: "desc",
+      limit: 20
+    }))
+    map(page.conversations, %.name)
+    ```
     """
 }
 fn
@@ -513,7 +732,18 @@ fn
 search-all
 meta {
     doc: """
-    Every `conversations` entry from `admin.conversations.search`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    Every `conversations` entry from `admin.conversations.search`, following
+    `next_cursor` until the last page or `max-items` (default 1000).
+    `request` sets the filters; its `cursor` is the starting point.
+
+    **Example**
+
+    ```hot
+    ::conversations ::slack::admin::conversations
+
+    hits ::conversations/search-all(::conversations/SearchRequest({query: "incident"}), 200)
+    map(hits, %.id)
+    ```
     """
 }
 fn
@@ -542,6 +772,14 @@ meta {
     admin.conversations.restrictAccess.addGroup - Add an IDP group to a private channel's allowlist. `team_id` is required for channels tied to one workspace.
 
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::conversations ::slack::admin::conversations
+
+    ::conversations/restrict-access-add-group(::conversations/RestrictAccessAddGroupRequest({channel_id: "C0123ABCDEF", group_id: "S0123ABCDEF", team_id: "T0123ABCDEF"}))
+    ```
     """
 }
 fn
@@ -563,6 +801,15 @@ meta {
     admin.conversations.restrictAccess.listGroups - List the IDP groups linked to a private channel (`group_ids`).
 
     Scope: `admin.conversations:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::conversations ::slack::admin::conversations
+
+    res ::conversations/restrict-access-list-groups(::conversations/RestrictAccessListGroupsRequest({channel_id: "C0123ABCDEF", team_id: "T0123ABCDEF"}))
+    res.group_ids
+    ```
     """
 }
 fn
@@ -585,6 +832,14 @@ meta {
     admin.conversations.restrictAccess.removeGroup - Remove an IDP group from a private channel's allowlist.
 
     Scope: `admin.conversations:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::conversations ::slack::admin::conversations
+
+    ::conversations/restrict-access-remove-group(::conversations/RestrictAccessRemoveGroupRequest({channel_id: "C0123ABCDEF", group_id: "S0123ABCDEF", team_id: "T0123ABCDEF"}))
+    ```
     """
 }
 fn
@@ -609,6 +864,15 @@ meta {
 
     Scope: `admin.conversations:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `ekm-list-original-connected-channel-info-all`.
+
+    **Example**
+
+    ```hot
+    ::conversations ::slack::admin::conversations
+
+    page ::conversations/ekm-list-original-connected-channel-info(::conversations/EkmListOriginalConnectedChannelInfoRequest({channel_ids: ["C0123ABCDEF"]}))
+    page.channels
+    ```
     """
 }
 fn
@@ -625,7 +889,19 @@ fn
 ekm-list-original-connected-channel-info-all
 meta {
     doc: """
-    Every `channels` entry from `admin.conversations.ekm.listOriginalConnectedChannelInfo`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    Every `channels` entry from
+    `admin.conversations.ekm.listOriginalConnectedChannelInfo`, following
+    `next_cursor` until the last page or `max-items` (default 1000).
+    `request` sets the filters; its `cursor` is the starting point.
+
+    **Example**
+
+    ```hot
+    ::conversations ::slack::admin::conversations
+
+    channels ::conversations/ekm-list-original-connected-channel-info-all(::conversations/EkmListOriginalConnectedChannelInfoRequest({team_ids: ["T0123ABCDEF"]}), 500)
+    length(channels)
+    ```
     """
 }
 fn

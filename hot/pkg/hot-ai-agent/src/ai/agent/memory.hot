@@ -67,7 +67,17 @@ DEFAULT_RETENTION RetentionPolicy({
 })
 
 common-memory-commands
-meta { doc: "Command declarations for common memory lifecycle controls." }
+meta {
+    doc: """
+    Command declarations for common memory lifecycle controls.
+
+    **Example**
+
+    ```hot
+    map(::ai::agent::memory/common-memory-commands(), %.name)  // ["memory", "forget", "export", "compact", "why"]
+    ```
+    """
+}
 fn (): Vec<Command> {
     [
         Command({
@@ -104,7 +114,22 @@ fn (): Vec<Command> {
 }
 
 parse-forget-request
-meta { doc: "Parse `/forget` arguments into `{scope, selector, raw}`." }
+meta {
+    doc: """
+    Parse `/forget` arguments into `{scope, selector, raw}`.
+
+    **Example**
+
+    ```hot
+    ::agent-memory ::ai::agent::memory
+
+    req ::agent-memory/parse-forget-request("source slack:C123")
+    req.scope  // "source"
+    req.selector  // "slack:C123"
+    ::agent-memory/parse-forget-request("").scope  // "session"
+    ```
+    """
+}
 fn (arg: Str): ForgetRequest {
     cleaned trim(or(arg, ""))
     parts split(cleaned, " ")
@@ -127,7 +152,21 @@ fn (arg: Str): ForgetRequest {
 
 inspect-export
 meta {
-    doc: "Build a MemoryInspection from an exported memory bundle plus optional capsule/graph counts."
+    doc: """
+    Build a MemoryInspection from an exported memory bundle plus optional
+    capsule/graph counts.
+
+    **Example**
+
+    ```hot
+    ::agent-memory ::ai::agent::memory
+
+    bundle ::ai::memory/MemoryExport({agent-name: "team-agent", session: [], user: [], kb: []})
+    view ::agent-memory/inspect-export(bundle, {capsule-count: 2})
+    view.session-count  // 0
+    view.capsule-count  // 2
+    ```
+    """
 }
 fn (bundle: MemoryExport, opts: Map?): MemoryInspection {
     o or(opts, {})
@@ -143,7 +182,22 @@ fn (bundle: MemoryExport, opts: Map?): MemoryInspection {
 }
 
 render-inspection
-meta { doc: "Render MemoryInspection as concise user-facing text." }
+meta {
+    doc: """
+    Render MemoryInspection as concise user-facing text.
+
+    **Example**
+
+    ```hot
+    ::agent-memory ::ai::agent::memory
+
+    bundle ::ai::memory/MemoryExport({agent-name: "team-agent", session: [], user: [], kb: []})
+    text ::agent-memory/render-inspection(::agent-memory/inspect-export(bundle, {capsule-count: 2}))
+    split(text, "\n")[0]  // "Memory snapshot:"
+    split(text, "\n")[4]  // "- Capsules: 2"
+    ```
+    """
+}
 fn (inspection: MemoryInspection): Str {
     ```
     Memory snapshot:
@@ -157,7 +211,20 @@ fn (inspection: MemoryInspection): Str {
 }
 
 render-export-summary
-meta { doc: "Render a concise summary of a memory export bundle." }
+meta {
+    doc: """
+    Render a concise summary of a memory export bundle.
+
+    **Example**
+
+    ```hot
+    ::agent-memory ::ai::agent::memory
+
+    bundle ::ai::memory/MemoryExport({agent-name: "team-agent", session: [], user: [], kb: []})
+    ::agent-memory/render-export-summary(bundle)  // "Export bundle contains 0 records: 0 session, 0 user, 0 KB."
+    ```
+    """
+}
 fn (bundle: MemoryExport): Str {
     total add(add(length(bundle.session), length(bundle.user)), length(bundle.kb))
     `Export bundle contains ${total} records: ${length(bundle.session)} session, ${length(bundle.user)} user, ${length(bundle.kb)} KB.`
@@ -165,7 +232,24 @@ fn (bundle: MemoryExport): Str {
 
 select-policy
 meta {
-    doc: "Select a retention policy by name, defaulting to the first policy or DEFAULT_RETENTION."
+    doc: """
+    Select a retention policy by name, defaulting to the first policy or
+    DEFAULT_RETENTION.
+
+    **Example**
+
+    ```hot
+    ::agent-memory ::ai::agent::memory
+
+    policies [
+        ::agent-memory/RetentionPolicy({name: "short", raw-retention-secs: 86400}),
+        ::agent-memory/RetentionPolicy({name: "long", raw-retention-secs: 2592000}),
+    ]
+    ::agent-memory/select-policy(policies, "long").name  // "long"
+    ::agent-memory/select-policy(policies, "missing").name  // "short"
+    ::agent-memory/select-policy([], null).name  // "default"
+    ```
+    """
 }
 fn (policies: Vec<RetentionPolicy>, name: Str?): RetentionPolicy {
     cond {

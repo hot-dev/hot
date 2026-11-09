@@ -19,7 +19,17 @@ seg ::modern-treasury::api/seg
 
 create-ledger
 meta {
-    doc: """POST /api/ledgers: create a ledger. `params` needs `name`; optional `description`, `metadata`."""
+    doc: """
+    POST /api/ledgers: create a ledger. `params` needs `name`; optional
+    `description`, `metadata`.
+
+    **Example**
+
+    ```hot
+    ledger ::modern-treasury::ledgers/create-ledger({name: "Wallets", metadata: {team: "payments"}})
+    ledger.id
+    ```
+    """
 }
 fn
 (params: Map): Map {
@@ -31,7 +41,16 @@ fn
 
 get-ledger
 meta {
-    doc: """GET /api/ledgers/{id}: retrieve a ledger."""
+    doc: """
+    GET /api/ledgers/{id}: retrieve a ledger.
+
+    **Example**
+
+    ```hot
+    ledger ::modern-treasury::ledgers/get-ledger("89c8bd30-e06a-4a79-b396-e6c7e13e7a12")
+    ledger.name
+    ```
+    """
 }
 fn
 (ledger-id: Str): Map {
@@ -43,7 +62,17 @@ fn
 
 list-ledgers
 meta {
-    doc: """GET /api/ledgers: one page. Filters: `id: [...]` (sent as `id[]`), `metadata`, `updated_at: {gte, lte}`, `per_page`, `after_cursor`."""
+    doc: """
+    GET /api/ledgers: one page. Filters: `id: [...]` (sent as `id[]`),
+    `metadata`, `updated_at: {gte, lte}`, `per_page`, `after_cursor`.
+
+    **Example**
+
+    ```hot
+    page ::modern-treasury::ledgers/list-ledgers({per_page: 25})
+    map(page.items, %.name)
+    ```
+    """
 }
 fn
 (): Map {
@@ -58,7 +87,15 @@ fn
 
 update-ledger
 meta {
-    doc: """PATCH /api/ledgers/{id}: change `name`, `description` or `metadata`."""
+    doc: """
+    PATCH /api/ledgers/{id}: change `name`, `description` or `metadata`.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::ledgers/update-ledger("89c8bd30-e06a-4a79-b396-e6c7e13e7a12", {description: "Customer wallets"})
+    ```
+    """
 }
 fn
 (ledger-id: Str, params: Map): Map {
@@ -103,7 +140,22 @@ fn
 
 get-ledger-account
 meta {
-    doc: """GET /api/ledger_accounts/{id}: retrieve a ledger account (by id or `external_id`) with its balances. `balances` options: `as_of_date`, `effective_at`, `effective_at_lower_bound`, `effective_at_upper_bound`, `as_of_lock_version`."""
+    doc: """
+    GET /api/ledger_accounts/{id}: retrieve a ledger account (by id or
+    `external_id`) with its balances. `balances` options: `as_of_date`,
+    `effective_at`, `effective_at_lower_bound`, `effective_at_upper_bound`,
+    `as_of_lock_version`.
+
+    **Example**
+
+    ```hot
+    account ::modern-treasury::ledgers/get-ledger-account("f1c7e474-e6d5-4741-9f76-04510c8b6d7a")
+    account.balances.posted_balance.amount
+
+    // Balances at a point in time
+    ::modern-treasury::ledgers/get-ledger-account("f1c7e474-e6d5-4741-9f76-04510c8b6d7a", {effective_at: "2026-11-01T00:00:00Z"})
+    ```
+    """
 }
 fn
 (ledger-account-id: Str): Map {
@@ -127,7 +179,7 @@ meta {
 
     ```hot
     b ::modern-treasury::ledgers/get-ledger-account-balances("f1c7e474-e6d5-4741-9f76-04510c8b6d7a", {})
-    b.posted_balance.amount   // => 10000
+    b.posted_balance.amount
     ```
     """
 }
@@ -142,7 +194,19 @@ fn
 
 list-ledger-accounts
 meta {
-    doc: """GET /api/ledger_accounts: one page. Filters: `ledger_id`, `currency`, `normal_balance`, `name: [...]`, `id: [...]`, `external_id`, `ledger_account_category_id`, `metadata`, `balances: {...}`, `posted_balance_amount: {gt, lt, eq}`, `per_page`, `after_cursor`."""
+    doc: """
+    GET /api/ledger_accounts: one page. Filters: `ledger_id`, `currency`,
+    `normal_balance`, `name: [...]`, `id: [...]`, `external_id`,
+    `ledger_account_category_id`, `metadata`, `balances: {...}`,
+    `posted_balance_amount: {gt, lt, eq}`, `per_page`, `after_cursor`.
+
+    **Example**
+
+    ```hot
+    page ::modern-treasury::ledgers/list-ledger-accounts({ledger_id: "89c8bd30-e06a-4a79-b396-e6c7e13e7a12", currency: "USD"})
+    map(page.items, %.name)
+    ```
+    """
 }
 fn
 (): Map {
@@ -157,7 +221,16 @@ fn
 
 update-ledger-account
 meta {
-    doc: """PATCH /api/ledger_accounts/{id}: change `name`, `description`, `external_id` or `metadata`."""
+    doc: """
+    PATCH /api/ledger_accounts/{id}: change `name`, `description`,
+    `external_id` or `metadata`.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::ledgers/update-ledger-account("f1c7e474-e6d5-4741-9f76-04510c8b6d7a", {name: "User 42 main wallet"})
+    ```
+    """
 }
 fn
 (ledger-account-id: Str, params: Map): Map {
@@ -171,7 +244,9 @@ fn
 // Ledger transactions and entries
 // ---------------------------------------------------------------------------
 
-entry-total fn (entries: Vec, direction: Str): Int {
+entry-total
+meta {no-doc: true}
+fn (entries: Vec, direction: Str): Int {
   reduce(filter(entries, (e) { eq(get(e, "direction"), direction) }), (acc, e) {
     amount get(e, "amount")
     add(acc, if(is-int(amount), amount, 0))
@@ -180,7 +255,18 @@ entry-total fn (entries: Vec, direction: Str): Int {
 
 is-balanced
 meta {
-    doc: """True when the Int `amount`s of the `credit` entries equal those of the `debit` entries. A pre-check for single-currency transactions (Modern Treasury checks each currency itself). Exposed for testing."""
+    doc: """
+    True when the Int `amount`s of the `credit` entries equal those of the
+    `debit` entries. A pre-check for single-currency transactions (Modern
+    Treasury checks each currency itself). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::ledgers/is-balanced([{direction: "debit", amount: 1000}, {direction: "credit", amount: 1000}])  // true
+    ::modern-treasury::ledgers/is-balanced([{direction: "debit", amount: 1000}])  // false
+    ```
+    """
 }
 fn (entries: Vec): Bool {
   eq(entry-total(entries, "credit"), entry-total(entries, "debit"))
@@ -188,7 +274,20 @@ fn (entries: Vec): Bool {
 
 invalid-entries
 meta {
-    doc: """The positions of `ledger_entries` that lack `ledger_account_id`, `direction` (`"credit"` or `"debit"`) or an `amount`/`amount_string`. Exposed for testing."""
+    doc: """
+    The positions of `ledger_entries` that lack `ledger_account_id`,
+    `direction` (`"credit"` or `"debit"`) or an `amount`/`amount_string`.
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::ledgers/invalid-entries([
+      {ledger_account_id: "a", direction: "debit", amount: 1000},
+      {ledger_account_id: "b", direction: "sideways", amount: 1000}
+    ])  // [1]
+    ```
+    """
 }
 fn (entries: Vec): Vec<Int> {
   checked map-indexed(entries, (i, e) {
@@ -252,7 +351,17 @@ fn
 
 get-ledger-transaction
 meta {
-    doc: """GET /api/ledger_transactions/{id}: retrieve a ledger transaction with its entries."""
+    doc: """
+    GET /api/ledger_transactions/{id}: retrieve a ledger transaction with
+    its entries.
+
+    **Example**
+
+    ```hot
+    transaction ::modern-treasury::ledgers/get-ledger-transaction("3e9a1f60-7c2b-4d18-a4f3-92b6d0e1c847")
+    map(transaction.ledger_entries, %.amount)
+    ```
+    """
 }
 fn
 (ledger-transaction-id: Str): Map {
@@ -264,7 +373,20 @@ fn
 
 list-ledger-transactions
 meta {
-    doc: """GET /api/ledger_transactions: one page. Filters: `ledger_id`, `ledger_account_id`, `status`, `external_id`, `ledgerable_type`, `ledgerable_id`, `effective_at: {gte, lte}`, `posted_at: {...}`, `updated_at: {...}`, `order_by: {created_at: "asc"}`, `metadata`, `per_page`, `after_cursor`."""
+    doc: """
+    GET /api/ledger_transactions: one page. Filters: `ledger_id`,
+    `ledger_account_id`, `status`, `external_id`, `ledgerable_type`,
+    `ledgerable_id`, `effective_at: {gte, lte}`, `posted_at: {...}`,
+    `updated_at: {...}`, `order_by: {created_at: "asc"}`, `metadata`,
+    `per_page`, `after_cursor`.
+
+    **Example**
+
+    ```hot
+    page ::modern-treasury::ledgers/list-ledger-transactions({ledger_account_id: "f1c7e474-e6d5-4741-9f76-04510c8b6d7a", status: "posted"})
+    map(page.items, %.description)
+    ```
+    """
 }
 fn
 (): Map {
@@ -279,7 +401,19 @@ fn
 
 update-ledger-transaction
 meta {
-    doc: """PATCH /api/ledger_transactions/{id}: change a pending ledger transaction: `status` (`"posted"` or `"archived"`), `description`, `metadata`, `effective_at`, or its `ledger_entries`. Posted transactions are immutable; reverse them instead."""
+    doc: """
+    PATCH /api/ledger_transactions/{id}: change a pending ledger
+    transaction: `status` (`"posted"` or `"archived"`), `description`,
+    `metadata`, `effective_at`, or its `ledger_entries`. Posted transactions
+    are immutable; reverse them instead.
+
+    **Example**
+
+    ```hot
+    transaction ::modern-treasury::ledgers/update-ledger-transaction("3e9a1f60-7c2b-4d18-a4f3-92b6d0e1c847", {status: "posted"})
+    transaction.status
+    ```
+    """
 }
 fn
 (ledger-transaction-id: Str, params: Map): Map {
@@ -291,7 +425,18 @@ fn
 
 reverse-ledger-transaction
 meta {
-    doc: """POST /api/ledger_transactions/{id}/reversal: post a new ledger transaction that undoes a posted one. `params`: `description`, `status`, `effective_at`, `external_id`, `metadata`."""
+    doc: """
+    POST /api/ledger_transactions/{id}/reversal: post a new ledger
+    transaction that undoes a posted one. `params`: `description`, `status`,
+    `effective_at`, `external_id`, `metadata`.
+
+    **Example**
+
+    ```hot
+    reversal ::modern-treasury::ledgers/reverse-ledger-transaction("3e9a1f60-7c2b-4d18-a4f3-92b6d0e1c847", {description: "Refund top-up", status: "posted"})
+    reversal.id
+    ```
+    """
 }
 fn
 (ledger-transaction-id: Str, params: Map): Map {
@@ -303,7 +448,19 @@ fn
 
 list-ledger-entries
 meta {
-    doc: """GET /api/ledger_entries: one page of ledger entries. Filters: `ledger_account_id`, `ledger_transaction_id`, `direction`, `status`, `effective_at: {...}`, `show_balances` (Bool, adds resulting balances), `order_by: {created_at: "asc"}`, `per_page`, `after_cursor`."""
+    doc: """
+    GET /api/ledger_entries: one page of ledger entries. Filters:
+    `ledger_account_id`, `ledger_transaction_id`, `direction`, `status`,
+    `effective_at: {...}`, `show_balances` (Bool, adds resulting balances),
+    `order_by: {created_at: "asc"}`, `per_page`, `after_cursor`.
+
+    **Example**
+
+    ```hot
+    page ::modern-treasury::ledgers/list-ledger-entries({ledger_account_id: "f1c7e474-e6d5-4741-9f76-04510c8b6d7a", show_balances: true})
+    map(page.items, %.amount)
+    ```
+    """
 }
 fn
 (): Map {

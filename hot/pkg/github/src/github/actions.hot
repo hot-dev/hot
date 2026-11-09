@@ -4,30 +4,59 @@
 query-string ::hot::uri/query-string
 
 actions-path
-meta {doc: """Build a repository Actions API path, including its leading slash."""}
+meta {
+    doc: """
+    Build a repository Actions API path, including its leading slash.
+
+    **Example**
+
+    ```hot
+    ::github::actions/actions-path("acme", "api", "/runs")  // "/repos/acme/api/actions/runs"
+    ```
+    """
+}
 fn (owner: Str, repo: Str, suffix: Str): Str {
   `/repos/${owner}/${repo}/actions${suffix}`
 }
 
 with-query
-meta {doc: """Append GitHub REST query parameters to an endpoint path."""}
+meta {
+    doc: """
+    Append GitHub REST query parameters to an endpoint path.
+
+    **Example**
+
+    ```hot
+    ::github::actions/with-query("/repos/acme/api/actions/runs", {status: "completed"})
+    // "/repos/acme/api/actions/runs?status=completed"
+    ```
+    """
+}
 fn (path: Str, params: Map): Str {
   `${path}${query-string(params)}`
 }
 
-workflow-path fn (owner: Str, repo: Str, workflow: Any): Str {
+workflow-path
+meta {no-doc: true}
+fn (owner: Str, repo: Str, workflow: Any): Str {
   actions-path(owner, repo, `/workflows/${workflow}`)
 }
 
-run-path fn (owner: Str, repo: Str, run-id: Any): Str {
+run-path
+meta {no-doc: true}
+fn (owner: Str, repo: Str, run-id: Any): Str {
   actions-path(owner, repo, `/runs/${run-id}`)
 }
 
-attempt-path fn (owner: Str, repo: Str, run-id: Any, attempt: Any): Str {
+attempt-path
+meta {no-doc: true}
+fn (owner: Str, repo: Str, run-id: Any, attempt: Any): Str {
   `${run-path(owner, repo, run-id)}/attempts/${attempt}`
 }
 
-job-path fn (owner: Str, repo: Str, job-id: Any): Str {
+job-path
+meta {no-doc: true}
+fn (owner: Str, repo: Str, job-id: Any): Str {
   actions-path(owner, repo, `/jobs/${job-id}`)
 }
 
@@ -37,7 +66,17 @@ job-path fn (owner: Str, repo: Str, job-id: Any): Str {
 
 list-workflows
 meta {
-    doc: """GET /repos/{owner}/{repo}/actions/workflows - Repository workflows. `params` supports `per_page` and `page`."""
+    doc: """
+    GET /repos/{owner}/{repo}/actions/workflows - Repository workflows.
+    `params` supports `per_page` and `page`.
+
+    **Example**
+
+    ```hot
+    result ::github::actions/list-workflows("acme", "api", {per_page: 100})
+    map(result.workflows, %.path)
+    ```
+    """
 }
 fn
 (owner: Str, repo: Str): Map {
@@ -52,7 +91,17 @@ fn
 
 get-workflow
 meta {
-    doc: """GET /repos/{owner}/{repo}/actions/workflows/{workflow} - Get a workflow by numeric id or file name."""
+    doc: """
+    GET /repos/{owner}/{repo}/actions/workflows/{workflow} - Get a workflow
+    by numeric id or file name.
+
+    **Example**
+
+    ```hot
+    workflow ::github::actions/get-workflow("acme", "api", "ci.yml")
+    workflow.state
+    ```
+    """
 }
 fn
 (owner: Str, repo: Str, workflow: Any): Map {
@@ -69,6 +118,13 @@ meta {
     one workflow. `params` supports `actor`, `branch`, `event`, `status`,
     `created`, `exclude_pull_requests`, `check_suite_id`, `head_sha`,
     `per_page`, and `page`.
+
+    **Example**
+
+    ```hot
+    result ::github::actions/list-runs-for-workflow("acme", "api", "ci.yml", {branch: "main", status: "failure"})
+    map(result.workflow_runs, %.html_url)
+    ```
     """
 }
 fn
@@ -84,7 +140,16 @@ fn
 
 enable-workflow
 meta {
-    doc: """PUT /repos/{owner}/{repo}/actions/workflows/{workflow}/enable - Enable a workflow."""
+    doc: """
+    PUT /repos/{owner}/{repo}/actions/workflows/{workflow}/enable - Enable a
+    workflow.
+
+    **Example**
+
+    ```hot
+    ::github::actions/enable-workflow("acme", "api", "ci.yml")
+    ```
+    """
 }
 fn
 (owner: Str, repo: Str, workflow: Any): Any {
@@ -96,7 +161,16 @@ fn
 
 disable-workflow
 meta {
-    doc: """PUT /repos/{owner}/{repo}/actions/workflows/{workflow}/disable - Disable a workflow."""
+    doc: """
+    PUT /repos/{owner}/{repo}/actions/workflows/{workflow}/disable - Disable
+    a workflow.
+
+    **Example**
+
+    ```hot
+    ::github::actions/disable-workflow("acme", "api", "ci.yml")
+    ```
+    """
 }
 fn
 (owner: Str, repo: Str, workflow: Any): Any {
@@ -106,7 +180,9 @@ fn
   ::api/json("PUT", `${workflow-path(owner, repo, workflow)}/disable`, {}, "", opts)
 }
 
-dispatch-body fn (ref: Str, inputs: Map): Map {
+dispatch-body
+meta {no-doc: true}
+fn (ref: Str, inputs: Map): Map {
   if(is-empty(inputs), {ref: ref}, {ref: ref, inputs: inputs})
 }
 
@@ -117,6 +193,15 @@ meta {
     Trigger a `workflow_dispatch` workflow on a ref. `workflow` is the
     file name (e.g. "deploy.yml") or numeric id; `inputs` (5-arity) is the
     inputs Map. Returns null on success (GitHub replies 204).
+
+    **Example**
+
+    ```hot
+    ::github::actions/dispatch-workflow("acme", "api", "deploy.yml", "main")
+
+    // With workflow inputs
+    ::github::actions/dispatch-workflow("acme", "api", "deploy.yml", "main", {environment: "staging"})
+    ```
     """
 }
 fn
@@ -136,7 +221,23 @@ fn
 
 list-workflow-runs
 meta {
-    doc: """GET /repos/{owner}/{repo}/actions/runs - Recent workflow runs. `params` supports `branch`, `status` ("queued"/"in_progress"/"completed"), `event`, `per_page`, `page`. Returns a single page (GitHub default 30, max 100); pass `page` to paginate."""
+    doc: """
+    GET /repos/{owner}/{repo}/actions/runs - Recent workflow runs. `params`
+    supports `branch`, `status` ("queued"/"in_progress"/"completed"),
+    `event`, `per_page`, `page`. Returns a single page (GitHub default 30,
+    max 100); pass `page` to paginate.
+
+    **Example**
+
+    ```hot
+    result ::github::actions/list-workflow-runs("acme", "api", {status: "in_progress", per_page: 20})
+    map(result.workflow_runs, %.id)
+
+    // For one installation or tenant
+    other ::github::actions/list-workflow-runs("acme", "api", {}, {token: ::hot::ctx/get("acme.github-token")})
+    other.total_count
+    ```
+    """
 }
 fn
 (owner: Str, repo: Str): Map {
@@ -151,7 +252,17 @@ fn
 
 get-workflow-run
 meta {
-    doc: """GET /repos/{owner}/{repo}/actions/runs/{run_id} - One run's status and conclusion — poll this to watch CI."""
+    doc: """
+    GET /repos/{owner}/{repo}/actions/runs/{run_id} - One run's status and
+    conclusion — poll this to watch CI.
+
+    **Example**
+
+    ```hot
+    run ::github::actions/get-workflow-run("acme", "api", 1234567890)
+    if(eq(run.status, "completed"), run.conclusion, "still running")
+    ```
+    """
 }
 fn
 (owner: Str, repo: Str, run-id: Any): Map {
@@ -163,7 +274,17 @@ fn
 
 get-workflow-run-attempt
 meta {
-    doc: """GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt} - One attempt of a re-run workflow."""
+    doc: """
+    GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt} - One
+    attempt of a re-run workflow.
+
+    **Example**
+
+    ```hot
+    attempt ::github::actions/get-workflow-run-attempt("acme", "api", 1234567890, 2)
+    attempt.conclusion
+    ```
+    """
 }
 fn
 (owner: Str, repo: Str, run-id: Any, attempt: Any): Map {
@@ -180,6 +301,14 @@ meta {
     conclusions for one workflow run. `params` supports `filter`
     ("latest"/"all"), `per_page`, and `page`. This is the endpoint that
     distinguishes a checkout-step failure from a later build or test failure.
+
+    **Example**
+
+    ```hot
+    result ::github::actions/list-workflow-jobs("acme", "api", 1234567890, {filter: "latest"})
+    failed filter(result.jobs, eq(%.conclusion, "failure"))
+    map(failed, %.name)
+    ```
     """
 }
 fn
@@ -199,6 +328,13 @@ meta {
     GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs -
     Jobs and step conclusions for one workflow attempt. `params` supports
     `per_page` and `page`.
+
+    **Example**
+
+    ```hot
+    result ::github::actions/list-workflow-attempt-jobs("acme", "api", 1234567890, 2)
+    map(result.jobs, %.conclusion)
+    ```
     """
 }
 fn
@@ -217,6 +353,13 @@ meta {
     doc: """
     GET /repos/{owner}/{repo}/actions/jobs/{job_id} - One workflow job,
     including its ordered steps and each step's status and conclusion.
+
+    **Example**
+
+    ```hot
+    job ::github::actions/get-workflow-job("acme", "api", 9876543210)
+    map(job.steps, %.name)
+    ```
     """
 }
 fn
@@ -233,6 +376,13 @@ meta {
     GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs - Download one
     job's plain-text log. This is the smallest useful log request after
     `list-workflow-jobs` identifies a failed checkout or test step.
+
+    **Example**
+
+    ```hot
+    log ::github::actions/download-workflow-job-logs("acme", "api", 9876543210)
+    filter(split(log, "\n"), contains(%, "error"))
+    ```
     """
 }
 fn
@@ -245,7 +395,17 @@ fn
 
 download-workflow-run-logs
 meta {
-    doc: """GET /repos/{owner}/{repo}/actions/runs/{run_id}/logs - Download a workflow run's log archive as Bytes."""
+    doc: """
+    GET /repos/{owner}/{repo}/actions/runs/{run_id}/logs - Download a
+    workflow run's log archive as Bytes.
+
+    **Example**
+
+    ```hot
+    archive ::github::actions/download-workflow-run-logs("acme", "api", 1234567890)
+    ::hot::zip/entries(archive)
+    ```
+    """
 }
 fn
 (owner: Str, repo: Str, run-id: Any): Any {
@@ -257,7 +417,17 @@ fn
 
 download-workflow-attempt-logs
 meta {
-    doc: """GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt}/logs - Download one attempt's log archive as Bytes."""
+    doc: """
+    GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt}/logs
+    - Download one attempt's log archive as Bytes.
+
+    **Example**
+
+    ```hot
+    archive ::github::actions/download-workflow-attempt-logs("acme", "api", 1234567890, 2)
+    ::hot::zip/entries(archive)
+    ```
+    """
 }
 fn
 (owner: Str, repo: Str, run-id: Any, attempt: Any): Any {
@@ -269,7 +439,16 @@ fn
 
 cancel-workflow-run
 meta {
-    doc: """POST /repos/{owner}/{repo}/actions/runs/{run_id}/cancel - Cancel a workflow run."""
+    doc: """
+    POST /repos/{owner}/{repo}/actions/runs/{run_id}/cancel - Cancel a
+    workflow run.
+
+    **Example**
+
+    ```hot
+    ::github::actions/cancel-workflow-run("acme", "api", 1234567890)
+    ```
+    """
 }
 fn
 (owner: Str, repo: Str, run-id: Any): Any {
@@ -285,6 +464,15 @@ meta {
     POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun - Re-run every
     job in a workflow run. The optional `options` Map supports
     `enable_debug_logging`.
+
+    **Example**
+
+    ```hot
+    ::github::actions/rerun-workflow("acme", "api", 1234567890)
+
+    // With step debug logs
+    ::github::actions/rerun-workflow("acme", "api", 1234567890, {enable_debug_logging: true})
+    ```
     """
 }
 fn
@@ -304,6 +492,12 @@ meta {
     POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs -
     Re-run only failed jobs and their dependent jobs. The optional `options`
     Map supports `enable_debug_logging`.
+
+    **Example**
+
+    ```hot
+    ::github::actions/rerun-failed-workflow-jobs("acme", "api", 1234567890)
+    ```
     """
 }
 fn
@@ -323,6 +517,12 @@ meta {
     POST /repos/{owner}/{repo}/actions/jobs/{job_id}/rerun - Re-run one
     job and its dependent jobs. The optional `options` Map supports
     `enable_debug_logging`.
+
+    **Example**
+
+    ```hot
+    ::github::actions/rerun-workflow-job("acme", "api", 9876543210)
+    ```
     """
 }
 fn

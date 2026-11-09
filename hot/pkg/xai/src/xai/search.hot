@@ -57,7 +57,7 @@ meta {
     response ::xai::responses/create(::xai::responses/CreateResponseRequest({
         model: "grok-3",
         input: "What is the latest news about AI?",
-        tools: [web-search-tool()]
+        tools: [::xai::search/web-search-tool()]
     }))
     ```
     """
@@ -80,7 +80,7 @@ meta {
     response ::xai::responses/create(::xai::responses/CreateResponseRequest({
         model: "grok-3",
         input: "What are people saying about the new iPhone?",
-        tools: [x-search-tool()]
+        tools: [::xai::search/x-search-tool()]
     }))
     ```
     """
@@ -105,11 +105,10 @@ meta {
     **Example**
 
     ```hot
-    answer search-web("grok-3", "What is the current weather in San Francisco?")
-    // => "Currently in San Francisco, it's 62°F..."
+    answer ::xai::search/search-web("grok-3", "What is the current weather in San Francisco?")
 
     // With instructions
-    answer search-web("grok-3", "Latest AI news", "Summarize in bullet points.")
+    answer ::xai::search/search-web("grok-3", "Latest AI news", "Summarize in bullet points.")
     ```
     """
 }
@@ -150,11 +149,10 @@ meta {
     **Example**
 
     ```hot
-    answer search-x("grok-3", "What are people saying about the latest tech news?")
-    // => "Here's what people are discussing on X..."
+    answer ::xai::search/search-x("grok-3", "What are people saying about the latest tech news?")
 
     // With instructions
-    answer search-x("grok-3", "Reactions to the new iPhone", "Focus on sentiment analysis.")
+    answer ::xai::search/search-x("grok-3", "Reactions to the new iPhone", "Focus on sentiment analysis.")
     ```
     """
 }
@@ -194,8 +192,7 @@ meta {
     **Example**
 
     ```hot
-    answer search-all("grok-3", "What's happening with climate change today?")
-    // => "Based on web and X sources..."
+    answer ::xai::search/search-all("grok-3", "What's happening with climate change today?")
     ```
     """
 }

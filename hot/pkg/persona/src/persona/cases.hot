@@ -50,7 +50,17 @@ fn
 
 get-case
 meta {
-    doc: """GET /cases/{id} - Retrieve a case. `opts` takes `include` (e.g. `["inquiries", "reports"]`) and `fields`."""
+    doc: """
+    GET /cases/{id} - Retrieve a case. `opts` takes `include` (e.g.
+    `["inquiries", "reports"]`) and `fields`.
+
+    **Example**
+
+    ```hot
+    c ::persona::cases/get-case("case_123", {include: ["inquiries", "reports"]})
+    ::persona::api/attr(c, "status")
+    ```
+    """
 }
 fn
 (case-id: Str): Map {
@@ -65,7 +75,18 @@ fn
 
 list-cases
 meta {
-    doc: """GET /cases - One page of cases. Filters: `status`, `case-template-id`, `account-id`, `reference-id`, `inquiry-id`, `report-id`. `opts` takes `page-size`, `after`, `before`."""
+    doc: """
+    GET /cases - One page of cases. Filters: `status`, `case-template-id`,
+    `account-id`, `reference-id`, `inquiry-id`, `report-id`. `opts` takes
+    `page-size`, `after`, `before`.
+
+    **Example**
+
+    ```hot
+    page ::persona::cases/list-cases({status: "Open"}, {page-size: 25})
+    map(page.data, %.id)
+    ```
+    """
 }
 fn
 (filters: Map): Map {
@@ -80,7 +101,15 @@ fn
 
 update-case
 meta {
-    doc: """PATCH /cases/{id} - Update `case-queue-id` or `fields`."""
+    doc: """
+    PATCH /cases/{id} - Update `case-queue-id` or `fields`.
+
+    **Example**
+
+    ```hot
+    ::persona::cases/update-case("case_123", {case-queue-id: "cque_123"})
+    ```
+    """
 }
 fn
 (case-id: Str, attributes: Map): Map {
@@ -92,7 +121,15 @@ fn
 
 assign-case
 meta {
-    doc: """POST /cases/{id}/assign - Assign a case to a dashboard user by email."""
+    doc: """
+    POST /cases/{id}/assign - Assign a case to a dashboard user by email.
+
+    **Example**
+
+    ```hot
+    ::persona::cases/assign-case("case_123", "reviewer@example.com")
+    ```
+    """
 }
 fn
 (case-id: Str, user-email-address: Str): Map {
@@ -104,7 +141,16 @@ fn
 
 set-status
 meta {
-    doc: """POST /cases/{id}/set-status - Move a case to a status configured on its template, e.g. `"Approved"`."""
+    doc: """
+    POST /cases/{id}/set-status - Move a case to a status configured on its
+    template, e.g. `"Approved"`.
+
+    **Example**
+
+    ```hot
+    ::persona::cases/set-status("case_123", "Approved")
+    ```
+    """
 }
 fn
 (case-id: Str, status: Str): Map {
@@ -116,7 +162,16 @@ fn
 
 add-objects
 meta {
-    doc: """POST /cases/{id}/add-objects - Attach inquiries, reports, accounts, verifications, transactions or documents by id."""
+    doc: """
+    POST /cases/{id}/add-objects - Attach inquiries, reports, accounts,
+    verifications, transactions or documents by id.
+
+    **Example**
+
+    ```hot
+    ::persona::cases/add-objects("case_123", ["inq_123", "rep_123"])
+    ```
+    """
 }
 fn
 (case-id: Str, object-ids: Vec<Str>): Map {
@@ -128,7 +183,16 @@ fn
 
 add-comment
 meta {
-    doc: """POST /cases/{id}/add-comment - Add a comment for reviewers. Keep PII out of comments."""
+    doc: """
+    POST /cases/{id}/add-comment - Add a comment for reviewers. Keep PII out
+    of comments.
+
+    **Example**
+
+    ```hot
+    ::persona::cases/add-comment("case_123", "Watchlist hit is a name collision.")
+    ```
+    """
 }
 fn
 (case-id: Str, comment: Str): Map {
@@ -140,7 +204,15 @@ fn
 
 redact-case
 meta {
-    doc: """DELETE /cases/{id} - Permanently remove a case's PII."""
+    doc: """
+    DELETE /cases/{id} - Permanently remove a case's PII.
+
+    **Example**
+
+    ```hot
+    ::persona::cases/redact-case("case_123")
+    ```
+    """
 }
 fn
 (case-id: Str): Map {

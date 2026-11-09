@@ -31,6 +31,15 @@ meta {
     admin.teams.create - Create a workspace. `team_discoverability`: `open`, `closed`, `invite_only` or `unlisted`. Returns `team` (the new team id).
 
     Scope: `admin.teams:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::teams ::slack::admin::teams
+
+    res ::teams/create(::teams/CreateRequest({team_domain: "acme-support", team_name: "Acme Support", team_discoverability: "invite_only"}))
+    res.team
+    ```
     """
 }
 fn
@@ -53,6 +62,18 @@ meta {
 
     Scope: `admin.teams:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `list-all`.
+
+    **Example**
+
+    ```hot
+    ::teams ::slack::admin::teams
+
+    page ::teams/list(::teams/ListRequest({limit: 100}))
+    map(page.teams, %.name)
+
+    // As another organization
+    ::teams/list(::teams/ListRequest({limit: 100}), {token: ::hot::ctx/get("tenant-b.slack.admin.token")})
+    ```
     """
 }
 fn
@@ -69,7 +90,18 @@ fn
 list-all
 meta {
     doc: """
-    Every `teams` entry from `admin.teams.list`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    Every `teams` entry from `admin.teams.list`, following `next_cursor`
+    until the last page or `max-items` (default 1000). `request` sets the
+    filters; its `cursor` is the starting point.
+
+    **Example**
+
+    ```hot
+    ::teams ::slack::admin::teams
+
+    teams ::teams/list-all()
+    map(teams, %.id)
+    ```
     """
 }
 fn
@@ -99,6 +131,15 @@ meta {
 
     Scope: `admin.teams:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `admins-list-all`.
+
+    **Example**
+
+    ```hot
+    ::teams ::slack::admin::teams
+
+    page ::teams/admins-list(::teams/AdminsListRequest({team_id: "T0123ABCDEF", limit: 100}))
+    page.admin_ids
+    ```
     """
 }
 fn
@@ -112,7 +153,18 @@ fn
 admins-list-all
 meta {
     doc: """
-    Every `admin_ids` entry from `admin.teams.admins.list`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    Every `admin_ids` entry from `admin.teams.admins.list`, following
+    `next_cursor` until the last page or `max-items` (default 1000).
+    `request` sets the filters; its `cursor` is the starting point.
+
+    **Example**
+
+    ```hot
+    ::teams ::slack::admin::teams
+
+    admins ::teams/admins-list-all(::teams/AdminsListRequest({team_id: "T0123ABCDEF"}))
+    length(admins)
+    ```
     """
 }
 fn
@@ -139,6 +191,15 @@ meta {
 
     Scope: `admin.teams:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `owners-list-all`.
+
+    **Example**
+
+    ```hot
+    ::teams ::slack::admin::teams
+
+    page ::teams/owners-list(::teams/OwnersListRequest({team_id: "T0123ABCDEF", limit: 100}))
+    page.owner_ids
+    ```
     """
 }
 fn
@@ -152,7 +213,18 @@ fn
 owners-list-all
 meta {
     doc: """
-    Every `owner_ids` entry from `admin.teams.owners.list`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    Every `owner_ids` entry from `admin.teams.owners.list`, following
+    `next_cursor` until the last page or `max-items` (default 1000).
+    `request` sets the filters; its `cursor` is the starting point.
+
+    **Example**
+
+    ```hot
+    ::teams ::slack::admin::teams
+
+    owners ::teams/owners-list-all(::teams/OwnersListRequest({team_id: "T0123ABCDEF"}))
+    length(owners)
+    ```
     """
 }
 fn
@@ -176,6 +248,15 @@ meta {
     admin.teams.settings.info - Get a workspace's settings (`team`).
 
     Scope: `admin.teams:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::teams ::slack::admin::teams
+
+    res ::teams/settings-info(::teams/SettingsInfoRequest({team_id: "T0123ABCDEF"}))
+    res.team.name
+    ```
     """
 }
 fn
@@ -197,6 +278,14 @@ meta {
     admin.teams.settings.setDefaultChannels - Set the channels new members join automatically.
 
     Scope: `admin.teams:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::teams ::slack::admin::teams
+
+    ::teams/settings-set-default-channels(::teams/SettingsSetDefaultChannelsRequest({team_id: "T0123ABCDEF", channel_ids: ["C0123ABCDEF"]}))
+    ```
     """
 }
 fn
@@ -218,6 +307,14 @@ meta {
     admin.teams.settings.setDescription - Set a workspace's description.
 
     Scope: `admin.teams:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::teams ::slack::admin::teams
+
+    ::teams/settings-set-description(::teams/SettingsSetDescriptionRequest({team_id: "T0123ABCDEF", description: "Customer support"}))
+    ```
     """
 }
 fn
@@ -239,6 +336,14 @@ meta {
     admin.teams.settings.setDiscoverability - Set who can find and join a workspace: `open`, `closed`, `invite_only` or `unlisted`.
 
     Scope: `admin.teams:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::teams ::slack::admin::teams
+
+    ::teams/settings-set-discoverability(::teams/SettingsSetDiscoverabilityRequest({team_id: "T0123ABCDEF", discoverability: "invite_only"}))
+    ```
     """
 }
 fn
@@ -260,6 +365,14 @@ meta {
     admin.teams.settings.setIcon - Set a workspace's icon from an image URL.
 
     Scope: `admin.teams:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::teams ::slack::admin::teams
+
+    ::teams/settings-set-icon(::teams/SettingsSetIconRequest({team_id: "T0123ABCDEF", image_url: "https://example.com/icon.png"}))
+    ```
     """
 }
 fn
@@ -281,6 +394,14 @@ meta {
     admin.teams.settings.setName - Rename a workspace.
 
     Scope: `admin.teams:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::teams ::slack::admin::teams
+
+    ::teams/settings-set-name(::teams/SettingsSetNameRequest({team_id: "T0123ABCDEF", name: "Acme Customer Support"}))
+    ```
     """
 }
 fn

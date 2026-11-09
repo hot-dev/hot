@@ -2,7 +2,7 @@
 
 hot.pkg.gleif {
   name: "hot.dev/gleif",
-  version: "0.1.1",
+  version: "0.1.2",
   hot-min-version: "3.0.2",
   description: "The GLEIF LEI API for Hot, with no key: search, fuzzy names, LEI and ISIN lookups, and direct and ultimate parents and children.",
   author: "Hot Dev",

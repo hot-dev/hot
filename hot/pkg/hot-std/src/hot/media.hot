@@ -198,6 +198,15 @@ meta {
     makes this dispatch helper safe on the open `Media` enum — any future
     variant enrolled via an arrow falls through to `false` rather than
     producing a runtime error.
+
+    **Example**
+
+    ```hot
+    ::media ::hot::media
+    file {file-id: "f-1", path: "media/clip", size: 1024, storage-backend: "local", created-at: 0, updated-at: 0}
+    image ::media/Media.Image({file: file, width: 640, height: 480, format: "png"})
+    ::media/is-image(image)  // true
+    ```
     """
 }
 fn (media: Media): Bool {
@@ -205,19 +214,58 @@ fn (media: Media): Bool {
 }
 
 is-audio
-meta {doc: """Check if media is an Audio variant."""}
+meta {
+    doc: """
+    Check if media is an Audio variant.
+
+    **Example**
+
+    ```hot
+    ::media ::hot::media
+    file {file-id: "f-1", path: "media/clip", size: 1024, storage-backend: "local", created-at: 0, updated-at: 0}
+    audio ::media/Media.Audio({file: file, duration_seconds: 3.5, format: "mp3"})
+    ::media/is-audio(audio)  // true
+    ```
+    """
+}
 fn (media: Media): Bool {
     match media { Media.Audio => true, _ => false }
 }
 
 is-video
-meta {doc: """Check if media is a Video variant."""}
+meta {
+    doc: """
+    Check if media is a Video variant.
+
+    **Example**
+
+    ```hot
+    ::media ::hot::media
+    file {file-id: "f-1", path: "media/clip", size: 1024, storage-backend: "local", created-at: 0, updated-at: 0}
+    video ::media/Media.Video({file: file, duration_seconds: 12.0, format: "mp4"})
+    ::media/is-video(video)  // true
+    ```
+    """
+}
 fn (media: Media): Bool {
     match media { Media.Video => true, _ => false }
 }
 
 has-duration
-meta {doc: """Check if media has a duration (audio or video)."""}
+meta {
+    doc: """
+    Check if media has a duration (audio or video).
+
+    **Example**
+
+    ```hot
+    ::media ::hot::media
+    file {file-id: "f-1", path: "media/clip", size: 1024, storage-backend: "local", created-at: 0, updated-at: 0}
+    video ::media/Media.Video({file: file, duration_seconds: 12.0, format: "mp4"})
+    ::media/has-duration(video)  // true
+    ```
+    """
+}
 fn (media: Media): Bool {
     match media { Media.Audio => true, Media.Video => true, _ => false }
 }
@@ -229,8 +277,12 @@ meta {
 
     **Example**
     ```hot
-    seconds duration(audio-media)  // 3.5
-    seconds duration(image-media)  // null
+    ::media ::hot::media
+    file {file-id: "f-1", path: "media/clip", size: 1024, storage-backend: "local", created-at: 0, updated-at: 0}
+    audio ::media/Media.Audio({file: file, duration_seconds: 3.5, format: "mp3"})
+    image ::media/Media.Image({file: file, width: 640, height: 480, format: "png"})
+    ::media/duration(audio)  // 3.5
+    ::media/duration(image)  // null
     ```
     """
 }

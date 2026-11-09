@@ -8,7 +8,20 @@ meta {
 get-user
 meta {
     ctx: {"elevenlabs.api.key": {required: false}},
-    doc: """GET /v1/user: the account (`user_id`, `first_name`, `subscription`, ...). The cheapest key smoke test."""
+    doc: """
+    GET /v1/user: the account (`user_id`, `first_name`, `subscription`,
+    ...). The cheapest key smoke test.
+
+    **Example**
+
+    ```hot
+    me ::elevenlabs::user/get-user()
+    me.user_id
+
+    // Check another tenant's key, from context
+    ::elevenlabs::user/get-user({api-key: ::hot::ctx/get("tenant.elevenlabs.key")})
+    ```
+    """
 }
 fn
 (): Map {

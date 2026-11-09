@@ -21,7 +21,22 @@ ListScheduledEventsRequest type {
 
 list-scheduled-events
 meta {
-    doc: """GET /guilds/{guild_id}/scheduled-events - The guild's scheduled events; `with_user_count: true` adds `user_count`."""
+    doc: """
+    GET /guilds/{guild_id}/scheduled-events - The guild's scheduled events;
+    `with_user_count: true` adds `user_count`.
+
+    **Example**
+
+    ```hot
+    ::events ::discord::events
+
+    events ::events/list-scheduled-events(::events/ListScheduledEventsRequest({
+      guild_id: "1000000000000000000",
+      with_user_count: true
+    }))
+    map(events, %.user_count)
+    ```
+    """
 }
 fn
 (request: ListScheduledEventsRequest): Vec<Map> {
@@ -88,7 +103,23 @@ GetScheduledEventRequest type {
 
 get-scheduled-event
 meta {
-    doc: """GET /guilds/{guild_id}/scheduled-events/{event_id} - One scheduled event."""
+    doc: """
+    GET /guilds/{guild_id}/scheduled-events/{event_id} - One scheduled
+    event.
+
+    **Example**
+
+    ```hot
+    ::events ::discord::events
+
+    event ::events/get-scheduled-event(::events/GetScheduledEventRequest({
+      guild_id: "1000000000000000000",
+      event_id: "2100000000000000000",
+      with_user_count: true
+    }))
+    event.status
+    ```
+    """
 }
 fn
 (request: GetScheduledEventRequest): Map {
@@ -126,6 +157,19 @@ meta {
     `4` cancels it). Only fields you set are sent. Switching to
     `entity_type: 3` needs `clear: ["channel_id"]` plus a location and end
     time. Needs MANAGE_EVENTS (or CREATE_EVENTS for your own events).
+
+    **Example**
+
+    ```hot
+    ::events ::discord::events
+
+    // Start the event
+    ::events/modify-scheduled-event(::events/ModifyScheduledEventRequest({
+      guild_id: "1000000000000000000",
+      event_id: "2100000000000000000",
+      status: 2
+    }))
+    ```
     """
 }
 fn
@@ -146,7 +190,20 @@ DeleteScheduledEventRequest type {
 
 delete-scheduled-event
 meta {
-    doc: """DELETE /guilds/{guild_id}/scheduled-events/{event_id} - Delete an event."""
+    doc: """
+    DELETE /guilds/{guild_id}/scheduled-events/{event_id} - Delete an event.
+
+    **Example**
+
+    ```hot
+    ::events ::discord::events
+
+    ::events/delete-scheduled-event(::events/DeleteScheduledEventRequest({
+      guild_id: "1000000000000000000",
+      event_id: "2100000000000000000"
+    }))
+    ```
+    """
 }
 fn
 (request: DeleteScheduledEventRequest): Bool {
@@ -167,7 +224,25 @@ GetScheduledEventUsersRequest type {
 
 get-scheduled-event-users
 meta {
-    doc: """GET /guilds/{guild_id}/scheduled-events/{event_id}/users - Users interested in an event (`[{guild_scheduled_event_id, user, member?}]`), up to `limit` (1-100). Page with `before`/`after` user ids."""
+    doc: """
+    GET /guilds/{guild_id}/scheduled-events/{event_id}/users - Users
+    interested in an event (`[{guild_scheduled_event_id, user, member?}]`),
+    up to `limit` (1-100). Page with `before`/`after` user ids.
+
+    **Example**
+
+    ```hot
+    ::events ::discord::events
+
+    interested ::events/get-scheduled-event-users(::events/GetScheduledEventUsersRequest({
+      guild_id: "1000000000000000000",
+      event_id: "2100000000000000000",
+      limit: 100,
+      with_member: true
+    }))
+    map(interested, %.user.username)
+    ```
+    """
 }
 fn
 (request: GetScheduledEventUsersRequest): Vec<Map> {

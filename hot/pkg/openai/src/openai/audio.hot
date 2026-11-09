@@ -62,7 +62,7 @@ meta {
     **Example**
 
     ```hot
-    audio-bytes ::openai::audio/speech(SpeechRequest({
+    audio-bytes ::openai::audio/speech(::openai::audio/SpeechRequest({
         model: "tts-1",
         input: "Hello, this is a test.",
         voice: "alloy"
@@ -75,7 +75,7 @@ meta {
     **Example - Different voice**
 
     ```hot
-    audio-bytes ::openai::audio/speech(SpeechRequest({
+    audio-bytes ::openai::audio/speech(::openai::audio/SpeechRequest({
         model: "tts-1",
         input: "Testing with a different voice.",
         voice: "nova"

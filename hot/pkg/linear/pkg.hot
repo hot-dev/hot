@@ -2,7 +2,7 @@
 
 hot.pkg.linear {
   name: "hot.dev/linear",
-  version: "0.2.1",
+  version: "0.2.2",
   hot-min-version: "3.0.2",
   description: "Linear API bindings for Hot. Issues, teams, and comments over Linear's GraphQL API, plus raw GraphQL access.",
   author: "Hot Dev",

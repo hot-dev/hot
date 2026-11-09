@@ -4,7 +4,19 @@
 
 build-comment-payload
 meta {
-    doc: """Build the create-comment payload. `target` is `{object, record_id}` to start a new thread on a record, or `{thread_id}` to reply to an existing thread. Exposed for testing; `create-comment` uses it."""
+    doc: """
+    Build the create-comment payload. `target` is `{object, record_id}` to
+    start a new thread on a record, or `{thread_id}` to reply to an existing
+    thread. Exposed for testing; `create-comment` uses it.
+
+    **Example**
+
+    ```hot
+    payload ::attio::comments/build-comment-payload({thread_id: "thread-1"}, "Thanks.", "member-1")
+    payload.data.thread_id  // "thread-1"
+    payload.data.author  // {type: "workspace-member", id: "member-1"}
+    ```
+    """
 }
 fn (target: Map, content: Str, author-member-id: Str): Map {
   base {
@@ -32,7 +44,7 @@ meta {
     ```hot
     me first(::attio::workspace/list-members().data)
     ::attio::comments/create-comment(
-      {object: "people", record_id: person.id.record_id},
+      {object: "people", record_id: "7f4e2a10-3b9c-4d2a-8f1e-6a5c9d0b1e23"},
       "Followed up by email.",
       me.id.workspace_member_id)
     ```
@@ -53,7 +65,17 @@ fn
 
 list-threads
 meta {
-    doc: """GET /threads?record_id=&object= - The comment threads on a record (each thread carries its comments)."""
+    doc: """
+    GET /threads?record_id=&object= - The comment threads on a record (each
+    thread carries its comments).
+
+    **Example**
+
+    ```hot
+    threads ::attio::comments/list-threads("people", ::attio::recordsEC)
+    map(threads.data, %.id.thread_id)
+    ```
+    """
 }
 fn
 (object: Str, record-id: Str): Map {

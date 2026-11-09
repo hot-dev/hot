@@ -18,11 +18,11 @@ meta {
     ```hot
     ::qd ::qdrant
 
-    ::qd/create-collection("docs", 1536)
+    ::qd/create-collection("docs", 3)
     ::qd/upsert-points("docs", [
-      {id: 1, vector: embedding, payload: {source: "guide.md"}}
+      {id: 1, vector: [0.12, 0.48, 0.91], payload: {source: "guide.md"}}
     ])
-    hits ::qd/search("docs", {vector: question-embedding, limit: 5, with_payload: true})
+    hits ::qd/search("docs", {vector: [0.1, 0.5, 0.9], limit: 5, with_payload: true})
     map(hits, (h) { h.payload.source })
     ```
     """
@@ -33,7 +33,16 @@ meta {
 base-url
 meta {
     ctx: {"qdrant.url": {required: false, secret: false}},
-    doc: """The instance URL without a trailing slash: the `qdrant.url` context variable or the local default, or the given URL."""
+    doc: """
+    The instance URL without a trailing slash: the `qdrant.url` context
+    variable or the local default, or the given URL.
+
+    **Example**
+
+    ```hot
+    ::qdrant/base-url("http://localhost:6333/")  // "http://localhost:6333"
+    ```
+    """
 }
 fn
 (): Str {
@@ -46,7 +55,24 @@ fn
 request
 meta {
     ctx: {"qdrant.url": {required: false, secret: false}, "qdrant.api.key": {required: false}},
-    doc: """The request behind every function: `opts` (`{url, api-key}`), then the context variables, then the local default (see `::qdrant::api/resolve`)."""
+    doc: """
+    The request behind every function: `opts` (`{url, api-key}`), then the
+    context variables, then the local default (see `::qdrant::api/resolve`).
+
+    **Example**
+
+    ```hot
+    // A route the package does not wrap. "" sends no body.
+    out ::qdrant/request("GET", "/collections/docs/aliases", "")
+    out.aliases
+
+    // Against another instance
+    ::qdrant/request("GET", "/collections", "", {
+      url: "https://tenant-b.qdrant.example",
+      api-key: ::hot::ctx/get("tenant-b.qdrant.api.key")
+    })
+    ```
+    """
 }
 fn
 (method: Str, path: Str, body: Any): Any {
@@ -91,7 +117,16 @@ fn
 list-collections
 meta {
     ctx: {"qdrant.url": {required: false, secret: false}, "qdrant.api.key": {required: false}},
-    doc: """GET /collections - The instance's collections."""
+    doc: """
+    GET /collections - The instance's collections.
+
+    **Example**
+
+    ```hot
+    out ::qdrant/list-collections()
+    map(out.collections, (c) { c.name })
+    ```
+    """
 }
 fn
 (): Map {
@@ -103,7 +138,23 @@ fn
 
 create-collection
 meta {
-    doc: """PUT /collections/{name} - Create a collection. The 3-arity form sets the distance metric ("Cosine" default, "Euclid", "Dot") or takes `opts`; the 4-arity form takes both."""
+    doc: """
+    PUT /collections/{name} - Create a collection. The 3-arity form sets the
+    distance metric ("Cosine" default, "Euclid", "Dot") or takes `opts`; the
+    4-arity form takes both.
+
+    **Example**
+
+    ```hot
+    ::qdrant/create-collection("docs", 1536)
+
+    // Dot product, on another instance
+    ::qdrant/create-collection("docs", 1536, "Dot", {
+      url: "https://tenant-b.qdrant.example",
+      api-key: ::hot::ctx/get("tenant-b.qdrant.api.key")
+    })
+    ```
+    """
 }
 fn
 (name: Str, dimension: Int): Any {
@@ -121,7 +172,17 @@ fn
 
 get-collection
 meta {
-    doc: """GET /collections/{name} - Collection info: vector config, point count, status."""
+    doc: """
+    GET /collections/{name} - Collection info: vector config, point count,
+    status.
+
+    **Example**
+
+    ```hot
+    info ::qdrant/get-collection("docs")
+    info.points_count
+    ```
+    """
 }
 fn
 (name: Str): Map {
@@ -133,7 +194,15 @@ fn
 
 delete-collection
 meta {
-    doc: """DELETE /collections/{name} - Drop a collection and its points."""
+    doc: """
+    DELETE /collections/{name} - Drop a collection and its points.
+
+    **Example**
+
+    ```hot
+    ::qdrant/delete-collection("docs")
+    ```
+    """
 }
 fn
 (name: Str): Any {
@@ -156,7 +225,7 @@ meta {
 
     ```hot
     ::qdrant/upsert-points("docs", [
-      {id: 1, vector: embedding, payload: {title: "Q3 roadmap", lang: "en"}}
+      {id: 1, vector: [0.12, 0.48, 0.91], payload: {title: "Q3 roadmap", lang: "en"}}
     ])
     ```
     """
@@ -181,7 +250,7 @@ meta {
 
     ```hot
     hits ::qdrant/search("docs", {
-      vector: embedding,
+      vector: [0.1, 0.5, 0.9],
       limit: 5,
       filter: {must: [{key: "lang", match: {value: "en"}}]},
       with_payload: true
@@ -200,7 +269,17 @@ fn
 
 get-points
 meta {
-    doc: """POST /collections/{name}/points - Retrieve points by ids (payloads included)."""
+    doc: """
+    POST /collections/{name}/points - Retrieve points by ids (payloads
+    included).
+
+    **Example**
+
+    ```hot
+    points ::qdrant/get-points("docs", [1, 2])
+    map(points, (p) { p.payload })
+    ```
+    """
 }
 fn
 (collection: Str, ids: Vec): Vec {
@@ -212,7 +291,19 @@ fn
 
 delete-points
 meta {
-    doc: """POST /collections/{name}/points/delete - Delete by ids (`{points: [...]}`) or by filter (`{filter: {...}}`)."""
+    doc: """
+    POST /collections/{name}/points/delete - Delete by ids (`{points:
+    [...]}`) or by filter (`{filter: {...}}`).
+
+    **Example**
+
+    ```hot
+    ::qdrant/delete-points("docs", {points: [1, 2]})
+
+    // Everything matching a filter
+    ::qdrant/delete-points("docs", {filter: {must: [{key: "lang", match: {value: "de"}}]}})
+    ```
+    """
 }
 fn
 (collection: Str, selector: Map): Any {
@@ -224,7 +315,21 @@ fn
 
 count-points
 meta {
-    doc: """POST /collections/{name}/points/count - Count points, optionally under a filter."""
+    doc: """
+    POST /collections/{name}/points/count - Count points, optionally under a
+    filter.
+
+    **Example**
+
+    ```hot
+    all ::qdrant/count-points("docs")
+    all.count
+
+    // Under a filter
+    english ::qdrant/count-points("docs", {must: [{key: "lang", match: {value: "en"}}]})
+    english.count
+    ```
+    """
 }
 fn
 (collection: Str): Map {

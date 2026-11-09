@@ -30,7 +30,18 @@ LIST_TYPES ["LIST_TYPE_UNSPECIFIED", "LIST_TYPE_ALLOWLIST", "LIST_TYPE_DENYLIST"
 
 list-type
 meta {
-    doc: """The wire `listType` for `"allowlist"`, `"denylist"` or `"both"` (or a wire value as is); an Err for anything else. Exposed for testing."""
+    doc: """
+    The wire `listType` for `"allowlist"`, `"denylist"` or `"both"` (or a
+    wire value as is); an Err for anything else. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::private-data/list-type("allowlist")  // "LIST_TYPE_ALLOWLIST"
+    ::cipherowl::private-data/list-type("both")  // "LIST_TYPE_UNSPECIFIED"
+    is-err(::cipherowl::private-data/list-type("blocklist"))  // true
+    ```
+    """
 }
 fn (value: Str): Str {
   v uppercase(trim(value))
@@ -43,7 +54,9 @@ fn (value: Str): Str {
   }
 }
 
-overrides-path fn (network: Str): Str {
+overrides-path
+meta {no-doc: true}
+fn (network: Str): Str {
   n ::api/validate-network(network)
   cond {
     is-err(n) => { n }
@@ -53,7 +66,19 @@ overrides-path fn (network: Str): Str {
 
 list-request
 meta {
-    doc: """The spec for one page of overrides on a network. `options` takes `listType` (`"allowlist"`, `"denylist"`, `"both"`), `pageSize`, `pageToken`, `includeDeleted` and `sinceTimestamp` (RFC 3339). Exposed for testing."""
+    doc: """
+    The spec for one page of overrides on a network. `options` takes
+    `listType` (`"allowlist"`, `"denylist"`, `"both"`), `pageSize`,
+    `pageToken`, `includeDeleted` and `sinceTimestamp` (RFC 3339). Exposed
+    for testing.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::private-data/list-request("ethereum_mainnet", {listType: "denylist"}).path
+    // "/api/private-data/v2/overrides/networks/ethereum_mainnet/addresses?listType=LIST_TYPE_DENYLIST"
+    ```
+    """
 }
 fn (network: Str, options: Map): Map {
   lt-opt get(options, "listType")
@@ -65,7 +90,9 @@ fn (network: Str, options: Map): Map {
   }
 }
 
-list-spec fn (base: Str, kind: Str?, options: Map): Map {
+list-spec
+meta {no-doc: true}
+fn (base: Str, kind: Str?, options: Map): Map {
   {
     method: "GET",
     path: `${base}${query({
@@ -81,7 +108,19 @@ list-spec fn (base: Str, kind: Str?, options: Map): Map {
 
 list-overrides
 meta {
-    doc: """One page of overrides: `{entries: [{listType, network, chain, address, addLabels, removeLabels, notes, version, createdAt, updatedAt, createdBy, updatedBy, deletedAt?}], nextPageToken}`."""
+    doc: """
+    One page of overrides: `{entries: [{listType, network, chain, address,
+    addLabels, removeLabels, notes, version, createdAt, updatedAt,
+    createdBy, updatedBy, deletedAt?}], nextPageToken}`.
+
+    **Example**
+
+    ```hot
+    page ::cipherowl::private-data/list-overrides("ethereum_mainnet", {listType: "denylist", pageSize: 100})
+    map(page.entries, (e) { e.address })
+    page.nextPageToken
+    ```
+    """
 }
 fn
 (network: Str, options: Map): Map {
@@ -93,7 +132,17 @@ fn
 
 list-all-overrides
 meta {
-    doc: """Collect up to `limit` overrides on a network across pages (same `options` as `list-overrides`)."""
+    doc: """
+    Collect up to `limit` overrides on a network across pages (same
+    `options` as `list-overrides`).
+
+    **Example**
+
+    ```hot
+    entries ::cipherowl::private-data/list-all-overrides("ethereum_mainnet", {listType: "allowlist"}, 1000)
+    length(entries)
+    ```
+    """
 }
 fn
 (network: Str, options: Map, limit: Int): Vec {
@@ -105,7 +154,18 @@ fn
 
 get-override
 meta {
-    doc: """The override for one address: `{entry}`; a 404 Err when there is none (`::cipherowl::api/is-status(e, 404)`)."""
+    doc: """
+    The override for one address: `{entry}`; a 404 Err when there is none
+    (`::cipherowl::api/is-status(e, 404)`).
+
+    **Example**
+
+    ```hot
+    out ::cipherowl::private-data/get-override("ethereum_mainnet", "0x0000000000000000000000000000000000000001")
+    out.entry.listType
+    out.entry.version
+    ```
+    """
 }
 fn
 (network: Str, address: Str): Map {
@@ -118,7 +178,21 @@ fn
 
 upsert-request
 meta {
-    doc: """The spec for creating or updating an override. `entry` takes `listType` (`"allowlist"`/`"denylist"` or the wire value, required), `address` (required), `addLabels`, `removeLabels`, `notes` and `expectedVersion` (default `"0"`, a new entry; int64 is sent as a string). Exposed for testing."""
+    doc: """
+    The spec for creating or updating an override. `entry` takes `listType`
+    (`"allowlist"`/`"denylist"` or the wire value, required), `address`
+    (required), `addLabels`, `removeLabels`, `notes` and `expectedVersion`
+    (default `"0"`, a new entry; int64 is sent as a string). Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    spec ::cipherowl::private-data/upsert-request("ethereum_mainnet", {listType: "allowlist", address: "0x0000000000000000000000000000000000000001"})
+    spec.body.listType  // "LIST_TYPE_ALLOWLIST"
+    spec.body.expectedVersion  // "0"
+    ```
+    """
 }
 fn (network: Str, entry: Map): Map {
   body ::api/compact(untype(entry))
@@ -173,7 +247,17 @@ fn
 
 allowlist-address
 meta {
-    doc: """Add a new address to the allowlist (`expectedVersion` `"0"`), with optional `notes`."""
+    doc: """
+    Add a new address to the allowlist (`expectedVersion` `"0"`), with
+    optional `notes`.
+
+    **Example**
+
+    ```hot
+    out ::cipherowl::private-data/allowlist-address("ethereum_mainnet", "0x0000000000000000000000000000000000000001", "treasury cold wallet")
+    out.entry.version
+    ```
+    """
 }
 fn
 (network: Str, address: Str, notes: Str?): Map {
@@ -185,7 +269,17 @@ fn
 
 denylist-address
 meta {
-    doc: """Add a new address to the denylist (`expectedVersion` `"0"`), with optional `notes`."""
+    doc: """
+    Add a new address to the denylist (`expectedVersion` `"0"`), with
+    optional `notes`.
+
+    **Example**
+
+    ```hot
+    out ::cipherowl::private-data/denylist-address("ethereum_mainnet", "0x0000000000000000000000000000000000000001", "confirmed fraud report")
+    out.created
+    ```
+    """
 }
 fn
 (network: Str, address: Str, notes: Str?): Map {
@@ -197,7 +291,17 @@ fn
 
 delete-override
 meta {
-    doc: """Remove the override for an address. Returns `{success}`; a 404 Err when there is none."""
+    doc: """
+    Remove the override for an address. Returns `{success}`; a 404 Err when
+    there is none.
+
+    **Example**
+
+    ```hot
+    out ::cipherowl::private-data/delete-override("ethereum_mainnet", "0x0000000000000000000000000000000000000001")
+    out.success
+    ```
+    """
 }
 fn
 (network: Str, address: Str): Map {

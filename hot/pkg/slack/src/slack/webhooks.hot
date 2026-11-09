@@ -24,15 +24,24 @@ meta {
   **Example**
 
   ```hot
-  // Using context variable (1-arity, most common)
-  is-valid ::slack::webhooks/verify-request(request)
+  slack-webhook
+  meta {webhook: {service: "slack", path: "/slack/webhook"}}
+  fn (request) {
+    // Using context variable (1-arity, most common)
+    is-valid ::slack::webhooks/verify-request(request)
 
-  // With explicit signing secret (2-arity, for multi-app)
-  is-valid ::slack::webhooks/verify-request(request, "your-signing-secret")
+    // With explicit signing secret (2-arity, for multi-app)
+    secret ::hot::ctx/get("tenant-b.slack.signing.secret")
+    is-valid ::slack::webhooks/verify-request(request, secret)
 
-  // With opts (2-arity): `signing-secret` decides the call when present,
-  // and a blank one is rejected rather than replaced by the context secret
-  is-valid ::slack::webhooks/verify-request(request, {signing-secret: "your-signing-secret"})
+    // With opts (2-arity): `signing-secret` decides the call when present,
+    // and a blank one is rejected rather than replaced by the context secret
+    is-valid ::slack::webhooks/verify-request(request, {signing-secret: secret})
+
+    if(is-valid,
+      send("slack:webhook", request.body),
+      ::hot::http/HttpResponse({status: 401, body: "invalid signature"}))
+  }
   ```
   """
 }

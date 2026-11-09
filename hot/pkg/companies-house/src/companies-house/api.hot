@@ -45,7 +45,17 @@ PACKAGE_AGENT "hot-dev-companies-house-pkg/0.1 (+https://hot.dev)"
 
 given
 meta {
-    doc: """True for a non-null value that is not a blank string."""
+    doc: """
+    True for a non-null value that is not a blank string.
+
+    **Example**
+
+    ```hot
+    ::companies-house::api/given("x")  // true
+    ::companies-house::api/given("  ")  // false
+    ::companies-house::api/given(null)  // false
+    ```
+    """
 }
 fn (v: Any): Bool {
   match v {
@@ -55,7 +65,9 @@ fn (v: Any): Bool {
   }
 }
 
-pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
+pick
+meta {no-doc: true}
+fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
   from-opts get(opts, key)
   from-ctx ::ctx/get(ctx-key)
   cond {
@@ -68,7 +80,9 @@ pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
 // Per-call URLs that receive the API key.
 KEYED_URL_KEYS ["base-url", "document-base-url"]
 
-strip-slash fn (url: Str): Str {
+strip-slash
+meta {no-doc: true}
+fn (url: Str): Str {
   ::re/replace-all(url, "/+$", "")
 }
 
@@ -84,7 +98,8 @@ meta {
     **Example**
 
     ```hot
-    cfg ::companies-house::api/resolve({api-key: tenant.ch-key})
+    cfg ::companies-house::api/resolve({api-key: ::hot::ctx/get("tenant.companies-house-key")})
+    cfg.base-url
     ```
     """
 }
@@ -112,7 +127,16 @@ fn (opts: Map): Map {
 
 require-api-key
 meta {
-    doc: """The API key from resolved settings, or an Err naming where to set it."""
+    doc: """
+    The API key from resolved settings, or an Err naming where to set it.
+
+    **Example**
+
+    ```hot
+    cfg ::companies-house::api/resolve({})
+    key ::companies-house::api/require-api-key(cfg)
+    ```
+    """
 }
 fn (cfg: Map): Str {
   cond {
@@ -144,7 +168,9 @@ type {
     message: Str
 }
 
-body-detail fn (body: Any): Str? {
+body-detail
+meta {no-doc: true}
+fn (body: Any): Str? {
   cond {
     is-str(body) => { if(gt(length(body), 200), `${slice(body, 0, 200)}…`, body) }
     is-map(body) => {
@@ -162,7 +188,9 @@ body-detail fn (body: Any): Str? {
   }
 }
 
-retry-after fn (headers: Map): Int? {
+retry-after
+meta {no-doc: true}
+fn (headers: Map): Int? {
   v get(headers, "retry-after")
   cond {
     is-null(v) => { null }
@@ -173,7 +201,17 @@ retry-after fn (headers: Map): Int? {
 
 http-error
 meta {
-    doc: """Build an `HttpError` from a non-2xx response. Exposed for testing; every request uses it."""
+    doc: """
+    Build an `HttpError` from a non-2xx response. Exposed for testing; every
+    request uses it.
+
+    **Example**
+
+    ```hot
+    e ::companies-house::api/http-error({status: 404, headers: {}, body: {errors: [{error: "company-profile-not-found"}]}}, "https://api.company-information.service.gov.uk/company/00000000")
+    e.message  // "companies-house: HTTP 404: company-profile-not-found"
+    ```
+    """
 }
 fn (response: HttpResponse, url: Str): HttpError {
   headers or(response.headers, {})
@@ -191,7 +229,16 @@ fn (response: HttpResponse, url: Str): HttpError {
 
 is-not-found
 meta {
-    doc: """True when `e` is an `HttpError` with status 404."""
+    doc: """
+    True when `e` is an `HttpError` with status 404.
+
+    **Example**
+
+    ```hot
+    ::companies-house::api/is-not-found({status: 404})  // true
+    ::companies-house::api/is-not-found({status: 429})  // false
+    ```
+    """
 }
 fn (e: Any): Bool {
   and(is-map(e), eq(get(e, "status"), 404))
@@ -203,7 +250,17 @@ fn (e: Any): Bool {
 
 query-string
 meta {
-    doc: """Build a `?a=1&b=2` suffix from a Map, dropping null and blank values (pure); `""` when nothing remains."""
+    doc: """
+    Build a `?a=1&b=2` suffix from a Map, dropping null and blank values
+    (pure); `""` when nothing remains.
+
+    **Example**
+
+    ```hot
+    ::companies-house::api/query-string({q: "tesco", start_index: null})  // "?q=tesco"
+    ::companies-house::api/query-string({q: ""})  // ""
+    ```
+    """
 }
 fn (params: Map): Str {
   ::uri/query-string(filter-vals(params, given))
@@ -211,7 +268,15 @@ fn (params: Map): Str {
 
 path-segment
 meta {
-    doc: """Percent-encode one path segment."""
+    doc: """
+    Percent-encode one path segment.
+
+    **Example**
+
+    ```hot
+    ::companies-house::api/path-segment("a b")  // "a%20b"
+    ```
+    """
 }
 fn (value: Any): Str {
   ::uri/encode(Str(value))
@@ -223,6 +288,15 @@ meta {
     GET (or another method) a Companies House URL with `headers`, returning
     the `HttpResponse` on 2xx or an Err carrying `HttpError`. A
     transport failure passes through as its own Err.
+
+    **Example**
+
+    ```hot
+    key ::hot::ctx/get("companies-house.api-key")
+    headers {Authorization: ::companies-house/auth-header(key)}
+    response ::companies-house::api/request("GET", "https://api.company-information.service.gov.uk/company/00445790", headers)
+    response.status
+    ```
     """
 }
 fn (method: Str, url: Str, headers: Map): HttpResponse {
@@ -241,7 +315,19 @@ fn (method: Str, url: Str, headers: Map): HttpResponse {
 
 get-json
 meta {
-    doc: """GET a JSON resource and return the decoded body, or an Err carrying `HttpError`."""
+    doc: """
+    GET a JSON resource and return the decoded body, or an Err carrying
+    `HttpError`.
+
+    **Example**
+
+    ```hot
+    key ::hot::ctx/get("companies-house.api-key")
+    headers {Authorization: ::companies-house/auth-header(key)}
+    profile ::companies-house::api/get-json("https://api.company-information.service.gov.uk/company/00445790", headers)
+    profile.company_name
+    ```
+    """
 }
 fn (url: Str, headers: Map): Any {
   response request("GET", url, {Accept: "application/json", ...headers})
@@ -257,7 +343,18 @@ fn (url: Str, headers: Map): Any {
 
 get-json-or-null
 meta {
-    doc: """`get-json`, but a 404 gives null (a missing company) instead of an Err."""
+    doc: """
+    `get-json`, but a 404 gives null (a missing company) instead of an Err.
+
+    **Example**
+
+    ```hot
+    key ::hot::ctx/get("companies-house.api-key")
+    headers {Authorization: ::companies-house/auth-header(key)}
+    profile ::companies-house::api/get-json-or-null("https://api.company-information.service.gov.uk/company/00000000", headers)
+    is-null(profile)
+    ```
+    """
 }
 fn (url: Str, headers: Map): Any {
   out get-json(url, headers)

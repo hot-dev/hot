@@ -25,7 +25,7 @@ meta {
     link ::link/create-link-token("user-42", "My App", {products: ["transactions"]})
 
     // 2. Exchange the public token Link returns for an access token
-    tokens ::link/exchange-public-token(public-token)
+    tokens ::link/exchange-public-token("public-sandbox-123")
 
     // 3. Pull everything new since the stored cursor
     sync ::transactions/sync-all-transactions(tokens.access_token, null)

@@ -41,7 +41,17 @@ fn (params: Map, opts: Map): Map {
 
 get-account-transfer
 meta {
-    doc: """GET /account_transfers/{id}: retrieve an Account Transfer."""
+    doc: """
+    GET /account_transfers/{id}: retrieve an Account Transfer.
+
+    **Example**
+
+    ```hot
+    transfer ::increase::account-transfers/get-account-transfer("account_transfer_uoxatyh3lt5evrsdvo7q")
+    transfer.status
+    transfer.amount
+    ```
+    """
 }
 fn
 (transfer-id: Str): Map {
@@ -53,7 +63,18 @@ fn
 
 list-account-transfers
 meta {
-    doc: """GET /account_transfers: one page of Account Transfers (`{data, next_cursor}`). Filters: `account_id`, `idempotency_key`, `created_at: {after, before, on_or_after, on_or_before}`, `limit`, `cursor`."""
+    doc: """
+    GET /account_transfers: one page of Account Transfers (`{data,
+    next_cursor}`). Filters: `account_id`, `idempotency_key`, `created_at:
+    {after, before, on_or_after, on_or_before}`, `limit`, `cursor`.
+
+    **Example**
+
+    ```hot
+    page ::increase::account-transfers/list-account-transfers({account_id: "account_in71c4amph0vgo2qllky", limit: 25})
+    map(page.data, %.id)
+    ```
+    """
 }
 fn
 (): Map {
@@ -68,7 +89,20 @@ fn
 
 approve-account-transfer
 meta {
-    doc: """POST /account_transfers/{id}/approve: approve an Account Transfer in `pending_approval`. Approving releases the transfer to be sent: agents must not approve on their own; leave it to a person (in the Increase dashboard, or through your own approval step that calls this)."""
+    doc: """
+    POST /account_transfers/{id}/approve: approve an Account Transfer in
+    `pending_approval`. Approving releases the transfer to be sent: agents
+    must not approve on their own; leave it to a person (in the Increase
+    dashboard, or through your own approval step that calls this).
+
+    **Example**
+
+    ```hot
+    // Call this from a person's approval step, never from an agent.
+    transfer ::increase::account-transfers/approve-account-transfer("account_transfer_uoxatyh3lt5evrsdvo7q")
+    transfer.status
+    ```
+    """
 }
 fn
 (transfer-id: Str): Map {
@@ -80,7 +114,17 @@ fn
 
 cancel-account-transfer
 meta {
-    doc: """POST /account_transfers/{id}/cancel: cancel an Account Transfer that is still `pending_approval`."""
+    doc: """
+    POST /account_transfers/{id}/cancel: cancel an Account Transfer that is
+    still `pending_approval`.
+
+    **Example**
+
+    ```hot
+    transfer ::increase::account-transfers/cancel-account-transfer("account_transfer_uoxatyh3lt5evrsdvo7q")
+    transfer.status
+    ```
+    """
 }
 fn
 (transfer-id: Str): Map {

@@ -39,7 +39,7 @@ meta {
     **Example**
 
     ```hot
-    models list()
+    models ::xai::models/list()
     models.data // => [{id: "grok-3", object: "model", ...}, ...]
 
     first-model first(models.data)
@@ -69,7 +69,7 @@ meta {
     **Example**
 
     ```hot
-    model get("grok-3-mini")
+    model ::xai::models/get("grok-3-mini")
     model.id // => "grok-3-mini"
     model.object // => "model"
     ```

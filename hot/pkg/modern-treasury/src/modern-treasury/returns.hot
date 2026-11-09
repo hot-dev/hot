@@ -8,7 +8,19 @@ seg ::modern-treasury::api/seg
 
 list-returns
 meta {
-    doc: """GET /api/returns: one page. Filters: `returnable_id`, `returnable_type` (`"payment_order"`, `"incoming_payment_detail"`, `"reversal"`, `"return"`), `internal_account_id`, `counterparty_id`, `per_page`, `after_cursor`."""
+    doc: """
+    GET /api/returns: one page. Filters: `returnable_id`, `returnable_type`
+    (`"payment_order"`, `"incoming_payment_detail"`, `"reversal"`,
+    `"return"`), `internal_account_id`, `counterparty_id`, `per_page`,
+    `after_cursor`.
+
+    **Example**
+
+    ```hot
+    page ::modern-treasury::returns/list-returns({returnable_id: "8c0f4c1e-2b6f-4d7e-9b1a-3f2e8d4c5b6a", returnable_type: "payment_order"})
+    map(page.items, %.code)
+    ```
+    """
 }
 fn
 (): Map {
@@ -23,7 +35,17 @@ fn
 
 get-return
 meta {
-    doc: """GET /api/returns/{id}: retrieve a return (`code`, e.g. `"R01"`, `reason`, `status`)."""
+    doc: """
+    GET /api/returns/{id}: retrieve a return (`code`, e.g. `"R01"`,
+    `reason`, `status`).
+
+    **Example**
+
+    ```hot
+    return ::modern-treasury::returns/get-return("9b4d7e02-6c1a-48f5-a3d9-0e7f2b5c8d16")
+    return.reason
+    ```
+    """
 }
 fn
 (return-id: Str): Map {
@@ -35,7 +57,23 @@ fn
 
 create-return
 meta {
-    doc: """POST /api/returns: return an incoming payment to its sender. `params` needs `returnable_id` (an incoming payment detail id) and `returnable_type` (`"incoming_payment_detail"`); optional `code` (e.g. `"R10"`), `reason`, `date_of_death`, `additional_information`, `data`. Sends money back: needs an `idempotency-key`."""
+    doc: """
+    POST /api/returns: return an incoming payment to its sender. `params`
+    needs `returnable_id` (an incoming payment detail id) and
+    `returnable_type` (`"incoming_payment_detail"`); optional `code` (e.g.
+    `"R10"`), `reason`, `date_of_death`, `additional_information`, `data`.
+    Sends money back: needs an `idempotency-key`.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::returns/create-return({
+      returnable_id: "6d2e8b14-3a7f-49c1-8e06-f4b1a9d3c572",
+      returnable_type: "incoming_payment_detail",
+      code: "R10"
+    }, {idempotency-key: "return-incoming-77"})
+    ```
+    """
 }
 fn (params: Map, opts: Map): Map {
   ::api/move-money("/api/returns", params, ["returnable_id", "returnable_type"], opts, "create-return")

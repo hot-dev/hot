@@ -18,6 +18,15 @@ meta {
     POST /zones/{zone_id}/purge_cache with an explicit body: one of
     `{files}`, `{tags}`, `{hosts}`, `{prefixes}`, or `{purge_everything: true}`.
     Returns `{id}`.
+
+    **Example**
+
+    ```hot
+    ::cloudflare::cache/purge("023e105f4ecef8ad9ca31a8372d0c353", {tags: ["pricing"]})
+
+    // Act for another account
+    ::cloudflare::cache/purge("023e105f4ecef8ad9ca31a8372d0c353", {hosts: ["www.example.com"]}, {token: ::hot::ctx/get("tenant-b.cloudflare.token")})
+    ```
     """
 }
 fn
@@ -38,6 +47,7 @@ meta {
     **Example**
 
     ```hot
+    zone-id "023e105f4ecef8ad9ca31a8372d0c353"
     ::cloudflare::cache/purge-urls(zone-id, ["https://example.com/", "https://example.com/pricing"])
     ```
     """
@@ -52,7 +62,16 @@ fn
 
 purge-tags
 meta {
-    doc: """Purge everything whose `Cache-Tag` response header carries any of `tags`."""
+    doc: """
+    Purge everything whose `Cache-Tag` response header carries any of
+    `tags`.
+
+    **Example**
+
+    ```hot
+    ::cloudflare::cache/purge-tags("023e105f4ecef8ad9ca31a8372d0c353", ["pricing", "homepage"])
+    ```
+    """
 }
 fn
 (zone-id: Str, tags: Vec<Str>): Map {
@@ -64,7 +83,16 @@ fn
 
 purge-hosts
 meta {
-    doc: """Purge everything cached for the given hostnames (e.g. `["www.example.com"]`)."""
+    doc: """
+    Purge everything cached for the given hostnames (e.g.
+    `["www.example.com"]`).
+
+    **Example**
+
+    ```hot
+    ::cloudflare::cache/purge-hosts("023e105f4ecef8ad9ca31a8372d0c353", ["www.example.com"])
+    ```
+    """
 }
 fn
 (zone-id: Str, hosts: Vec<Str>): Map {
@@ -76,7 +104,16 @@ fn
 
 purge-prefixes
 meta {
-    doc: """Purge by URL prefix: hostname plus path, no scheme, query, or fragment (e.g. `["www.example.com/blog/"]`)."""
+    doc: """
+    Purge by URL prefix: hostname plus path, no scheme, query, or fragment
+    (e.g. `["www.example.com/blog/"]`).
+
+    **Example**
+
+    ```hot
+    ::cloudflare::cache/purge-prefixes("023e105f4ecef8ad9ca31a8372d0c353", ["www.example.com/blog/"])
+    ```
+    """
 }
 fn
 (zone-id: Str, prefixes: Vec<Str>): Map {
@@ -88,7 +125,16 @@ fn
 
 purge-everything
 meta {
-    doc: """Purge the zone's entire cache. Expect a burst of origin traffic afterwards."""
+    doc: """
+    Purge the zone's entire cache. Expect a burst of origin traffic
+    afterwards.
+
+    **Example**
+
+    ```hot
+    ::cloudflare::cache/purge-everything("023e105f4ecef8ad9ca31a8372d0c353")
+    ```
+    """
 }
 fn
 (zone-id: Str): Map {

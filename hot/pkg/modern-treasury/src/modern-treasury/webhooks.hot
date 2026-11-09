@@ -26,7 +26,17 @@ header ::modern-treasury::api/header
 
 sign
 meta {
-    doc: """The `X-Signature` value Modern Treasury would send for `body`: lowercase hex HMAC-SHA256 under `key`. Use it to build test deliveries."""
+    doc: """
+    The `X-Signature` value Modern Treasury would send for `body`: lowercase
+    hex HMAC-SHA256 under `key`. Use it to build test deliveries.
+
+    **Example**
+
+    ```hot
+    key ::hot::ctx/get("modern-treasury.webhook.key")
+    signature ::modern-treasury::webhooks/sign(key, "{\"event\":\"completed\"}")
+    ```
+    """
 }
 fn (key: Str, body: Str | Bytes): Str {
   ::hmac/hmac-sha256(::ctx/mark-secret(key), body)
@@ -34,7 +44,20 @@ fn (key: Str, body: Str | Bytes): Str {
 
 verify-signature
 meta {
-    doc: """True when `signature` (hex) is the HMAC-SHA256 of `body` under `key`, compared in constant time. An empty key or signature never verifies. Pass the raw body, never a re-serialized one."""
+    doc: """
+    True when `signature` (hex) is the HMAC-SHA256 of `body` under `key`,
+    compared in constant time. An empty key or signature never verifies.
+    Pass the raw body, never a re-serialized one.
+
+    **Example**
+
+    ```hot
+    key ::hot::ctx/get("modern-treasury.webhook.key")
+    body "{\"event\":\"completed\"}"
+    signature ::modern-treasury::webhooks/sign(key, body)
+    ::modern-treasury::webhooks/verify-signature(body, signature, key)
+    ```
+    """
 }
 fn (body: Str | Bytes, signature: Str, key: Str): Bool {
   ::ctx/mark-secret(key)
@@ -112,14 +135,16 @@ meta {
     **Example**
 
     ```hot
-    e ::modern-treasury::webhooks/parse-event(request)
-    cond {
-      and(eq(e.topic, "payment_order"), eq(e.event, "completed")) => {
-        order ::modern-treasury::payment-orders/get-payment-order(e.id)
-        // act on order.status
-      }
-      => { null }
+    request {
+      headers: {X-Topic: "payment_order", X-Webhook-ID: "wh_1", X-Live-Mode: "false"},
+      body: {event: "completed", data: {id: "po_1", status: "completed"}}
     }
+    e ::modern-treasury::webhooks/parse-event(request)
+    e.topic  // "payment_order"
+    e.event  // "completed"
+    e.id  // "po_1"
+    e.webhook_id  // "wh_1"
+    e.live_mode  // false
     ```
     """
 }
@@ -155,7 +180,23 @@ fn (request: Map): Event {
 construct-event
 meta {
     ctx: {"modern-treasury.webhook.key": {required: false}},
-    doc: """Verify a request (see `verify-request`) and return its `Event`, or an Err when the signature doesn't verify. The 2-arity form takes an explicit key."""
+    doc: """
+    Verify a request (see `verify-request`) and return its `Event`, or an
+    Err when the signature doesn't verify. The 2-arity form takes an
+    explicit key.
+
+    **Example**
+
+    ```hot
+    handle (request) {
+      e ::modern-treasury::webhooks/construct-event(request)
+      if(is-err(e),
+        ::hot::http/HttpResponse({status: 401, body: "invalid signature"}),
+        ::hot::http/HttpResponse({status: 200, body: {received: e.webhook_id}})
+      )
+    }
+    ```
+    """
 }
 fn
 (request: Map): Any {

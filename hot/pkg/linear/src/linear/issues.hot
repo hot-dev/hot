@@ -67,7 +67,16 @@ fn
 
 get-issue
 meta {
-    doc: """Fetch one issue by id or identifier (e.g. "ENG-123")."""
+    doc: """
+    Fetch one issue by id or identifier (e.g. "ENG-123").
+
+    **Example**
+
+    ```hot
+    issue ::linear::issues/get-issue(::linear::issuesD)
+    issue.state.name
+    ```
+    """
 }
 fn
 (id: Str): Map {
@@ -89,7 +98,17 @@ fn
 
 build-create-input
 meta {
-    doc: """Build an IssueCreateInput from a team id, title, and options (`description`, `priority` 0-4, `assigneeId`, `stateId`, `labelIds`, `projectId`). Exposed for testing; `create-issue` uses it."""
+    doc: """
+    Build an IssueCreateInput from a team id, title, and options
+    (`description`, `priority` 0-4, `assigneeId`, `stateId`, `labelIds`,
+    `projectId`). Exposed for testing; `create-issue` uses it.
+
+    **Example**
+
+    ```hot
+    ::linear::issues/build-create-input("team-1", "Fix login", {priority: 2})  // {teamId: "team-1", title: "Fix login", priority: 2}
+    ```
+    """
 }
 fn (team-id: Str, title: Str, options: Map): Map {
   filter-vals({
@@ -112,8 +131,9 @@ meta {
     **Example**
 
     ```hot
+    team ::linear::teams/get-team-by-key("ENG")
     issue ::linear::issues/create-issue(team.id, "Fix flaky webhook test", {priority: 2})
-    issue.identifier  // => "ENG-231"
+    issue.identifier
     ```
     """
 }
@@ -143,7 +163,17 @@ fn
 
 update-issue
 meta {
-    doc: """Update an issue's fields (IssueUpdateInput: `title`, `description`, `priority`, `stateId`, `assigneeId`, ...)."""
+    doc: """
+    Update an issue's fields (IssueUpdateInput: `title`, `description`,
+    `priority`, `stateId`, `assigneeId`, ...).
+
+    **Example**
+
+    ```hot
+    issue ::linear::issues/update-issue(::linear::issuesD, {priority: 1, title: "Fix login on Safari"})
+    issue.priority
+    ```
+    """
 }
 fn
 (id: Str, changes: Map): Map {
@@ -168,7 +198,16 @@ fn
 
 create-comment
 meta {
-    doc: """Comment on an issue (markdown body)."""
+    doc: """
+    Comment on an issue (markdown body).
+
+    **Example**
+
+    ```hot
+    comment ::linear::issues/create-comment(::linear::issuesD, "Reproduced on **staging**.")
+    comment.url
+    ```
+    """
 }
 fn
 (issue-id: Str, body: Str): Map {
@@ -193,7 +232,21 @@ fn
 
 list-comments
 meta {
-    doc: """The comments on an issue. `options` (2-arity) supports `first` (page size, default 50) and `after` (cursor). Returns `{nodes: [{id, body, createdAt, user}], pageInfo: {hasNextPage, endCursor}}`."""
+    doc: """
+    The comments on an issue. `options` (2-arity) supports `first` (page
+    size, default 50) and `after` (cursor). Returns `{nodes: [{id, body,
+    createdAt, user}], pageInfo: {hasNextPage, endCursor}}`.
+
+    **Example**
+
+    ```hot
+    comments ::linear::issues/list-comments(::linear::issuesD, {first: 20})
+    map(comments.nodes, %.body)
+
+    // The next page
+    more ::linear::issues/list-comments(::linear::issuesD, {first: 20, after: comments.pageInfo.endCursor})
+    ```
+    """
 }
 fn
 (issue-id: Str): Map {
@@ -229,7 +282,16 @@ fn
 
 archive-issue
 meta {
-    doc: """Archive an issue (it stays queryable but leaves active views). Returns true on success."""
+    doc: """
+    Archive an issue (it stays queryable but leaves active views). Returns
+    true on success.
+
+    **Example**
+
+    ```hot
+    ::linear::issues/archive-issue(::linear::issuesD)
+    ```
+    """
 }
 fn
 (id: Str): Bool {
@@ -251,7 +313,16 @@ fn
 
 delete-issue
 meta {
-    doc: """Move an issue to the trash (recoverable in Linear for a grace period). Returns true on success."""
+    doc: """
+    Move an issue to the trash (recoverable in Linear for a grace period).
+    Returns true on success.
+
+    **Example**
+
+    ```hot
+    ::linear::issues/delete-issue(::linear::issuesD)
+    ```
+    """
 }
 fn
 (id: Str): Bool {
@@ -273,7 +344,16 @@ fn
 
 search-issues
 meta {
-    doc: """Full-text issue search. Returns `{nodes, pageInfo}`."""
+    doc: """
+    Full-text issue search. Returns `{nodes, pageInfo}`.
+
+    **Example**
+
+    ```hot
+    hits ::linear::issues/search-issues("rate limit")
+    map(hits.nodes, %.identifier)
+    ```
+    """
 }
 fn
 (term: Str): Map {

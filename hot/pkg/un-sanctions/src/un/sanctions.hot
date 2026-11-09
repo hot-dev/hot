@@ -76,7 +76,9 @@ type {
     url: Str
 }
 
-present fn (v: Any): Bool {
+present
+meta {no-doc: true}
+fn (v: Any): Bool {
   match v {
     Null => { false }
     Str => { not(is-empty(trim(v))) }
@@ -86,7 +88,15 @@ present fn (v: Any): Bool {
 
 clean-list
 meta {
-    doc: """Trim strings, drop blanks and duplicates, keep the first-seen order."""
+    doc: """
+    Trim strings, drop blanks and duplicates, keep the first-seen order.
+
+    **Example**
+
+    ```hot
+    ::un::sanctions/clean-list([" Iraq ", "Iraq", "", null, "DRC"])  // ["Iraq", "DRC"]
+    ```
+    """
 }
 fn (values: Vec): Vec<Str> {
   distinct(map(filter(values, present), (v) { trim(Str(v)) }))
@@ -94,13 +104,23 @@ fn (values: Vec): Vec<Str> {
 
 other-names
 meta {
-    doc: """Cleaned aliases without the primary name, ignoring case."""
+    doc: """
+    Cleaned aliases without the primary name, ignoring case.
+
+    **Example**
+
+    ```hot
+    ::un::sanctions/other-names(["Jane Roe", "JANE ROE", "J. Roe"], "Jane Roe")  // ["J. Roe"]
+    ```
+    """
 }
 fn (aliases: Vec, name: Str): Vec<Str> {
   filter(clean-list(aliases), (a) { ne(lowercase(a), lowercase(name)) })
 }
 
-blank-to-null fn (v: Any): Str? {
+blank-to-null
+meta {no-doc: true}
+fn (v: Any): Str? {
   if(present(v), trim(Str(v)), null)
 }
 
@@ -113,7 +133,9 @@ MONTHS {
   jul: "07", aug: "08", sep: "09", oct: "10", nov: "11", dec: "12"
 }
 
-pad2 fn (s: Str): Str {
+pad2
+meta {no-doc: true}
+fn (s: Str): Str {
   if(eq(length(s), 1), `0${s}`, s)
 }
 
@@ -168,7 +190,9 @@ fn (raw: Str?): Str? {
   }
 }
 
-dob-of fn (node: Str): Str? {
+dob-of
+meta {no-doc: true}
+fn (node: Str): Str? {
   date ::sx/text(node, "DATE")
   year ::sx/text(node, "YEAR")
   from ::sx/text(node, "FROM_YEAR")
@@ -182,13 +206,28 @@ dob-of fn (node: Str): Str? {
   }
 }
 
-address-line fn (node: Str): Str {
+address-line
+meta {no-doc: true}
+fn (node: Str): Str {
   join(filter(map(["STREET", "CITY", "STATE_PROVINCE", "ZIP_CODE", "COUNTRY"], (t) { ::sx/text(node, t) }), is-some), ", ")
 }
 
 parse-record
 meta {
-    doc: """Turn one `<INDIVIDUAL>` or `<ENTITY>` record string into a `Listing`; `individual` says which. Exposed for testing."""
+    doc: """
+    Turn one `<INDIVIDUAL>` or `<ENTITY>` record string into a `Listing`;
+    `individual` says which. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    record "<INDIVIDUAL><FIRST_NAME>JANE</FIRST_NAME><SECOND_NAME>ROE</SECOND_NAME><REFERENCE_NUMBER>IQi.004</REFERENCE_NUMBER><INDIVIDUAL_ALIAS><ALIAS_NAME>J. Roe</ALIAS_NAME></INDIVIDUAL_ALIAS></INDIVIDUAL>"
+    l ::un::sanctions/parse-record(record, true)
+    l.id  // "IQi.004"
+    l.name  // "JANE ROE"
+    l.aliases  // ["J. Roe"]
+    ```
+    """
 }
 fn (record: Str, individual: Bool): Listing {
   prefix if(individual, "INDIVIDUAL", "ENTITY")
@@ -213,7 +252,16 @@ fn (record: Str, individual: Bool): Listing {
 
 parse
 meta {
-    doc: """Parse the whole UN consolidated XML into `Listing` records (pure)."""
+    doc: """
+    Parse the whole UN consolidated XML into `Listing` records (pure).
+
+    **Example**
+
+    ```hot
+    file "<CONSOLIDATED_LIST><ENTITIES><ENTITY><FIRST_NAME>ACME TRADING</FIRST_NAME><REFERENCE_NUMBER>CDe.005</REFERENCE_NUMBER></ENTITY></ENTITIES></CONSOLIDATED_LIST>"
+    map(::un::sanctions/parse(file), (l) { l.kind })  // ["entity"]
+    ```
+    """
 }
 fn (doc: Str): Vec<Listing> {
   people map(::sx/records(doc, "INDIVIDUAL"), (rec) { parse-record(rec, true) })
@@ -223,7 +271,18 @@ fn (doc: Str): Vec<Listing> {
 
 require-entries
 meta {
-    doc: """The parsed records, or an Err when there are none: a changed file format can parse to nothing, and an empty list must not pass for a list with nobody on it."""
+    doc: """
+    The parsed records, or an Err when there are none: a changed file format
+    can parse to nothing, and an empty list must not pass for a list with
+    nobody on it.
+
+    **Example**
+
+    ```hot
+    ::un::sanctions/require-entries([{id: "IQi.004"}])  // [{id: "IQi.004"}]
+    is-err(::un::sanctions/require-entries([]))  // true
+    ```
+    """
 }
 fn (entries: Vec): Vec {
   cond {

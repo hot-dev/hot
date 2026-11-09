@@ -19,7 +19,19 @@ DEFAULT_MAX_RESTARTS 3
 
 build-sync-request
 meta {
-    doc: """The `/transactions/sync` body: `access_token`, `cursor` (omitted when null or empty, meaning "from the beginning"), and params `count` (1-500, default 100) and `options` (`include_original_description`, `personal_finance_category_version`, `days_requested`, `account_id`). Exposed for testing."""
+    doc: """
+    The `/transactions/sync` body: `access_token`, `cursor` (omitted when
+    null or empty, meaning "from the beginning"), and params `count` (1-500,
+    default 100) and `options` (`include_original_description`,
+    `personal_finance_category_version`, `days_requested`, `account_id`).
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::plaid::transactions/build-sync-request("access-sandbox-123", "", {count: 50})  // {access_token: "access-sandbox-123", count: 50}
+    ```
+    """
 }
 fn (access-token: Str, cursor: Str?, params: Map): Map {
   ::api/compact({
@@ -37,6 +49,14 @@ meta {
     the first call). Returns `{added, modified, removed, next_cursor,
     has_more, accounts, transactions_update_status}`. Params: `count`,
     `options`. Most callers want `sync-all-transactions`.
+
+    **Example**
+
+    ```hot
+    access-token ::hot::ctx/get("plaid.access-token")
+    page ::plaid::transactions/sync-transactions(access-token, null, {count: 100})
+    page.next_cursor
+    ```
     """
 }
 fn
@@ -50,13 +70,29 @@ fn
   ::api/post("/transactions/sync", build-sync-request(access-token, cursor, params), opts)
 }
 
-empty-sync fn (cursor: Str?): Map {
+empty-sync
+meta {no-doc: true}
+fn (cursor: Str?): Map {
   {added: [], modified: [], removed: [], accounts: [], next_cursor: cursor, has_more: false, pages: 0}
 }
 
 merge-sync-page
 meta {
-    doc: """Fold one sync page into an accumulated result: concatenates `added`/`modified`/`removed`, keeps the latest `accounts`, `next_cursor`, `has_more` and `transactions_update_status`, counts `pages`. Exposed for testing."""
+    doc: """
+    Fold one sync page into an accumulated result: concatenates
+    `added`/`modified`/`removed`, keeps the latest `accounts`,
+    `next_cursor`, `has_more` and `transactions_update_status`, counts
+    `pages`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    acc {added: [], modified: [], removed: [], accounts: [], pages: 0}
+    merged ::plaid::transactions/merge-sync-page(acc, {added: [{transaction_id: "t1"}], next_cursor: "c2", has_more: false})
+    merged.added  // [{transaction_id: "t1"}]
+    merged.pages  // 1
+    ```
+    """
 }
 fn (acc: Map, page: Map): Map {
   {
@@ -71,7 +107,9 @@ fn (acc: Map, page: Map): Map {
   }
 }
 
-sync-loop fn (fetch: Fn, start-cursor: Str?, cursor: Str?, params: Map, acc: Map, restarts: Int): Map {
+sync-loop
+meta {no-doc: true}
+fn (fetch: Fn, start-cursor: Str?, cursor: Str?, params: Map, acc: Map, restarts: Int): Map {
   max-pages or(get(params, "max-pages"), DEFAULT_MAX_PAGES)
   max-restarts or(get(params, "max-restarts"), DEFAULT_MAX_RESTARTS)
   page fetch(cursor)
@@ -102,7 +140,19 @@ sync-loop fn (fetch: Fn, start-cursor: Str?, cursor: Str?, params: Map, acc: Map
 
 sync-all-with
 meta {
-    doc: """The `has_more` loop of `sync-all-transactions` over any `fetch` function `(cursor) -> page or Err`. Exposed for testing with a stubbed fetch."""
+    doc: """
+    The `has_more` loop of `sync-all-transactions` over any `fetch` function
+    `(cursor) -> page or Err`. Exposed for testing with a stubbed fetch.
+
+    **Example**
+
+    ```hot
+    fetch (cursor) { {added: [{transaction_id: "t1"}], modified: [], removed: [], next_cursor: "c2", has_more: false} }
+    out ::plaid::transactions/sync-all-with(fetch, null, {})
+    out.next_cursor  // "c2"
+    out.pages  // 1
+    ```
+    """
 }
 fn (fetch: Fn, cursor: Str?, params: Map): Map {
   sync-loop(fetch, cursor, cursor, params, empty-sync(cursor), 0)
@@ -123,6 +173,9 @@ meta {
     **Example**
 
     ```hot
+    cursors ::hot::store/Map({name: "plaid-cursors"})
+    item-id "item_123"
+    access-token ::hot::ctx/get("plaid.access-token")
     cursor ::hot::store/get(cursors, item-id)
     changes ::plaid::transactions/sync-all-transactions(access-token, cursor, {count: 500})
     // apply changes.added / changes.modified / changes.removed, then:
@@ -151,6 +204,14 @@ meta {
     `include_original_description`, `days_requested`. Returns
     `{transactions, total_transactions, accounts, item}`. Prefer sync for
     keeping a copy up to date.
+
+    **Example**
+
+    ```hot
+    access-token ::hot::ctx/get("plaid.access-token")
+    out ::plaid::transactions/get-transactions(access-token, "2026-01-01", "2026-03-31", {count: 500})
+    out.total_transactions
+    ```
     """
 }
 fn
@@ -171,7 +232,18 @@ fn
 
 refresh-transactions
 meta {
-    doc: """POST /transactions/refresh: ask Plaid to check the institution now (an add-on product). New data arrives through the usual `SYNC_UPDATES_AVAILABLE` webhook."""
+    doc: """
+    POST /transactions/refresh: ask Plaid to check the institution now (an
+    add-on product). New data arrives through the usual
+    `SYNC_UPDATES_AVAILABLE` webhook.
+
+    **Example**
+
+    ```hot
+    access-token ::hot::ctx/get("plaid.access-token")
+    ::plaid::transactions/refresh-transactions(access-token)
+    ```
+    """
 }
 fn
 (access-token: Str): Map {
@@ -183,7 +255,20 @@ fn
 
 get-recurring-transactions
 meta {
-    doc: """POST /transactions/recurring/get: inflow and outflow streams (subscriptions, payroll, ...) detected from the Item's history. Options: `personal_finance_category_version`. Pass `account_ids` in the 3-arity form. Returns `{inflow_streams, outflow_streams, updated_datetime}`."""
+    doc: """
+    POST /transactions/recurring/get: inflow and outflow streams
+    (subscriptions, payroll, ...) detected from the Item's history. Options:
+    `personal_finance_category_version`. Pass `account_ids` in the 3-arity
+    form. Returns `{inflow_streams, outflow_streams, updated_datetime}`.
+
+    **Example**
+
+    ```hot
+    access-token ::hot::ctx/get("plaid.access-token")
+    out ::plaid::transactions/get-recurring-transactions(access-token, ["acc_123"], null)
+    map(out.outflow_streams, %.description)
+    ```
+    """
 }
 fn
 (access-token: Str): Map {

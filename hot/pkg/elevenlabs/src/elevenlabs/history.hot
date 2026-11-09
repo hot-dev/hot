@@ -40,7 +40,16 @@ fn
 get-history-item
 meta {
     ctx: {"elevenlabs.api.key": {required: false}},
-    doc: """GET /v1/history/{history_item_id}: one generation's metadata."""
+    doc: """
+    GET /v1/history/{history_item_id}: one generation's metadata.
+
+    **Example**
+
+    ```hot
+    item ::elevenlabs::history/get-history-item("VW7YKqPnjY4h39yTbx2L")
+    item.text
+    ```
+    """
 }
 fn
 (history-item-id: Str): Map {
@@ -53,7 +62,17 @@ fn
 get-history-audio
 meta {
     ctx: {"elevenlabs.api.key": {required: false}},
-    doc: """GET /v1/history/{history_item_id}/audio: the generation's audio as `Bytes`."""
+    doc: """
+    GET /v1/history/{history_item_id}/audio: the generation's audio as
+    `Bytes`.
+
+    **Example**
+
+    ```hot
+    audio ::elevenlabs::history/get-history-audio("VW7YKqPnjY4h39yTbx2L")
+    ::hot::file/write-file-bytes("replay.mp3", audio)
+    ```
+    """
 }
 fn
 (history-item-id: Str): Bytes {
@@ -66,7 +85,17 @@ fn
 delete-history-item
 meta {
     ctx: {"elevenlabs.api.key": {required: false}},
-    doc: """DELETE /v1/history/{history_item_id}: delete a generation. Returns `{status: "ok"}`."""
+    doc: """
+    DELETE /v1/history/{history_item_id}: delete a generation. Returns
+    `{status: "ok"}`.
+
+    **Example**
+
+    ```hot
+    result ::elevenlabs::history/delete-history-item("VW7YKqPnjY4h39yTbx2L")
+    result.status
+    ```
+    """
 }
 fn
 (history-item-id: Str): Map {
