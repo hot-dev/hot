@@ -97,6 +97,10 @@ meta ["test"] fn () {
     assert-eq({createParagraphBullets: {range: {startIndex: 1, endIndex: 2}, bulletPreset: "BULLET_DISC_CIRCLE_SQUARE"}}, ::req/bullets(1, 2))
     assert-eq({color: {rgbColor: ::req/rgb(255, 0, 0)}}, ::req/optional-color(::req/hex-color("#ff0000")))
     assert(is-err(::req/hex-color("red")))
+    assert-eq(::req/hex-color("#ff0000"), ::req/hex-color("ff0000"), "the leading # is optional")
+    assert-eq(::req/hex-color("#ff0000"), ::req/hex-color(" #FF0000 "), "trimmed and case-insensitive")
+    assert(is-err(::req/hex-color("1a#73#e8")), "a # anywhere but the start is invalid")
+    assert(is-err(::req/hex-color("##ff0000")), "only one leading # is removed")
     assert-eq("a,b", join(sort(split(::req/field-mask({a: 1, b: 2}), ",")), ","))
 }
 

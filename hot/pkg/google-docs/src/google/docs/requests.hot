@@ -14,7 +14,7 @@ meta {
     ```hot
     ::req ::google::docs::requests
 
-    ::google::docs::documents/batch-update(id, [
+    ::google::docs::documents/batch-update("1AbCdEf", [
       ::req/insert-text("Status\nAll green\n", 1),
       ::req/heading(1, 8, 1),
       ::req/bold(8, 17)
@@ -34,7 +34,16 @@ NUMBERED "NUMBERED_DECIMAL_ALPHA_ROMAN"
 
 location
 meta {
-    doc: """A `Location` at a UTF-16 index."""
+    doc: """
+    A `Location` at a UTF-16 index.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/location(5)  // {index: 5}
+    ::google::docs::requests/location(5, {tabId: "t.1"})  // {index: 5, tabId: "t.1"}
+    ```
+    """
 }
 fn
 (index: Int): Map {
@@ -46,7 +55,17 @@ fn
 
 end-of-segment
 meta {
-    doc: """An `EndOfSegmentLocation`: the end of the body, or of `opts.segmentId`, in the first tab or `opts.tabId`."""
+    doc: """
+    An `EndOfSegmentLocation`: the end of the body, or of `opts.segmentId`,
+    in the first tab or `opts.tabId`.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/end-of-segment()  // {}
+    ::google::docs::requests/end-of-segment({segmentId: "kix.header"})  // {segmentId: "kix.header"}
+    ```
+    """
 }
 fn
 (): Map {
@@ -58,7 +77,15 @@ fn
 
 text-range
 meta {
-    doc: """A `Range`: `start` inclusive to `end` exclusive."""
+    doc: """
+    A `Range`: `start` inclusive to `end` exclusive.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/text-range(1, 8)  // {startIndex: 1, endIndex: 8}
+    ```
+    """
 }
 fn
 (start: Int, end: Int): Map {
@@ -70,7 +97,15 @@ fn
 
 points
 meta {
-    doc: """A `Dimension` in points."""
+    doc: """
+    A `Dimension` in points.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/points(12)  // {magnitude: 12, unit: "PT"}
+    ```
+    """
 }
 fn (value: Int | Dec): Map {
   {magnitude: value, unit: "PT"}
@@ -78,7 +113,15 @@ fn (value: Int | Dec): Map {
 
 rgb
 meta {
-    doc: """A Docs `RgbColor` from 0-255 channels."""
+    doc: """
+    A Docs `RgbColor` from 0-255 channels.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/rgb(255, 0, 0)  // {red: 1.0, green: 0.0, blue: 0.0}
+    ```
+    """
 }
 fn (red: Int, green: Int, blue: Int): Map {
   {red: div(Dec(red), 255), green: div(Dec(green), 255), blue: div(Dec(blue), 255)}
@@ -86,10 +129,20 @@ fn (red: Int, green: Int, blue: Int): Map {
 
 hex-color
 meta {
-    doc: """A Docs `RgbColor` from a hex string (`"#1a73e8"` or `"1a73e8"`); an Err for anything else."""
+    doc: """
+    A Docs `RgbColor` from a hex string (`"#1a73e8"` or `"1a73e8"`); an Err
+    for anything else.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/hex-color("#ff0000")  // {red: 1.0, green: 0.0, blue: 0.0}
+    ```
+    """
 }
 fn (hex: Str): Map {
-  h lowercase(::hot::str/replace(trim(hex), "#", ""))
+  trimmed trim(hex)
+  h lowercase(if(starts-with(trimmed, "#"), slice(trimmed, 1), trimmed))
   cond {
     not(::hot::regex/is-match(h, "^[0-9a-f]{6}$")) => { err(`google-docs: invalid hex color ${to-json(hex)}`) }
     => {
@@ -101,7 +154,17 @@ fn (hex: Str): Map {
 
 optional-color
 meta {
-    doc: """An `OptionalColor` wrapping an `RgbColor`, for `foregroundColor` and `backgroundColor`."""
+    doc: """
+    An `OptionalColor` wrapping an `RgbColor`, for `foregroundColor` and
+    `backgroundColor`.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/optional-color(::google::docs::requests/rgb(255, 0, 0))
+    // {color: {rgbColor: {red: 1.0, green: 0.0, blue: 0.0}}}
+    ```
+    """
 }
 fn (color: Map): Map {
   {color: {rgbColor: color}}
@@ -109,7 +172,16 @@ fn (color: Map): Map {
 
 field-mask
 meta {
-    doc: """A style's top-level keys as a field mask, so only the fields you pass change."""
+    doc: """
+    A style's top-level keys as a field mask, so only the fields you pass
+    change.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/field-mask({bold: true, italic: false})  // "bold,italic"
+    ```
+    """
 }
 fn (style: Map): Str {
   join(map(keys(style), Str), ",")
@@ -121,7 +193,17 @@ fn (style: Map): Str {
 
 insert-text
 meta {
-    doc: """`insertText` at a UTF-16 index, which must fall inside an existing paragraph."""
+    doc: """
+    `insertText` at a UTF-16 index, which must fall inside an existing
+    paragraph.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/insert-text("Hello", 1)
+    // {insertText: {text: "Hello", location: {index: 1}}}
+    ```
+    """
 }
 fn
 (text: Str, index: Int): Map {
@@ -133,7 +215,16 @@ fn
 
 append-text
 meta {
-    doc: """`insertText` at the end of the body or segment."""
+    doc: """
+    `insertText` at the end of the body or segment.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/append-text("Hello\n")
+    // {insertText: {text: "Hello\n", endOfSegmentLocation: {}}}
+    ```
+    """
 }
 fn
 (text: Str): Map {
@@ -145,7 +236,17 @@ fn
 
 delete-range
 meta {
-    doc: """`deleteContentRange`. A range cannot include a segment's final newline or split a table or surrogate pair."""
+    doc: """
+    `deleteContentRange`. A range cannot include a segment's final newline
+    or split a table or surrogate pair.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/delete-range(1, 8)
+    // {deleteContentRange: {range: {startIndex: 1, endIndex: 8}}}
+    ```
+    """
 }
 fn
 (start: Int, end: Int): Map {
@@ -155,14 +256,27 @@ fn
   {deleteContentRange: {range: text-range(start, end, opts)}}
 }
 
-tabs-criteria fn (opts: Map): Map? {
+tabs-criteria
+meta {no-doc: true}
+fn (opts: Map): Map? {
   ids get(opts, "tabIds")
   if(is-null(ids), null, {tabIds: ids})
 }
 
 replace-all-text
 meta {
-    doc: """`replaceAllText`: every occurrence, in every tab unless `opts.tabIds`. Case-sensitive unless `opts.matchCase` is false; `opts.searchByRegex` treats `search` as a regular expression."""
+    doc: """
+    `replaceAllText`: every occurrence, in every tab unless `opts.tabIds`.
+    Case-sensitive unless `opts.matchCase` is false; `opts.searchByRegex`
+    treats `search` as a regular expression.
+
+    **Example**
+
+    ```hot
+    req ::google::docs::requests/replace-all-text("2025", "2026", {matchCase: false})
+    req.replaceAllText.containsText  // {text: "2025", matchCase: false}
+    ```
+    """
 }
 fn
 (search: Str, replacement: Str): Map {
@@ -182,7 +296,18 @@ fn
 
 fill-template
 meta {
-    doc: """One `replaceAllText` per entry of `values`, replacing `{{key}}` with the value as text. Null values are skipped."""
+    doc: """
+    One `replaceAllText` per entry of `values`, replacing `{{key}}` with the
+    value as text. Null values are skipped.
+
+    **Example**
+
+    ```hot
+    reqs ::google::docs::requests/fill-template({name: "Ada"})
+    reqs[0].replaceAllText.containsText.text  // "{{name}}"
+    reqs[0].replaceAllText.replaceText  // "Ada"
+    ```
+    """
 }
 fn
 (values: Map): Vec {
@@ -199,7 +324,17 @@ fn
 
 text-style
 meta {
-    doc: """`updateTextStyle` with any `TextStyle` (`bold`, `italic`, `underline`, `strikethrough`, `fontSize`, `foregroundColor`, `backgroundColor`, `link`, `weightedFontFamily`, ...). The field mask is the keys you pass."""
+    doc: """
+    `updateTextStyle` with any `TextStyle` (`bold`, `italic`, `underline`,
+    `strikethrough`, `fontSize`, `foregroundColor`, `backgroundColor`,
+    `link`, `weightedFontFamily`, ...). The field mask is the keys you pass.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/text-style(1, 8, {bold: true, underline: true}).updateTextStyle.fields  // "bold,underline"
+    ```
+    """
 }
 fn
 (start: Int, end: Int, style: Map): Map {
@@ -210,7 +345,17 @@ fn
 }
 
 bold
-meta {doc: """Make a range bold."""}
+meta {
+    doc: """
+    Make a range bold.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/bold(1, 8).updateTextStyle.textStyle  // {bold: true}
+    ```
+    """
+}
 fn
 (start: Int, end: Int): Map {
   text-style(start, end, {bold: true})
@@ -220,7 +365,17 @@ fn
 }
 
 italic
-meta {doc: """Make a range italic."""}
+meta {
+    doc: """
+    Make a range italic.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/italic(1, 8).updateTextStyle.textStyle  // {italic: true}
+    ```
+    """
+}
 fn
 (start: Int, end: Int): Map {
   text-style(start, end, {italic: true})
@@ -230,7 +385,18 @@ fn
 }
 
 link
-meta {doc: """Link a range to `url`."""}
+meta {
+    doc: """
+    Link a range to `url`.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/link(1, 8, "https://hot.dev").updateTextStyle.textStyle
+    // {link: {url: "https://hot.dev"}}
+    ```
+    """
+}
 fn
 (start: Int, end: Int, url: Str): Map {
   text-style(start, end, {link: {url: url}})
@@ -240,7 +406,18 @@ fn
 }
 
 font-size
-meta {doc: """Set a range's font size in points."""}
+meta {
+    doc: """
+    Set a range's font size in points.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/font-size(1, 8, 14).updateTextStyle.textStyle
+    // {fontSize: {magnitude: 14, unit: "PT"}}
+    ```
+    """
+}
 fn
 (start: Int, end: Int, size: Int | Dec): Map {
   text-style(start, end, {fontSize: points(size)})
@@ -250,7 +427,17 @@ fn
 }
 
 text-color
-meta {doc: """Set a range's text color from an `RgbColor` (`rgb` or `hex-color`)."""}
+meta {
+    doc: """
+    Set a range's text color from an `RgbColor` (`rgb` or `hex-color`).
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/text-color(1, 8, ::google::docs::requests/hex-color("#ff0000")).updateTextStyle.fields  // "foregroundColor"
+    ```
+    """
+}
 fn
 (start: Int, end: Int, color: Map): Map {
   text-style(start, end, {foregroundColor: optional-color(color)})
@@ -261,7 +448,17 @@ fn
 
 paragraph-style
 meta {
-    doc: """`updateParagraphStyle` with any `ParagraphStyle` (`namedStyleType`, `alignment`, `lineSpacing`, `spaceAbove`, `indentStart`, ...) on every paragraph the range touches. The field mask is the keys you pass."""
+    doc: """
+    `updateParagraphStyle` with any `ParagraphStyle` (`namedStyleType`,
+    `alignment`, `lineSpacing`, `spaceAbove`, `indentStart`, ...) on every
+    paragraph the range touches. The field mask is the keys you pass.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/paragraph-style(1, 8, {alignment: "CENTER"}).updateParagraphStyle.fields  // "alignment"
+    ```
+    """
 }
 fn
 (start: Int, end: Int, style: Map): Map {
@@ -273,7 +470,17 @@ fn
 
 named-style
 meta {
-    doc: """Apply a named style: `NORMAL_TEXT`, `TITLE`, `SUBTITLE` or `HEADING_1` to `HEADING_6`."""
+    doc: """
+    Apply a named style: `NORMAL_TEXT`, `TITLE`, `SUBTITLE` or `HEADING_1`
+    to `HEADING_6`.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/named-style(1, 8, "TITLE").updateParagraphStyle.paragraphStyle
+    // {namedStyleType: "TITLE"}
+    ```
+    """
 }
 fn
 (start: Int, end: Int, name: Str): Map {
@@ -285,7 +492,17 @@ fn
 
 heading
 meta {
-    doc: """Make the paragraphs in a range a heading of `level` 1 to 6; an Err for any other level."""
+    doc: """
+    Make the paragraphs in a range a heading of `level` 1 to 6; an Err for
+    any other level.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/heading(1, 8, 2).updateParagraphStyle.paragraphStyle
+    // {namedStyleType: "HEADING_2"}
+    ```
+    """
 }
 fn
 (start: Int, end: Int, level: Int): Map {
@@ -299,7 +516,17 @@ fn
 }
 
 align
-meta {doc: """Set paragraph alignment: `START`, `CENTER`, `END` or `JUSTIFIED`."""}
+meta {
+    doc: """
+    Set paragraph alignment: `START`, `CENTER`, `END` or `JUSTIFIED`.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/align(1, 8, "CENTER").updateParagraphStyle.paragraphStyle  // {alignment: "CENTER"}
+    ```
+    """
+}
 fn
 (start: Int, end: Int, alignment: Str): Map {
   paragraph-style(start, end, {alignment: alignment})
@@ -310,7 +537,18 @@ fn
 
 bullets
 meta {
-    doc: """`createParagraphBullets` on the paragraphs in a range. `preset` defaults to `BULLET_DISC_CIRCLE_SQUARE`; `NUMBERED` holds the usual numbered preset."""
+    doc: """
+    `createParagraphBullets` on the paragraphs in a range. `preset` defaults
+    to `BULLET_DISC_CIRCLE_SQUARE`; `NUMBERED` holds the usual numbered
+    preset.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/bullets(1, 20).createParagraphBullets.bulletPreset  // "BULLET_DISC_CIRCLE_SQUARE"
+    ::google::docs::requests/bullets(1, 20, ::google::docs::requests/NUMBERED).createParagraphBullets.bulletPreset  // "NUMBERED_DECIMAL_ALPHA_ROMAN"
+    ```
+    """
 }
 fn
 (start: Int, end: Int): Map {
@@ -324,7 +562,18 @@ fn
 }
 
 delete-bullets
-meta {doc: """`deleteParagraphBullets` on the paragraphs in a range."""}
+meta {
+    doc: """
+    `deleteParagraphBullets` on the paragraphs in a range.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/delete-bullets(1, 20)
+    // {deleteParagraphBullets: {range: {startIndex: 1, endIndex: 20}}}
+    ```
+    """
+}
 fn
 (start: Int, end: Int): Map {
   delete-bullets(start, end, {})
@@ -339,7 +588,17 @@ fn
 
 insert-table
 meta {
-    doc: """`insertTable` at an index. Docs adds a newline before the table, so its start index is `add(index, 1)`."""
+    doc: """
+    `insertTable` at an index. Docs adds a newline before the table, so its
+    start index is `add(index, 1)`.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/insert-table(2, 3, 1)
+    // {insertTable: {rows: 2, columns: 3, location: {index: 1}}}
+    ```
+    """
 }
 fn
 (rows: Int, columns: Int, index: Int): Map {
@@ -350,7 +609,18 @@ fn
 }
 
 append-table
-meta {doc: """`insertTable` at the end of the body or segment."""}
+meta {
+    doc: """
+    `insertTable` at the end of the body or segment.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/append-table(2, 3)
+    // {insertTable: {rows: 2, columns: 3, endOfSegmentLocation: {}}}
+    ```
+    """
+}
 fn
 (rows: Int, columns: Int): Map {
   append-table(rows, columns, {})
@@ -361,7 +631,17 @@ fn
 
 table-cell
 meta {
-    doc: """A `TableCellLocation`: 0-based row and column of the table starting at `table-start` (see `::google::docs::content/tables`)."""
+    doc: """
+    A `TableCellLocation`: 0-based row and column of the table starting at
+    `table-start` (see `::google::docs::content/tables`).
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/table-cell(2, 0, 1)
+    // {tableStartLocation: {index: 2}, rowIndex: 0, columnIndex: 1}
+    ```
+    """
 }
 fn
 (table-start: Int, row: Int, column: Int): Map {
@@ -372,7 +652,17 @@ fn
 }
 
 insert-table-row
-meta {doc: """`insertTableRow` below (or, with `below` false, above) a row."""}
+meta {
+    doc: """
+    `insertTableRow` below (or, with `below` false, above) a row.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/insert-table-row(2, 0, true).insertTableRow.insertBelow  // true
+    ```
+    """
+}
 fn
 (table-start: Int, row: Int, below: Bool): Map {
   insert-table-row(table-start, row, below, {})
@@ -383,7 +673,16 @@ fn
 
 insert-table-column
 meta {
-    doc: """`insertTableColumn` to the right of (or, with `right` false, to the left of) a column."""
+    doc: """
+    `insertTableColumn` to the right of (or, with `right` false, to the left
+    of) a column.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/insert-table-column(2, 0, false).insertTableColumn.insertRight  // false
+    ```
+    """
 }
 fn
 (table-start: Int, column: Int, right: Bool): Map {
@@ -394,7 +693,17 @@ fn
 }
 
 delete-table-row
-meta {doc: """`deleteTableRow`."""}
+meta {
+    doc: """
+    `deleteTableRow`.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/delete-table-row(2, 1).deleteTableRow.tableCellLocation.rowIndex  // 1
+    ```
+    """
+}
 fn
 (table-start: Int, row: Int): Map {
   delete-table-row(table-start, row, {})
@@ -404,7 +713,17 @@ fn
 }
 
 delete-table-column
-meta {doc: """`deleteTableColumn`."""}
+meta {
+    doc: """
+    `deleteTableColumn`.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/delete-table-column(2, 1).deleteTableColumn.tableCellLocation.columnIndex  // 1
+    ```
+    """
+}
 fn
 (table-start: Int, column: Int): Map {
   delete-table-column(table-start, column, {})
@@ -413,7 +732,9 @@ fn
   {deleteTableColumn: {tableCellLocation: table-cell(table-start, 0, column, opts)}}
 }
 
-object-size fn (opts: Map): Map? {
+object-size
+meta {no-doc: true}
+fn (opts: Map): Map? {
   width get(opts, "width")
   height get(opts, "height")
   size ::docs/compact({
@@ -425,7 +746,17 @@ object-size fn (opts: Map): Map? {
 
 insert-image
 meta {
-    doc: """`insertInlineImage` from a public URL (PNG, JPEG or GIF under 50 MB). `opts.width` and `opts.height` are in points."""
+    doc: """
+    `insertInlineImage` from a public URL (PNG, JPEG or GIF under 50 MB).
+    `opts.width` and `opts.height` are in points.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/insert-image("https://hot.dev/logo.png", 1, {width: 120})
+    // {insertInlineImage: {uri: "https://hot.dev/logo.png", location: {index: 1}, objectSize: {width: {magnitude: 120, unit: "PT"}}}}
+    ```
+    """
 }
 fn
 (uri: Str, index: Int): Map {
@@ -436,7 +767,17 @@ fn
 }
 
 append-image
-meta {doc: """`insertInlineImage` at the end of the body or segment."""}
+meta {
+    doc: """
+    `insertInlineImage` at the end of the body or segment.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/append-image("https://hot.dev/logo.png").insertInlineImage.uri  // "https://hot.dev/logo.png"
+    ```
+    """
+}
 fn
 (uri: Str): Map {
   append-image(uri, {})
@@ -446,7 +787,17 @@ fn
 }
 
 insert-page-break
-meta {doc: """`insertPageBreak` at an index in the body."""}
+meta {
+    doc: """
+    `insertPageBreak` at an index in the body.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/insert-page-break(12)  // {insertPageBreak: {location: {index: 12}}}
+    ```
+    """
+}
 fn
 (index: Int): Map {
   insert-page-break(index, {})
@@ -456,7 +807,17 @@ fn
 }
 
 append-page-break
-meta {doc: """`insertPageBreak` at the end of the body."""}
+meta {
+    doc: """
+    `insertPageBreak` at the end of the body.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/append-page-break()  // {insertPageBreak: {endOfSegmentLocation: {}}}
+    ```
+    """
+}
 fn
 (): Map {
   append-page-break({})
@@ -471,7 +832,17 @@ fn
 
 create-named-range
 meta {
-    doc: """`createNamedRange`: a label that tracks its text as the document changes."""
+    doc: """
+    `createNamedRange`: a label that tracks its text as the document
+    changes.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/create-named-range("summary", 1, 8)
+    // {createNamedRange: {name: "summary", range: {startIndex: 1, endIndex: 8}}}
+    ```
+    """
 }
 fn
 (name: Str, start: Int, end: Int): Map {
@@ -483,7 +854,16 @@ fn
 
 delete-named-range
 meta {
-    doc: """`deleteNamedRange` for every range with this name, in every tab unless `opts.tabIds`."""
+    doc: """
+    `deleteNamedRange` for every range with this name, in every tab unless
+    `opts.tabIds`.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/delete-named-range("summary")  // {deleteNamedRange: {name: "summary"}}
+    ```
+    """
 }
 fn
 (name: Str): Map {
@@ -495,7 +875,17 @@ fn
 
 replace-named-range
 meta {
-    doc: """`replaceNamedRangeContent`: replace the text of the named range, in every tab unless `opts.tabIds`."""
+    doc: """
+    `replaceNamedRangeContent`: replace the text of the named range, in
+    every tab unless `opts.tabIds`.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/replace-named-range("summary", "All green")
+    // {replaceNamedRangeContent: {namedRangeName: "summary", text: "All green"}}
+    ```
+    """
 }
 fn
 (name: Str, text: Str): Map {
@@ -507,7 +897,16 @@ fn
 
 create-header
 meta {
-    doc: """`createHeader` on the default section. The reply's `createHeader.headerId` is the `segmentId` for adding text to it."""
+    doc: """
+    `createHeader` on the default section. The reply's
+    `createHeader.headerId` is the `segmentId` for adding text to it.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/create-header()  // {createHeader: {type: "DEFAULT"}}
+    ```
+    """
 }
 fn (): Map {
   {createHeader: {type: "DEFAULT"}}
@@ -515,7 +914,16 @@ fn (): Map {
 
 create-footer
 meta {
-    doc: """`createFooter` on the default section. The reply's `createFooter.footerId` is the `segmentId` for adding text to it."""
+    doc: """
+    `createFooter` on the default section. The reply's
+    `createFooter.footerId` is the `segmentId` for adding text to it.
+
+    **Example**
+
+    ```hot
+    ::google::docs::requests/create-footer()  // {createFooter: {type: "DEFAULT"}}
+    ```
+    """
 }
 fn (): Map {
   {createFooter: {type: "DEFAULT"}}

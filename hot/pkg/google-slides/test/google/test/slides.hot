@@ -50,6 +50,14 @@ meta ["test"] fn () {
     assert-eq("tb", ::content/find-element(SLIDE, "tb").objectId)
     assert(is-null(::content/find-placeholder(SLIDE, "SUBTITLE")))
     assert(is-null(::content/slide-title({})), "no title placeholder")
+    assert-eq("c", ::content/find-element(SLIDE, "c").objectId, "finds an element inside a group")
+    grouped {pageElements: [{objectId: "g", elementGroup: {children: [
+      {objectId: "inner", elementGroup: {children: [
+        {objectId: "t2", shape: {placeholder: {type: "TITLE", index: 0}, text: run("Nested\n")}}
+      ]}}
+    ]}}]}
+    assert-eq("Nested", ::content/slide-title(grouped), "finds a title in nested groups")
+    assert-eq("t2", ::content/find-placeholder(grouped, "TITLE").objectId)
     assert-eq("", ::content/speaker-notes({}), "no notes page")
     assert-eq([{id: "s1", title: "Hello", text: "Hello\nWorld\na\nb\nin group\n", notes: "Say hi"}], ::content/outline({slides: [SLIDE]}))
     assert-eq([], ::content/outline({}))
@@ -106,6 +114,10 @@ meta ["test"] fn () {
     assert-eq({magnitude: 18, unit: "PT"}, ::req/font-size("o", 18).updateTextStyle.style.fontSize)
     assert-eq({opaqueColor: {rgbColor: ::req/rgb(255, 0, 0)}}, ::req/optional-color(::req/hex-color("#ff0000")))
     assert(is-err(::req/hex-color("red")))
+    assert-eq(::req/hex-color("#ff0000"), ::req/hex-color("ff0000"), "the leading # is optional")
+    assert-eq(::req/hex-color("#ff0000"), ::req/hex-color(" #FF0000 "), "trimmed and case-insensitive")
+    assert(is-err(::req/hex-color("1a#73#e8")), "a # anywhere but the start is invalid")
+    assert(is-err(::req/hex-color("##ff0000")), "only one leading # is removed")
     assert-eq({createParagraphBullets: {objectId: "o", bulletPreset: "BULLET_DISC_CIRCLE_SQUARE", textRange: {type: "ALL"}}}, ::req/bullets("o"))
     b ::req/background("pg", {red: 1, green: 1, blue: 1})
     assert-eq("pageBackgroundFill.solidFill.color", b.updatePageProperties.fields)
